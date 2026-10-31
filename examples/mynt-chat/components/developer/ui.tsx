@@ -190,6 +190,51 @@ export function SecretPanel({ title, label, value, warning, children, onDone }: 
   );
 }
 
+// Several credentials shown once together (one SSH login per app VM), each with its own Copy button.
+export function SecretList({ title, items, warning, children, onDone }: { title: string; items: { key: string; label: string; value: string }[]; warning: string; children?: ReactNode; onDone: () => void }) {
+  return (
+    <section className="dev-secret" aria-label={title}>
+      <h3>{title}</h3>
+      <p className="dev-secret-warn">{warning}</p>
+      {children}
+      {items.map((i) => (
+        <SecretRow key={i.key} label={i.label} value={i.value} />
+      ))}
+      <div className="dev-actions">
+        <button type="button" className="btn btn-secondary dev-btn" onClick={onDone}>
+          Done, hide them
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function SecretRow({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied("copied");
+    } catch {
+      setCopied("failed");
+    }
+  };
+  return (
+    <div className="dev-secret-row">
+      <label className="dev-secret-label">
+        {label}
+        <textarea readOnly value={value} rows={value.length > 60 ? 3 : 1} onFocus={(e) => e.currentTarget.select()} className="mono" autoComplete="off" spellCheck={false} />
+      </label>
+      <div className="dev-actions">
+        <button type="button" className="btn btn-primary dev-btn" onClick={copy}>
+          {copied === "copied" ? "Copied" : "Copy login"}
+        </button>
+      </div>
+      {copied === "failed" ? <p className="dev-muted">Couldn&apos;t copy; select the text and copy it yourself.</p> : null}
+    </div>
+  );
+}
+
 export function Pre({ text, empty }: { text: string; empty: string }) {
   return <pre className="dev-pre">{text || empty}</pre>;
 }

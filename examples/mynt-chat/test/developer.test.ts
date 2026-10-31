@@ -7,6 +7,10 @@ import {
   buildFacts,
   buildRows,
   diffView,
+  FINISHED_BUILD,
+  reopenState,
+  sshLogins,
+  usageFacts,
   filesView,
   hostingView,
   isDeveloper,
@@ -42,6 +46,17 @@ describe("developer tool calls", () => {
     expect(parseDevCall({ tool: "get_build", args: {} })).toHaveProperty("error");
     expect(parseDevCall({ tool: "sandbox_run", args: { build_id: "b1", command: "" } })).toHaveProperty("error");
     expect(parseDevCall({ tool: "vm_access", args: { hours: 48 } })).toHaveProperty("error");
+    expect(parseDevCall({ tool: "reopen_sandbox", args: { build_id: "b1", hours: 4 } })).toEqual({ tool: "reopen_sandbox", args: { build_id: "b1", hours: 4 } });
+    expect(parseDevCall({ tool: "reopen_sandbox", args: { build_id: "b1" } })).toEqual({ tool: "reopen_sandbox", args: { build_id: "b1" } });
+    expect(parseDevCall({ tool: "reopen_sandbox", args: { build_id: "b1", hours: 0 } })).toHaveProperty("error");
+    expect(parseDevCall({ tool: "reopen_sandbox", args: { build_id: "b1", hours: 9 } })).toHaveProperty("error");
+    expect(parseDevCall({ tool: "close_sandbox", args: { build_id: "b1" } })).toEqual({ tool: "close_sandbox", args: { build_id: "b1" } });
+    expect(parseDevCall({ tool: "close_sandbox", args: {} })).toHaveProperty("error");
+    expect(parseDevCall({ tool: "app_logs", args: { app_id: "a1", service: "api" } })).toEqual({ tool: "app_logs", args: { app_id: "a1", service: "api" } });
+    expect(parseDevCall({ tool: "app_run", args: { app_id: "a1", command: "ls", service: "web.1" } })).toHaveProperty("tool", "app_run");
+    expect(parseDevCall({ tool: "restart_app", args: { app_id: "a1", service: "api" } })).toHaveProperty("tool", "restart_app");
+    expect(parseDevCall({ tool: "restart_app", args: { app_id: "a1", service: "-bad" } })).toHaveProperty("error");
+    expect(parseDevCall({ tool: "app_logs", args: { app_id: "a1", service: "a b" } })).toHaveProperty("error");
     expect(parseDevCall({ tool: "steer_build", args: { build_id: "b1", message: "x" } })).toHaveProperty("error");
   });
 
@@ -200,7 +215,44 @@ describe("hosting", () => {
       ["a1", "https://a1.example.com/", "running", "", "abcdef012345"],
       ["a2", "", "deploying", "image build failed", ""],
     ]);
-    expect(hostingView({ tenant: null, apps: [] })).toEqual({ tenant: null, status: "", apps: [] });
+    expect(v.usage).toBeNull();
+    expect(hostingView({ tenant: null, apps: [] })).toEqual({ tenant: null, status: "", apps: [], usage: null });
+  });
+
+  it("shows usage as VMs, hours and an estimated cost", () => {
+    expect(hostingView({ ...status, usage: { vms: 2, hours: 12.5, usd_estimate: 2.5, usd_per_hour: 0.2 } }).usage).toEqual([
+      ["VMs", "2"],
+      ["Machine hours", "12.5"],
+      ["Estimated cost", "US$2.50 (estimate, at US$0.20 per VM hour)"],
+    ]);
+    expect(usageFacts(null)).toBeNull();
+  });
+
+  it("maps a compose app's services with safe URLs", () => {
+    const a = appRow({ app_id: "a3", services: [{ service: "api", expose: "api", port: 8081, domain: "x", url: "https://a3-api.example.com" }, { service: "web", expose: "web", port: 8080, domain: null, url: null }, { expose: "x" }] });
+    expect(a.services).toEqual([
+      { service: "api", expose: "api", port: "8081", url: "https://a3-api.example.com/" },
+      { service: "web", expose: "web", port: "8080", url: "" },
+    ]);
+    expect(appRow({ app_id: "a1" }).services).toEqual([]);
+  });
+
+  it("lists one SSH login per app VM", () => {
+    const v = sshLogins({ logins: [{ app_id: "a1", ssh: "ssh one" }, { app_id: "a2", ssh: "ssh two" }, { app_id: "a3" }], expires_at: "2026-10-31T18:00:00Z", user: "developer" }, { a1: "Deposits" });
+    expect(v).toEqual({
+      logins: [
+        { app_id: "a1", name: "Deposits", ssh: "ssh one" },
+        { app_id: "a2", name: "a2", ssh: "ssh two" },
+      ],
+      expires: "2026-10-31 18:00 UTC",
+    });
+    expect(sshLogins({ ssh: "old shape" }).logins).toEqual([]);
+  });
+
+  it("reads reopen_sandbox and knows which builds can reopen", () => {
+    expect(reopenState({ build_id: "b1", ready: false, next: "call again" })).toEqual({ ready: false, until: "" });
+    expect(reopenState({ build_id: "b1", ready: true, until: "2026-10-31T18:00:00Z" })).toEqual({ ready: true, until: "2026-10-31 18:00 UTC" });
+    expect([...FINISHED_BUILD].sort()).toEqual(["blocked", "failed", "over_budget", "stopped", "succeeded"]);
   });
 
   it("reads docker logs and status output", () => {

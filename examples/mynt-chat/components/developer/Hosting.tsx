@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { appRow, buildRows, formatDate, hostingView, logRows, matches, runRow, statusRows, type AppRow, type BuildRow } from "@/lib/developer";
+import { appRow, buildRows, hostingView, sshLogins, type LoginRow, logRows, matches, runRow, statusRows, type AppRow, type BuildRow } from "@/lib/developer";
 import { callDevTool, type ToolResult } from "./api";
 import { RunPanel } from "./RunPanel";
-import { ActionRow, DataTable, ExternalLink, MetaCard, Notice, Pre, SecretPanel, StatusPill, Tabs, Toolbar } from "./ui";
+import { ActionRow, DataTable, ExternalLink, MetaCard, Notice, Pre, SecretList, StatusPill, Tabs, Toolbar } from "./ui";
 
 type Report = (r: ToolResult) => boolean;
 
@@ -14,8 +14,8 @@ export function HostingSection({ report, onOpen }: { report: Report; onOpen: (ap
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  // The SSH login: component state only, dropped on "Done" or leaving the page.
-  const [ssh, setSsh] = useState<{ command: string; expires: string } | null>(null);
+  // The SSH logins (one per app VM): component state only, dropped on "Done" or leaving the page.
+  const [ssh, setSsh] = useState<{ logins: LoginRow[]; expires: string } | null>(null);
   const [deploying, setDeploying] = useState(false);
 
   const load = useCallback(async () => {
@@ -44,8 +44,8 @@ export function HostingSection({ report, onOpen }: { report: Report; onOpen: (ap
     const r = await callDevTool("vm_access", { hours: 8 });
     setBusy(null);
     if (!report(r)) return;
-    const d = (r.data ?? {}) as { ssh?: unknown; expires_at?: unknown };
-    if (typeof d.ssh === "string") setSsh({ command: d.ssh, expires: typeof d.expires_at === "string" ? formatDate(d.expires_at) : "" });
+    const access = sshLogins(r.data);
+    if (access.logins.length) setSsh(access);
   };
 
   const apps = useMemo(() => (data?.apps ?? []).filter((a) => matches(a, query)), [data, query]);
@@ -66,7 +66,7 @@ export function HostingSection({ report, onOpen }: { report: Report; onOpen: (ap
           Deploy an app
         </button>
         <button type="button" className="btn btn-secondary dev-btn" onClick={() => void sshLogin()} disabled={!hasTenant || busy !== null}>
-          {busy === "ssh" ? "Getting a login…" : "SSH login"}
+          {busy === "ssh" ? "Getting logins…" : "SSH logins"}
         </button>
       </Toolbar>
 
@@ -77,15 +77,14 @@ export function HostingSection({ report, onOpen }: { report: Report; onOpen: (ap
       ) : null}
 
       {ssh ? (
-        <SecretPanel
-          title="SSH login to your hosting VM"
-          label="Command"
-          value={ssh.command}
-          warning={`This is a credential: anyone with it can log in to your VM${ssh.expires ? ` until ${ssh.expires}` : ""}. It's shown once and not saved anywhere; a new login revokes this one. Don't paste it into chats or tickets.`}
+        <SecretList
+          title="SSH logins to your apps' VMs"
+          items={ssh.logins.map((l) => ({ key: l.app_id, label: `App ${l.name}`, value: l.ssh }))}
+          warning={`These are credentials: anyone with one can log in to that app's VM${ssh.expires ? ` until ${ssh.expires}` : ""}. They're shown once and not saved anywhere; new logins revoke these. Don't paste them into chats or tickets.`}
           onDone={() => setSsh(null)}
         >
-          <p className="dev-muted">Paste it in a terminal, or use it as a VS Code Remote-SSH host. Your apps run as containers named mynt-app-&lt;id&gt;.</p>
-        </SecretPanel>
+          <p className="dev-muted">Each app has its own VM. Paste a command in a terminal, or use it as a VS Code Remote-SSH host. Apps run as containers named mynt-app-&lt;id&gt;.</p>
+        </SecretList>
       ) : null}
 
       {deploying ? (
@@ -105,7 +104,10 @@ export function HostingSection({ report, onOpen }: { report: Report; onOpen: (ap
           <MetaCard
             title="Your hosting"
             subtitle="An isolated VM that runs your apps from builds Mynt verified, reachable only through Mynt's gateway."
-            facts={data.tenant.map(([k, v]) => [k, k === "Status" ? <StatusPill key="s" status={v} /> : v] as [string, ReactNode])}
+            facts={[
+              ...data.tenant.map(([k, v]) => [k, k === "Status" ? <StatusPill key="s" status={v} /> : v] as [string, ReactNode]),
+              ...(data.usage ?? []).map(([k, v]) => [k, v] as [string, ReactNode]),
+            ]}
           />
         ) : (
           <Notice tone="info">You have no hosting yet. Request hosting to get your own isolated VM for your apps.</Notice>
@@ -203,6 +205,8 @@ export function AppDetail({ initial, report, onBack }: { initial: AppRow; report
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const appId = initial.app_id;
+  const services = useMemo(() => [...new Set(app.services.map((x) => x.service))], [app.services]);
+  const [service, setService] = useState("");
 
   const reload = useCallback(async () => {
     const r = await callDevTool("hosting_status");
@@ -213,9 +217,9 @@ export function AppDetail({ initial, report, onBack }: { initial: AppRow; report
   }, [appId, report]);
 
   const restart = async () => {
-    if (!window.confirm("Restart this app's container? It runs the same verified commit.")) return;
+    if (!window.confirm(service ? `Restart the ${service} service? It runs the same verified commit.` : "Restart this app's container? It runs the same verified commit.")) return;
     setBusy("restart");
-    const r = await callDevTool("restart_app", { app_id: appId });
+    const r = await callDevTool("restart_app", { app_id: appId, ...(service ? { service } : {}) });
     setBusy(null);
     if (report(r)) setNotice({ tone: "ok", text: "Restarted." });
   };
@@ -269,16 +273,44 @@ export function AppDetail({ initial, report, onBack }: { initial: AppRow; report
         ).filter(([, v]) => v)}
       />
 
+      {app.services.length ? (
+        <DataTable
+          columns={[
+            { key: "service", label: "Service", mono: true },
+            { key: "expose", label: "Exposed as" },
+            { key: "url", label: "URL", wide: true, render: (x) => (x.url ? <ExternalLink href={x.url}>{x.url}</ExternalLink> : "not served") },
+            { key: "port", label: "VM port", mono: true },
+          ]}
+          rows={app.services}
+          rowKey={(x) => `${x.service}-${x.expose}`}
+          empty="No services."
+          fill={false}
+        />
+      ) : null}
+
       <Tabs tabs={APP_TABS} current={tab} onChange={setTab} label="Hosted app details" />
+      {services.length && tab !== "status" ? (
+        <label className="dev-select">
+          <span>Service</span>
+          <select value={service} onChange={(e) => setService(e.target.value)}>
+            <option value="">{tab === "logs" ? "All services" : "Default (first) service"}</option>
+            {services.map((x) => (
+              <option key={x} value={x}>
+                {x}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       <div className="dev-tabpanel" role="tabpanel">
-        {tab === "logs" ? <LogsTab appId={appId} report={report} /> : null}
+        {tab === "logs" ? <LogsTab appId={appId} service={service} report={report} /> : null}
         {tab === "status" ? <StatusTab appId={appId} report={report} /> : null}
         {tab === "run" ? (
           <RunPanel
             placeholder="wget -qO- localhost:8080/healthz"
             hint="Runs inside the app's container (under gVisor, read-only apart from /tmp), never on the VM itself. Output is capped and secrets are scrubbed; every command is audited."
             run={async (command) => {
-              const r = await callDevTool("app_run", { app_id: appId, command });
+              const r = await callDevTool("app_run", { app_id: appId, command, ...(service ? { service } : {}) });
               if (r.signedOut) report(r);
               return runRow(command, r.ok ? r.data : (r.error ?? r.data), !r.ok);
             }}
@@ -291,17 +323,17 @@ export function AppDetail({ initial, report, onBack }: { initial: AppRow; report
 
 const TAILS = [100, 200, 500, 1000, 2000];
 
-function LogsTab({ appId, report }: { appId: string; report: Report }) {
+function LogsTab({ appId, service, report }: { appId: string; service: string; report: Report }) {
   const [output, setOutput] = useState<string | null>(null);
   const [tail, setTail] = useState(200);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
-    const r = await callDevTool("app_logs", { app_id: appId, tail });
+    const r = await callDevTool("app_logs", { app_id: appId, tail, ...(service ? { service } : {}) });
     setLoading(false);
     if (report(r)) setOutput(String((r.data as { output?: unknown })?.output ?? ""));
-  }, [appId, tail, report]);
+  }, [appId, tail, service, report]);
   useEffect(() => {
     void load();
   }, [load]);
