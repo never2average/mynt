@@ -16,16 +16,17 @@ export interface DirectHostingProvider {
   readonly direct: true;
   createVm(slug: string): Promise<{ id: string }>;
   run(vmId: string, command: string, opts?: { env?: Record<string, string>; timeoutMs?: number; linuxUser?: string; stdin?: string }): Promise<DirectRun>;
-  // Replaces the VM's egress allowlist with exactly these hosts.
-  setEgress(vmId: string, hosts: string[]): Promise<void>;
+  // Replaces the VM's egress allowlist with exactly these hosts. Hosts in `inject` get those request headers added
+  // at the edge (the VM never holds them; the edge terminates TLS for them, so clients trust Freestyle's CA).
+  setEgress(vmId: string, hosts: string[], inject?: Record<string, Record<string, string>>): Promise<void>;
   // Serves https://<domain> from a port on the VM (replacing any route for that domain).
   setRoute(vmId: string, domain: string, port: number): Promise<void>;
   removeRoute(domain: string): Promise<void>;
   pause(vmId: string): Promise<void>;
   start(vmId: string): Promise<void>;
   deleteVm(vmId: string): Promise<void>;
-  // An SSH login for one Linux user on the VM, valid until expiresAt.
-  grantAccess(vmId: string, linuxUser: string, expiresAt: Date): Promise<{ ssh: string; expires_at: string; identity: string }>;
+  // SSH logins for one Linux user on these VMs, valid until expiresAt (one identity, one token, a grant per VM).
+  grantAccess(vmIds: string[], linuxUser: string, expiresAt: Date): Promise<{ ssh: Record<string, string>; expires_at: string; identity: string }>;
   // Machine time so far, never under-counted.
   usage(vmId: string): Promise<{ seconds: number }>;
   revokeAccess(identity: string): Promise<void>;
@@ -79,10 +80,15 @@ export class FreestyleProvider implements DirectHostingProvider {
     return rules.filter(match);
   }
 
-  async setEgress(vmId: string, hosts: string[]) {
-    await this.setNetworkEgress(vmId, hosts.filter((h) => NETWORK_EGRESS_HOSTS.has(h)));
-    const current = await this.rules((r) => r.source?.vmId === vmId && r.destination?.public === true);
-    const want = new Set(hosts.filter((h) => !NETWORK_EGRESS_HOSTS.has(h)));
+  async setEgress(vmId: string, hosts: string[], inject: Record<string, Record<string, string>> = {}) {
+    await this.setNetworkEgress(vmId, hosts.filter((h) => NETWORK_EGRESS_HOSTS.has(h) && !inject[h]));
+    const mine = await this.rules((r) => r.source?.vmId === vmId && r.destination?.public === true);
+    // Injecting rules are always replaced: their header values read back masked, so they can't be compared.
+    for (const r of mine) if (r.transform?.length) await this.call("DELETE", `/tls/${r.id}`);
+    for (const [domain, headers] of Object.entries(inject))
+      await this.call("POST", "/tls", { action: "allow", domain, source: { vmId }, destination: { public: true }, transform: [{ headers }] });
+    const current = mine.filter((r) => !r.transform?.length);
+    const want = new Set(hosts.filter((h) => !NETWORK_EGRESS_HOSTS.has(h) && !inject[h]));
     // A plain outbound rule passes TLS straight through: the VM's TLS runs end to end to the host, so nothing in
     // between sees its requests or the app key in them.
     const keep = current.filter((r) => want.has(r.domain));
@@ -125,11 +131,12 @@ export class FreestyleProvider implements DirectHostingProvider {
   }
 
   // One identity per grant: deleting it later revokes the token and the grant together.
-  async grantAccess(vmId: string, linuxUser: string, expiresAt: Date) {
+  async grantAccess(vmIds: string[], linuxUser: string, expiresAt: Date) {
     const { id } = await this.call<{ id: string }>("POST", "/identities", {});
-    await this.call("POST", `/identities/${id}/permissions/vm`, { vmId, allowedLinuxUsers: [linuxUser] });
+    for (const vmId of vmIds) await this.call("POST", `/identities/${id}/permissions/vm`, { vmId, allowedLinuxUsers: [linuxUser] });
     const t = await this.call<{ token: string; expiresAt: string | null }>("POST", `/identities/${id}/tokens`, { expiresAt: expiresAt.toISOString() });
-    return { ssh: `ssh ${vmId}+${linuxUser}:${t.token}@${FREESTYLE_SSH_HOST}`, expires_at: t.expiresAt ?? expiresAt.toISOString(), identity: id };
+    const ssh = Object.fromEntries(vmIds.map((vmId) => [vmId, `ssh ${vmId}+${linuxUser}:${t.token}@${FREESTYLE_SSH_HOST}`]));
+    return { ssh, expires_at: t.expiresAt ?? expiresAt.toISOString(), identity: id };
   }
 
   // Freestyle's own run-seconds can lag (it reads 0 on a VM that has been running), so the larger of that and the
@@ -157,4 +164,5 @@ interface TlsRule {
   protocol?: string;
   source?: { vmId?: string | null; public?: boolean | null };
   destination?: { vmId?: string | null; port?: number | null; public?: boolean | null };
+  transform?: unknown[] | null;
 }

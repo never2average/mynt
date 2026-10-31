@@ -88,12 +88,18 @@ export function checkCompose(text: string): ComposeCheck {
 // What Mynt layers on top: every default service without privilege escalation and limited, and each exposed
 // service published on the VM port Mynt routes to. Capabilities stay at Docker's defaults (cap_add is refused), so
 // ordinary services such as a database still start. JSON is valid compose YAML.
-export function composeOverride(check: ComposeCheck, ports: Record<string, number>, runtime = "runc"): string {
+// Where the VM's CA bundle (public roots plus the edge's CA, which signs the calls it adds Mynt's key to) is
+// mounted in each container, and the variables that point common runtimes at it.
+export const CA_BUNDLE = "/etc/mynt/ca.crt";
+export const CA_ENV = { SSL_CERT_FILE: CA_BUNDLE, NODE_EXTRA_CA_CERTS: CA_BUNDLE, REQUESTS_CA_BUNDLE: CA_BUNDLE, CURL_CA_BUNDLE: CA_BUNDLE };
+
+export function composeOverride(check: ComposeCheck, ports: Record<string, number>, runtime = "runc", trustEdge = false): string {
   const services: Obj = {};
   for (const name of check.services) {
     const e = check.exposed.find((x) => x.service === name);
     services[name] = {
       ...(runtime === "runsc" ? { runtime: "runsc" } : {}),
+      ...(trustEdge ? { volumes: [`/etc/ssl/certs/ca-certificates.crt:${CA_BUNDLE}:ro`], environment: CA_ENV } : {}),
       security_opt: ["no-new-privileges:true"],
       mem_limit: "1g",
       cpus: 1,
