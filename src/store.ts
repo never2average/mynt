@@ -1337,7 +1337,7 @@ const toSdkRelease = (r: Row): SdkRelease => ({
 // --- end SDKs and experiences ---
 
 export class Store {
-  private constructor(private readonly db: Db) {}
+  private constructor(readonly db: Db) {}
 
   // Creates the schema if needed. Mynt ships no catalogue: products come from innovators, regions and
   // categories from admins. `seed` (tests only) inserts published, read-only products and the regions and
