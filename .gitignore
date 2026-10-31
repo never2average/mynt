@@ -3,3 +3,4 @@ dist/
 /.claude/
 *.sqlite
 .env
+__pycache__/
