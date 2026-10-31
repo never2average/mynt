@@ -549,6 +549,13 @@ The device SDKs are generated from source templates in [`sdk-templates/`](sdk-te
 - **Serving:** customers reach the app at `<app>.<HOSTING_APPS_DOMAIN>`, through the edge and the tunnel.
 - **The kill switch:** an admin's `suspend_tenant` takes the VM off the gateway at once (peers, routes and egress) and powers it off. `resume_tenant` brings it back, and `undeploy_app` stops a single app.
 
+**Direct hosting on Freestyle** (set `FREESTYLE_API_KEY`; the default when present). Instead of a tunnel, Mynt drives each developer's [Freestyle](https://www.freestyle.sh) VM through Freestyle's API:
+- **The VM starts with nothing in and nothing out.** Its egress is exactly the union of its apps' allowlists, as per-domain rules that pass TLS straight through, so nothing in between sees the traffic. The npm registries, which Freestyle's edge can't carry yet, are allowed by their own addresses instead.
+- **Deploying** builds the verified commit on the VM. The source token and the app key travel as the command's environment, never its text. The container runs read-only, with no capabilities and limited CPU and memory. The VM itself is the developer's own isolated machine.
+- **Serving:** each app gets a public HTTPS route, `https://mynt-<app>.style.dev` (or `<app>.<HOSTING_APPS_DOMAIN>`), straight to its port.
+- **The developer logs in:** `vm_access` returns an SSH command for their own Linux user (in the docker group, no sudo), scoped to their VM and valid for a few hours. It works as a VS Code Remote-SSH host too, and each new login revokes the last. `app_status`, `app_logs`, `app_run` and `restart_app` run at once, with no queue.
+- **The kill switch** pauses the VM.
+
 **Working with a hosted app.** The hosting VM accepts no inbound connections, so developers reach it through Mynt: `app_status` (state, health, restarts, CPU and memory), `app_logs`, `app_run` (a command inside the app's container, under gVisor, never on the VM itself) and `restart_app`. Mynt queues the request; the VM's agent claims it over the tunnel within a few seconds, runs it against that developer's own app container only, and posts the result back, scrubbed of secrets. Every request is audited.
 
 [`deploy/host/hosting-gateway.sh`](deploy/host/hosting-gateway.sh) sets up the gateway on the host that runs Mynt, and a timer re-syncs it every minute from `mynt hosting wg-peers`, `egress-allowlist` and `routes`. Hosting is enabled with `HOSTING_DO_TOKEN`, `HOSTING_GATEWAY_ENDPOINT`, `HOSTING_GATEWAY_PUBLIC_KEY` and `PUBLIC_URL`; DigitalOcean is the first provider.
