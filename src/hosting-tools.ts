@@ -37,6 +37,13 @@ export async function egressFor(store: Store, hosting: HostingService, appId: st
   return [...hosts].sort();
 }
 
+// A compose app's service (e.g. api or web); omitted means all of them, or the first for a command.
+const SERVICE = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/)
+  .optional()
+  .describe("For a compose app: the service (e.g. api or web)");
+
 // The build a deployment runs: one of the developer's builds that Mynt verified and pushed.
 async function verifiedBuild(store: Store, developerId: string, buildId: string) {
   const r = await store.buildRun(buildId);
@@ -77,7 +84,8 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const apps = (await hosting.hostedApps(tenant.id)).map((h) => {
         const route = routes.find((r) => r.upstream === `${tenant.tunnel_ip}:${h.port}`);
         const direct = hosting.provider && "direct" in hosting.provider ? hosting.appDomain(h.app_id) : null;
-        return { ...h, url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
+        const services = h.services?.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null }));
+        return { ...h, ...(services ? { services } : {}), url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
       });
       return json({ tenant, apps });
     },
@@ -102,12 +110,26 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       if ("error" in found) return fail(found.error!);
       if (found.build.app_id && found.build.app_id !== app_id) return fail(`Build '${build_id}' was for another app`);
       const environment = app.status === "published" ? "live" : "sandbox";
-      const { secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
+      let plan;
+      try {
+        plan = await hosting.planSource(user.id, found.build.repository, found.build.commit_sha);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+      if (plan.check?.errors.length) return fail(`Mynt can't host this compose file: ${plan.check.errors.join("; ")}`);
+      if (plan.composeFile && !(hosting.provider && "direct" in hosting.provider)) return fail("Compose apps need direct hosting (Freestyle), which isn't configured here");
       const egress = await egressFor(store, hosting, app_id);
-      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress);
+      const { secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
+      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan);
       await store.audit(user.id, "deploy_app", app_id, { build_id, commit_sha: found.build.commit_sha, environment });
       const domain = hosting.appDomain(app_id);
-      return json({ ...hosted, environment, egress, url: domain ? `https://${domain}` : null });
+      return json({
+        ...hosted,
+        environment,
+        egress,
+        url: domain ? `https://${domain}` : null,
+        ...(hosted.services ? { services: hosted.services.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null })) } : {}),
+      });
     },
   );
 
@@ -183,10 +205,10 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "A hosted app's logs",
       description: "Developer: the latest log lines of your hosted app, with timestamps. Secrets are scrubbed.",
-      inputSchema: { app_id: z.string(), tail: z.number().int().min(1).max(2000).default(200) },
+      inputSchema: { app_id: z.string(), tail: z.number().int().min(1).max(2000).default(200), service: SERVICE },
       annotations: { readOnlyHint: true },
     },
-    async ({ app_id, tail }) => onVm(app_id, "logs", { tail }, 30),
+    async ({ app_id, tail, service }) => onVm(app_id, "logs", { tail, ...(service ? { service } : {}) }, 30),
   );
 
   server.registerTool(
@@ -195,9 +217,9 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       title: "Run a command in a hosted app",
       description:
         "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:8080/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited.",
-      inputSchema: { app_id: z.string(), command: z.string().min(1).max(4000), timeout_seconds: z.number().int().min(1).max(120).default(30) },
+      inputSchema: { app_id: z.string(), command: z.string().min(1).max(4000), timeout_seconds: z.number().int().min(1).max(120).default(30), service: SERVICE },
     },
-    async ({ app_id, command, timeout_seconds }) => onVm(app_id, "exec", { command, timeout_seconds }, timeout_seconds + 15),
+    async ({ app_id, command, timeout_seconds, service }) => onVm(app_id, "exec", { command, timeout_seconds, ...(service ? { service } : {}) }, timeout_seconds + 15),
   );
 
   server.registerTool(
@@ -205,9 +227,9 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Restart a hosted app",
       description: "Developer: restart your hosted app's container on your VM (same verified commit).",
-      inputSchema: { app_id: z.string() },
+      inputSchema: { app_id: z.string(), service: SERVICE },
     },
-    async ({ app_id }) => onVm(app_id, "restart", {}, 60),
+    async ({ app_id, service }) => onVm(app_id, "restart", service ? { service } : {}, 60),
   );
 }
 

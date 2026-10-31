@@ -3,6 +3,7 @@ import type { Db } from "./db.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
 import { FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
+import { checkCompose, composeOverride, COMPOSE_FILES, type ComposeCheck } from "./compose.js";
 
 // Hosted runtime: developers' apps (their financial part: the server that holds the app key, calls
 // contract actions and handles webhooks) run on an isolated VM per developer, built from the exact commit
@@ -158,7 +159,15 @@ export interface HostedApp {
   port: number;
   status: "deploying" | "running" | "stopped";
   error?: string | null;
+  // A compose app: the services Mynt serves, each on its own VM port and address.
+  services?: HostedService[];
   updated_at: string;
+}
+export interface HostedService {
+  service: string;
+  expose: string;
+  port: number; // on the VM
+  domain: string | null;
 }
 
 const TABLES = `
@@ -207,6 +216,8 @@ const TABLES = `
   ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS access_identity text;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS egress jsonb;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS error text;
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS compose_file text;
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS services jsonb;
   CREATE INDEX IF NOT EXISTS hosting_commands_tenant_idx ON financial_products.hosting_commands (tenant_id, status, created_at);
 `;
 
@@ -216,29 +227,52 @@ id developer >/dev/null 2>&1 || sudo -n useradd --create-home --shell /bin/bash 
 sudo -n usermod -aG docker developer
 docker version --format '{{.Server.Version}}'`;
 
-// Builds the verified commit and runs it hardened; NAME, SHA, PORT, SOURCE_URL, SOURCE_TOKEN, MYNT_API_KEY and
-// MYNT_BASE_URL come from the environment.
+// Builds the verified commit and runs it: a compose app as a project with Mynt's override on top, otherwise its
+// Dockerfile, hardened. NAME, SHA, PORT, SOURCE_URL, SOURCE_TOKEN, COMPOSE_FILE_NAME, COMPOSE_OVERRIDE and the
+// MYNT_* settings come from the environment.
 const DIRECT_DEPLOY = `set -euo pipefail
-IMG="mynt/$NAME:$SHA"
-if ! docker image inspect "$IMG" >/dev/null 2>&1; then
-  DIR=$(mktemp -d)
-  curl -fsSL -H "Authorization: Bearer $SOURCE_TOKEN" "$SOURCE_URL" | tar -xz -C "$DIR" --strip-components=1
-  docker build -q -t "$IMG" "$DIR" >/dev/null
-  rm -rf "$DIR"
+DIR="$HOME/apps/$NAME/$SHA"
+if [ ! -d "$DIR" ]; then
+  mkdir -p "$DIR.tmp"
+  curl -fsSL -H "Authorization: Bearer $SOURCE_TOKEN" "$SOURCE_URL" | tar -xz -C "$DIR.tmp" --strip-components=1
+  mv "$DIR.tmp" "$DIR"
 fi
-docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
-  --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL "$IMG" >/dev/null
+cd "$DIR"
+if [ -n "$COMPOSE_FILE_NAME" ]; then
+  printf '%s' "$COMPOSE_OVERRIDE" > .mynt-override.json
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker compose -p "$NAME" -f "$COMPOSE_FILE_NAME" -f .mynt-override.json up -d --build --remove-orphans --wait --wait-timeout 300
+else
+  IMG="mynt/$NAME:$SHA"
+  docker image inspect "$IMG" >/dev/null 2>&1 || docker build -q -t "$IMG" . >/dev/null
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$NAME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
+    --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL "$IMG" >/dev/null
+fi
+ls -1dt "$HOME/apps/$NAME"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
 echo "running $NAME at $SHA"`;
 
-// The same commands the tunnel agent runs, for a direct VM; exec's command arrives as $CMD.
+// The same commands the tunnel agent runs, for a direct VM: against the compose project when the app is one
+// (a service can be named in $SERVICE), otherwise its container. exec's command arrives as $CMD.
 export function directCommand(kind: HostingCommandKind, name: string, args: Record<string, unknown>): string {
   if (!/^mynt-app-[0-9a-f]{8}$/.test(name)) throw new Error("Not an app container");
-  if (kind === "status")
-    return `docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, health {{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}, restarts {{.RestartCount}}, image {{.Config.Image}}' ${name} 2>&1 && docker stats --no-stream --format '{{.CPUPerc}} CPU, {{.MemUsage}} memory' ${name} 2>&1`;
-  if (kind === "logs") return `docker logs --timestamps --tail ${Math.max(1, Math.min(2000, Number(args.tail ?? 200)))} ${name} 2>&1`;
-  if (kind === "restart") return `docker restart ${name} 2>&1`;
-  return `timeout ${Math.max(1, Math.min(120, Number(args.timeout_seconds ?? 60)))} docker exec ${name} sh -c "$CMD" 2>&1`;
+  const tail = Math.max(1, Math.min(2000, Number(args.tail ?? 200)));
+  const timeout = Math.max(1, Math.min(120, Number(args.timeout_seconds ?? 60)));
+  const project = `[ -n "$(docker compose -p ${name} ps -aq 2>/dev/null)" ]`;
+  const cmd: Record<HostingCommandKind, [string, string]> = {
+    status: [
+      `docker compose -p ${name} ps --format '{{.Service}}: {{.State}} {{.Status}}' && docker stats --no-stream --format '{{.Name}}: {{.CPUPerc}} CPU, {{.MemUsage}} memory' $(docker compose -p ${name} ps -q)`,
+      `docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, health {{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}, restarts {{.RestartCount}}, image {{.Config.Image}}' ${name} && docker stats --no-stream --format '{{.CPUPerc}} CPU, {{.MemUsage}} memory' ${name}`,
+    ],
+    logs: [`docker compose -p ${name} logs --timestamps --tail ${tail} $SERVICE`, `docker logs --timestamps --tail ${tail} ${name}`],
+    restart: [`docker compose -p ${name} restart $SERVICE`, `docker restart ${name}`],
+    exec: [
+      `timeout ${timeout} docker compose -p ${name} exec -T "\${SERVICE:-$(docker compose -p ${name} ps --services | head -1)}" sh -c "$CMD"`,
+      `timeout ${timeout} docker exec ${name} sh -c "$CMD"`,
+    ],
+  };
+  const [compose, single] = cmd[kind];
+  return `if ${project}; then ${compose}; else ${single}; fi 2>&1`;
 }
 
 // The container an app runs in on its VM.
@@ -290,6 +324,7 @@ const toHostedApp = (r: Record<string, unknown>): HostedApp => ({
   port: Number(r.port),
   status: r.status as HostedApp["status"],
   ...(r.error ? { error: r.error as string } : {}),
+  ...(r.services ? { services: (typeof r.services === "string" ? JSON.parse(r.services) : r.services) as HostedService[] } : {}),
   updated_at: iso(r.updated_at)!,
 });
 
@@ -495,9 +530,52 @@ export class HostingService {
     return (await this.tenantOf(developerId))!;
   }
 
+  // Reads the app's compose file at the verified commit (if it has one) and checks it. GitHub is asked with the
+  // developer's read-only token for that repository.
+  githubFetch: typeof fetch = (...a) => fetch(...a);
+  async planSource(developerId: string, repository: string, commitSha: string): Promise<{ composeFile: string | null; check: ComposeCheck | null }> {
+    const token = await this.sourceToken(developerId, repository);
+    for (const file of COMPOSE_FILES) {
+      const res = await this.githubFetch(`https://api.github.com/repos/${repository}/contents/${file}?ref=${commitSha}`, {
+        headers: { Accept: "application/vnd.github.raw+json", "X-GitHub-Api-Version": "2022-11-28", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status === 404) continue;
+      if (!res.ok) throw new Error(`Couldn't read ${file} from ${repository}: GitHub said ${res.status}`);
+      return { composeFile: file, check: checkCompose(await res.text()) };
+    }
+    return { composeFile: null, check: null };
+  }
+
   // Where an app is served.
-  appDomain(appId: string) {
-    return this.config?.appsDomain ? `${appId.slice(0, 8)}.${this.config.appsDomain}` : isDirect(this.provider) ? `mynt-${appId.slice(0, 8)}.style.dev` : null;
+  appDomain(appId: string, expose = "web") {
+    const base = this.config?.appsDomain ? `${appId.slice(0, 8)}.${this.config.appsDomain}` : isDirect(this.provider) ? `mynt-${appId.slice(0, 8)}.style.dev` : null;
+    if (!base || expose === "web") return base;
+    return this.config?.appsDomain ? `${appId.slice(0, 8)}-${expose}.${this.config.appsDomain}` : `mynt-${appId.slice(0, 8)}-${expose}.style.dev`;
+  }
+
+  // Runs a script on a direct VM as a detached job and waits for it, so a long build isn't cut off at the
+  // provider's per-command limit. Secrets go in env; the script text holds none.
+  jobPollMs = 5_000;
+  private async runJob(p: DirectHostingProvider, vmId: string, script: string, env: Record<string, string>, timeoutMs = 30 * 60_000) {
+    const job = `job-${randomUUID().slice(0, 8)}`;
+    const dir = "$HOME/.mynt-jobs";
+    const started = await p.run(
+      vmId,
+      `mkdir -p ${dir} && printf '%s' "$JOB_SCRIPT" > ${dir}/${job}.sh && (nohup bash ${dir}/${job}.sh > ${dir}/${job}.log 2>&1; echo $? > ${dir}/${job}.exit) >/dev/null 2>&1 & echo started`,
+      { env: { ...env, JOB_SCRIPT: script }, timeoutMs: 30_000 },
+    );
+    if (started.exitCode !== 0) return { exitCode: started.exitCode, output: `${started.stdout}${started.stderr}` };
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, this.jobPollMs));
+      const r = await p.run(vmId, `cat ${dir}/${job}.exit 2>/dev/null || echo running`, { timeoutMs: 30_000 });
+      const state = r.stdout.trim();
+      if (state !== "running" || Date.now() >= until) {
+        const log = await p.run(vmId, `tail -c 8000 ${dir}/${job}.log 2>/dev/null; rm -f ${dir}/${job}.*`, { timeoutMs: 30_000 });
+        return { exitCode: state === "running" ? null : Number(state), output: log.stdout };
+      }
+    }
   }
 
   // Direct VMs: egress is the union of the hosted apps' allowlists, nothing more.
@@ -508,28 +586,30 @@ export class HostingService {
     await p.setEgress(tenant.vm_id!, [...hosts].sort());
   }
 
-  // Builds and runs the verified commit on the VM; secrets travel as the command's environment, never its text.
-  private async deployDirect(p: DirectHostingProvider, tenant: Tenant, hosted: HostedApp, appKey: string) {
+  // Builds and runs the verified commit on the VM; secrets travel as the job's environment, never its text.
+  private async deployDirect(p: DirectHostingProvider, tenant: Tenant, hosted: HostedApp, appKey: string, plan: { composeFile: string | null; check: ComposeCheck | null }) {
     const fail = (message: string) =>
       this.db.query("UPDATE financial_products.hosted_apps SET status = 'stopped', error = $2, updated_at = now() WHERE app_id = $1", [hosted.app_id, message.slice(0, 1000)]);
     try {
       await this.syncEgress(p, tenant);
       const token = await this.sourceToken(tenant.developer_id, hosted.repository);
-      const r = await p.run(tenant.vm_id!, DIRECT_DEPLOY, {
-        timeoutMs: 300_000,
-        env: {
-          NAME: containerName(hosted.app_id),
-          SHA: hosted.commit_sha,
-          PORT: String(hosted.port),
-          SOURCE_URL: `https://api.github.com/repos/${hosted.repository}/tarball/${hosted.commit_sha}`,
-          SOURCE_TOKEN: token ?? "",
-          MYNT_API_KEY: appKey,
-          MYNT_BASE_URL: `${this.config?.publicUrl ?? ""}/v1`,
-        },
+      const services = hosted.services ?? [];
+      const origin = this.config?.publicUrl ?? "";
+      const r = await this.runJob(p, tenant.vm_id!, DIRECT_DEPLOY, {
+        NAME: containerName(hosted.app_id),
+        SHA: hosted.commit_sha,
+        PORT: String(hosted.port),
+        SOURCE_URL: `https://api.github.com/repos/${hosted.repository}/tarball/${hosted.commit_sha}`,
+        SOURCE_TOKEN: token ?? "",
+        COMPOSE_FILE_NAME: plan.composeFile ?? "",
+        COMPOSE_OVERRIDE: plan.check ? composeOverride(plan.check, Object.fromEntries(services.map((x) => [x.expose, x.port]))) : "",
+        MYNT_API_KEY: appKey,
+        MYNT_BASE_URL: `${origin}/v1`,
+        MYNT_API_BASE: `${origin}/v1`,
+        MYNT_API_ORIGIN: origin,
       });
-      if (r.exitCode !== 0) return void (await fail(boxOutput(`${r.stdout}\n${r.stderr}`, [appKey, token ?? ""]).slice(-1000) || "The build was killed by its time limit"));
-      const domain = this.appDomain(hosted.app_id);
-      if (domain) await p.setRoute(tenant.vm_id!, domain, hosted.port);
+      if (r.exitCode !== 0) return void (await fail(boxOutput(r.output, [appKey, token ?? ""]).slice(-1000) || "The build was killed by its time limit"));
+      for (const x of services.length ? services : [{ port: hosted.port, domain: this.appDomain(hosted.app_id) }]) if (x.domain) await p.setRoute(tenant.vm_id!, x.domain, x.port);
       await this.db.query("UPDATE financial_products.hosted_apps SET status = 'running', error = NULL, updated_at = now() WHERE app_id = $1 AND commit_sha = $2", [hosted.app_id, hosted.commit_sha]);
     } catch (e) {
       await fail((e as Error).message);
@@ -583,10 +663,19 @@ export class HostingService {
     appKey: string,
     sandbox: boolean,
     egress: string[] = [],
+    plan: { composeFile: string | null; check: ComposeCheck | null } = { composeFile: null, check: null },
   ): Promise<HostedApp> {
-    const ports = (await this.hostedApps(tenant.id)).filter((h) => h.app_id !== app.id).map((h) => h.port);
-    let port = 9000;
-    while (ports.includes(port)) port++;
+    if (plan.check?.errors.length) throw new Error(`The compose file isn't accepted: ${plan.check.errors.join("; ")}`);
+    if (plan.composeFile && !isDirect(this.provider)) throw new Error("Compose apps need direct hosting (Freestyle)");
+    const ports = (await this.hostedApps(tenant.id)).filter((h) => h.app_id !== app.id).flatMap((h) => [h.port, ...(h.services ?? []).map((x) => x.port)]);
+    const free = () => {
+      let n = 9000;
+      while (ports.includes(n)) n++;
+      ports.push(n);
+      return n;
+    };
+    const services: HostedService[] = (plan.check?.exposed ?? []).map((e) => ({ service: e.service, expose: e.expose, port: free(), domain: this.appDomain(app.id, e.expose) }));
+    const port = services[0]?.port ?? free();
     const r = await this.one(
       `INSERT INTO financial_products.hosted_apps (app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'deploying')
@@ -595,22 +684,30 @@ export class HostingService {
        RETURNING *`,
       [app.id, tenant.id, build.id, build.repository, build.commit_sha, port, seal(appKey, sandbox) + (sandbox ? ":sandbox" : ":live")],
     );
-    await this.db.query("UPDATE financial_products.hosted_apps SET egress = $2, error = NULL WHERE app_id = $1", [app.id, JSON.stringify(egress)]);
-    const hosted = toHostedApp(r!);
-    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey);
+    void r;
+    const hosted = toHostedApp(
+      (await this.one(
+        "UPDATE financial_products.hosted_apps SET egress = $2, error = NULL, compose_file = $3, services = $4 WHERE app_id = $1 RETURNING *",
+        [app.id, JSON.stringify(egress), plan.composeFile, services.length ? JSON.stringify(services) : null],
+      ))!,
+    );
+    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey, plan);
     return hosted;
   }
 
   async undeploy(appId: string): Promise<boolean> {
-    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id", [appId])).rows[0] as { tenant_id: string } | undefined;
+    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id, services", [appId])).rows[0] as
+      | { tenant_id: string; services: unknown }
+      | undefined;
     if (!r) return false;
+    const services = ((typeof r.services === "string" ? JSON.parse(r.services) : r.services) ?? []) as HostedService[];
     const p = this.provider;
     if (isDirect(p)) {
       const tenant = (await this.tenants()).find((t) => t.id === r.tenant_id);
       if (tenant?.vm_id) {
-        await p.run(tenant.vm_id, `docker rm -f ${containerName(appId)} >/dev/null 2>&1 || true`).catch(() => undefined);
-        const domain = this.appDomain(appId);
-        if (domain) await p.removeRoute(domain).catch(() => undefined);
+        const name = containerName(appId);
+        await p.run(tenant.vm_id, `docker compose -p ${name} down --remove-orphans >/dev/null 2>&1; docker rm -f ${name} >/dev/null 2>&1 || true`).catch(() => undefined);
+        for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(appId)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
         await this.syncEgress(p, tenant).catch(() => undefined);
       }
     }
@@ -671,7 +768,10 @@ export class HostingService {
       await this.db.query("UPDATE financial_products.hosting_commands SET status = 'running' WHERE id = $1", [id]);
       const timeout = Number(args.timeout_seconds ?? 60);
       const r = await this.provider
-        .run(tenant.vm_id, directCommand(kind, containerName(appId), args), { timeoutMs: (timeout + 5) * 1000, env: kind === "exec" ? { CMD: String(args.command) } : undefined })
+        .run(tenant.vm_id, directCommand(kind, containerName(appId), args), {
+          timeoutMs: (timeout + 5) * 1000,
+          env: { ...(kind === "exec" ? { CMD: String(args.command) } : {}), SERVICE: String(args.service ?? "") },
+        })
         .catch((e: Error) => ({ exitCode: null, stdout: "", stderr: e.message }));
       await this.finishCommand(tenant, id, r.exitCode, `${r.stdout}${r.stderr}`);
     }
