@@ -235,13 +235,18 @@ function fakeDirect() {
     name: "freestyle",
     direct: true,
     deployExit: 0,
+    runtime: "runc",
+    egressHistory: [],
+    async usage() {
+      return { seconds: 7200 };
+    },
     async createVm(slug) {
       calls.push(["create", slug]);
       return { id: "vm-direct" };
     },
     async run(vmId, command, opts = {}) {
       calls.push(["run", vmId, command, opts]);
-      if (command.includes("useradd")) return { exitCode: 0, stdout: "29.1.3\n", stderr: "" };
+      if (command.includes("useradd")) return { exitCode: 0, stdout: `29.1.3\nruntime: ${this.runtime}\n`, stderr: "" };
       if (command.includes("nohup bash")) {
         this.job = opts.env;
         return { exitCode: 0, stdout: "started\n", stderr: "" };
@@ -253,6 +258,7 @@ function fakeDirect() {
     },
     async setEgress(vmId, hosts) {
       egress.set(vmId, hosts);
+      this.egressHistory.push(hosts);
     },
     async setRoute(vmId, domain, port) {
       routes.set(domain, `${vmId}:${port}`);
@@ -286,6 +292,8 @@ test("direct hosting (Freestyle): a VM up at once, egress per app, built from th
     assert.equal(tenant.status, "running", "no bootstrap, no tunnel: the VM is up at once");
     assert.deepEqual(provider.calls[0], ["create", `mynt-t-${tenant.id.slice(0, 8)}`]);
     assert.match(provider.calls[1][2], /useradd --create-home --shell \/bin\/bash developer[\s\S]*usermod -aG docker developer/);
+    assert.match(provider.calls[1][2], /gvisor\/releases\/release\/\d{8}\/x86_64[\s\S]*sha512sum -c gvisor\.tar\.bz2\.sha512/, "gVisor from a pinned, checksummed release");
+    assert.deepEqual(provider.egressHistory, [["storage.googleapis.com"], []], "its host is allowed only for setup");
     assert.equal((await api("POST", "/v1/hosting/bootstrap", null, { token: "x".repeat(32), wg_public_key: WG_KEY })).status, 401, "nothing to bootstrap");
 
     const deployed = (await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") })).data;
@@ -297,6 +305,9 @@ test("direct hosting (Freestyle): a VM up at once, egress per app, built from th
     assert.equal(run[3].env.SOURCE_TOKEN, "ghs_readonly");
     assert.equal(run[3].env.SOURCE_URL, `https://api.github.com/repos/dev/saver/tarball/${"a".repeat(40)}`);
     assert.equal(run[3].env.COMPOSE_FILE_NAME, "", "no compose file: its Dockerfile");
+    assert.equal(run[3].env.RUNTIME, "runc", "gVisor didn't install on this VM: Docker's runtime");
+    assert.match(run[3].env.JOB_SCRIPT, /docker run -d --name "\$NAME" --runtime "\$RUNTIME"/);
+    assert.deepEqual((await call(dev, "hosting_status")).data.usage, { hours: 2, usd_estimate: 0.4, usd_per_hour: 0.2, container_runtime: "runc" });
     assert.ok(!run[2].includes(run[3].env.MYNT_API_KEY) && !run[2].includes("ghs_readonly"), "secrets travel as environment, never in the command");
     assert.ok(!run[3].env.JOB_SCRIPT.includes("mynt_test_"), "nor in the script");
     assert.match(run[3].env.JOB_SCRIPT, /--read-only --tmpfs \/tmp --cap-drop ALL/);
@@ -392,6 +403,7 @@ test("direct hosting: a compose app runs as a project, each labelled service on 
   const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
   try {
     const { call, dev } = w;
+    provider.runtime = "runsc";
     await call(dev, "request_hosting");
     w.sourceFiles.set("compose.yaml", "services:\n  web:\n    image: x\n    privileged: true\n");
     const refused = await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") });
@@ -409,6 +421,8 @@ test("direct hosting: a compose app runs as a project, each labelled service on 
     const job = provider.job;
     assert.equal(job.COMPOSE_FILE_NAME, "compose.yaml");
     assert.deepEqual(JSON.parse(job.COMPOSE_OVERRIDE).services.web.ports, ["9001:8080"]);
+    assert.equal(JSON.parse(job.COMPOSE_OVERRIDE).services.api.runtime, "runsc", "every service under gVisor");
+    assert.equal(job.RUNTIME, "runsc");
     assert.equal(job.MYNT_API_ORIGIN, "https://mynt.example.com");
     assert.match(job.JOB_SCRIPT, /docker compose -p "\$NAME" -f "\$COMPOSE_FILE_NAME" -f \.mynt-override\.json up -d --build --remove-orphans --wait/);
     assert.equal(provider.routes.get(`mynt-${id}.style.dev`), "vm-direct:9001");
@@ -466,6 +480,10 @@ test("Freestyle provider: egress rules diffed per VM, npm by its addresses, rout
   assert.deepEqual(sent.at(-1), ["POST", "/tls", { action: "allow", domain: "app.style.dev", protocol: "http", source: { public: true }, destination: { vmId: "vm-1", port: 9000 } }]);
 
   const access = await p.grantAccess("vm-1", "developer", new Date("2026-11-01T00:00:00Z"));
+  const usage = await new FreestyleProvider("fs_key", {
+    fetch: async () => new Response(JSON.stringify({ totalRunSeconds: 0, createdAt: new Date(Date.now() - 3600e3).toISOString() })),
+  }).usage("vm-1");
+  assert.ok(usage.seconds >= 3599 && usage.seconds < 3700, "a run-seconds of 0 still counts the hour since creation");
   assert.equal(access.ssh, "ssh vm-1+developer:secret_token@beta-ssh.freestyle.sh");
   assert.ok(sent.some(([m, path, b]) => m === "POST" && path === "/identities/idn-1/permissions/vm" && b.allowedLinuxUsers[0] === "developer" && b.allowedLinuxUsers.length === 1));
 });

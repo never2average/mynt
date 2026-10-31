@@ -26,6 +26,8 @@ export interface DirectHostingProvider {
   deleteVm(vmId: string): Promise<void>;
   // An SSH login for one Linux user on the VM, valid until expiresAt.
   grantAccess(vmId: string, linuxUser: string, expiresAt: Date): Promise<{ ssh: string; expires_at: string; identity: string }>;
+  // Machine time so far, never under-counted.
+  usage(vmId: string): Promise<{ seconds: number }>;
   revokeAccess(identity: string): Promise<void>;
 }
 
@@ -128,6 +130,14 @@ export class FreestyleProvider implements DirectHostingProvider {
     await this.call("POST", `/identities/${id}/permissions/vm`, { vmId, allowedLinuxUsers: [linuxUser] });
     const t = await this.call<{ token: string; expiresAt: string | null }>("POST", `/identities/${id}/tokens`, { expiresAt: expiresAt.toISOString() });
     return { ssh: `ssh ${vmId}+${linuxUser}:${t.token}@${FREESTYLE_SSH_HOST}`, expires_at: t.expiresAt ?? expiresAt.toISOString(), identity: id };
+  }
+
+  // Freestyle's own run-seconds can lag (it reads 0 on a VM that has been running), so the larger of that and the
+  // time since the VM was created is what spend caps see.
+  async usage(vmId: string) {
+    const vm = await this.call<{ totalRunSeconds?: number | null; createdAt?: string }>("GET", `/vms/${encodeURIComponent(vmId)}`).catch(() => ({}) as { totalRunSeconds?: number; createdAt?: string });
+    const since = vm.createdAt ? Math.max(0, (Date.now() - Date.parse(vm.createdAt)) / 1000) : 0;
+    return { seconds: Math.max(vm.totalRunSeconds ?? 0, since) };
   }
 
   async revokeAccess(identity: string) {

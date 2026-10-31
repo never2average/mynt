@@ -110,8 +110,7 @@ export class FreestyleSandboxes implements BoatClient {
 
   // Machine time, at the configured hourly rate; the agent's model spend is tracked by Mynt's runner.
   async costDollars(id: string) {
-    const vm = await this.fs.call<{ totalRunSeconds?: number | null }>("GET", `/vms/${encodeURIComponent(id)}`).catch(() => ({ totalRunSeconds: 0 }));
-    return ((vm.totalRunSeconds ?? 0) / 3600) * (this.opts.usdPerHour ?? 0.2);
+    return ((await this.fs.usage(id)).seconds / 3600) * (this.opts.usdPerHour ?? 0.2);
   }
 
   // Stopping a sandbox ends it: the VM and everything routed to it go.

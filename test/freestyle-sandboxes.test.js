@@ -30,6 +30,9 @@ function fakeFreestyle() {
     async deleteVm(id) {
       calls.push(["delete", id]);
     },
+    async usage() {
+      return { seconds: 1800 };
+    },
   };
 }
 

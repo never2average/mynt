@@ -88,11 +88,12 @@ export function checkCompose(text: string): ComposeCheck {
 // What Mynt layers on top: every default service without privilege escalation and limited, and each exposed
 // service published on the VM port Mynt routes to. Capabilities stay at Docker's defaults (cap_add is refused), so
 // ordinary services such as a database still start. JSON is valid compose YAML.
-export function composeOverride(check: ComposeCheck, ports: Record<string, number>): string {
+export function composeOverride(check: ComposeCheck, ports: Record<string, number>, runtime = "runc"): string {
   const services: Obj = {};
   for (const name of check.services) {
     const e = check.exposed.find((x) => x.service === name);
     services[name] = {
+      ...(runtime === "runsc" ? { runtime: "runsc" } : {}),
       security_opt: ["no-new-privileges:true"],
       mem_limit: "1g",
       cpus: 1,
