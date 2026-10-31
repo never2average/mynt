@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { AGENT_DIR, agentState, launchAgent, workspaceCwd, type AgentBackend } from "./agent-host.js";
+import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentBackend } from "./agent-host.js";
 import { CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -100,6 +100,9 @@ export interface Build {
   cost_usd: number;
   cap_usd: number;
   error: string | null;
+  // A sandbox reopened on the build's branch after the build ended, for the developer to keep working in.
+  box_sandbox_id: string | null;
+  box_until: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -131,6 +134,8 @@ const TABLES = `
   );
   CREATE INDEX IF NOT EXISTS build_runs_developer_idx ON financial_products.build_runs (developer_id, created_at DESC);
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS sandbox_key_id text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS box_sandbox_id text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS box_until timestamptz;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS verify_sandbox_id text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS verify_step text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS verify_process_id integer;
@@ -167,6 +172,8 @@ const toBuild = ({ agent_token_hash: _, ...r }: Row): Build => ({
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
   finished_at: iso(r.finished_at),
+  box_sandbox_id: (r.box_sandbox_id as string | null) ?? null,
+  box_until: iso(r.box_until),
 });
 
 // Files the agent reads and writes inside the sandbox. boat.dev's file API only accepts paths under
@@ -360,8 +367,12 @@ export class BuildService {
   // The build's box: the sandbox the coding agents work in, for as long as it's up (during the build and, once
   // it has shipped, while its preview runs). Everything a developer does there goes on the build's timeline.
   private async box(build: Build): Promise<string> {
+    if (this.boat && build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) {
+      if (!(await this.prepareBox(build))) throw new Error("The reopened sandbox is still starting; try again in a few seconds");
+      return build.box_sandbox_id;
+    }
     if (!this.boat || !build.sandbox_id) throw new Error("This build has no sandbox");
-    if (build.status === "stopped" || build.status === "over_budget") throw new Error(`The build is ${build.status}; its sandbox is gone`);
+    if (build.status === "stopped" || build.status === "over_budget") throw new Error(`The build is ${build.status}; its sandbox is gone (reopen_sandbox starts a fresh one on its branch)`);
     const s = await this.boat.getSandbox(build.sandbox_id);
     if (!["ready", "idle", "running", "provisioned"].includes(s.state)) throw new Error(`The build's sandbox is ${s.state}`);
     return build.sandbox_id;
@@ -402,6 +413,61 @@ export class BuildService {
     const { url } = await this.boat!.host(id, EDITOR_PORT);
     await this.event(build.id, "box", "The developer opened the editor");
     return { url, password, note: "Opens VS Code on the app the agents are building, with a terminal. Edits land in the same working tree; tell the agents with steer_build." };
+  }
+
+  // A fresh sandbox on a finished build's pushed branch: the app checked out where the agents had it, the coding
+  // team's workspace beside it, a short-lived GitHub token to push with, for a few hours.
+  async reopen(build: Build, hours = 4) {
+    if (!this.boat) throw new Error("Sandboxes aren't configured on this deployment");
+    if (!TERMINAL.includes(build.status)) throw new Error(`The build is still ${build.status}: use its own sandbox`);
+    if (!build.repository || !build.branch || !this.repos) throw new Error("This build pushed no branch, so there's nothing to reopen");
+    if (build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) return { sandbox: "already open", until: build.box_until };
+    const installation = await this.installation(build.developer_id, build.repository);
+    if (!installation) throw new Error(`Mynt's GitHub App can't reach ${build.repository} any more`);
+    const { token } = await this.repos.tokenFor(build.repository, installation);
+    const ttl = Math.round(Math.max(1, Math.min(8, hours)) * 3600);
+    const s = await this.boat.createSandbox({
+      name: `mynt-box-${build.id}`,
+      type: this.config.sandboxType,
+      ttlSeconds: ttl,
+      labels: { mynt_build: build.id, mynt_role: "box" },
+      env: { GITHUB_REPOSITORY: build.repository, GITHUB_TOKEN: token, MYNT_BRANCH: build.branch, ...(this.config.publicUrl ? { MYNT_API_BASE: `${this.config.publicUrl}/v1` } : {}) },
+    });
+    const until = new Date(Date.now() + ttl * 1000).toISOString();
+    await this.db.query("UPDATE financial_products.build_runs SET box_sandbox_id = $2, box_until = $3, updated_at = now() WHERE id = $1", [build.id, s.id, until]);
+    await this.event(build.id, "box", "The developer reopened the build's sandbox on its branch", { until });
+    return { sandbox: "provisioning", until };
+  }
+
+  // Once a reopened sandbox is up: the branch checked out (the token through a credential helper, never in the
+  // URL or the remote), and the coding workspace written beside it.
+  private async prepareBox(build: Build) {
+    const id = build.box_sandbox_id!;
+    const s = await this.boat!.getSandbox(id);
+    if (!["ready", "idle", "running", "provisioned"].includes(s.state)) return false;
+    if ((await this.boat!.readFile(id, `${OUT}/box.ready`)) !== null) return true;
+    const helper = `!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f`;
+    const r = await this.boat!.exec(
+      id,
+      `set -e; git config --global credential.helper ${shellQuote(helper)}; git config --global user.name "Mynt"; git config --global user.email "builds@mynt.invalid"; rm -rf ${WORKSPACE}; git clone --quiet --branch "$MYNT_BRANCH" "https://github.com/$GITHUB_REPOSITORY.git" ${WORKSPACE}; mkdir -p ${OUT}; touch ${OUT}/box.ready; git -C ${WORKSPACE} log --oneline -1`,
+      { timeoutSeconds: 300 },
+    );
+    if (r.exitCode !== 0) throw new Error(`Couldn't check out ${build.branch}: ${boxOutput(r.stderr).slice(-300)}`);
+    for (const [path, content] of Object.entries(workspaceFiles("coding-build"))) await this.boat!.writeFile(id, `${workspaceCwd("coding-build")}/${path}`, content);
+    return true;
+  }
+
+  async boxReady(build: Build) {
+    if (!build.box_sandbox_id) return false;
+    return this.prepareBox(build);
+  }
+
+  async closeBox(build: Build) {
+    if (!build.box_sandbox_id) throw new Error("No reopened sandbox for this build");
+    if (this.boat) await this.boat.stop(build.box_sandbox_id).catch(() => undefined);
+    await this.db.query("UPDATE financial_products.build_runs SET box_sandbox_id = NULL, box_until = NULL, updated_at = now() WHERE id = $1", [build.id]);
+    await this.event(build.id, "box", "The developer closed the reopened sandbox");
+    return { closed: true };
   }
 
   // Background loop; tests call tick() directly.
@@ -891,6 +957,35 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       return fail((e as Error).message);
     }
   };
+
+  server.registerTool(
+    "reopen_sandbox",
+    {
+      title: "Reopen a finished build's sandbox",
+      description:
+        "Developer: a fresh sandbox on a finished build's pushed branch, with the coding team's workspace, for a few hours: then open_sandbox_editor, sandbox_run, sandbox_files and sandbox_diff work on it, and you can commit and push to the branch. Call again to see when it's ready.",
+      inputSchema: { build_id: z.string(), hours: z.number().min(1).max(8).default(4) },
+    },
+    async ({ build_id, hours }) =>
+      onBox(build_id, async (b) => {
+        if (b.box_sandbox_id && b.box_until && Date.parse(b.box_until) > Date.now()) {
+          const ready = await builds.boxReady(b);
+          return { build_id, ready, until: b.box_until, ...(ready ? { next: "open_sandbox_editor or sandbox_run" } : { next: "call reopen_sandbox again in a few seconds" }) };
+        }
+        return { build_id, ...(await builds.reopen(b, hours)), ready: false, next: "call reopen_sandbox again in a few seconds" };
+      }),
+  );
+
+  server.registerTool(
+    "close_sandbox",
+    {
+      title: "Close a reopened sandbox",
+      description: "Developer: end the sandbox you reopened on a build's branch (anything not pushed is lost).",
+      inputSchema: { build_id: z.string() },
+      annotations: { destructiveHint: true },
+    },
+    async ({ build_id }) => onBox(build_id, (b) => builds.closeBox(b)),
+  );
 
   server.registerTool(
     "open_sandbox_editor",

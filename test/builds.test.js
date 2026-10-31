@@ -404,6 +404,47 @@ test("developers work in their build's sandbox: VS Code, commands, files and the
   assert.match((await call(dev, "sandbox_run", { build_id: started.id, command: "ls" })).data.error, /its sandbox is gone/);
 });
 
+test("a finished build's sandbox reopens on its branch for the developer, with the coding workspace, until closed", async () => {
+  const ctx = await setup();
+  const { boat, as, connect, call } = ctx;
+  const dev = await connect(await as("Dev", ["developer"]));
+  const other = await connect(await as("Other", ["developer"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  const { started, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings comparison page", app_id: app.id, repository: "acme/savings-app" } });
+  assert.equal(build.status, "succeeded");
+  assert.match((await call(other, "reopen_sandbox", { build_id: started.id })).data.error, /No build of yours/);
+
+  const first = (await call(dev, "reopen_sandbox", { build_id: started.id, hours: 2 })).data;
+  assert.equal(first.ready, false);
+  const box = [...boat.sandboxes.values()].find((s) => s.opts.labels.mynt_role === "box");
+  assert.equal(box.opts.ttlSeconds, 7200);
+  assert.equal(box.opts.env.GITHUB_TOKEN, "ghs_short_lived");
+  assert.equal(box.opts.env.GITHUB_REPOSITORY, "acme/savings-app");
+  assert.ok(!Object.keys(box.opts.env).some((k) => /ANTHROPIC|MYNT_SANDBOX_KEY|AGENT/.test(k)), "no model or app keys in a developer's box");
+  assert.equal(box.opts.env.MYNT_BRANCH, build.branch);
+  assert.match((await call(dev, "sandbox_run", { build_id: started.id, command: "ls" })).data.error, /still starting/);
+
+  boat.ready(box.id);
+  const second = (await call(dev, "reopen_sandbox", { build_id: started.id })).data;
+  assert.equal(second.ready, true);
+  const clone = box.commands.find((c) => c.command.includes("git clone"));
+  assert.match(clone.command, /git clone --quiet --branch "\$MYNT_BRANCH" "https:\/\/github\.com\/\$GITHUB_REPOSITORY\.git" \/home\/user\/workspace\/app/);
+  assert.ok(!clone.command.includes("ghs_"), "the token is never in the command or the remote URL");
+  assert.ok(box.files.has("/home/user/workspaces/coding-build/CLAUDE.md") && box.files.has("/home/user/workspaces/coding-build/.claude/agents/architect.md"), "the coding team's workspace is there");
+
+  // The box tools now work on it.
+  assert.equal((await call(dev, "sandbox_run", { build_id: started.id, command: "git status" })).isError, false);
+  assert.ok(box.commands.at(-1).command.endsWith("git status"));
+  const editor = (await call(dev, "open_sandbox_editor", { build_id: started.id })).data;
+  assert.match(editor.url, new RegExp(`^https://${box.id}-8443\\.`));
+
+  assert.equal((await call(dev, "close_sandbox", { build_id: started.id })).data.closed, true);
+  assert.ok(box.stopped);
+  const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline.filter((e) => e.phase === "box").map((e) => e.message);
+  assert.ok(timeline.includes("The developer reopened the build's sandbox on its branch") && timeline.includes("The developer closed the reopened sandbox"));
+});
+
 test("builds stay off without a model backend for the proxy", async () => {
   const { as, connect, call } = await setup({ config: { agentBackend: null } });
   const dev = await connect(await as("Dev", ["developer"]));
