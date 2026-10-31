@@ -317,14 +317,14 @@ test("direct hosting (Freestyle): a VM per app, its key added at the edge and ne
     const key = (await w.store.db.query("SELECT app_key_sealed FROM financial_products.hosted_apps")).rows[0].app_key_sealed;
     const inject = provider.injected.get(vm);
     assert.deepEqual(Object.keys(inject), ["mynt.example.com"]);
-    assert.match(inject["mynt.example.com"].authorization, /^Bearer mynt_test_[A-Za-z0-9_-]{16,}$/);
-    assert.ok(!key.includes(inject["mynt.example.com"].authorization.slice(7)), "the key is stored sealed");
+    assert.match(inject["mynt.example.com"]["x-mynt-app-key"], /^mynt_test_[A-Za-z0-9_-]{16,}$/, "a header of its own, never Authorization");
+    assert.ok(!key.includes(inject["mynt.example.com"]["x-mynt-app-key"]), "the key is stored sealed");
     assert.ok(!provider.egress.get(vm).includes("mynt.example.com"), "Mynt's host only through the injecting rule");
     assert.ok(provider.egress.get(vm).includes("bank.example.com") && provider.egress.get(vm).includes("registry.npmjs.org"));
     const run = provider.calls.find(([c, , cmd]) => c === "run" && cmd.includes("nohup bash"));
     assert.equal(run[1], vm);
     assert.equal(run[3].env.MYNT_API_KEY, "mynt_test_injected_at_edge", "the app only ever sees a placeholder");
-    const real = inject["mynt.example.com"].authorization.slice(7);
+    const real = inject["mynt.example.com"]["x-mynt-app-key"];
     assert.ok(!JSON.stringify(provider.calls).includes(real), "the real key is never sent to the VM");
     assert.equal(run[3].env.SOURCE_TOKEN, "ghs_readonly");
     assert.equal(run[3].env.SOURCE_URL, `https://api.github.com/repos/dev/saver/tarball/${"a".repeat(40)}`);

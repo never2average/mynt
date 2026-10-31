@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
-import { FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
+import { EDGE_KEY_HEADER, edgePlaceholder, FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
 import { CA_BUNDLE, checkCompose, composeOverride, COMPOSE_FILES, type ComposeCheck } from "./compose.js";
 
 // Hosted runtime: developers' apps (their financial part: the server that holds the app key, calls
@@ -617,7 +617,7 @@ export class HostingService {
     const row = await this.one("SELECT egress, app_key_sealed FROM financial_products.hosted_apps WHERE app_id = $1", [appId]);
     const hosts = ((typeof row?.egress === "string" ? JSON.parse(row.egress) : row?.egress) ?? []) as string[];
     const mynt = this.config?.publicUrl ? new URL(this.config.publicUrl).host : null;
-    const inject = mynt ? { [mynt]: { authorization: `Bearer ${this.appKey(row).key}` } } : {};
+    const inject = mynt ? { [mynt]: { [EDGE_KEY_HEADER]: this.appKey(row).key } } : {};
     await p.setEgress(vmId, [...new Set(hosts)].filter((h) => h !== mynt).sort(), inject);
   }
 
@@ -641,7 +641,7 @@ export class HostingService {
         COMPOSE_FILE_NAME: plan.composeFile ?? "",
         COMPOSE_OVERRIDE: plan.check ? composeOverride(plan.check, Object.fromEntries(services.map((x) => [x.expose, x.port])), runtime, true) : "",
         // The app never holds its key: SDKs get a placeholder of the right shape, and the edge adds the real one.
-        MYNT_API_KEY: `mynt_${sandbox ? "test" : "live"}_injected_at_edge`,
+        MYNT_API_KEY: edgePlaceholder(sandbox),
         MYNT_BASE_URL: `${origin}/v1`,
         MYNT_API_BASE: `${origin}/v1`,
         MYNT_API_ORIGIN: origin,

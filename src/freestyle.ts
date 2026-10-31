@@ -34,6 +34,13 @@ export interface DirectHostingProvider {
 
 export const isDirect = (p: unknown): p is DirectHostingProvider => !!p && (p as { direct?: unknown }).direct === true;
 
+// Hosted apps never hold their Mynt key: they send this placeholder as their bearer, and Freestyle's edge adds the
+// real key as EDGE_KEY_HEADER on the way out. Mynt honours the header only alongside the placeholder, and never on
+// client-session routes, so a browser's session token is never swapped for the app's key.
+export const EDGE_KEY_HEADER = "x-mynt-app-key";
+export const EDGE_PLACEHOLDER = /^mynt_(live|test)_injected_at_edge$/;
+export const edgePlaceholder = (sandbox: boolean) => `mynt_${sandbox ? "test" : "live"}_injected_at_edge`;
+
 export const FREESTYLE_SSH_HOST = "beta-ssh.freestyle.sh";
 // Hosts Freestyle's edge resets after the TLS hello (the npm registries, as of 2026-10): these are allowed at the
 // network layer instead, by their own IPv4 addresses, resolved at each sync.

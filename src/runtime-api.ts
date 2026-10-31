@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EDGE_KEY_HEADER, EDGE_PLACEHOLDER } from "./freestyle.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { APP_EVENT_TYPES, appProducts, buildTerms, HANDOFF_ACTIONS, resolveHandoff } from "./runtime.js";
@@ -151,7 +152,16 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
 
   const authenticate = async (req: IncomingMessage): Promise<{ key: ApiKey; app: App }> => {
     const auth = req.headers.authorization;
-    const secret = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    let secret = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    // A Mynt-hosted app: its key arrives in the header the edge adds, and only counts with the placeholder bearer
+    // of the same environment.
+    const placeholder = EDGE_PLACEHOLDER.exec(secret);
+    if (placeholder) {
+      const injected = req.headers[EDGE_KEY_HEADER];
+      secret = typeof injected === "string" ? injected.trim() : "";
+      if (!secret.startsWith(`mynt_${placeholder[1]}_`))
+        throw new ApiError(401, "unauthorized", "That placeholder key only works from a Mynt-hosted app", { "WWW-Authenticate": "Bearer" });
+    }
     if (!/^mynt_(live|test)_/.test(secret)) throw new ApiError(401, "unauthorized", "Send your app's API key as Authorization: Bearer mynt_…", { "WWW-Authenticate": "Bearer" });
     const found = await store.apiKeyBySecret(secret);
     if (!found) throw new ApiError(401, "invalid_key", "The API key is unknown or revoked", { "WWW-Authenticate": 'Bearer error="invalid_token"' });

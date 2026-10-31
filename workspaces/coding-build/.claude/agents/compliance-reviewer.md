@@ -22,6 +22,9 @@ Check every item and report each failure with the file, the line and the fix:
 6. **Build terms**: required disclosures verbatim wherever a product appears, no banned phrase anywhere in the UI
    or copy, branding as specified, only permitted hand-offs.
 7. **Webhooks**: signatures verified on the raw body before any processing; events handled idempotently.
-8. **Paused sales**: a product with `sales_paused` is never offered.
+8. **No open proxy to Mynt**: nothing in the app forwards a caller's request to Mynt's API except `/v1/client/*`
+   (client sessions). On Mynt's hosting the app key is added to every call to Mynt's other routes on the way out,
+   so a forwarding route would hand callers the app key's powers.
+9. **Paused sales**: a product with `sales_paused` is never offered.
 
 End with `PASS` only if every item passes; otherwise `FAIL` and the list.
