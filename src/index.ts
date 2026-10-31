@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ClerkAdmin, ClerkAuth, clerkConfigFromEnv } from "./auth.js";
-import { HttpBoatClient } from "./boat.js";
+import { sandboxesFromEnv } from "./freestyle-sandboxes.js";
 import { BdService, bdConfigFromEnv } from "./bd.js";
 import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./hosting.js";
 import { egressFor } from "./hosting-tools.js";
@@ -38,6 +38,8 @@ Environment:
   FINANCIAL_PRODUCTS_FILE   JSON catalog used to seed published products
   FINANCIAL_PRODUCTS_TOKEN  User token for stdio mode; omit to browse as a guest
   BOAT_API_KEY              With PUBLIC_URL and a model backend: coding-agent builds in boat.dev sandboxes (BUILD_CAP_USD, ...)
+  SANDBOX_PROVIDER=freestyle  Agent sandboxes on Freestyle VMs instead (with FREESTYLE_API_KEY; FREESTYLE_USD_PER_HOUR for spend caps)
+  FREESTYLE_API_KEY         Developers' hosting on Freestyle VMs (direct: per-domain egress, public routes, SSH logins)
   GOOGLE_APPLICATION_CREDENTIALS  Service account key file: build agents use Claude on Vertex AI (VERTEX_PROJECT_ID, VERTEX_REGION=global)
   DESK_JOB_CAP_USD          Innovators' product desk (with BOAT_API_KEY and the GitHub App): per-job and DESK_MONTHLY_CAP_USD per-firm caps
   REVIEW_AUTO_OPEN=1        Open a governance review for every licence awaiting review (REVIEW_CASE_CAP_USD, REVIEW_MONTHLY_CAP_USD)
@@ -67,11 +69,10 @@ const die = (msg: string): never => {
 const openDb = () => connectPostgres(process.env.DATABASE_URL ?? die("DATABASE_URL is required (your Supabase Postgres connection string)"));
 const openStore = () => Store.open(openDb());
 
-// Coding-agent builds run in boat.dev sandboxes when a boat key is configured.
 const openServices = async () => {
   const db = openDb();
   const store = await Store.open(db);
-  const boat = process.env.BOAT_API_KEY ? new HttpBoatClient(process.env.BOAT_API_KEY) : null;
+  const boat = sandboxesFromEnv();
   const buildConfig = buildConfigFromEnv();
   const github = GitHubApp.fromEnv();
   const builds = await BuildService.open(db, store, boat, github, buildConfig);

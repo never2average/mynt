@@ -264,6 +264,12 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **What the agent builds is a whole app, not just a server:** one Docker Compose project with `api/` (holds the app key, mints client sessions, handles webhooks), `web/` and `mobile/` (Expo React Native by default; Kotlin, Swift or Flutter on request), started from `workspaces/coding-build/templates/mynt-app/` with the build's generated SDKs wired in. The lead agent works with a team of subagents in `workspaces/coding-build/.claude/agents/` (architect, server, web and mobile engineers, a read-only compliance reviewer, QA and release). Their skills are human-written skills found on GitHub by HyDE search (Mynt's own drafts used as the queries) and vendored with their upstream licence and source, plus a short Mynt layer.
 
+**Agent sandboxes on Freestyle.** Builds, the product desk, governance review and the connector run in boat.dev sandboxes by default. With `SANDBOX_PROVIDER=freestyle` (and `FREESTYLE_API_KEY`), the same agents run in Freestyle VMs instead (`src/freestyle-sandboxes.ts`):
+- each sandbox is a VM with the agents' own `user` account and the sandbox env in a 0600 file;
+- previews and source downloads are served at unguessable `style.dev` names, so the link is the credential, as with boat's token-gated links;
+- stopping a sandbox deletes the VM;
+- machine spend counts toward the caps at `FREESTYLE_USD_PER_HOUR`.
+
 **The developer works in the same box.** While a build runs, and after it ships for as long as its preview is up, `open_sandbox_editor` opens VS Code in the browser on the sandbox (a private, token-gated link plus a password), with a terminal next to the agents. `sandbox_run`, `sandbox_files` and `sandbox_diff` do the same from any MCP client. Output is capped and scrubbed of credentials, and everything the developer does is on the build's timeline.
 
 **The agent doesn't grade its own work.** When it finishes, Mynt verifies the build itself, in a **fresh sandbox the agent never touched**, with no secrets:

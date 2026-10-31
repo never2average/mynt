@@ -15,7 +15,7 @@ export interface DirectHostingProvider {
   readonly name: string;
   readonly direct: true;
   createVm(slug: string): Promise<{ id: string }>;
-  run(vmId: string, command: string, opts?: { env?: Record<string, string>; timeoutMs?: number }): Promise<DirectRun>;
+  run(vmId: string, command: string, opts?: { env?: Record<string, string>; timeoutMs?: number; linuxUser?: string; stdin?: string }): Promise<DirectRun>;
   // Replaces the VM's egress allowlist with exactly these hosts.
   setEgress(vmId: string, hosts: string[]): Promise<void>;
   // Serves https://<domain> from a port on the VM (replacing any route for that domain).
@@ -44,7 +44,7 @@ export class FreestyleProvider implements DirectHostingProvider {
     private readonly opts: { fetch?: typeof fetch; base?: string; resolve4?: (host: string) => Promise<string[]> } = {},
   ) {}
 
-  private async call<T = Record<string, unknown>>(method: string, path: string, body?: unknown): Promise<T> {
+  async call<T = Record<string, unknown>>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await (this.opts.fetch ?? fetch)(`${this.opts.base ?? "https://api.freestyle.sh/v5"}${path}`, {
       method,
       headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
@@ -60,11 +60,13 @@ export class FreestyleProvider implements DirectHostingProvider {
     return { id: vm.id };
   }
 
-  async run(vmId: string, command: string, opts: { env?: Record<string, string>; timeoutMs?: number } = {}) {
+  async run(vmId: string, command: string, opts: { env?: Record<string, string>; timeoutMs?: number; linuxUser?: string; stdin?: string } = {}) {
     const r = await this.call<{ stdout?: string; stderr?: string; statusCode: number | null }>("POST", `/vms/${encodeURIComponent(vmId)}/exec-await`, {
       command,
       timeoutMs: Math.min(opts.timeoutMs ?? 30_000, 300_000),
       ...(opts.env ? { env: opts.env } : {}),
+      ...(opts.linuxUser ? { linuxUser: opts.linuxUser } : {}),
+      ...(opts.stdin !== undefined ? { stdin: opts.stdin } : {}),
     });
     return { exitCode: r.statusCode, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
