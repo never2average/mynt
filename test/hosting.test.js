@@ -56,6 +56,13 @@ async function world({ provider = fakeProvider(), config = CONFIG } = {}) {
     build_terms: { permitted_actions: ["display", "deep_link", "initiate_onboarding"], handoff_url: "https://bank.example.com/start" },
   });
   const hosting = await HostingService.open(ctx.store.db, provider, config, async () => "ghs_readonly");
+  const sourceFiles = new Map();
+  hosting.githubFetch = async (url, init) => {
+    const file = decodeURIComponent(new URL(url).pathname.split("/contents/")[1]);
+    assert.equal(init.headers.Authorization, "Bearer ghs_readonly");
+    return sourceFiles.has(file) ? new Response(sourceFiles.get(file)) : new Response("{}", { status: 404 });
+  };
+  hosting.jobPollMs = 1;
   const modules = await ModuleRegistry.open(ctx.store.db);
   const connectWith = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -85,7 +92,7 @@ async function world({ provider = fakeProvider(), config = CONFIG } = {}) {
     http.closeAllConnections();
     http.close();
   };
-  return { ...ctx, provider, hosting, modules, connectWith, devUser, dev, app, build, api, close };
+  return { ...ctx, provider, hosting, modules, connectWith, devUser, dev, app, build, api, close, sourceFiles };
 }
 
 test("hosting: a locked-down VM per developer, apps from verified builds, a policy over the tunnel, and a kill switch", async () => {
@@ -235,7 +242,12 @@ function fakeDirect() {
     async run(vmId, command, opts = {}) {
       calls.push(["run", vmId, command, opts]);
       if (command.includes("useradd")) return { exitCode: 0, stdout: "29.1.3\n", stderr: "" };
-      if (command.includes("docker build")) return { exitCode: this.deployExit, stdout: "", stderr: this.deployExit ? `npm ERR! auth ${opts.env.MYNT_API_KEY}` : "" };
+      if (command.includes("nohup bash")) {
+        this.job = opts.env;
+        return { exitCode: 0, stdout: "started\n", stderr: "" };
+      }
+      if (command.startsWith("cat ") && command.includes(".exit")) return { exitCode: 0, stdout: `${this.deployExit}\n`, stderr: "" };
+      if (command.startsWith("tail -c 8000")) return { exitCode: 0, stdout: this.deployExit ? `npm ERR! auth ${this.job.MYNT_API_KEY}` : "running", stderr: "" };
       if (command.includes("docker logs")) return { exitCode: 0, stdout: "listening on 8080\nMYNT_API_KEY=mynt_test_abcdefgh12345678\n", stderr: "" };
       return { exitCode: 0, stdout: "ok", stderr: "" };
     },
@@ -280,12 +292,14 @@ test("direct hosting (Freestyle): a VM up at once, egress per app, built from th
     assert.equal(deployed.status, "deploying");
     assert.equal(deployed.url, `https://mynt-${w.app.id.slice(0, 8)}.style.dev`);
     await w.hosting.pending;
-    const run = provider.calls.find(([c, , cmd]) => c === "run" && cmd.includes("docker build"));
+    const run = provider.calls.find(([c, , cmd]) => c === "run" && cmd.includes("nohup bash"));
     assert.match(run[3].env.MYNT_API_KEY, /^mynt_test_/);
     assert.equal(run[3].env.SOURCE_TOKEN, "ghs_readonly");
     assert.equal(run[3].env.SOURCE_URL, `https://api.github.com/repos/dev/saver/tarball/${"a".repeat(40)}`);
+    assert.equal(run[3].env.COMPOSE_FILE_NAME, "", "no compose file: its Dockerfile");
     assert.ok(!run[2].includes(run[3].env.MYNT_API_KEY) && !run[2].includes("ghs_readonly"), "secrets travel as environment, never in the command");
-    assert.match(run[2], /--read-only --tmpfs \/tmp --cap-drop ALL/);
+    assert.ok(!run[3].env.JOB_SCRIPT.includes("mynt_test_"), "nor in the script");
+    assert.match(run[3].env.JOB_SCRIPT, /--read-only --tmpfs \/tmp --cap-drop ALL/);
     assert.ok(provider.egress.get("vm-direct").includes("bank.example.com") && provider.egress.get("vm-direct").includes("registry.npmjs.org"));
     assert.equal(provider.routes.get(`mynt-${w.app.id.slice(0, 8)}.style.dev`), "vm-direct:9000");
     assert.equal((await call(dev, "hosting_status")).data.apps[0].status, "running");
@@ -296,7 +310,7 @@ test("direct hosting (Freestyle): a VM up at once, egress per app, built from th
     const ran = await call(dev, "app_run", { app_id: w.app.id, command: "cat /etc/hostname; rm -rf /" });
     assert.equal(ran.isError, false);
     const exec = provider.calls.findLast(([c]) => c === "run");
-    assert.match(exec[2], /^timeout 30 docker exec mynt-app-[0-9a-f]{8} sh -c "\$CMD"/);
+    assert.match(exec[2], /docker compose -p mynt-app-[0-9a-f]{8} exec -T [\s\S]* else timeout 30 docker exec mynt-app-[0-9a-f]{8} sh -c "\$CMD"/);
     assert.equal(exec[3].env.CMD, "cat /etc/hostname; rm -rf /");
 
     // An SSH login for the developer's own user; a new one revokes the last.
@@ -323,6 +337,96 @@ test("direct hosting (Freestyle): a VM up at once, egress per app, built from th
     assert.equal((await call(dev, "undeploy_app", { app_id: w.app.id })).isError, false);
     assert.equal(provider.routes.size, 0);
     assert.deepEqual(provider.egress.get("vm-direct"), []);
+  } finally {
+    w.close();
+  }
+});
+
+test("compose files: what Mynt refuses, which services it serves, and the override it adds", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { checkCompose, composeOverride } = await import("../dist/compose.js");
+  const template = checkCompose(readFileSync(new URL("../workspaces/coding-build/templates/mynt-app/compose.yaml", import.meta.url), "utf8"));
+  assert.deepEqual(template, {
+    errors: [],
+    services: ["api", "web"],
+    exposed: [
+      { service: "api", expose: "api", port: 3000 },
+      { service: "web", expose: "web", port: 8080 },
+    ],
+  }, "the starter app is accepted; mobile is behind a profile");
+  const bad = checkCompose(`services:
+  a:
+    image: x
+    privileged: true
+    network_mode: host
+    cap_add: [SYS_ADMIN]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock", "data:/data"]
+    ports: ["8080:80", "127.0.0.1:9000:9000"]
+    security_opt: ["seccomp=unconfined"]
+  b:
+    build: ../outside
+    pid: host
+    labels: { mynt.expose: Web!, mynt.port: "80" }
+`);
+  assert.deepEqual(bad.errors, [
+    "a: privileged mode isn't allowed",
+    "a: network_mode: host isn't allowed",
+    "a: cap_add isn't allowed",
+    "a: host mounts aren't allowed (use named volumes)",
+    "a: unconfined security options aren't allowed",
+    "a: port 8080:80 is published beyond loopback (Mynt serves labelled services itself)",
+    "b: pid: host isn't allowed",
+    "b: the build context must be inside the repository",
+    "b: mynt.expose must be a short lowercase name, e.g. web or api",
+  ]);
+  assert.match(checkCompose("services: [").errors[0], /isn't valid YAML/);
+  assert.deepEqual(checkCompose("services:\n  a:\n    image: x\n").errors, ["No service is labelled mynt.expose (with mynt.port), so there's nothing to serve"]);
+  const override = JSON.parse(composeOverride(template, { api: 9000, web: 9001 }));
+  assert.deepEqual(override.services.web, { security_opt: ["no-new-privileges:true"], mem_limit: "1g", cpus: 1, restart: "unless-stopped", ports: ["9001:8080"] });
+  assert.deepEqual(override.services.api.ports, ["9000:3000"]);
+});
+
+test("direct hosting: a compose app runs as a project, each labelled service on its own address", async () => {
+  const { readFileSync } = await import("node:fs");
+  const provider = fakeDirect();
+  const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
+  try {
+    const { call, dev } = w;
+    await call(dev, "request_hosting");
+    w.sourceFiles.set("compose.yaml", "services:\n  web:\n    image: x\n    privileged: true\n");
+    const refused = await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") });
+    assert.match(refused.data.error, /Mynt can't host this compose file: web: privileged mode isn't allowed/);
+    assert.ok(!provider.calls.some(([c, , cmd]) => c === "run" && cmd.includes("nohup")), "nothing ran");
+
+    w.sourceFiles.set("compose.yaml", readFileSync(new URL("../workspaces/coding-build/templates/mynt-app/compose.yaml", import.meta.url), "utf8"));
+    const deployed = (await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded", "c".repeat(40)) })).data;
+    const id = w.app.id.slice(0, 8);
+    assert.deepEqual(deployed.services.map((x) => [x.expose, x.port, x.url]), [
+      ["api", 9000, `https://mynt-${id}-api.style.dev`],
+      ["web", 9001, `https://mynt-${id}.style.dev`],
+    ]);
+    await w.hosting.pending;
+    const job = provider.job;
+    assert.equal(job.COMPOSE_FILE_NAME, "compose.yaml");
+    assert.deepEqual(JSON.parse(job.COMPOSE_OVERRIDE).services.web.ports, ["9001:8080"]);
+    assert.equal(job.MYNT_API_ORIGIN, "https://mynt.example.com");
+    assert.match(job.JOB_SCRIPT, /docker compose -p "\$NAME" -f "\$COMPOSE_FILE_NAME" -f \.mynt-override\.json up -d --build --remove-orphans --wait/);
+    assert.equal(provider.routes.get(`mynt-${id}.style.dev`), "vm-direct:9001");
+    assert.equal(provider.routes.get(`mynt-${id}-api.style.dev`), "vm-direct:9000");
+    const status = (await call(dev, "hosting_status")).data.apps[0];
+    assert.equal(status.status, "running");
+    assert.equal(status.services.length, 2);
+
+    // Commands name a service; it travels as $SERVICE, not in the script.
+    await call(dev, "app_logs", { app_id: w.app.id, service: "api", tail: 10 });
+    const logs = provider.calls.findLast(([c]) => c === "run");
+    assert.match(logs[2], new RegExp(`docker compose -p mynt-app-${id} logs --timestamps --tail 10 \\$SERVICE`));
+    assert.equal(logs[3].env.SERVICE, "api");
+    assert.match((await call(dev, "app_run", { app_id: w.app.id, service: "api; rm -rf /", command: "id" })).data.error ?? "", /Invalid|invalid|match/i, "service names are checked");
+
+    assert.equal((await call(dev, "undeploy_app", { app_id: w.app.id })).isError, false);
+    assert.equal(provider.routes.size, 0, "every service's route is removed");
+    assert.match(provider.calls.findLast(([c, , cmd]) => c === "run" && cmd.includes("down"))[2], /docker compose -p mynt-app-[0-9a-f]{8} down --remove-orphans/);
   } finally {
     w.close();
   }
