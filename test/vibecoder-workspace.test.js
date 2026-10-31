@@ -53,3 +53,22 @@ test("the starter app is one Compose project: api holds the key, web and mobile 
   }
   assert.ok(files["scripts/scaffold_app.py"]);
 });
+
+test("native mobile starters (Kotlin, Swift, Flutter) run a journey on a client session, never an app key", () => {
+  const starters = {
+    kotlin: ["README.md", "settings.gradle.kts", "app/build.gradle.kts", "app/src/main/AndroidManifest.xml", "app/src/main/kotlin/app/mynt/starter/MainActivity.kt"],
+    swift: ["README.md", "Package.swift", "Sources/MyntStarter/MyntStarterApp.swift"],
+    flutter: ["README.md", "pubspec.yaml", "lib/main.dart"],
+  };
+  for (const [lang, paths] of Object.entries(starters)) {
+    for (const p of paths) assert.ok(files[`templates/mynt-app-mobile/${lang}/${p}`], `${lang}/${p}`);
+    for (const [p, text] of Object.entries(files).filter(([p]) => p.startsWith(`templates/mynt-app-mobile/${lang}/`))) {
+      assert.doesNotMatch(text, /MYNT_API_KEY|mynt_(live|test)_/, `${p} never sees the app key`);
+    }
+  }
+  const t = (p) => files[`templates/mynt-app-mobile/${p}`];
+  assert.match(t("kotlin/app/src/main/kotlin/app/mynt/starter/MainActivity.kt"), /FLAG_SECURE[\s\S]*CustomTabsIntent[\s\S]*JourneyRunner\(/);
+  assert.match(t("swift/Sources/MyntStarter/MyntStarterApp.swift"), /ASWebAuthenticationSession/);
+  assert.match(t("swift/Sources/MyntStarter/MyntStarterApp.swift"), /SecureField/);
+  assert.match(t("flutter/lib/main.dart"), /obscureText[\s\S]*inAppBrowserView/);
+});
