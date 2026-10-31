@@ -16,6 +16,7 @@ export const BUILD_HOSTS = [
   "registry-1.docker.io",
   "auth.docker.io",
   "production.cloudflare.docker.com",
+  "production.cloudfront.docker.com",
   "registry.npmjs.org",
   "pypi.org",
   "files.pythonhosted.org",
@@ -75,7 +76,8 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const routes = await hosting.routes();
       const apps = (await hosting.hostedApps(tenant.id)).map((h) => {
         const route = routes.find((r) => r.upstream === `${tenant.tunnel_ip}:${h.port}`);
-        return { ...h, url: route ? `https://${route.host}` : null };
+        const direct = hosting.provider && "direct" in hosting.provider ? hosting.appDomain(h.app_id) : null;
+        return { ...h, url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
       });
       return json({ tenant, apps });
     },
@@ -101,9 +103,11 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       if (found.build.app_id && found.build.app_id !== app_id) return fail(`Build '${build_id}' was for another app`);
       const environment = app.status === "published" ? "live" : "sandbox";
       const { secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
-      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox");
+      const egress = await egressFor(store, hosting, app_id);
+      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress);
       await store.audit(user.id, "deploy_app", app_id, { build_id, commit_sha: found.build.commit_sha, environment });
-      return json({ ...hosted, environment, egress: await egressFor(store, hosting, app_id) });
+      const domain = hosting.appDomain(app_id);
+      return json({ ...hosted, environment, egress, url: domain ? `https://${domain}` : null });
     },
   );
 
@@ -121,6 +125,27 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       if (!(await hosting.undeploy(app_id))) return fail(`'${app_id}' isn't hosted`);
       await store.audit(user.id, "undeploy_app", app_id);
       return json({ app_id, hosted: false });
+    },
+  );
+
+  server.registerTool(
+    "vm_access",
+    {
+      title: "Log in to your hosting VM",
+      description:
+        "Developer: an SSH login to your hosting VM as your own Linux user (in the docker group, no sudo), valid for a few hours; a new login revokes the last one. Paste the command in a terminal, or use it as a VS Code Remote-SSH host. Keep it private: it's a credential.",
+      inputSchema: { hours: z.number().int().min(1).max(24).default(8) },
+    },
+    async ({ hours }) => {
+      const tenant = await hosting.tenantOf(user.id);
+      if (!tenant) return fail("You have no hosting yet (request_hosting)");
+      try {
+        const access = await hosting.vmAccess(tenant, hours);
+        await store.audit(user.id, "vm_access", tenant.id, { hours });
+        return json({ ...access, user: "developer", note: "Your apps run as containers named mynt-app-<id>: docker ps, docker logs, docker exec." });
+      } catch (e) {
+        return fail((e as Error).message);
+      }
     },
   );
 

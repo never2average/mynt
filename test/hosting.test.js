@@ -44,7 +44,7 @@ const CONFIG = {
 };
 const WG_KEY = "A".repeat(43) + "=";
 
-async function world() {
+async function world({ provider = fakeProvider(), config = CONFIG } = {}) {
   const ctx = await setup();
   await publishDefined(ctx, (d) => {
     d.descriptions.documents = { kfs: "https://bank.example.com/rd/kfs.pdf" };
@@ -55,8 +55,7 @@ async function world() {
     access_mode: "open",
     build_terms: { permitted_actions: ["display", "deep_link", "initiate_onboarding"], handoff_url: "https://bank.example.com/start" },
   });
-  const provider = fakeProvider();
-  const hosting = await HostingService.open(ctx.store.db, provider, CONFIG, async () => "ghs_readonly");
+  const hosting = await HostingService.open(ctx.store.db, provider, config, async () => "ghs_readonly");
   const modules = await ModuleRegistry.open(ctx.store.db);
   const connectWith = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -215,6 +214,156 @@ test("hosting: developers see and work their hosted app through the VM's agent, 
   } finally {
     w.close();
   }
+});
+
+// A direct provider (Freestyle-shaped): records what Mynt does to each VM.
+function fakeDirect() {
+  const calls = [];
+  const egress = new Map();
+  const routes = new Map();
+  return {
+    calls,
+    egress,
+    routes,
+    name: "freestyle",
+    direct: true,
+    deployExit: 0,
+    async createVm(slug) {
+      calls.push(["create", slug]);
+      return { id: "vm-direct" };
+    },
+    async run(vmId, command, opts = {}) {
+      calls.push(["run", vmId, command, opts]);
+      if (command.includes("useradd")) return { exitCode: 0, stdout: "29.1.3\n", stderr: "" };
+      if (command.includes("docker build")) return { exitCode: this.deployExit, stdout: "", stderr: this.deployExit ? `npm ERR! auth ${opts.env.MYNT_API_KEY}` : "" };
+      if (command.includes("docker logs")) return { exitCode: 0, stdout: "listening on 8080\nMYNT_API_KEY=mynt_test_abcdefgh12345678\n", stderr: "" };
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    },
+    async setEgress(vmId, hosts) {
+      egress.set(vmId, hosts);
+    },
+    async setRoute(vmId, domain, port) {
+      routes.set(domain, `${vmId}:${port}`);
+    },
+    async removeRoute(domain) {
+      routes.delete(domain);
+    },
+    async pause(vmId) {
+      calls.push(["pause", vmId]);
+    },
+    async start(vmId) {
+      calls.push(["start", vmId]);
+    },
+    async deleteVm() {},
+    async grantAccess(vmId, user, expiresAt) {
+      calls.push(["grant", vmId, user]);
+      return { ssh: `ssh ${vmId}+${user}:tok_${calls.length}@beta-ssh.freestyle.sh`, expires_at: expiresAt.toISOString(), identity: `idn-${calls.length}` };
+    },
+    async revokeAccess(identity) {
+      calls.push(["revoke", identity]);
+    },
+  };
+}
+
+test("direct hosting (Freestyle): a VM up at once, egress per app, built from the verified commit, routed, and an SSH login", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
+  try {
+    const { call, dev, api } = w;
+    const tenant = (await call(dev, "request_hosting")).data;
+    assert.equal(tenant.status, "running", "no bootstrap, no tunnel: the VM is up at once");
+    assert.deepEqual(provider.calls[0], ["create", `mynt-t-${tenant.id.slice(0, 8)}`]);
+    assert.match(provider.calls[1][2], /useradd --create-home --shell \/bin\/bash developer[\s\S]*usermod -aG docker developer/);
+    assert.equal((await api("POST", "/v1/hosting/bootstrap", null, { token: "x".repeat(32), wg_public_key: WG_KEY })).status, 401, "nothing to bootstrap");
+
+    const deployed = (await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") })).data;
+    assert.equal(deployed.status, "deploying");
+    assert.equal(deployed.url, `https://mynt-${w.app.id.slice(0, 8)}.style.dev`);
+    await w.hosting.pending;
+    const run = provider.calls.find(([c, , cmd]) => c === "run" && cmd.includes("docker build"));
+    assert.match(run[3].env.MYNT_API_KEY, /^mynt_test_/);
+    assert.equal(run[3].env.SOURCE_TOKEN, "ghs_readonly");
+    assert.equal(run[3].env.SOURCE_URL, `https://api.github.com/repos/dev/saver/tarball/${"a".repeat(40)}`);
+    assert.ok(!run[2].includes(run[3].env.MYNT_API_KEY) && !run[2].includes("ghs_readonly"), "secrets travel as environment, never in the command");
+    assert.match(run[2], /--read-only --tmpfs \/tmp --cap-drop ALL/);
+    assert.ok(provider.egress.get("vm-direct").includes("bank.example.com") && provider.egress.get("vm-direct").includes("registry.npmjs.org"));
+    assert.equal(provider.routes.get(`mynt-${w.app.id.slice(0, 8)}.style.dev`), "vm-direct:9000");
+    assert.equal((await call(dev, "hosting_status")).data.apps[0].status, "running");
+
+    // Commands run at once on the VM; the developer's command arrives as $CMD, not in the script.
+    const logs = (await call(dev, "app_logs", { app_id: w.app.id, tail: 20 })).data;
+    assert.equal(logs.output, "listening on 8080\nMYNT_API_KEY=[redacted]\n");
+    const ran = await call(dev, "app_run", { app_id: w.app.id, command: "cat /etc/hostname; rm -rf /" });
+    assert.equal(ran.isError, false);
+    const exec = provider.calls.findLast(([c]) => c === "run");
+    assert.match(exec[2], /^timeout 30 docker exec mynt-app-[0-9a-f]{8} sh -c "\$CMD"/);
+    assert.equal(exec[3].env.CMD, "cat /etc/hostname; rm -rf /");
+
+    // An SSH login for the developer's own user; a new one revokes the last.
+    const first = (await call(dev, "vm_access", { hours: 2 })).data;
+    assert.match(first.ssh, /^ssh vm-direct\+developer:tok_\d+@beta-ssh\.freestyle\.sh$/);
+    const second = (await call(dev, "vm_access", {})).data;
+    assert.notEqual(second.ssh, first.ssh);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id.startsWith("idn-")), "the previous login is revoked");
+
+    // A failed build says why, without the secrets.
+    provider.deployExit = 1;
+    await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded", "b".repeat(40)) });
+    await w.hosting.pending;
+    const failed = (await call(dev, "hosting_status")).data.apps[0];
+    assert.equal(failed.status, "stopped");
+    assert.match(failed.error, /npm ERR! auth/);
+    assert.doesNotMatch(failed.error, /mynt_test_/);
+
+    // Kill switch pauses; undeploy removes the container, the route and the app's egress.
+    const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
+    await call(await w.connectWith(adminUser), "suspend_tenant", { tenant_id: tenant.id, reason: "abuse report" });
+    assert.ok(provider.calls.some(([c]) => c === "pause"));
+    await w.hosting.resume(tenant.id);
+    assert.equal((await call(dev, "undeploy_app", { app_id: w.app.id })).isError, false);
+    assert.equal(provider.routes.size, 0);
+    assert.deepEqual(provider.egress.get("vm-direct"), []);
+  } finally {
+    w.close();
+  }
+});
+
+test("Freestyle provider: egress rules diffed per VM, npm by its addresses, routes by shape, SSH logins scoped to one user", async () => {
+  const { FreestyleProvider } = await import("../dist/freestyle.js");
+  const tls = [{ id: "tls-old", domain: "old.example.com", source: { vmId: "vm-1" }, destination: { public: true } }, { id: "tls-other", domain: "x.example.com", source: { vmId: "vm-2" }, destination: { public: true } }];
+  const fw = [{ id: "fw-stale", source: { vmId: "vm-1" }, destination: { cidr: "198.51.100.9/32" } }];
+  const sent = [];
+  const fetch = async (url, init) => {
+    const path = url.replace("https://api.freestyle.sh/v5", "");
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    sent.push([init.method, path, body]);
+    assert.match(init.headers.Authorization, /^Bearer fs_key$/);
+    const reply = (v, status = 200) => new Response(JSON.stringify(v), { status });
+    if (init.method === "GET" && path === "/tls") return reply({ rules: tls });
+    if (init.method === "GET" && path === "/firewall/rules") return reply({ rules: fw });
+    if (init.method === "POST" && path === "/identities") return reply({ id: "idn-1", managed: false });
+    if (init.method === "POST" && path === "/identities/idn-1/tokens") return reply({ id: "tok", token: "secret_token", expiresAt: body.expiresAt });
+    return reply({});
+  };
+  const p = new FreestyleProvider("fs_key", { fetch, resolve4: async (h) => (h === "registry.npmjs.org" ? ["104.16.1.35", "104.16.2.35"] : []) });
+
+  await p.setEgress("vm-1", ["api.github.com", "registry.npmjs.org"]);
+  const writes = sent.filter(([m]) => m !== "GET");
+  assert.deepEqual(writes, [
+    ["DELETE", "/firewall/rules/fw-stale", undefined],
+    ["POST", "/firewall/rules", { action: "allow", source: { vmId: "vm-1" }, destination: { cidr: "104.16.1.35/32" } }],
+    ["POST", "/firewall/rules", { action: "allow", source: { vmId: "vm-1" }, destination: { cidr: "104.16.2.35/32" } }],
+    ["DELETE", "/tls/tls-old", undefined],
+    ["POST", "/tls", { action: "allow", domain: "api.github.com", source: { vmId: "vm-1" }, destination: { public: true } }],
+  ], "another VM's rules are untouched; npm goes by address");
+
+  sent.length = 0;
+  await p.setRoute("vm-1", "app.style.dev", 9000);
+  assert.deepEqual(sent.at(-1), ["POST", "/tls", { action: "allow", domain: "app.style.dev", protocol: "http", source: { public: true }, destination: { vmId: "vm-1", port: 9000 } }]);
+
+  const access = await p.grantAccess("vm-1", "developer", new Date("2026-11-01T00:00:00Z"));
+  assert.equal(access.ssh, "ssh vm-1+developer:secret_token@beta-ssh.freestyle.sh");
+  assert.ok(sent.some(([m, path, b]) => m === "POST" && path === "/identities/idn-1/permissions/vm" && b.allowedLinuxUsers[0] === "developer" && b.allowedLinuxUsers.length === 1));
 });
 
 test("modules: manifests checked against live contracts, namespaces owned, outdated once a contract changes", async () => {

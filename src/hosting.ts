@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
+import { FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
 
 // Hosted runtime: developers' apps (their financial part: the server that holds the app key, calls
 // contract actions and handles webhooks) run on an isolated VM per developer, built from the exact commit
@@ -107,6 +108,16 @@ export interface HostingConfig {
 }
 
 export function hostingConfigFromEnv(env = process.env): HostingConfig | null {
+  if (env.FREESTYLE_API_KEY && env.PUBLIC_URL)
+    return {
+      publicUrl: env.PUBLIC_URL.replace(/\/+$/, ""),
+      gatewayEndpoint: "",
+      gatewayPublicKey: "",
+      gatewayIp: "",
+      region: env.HOSTING_REGION ?? "",
+      size: env.HOSTING_SIZE ?? "",
+      appsDomain: env.HOSTING_APPS_DOMAIN ?? null,
+    };
   const need = ["HOSTING_GATEWAY_ENDPOINT", "HOSTING_GATEWAY_PUBLIC_KEY", "PUBLIC_URL"];
   if (need.some((k) => !env[k])) return null;
   const endpoint = env.HOSTING_GATEWAY_ENDPOINT!;
@@ -121,7 +132,8 @@ export function hostingConfigFromEnv(env = process.env): HostingConfig | null {
   };
 }
 
-export function hostingProviderFromEnv(env = process.env): HostingProvider | null {
+export function hostingProviderFromEnv(env = process.env): HostingProvider | DirectHostingProvider | null {
+  if (env.FREESTYLE_API_KEY) return new FreestyleProvider(env.FREESTYLE_API_KEY);
   return env.HOSTING_DO_TOKEN ? new DigitalOceanProvider(env.HOSTING_DO_TOKEN, { image: env.HOSTING_DO_IMAGE }) : null;
 }
 
@@ -145,6 +157,7 @@ export interface HostedApp {
   commit_sha: string;
   port: number;
   status: "deploying" | "running" | "stopped";
+  error?: string | null;
   updated_at: string;
 }
 
@@ -191,8 +204,42 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz
   );
+  ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS access_identity text;
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS egress jsonb;
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS error text;
   CREATE INDEX IF NOT EXISTS hosting_commands_tenant_idx ON financial_products.hosting_commands (tenant_id, status, created_at);
 `;
+
+// First boot of a direct VM: the developer's own Linux user (docker, no sudo).
+const DIRECT_SETUP = `set -e
+id developer >/dev/null 2>&1 || sudo -n useradd --create-home --shell /bin/bash developer
+sudo -n usermod -aG docker developer
+docker version --format '{{.Server.Version}}'`;
+
+// Builds the verified commit and runs it hardened; NAME, SHA, PORT, SOURCE_URL, SOURCE_TOKEN, MYNT_API_KEY and
+// MYNT_BASE_URL come from the environment.
+const DIRECT_DEPLOY = `set -euo pipefail
+IMG="mynt/$NAME:$SHA"
+if ! docker image inspect "$IMG" >/dev/null 2>&1; then
+  DIR=$(mktemp -d)
+  curl -fsSL -H "Authorization: Bearer $SOURCE_TOKEN" "$SOURCE_URL" | tar -xz -C "$DIR" --strip-components=1
+  docker build -q -t "$IMG" "$DIR" >/dev/null
+  rm -rf "$DIR"
+fi
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+docker run -d --name "$NAME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
+  --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL "$IMG" >/dev/null
+echo "running $NAME at $SHA"`;
+
+// The same commands the tunnel agent runs, for a direct VM; exec's command arrives as $CMD.
+export function directCommand(kind: HostingCommandKind, name: string, args: Record<string, unknown>): string {
+  if (!/^mynt-app-[0-9a-f]{8}$/.test(name)) throw new Error("Not an app container");
+  if (kind === "status")
+    return `docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, health {{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}, restarts {{.RestartCount}}, image {{.Config.Image}}' ${name} 2>&1 && docker stats --no-stream --format '{{.CPUPerc}} CPU, {{.MemUsage}} memory' ${name} 2>&1`;
+  if (kind === "logs") return `docker logs --timestamps --tail ${Math.max(1, Math.min(2000, Number(args.tail ?? 200)))} ${name} 2>&1`;
+  if (kind === "restart") return `docker restart ${name} 2>&1`;
+  return `timeout ${Math.max(1, Math.min(120, Number(args.timeout_seconds ?? 60)))} docker exec ${name} sh -c "$CMD" 2>&1`;
+}
 
 // The container an app runs in on its VM.
 export const containerName = (appId: string) => `mynt-app-${appId.slice(0, 8)}`;
@@ -242,6 +289,7 @@ const toHostedApp = (r: Record<string, unknown>): HostedApp => ({
   commit_sha: r.commit_sha as string,
   port: Number(r.port),
   status: r.status as HostedApp["status"],
+  ...(r.error ? { error: r.error as string } : {}),
   updated_at: iso(r.updated_at)!,
 });
 
@@ -362,14 +410,14 @@ systemctl daemon-reload && systemctl enable --now mynt-agent mynt-agent-commands
 export class HostingService {
   private constructor(
     private readonly db: Db,
-    readonly provider: HostingProvider | null,
+    readonly provider: HostingProvider | DirectHostingProvider | null,
     readonly config: HostingConfig | null,
     private readonly sourceToken: (developerId: string, repository: string) => Promise<string | null>,
   ) {}
 
   static async open(
     db: Db,
-    provider: HostingProvider | null,
+    provider: HostingProvider | DirectHostingProvider | null,
     config: HostingConfig | null,
     sourceToken: (developerId: string, repository: string) => Promise<string | null> = async () => null,
   ) {
@@ -408,6 +456,7 @@ export class HostingService {
     if (existing && existing.status !== "failed") return existing;
     if (existing) await this.db.query("DELETE FROM financial_products.hosting_tenants WHERE id = $1", [existing.id]);
     const id = randomUUID();
+    if (isDirect(this.provider)) return this.provisionDirect(this.provider, id, developerId);
     const bootstrap = randomBytes(24).toString("base64url");
     await this.db.query(
       `INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status, bootstrap_hash, bootstrap_expires_at)
@@ -429,9 +478,79 @@ export class HostingService {
     return (await this.tenantOf(developerId))!;
   }
 
+  private async provisionDirect(p: DirectHostingProvider, id: string, developerId: string): Promise<Tenant> {
+    await this.db.query(
+      "INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status) VALUES ($1, $2, $3, 'provisioning')",
+      [id, developerId, p.name],
+    );
+    try {
+      const vm = await p.createVm(`mynt-t-${id.slice(0, 8)}`);
+      await this.db.query("UPDATE financial_products.hosting_tenants SET vm_id = $2, updated_at = now() WHERE id = $1", [id, vm.id]);
+      const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 120_000 });
+      if (r.exitCode !== 0) throw new Error(`setup failed: ${boxOutput(r.stderr || r.stdout).slice(-300)}`);
+      await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'running', updated_at = now() WHERE id = $1", [id]);
+    } catch (e) {
+      await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'failed', error = $2, updated_at = now() WHERE id = $1", [id, (e as Error).message.slice(0, 500)]);
+    }
+    return (await this.tenantOf(developerId))!;
+  }
+
+  // Where an app is served.
+  appDomain(appId: string) {
+    return this.config?.appsDomain ? `${appId.slice(0, 8)}.${this.config.appsDomain}` : isDirect(this.provider) ? `mynt-${appId.slice(0, 8)}.style.dev` : null;
+  }
+
+  // Direct VMs: egress is the union of the hosted apps' allowlists, nothing more.
+  private async syncEgress(p: DirectHostingProvider, tenant: Tenant) {
+    const rows = (await this.db.query("SELECT egress FROM financial_products.hosted_apps WHERE tenant_id = $1", [tenant.id])).rows as { egress: unknown }[];
+    const hosts = new Set<string>();
+    for (const r of rows) for (const h of (typeof r.egress === "string" ? JSON.parse(r.egress) : r.egress) ?? []) hosts.add(h);
+    await p.setEgress(tenant.vm_id!, [...hosts].sort());
+  }
+
+  // Builds and runs the verified commit on the VM; secrets travel as the command's environment, never its text.
+  private async deployDirect(p: DirectHostingProvider, tenant: Tenant, hosted: HostedApp, appKey: string) {
+    const fail = (message: string) =>
+      this.db.query("UPDATE financial_products.hosted_apps SET status = 'stopped', error = $2, updated_at = now() WHERE app_id = $1", [hosted.app_id, message.slice(0, 1000)]);
+    try {
+      await this.syncEgress(p, tenant);
+      const token = await this.sourceToken(tenant.developer_id, hosted.repository);
+      const r = await p.run(tenant.vm_id!, DIRECT_DEPLOY, {
+        timeoutMs: 300_000,
+        env: {
+          NAME: containerName(hosted.app_id),
+          SHA: hosted.commit_sha,
+          PORT: String(hosted.port),
+          SOURCE_URL: `https://api.github.com/repos/${hosted.repository}/tarball/${hosted.commit_sha}`,
+          SOURCE_TOKEN: token ?? "",
+          MYNT_API_KEY: appKey,
+          MYNT_BASE_URL: `${this.config?.publicUrl ?? ""}/v1`,
+        },
+      });
+      if (r.exitCode !== 0) return void (await fail(boxOutput(`${r.stdout}\n${r.stderr}`, [appKey, token ?? ""]).slice(-1000) || "The build was killed by its time limit"));
+      const domain = this.appDomain(hosted.app_id);
+      if (domain) await p.setRoute(tenant.vm_id!, domain, hosted.port);
+      await this.db.query("UPDATE financial_products.hosted_apps SET status = 'running', error = NULL, updated_at = now() WHERE app_id = $1 AND commit_sha = $2", [hosted.app_id, hosted.commit_sha]);
+    } catch (e) {
+      await fail((e as Error).message);
+    }
+  }
+
+  // A login for the developer on their VM (their Linux user, in the docker group, no sudo); the previous one is revoked.
+  async vmAccess(tenant: Tenant, hours = 8) {
+    if (!isDirect(this.provider)) throw new Error("Direct VM access needs a direct hosting provider");
+    if (tenant.status !== "running" || !tenant.vm_id) throw new Error(`Your VM is ${tenant.status}`);
+    const prev = (await this.one("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.access_identity as string | null;
+    if (prev) await this.provider.revokeAccess(prev).catch(() => undefined);
+    const grant = await this.provider.grantAccess(tenant.vm_id, "developer", new Date(Date.now() + hours * 3600e3));
+    await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = $2, updated_at = now() WHERE id = $1", [tenant.id, grant.identity]);
+    return { ssh: grant.ssh, expires_at: grant.expires_at };
+  }
+
   // A booting VM registers its WireGuard key with its one-time token; it gets its tunnel address and agent token.
   async bootstrap(token: string, wgPublicKey: string) {
     if (!this.provider || !this.config) throw new Error("Hosting isn't configured on this deployment");
+    if (isDirect(this.provider)) return null;
     if (!/^[A-Za-z0-9+/]{43}=$/.test(wgPublicKey)) throw new Error("wg_public_key must be a WireGuard public key");
     const r = await this.one(
       "SELECT * FROM financial_products.hosting_tenants WHERE bootstrap_hash = $1 AND bootstrap_expires_at > now() AND status = 'provisioning'",
@@ -457,7 +576,14 @@ export class HostingService {
   }
 
   // Runs an app's verified commit on its developer's VM, with a dedicated app key kept sealed.
-  async deploy(tenant: Tenant, app: { id: string }, build: { id: string; repository: string; commit_sha: string }, appKey: string, sandbox: boolean): Promise<HostedApp> {
+  async deploy(
+    tenant: Tenant,
+    app: { id: string },
+    build: { id: string; repository: string; commit_sha: string },
+    appKey: string,
+    sandbox: boolean,
+    egress: string[] = [],
+  ): Promise<HostedApp> {
     const ports = (await this.hostedApps(tenant.id)).filter((h) => h.app_id !== app.id).map((h) => h.port);
     let port = 9000;
     while (ports.includes(port)) port++;
@@ -469,23 +595,41 @@ export class HostingService {
        RETURNING *`,
       [app.id, tenant.id, build.id, build.repository, build.commit_sha, port, seal(appKey, sandbox) + (sandbox ? ":sandbox" : ":live")],
     );
-    return toHostedApp(r!);
+    await this.db.query("UPDATE financial_products.hosted_apps SET egress = $2, error = NULL WHERE app_id = $1", [app.id, JSON.stringify(egress)]);
+    const hosted = toHostedApp(r!);
+    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey);
+    return hosted;
   }
 
   async undeploy(appId: string): Promise<boolean> {
-    return (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING app_id", [appId])).rows.length > 0;
+    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id", [appId])).rows[0] as { tenant_id: string } | undefined;
+    if (!r) return false;
+    const p = this.provider;
+    if (isDirect(p)) {
+      const tenant = (await this.tenants()).find((t) => t.id === r.tenant_id);
+      if (tenant?.vm_id) {
+        await p.run(tenant.vm_id, `docker rm -f ${containerName(appId)} >/dev/null 2>&1 || true`).catch(() => undefined);
+        const domain = this.appDomain(appId);
+        if (domain) await p.removeRoute(domain).catch(() => undefined);
+        await this.syncEgress(p, tenant).catch(() => undefined);
+      }
+    }
+    return true;
   }
+
+  // The background deploy of a direct VM, for tests and the CLI to await.
+  pending: Promise<unknown> = Promise.resolve();
 
   // The kill switch: off the gateway at once (peers, routes, allowlist) and powered off.
   async suspend(tenantId: string): Promise<Tenant | undefined> {
     const r = await this.one("UPDATE financial_products.hosting_tenants SET status = 'suspended', updated_at = now() WHERE id = $1 RETURNING *", [tenantId]);
-    if (r?.vm_id && this.provider) await this.provider.powerOff(r.vm_id as string).catch(() => undefined);
+    if (r?.vm_id && this.provider) await (isDirect(this.provider) ? this.provider.pause(r.vm_id as string) : this.provider.powerOff(r.vm_id as string)).catch(() => undefined);
     return r && toTenant(r);
   }
 
   async resume(tenantId: string): Promise<Tenant | undefined> {
     const r = await this.one("UPDATE financial_products.hosting_tenants SET status = 'running', updated_at = now() WHERE id = $1 AND status = 'suspended' RETURNING *", [tenantId]);
-    if (r?.vm_id && this.provider) await this.provider.powerOn(r.vm_id as string).catch(() => undefined);
+    if (r?.vm_id && this.provider) await (isDirect(this.provider) ? this.provider.start(r.vm_id as string) : this.provider.powerOn(r.vm_id as string)).catch(() => undefined);
     return r && toTenant(r);
   }
 
@@ -523,6 +667,14 @@ export class HostingService {
       "INSERT INTO financial_products.hosting_commands (id, tenant_id, app_id, kind, args, status, requested_by) VALUES ($1, $2, $3, $4, $5, 'queued', $6)",
       [id, tenant.id, appId, kind, JSON.stringify(args), requestedBy],
     );
+    if (isDirect(this.provider) && tenant.vm_id) {
+      await this.db.query("UPDATE financial_products.hosting_commands SET status = 'running' WHERE id = $1", [id]);
+      const timeout = Number(args.timeout_seconds ?? 60);
+      const r = await this.provider
+        .run(tenant.vm_id, directCommand(kind, containerName(appId), args), { timeoutMs: (timeout + 5) * 1000, env: kind === "exec" ? { CMD: String(args.command) } : undefined })
+        .catch((e: Error) => ({ exitCode: null, stdout: "", stderr: e.message }));
+      await this.finishCommand(tenant, id, r.exitCode, `${r.stdout}${r.stderr}`);
+    }
     return (await this.command(id))!;
   }
 
@@ -571,7 +723,7 @@ export class HostingService {
 
   // Where the edge sends each hosted app's traffic: <app>.<appsDomain> to the app on its tenant's tunnel address.
   async routes(): Promise<{ host: string; upstream: string }[]> {
-    if (!this.config?.appsDomain) return [];
+    if (!this.config?.appsDomain || isDirect(this.provider)) return [];
     const running = new Map((await this.tenants()).filter((t) => t.status === "running").map((t) => [t.id, t]));
     return (await this.hostedApps())
       .filter((h) => running.has(h.tenant_id))
