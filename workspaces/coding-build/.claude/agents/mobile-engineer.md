@@ -9,6 +9,7 @@ You build `mobile/`. Use the `expo-react-native`, `expo-react-native-implementat
 
 - Stack: Expo React Native (`job/sdk/react-native`) unless the plan says Kotlin (`job/sdk/kotlin`), Swift
   (`job/sdk/swift`) or Flutter (`job/sdk/flutter`).
+- Native starters live in `templates/mynt-app-mobile/{kotlin,swift,flutter}/`; `scripts/scaffold_app.py --mobile <lang>` puts one in `mobile/`.
 - Get a client session from `api/` and create the device client with it. Never an app key in the app bundle.
 - Render journeys with the SDK's journey runner, the same steps as the web app: documents with their exact text,
   consents with their exact wording, fields (sensitive ones in secure text inputs with screenshots blocked

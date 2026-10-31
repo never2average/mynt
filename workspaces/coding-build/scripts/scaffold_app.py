@@ -3,10 +3,12 @@
 
 usage: python3 scripts/scaffold_app.py <dest> [--mobile expo|kotlin|swift|flutter] [--no-web] [--no-mobile]
 """
-import argparse, json, os, shutil, sys
+import argparse, json, os, re, shutil, sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE = os.path.join(HERE, "templates", "mynt-app")
+MOBILE_TEMPLATES = os.path.join(HERE, "templates", "mynt-app-mobile")
+PLACEHOLDER = "__MYNT_SDK_PACKAGE__"
 SDK = os.path.join(HERE, "job", "sdk")
 
 
@@ -17,6 +19,35 @@ def rename_package(path, name):
     with open(path, "w") as f:
         json.dump(pkg, f, indent=2)
         f.write("\n")
+
+
+def native_mobile(mobile, lang):
+    """Native apps build outside Compose: swap the Expo skeleton for templates/mynt-app-mobile/<lang>,
+    put this build's SDK where that template expects it and fill in the SDK's package/module name."""
+    shutil.rmtree(mobile)
+    shutil.copytree(os.path.join(MOBILE_TEMPLATES, lang), mobile)
+    sdk = os.path.join(SDK, lang)
+    if lang == "kotlin":
+        src = os.path.join(sdk, "src", "main", "kotlin")
+        shutil.copytree(src, os.path.join(mobile, "app", "src", "main", "kotlin"), dirs_exist_ok=True)
+        client = next(os.path.join(d, f) for d, _, fs in os.walk(src) for f in fs if f == "MyntClient.kt")
+        with open(client) as f:
+            name = re.search(r"^package\s+([\w.]+)", f.read(), re.M).group(1)
+    elif lang == "swift":
+        shutil.copytree(sdk, os.path.join(mobile, "MyntSDK"))
+        name = os.listdir(os.path.join(sdk, "Sources"))[0]
+    else:
+        shutil.copytree(sdk, os.path.join(mobile, "mynt_sdk"))
+        with open(os.path.join(sdk, "pubspec.yaml")) as f:
+            name = re.search(r"^name:\s*(\S+)", f.read(), re.M).group(1)
+    for d, _, fs in os.walk(mobile):
+        for f in fs:
+            p = os.path.join(d, f)
+            with open(p) as fh:
+                text = fh.read()
+            if PLACEHOLDER in text:
+                with open(p, "w") as fh:
+                    fh.write(text.replace(PLACEHOLDER, name))
 
 
 def main():
@@ -45,9 +76,7 @@ def main():
         shutil.copytree(os.path.join(SDK, "react-native"), os.path.join(packages, "mynt-sdk-react-native"))
         rename_package(os.path.join(packages, "mynt-sdk-react-native", "package.json"), "mynt-sdk-react-native")
     else:
-        # Native apps build outside Compose; the SDK sits next to them and the Expo skeleton goes.
-        shutil.rmtree(os.path.join(a.dest, "mobile"))
-        shutil.copytree(os.path.join(SDK, a.mobile), os.path.join(a.dest, "mobile", "mynt-sdk"))
+        native_mobile(os.path.join(a.dest, "mobile"), a.mobile)
 
     # Keep the root workspaces list to the parts that exist.
     root = os.path.join(a.dest, "package.json")
