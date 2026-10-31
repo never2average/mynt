@@ -214,6 +214,7 @@ const TABLES = `
     finished_at timestamptz
   );
   ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS access_identity text;
+  ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS runtime text;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS egress jsonb;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS error text;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS compose_file text;
@@ -221,11 +222,23 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS hosting_commands_tenant_idx ON financial_products.hosting_commands (tenant_id, status, created_at);
 `;
 
-// First boot of a direct VM: the developer's own Linux user (docker, no sudo).
+// gVisor's release, pinned and checked against its published SHA-512.
+export const GVISOR_HOST = "storage.googleapis.com";
+export const GVISOR_RELEASE = "20261019";
+
+// First boot of a direct VM: the developer's own Linux user (docker, no sudo), and gVisor for the apps'
+// containers when it installs (otherwise they run on Docker's default runtime, still in the developer's own VM).
 const DIRECT_SETUP = `set -e
 id developer >/dev/null 2>&1 || sudo -n useradd --create-home --shell /bin/bash developer
 sudo -n usermod -aG docker developer
-docker version --format '{{.Server.Version}}'`;
+docker version --format '{{.Server.Version}}'
+if ! docker info --format '{{json .Runtimes}}' | grep -q runsc; then
+  ( set -e; T=$(mktemp -d); cd "$T"; U=https://${GVISOR_HOST}/gvisor/releases/release/${GVISOR_RELEASE}/x86_64
+    curl -fsSLO "$U/gvisor.tar.bz2"; curl -fsSLO "$U/gvisor.tar.bz2.sha512"; sha512sum -c gvisor.tar.bz2.sha512 >/dev/null
+    mkdir g && tar -xjf gvisor.tar.bz2 -C g && sudo -n install -m 755 "$(find g -name runsc -type f | head -1)" /usr/local/bin/runsc
+    sudo -n /usr/local/bin/runsc install >/dev/null 2>&1 && sudo -n systemctl restart docker; cd /; rm -rf "$T" ) || echo "gVisor didn't install"
+fi
+docker info --format '{{json .Runtimes}}' | grep -q runsc && echo "runtime: runsc" || echo "runtime: runc"`;
 
 // Builds the verified commit and runs it: a compose app as a project with Mynt's override on top, otherwise its
 // Dockerfile, hardened. NAME, SHA, PORT, SOURCE_URL, SOURCE_TOKEN, COMPOSE_FILE_NAME, COMPOSE_OVERRIDE and the
@@ -246,7 +259,7 @@ else
   IMG="mynt/$NAME:$SHA"
   docker image inspect "$IMG" >/dev/null 2>&1 || docker build -q -t "$IMG" . >/dev/null
   docker rm -f "$NAME" >/dev/null 2>&1 || true
-  docker run -d --name "$NAME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
+  docker run -d --name "$NAME" --runtime "$RUNTIME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
     --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL "$IMG" >/dev/null
 fi
 ls -1dt "$HOME/apps/$NAME"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
@@ -521,9 +534,13 @@ export class HostingService {
     try {
       const vm = await p.createVm(`mynt-t-${id.slice(0, 8)}`);
       await this.db.query("UPDATE financial_products.hosting_tenants SET vm_id = $2, updated_at = now() WHERE id = $1", [id, vm.id]);
-      const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 120_000 });
+      // gVisor comes from its pinned, checksummed release: the only host the VM may reach until it hosts an app.
+      await p.setEgress(vm.id, [GVISOR_HOST]);
+      const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 240_000 });
       if (r.exitCode !== 0) throw new Error(`setup failed: ${boxOutput(r.stderr || r.stdout).slice(-300)}`);
-      await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'running', updated_at = now() WHERE id = $1", [id]);
+      const runtime = /runtime: runsc/.test(r.stdout) ? "runsc" : "runc";
+      await p.setEgress(vm.id, []);
+      await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'running', runtime = $2, updated_at = now() WHERE id = $1", [id, runtime]);
     } catch (e) {
       await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'failed', error = $2, updated_at = now() WHERE id = $1", [id, (e as Error).message.slice(0, 500)]);
     }
@@ -595,14 +612,16 @@ export class HostingService {
       const token = await this.sourceToken(tenant.developer_id, hosted.repository);
       const services = hosted.services ?? [];
       const origin = this.config?.publicUrl ?? "";
+      const runtime = String((await this.one("SELECT runtime FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.runtime ?? "runc");
       const r = await this.runJob(p, tenant.vm_id!, DIRECT_DEPLOY, {
+        RUNTIME: runtime,
         NAME: containerName(hosted.app_id),
         SHA: hosted.commit_sha,
         PORT: String(hosted.port),
         SOURCE_URL: `https://api.github.com/repos/${hosted.repository}/tarball/${hosted.commit_sha}`,
         SOURCE_TOKEN: token ?? "",
         COMPOSE_FILE_NAME: plan.composeFile ?? "",
-        COMPOSE_OVERRIDE: plan.check ? composeOverride(plan.check, Object.fromEntries(services.map((x) => [x.expose, x.port]))) : "",
+        COMPOSE_OVERRIDE: plan.check ? composeOverride(plan.check, Object.fromEntries(services.map((x) => [x.expose, x.port])), runtime) : "",
         MYNT_API_KEY: appKey,
         MYNT_BASE_URL: `${origin}/v1`,
         MYNT_API_BASE: `${origin}/v1`,
@@ -614,6 +633,14 @@ export class HostingService {
     } catch (e) {
       await fail((e as Error).message);
     }
+  }
+
+  // Machine time and its estimated cost, for the developer and admins.
+  async usage(tenant: Tenant, usdPerHour = Number(process.env.FREESTYLE_USD_PER_HOUR ?? 0.2)) {
+    if (!isDirect(this.provider) || !tenant.vm_id) return null;
+    const { seconds } = await this.provider.usage(tenant.vm_id).catch(() => ({ seconds: 0 }));
+    const runtime = (await this.one("SELECT runtime FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.runtime ?? null;
+    return { hours: Math.round((seconds / 3600) * 100) / 100, usd_estimate: Math.round((seconds / 3600) * usdPerHour * 100) / 100, usd_per_hour: usdPerHour, container_runtime: runtime };
   }
 
   // A login for the developer on their VM (their Linux user, in the docker group, no sudo); the previous one is revoked.

@@ -87,7 +87,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         const services = h.services?.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null }));
         return { ...h, ...(services ? { services } : {}), url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
       });
-      return json({ tenant, apps });
+      return json({ tenant, apps, usage: await hosting.usage(tenant) });
     },
   );
 
@@ -242,7 +242,7 @@ export function registerHostingAdminTools(server: McpServer, store: Store, user:
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => json(await Promise.all((await hosting.tenants()).map(async (t) => ({ ...t, apps: await hosting.hostedApps(t.id) })))),
+    async () => json(await Promise.all((await hosting.tenants()).map(async (t) => ({ ...t, apps: await hosting.hostedApps(t.id), usage: await hosting.usage(t) })))),
   );
 
   for (const [name, action, description] of [
