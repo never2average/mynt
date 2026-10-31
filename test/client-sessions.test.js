@@ -112,6 +112,28 @@ test("client sessions: minted server-side, scoped, consent before hosted actions
   }
 });
 
+test("a Mynt-hosted app's key arrives from the edge: honoured only with the placeholder, never on client routes", async () => {
+  const w = await world();
+  try {
+    const { api, key } = w;
+    const EDGE = "x-mynt-app-key";
+    const mint = (bearer, headers = {}) => api("POST", "/v1/client_sessions", bearer, { product_ids: ["everyday-rd"] }, headers);
+    // The app sends the placeholder; the edge adds its key.
+    assert.equal((await mint("mynt_test_injected_at_edge", { [EDGE]: key })).status, 201);
+    // The placeholder alone, or with the other environment's key, is nothing.
+    assert.equal((await mint("mynt_test_injected_at_edge")).status, 401);
+    assert.equal((await mint("mynt_live_injected_at_edge", { [EDGE]: key })).status, 401, "a sandbox key can't stand in for a live placeholder");
+    assert.equal((await mint("mynt_test_injected_at_edge", { [EDGE]: "mynt_test_not_a_real_key_000000" })).status, 401);
+    // A client session isn't swapped for the app key: the injected header is ignored next to any other bearer.
+    const session = (await mint(key)).body.client_secret;
+    assert.equal((await mint(session, { [EDGE]: key })).status, 401, "a session token plus the injected key doesn't reach server routes");
+    assert.equal((await api("GET", "/v1/client/offers", session, undefined, { Origin: ORIGIN, [EDGE]: key })).status, 200, "client routes run on the session alone");
+    assert.equal((await api("GET", "/v1/client/offers", "mynt_test_injected_at_edge", undefined, { Origin: ORIGIN, [EDGE]: key })).status, 401, "and never take the app key");
+  } finally {
+    w.close();
+  }
+});
+
 test("the generated SDK has a server client that mints sessions and a browser client that uses them", async () => {
   const w = await world();
   try {

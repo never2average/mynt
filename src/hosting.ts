@@ -2,8 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
-import { FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
-import { checkCompose, composeOverride, COMPOSE_FILES, type ComposeCheck } from "./compose.js";
+import { EDGE_KEY_HEADER, edgePlaceholder, FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
+import { CA_BUNDLE, checkCompose, composeOverride, COMPOSE_FILES, type ComposeCheck } from "./compose.js";
 
 // Hosted runtime: developers' apps (their financial part: the server that holds the app key, calls
 // contract actions and handles webhooks) run on an isolated VM per developer, built from the exact commit
@@ -219,6 +219,8 @@ const TABLES = `
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS error text;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS compose_file text;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS services jsonb;
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS vm_id text;
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS runtime text;
   CREATE INDEX IF NOT EXISTS hosting_commands_tenant_idx ON financial_products.hosting_commands (tenant_id, status, created_at);
 `;
 
@@ -260,7 +262,9 @@ else
   docker image inspect "$IMG" >/dev/null 2>&1 || docker build -q -t "$IMG" . >/dev/null
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   docker run -d --name "$NAME" --runtime "$RUNTIME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
-    --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL "$IMG" >/dev/null
+    --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL \\
+    -v /etc/ssl/certs/ca-certificates.crt:${CA_BUNDLE}:ro -e SSL_CERT_FILE=${CA_BUNDLE} -e NODE_EXTRA_CA_CERTS=${CA_BUNDLE} \\
+    -e REQUESTS_CA_BUNDLE=${CA_BUNDLE} -e CURL_CA_BUNDLE=${CA_BUNDLE} "$IMG" >/dev/null
 fi
 ls -1dt "$HOME/apps/$NAME"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
 echo "running $NAME at $SHA"`;
@@ -526,25 +530,38 @@ export class HostingService {
     return (await this.tenantOf(developerId))!;
   }
 
+  // Direct hosting gives each app its own VM when it's first deployed, so the tenant is ready at once.
   private async provisionDirect(p: DirectHostingProvider, id: string, developerId: string): Promise<Tenant> {
-    await this.db.query(
-      "INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status) VALUES ($1, $2, $3, 'provisioning')",
-      [id, developerId, p.name],
-    );
-    try {
-      const vm = await p.createVm(`mynt-t-${id.slice(0, 8)}`);
-      await this.db.query("UPDATE financial_products.hosting_tenants SET vm_id = $2, updated_at = now() WHERE id = $1", [id, vm.id]);
-      // gVisor comes from its pinned, checksummed release: the only host the VM may reach until it hosts an app.
-      await p.setEgress(vm.id, [GVISOR_HOST]);
-      const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 240_000 });
-      if (r.exitCode !== 0) throw new Error(`setup failed: ${boxOutput(r.stderr || r.stdout).slice(-300)}`);
-      const runtime = /runtime: runsc/.test(r.stdout) ? "runsc" : "runc";
-      await p.setEgress(vm.id, []);
-      await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'running', runtime = $2, updated_at = now() WHERE id = $1", [id, runtime]);
-    } catch (e) {
-      await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'failed', error = $2, updated_at = now() WHERE id = $1", [id, (e as Error).message.slice(0, 500)]);
-    }
+    await this.db.query("INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status) VALUES ($1, $2, $3, 'running')", [id, developerId, p.name]);
     return (await this.tenantOf(developerId))!;
+  }
+
+  // Each hosted app has a VM of its own: the edge can then add that app's key, and only that app's, to its calls
+  // to Mynt. First boot installs gVisor from its pinned, checksummed release (the only host it may reach then).
+  private async appVm(p: DirectHostingProvider, hosted: HostedApp): Promise<{ vmId: string; runtime: string }> {
+    const row = await this.one("SELECT vm_id, runtime FROM financial_products.hosted_apps WHERE app_id = $1", [hosted.app_id]);
+    if (row?.vm_id) return { vmId: row.vm_id as string, runtime: String(row.runtime ?? "runc") };
+    const vm = await p.createVm(`mynt-a-${hosted.app_id.slice(0, 8)}`);
+    await this.db.query("UPDATE financial_products.hosted_apps SET vm_id = $2 WHERE app_id = $1", [hosted.app_id, vm.id]);
+    await p.setEgress(vm.id, [GVISOR_HOST]);
+    const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 240_000 });
+    if (r.exitCode !== 0) throw new Error(`VM setup failed: ${boxOutput(r.stderr || r.stdout).slice(-300)}`);
+    const runtime = /runtime: runsc/.test(r.stdout) ? "runsc" : "runc";
+    await this.db.query("UPDATE financial_products.hosted_apps SET runtime = $2 WHERE app_id = $1", [hosted.app_id, runtime]);
+    return { vmId: vm.id, runtime };
+  }
+
+  private async appVms(tenantId: string): Promise<{ app_id: string; vm_id: string }[]> {
+    return (await this.db.query("SELECT app_id, vm_id FROM financial_products.hosted_apps WHERE tenant_id = $1 AND vm_id IS NOT NULL", [tenantId])).rows as {
+      app_id: string;
+      vm_id: string;
+    }[];
+  }
+
+  private appKey(row: Record<string, unknown> | undefined) {
+    const stored = String(row?.app_key_sealed ?? "");
+    const sandbox = stored.endsWith(":sandbox");
+    return { key: open(stored.replace(/:(sandbox|live)$/, ""), sandbox), sandbox };
   }
 
   // Reads the app's compose file at the verified commit (if it has one) and checks it. GitHub is asked with the
@@ -595,25 +612,26 @@ export class HostingService {
     }
   }
 
-  // Direct VMs: egress is the union of the hosted apps' allowlists, nothing more.
-  private async syncEgress(p: DirectHostingProvider, tenant: Tenant) {
-    const rows = (await this.db.query("SELECT egress FROM financial_products.hosted_apps WHERE tenant_id = $1", [tenant.id])).rows as { egress: unknown }[];
-    const hosts = new Set<string>();
-    for (const r of rows) for (const h of (typeof r.egress === "string" ? JSON.parse(r.egress) : r.egress) ?? []) hosts.add(h);
-    await p.setEgress(tenant.vm_id!, [...hosts].sort());
+  // An app's VM reaches exactly its allowlist; calls to Mynt's API get the app's key added at the edge.
+  private async syncEgress(p: DirectHostingProvider, vmId: string, appId: string) {
+    const row = await this.one("SELECT egress, app_key_sealed FROM financial_products.hosted_apps WHERE app_id = $1", [appId]);
+    const hosts = ((typeof row?.egress === "string" ? JSON.parse(row.egress) : row?.egress) ?? []) as string[];
+    const mynt = this.config?.publicUrl ? new URL(this.config.publicUrl).host : null;
+    const inject = mynt ? { [mynt]: { [EDGE_KEY_HEADER]: this.appKey(row).key } } : {};
+    await p.setEgress(vmId, [...new Set(hosts)].filter((h) => h !== mynt).sort(), inject);
   }
 
   // Builds and runs the verified commit on the VM; secrets travel as the job's environment, never its text.
-  private async deployDirect(p: DirectHostingProvider, tenant: Tenant, hosted: HostedApp, appKey: string, plan: { composeFile: string | null; check: ComposeCheck | null }) {
+  private async deployDirect(p: DirectHostingProvider, tenant: Tenant, hosted: HostedApp, appKey: string, sandbox: boolean, plan: { composeFile: string | null; check: ComposeCheck | null }) {
     const fail = (message: string) =>
       this.db.query("UPDATE financial_products.hosted_apps SET status = 'stopped', error = $2, updated_at = now() WHERE app_id = $1", [hosted.app_id, message.slice(0, 1000)]);
     try {
-      await this.syncEgress(p, tenant);
+      const { vmId, runtime } = await this.appVm(p, hosted);
+      await this.syncEgress(p, vmId, hosted.app_id);
       const token = await this.sourceToken(tenant.developer_id, hosted.repository);
       const services = hosted.services ?? [];
       const origin = this.config?.publicUrl ?? "";
-      const runtime = String((await this.one("SELECT runtime FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.runtime ?? "runc");
-      const r = await this.runJob(p, tenant.vm_id!, DIRECT_DEPLOY, {
+      const r = await this.runJob(p, vmId, DIRECT_DEPLOY, {
         RUNTIME: runtime,
         NAME: containerName(hosted.app_id),
         SHA: hosted.commit_sha,
@@ -621,14 +639,15 @@ export class HostingService {
         SOURCE_URL: `https://api.github.com/repos/${hosted.repository}/tarball/${hosted.commit_sha}`,
         SOURCE_TOKEN: token ?? "",
         COMPOSE_FILE_NAME: plan.composeFile ?? "",
-        COMPOSE_OVERRIDE: plan.check ? composeOverride(plan.check, Object.fromEntries(services.map((x) => [x.expose, x.port])), runtime) : "",
-        MYNT_API_KEY: appKey,
+        COMPOSE_OVERRIDE: plan.check ? composeOverride(plan.check, Object.fromEntries(services.map((x) => [x.expose, x.port])), runtime, true) : "",
+        // The app never holds its key: SDKs get a placeholder of the right shape, and the edge adds the real one.
+        MYNT_API_KEY: edgePlaceholder(sandbox),
         MYNT_BASE_URL: `${origin}/v1`,
         MYNT_API_BASE: `${origin}/v1`,
         MYNT_API_ORIGIN: origin,
       });
       if (r.exitCode !== 0) return void (await fail(boxOutput(r.output, [appKey, token ?? ""]).slice(-1000) || "The build was killed by its time limit"));
-      for (const x of services.length ? services : [{ port: hosted.port, domain: this.appDomain(hosted.app_id) }]) if (x.domain) await p.setRoute(tenant.vm_id!, x.domain, x.port);
+      for (const x of services.length ? services : [{ port: hosted.port, domain: this.appDomain(hosted.app_id) }]) if (x.domain) await p.setRoute(vmId, x.domain, x.port);
       await this.db.query("UPDATE financial_products.hosted_apps SET status = 'running', error = NULL, updated_at = now() WHERE app_id = $1 AND commit_sha = $2", [hosted.app_id, hosted.commit_sha]);
     } catch (e) {
       await fail((e as Error).message);
@@ -637,21 +656,29 @@ export class HostingService {
 
   // Machine time and its estimated cost, for the developer and admins.
   async usage(tenant: Tenant, usdPerHour = Number(process.env.FREESTYLE_USD_PER_HOUR ?? 0.2)) {
-    if (!isDirect(this.provider) || !tenant.vm_id) return null;
-    const { seconds } = await this.provider.usage(tenant.vm_id).catch(() => ({ seconds: 0 }));
-    const runtime = (await this.one("SELECT runtime FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.runtime ?? null;
-    return { hours: Math.round((seconds / 3600) * 100) / 100, usd_estimate: Math.round((seconds / 3600) * usdPerHour * 100) / 100, usd_per_hour: usdPerHour, container_runtime: runtime };
+    if (!isDirect(this.provider)) return null;
+    let seconds = 0;
+    const vms = await this.appVms(tenant.id);
+    for (const v of vms) seconds += (await this.provider.usage(v.vm_id).catch(() => ({ seconds: 0 }))).seconds;
+    return { vms: vms.length, hours: Math.round((seconds / 3600) * 100) / 100, usd_estimate: Math.round((seconds / 3600) * usdPerHour * 100) / 100, usd_per_hour: usdPerHour };
   }
 
-  // A login for the developer on their VM (their Linux user, in the docker group, no sudo); the previous one is revoked.
+  // Logins for the developer on each of their apps' VMs (their Linux user, in the docker group, no sudo); the
+  // previous ones are revoked. The apps' keys aren't on the VMs, so a login never exposes them.
   async vmAccess(tenant: Tenant, hours = 8) {
     if (!isDirect(this.provider)) throw new Error("Direct VM access needs a direct hosting provider");
-    if (tenant.status !== "running" || !tenant.vm_id) throw new Error(`Your VM is ${tenant.status}`);
+    if (tenant.status !== "running") throw new Error(`Your hosting is ${tenant.status}`);
+    const vms = await this.appVms(tenant.id);
+    if (!vms.length) throw new Error("None of your apps has a VM yet: deploy one first");
     const prev = (await this.one("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.access_identity as string | null;
     if (prev) await this.provider.revokeAccess(prev).catch(() => undefined);
-    const grant = await this.provider.grantAccess(tenant.vm_id, "developer", new Date(Date.now() + hours * 3600e3));
+    const grant = await this.provider.grantAccess(
+      vms.map((v) => v.vm_id),
+      "developer",
+      new Date(Date.now() + hours * 3600e3),
+    );
     await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = $2, updated_at = now() WHERE id = $1", [tenant.id, grant.identity]);
-    return { ssh: grant.ssh, expires_at: grant.expires_at };
+    return { logins: vms.map((v) => ({ app_id: v.app_id, ssh: grant.ssh[v.vm_id] })), expires_at: grant.expires_at };
   }
 
   // A booting VM registers its WireGuard key with its one-time token; it gets its tunnel address and agent token.
@@ -718,25 +745,21 @@ export class HostingService {
         [app.id, JSON.stringify(egress), plan.composeFile, services.length ? JSON.stringify(services) : null],
       ))!,
     );
-    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey, plan);
+    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey, sandbox, plan);
     return hosted;
   }
 
   async undeploy(appId: string): Promise<boolean> {
-    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id, services", [appId])).rows[0] as
-      | { tenant_id: string; services: unknown }
+    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id, services, vm_id", [appId])).rows[0] as
+      | { tenant_id: string; services: unknown; vm_id: string | null }
       | undefined;
     if (!r) return false;
     const services = ((typeof r.services === "string" ? JSON.parse(r.services) : r.services) ?? []) as HostedService[];
     const p = this.provider;
     if (isDirect(p)) {
-      const tenant = (await this.tenants()).find((t) => t.id === r.tenant_id);
-      if (tenant?.vm_id) {
-        const name = containerName(appId);
-        await p.run(tenant.vm_id, `docker compose -p ${name} down --remove-orphans >/dev/null 2>&1; docker rm -f ${name} >/dev/null 2>&1 || true`).catch(() => undefined);
-        for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(appId)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
-        await this.syncEgress(p, tenant).catch(() => undefined);
-      }
+      // Deleting the app's VM ends it, its rules (egress, the key) and its routes.
+      for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(appId)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
+      if (r.vm_id) await p.deleteVm(r.vm_id).catch(() => undefined);
     }
     return true;
   }
@@ -747,13 +770,17 @@ export class HostingService {
   // The kill switch: off the gateway at once (peers, routes, allowlist) and powered off.
   async suspend(tenantId: string): Promise<Tenant | undefined> {
     const r = await this.one("UPDATE financial_products.hosting_tenants SET status = 'suspended', updated_at = now() WHERE id = $1 RETURNING *", [tenantId]);
-    if (r?.vm_id && this.provider) await (isDirect(this.provider) ? this.provider.pause(r.vm_id as string) : this.provider.powerOff(r.vm_id as string)).catch(() => undefined);
+    const p = this.provider;
+    if (r && isDirect(p)) for (const v of await this.appVms(tenantId)) await p.pause(v.vm_id).catch(() => undefined);
+    else if (r?.vm_id && p && !isDirect(p)) await p.powerOff(r.vm_id as string).catch(() => undefined);
     return r && toTenant(r);
   }
 
   async resume(tenantId: string): Promise<Tenant | undefined> {
     const r = await this.one("UPDATE financial_products.hosting_tenants SET status = 'running', updated_at = now() WHERE id = $1 AND status = 'suspended' RETURNING *", [tenantId]);
-    if (r?.vm_id && this.provider) await (isDirect(this.provider) ? this.provider.start(r.vm_id as string) : this.provider.powerOn(r.vm_id as string)).catch(() => undefined);
+    const p = this.provider;
+    if (r && isDirect(p)) for (const v of await this.appVms(tenantId)) await p.start(v.vm_id).catch(() => undefined);
+    else if (r?.vm_id && p && !isDirect(p)) await p.powerOn(r.vm_id as string).catch(() => undefined);
     return r && toTenant(r);
   }
 
@@ -791,11 +818,15 @@ export class HostingService {
       "INSERT INTO financial_products.hosting_commands (id, tenant_id, app_id, kind, args, status, requested_by) VALUES ($1, $2, $3, $4, $5, 'queued', $6)",
       [id, tenant.id, appId, kind, JSON.stringify(args), requestedBy],
     );
-    if (isDirect(this.provider) && tenant.vm_id) {
+    const vmId = isDirect(this.provider) ? ((await this.one("SELECT vm_id FROM financial_products.hosted_apps WHERE app_id = $1", [appId]))?.vm_id as string | null) : null;
+    if (isDirect(this.provider) && !vmId) {
+      await this.db.query("UPDATE financial_products.hosting_commands SET status = 'running' WHERE id = $1", [id]);
+      await this.finishCommand(tenant, id, null, "The app's VM isn't up yet");
+    } else if (isDirect(this.provider) && vmId) {
       await this.db.query("UPDATE financial_products.hosting_commands SET status = 'running' WHERE id = $1", [id]);
       const timeout = Number(args.timeout_seconds ?? 60);
       const r = await this.provider
-        .run(tenant.vm_id, directCommand(kind, containerName(appId), args), {
+        .run(vmId, directCommand(kind, containerName(appId), args), {
           timeoutMs: (timeout + 5) * 1000,
           env: { ...(kind === "exec" ? { CMD: String(args.command) } : {}), SERVICE: String(args.service ?? "") },
         })

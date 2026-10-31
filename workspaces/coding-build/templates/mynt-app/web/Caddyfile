@@ -8,8 +8,9 @@
 	handle /api/* {
 		reverse_proxy api:3000
 	}
-	# Mynt's client API (client sessions only; the app key never passes through here).
-	handle /v1/* {
+	# Mynt's client API only: client sessions, never the app key. Hosted on Mynt, anything this server sends to
+	# Mynt's other routes would carry the app's key (added on the way out), so nothing else is forwarded.
+	handle /v1/client/* {
 		reverse_proxy {$MYNT_API_ORIGIN} {
 			header_up Host {upstream_hostport}
 		}

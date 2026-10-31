@@ -155,7 +155,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Log in to your hosting VM",
       description:
-        "Developer: an SSH login to your hosting VM as your own Linux user (in the docker group, no sudo), valid for a few hours; a new login revokes the last one. Paste the command in a terminal, or use it as a VS Code Remote-SSH host. Keep it private: it's a credential.",
+        "Developer: SSH logins to your hosted apps' VMs (each app has its own) as your own Linux user (in the docker group, no sudo), valid for a few hours; new logins revoke the last ones. Paste a command in a terminal, or use it as a VS Code Remote-SSH host. Keep them private: they're credentials. Apps' Mynt keys aren't on the VMs (they're added to calls to Mynt on the way out).",
       inputSchema: { hours: z.number().int().min(1).max(24).default(8) },
     },
     async ({ hours }) => {

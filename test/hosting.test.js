@@ -227,11 +227,15 @@ test("hosting: developers see and work their hosted app through the VM's agent, 
 function fakeDirect() {
   const calls = [];
   const egress = new Map();
+  const injected = new Map();
   const routes = new Map();
+  const deleted = [];
   return {
     calls,
     egress,
+    injected,
     routes,
+    deleted,
     name: "freestyle",
     direct: true,
     deployExit: 0,
@@ -242,7 +246,7 @@ function fakeDirect() {
     },
     async createVm(slug) {
       calls.push(["create", slug]);
-      return { id: "vm-direct" };
+      return { id: `vm-${slug}` };
     },
     async run(vmId, command, opts = {}) {
       calls.push(["run", vmId, command, opts]);
@@ -252,13 +256,14 @@ function fakeDirect() {
         return { exitCode: 0, stdout: "started\n", stderr: "" };
       }
       if (command.startsWith("cat ") && command.includes(".exit")) return { exitCode: 0, stdout: `${this.deployExit}\n`, stderr: "" };
-      if (command.startsWith("tail -c 8000")) return { exitCode: 0, stdout: this.deployExit ? `npm ERR! auth ${this.job.MYNT_API_KEY}` : "running", stderr: "" };
+      if (command.startsWith("tail -c 8000")) return { exitCode: 0, stdout: this.deployExit ? `npm ERR! source token ${this.job.SOURCE_TOKEN}` : "running", stderr: "" };
       if (command.includes("docker logs")) return { exitCode: 0, stdout: "listening on 8080\nMYNT_API_KEY=mynt_test_abcdefgh12345678\n", stderr: "" };
       return { exitCode: 0, stdout: "ok", stderr: "" };
     },
-    async setEgress(vmId, hosts) {
+    async setEgress(vmId, hosts, inject = {}) {
       egress.set(vmId, hosts);
-      this.egressHistory.push(hosts);
+      injected.set(vmId, inject);
+      this.egressHistory.push([vmId, hosts]);
     },
     async setRoute(vmId, domain, port) {
       routes.set(domain, `${vmId}:${port}`);
@@ -272,10 +277,13 @@ function fakeDirect() {
     async start(vmId) {
       calls.push(["start", vmId]);
     },
-    async deleteVm() {},
-    async grantAccess(vmId, user, expiresAt) {
-      calls.push(["grant", vmId, user]);
-      return { ssh: `ssh ${vmId}+${user}:tok_${calls.length}@beta-ssh.freestyle.sh`, expires_at: expiresAt.toISOString(), identity: `idn-${calls.length}` };
+    async deleteVm(vmId) {
+      deleted.push(vmId);
+    },
+    async grantAccess(vmIds, user, expiresAt) {
+      calls.push(["grant", vmIds, user]);
+      const n = calls.length;
+      return { ssh: Object.fromEntries(vmIds.map((v) => [v, `ssh ${v}+${user}:tok_${n}@beta-ssh.freestyle.sh`])), expires_at: expiresAt.toISOString(), identity: `idn-${n}` };
     },
     async revokeAccess(identity) {
       calls.push(["revoke", identity]);
@@ -283,71 +291,91 @@ function fakeDirect() {
   };
 }
 
-test("direct hosting (Freestyle): a VM up at once, egress per app, built from the verified commit, routed, and an SSH login", async () => {
+test("direct hosting (Freestyle): a VM per app, its key added at the edge and never on the VM, built from the verified commit, routed, and SSH logins", async () => {
   const provider = fakeDirect();
   const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
   try {
     const { call, dev, api } = w;
     const tenant = (await call(dev, "request_hosting")).data;
-    assert.equal(tenant.status, "running", "no bootstrap, no tunnel: the VM is up at once");
-    assert.deepEqual(provider.calls[0], ["create", `mynt-t-${tenant.id.slice(0, 8)}`]);
-    assert.match(provider.calls[1][2], /useradd --create-home --shell \/bin\/bash developer[\s\S]*usermod -aG docker developer/);
-    assert.match(provider.calls[1][2], /gvisor\/releases\/release\/\d{8}\/x86_64[\s\S]*sha512sum -c gvisor\.tar\.bz2\.sha512/, "gVisor from a pinned, checksummed release");
-    assert.deepEqual(provider.egressHistory, [["storage.googleapis.com"], []], "its host is allowed only for setup");
+    assert.equal(tenant.status, "running", "no bootstrap, no tunnel: ready at once");
+    assert.equal(provider.calls.length, 0, "no VM until an app is deployed");
     assert.equal((await api("POST", "/v1/hosting/bootstrap", null, { token: "x".repeat(32), wg_public_key: WG_KEY })).status, 401, "nothing to bootstrap");
+    assert.match((await call(dev, "vm_access", {})).data.error, /deploy one first/);
 
     const deployed = (await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") })).data;
     assert.equal(deployed.status, "deploying");
     assert.equal(deployed.url, `https://mynt-${w.app.id.slice(0, 8)}.style.dev`);
     await w.hosting.pending;
+    const vm = `vm-mynt-a-${w.app.id.slice(0, 8)}`;
+    assert.deepEqual(provider.calls[0], ["create", `mynt-a-${w.app.id.slice(0, 8)}`], "the app's own VM");
+    const setup = provider.calls[1];
+    assert.match(setup[2], /useradd --create-home --shell \/bin\/bash developer[\s\S]*usermod -aG docker developer/);
+    assert.match(setup[2], /gvisor\/releases\/release\/\d{8}\/x86_64[\s\S]*sha512sum -c gvisor\.tar\.bz2\.sha512/, "gVisor from a pinned, checksummed release");
+    assert.deepEqual(provider.egressHistory[0], [vm, ["storage.googleapis.com"]], "only gVisor's host during setup");
+
+    // The key: injected for Mynt's host at the edge, a placeholder in the app.
+    const key = (await w.store.db.query("SELECT app_key_sealed FROM financial_products.hosted_apps")).rows[0].app_key_sealed;
+    const inject = provider.injected.get(vm);
+    assert.deepEqual(Object.keys(inject), ["mynt.example.com"]);
+    assert.match(inject["mynt.example.com"]["x-mynt-app-key"], /^mynt_test_[A-Za-z0-9_-]{16,}$/, "a header of its own, never Authorization");
+    assert.ok(!key.includes(inject["mynt.example.com"]["x-mynt-app-key"]), "the key is stored sealed");
+    assert.ok(!provider.egress.get(vm).includes("mynt.example.com"), "Mynt's host only through the injecting rule");
+    assert.ok(provider.egress.get(vm).includes("bank.example.com") && provider.egress.get(vm).includes("registry.npmjs.org"));
     const run = provider.calls.find(([c, , cmd]) => c === "run" && cmd.includes("nohup bash"));
-    assert.match(run[3].env.MYNT_API_KEY, /^mynt_test_/);
+    assert.equal(run[1], vm);
+    assert.equal(run[3].env.MYNT_API_KEY, "mynt_test_injected_at_edge", "the app only ever sees a placeholder");
+    const real = inject["mynt.example.com"]["x-mynt-app-key"];
+    assert.ok(!JSON.stringify(provider.calls).includes(real), "the real key is never sent to the VM");
     assert.equal(run[3].env.SOURCE_TOKEN, "ghs_readonly");
     assert.equal(run[3].env.SOURCE_URL, `https://api.github.com/repos/dev/saver/tarball/${"a".repeat(40)}`);
     assert.equal(run[3].env.COMPOSE_FILE_NAME, "", "no compose file: its Dockerfile");
     assert.equal(run[3].env.RUNTIME, "runc", "gVisor didn't install on this VM: Docker's runtime");
     assert.match(run[3].env.JOB_SCRIPT, /docker run -d --name "\$NAME" --runtime "\$RUNTIME"/);
-    assert.deepEqual((await call(dev, "hosting_status")).data.usage, { hours: 2, usd_estimate: 0.4, usd_per_hour: 0.2, container_runtime: "runc" });
-    assert.ok(!run[2].includes(run[3].env.MYNT_API_KEY) && !run[2].includes("ghs_readonly"), "secrets travel as environment, never in the command");
-    assert.ok(!run[3].env.JOB_SCRIPT.includes("mynt_test_"), "nor in the script");
+    assert.match(run[3].env.JOB_SCRIPT, /-v \/etc\/ssl\/certs\/ca-certificates\.crt:\/etc\/mynt\/ca\.crt:ro -e SSL_CERT_FILE=\/etc\/mynt\/ca\.crt -e NODE_EXTRA_CA_CERTS=/, "the app trusts the edge's CA");
+    assert.ok(!run[2].includes("ghs_readonly"), "secrets travel as environment, never in the command");
     assert.match(run[3].env.JOB_SCRIPT, /--read-only --tmpfs \/tmp --cap-drop ALL/);
-    assert.ok(provider.egress.get("vm-direct").includes("bank.example.com") && provider.egress.get("vm-direct").includes("registry.npmjs.org"));
-    assert.equal(provider.routes.get(`mynt-${w.app.id.slice(0, 8)}.style.dev`), "vm-direct:9000");
-    assert.equal((await call(dev, "hosting_status")).data.apps[0].status, "running");
+    assert.equal(provider.routes.get(`mynt-${w.app.id.slice(0, 8)}.style.dev`), `${vm}:9000`);
+    const status = (await call(dev, "hosting_status")).data;
+    assert.equal(status.apps[0].status, "running");
+    assert.deepEqual(status.usage, { vms: 1, hours: 2, usd_estimate: 0.4, usd_per_hour: 0.2 });
 
-    // Commands run at once on the VM; the developer's command arrives as $CMD, not in the script.
+    // Commands run at once on the app's VM; the developer's command arrives as $CMD, not in the script.
     const logs = (await call(dev, "app_logs", { app_id: w.app.id, tail: 20 })).data;
     assert.equal(logs.output, "listening on 8080\nMYNT_API_KEY=[redacted]\n");
     const ran = await call(dev, "app_run", { app_id: w.app.id, command: "cat /etc/hostname; rm -rf /" });
     assert.equal(ran.isError, false);
     const exec = provider.calls.findLast(([c]) => c === "run");
+    assert.equal(exec[1], vm);
     assert.match(exec[2], /docker compose -p mynt-app-[0-9a-f]{8} exec -T [\s\S]* else timeout 30 docker exec mynt-app-[0-9a-f]{8} sh -c "\$CMD"/);
     assert.equal(exec[3].env.CMD, "cat /etc/hostname; rm -rf /");
 
-    // An SSH login for the developer's own user; a new one revokes the last.
+    // SSH logins for the developer's own user on each app's VM; new ones revoke the last.
     const first = (await call(dev, "vm_access", { hours: 2 })).data;
-    assert.match(first.ssh, /^ssh vm-direct\+developer:tok_\d+@beta-ssh\.freestyle\.sh$/);
+    assert.deepEqual(first.logins.map((l) => l.app_id), [w.app.id]);
+    assert.match(first.logins[0].ssh, new RegExp(`^ssh ${vm}\\+developer:tok_\\d+@beta-ssh\\.freestyle\\.sh$`));
     const second = (await call(dev, "vm_access", {})).data;
-    assert.notEqual(second.ssh, first.ssh);
-    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id.startsWith("idn-")), "the previous login is revoked");
+    assert.notEqual(second.logins[0].ssh, first.logins[0].ssh);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id.startsWith("idn-")), "the previous logins are revoked");
 
-    // A failed build says why, without the secrets.
+    // A redeploy reuses the app's VM; a failed build says why, without the secrets.
     provider.deployExit = 1;
     await call(dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded", "b".repeat(40)) });
     await w.hosting.pending;
+    assert.equal(provider.calls.filter(([c]) => c === "create").length, 1, "same VM");
     const failed = (await call(dev, "hosting_status")).data.apps[0];
     assert.equal(failed.status, "stopped");
-    assert.match(failed.error, /npm ERR! auth/);
-    assert.doesNotMatch(failed.error, /mynt_test_/);
+    assert.match(failed.error, /npm ERR! source token/);
+    assert.doesNotMatch(failed.error, /ghs_readonly/);
 
-    // Kill switch pauses; undeploy removes the container, the route and the app's egress.
+    // Kill switch pauses every app VM; undeploy deletes the app's VM (its rules and key go with it).
     const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
     await call(await w.connectWith(adminUser), "suspend_tenant", { tenant_id: tenant.id, reason: "abuse report" });
-    assert.ok(provider.calls.some(([c]) => c === "pause"));
+    assert.ok(provider.calls.some(([c, id]) => c === "pause" && id === vm));
     await w.hosting.resume(tenant.id);
+    assert.ok(provider.calls.some(([c, id]) => c === "start" && id === vm));
     assert.equal((await call(dev, "undeploy_app", { app_id: w.app.id })).isError, false);
     assert.equal(provider.routes.size, 0);
-    assert.deepEqual(provider.egress.get("vm-direct"), []);
+    assert.deepEqual(provider.deleted, [vm]);
   } finally {
     w.close();
   }
@@ -422,11 +450,14 @@ test("direct hosting: a compose app runs as a project, each labelled service on 
     assert.equal(job.COMPOSE_FILE_NAME, "compose.yaml");
     assert.deepEqual(JSON.parse(job.COMPOSE_OVERRIDE).services.web.ports, ["9001:8080"]);
     assert.equal(JSON.parse(job.COMPOSE_OVERRIDE).services.api.runtime, "runsc", "every service under gVisor");
+    assert.deepEqual(JSON.parse(job.COMPOSE_OVERRIDE).services.api.volumes, ["/etc/ssl/certs/ca-certificates.crt:/etc/mynt/ca.crt:ro"]);
+    assert.equal(JSON.parse(job.COMPOSE_OVERRIDE).services.api.environment.NODE_EXTRA_CA_CERTS, "/etc/mynt/ca.crt");
+    assert.equal(job.MYNT_API_KEY, "mynt_test_injected_at_edge");
     assert.equal(job.RUNTIME, "runsc");
     assert.equal(job.MYNT_API_ORIGIN, "https://mynt.example.com");
     assert.match(job.JOB_SCRIPT, /docker compose -p "\$NAME" -f "\$COMPOSE_FILE_NAME" -f \.mynt-override\.json up -d --build --remove-orphans --wait/);
-    assert.equal(provider.routes.get(`mynt-${id}.style.dev`), "vm-direct:9001");
-    assert.equal(provider.routes.get(`mynt-${id}-api.style.dev`), "vm-direct:9000");
+    assert.equal(provider.routes.get(`mynt-${id}.style.dev`), `vm-mynt-a-${id}:9001`);
+    assert.equal(provider.routes.get(`mynt-${id}-api.style.dev`), `vm-mynt-a-${id}:9000`);
     const status = (await call(dev, "hosting_status")).data.apps[0];
     assert.equal(status.status, "running");
     assert.equal(status.services.length, 2);
@@ -440,7 +471,7 @@ test("direct hosting: a compose app runs as a project, each labelled service on 
 
     assert.equal((await call(dev, "undeploy_app", { app_id: w.app.id })).isError, false);
     assert.equal(provider.routes.size, 0, "every service's route is removed");
-    assert.match(provider.calls.findLast(([c, , cmd]) => c === "run" && cmd.includes("down"))[2], /docker compose -p mynt-app-[0-9a-f]{8} down --remove-orphans/);
+    assert.deepEqual(provider.deleted, [`vm-mynt-a-${id}`], "undeploy deletes the app's VM");
   } finally {
     w.close();
   }
@@ -479,12 +510,15 @@ test("Freestyle provider: egress rules diffed per VM, npm by its addresses, rout
   await p.setRoute("vm-1", "app.style.dev", 9000);
   assert.deepEqual(sent.at(-1), ["POST", "/tls", { action: "allow", domain: "app.style.dev", protocol: "http", source: { public: true }, destination: { vmId: "vm-1", port: 9000 } }]);
 
-  const access = await p.grantAccess("vm-1", "developer", new Date("2026-11-01T00:00:00Z"));
+  sent.length = 0;
+  await p.setEgress("vm-1", ["api.github.com"], { "mynt.example.com": { authorization: "Bearer mynt_live_x" } });
+  assert.ok(sent.some(([m, path, b]) => m === "POST" && path === "/tls" && b.domain === "mynt.example.com" && b.transform[0].headers.authorization === "Bearer mynt_live_x"), "Mynt's host gets an injecting rule");
+  const access = await p.grantAccess(["vm-1", "vm-2"], "developer", new Date("2026-11-01T00:00:00Z"));
   const usage = await new FreestyleProvider("fs_key", {
     fetch: async () => new Response(JSON.stringify({ totalRunSeconds: 0, createdAt: new Date(Date.now() - 3600e3).toISOString() })),
   }).usage("vm-1");
   assert.ok(usage.seconds >= 3599 && usage.seconds < 3700, "a run-seconds of 0 still counts the hour since creation");
-  assert.equal(access.ssh, "ssh vm-1+developer:secret_token@beta-ssh.freestyle.sh");
+  assert.deepEqual(access.ssh, { "vm-1": "ssh vm-1+developer:secret_token@beta-ssh.freestyle.sh", "vm-2": "ssh vm-2+developer:secret_token@beta-ssh.freestyle.sh" });
   assert.ok(sent.some(([m, path, b]) => m === "POST" && path === "/identities/idn-1/permissions/vm" && b.allowedLinuxUsers[0] === "developer" && b.allowedLinuxUsers.length === 1));
 });
 
