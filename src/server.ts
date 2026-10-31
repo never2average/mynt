@@ -45,6 +45,7 @@ import { emitProductEvent, ensureRelease, registerRuntimeInnovatorTools, registe
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
+import { registerOpsTools } from "./ops.js";
 import { registerModuleTools } from "./modules.js";
 
 // The name MCP clients show for this server.
@@ -111,6 +112,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);
+    registerOpsTools(server, store.db);
   }
 
   return server;
