@@ -521,3 +521,534 @@ button:disabled {
     border-color: var(--mynt);
   }
 }
+
+/* Developer console (/developer) */
+.dev-app {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.dev-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: env(safe-area-inset-top) var(--gutter-r) 0 var(--gutter);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.dev-brand-sub {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.dev-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.dev-main {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px var(--gutter-r) max(16px, env(safe-area-inset-bottom)) var(--gutter);
+}
+
+.dev-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dev-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: clamp(8px, 6vh, 64px);
+  max-width: 560px;
+}
+
+.dev-gate h2 {
+  margin: 0;
+  font-size: clamp(22px, 6vw, 28px);
+}
+
+.dev-muted {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+}
+
+/* Search (full width) and labelled actions */
+.dev-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.dev-search {
+  flex: 1 1 100%;
+  display: flex;
+}
+
+.dev-search input,
+.dev-steer input,
+.dev-steer select,
+.dev-steer textarea,
+.dev-select select,
+.dev-secret textarea {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 16px; /* keeps iOS from zooming on focus */
+}
+
+.dev-search input:focus,
+.dev-steer :is(input, select, textarea):focus,
+.dev-select select:focus,
+.dev-secret textarea:focus {
+  outline: none;
+  border-color: var(--mynt);
+}
+
+.dev-secret textarea {
+  resize: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 16px;
+  word-break: break-all;
+}
+
+.dev-table td > .dev-pill {
+  justify-self: start;
+}
+
+.dev-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dev-toolbar .dev-actions {
+  flex: 1 1 100%;
+}
+
+.dev-btn {
+  flex: 0 1 auto;
+  font-size: 15px;
+}
+
+.btn-danger {
+  border: 1px solid var(--error-text);
+  background: transparent;
+  color: var(--error-text);
+}
+
+.btn-danger:active:not(:disabled) {
+  background: var(--error-bg);
+}
+
+.dev-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.dev-select select {
+  width: auto;
+}
+
+/* Tables fill the height that's left; rows open details */
+.dev-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: auto;
+}
+
+.dev-table-wrap.fill {
+  flex: 1 1 auto;
+  min-height: 240px;
+}
+
+.dev-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+
+.dev-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 10px 12px;
+  white-space: nowrap;
+}
+
+.dev-table td {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.dev-table td:not(.wide) {
+  white-space: nowrap;
+}
+
+.dev-table .wide {
+  width: 100%;
+  white-space: normal;
+}
+
+.dev-table tr.clickable {
+  cursor: pointer;
+}
+
+.dev-table tr.clickable:active {
+  background: var(--surface-2);
+}
+
+.dev-table .dev-empty td {
+  color: var(--muted);
+  text-align: center;
+  padding: 32px 12px;
+  white-space: normal;
+}
+
+.dev-table .dev-pre {
+  max-height: 320px;
+}
+
+.dev-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dev-pill.ok {
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+.dev-pill.bad {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.dev-pill.busy {
+  background: color-mix(in srgb, var(--mynt) 18%, transparent);
+  color: var(--card-label);
+}
+
+/* Detail: metadata card, then tabs */
+.dev-meta {
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.dev-meta-head h2 {
+  margin: 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.dev-meta-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dev-meta dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr));
+  gap: 10px 16px;
+  margin: 12px 0 0;
+}
+
+.dev-meta dt {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.dev-meta dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.dev-tabs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+
+.dev-tabs button {
+  flex: none;
+  min-height: var(--tap);
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.dev-tabs button.active {
+  color: var(--text);
+  border-bottom-color: var(--mynt);
+}
+
+.dev-tabpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dev-pre {
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.dev-run,
+.dev-run-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dev-run {
+  flex: 1;
+  min-height: 0;
+}
+
+.dev-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.dev-notice.ok {
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+.dev-notice.error {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.dev-notice.info {
+  background: var(--surface-2);
+}
+
+.dev-steer,
+.dev-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.dev-steer label,
+.dev-secret-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dev-steer textarea {
+  resize: vertical;
+}
+
+.dev-secret {
+  border-color: var(--error-text);
+}
+
+.dev-secret h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.dev-secret p {
+  margin: 0;
+}
+
+.dev-secret-warn {
+  color: var(--error-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+@media (min-width: 768px) {
+  /* On larger screens the page is the viewport and tables take the height that's left. */
+  .dev-app {
+    height: 100dvh;
+  }
+
+  .dev-main {
+    overflow-y: auto;
+  }
+
+  .dev-toolbar {
+    flex-wrap: nowrap;
+  }
+
+  .dev-search {
+    flex: 1 1 auto;
+  }
+
+  .dev-toolbar .dev-actions {
+    flex: none;
+    flex-wrap: nowrap;
+  }
+
+  .dev-run-form {
+    flex-direction: row;
+  }
+
+  .dev-run-form .dev-search {
+    flex: 1;
+  }
+}
+
+/* Phones: each table row becomes a small card, labelled field by field. */
+@media (max-width: 639px) {
+  .dev-btn {
+    flex: 1 1 auto;
+  }
+
+  .dev-table-wrap.fill {
+    min-height: 0;
+  }
+
+  .dev-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .dev-table,
+  .dev-table tbody,
+  .dev-table tr,
+  .dev-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .dev-table tr {
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .dev-table tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .dev-table td {
+    display: grid;
+    grid-template-columns: minmax(84px, 30%) minmax(0, 1fr);
+    gap: 8px;
+    border-top: 0;
+    padding: 4px 12px;
+    white-space: normal !important;
+  }
+
+  .dev-table td::before {
+    content: attr(data-label);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding-top: 2px;
+  }
+
+  .dev-table .dev-empty td {
+    display: block;
+  }
+
+  .dev-table .dev-empty td::before {
+    content: none;
+  }
+}
+
+@media (hover: hover) {
+  .dev-table tr.clickable:hover {
+    background: var(--surface-2);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: var(--error-bg);
+  }
+
+  .dev-tabs button:hover {
+    color: var(--text);
+  }
+}

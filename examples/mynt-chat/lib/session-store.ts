@@ -19,6 +19,7 @@ export interface Session {
   pendingEvents: string[]; // app events (accept, request) for Claude, sent with the next message
   busy?: boolean; // one chat turn, accept or request at a time per session
   userId?: string; // the signed-in Mynt user (from whoami), for the daily message cap
+  roles?: string[]; // their effective Mynt roles (from whoami), refreshed when /developer loads
 }
 
 export const SESSION_COOKIE = "mynt_chat_sid";

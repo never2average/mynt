@@ -22,6 +22,15 @@ browser ──cookie (session id only)──▶ Next.js server ──OAuth token
 - **Requests.** Innovators read product requests, so Claude can only propose one. The user sees exactly what would be sent and taps **Send request** (`/api/request` then calls `request_product`) or **Not now**.
 - **App events.** Accepting or sending a request is told to Claude with the user's next message, never written into the history while a reply is running.
 
+## Developer console
+
+`/developer` is a console for developers: their coding-agent builds and their hosting, through the same signed-in MCP session as the chat (no extra credentials). It shows to signed-in users whose Mynt roles (from `whoami`) include developer; Mynt checks every call again.
+
+- **Builds.** A searchable table of `list_builds` (status, goal, cost against the cap, created) with this month's spend. A build opens with its facts on top (`get_build`), the actions **Open in VS Code**, **Steer** and **Stop build**, and tabs: **Activity** (`get_build_activity`), **Timeline**, **Files** (a folder browser over `sandbox_files`), **Diff** (`sandbox_diff`: changed files, then the full diff) and **Run** (a command box for `sandbox_run`, with each command's output).
+- **Hosting.** Your VM from `hosting_status` (or **Request hosting**), **Deploy an app** from a succeeded build, **SSH login** (`vm_access`), and a table of hosted apps with their URL, status and error. An app opens with **Restart** and **Undeploy** and tabs **Logs** (`app_logs`), **Status** (`app_status`) and **Run** (`app_run`).
+- **Credentials.** The editor password and the SSH login are shown once with a copy button and live only in the page's memory until you hide them or leave. The server passes them through with `Cache-Control: no-store` and never logs or stores them; failed calls are logged by tool name only.
+- **Scope.** `/api/developer/tools` calls only the tools listed in `DEV_TOOLS` (`lib/developer.ts`), with their arguments checked. Starting builds and connecting repositories stay in Mynt's own clients.
+
 ## Configuration
 
 All configuration is through environment variables. Copy `.env.example` to `.env.local` and fill it in.
@@ -58,7 +67,7 @@ Checks:
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # vitest: card/event parsing, transcript, the session store and OAuth provider, the agent loop
+npm test            # vitest: card/event parsing, transcript, the session store and OAuth provider, the agent loop, the developer console
 npm run build
 ```
 
