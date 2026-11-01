@@ -13,8 +13,11 @@ V=${VERIFY_DIR}
 APP=${VERIFY_APP}
 mkdir -p "$V/bin"
 
+# Hash exactly the files of the verified source archive. Mynt's own checks (installs, tests, builds) write
+# node_modules, dist and coverage into the tree, and those aren't the source; a changed or deleted source file
+# still changes the hash (a missing file's error is hashed too).
 tree_hash() {
-  (cd "$APP" && find . -type f -not -path './node_modules/*' -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+  (cd "$APP" && tar -tzf "$V/app.tgz" | grep -v '/$' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum 2>&1 | sha256sum | cut -d' ' -f1)
 }
 if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then tree_hash > "$V/after.sha"; exit 0; fi
 
