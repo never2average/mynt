@@ -595,6 +595,43 @@ process.stdin.on("data", (d) => {
   assert.match(readFileSync(join(dir, "agent.jsonl"), "utf8"), /on it: Build it/);
 });
 
+test("the runner ends a Claude Code that a background task keeps alive after its last result, keeping that result", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+  const { AGENT_RUNNER } = await import("../dist/agent-runner.js");
+  const home = mkdtempSync(join(tmpdir(), "mynt-runner-"));
+  const dir = join(home, "mynt-agent");
+  mkdirSync(join(home, ".mynt-claude", "node_modules", ".bin"), { recursive: true });
+  // A stand-in Claude Code with a "preview server" running in the background: its stdin closing doesn't end it,
+  // and it keeps reporting on the background task.
+  const fake = join(home, ".mynt-claude", "node_modules", ".bin", "claude");
+  writeFileSync(
+    fake,
+    `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "sess_bg" }));
+process.stdin.on("data", () => console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 1.5, result: "pushed" })));
+let n = 0;
+setInterval(() => { if (++n <= 2) console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 1.5 })); }, 100);
+`,
+  );
+  chmodSync(fake, 0o755);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "runner.mjs"), AGENT_RUNNER);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ prompt: "Build it", cwd: join(home, "work"), budgetUsd: 4, version: "0.0.0" }));
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ token: "t", env: {} }));
+  const started = Date.now();
+  const child = spawn(process.execPath, [join(dir, "runner.mjs"), dir], { env: { ...process.env, HOME: home, MYNT_AGENT_SETTLE_MS: "400" }, stdio: "ignore" });
+  await new Promise((r) => child.on("exit", r));
+  assert.ok(Date.now() - started < 15_000, "the runner didn't wait forever");
+  const state = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+  assert.equal(state.done, true);
+  assert.equal(state.last_subtype, "success", "its last result stands, so the build moves on to verification");
+  assert.equal(state.cost_usd, 1.5);
+  assert.equal(state.summary, "pushed");
+});
+
 test("without a boat.dev key builds are disabled cleanly, and agents never connect outside services", async () => {
   const { as, connect, call } = await setup({ boat: null });
   const dev = await connect(await as("Dev", ["developer"]));
