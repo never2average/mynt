@@ -13,13 +13,18 @@ V=${VERIFY_DIR}
 APP=${VERIFY_APP}
 mkdir -p "$V/bin"
 
-# Hash exactly the files of the verified source archive. Mynt's own checks (installs, tests, builds) write
-# node_modules, dist and coverage into the tree, and those aren't the source; a changed or deleted source file
-# still changes the hash (a missing file's error is hashed too).
-tree_hash() {
-  (cd "$APP" && tar -tzf "$V/app.tgz" | grep -v '/$' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum 2>&1 | sha256sum | cut -d' ' -f1)
+# The audit must leave the source untouched. Snapshot each file of the verified source archive (a missing
+# file's error is recorded too) once Mynt's own checks have finished, since installs, builds and formatters may
+# rewrite a lockfile or a config; then again after the audit. A difference blocks the build and names the files.
+tree_sums() { # out-prefix
+  (cd "$APP" && tar -tzf "$V/app.tgz" | grep -v '/$' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum 2>&1) > "$1.sums"
+  sha256sum < "$1.sums" | cut -d' ' -f1 > "$1.sha"
 }
-if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then tree_hash > "$V/after.sha"; exit 0; fi
+if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then
+  tree_sums "$V/after"
+  diff "$V/before.sums" "$V/after.sums" | grep '^[<>]' | sed -E 's/^[<>] //; s/^[0-9a-f]{64}  //; s/^sha256sum: (.*): No such file or directory$/\1 (deleted)/' | LC_ALL=C sort -u | head -20 > "$V/changed.txt"
+  exit 0
+fi
 
 URL="$1"; WANT="$2"
 CHECKS="$V/checks.jsonl"; : > "$CHECKS"
@@ -27,6 +32,7 @@ check() {
   python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "status": sys.argv[2], "detail": sys.argv[3][-1500:]}))' "$1" "$2" "$3" >> "$CHECKS"
 }
 finish() {
+  [ -f "$V/unpacked" ] && tree_sums "$V/before"
   python3 - "$CHECKS" "$V/report.json" <<'PY'
 import json, sys
 checks = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
@@ -49,7 +55,7 @@ GOT=$(sha256sum "$V/app.tgz" | cut -d' ' -f1)
 [ "$GOT" = "$WANT" ] || { check source fail "source checksum mismatch ($GOT)"; exit 0; }
 mkdir -p "$APP" && tar -xzf "$V/app.tgz" -C "$APP"
 check source pass "sha256 $GOT"
-tree_hash > "$V/before.sha"
+touch "$V/unpacked"
 cd "$APP"
 has_script() { [ -f package.json ] && node -e "process.exit((require('./package.json').scripts||{})['$1'] ? 0 : 1)" 2>/dev/null; }
 

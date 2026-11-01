@@ -55,6 +55,7 @@ function fakeBoat() {
       if (command.includes("tar --exclude")) return { exitCode: 0, stdout: `${SHA}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
       if (command.includes("verify.sh --rehash")) {
         s.files.set(`${V}/after.sha`, boat.tamperDuringAudit ? "changed\n" : s.files.get(`${V}/before.sha`));
+        s.files.set(`${V}/changed.txt`, boat.tamperDuringAudit ? "./api/index.ts\n" : "");
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("verify.sh")) return { processId: 7, exitCode: null, stdout: "", stderr: "" };
@@ -269,7 +270,7 @@ test("a build is blocked if the audit changed the code, or the pushed branch isn
   ctx.boat.tamperDuringAudit = true;
   let r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please", repository: "acme/savings-app" } });
   assert.equal(r.build.status, "blocked");
-  assert.match(r.build.error, /source changed during the audit/);
+  assert.match(r.build.error, /source changed during the audit: \.\/api\/index\.ts;/);
 
   ctx.boat.tamperDuringAudit = false;
   ctx.boat.branchMatches = false;
