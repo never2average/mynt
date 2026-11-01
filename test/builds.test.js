@@ -749,3 +749,52 @@ test("a build that fails stops its sandboxes and kills its proxy token", async (
   assert.ok(ctx.boat.sandboxes.get(sbx).stopped, "the coding sandbox is stopped");
   assert.equal(await ctx.builds.agentTokenActive(token), false);
 });
+
+test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real error, does", async () => {
+  const ctx = await setup();
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
+  const start = async () => (await ctx.call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id })).data;
+  const real = ctx.boat.getSandbox;
+  const failWith = (msg) => { ctx.boat.getSandbox = async () => { throw new Error(msg); }; };
+  const heal = () => { ctx.boat.getSandbox = real; };
+  const outage = 'Freestyle POST /vms/vm-1/exec-await: 503 {"code":"INTERNAL_ERROR"}';
+
+  // A passing outage: the build rides it out and carries on.
+  const a = await start();
+  await ctx.builds.tick(); // sandbox requested
+  ctx.boat.ready((await ctx.builds.get(a.id)).sandbox_id);
+  failWith(outage);
+  await ctx.builds.tick();
+  await ctx.builds.tick();
+  assert.equal((await ctx.builds.get(a.id)).status, "provisioning");
+  heal();
+  await ctx.builds.tick(); // agent prompted
+  assert.notEqual((await ctx.builds.get(a.id)).status, "failed");
+  assert.notEqual((await ctx.builds.get(a.id)).status, "provisioning");
+
+  // An outage that outlasts the grace period fails the build, with the provider's error.
+  const grace = BuildService.TRANSIENT_GRACE_MS;
+  BuildService.TRANSIENT_GRACE_MS = 30;
+  const b = await start();
+  await ctx.builds.tick();
+  ctx.boat.ready((await ctx.builds.get(b.id)).sandbox_id);
+  failWith(outage);
+  await ctx.builds.tick();
+  assert.equal((await ctx.builds.get(b.id)).status, "provisioning");
+  await new Promise((r) => setTimeout(r, 50));
+  await ctx.builds.tick();
+  BuildService.TRANSIENT_GRACE_MS = grace;
+  heal();
+  assert.equal((await ctx.builds.get(b.id)).status, "failed");
+  assert.match((await ctx.builds.get(b.id)).error, /503/);
+
+  // A real error fails at once.
+  const c = await start();
+  await ctx.builds.tick();
+  ctx.boat.ready((await ctx.builds.get(c.id)).sandbox_id);
+  failWith('Freestyle POST /vms/vm-1/exec-await: 400 {"code":"BAD_REQUEST"}');
+  await ctx.builds.tick();
+  heal();
+  assert.equal((await ctx.builds.get(c.id)).status, "failed");
+});
