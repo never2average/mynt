@@ -191,6 +191,9 @@ export function isTransient(e: unknown): boolean {
   return /: (429|5\d\d)\b|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
 }
 
+// What a failed audit left behind, kept on the build before its sandbox is deleted.
+type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
+
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 const OUT = "/home/user/mynt-out";
 
@@ -688,8 +691,18 @@ export class BuildService {
         boat.readFile(vid, `${VERIFY_DIR}/after.sha`),
         boat.readFile(vid, `${VERIFY_DIR}/changed.txt`).catch(() => null),
       ]);
+      // The sandbox goes next, and with it the only record of a failed audit: keep the agent's own account.
+      let audit: AuditRun | undefined;
+      if (!auditor!.ok || !maxwell) {
+        const log = await boat
+          .exec(vid, `tail -c 1500 ${AGENT_DIR}/runner.log 2>/dev/null; echo; tail -n 3 ${AGENT_DIR}/agent.jsonl 2>/dev/null | cut -c1-600`, { timeoutSeconds: 30 })
+          .then((r) => r.stdout ?? "")
+          .catch(() => "");
+        const st = auditor!.state;
+        audit = { result: st?.last_subtype ?? null, exit_code: st?.exit_code ?? null, error: st?.error ?? null, summary: st?.summary?.slice(0, 1500) ?? null, log: log.slice(-3000) || null, report_written: !!maxwell };
+      }
       await boat.stop(vid).catch(() => {});
-      await this.decide(b, { report, maxwell, unchanged: !!before && before.trim() === after?.trim(), changed: (changed ?? "").split("\n").map((l) => l.trim()).filter(Boolean), auditFinished: auditor!.ok });
+      await this.decide(b, { report, maxwell, unchanged: !!before && before.trim() === after?.trim(), changed: (changed ?? "").split("\n").map((l) => l.trim()).filter(Boolean), auditFinished: auditor!.ok, audit });
     }
   }
 
@@ -697,7 +710,7 @@ export class BuildService {
   // findings, every check passing, and a pushed branch identical to the verified source.
   private async decide(
     b: Build,
-    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean },
+    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean; audit?: AuditRun },
   ) {
     const boat = this.boat!;
     const counts = v.maxwell?.counts ?? {};
@@ -714,7 +727,11 @@ export class BuildService {
       const files = v.changed?.length ? `: ${v.changed.slice(0, 5).join(", ")}${v.changed.length > 5 ? ", …" : ""}` : "";
       return end("blocked", `The source changed during the audit${files}; the result can't be trusted`, { changed: v.changed ?? [] });
     }
-    if (!v.auditFinished || !v.maxwell) return end("blocked", "No independent Maxwell audit result; a build can't ship without one");
+    if (!v.auditFinished || !v.maxwell) {
+      const a = v.audit;
+      const why = !a ? "" : !a.report_written && a.result === "success" ? " (the auditor finished without writing its report)" : ` (auditor: ${[a.result ?? "no result", a.exit_code != null ? `exit ${a.exit_code}` : "", a.error ?? ""].filter(Boolean).join(", ")})`;
+      return end("blocked", `No independent Maxwell audit result${why}; a build can't ship without one`, { audit: a ?? null });
+    }
     if (serious > 0) return end("blocked", `Security gate: ${serious} critical/high Maxwell finding(s)`, counts);
     const failed = checks.filter((c) => c.status === "fail");
     if (failed.length) return end("failed", `Not production-ready: ${failed.map((c) => c.name).join(", ")}`, failed);
