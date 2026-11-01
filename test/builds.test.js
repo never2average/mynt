@@ -248,8 +248,8 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
 
 for (const [label, opts, status, pattern] of [
   ["the agent's own report can't hide findings: Mynt's audit decides", { agent: { ...agentReport, maxwell: { counts: { high: 0 } } }, verification: { maxwell: { counts: { critical: 0, high: 2 } } } }, "blocked", /Security gate: 2/],
-  ["no independent audit, no ship", { verification: { maxwell: null } }, "blocked", /No independent Maxwell audit/],
-  ["an audit that didn't finish doesn't count", { verification: { auditStatus: "error_max_budget_usd" } }, "blocked", /No independent Maxwell audit/],
+  ["no independent audit, no ship", { verification: { maxwell: null } }, "blocked", /No independent Maxwell audit result \(the auditor finished without writing its report\)/],
+  ["an audit that didn't finish doesn't count", { verification: { auditStatus: "error_max_budget_usd" } }, "blocked", /No independent Maxwell audit result \(auditor: error_max_budget_usd/],
   ["a failing check from Mynt's script fails the build", { verification: { checks: [...passingChecks, { name: "secrets_scan", status: "fail", detail: "1 secret(s)" }] } }, "failed", /secrets_scan/],
 ]) {
   test(label, async () => {
