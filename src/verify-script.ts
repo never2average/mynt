@@ -16,8 +16,9 @@ mkdir -p "$V/bin"
 # The audit must leave the source untouched. Snapshot each file of the verified source archive (a missing
 # file's error is recorded too) once Mynt's own checks have finished, since installs, builds and formatters may
 # rewrite a lockfile or a config; then again after the audit. A difference blocks the build and names the files.
+# Git's own folder isn't source: any git command, even a read-only status, rewrites its index.
 tree_sums() { # out-prefix
-  (cd "$APP" && tar -tzf "$V/app.tgz" | grep -v '/$' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum 2>&1) > "$1.sums"
+  (cd "$APP" && tar -tzf "$V/app.tgz" | grep -v -e '/$' -e '^\(\./\)\?\.git/' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum 2>&1) > "$1.sums"
   sha256sum < "$1.sums" | cut -d' ' -f1 > "$1.sha"
 }
 if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then
