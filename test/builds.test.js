@@ -213,9 +213,12 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   const instructions = coding.files.get(`${BUILD}/CLAUDE.md`);
   assert.match(instructions, /Do not open a pull request/);
   assert.match(instructions, /re-runs the audit and the checks itself/);
-  assert.ok(coding.files.has(`${BUILD}/.claude/skills/maxwell-audit/SKILL.md`) && coding.files.has(`${BUILD}/scripts/report_status.py`));
+  assert.ok(coding.files.has(`${BUILD}/.claude/skills/secure/SKILL.md`) && coding.files.has(`${BUILD}/scripts/report_status.py`));
+  assert.ok(![...coding.files.keys()].some((p) => p.includes("maxwell")), "Maxwell runs once, in Mynt's verification, not in the coding agent's sandbox");
+  assert.match(instructions, /Don't install or run Maxwell/);
   assert.equal(config.cwd, BUILD);
   assert.equal(JSON.parse(coding.files.get(`${BUILD}/job/build.json`)).build.repository, "acme/savings-app");
+  assert.equal(JSON.parse(coding.files.get(`${BUILD}/job/build.json`)).build.maxwell_repo, undefined);
   assert.ok(coding.files.has(`${BUILD}/job/sdk/openapi.json`));
 
   // The verifier: a fresh sandbox with no secrets, Mynt's own script, and an audit-only agent.
@@ -596,7 +599,6 @@ test("without a boat.dev key builds are disabled cleanly, and agents never conne
   const { as, connect, call } = await setup({ boat: null });
   const dev = await connect(await as("Dev", ["developer"]));
   assert.match((await call(dev, "start_build", { goal: "Build a savings page please" })).data.error, /aren't enabled/);
-  assert.match(workspaceFiles("coding-build")[".claude/skills/maxwell-audit/SKILL.md"], /Do not connect any external service or sign in anywhere/);
   assert.match(workspaceFiles("build-audit")["CLAUDE.md"], /Don't connect any external service or sign in anywhere/);
 });
 
