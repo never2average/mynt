@@ -632,6 +632,51 @@ setInterval(() => { if (++n <= 2) console.log(JSON.stringify({ type: "result", s
   assert.equal(state.summary, "pushed");
 });
 
+test("the runner never cuts off an agent whose sub-agents are still working after the lead's turn ends", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+  const { AGENT_RUNNER } = await import("../dist/agent-runner.js");
+  const home = mkdtempSync(join(tmpdir(), "mynt-runner-"));
+  const dir = join(home, "mynt-agent");
+  mkdirSync(join(home, ".mynt-claude", "node_modules", ".bin"), { recursive: true });
+  // The lead delegates, ends its turn (a result), then its sub-agents stream work for longer than the settle
+  // window before the lead's real final result; then it exits on its own.
+  const fake = join(home, ".mynt-claude", "node_modules", ".bin", "claude");
+  writeFileSync(
+    fake,
+    `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "sess_team" }));
+process.stdin.once("data", () => {
+  console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.5, result: "delegated to the team" }));
+  let n = 0;
+  const t = setInterval(() => {
+    console.log(JSON.stringify({ type: "assistant", parent_tool_use_id: "toolu_team", message: { content: [{ type: "text", text: "sub-agent step " + ++n }] } }));
+    if (n === 15) {
+      clearInterval(t);
+      console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 3, result: "built, checked and pushed" }));
+      process.exit(0);
+    }
+  }, 100);
+});
+`,
+  );
+  chmodSync(fake, 0o755);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "runner.mjs"), AGENT_RUNNER);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ prompt: "Build it", cwd: join(home, "work"), budgetUsd: 4, version: "0.0.0" }));
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ token: "t", env: {} }));
+  // Settle after 400 ms of silence: the sub-agents' 1.5 s of output must keep the agent alive.
+  const child = spawn(process.execPath, [join(dir, "runner.mjs"), dir], { env: { ...process.env, HOME: home, MYNT_AGENT_SETTLE_MS: "400" }, stdio: "ignore" });
+  await new Promise((r) => child.on("exit", r));
+  const state = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+  assert.equal(state.summary, "built, checked and pushed", "the agent finished; it wasn't cut off after the lead's first turn");
+  assert.equal(state.cost_usd, 3);
+  assert.equal(state.exit_code, 0);
+  assert.match(readFileSync(join(dir, "agent.jsonl"), "utf8"), /sub-agent step 15/);
+});
+
 test("without a boat.dev key builds are disabled cleanly, and agents never connect outside services", async () => {
   const { as, connect, call } = await setup({ boat: null });
   const dev = await connect(await as("Dev", ["developer"]));

@@ -501,6 +501,9 @@ export class BuildService {
         await this.advance(build);
       } catch (e) {
         const current = (await this.get(build.id)) ?? build;
+        // Stopped (or otherwise ended) while this tick was in flight: its sandboxes are gone on purpose, and the
+        // build keeps the status it ended with.
+        if (TERMINAL.includes(current.status)) continue;
         await this.retireKey(current);
         // Don't leave a failed build's machines running until their TTL.
         for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.boat.stop(id).catch(() => {});

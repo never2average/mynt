@@ -83,9 +83,10 @@ const seen = new Set();
 const pending = () => readdirSync(inbox).filter((f) => !seen.has(f)).sort();
 let ended = false;
 // After its input is closed, Claude Code exits on its own, unless a background task it started (a preview
-// server, say) keeps it alive: then it only reports on that task, forever. So once it has been quiet this long
-// after its last result, end it; its last result stands.
-const SETTLE_MS = Number(process.env.MYNT_AGENT_SETTLE_MS || 90000);
+// server, say) keeps it alive: then it sits silent, waking only to report on that task. So once it has produced
+// no output at all for this long, end it; its last result stands. Any output resets the clock: sub-agents working
+// in the background after the lead's turn ends keep streaming, and must not be cut off.
+const SETTLE_MS = Number(process.env.MYNT_AGENT_SETTLE_MS || 300000);
 let quiet = null;
 const settle = () => {
   clearTimeout(quiet);
@@ -105,6 +106,7 @@ const maybeEnd = () => {
 
 let buf = "";
 child.stdout.on("data", (d) => {
+  if (ended) settle();
   buf += d;
   for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
     const line = buf.slice(0, i);
