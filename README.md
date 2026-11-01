@@ -1,48 +1,55 @@
+<div align="center">
+
 # Mynt
 
-**Lovable for finance apps.** Describe the financial product you want; Mynt's AI agents design it, price it, test it, clear compliance, build it and launch it.
+### Lovable for finance apps: regulated products, composed; the apps on top, built by agents and verified by Mynt.
 
-**Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](#install--build) · **Go deeper:** [Reference](#reference)
+Products as compositions, not one-offs · regulation computed, not remembered · agents build, Mynt verifies · keys never on a developer's machine · MIT licensed
 
-| If you are… | Mynt gives you |
-| --- | --- |
-| **A licensed firm** (bank, NBFC, insurer, AMC, distributor) | A product foundry: compose a product from regulated building blocks, price it, test it, see exactly which licences and obligations it carries, and publish it to developers |
-| **A developer or vibecoder** | Ready-made regulated products to build on, and a team of coding agents that ships the whole app (server, web and mobile) as one Docker Compose project, audited and hosted |
-| **A customer** | Products shaped around what you actually need, offered in the apps you already use |
-| **A compliance team** | The regulator → licence → obligation → control map for every product, with evidence and an audit trail |
+</div>
 
-## The problem
+---
 
-The need for a better financial product is usually obvious from the data. Examples:
-- pay-later for a shop's regular customers;
-- cover for a slow season;
-- six weeks of working capital before a festival, repaid a little every day, instead of a 12-month loan with fixed EMIs.
+## Two ideas
 
-Building one still takes months:
-- pricing and feasibility;
-- finding a licensed partner;
-- working out which regulations and licences apply;
-- controls and disclosures;
-- the app itself;
-- distribution.
+### 1. A financial product is a composition
 
-So products get built for the average customer, and nobody builds the one that fits.
+You don't design a financial product from scratch here. You compose one from regulated building blocks (**primitives**), each a line of business (credit, payments, insurance, …) and an action on it (issuance, sale, servicing, …):
 
-## Describe it. Agents build it.
+- a recurring deposit is a recurring payment mandate plus a term deposit;
+- a foreign-currency transfer is a currency exchange plus a payment.
 
-You chat with Mynt and describe the product or app. Its agents take it from there:
+Because a product is made of primitives, its regulatory regime follows from them: which regulators, which licences may provide each part, and which obligations, filings and controls apply. Mynt works that out from its regulatory model instead of asking anyone to remember it, and checks the product's legal entity, its parties and their GRC folders against it.
 
-1. **The chat agent** works out what's needed, asking one clarifying question at a time.
-2. **The product foundry** designs the terms and pricing and picks the licensed partner.
-   - A product is composed from regulated building blocks: a recurring deposit is a recurring payment mandate plus a term deposit.
-   - So its regulatory regime follows from what it's made of.
-   - Its feasibility is worked out in code.
-3. **Compliance, platform, acquisition and back office** are spun up for that one product:
-   - its compliance is checked against the regulation and the licences behind it;
-   - it runs in its own isolated environment;
-   - experiences are built for it, and it reaches the right customers;
-   - it's serviced and reconciled.
-4. **It comes back to the same chat** as a product card: the terms, and a one-tap accept.
+The same product can be re-composed rather than rebuilt. Adding a part, changing who provides it or tightening a term is a change to its definition, checked against the regime before it's published.
+
+### 2. Agents build; Mynt verifies
+
+Agents do the work (designing, pricing, building, reviewing, prospecting), but none of them grades its own work:
+
+- **Builds are verified in a clean sandbox the agent never touched.** Tests, lint and types, a secrets scan, a dependency audit, an SBOM, every required disclosure, and an independent security audit run before any pull request is opened.
+- **Agents are steered by folders, not prompts in code.** Each agent's instructions, skills and scripts live in `workspaces/<agent>/` and become its working directory. Its skills are human-written ones found on GitHub and vendored with their licence and source.
+- **Secrets never reach a sandbox or a hosted app.** Agents reach the model through Mynt's proxy with a token that dies with the run. A hosted app sends a placeholder, and its key is added on the way out.
+- **Every cost is counted.** Sandboxes, model spend and hosting come from metered records, against per-build and monthly caps, and a figure that can't be measured is never shown as $0.
+
+## What it does
+
+A developer asks, in their own MCP client:
+
+> Build a savings app on the recurring deposit, with a web app and an Expo mobile app.
+
+Mynt takes it from there:
+
+- **Plans** it: an architect agent picks the products, actions and journeys, and which parts the app needs.
+- **Builds** `api/`, `web/` and `mobile/` as one Docker Compose project, on SDKs generated for exactly those products (TypeScript, React Native, Kotlin, Swift, Flutter and Python).
+- **Reviews** it against every product's contract and build terms: documents shown word for word, consent before the action that needs it, no banned phrase, no open proxy to Mynt.
+- **Verifies** it in a clean sandbox, then opens the pull request.
+- **Hosts** it on a VM of its own: egress only to the hosts it needs, containers under gVisor, a public HTTPS address for each service.
+- **Hands back to you** only when it needs you: connecting a repository, an approval, a credential.
+
+While the agents work, the developer can open the sandbox in VS Code, run commands in it and see the diff; once the app is hosted, they can read its logs, run commands in it and SSH into its VM.
+
+A licensed firm uses the same platform to **compose** a product, **price** and **test** it in its own model repository, **see** exactly which licences and obligations it carries, and **publish** it to developers. A customer asks for what they need in plain words, and gets a product card back:
 
 ```
 You:   I need ₹80,000 of stock for six weeks before Diwali.
@@ -55,72 +62,39 @@ Mynt:  ┌───────────────────────�
        └─────────────────────────────────────────────┘
 ```
 
-**From months of launch work to one conversation.**
+## Why it's different
 
-## How it fits together
+| | |
+|---|---|
+| **Composed, not hand-built** | A product is a definition over regulated primitives, so it stays small, reviewable and checkable against its regime. |
+| **Regulation is computed** | Regulators, licences, law and GRC registers are data. A product's regime, and what its entity holds or is missing, follow from its composition. |
+| **Agents never grade their own work** | A build ships only if Mynt's own checks pass in a sandbox the agent never touched. A failed check blocks the pull request. |
+| **Keys stay out of reach** | The app key lives only in a server Mynt hosts, and even there it's added on the way out, never stored on the VM. Web and mobile apps run on short-lived client sessions. |
+| **Customer data in one vault** | Encrypted (AES-256-GCM), collected only after consent, erasable on request, and never in the app's own database or logs. |
+| **Isolated by default** | Each hosted app has its own Firecracker microVM, its containers run under gVisor, and it can reach only the hosts it needs. |
 
-```mermaid
-flowchart LR
-  subgraph People
-    C[Customers]
-    D[Developers]
-    I[Innovators<br/>licensed firms]
-    A[Admins]
-  end
+## Measured
 
-  subgraph Mynt["Mynt platform"]
-    Chat[Chat agent]
-    Foundry[Product foundry<br/>composition · pricing · feasibility]
-    Reg[Regulatory model<br/>regulators · licences · law · GRC]
-    Desk[Governance desk]
-    Builds[Coding-agent builds<br/>lead + 7 specialists]
-    Runtime[Runtime API<br/>contracts · client sessions · journeys]
-    Vault[(Customer vault<br/>encrypted, consented)]
-    Hosting[Hosted runtime<br/>isolated VM per developer]
-  end
+- **The live regulatory model holds 62 regulators, about 766 licence types, 712 product types and about 2,030 items of law.**
+- **A hosted app's VM boots in about a second,** and a two-service Compose app built and started in 16 seconds, measured on Freestyle.
+- **Every push builds and runs the starter app.** CI scaffolds it from a freshly generated SDK, compiles `api/`, `web/` and the Expo app, builds the three images and runs them hardened (read-only, no capabilities) before checking that they serve.
 
-  subgraph Apps["A developer's app (one Compose project)"]
-    API[api/]
-    Web[web/]
-    Mobile[mobile/]
-  end
+## How it works
 
-  Providers[Providers' hosted flows<br/>KYC · mandates · e-sign · payments]
-
-  I --> Foundry --> Reg
-  A --> Reg
-  A --> Desk --> Foundry
-  D --> Builds --> Apps
-  Apps --> Hosting
-  C --> Chat --> Foundry
-  C --> Web & Mobile
-  API -- app key --> Runtime
-  Web & Mobile -- client session --> Runtime
-  Runtime --> Vault
-  Runtime --> Providers
+```
+ idea ──► compose ──► review ──► publish ──► build ──► verify ──► host ──► customers
+ innovator  primitives,  admins:    offered to    agent team    clean sandbox,  own VM,     web, mobile,
+            pricing,     firm,      developers    in a sandbox, independent     gVisor,     chat
+            feasibility  licences,                SDKs          audit           key at the
+                         product                                  ▲             edge
+                                                                  └── a failed check blocks the pull request
 ```
 
-### What a developer ships
+- **Primitives** are the regulated building blocks: a line of business and an action on it.
+- **Products** are compositions of primitives, versioned, with a definition, a developer contract and build terms.
+- **Workspaces** (`workspaces/<agent>/`) steer the hosted agents: the coding team, the product desk, the governance desk and the business-development agent.
 
-Every app Mynt's coding agents build is one Docker Compose project. Only the server ever holds the app key; the web and mobile apps run on short-lived client sessions, and customer data goes straight to Mynt's vault.
-
-```mermaid
-flowchart TB
-  subgraph Compose["compose.yaml"]
-    direction LR
-    API["api/<br/>Node · TypeScript<br/>holds the app key<br/>mints client sessions<br/>verifies webhooks"]
-    Web["web/<br/>React · Vite<br/>offers · documents<br/>consents · journeys"]
-    Mobile["mobile/<br/>Expo React Native<br/>(Kotlin · Swift · Flutter)"]
-  end
-  SDK["packages/mynt-sdk<br/>generated for the app's products,<br/>in TypeScript, React Native, Kotlin,<br/>Swift, Flutter and Python"]
-  SDK -.-> API & Web & Mobile
-  Web -- "POST /api/session" --> API
-  Mobile -- "POST /api/session" --> API
-  API -- "app key" --> M[Mynt runtime API]
-  Web -- "client session" --> M
-  Mobile -- "client session" --> M
-  M -- "webhooks" --> API
-```
+## What a developer ships
 
 ```
 my-app/
@@ -132,13 +106,25 @@ my-app/
 └── packages/mynt-sdk/    the generated SDK
 ```
 
-The coding agents that build it work as a team: an architect plans, server, web and mobile engineers build their parts, a read-only compliance reviewer checks every product's contract and build terms, QA runs every journey against the sandbox, and a release engineer ships the Compose project. Mynt then re-verifies the build itself in a clean sandbox before anything is merged.
+The coding team: an **architect** plans; **server**, **web** and **mobile engineers** build their parts; a read-only **compliance reviewer** checks every product's contract and build terms; **QA** runs every journey against the sandbox; a **release engineer** ships the Compose project.
 
-## A self-improving compliance loop
+## Works with your MCP client
 
-Every product gets its own compliance workspace. That workspace links the regulations to:
-- the business functions and people responsible;
-- what each of them must do and how;
+Mynt is an [MCP](https://modelcontextprotocol.io) server; clients show it as `mynt`. Any MCP client can use it, so it isn't tied to one tool. Claude Code is the reference. `examples/mynt-chat` is a sample client: a mobile-friendly chat for customers, and a developer console for builds, sandboxes and hosting.
+
+## Ground rules Mynt enforces
+
+- **Secrets by name only.** Keys live in the server's environment, are never printed, and never enter a sandbox, a hosted app or a pull request.
+- **Products follow their contracts.** Only the actions a product lists, where they may run; every required document shown word for word; consent before the action that needs it.
+- **Agents never grade their own work.** Verification runs in a clean sandbox, and only its result decides whether a build ships.
+- **No open proxy to Mynt.** On Mynt's hosting, anything an app sends to Mynt's server-side routes carries its key, so apps forward only client-session routes.
+- **Nothing is guessed.** A cost that can't be measured is never shown as $0; Freestyle machine time counts the larger of its own figure and wall-clock time.
+
+## A compliance loop that improves
+
+Every product gets its own compliance workspace, linking the regulations to:
+
+- the business functions and people responsible, and what each must do;
 - the policies and controls that do it;
 - the metrics and evidence that prove it;
 - the disclosures and reports that go back to the regulator.
@@ -147,22 +133,22 @@ Each new product, review and inspection makes the loop better. Everything has an
 
 ## Business model
 
-A take rate on every product sold, with no fixed percentage per line: admins configure a take rate per line, proportional to each product's compliance and back-office workload. Each line's rate is a base percentage plus a percentage per workload point, kept between a floor and a cap, and applied to a stated basis (such as revenue or volume).
+A take rate on every product sold, with no fixed percentage per line. Admins set a rate per line, proportional to each product's compliance and back-office workload: a base percentage plus a percentage per workload point, between a floor and a cap, applied to a stated basis (such as revenue or volume).
 
-A product's workload score comes from its composition. Each regulated primitive it is made of scores 1 point. It adds a tenth of the average number of obligations, filings and controls carried by the licences that may provide it, and 1 more point if the product services it. A product that carries more regulation and more ongoing operations pays proportionally more.
+A product's workload comes from its composition: 1 point per regulated primitive, plus a tenth of the average obligations, filings and controls carried by the licences that may provide it, plus 1 point if the product services it. More regulation and more ongoing operations pay proportionally more.
 
 ## What's in this repository
 
-This repository is Mynt's platform, published as an [MCP](https://modelcontextprotocol.io) server (MCP clients show it as `mynt`). It covers products in eleven lines, grouped by economic function: **credit, securitization, payments, account operations, custody and settlement, wealth, insurance, guarantees and trade, exchange, derivatives and information**. It serves the people and agents around a product:
+Mynt's platform, published as an MCP server. It covers eleven lines, grouped by economic function: **credit, securitization, payments, account operations, custody and settlement, wealth, insurance, guarantees and trade, exchange, derivatives and information**.
 
 | Who | What Mynt gives them |
 | --- | --- |
 | **Consumers** | Products and offers they can use, and a way to say what they need |
 | **Innovators** (licensed firms) | The product foundry: composition from regulated primitives, term sheets and feasibility analysis in their own model repository, versioning, licensing checks, distribution |
-| **Developers** | Apps and experiences on top of products: SDKs, APIs, webhooks, sandbox, GTM campaigns, and coding agents that build and ship them |
-| **Admins** | The regulatory model (regulators, licences, law, GRC), the governance desk that reviews firms, licences and products, and oversight |
+| **Developers** | Apps on top of products: SDKs, APIs, webhooks, a sandbox, GTM campaigns, and coding agents that build, verify and host them |
+| **Admins** | The regulatory model (regulators, licences, law, GRC), the governance desk that reviews firms, licences and products, and `ops_status` for what needs attention |
 
-Hosted agents do the work: they build, audit, run the product desk, review governance and do business development. Each one is steered by its own folder under `workspaces/`, and Mynt checks whatever an agent produces itself.
+**Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](#install--build) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md)
 
 The rest of this README is the technical reference.
 

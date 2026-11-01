@@ -4,3 +4,5 @@ dist/
 *.sqlite
 .env
 __pycache__/
+AGENTS.local.md
+.env*
