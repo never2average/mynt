@@ -663,14 +663,15 @@ export class BuildService {
     if (b.verify_step === "audit") {
       if (auditor!.running) return;
       await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 });
-      const [report, maxwell, before, after] = await Promise.all([
+      const [report, maxwell, before, after, changed] = await Promise.all([
         boat.readFile(vid, `${VERIFY_DIR}/report.json`).then((t) => parseJson<{ checks: Check[] }>(t)),
         boat.readFile(vid, `${VERIFY_DIR}/maxwell.json`).then((t) => parseJson<NonNullable<AgentResult["maxwell"]>>(t)),
         boat.readFile(vid, `${VERIFY_DIR}/before.sha`),
         boat.readFile(vid, `${VERIFY_DIR}/after.sha`),
+        boat.readFile(vid, `${VERIFY_DIR}/changed.txt`).catch(() => null),
       ]);
       await boat.stop(vid).catch(() => {});
-      await this.decide(b, { report, maxwell, unchanged: !!before && before.trim() === after?.trim(), auditFinished: auditor!.ok });
+      await this.decide(b, { report, maxwell, unchanged: !!before && before.trim() === after?.trim(), changed: (changed ?? "").split("\n").map((l) => l.trim()).filter(Boolean), auditFinished: auditor!.ok });
     }
   }
 
@@ -678,7 +679,7 @@ export class BuildService {
   // findings, every check passing, and a pushed branch identical to the verified source.
   private async decide(
     b: Build,
-    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; auditFinished: boolean },
+    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean },
   ) {
     const boat = this.boat!;
     const counts = v.maxwell?.counts ?? {};
@@ -691,7 +692,10 @@ export class BuildService {
       await this.event(b.id, status, error, data);
     };
     if (!v.report) return end("failed", "Verification didn't produce a report");
-    if (!v.unchanged) return end("blocked", "The source changed during the audit; the result can't be trusted");
+    if (!v.unchanged) {
+      const files = v.changed?.length ? `: ${v.changed.slice(0, 5).join(", ")}${v.changed.length > 5 ? ", …" : ""}` : "";
+      return end("blocked", `The source changed during the audit${files}; the result can't be trusted`, { changed: v.changed ?? [] });
+    }
     if (!v.auditFinished || !v.maxwell) return end("blocked", "No independent Maxwell audit result; a build can't ship without one");
     if (serious > 0) return end("blocked", `Security gate: ${serious} critical/high Maxwell finding(s)`, counts);
     const failed = checks.filter((c) => c.status === "fail");
