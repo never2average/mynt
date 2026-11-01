@@ -56,7 +56,11 @@ def main():
     ap.add_argument("--mobile", default="expo", choices=["expo", "kotlin", "swift", "flutter"])
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--no-mobile", action="store_true")
+    ap.add_argument("--sdk", default=None, help="the generated SDK folder (default: job/sdk)")
     a = ap.parse_args()
+    global SDK
+    if a.sdk:
+        SDK = os.path.abspath(a.sdk)
 
     if os.path.exists(a.dest) and os.listdir(a.dest):
         sys.exit(f"{a.dest} isn't empty")

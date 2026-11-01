@@ -35,9 +35,11 @@ createServer(async (req, res) => {
     if (req.method === "POST" && path === "/webhooks/mynt") {
       const raw = await body(req); // verify the raw body before anything else
       const event = verifyWebhook(raw, String(req.headers["mynt-signature"] ?? ""), process.env.MYNT_WEBHOOK_SECRET ?? "");
-      if (seen.has(event.id)) return send(res, 200, { duplicate: true });
-      seen.add(event.id);
-      console.log("mynt event", event.id, event.type); // ids and types only, never customer data
+      const eventId = String(event.id ?? "");
+      if (!eventId) return send(res, 400, { error: "no_event_id" });
+      if (seen.has(eventId)) return send(res, 200, { duplicate: true });
+      seen.add(eventId);
+      console.log("mynt event", eventId, event.type); // ids and types only, never customer data
       return send(res, 200, { ok: true });
     }
 

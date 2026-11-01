@@ -41,7 +41,12 @@ export function App() {
   return (
     <main>
       {step.title && <h1>{step.title}</h1>}
-      <form action={(f) => void submit(f).catch((e) => setError(e.message))}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit(new FormData(e.currentTarget)).catch((err: Error) => setError(err.message));
+        }}
+      >
         {(step.screen ?? []).map((e, i) => {
           if (e.type === "text") return <p key={i}>{e.text}</p>;
           if (e.type === "disclosure") return <section key={i} style={{ whiteSpace: "pre-wrap" }}>{DOCUMENT_TEXT[e.document]}</section>;

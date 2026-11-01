@@ -23,6 +23,50 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+  # The starter app the coding agents scaffold (api, web, Expo mobile) compiles against a freshly generated SDK,
+  # and its Compose images build.
+  starter-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node test/fixtures/generate-client-sdks.mjs sdk-out
+      - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out
+      - name: api, web and mobile compile
+        working-directory: starter
+        run: |
+          npm install --no-audit --no-fund
+          npm run build -w mynt-sdk
+          npm run build -w mynt-sdk-react-native
+          npm run typecheck -w api
+          npm run build -w web
+          npm run typecheck -w mobile
+      - name: Compose images build
+        working-directory: starter
+        env:
+          MYNT_API_KEY: mynt_test_ci
+          MYNT_API_ORIGIN: https://mynt.example
+        run: |
+          rm -rf node_modules */node_modules packages/*/node_modules packages/*/dist
+          docker compose --profile mobile build
+      - name: The app runs hardened (read-only, no capabilities) and serves
+        working-directory: starter
+        env:
+          MYNT_API_KEY: mynt_test_ci
+          MYNT_API_ORIGIN: https://mynt.example
+        run: |
+          docker compose --profile mobile up -d --wait --wait-timeout 120
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
+          curl -fsS http://127.0.0.1:8080/api/healthz | grep -q '"ok":true'
+          # Only client-session routes are forwarded to Mynt; anything else under /v1 is the app's own page.
+          curl -fsS -o /dev/null -w '%{content_type}' http://127.0.0.1:8080/v1/products | grep -q text/html
+          docker compose --profile mobile exec -T mobile wget -qO- http://127.0.0.1:8081/ | grep -qi '<!doctype html>'
+          docker compose --profile mobile down -v
   # Generates every device SDK for a defined product and compiles the native ones with their own toolchains.
   client-sdks:
     runs-on: ubuntu-latest
