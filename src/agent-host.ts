@@ -95,7 +95,9 @@ export async function launchAgent(
   let cwd = o.cwd ?? "/home/user";
   if (o.workspace) {
     cwd = workspaceCwd(o.workspace);
-    for (const [path, content] of Object.entries({ ...workspaceFiles(o.workspace), ...(o.jobFiles ?? {}) })) await boat.writeFile(sandbox, `${cwd}/${path}`, content);
+    const files = Object.fromEntries(Object.entries({ ...workspaceFiles(o.workspace), ...(o.jobFiles ?? {}) }).map(([path, content]) => [`${cwd}/${path}`, content]));
+    if (boat.writeFiles) await boat.writeFiles(sandbox, files);
+    else for (const [path, content] of Object.entries(files)) await boat.writeFile(sandbox, path, content);
   }
   const run = { prompt: o.prompt, cwd, model: config.model, budgetUsd, version: CLAUDE_CODE_VERSION };
   await boat.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, AGENT_RUNNER);

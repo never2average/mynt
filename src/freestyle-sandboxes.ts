@@ -11,6 +11,7 @@ const USER = "user";
 const NODE_VERSION = "22.11.0";
 const PROCS = "/home/user/.mynt-procs";
 const CHUNK = 512 * 1024;
+const BATCH = 600 * 1024; // base64 bytes per batch: JSON on stdin stays under Freestyle's 1 MiB
 
 // First boot: the agents' account (docker, no sudo), Node for the runner, and the sandbox env.
 const SETUP = `set -e
@@ -87,6 +88,32 @@ export class FreestyleSandboxes implements BoatClient {
       });
       if (r.exitCode !== 0) throw new Error(`Couldn't write ${path}: ${r.stderr.slice(-200)}`);
     }
+  }
+
+  // Many files in a few commands: each batch goes over stdin as JSON and Node on the VM writes it, so starting an
+  // agent with a whole workspace takes a few calls, not one per file.
+  async writeFiles(id: string, files: Record<string, string>) {
+    const WRITE = `const fs=require("fs"),p=require("path");let d="";process.stdin.on("data",(c)=>(d+=c)).on("end",()=>{for(const [f,b] of Object.entries(JSON.parse(d))){fs.mkdirSync(p.dirname(f),{recursive:true});fs.writeFileSync(f,Buffer.from(b,"base64"))}})`;
+    let batch: Record<string, string> = {};
+    let size = 0;
+    const flush = async () => {
+      if (!size) return;
+      const r = await this.run(id, `node -e ${shellQuote(WRITE)}`, { stdin: Buffer.from(JSON.stringify(batch)).toString("base64"), timeoutMs: 120_000 });
+      if (r.exitCode !== 0) throw new Error(`Couldn't write files: ${r.stderr.slice(-200)}`);
+      batch = {};
+      size = 0;
+    };
+    for (const [path, content] of Object.entries(files)) {
+      const b64 = Buffer.from(content).toString("base64");
+      if (b64.length > BATCH) {
+        await this.writeFile(id, path, content);
+        continue;
+      }
+      if (size + b64.length > BATCH) await flush();
+      batch[path] = b64;
+      size += b64.length + path.length + 8;
+    }
+    await flush();
   }
 
   async readFile(id: string, path: string) {

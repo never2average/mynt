@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { serialLoop } from "./worker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { agentState, launchAgent, type AgentHostConfig } from "./agent-host.js";
@@ -469,8 +470,7 @@ export class DeskService {
 
   startWorker(intervalMs = Number(process.env.DESK_POLL_MS ?? 5000)) {
     if (this.timer || !this.enabled) return;
-    this.timer = setInterval(() => void this.tick().catch((e) => console.error("desk worker", e)), intervalMs);
-    this.timer.unref();
+    this.timer = serialLoop(() => this.tick(), intervalMs, "desk worker");
   }
 
   stopWorker() {

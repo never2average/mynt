@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { serialLoop } from "./worker.js";
 import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentBackend } from "./agent-host.js";
 import { CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -473,8 +474,7 @@ export class BuildService {
   // Background loop; tests call tick() directly.
   startWorker(intervalMs = Number(process.env.BUILD_POLL_MS ?? 5000)) {
     if (this.timer || !this.boat) return;
-    this.timer = setInterval(() => void this.tick().catch((e) => console.error("build worker", e)), intervalMs);
-    this.timer.unref();
+    this.timer = serialLoop(() => this.tick(), intervalMs, "build worker");
   }
 
   stopWorker() {
