@@ -798,3 +798,53 @@ test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real
   heal();
   assert.equal((await ctx.builds.get(c.id)).status, "failed");
 });
+
+// A stand-in Claude Code that ends its turn while a background task of its own (a long scan) runs silently, then
+// writes its report once the task finishes. `taskMs` is how long the scan stays silent.
+async function runWithBackgroundTask({ taskMs, env }) {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+  const { AGENT_RUNNER } = await import("../dist/agent-runner.js");
+  const home = mkdtempSync(join(tmpdir(), "mynt-runner-"));
+  const dir = join(home, "mynt-agent");
+  mkdirSync(join(home, ".mynt-claude", "node_modules", ".bin"), { recursive: true });
+  const fake = join(home, ".mynt-claude", "node_modules", ".bin", "claude");
+  writeFileSync(
+    fake,
+    `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "sess_scan" }));
+process.stdin.once("data", () => {
+  console.log(JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "scan" }] }));
+  console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 1, result: "scans running; I'll write the report when they finish" }));
+  setTimeout(() => {
+    console.log(JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [] }));
+    console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 2, result: "report written" }));
+    process.exit(0);
+  }, ${taskMs});
+});
+`,
+  );
+  chmodSync(fake, 0o755);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "runner.mjs"), AGENT_RUNNER);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ prompt: "Audit it", cwd: join(home, "work"), budgetUsd: 4, version: "0.0.0" }));
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ token: "t", env: {} }));
+  const child = spawn(process.execPath, [join(dir, "runner.mjs"), dir], { env: { ...process.env, HOME: home, ...env }, stdio: "ignore" });
+  await new Promise((r) => child.on("exit", r));
+  return JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+}
+
+test("the runner waits out a silent background task the agent is waiting on, up to a ceiling", async () => {
+  // The scan is silent for 1.5 s against a 0.4 s settle window: the agent finishes and writes its report.
+  const waited = await runWithBackgroundTask({ taskMs: 1500, env: { MYNT_AGENT_SETTLE_MS: "400" } });
+  assert.equal(waited.summary, "report written", "the agent wasn't cut off while its scan ran");
+  assert.equal(waited.exit_code, 0);
+  assert.equal(waited.cost_usd, 2);
+
+  // A background task that outlasts the ceiling is ended; the last result stands.
+  const capped = await runWithBackgroundTask({ taskMs: 60000, env: { MYNT_AGENT_SETTLE_MS: "300", MYNT_AGENT_BACKGROUND_MAX_MS: "1000" } });
+  assert.notEqual(capped.exit_code, 0);
+  assert.match(capped.summary, /scans running/);
+});
