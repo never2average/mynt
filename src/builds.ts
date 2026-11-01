@@ -743,7 +743,8 @@ export class BuildService {
       products.push({ ...record.product, version: record.version, build_terms: record.build_terms, access: access.via });
     }
     return {
-      build: { id: b.id, repository: b.repository, branch: b.branch, maxwell_repo: this.config.maxwellRepo },
+      // The security audit (Maxwell) runs once, in Mynt's own verification; the coding agent doesn't get it.
+      build: { id: b.id, repository: b.repository, branch: b.branch },
       goal: b.goal,
       app: app ?? null,
       products,
