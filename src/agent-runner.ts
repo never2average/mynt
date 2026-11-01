@@ -86,11 +86,18 @@ let ended = false;
 // server, say) keeps it alive: then it sits silent, waking only to report on that task. So once it has produced
 // no output at all for this long, end it; its last result stands. Any output resets the clock: sub-agents working
 // in the background after the lead's turn ends keep streaming, and must not be cut off.
+// But silence isn't idleness while Claude Code reports background tasks of its own (a long scan it is waiting on):
+// then wait, up to BACKGROUND_MAX_MS of silence in all. A preview meant to outlive the agent is started detached,
+// outside Claude Code's tasks, so it never holds the agent open.
 const SETTLE_MS = Number(process.env.MYNT_AGENT_SETTLE_MS || 300000);
+const BACKGROUND_MAX_MS = Number(process.env.MYNT_AGENT_BACKGROUND_MAX_MS || 3600000);
 let quiet = null;
+let background = 0;
+let lastOutput = Date.now();
 const settle = () => {
   clearTimeout(quiet);
   quiet = setTimeout(() => {
+    if (background > 0 && Date.now() - lastOutput < BACKGROUND_MAX_MS) return settle();
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 10000).unref();
   }, SETTLE_MS);
@@ -106,6 +113,7 @@ const maybeEnd = () => {
 
 let buf = "";
 child.stdout.on("data", (d) => {
+  lastOutput = Date.now();
   if (ended) settle();
   buf += d;
   for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
@@ -120,6 +128,7 @@ child.stdout.on("data", (d) => {
       continue;
     }
     if (m.type === "system" && m.subtype === "init") state.session_id = m.session_id ?? null;
+    if (m.type === "system" && m.subtype === "background_tasks_changed") background = Array.isArray(m.tasks) ? m.tasks.length : 0;
     if (m.type === "result") {
       state.turns++;
       state.last_subtype = m.subtype ?? null;
