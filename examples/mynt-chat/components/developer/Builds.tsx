@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ACTIVE_BUILD,
+  FINISHED_BUILD,
   activityRows,
   buildFacts,
   buildRow,
@@ -12,6 +13,7 @@ import {
   formatUsd,
   joinPath,
   matches,
+  reopenState,
   runRow,
   safeUrl,
   timelineRows,
@@ -112,6 +114,13 @@ export function BuildDetail({ buildId, report, onBack }: { buildId: string; repo
   const [editor, setEditor] = useState<{ url: string; password: string } | null>(null);
   const [steering, setSteering] = useState(false);
   const [steer, setSteer] = useState("");
+  // A finished build's reopened sandbox: "opening" while reopen_sandbox says it isn't ready yet.
+  const [sandbox, setSandbox] = useState<{ state: "opening" | "ready"; until: string } | null>(null);
+  const [sandboxRev, setSandboxRev] = useState(0);
+  const poll = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (poll.current) clearTimeout(poll.current);
+  }, []);
 
   const loadBuild = useCallback(async () => {
     const r = await callDevTool("get_build", { build_id: buildId });
@@ -125,6 +134,45 @@ export function BuildDetail({ buildId, report, onBack }: { buildId: string; repo
   const row = build ? buildRow(build) : null;
   const facts = build ? buildFacts(build) : [];
   const status = row?.status ?? "";
+  const branch = build ? String((build as { branch?: unknown }).branch ?? "") : "";
+  const canReopen = FINISHED_BUILD.has(status) && Boolean(branch);
+
+  const reopen = async () => {
+    if (poll.current) clearTimeout(poll.current);
+    setBusy("reopen");
+    const tick = async (): Promise<void> => {
+      const r = await callDevTool("reopen_sandbox", { build_id: buildId, hours: 4 });
+      if (!report(r)) {
+        setBusy(null);
+        setSandbox(null);
+        return;
+      }
+      const s = reopenState(r.data);
+      if (s.ready) {
+        setBusy(null);
+        setSandbox({ state: "ready", until: s.until });
+        setSandboxRev((n) => n + 1);
+        setNotice(`Sandbox ready on ${branch}${s.until ? ` until ${s.until}` : ""}. Files, Diff, Run and VS Code work on it; commit and push to the branch to keep changes.`);
+        return;
+      }
+      setSandbox({ state: "opening", until: s.until });
+      poll.current = setTimeout(() => void tick(), 4000);
+    };
+    await tick();
+  };
+
+  const closeSandbox = async () => {
+    if (!window.confirm("Close the reopened sandbox? Anything you haven't pushed to the branch is lost.")) return;
+    if (poll.current) clearTimeout(poll.current);
+    setBusy("close");
+    const r = await callDevTool("close_sandbox", { build_id: buildId });
+    setBusy(null);
+    if (report(r)) {
+      setSandbox(null);
+      setSandboxRev((n) => n + 1);
+      setNotice("Sandbox closed.");
+    }
+  };
 
   const openEditor = async () => {
     // Opened now, while the click still counts as a user gesture, so it isn't blocked as a pop-up.
@@ -187,6 +235,16 @@ export function BuildDetail({ buildId, report, onBack }: { buildId: string; repo
         <button type="button" className="btn btn-danger dev-btn" onClick={() => void stop()} disabled={busy !== null || !ACTIVE_BUILD.has(status)}>
           {busy === "stop" ? "Stopping…" : "Stop build"}
         </button>
+        {canReopen ? (
+          <>
+            <button type="button" className="btn btn-secondary dev-btn" onClick={() => void reopen()} disabled={busy !== null}>
+              {busy === "reopen" ? "Reopening sandbox…" : sandbox?.state === "ready" ? "Extend sandbox" : "Reopen sandbox"}
+            </button>
+            <button type="button" className="btn btn-danger dev-btn" onClick={() => void closeSandbox()} disabled={busy === "close" || busy === "editor"}>
+              {busy === "close" ? "Closing…" : "Close sandbox"}
+            </button>
+          </>
+        ) : null}
       </ActionRow>
 
       {notice ? (
@@ -194,6 +252,8 @@ export function BuildDetail({ buildId, report, onBack }: { buildId: string; repo
           {notice}
         </Notice>
       ) : null}
+
+      {sandbox?.state === "opening" ? <Notice tone="info">Reopening a sandbox on {branch}; this takes a minute or two. Checking every few seconds…</Notice> : null}
 
       {editor ? (
         <SecretPanel
@@ -239,7 +299,7 @@ export function BuildDetail({ buildId, report, onBack }: { buildId: string; repo
       />
 
       <Tabs tabs={BUILD_TABS} current={tab} onChange={setTab} label="Build details" />
-      <div className="dev-tabpanel" role="tabpanel">
+      <div className="dev-tabpanel" role="tabpanel" key={sandboxRev}>
         {tab === "activity" ? <ActivityTab buildId={buildId} report={report} /> : null}
         {tab === "timeline" ? <EventsTable rows={build ? timelineRows(build) : []} empty={build ? "No events yet." : "Loading…"} withTime /> : null}
         {tab === "files" ? <FilesTab buildId={buildId} report={report} /> : null}

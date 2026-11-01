@@ -1052,3 +1052,9 @@ button:disabled {
     color: var(--text);
   }
 }
+
+.dev-secret-row {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}

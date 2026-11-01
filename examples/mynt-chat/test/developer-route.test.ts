@@ -81,7 +81,7 @@ describe("POST /api/developer/tools", () => {
   it("passes the editor password and SSH login through without keeping or logging them", async () => {
     const logs = [vi.spyOn(console, "log"), vi.spyOn(console, "error"), vi.spyOn(console, "warn"), vi.spyOn(console, "info")];
     fake.replies.set("open_sandbox_editor", { isError: false, text: JSON.stringify({ url: "https://box.example.com/", password: PASSWORD }) });
-    fake.replies.set("vm_access", { isError: false, text: JSON.stringify({ ssh: SSH, expires_at: "2026-10-31T18:00:00Z" }) });
+    fake.replies.set("vm_access", { isError: false, text: JSON.stringify({ logins: [{ app_id: "a1", ssh: SSH }], expires_at: "2026-10-31T18:00:00Z", user: "developer", note: "n" }) });
 
     const editor = await post({ tool: "open_sandbox_editor", args: { build_id: "b1" } });
     expect(editor.headers.get("cache-control")).toBe("no-store");
@@ -89,7 +89,7 @@ describe("POST /api/developer/tools", () => {
 
     const vm = await post({ tool: "vm_access", args: { hours: 8 } });
     expect(vm.headers.get("cache-control")).toBe("no-store");
-    expect((await vm.json()).data.ssh).toBe(SSH);
+    expect((await vm.json()).data.logins[0].ssh).toBe(SSH);
 
     const kept = JSON.stringify(fake.session);
     expect(kept).not.toContain(PASSWORD);

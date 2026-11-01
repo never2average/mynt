@@ -6,6 +6,8 @@ import { z } from "zod";
 
 const id = z.string().trim().min(1).max(200);
 const command = z.string().min(1).max(4000);
+// A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
+const service = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/).optional();
 
 // Mynt's coding-agent and hosting tools (src/builds.ts, src/hosting-tools.ts), with the same
 // limits Mynt applies. Mynt checks everything again; these keep junk off the wire. Anything not
@@ -20,15 +22,17 @@ export const DEV_TOOLS = {
   sandbox_run: z.object({ build_id: id, command, timeout_seconds: z.number().int().min(1).max(300).optional() }),
   sandbox_files: z.object({ build_id: id, path: z.string().max(1000).optional() }),
   sandbox_diff: z.object({ build_id: id }),
+  reopen_sandbox: z.object({ build_id: id, hours: z.number().min(1).max(8).optional() }),
+  close_sandbox: z.object({ build_id: id }),
   hosting_status: z.object({}),
   request_hosting: z.object({}),
   deploy_app: z.object({ app_id: id, build_id: id }),
   undeploy_app: z.object({ app_id: id }),
   vm_access: z.object({ hours: z.number().int().min(1).max(24).optional() }),
   app_status: z.object({ app_id: id }),
-  app_logs: z.object({ app_id: id, tail: z.number().int().min(1).max(2000).optional() }),
-  app_run: z.object({ app_id: id, command, timeout_seconds: z.number().int().min(1).max(120).optional() }),
-  restart_app: z.object({ app_id: id }),
+  app_logs: z.object({ app_id: id, tail: z.number().int().min(1).max(2000).optional(), service }),
+  app_run: z.object({ app_id: id, command, timeout_seconds: z.number().int().min(1).max(120).optional(), service }),
+  restart_app: z.object({ app_id: id, service }),
 } as const;
 
 export type DevTool = keyof typeof DEV_TOOLS;
@@ -288,6 +292,24 @@ export interface AppRow {
   build_id: string;
   repository: string;
   updated: string;
+  services: ServiceRow[];
+}
+
+// A compose app's services, each served at its own address.
+export interface ServiceRow {
+  service: string;
+  expose: string;
+  port: string;
+  url: string;
+}
+
+export function serviceRows(v: unknown): ServiceRow[] {
+  return arr(v)
+    .map((x) => {
+      const o = obj(x);
+      return { service: str(o.service), expose: str(o.expose), port: str(o.port), url: safeUrl(o.url) };
+    })
+    .filter((x) => x.service);
 }
 
 export function appRow(a: unknown): AppRow {
@@ -301,10 +323,45 @@ export function appRow(a: unknown): AppRow {
     build_id: str(o.build_id),
     repository: str(o.repository),
     updated: formatDate(str(o.updated_at)),
+    services: serviceRows(o.services),
   };
 }
 
-export function hostingView(data: unknown): { tenant: [string, string][] | null; status: string; apps: AppRow[] } {
+// hosting_status usage: machine time across the app VMs and its estimated cost (or null).
+export function usageFacts(v: unknown): [string, string][] | null {
+  if (!v || typeof v !== "object") return null;
+  const o = obj(v);
+  const vms = num(o.vms);
+  const hours = num(o.hours);
+  const usd = num(o.usd_estimate);
+  const rate = num(o.usd_per_hour);
+  return ([
+    ["VMs", vms === null ? "" : String(vms)],
+    ["Machine hours", hours === null ? "" : String(hours)],
+    ["Estimated cost", usd === null ? "" : `${formatUsd(usd)} (estimate${rate === null ? "" : `, at ${formatUsd(rate)} per VM hour`})`],
+  ] as [string, string][]).filter(([, x]) => x);
+}
+
+// vm_access: one SSH login per hosted app VM, named after the app when the console knows it.
+export interface LoginRow {
+  app_id: string;
+  name: string;
+  ssh: string;
+}
+
+export function sshLogins(data: unknown, names: Record<string, string> = {}): { logins: LoginRow[]; expires: string } {
+  const o = obj(data);
+  const logins = arr(o.logins)
+    .map((x) => {
+      const l = obj(x);
+      const app_id = str(l.app_id);
+      return { app_id, name: names[app_id] || app_id, ssh: typeof l.ssh === "string" ? l.ssh : "" };
+    })
+    .filter((l) => l.app_id && l.ssh);
+  return { logins, expires: formatDate(str(o.expires_at)) };
+}
+
+export function hostingView(data: unknown): { tenant: [string, string][] | null; status: string; apps: AppRow[]; usage: [string, string][] | null } {
   const o = obj(data);
   const t = o.tenant ? obj(o.tenant) : null;
   const tenant = t
@@ -317,7 +374,7 @@ export function hostingView(data: unknown): { tenant: [string, string][] | null;
         ["Error", str(t.error)],
       ] as [string, string][]).filter(([, v]) => v)
     : null;
-  return { tenant, status: t ? str(t.status) : "", apps: arr(o.apps).map(appRow).filter((a) => a.app_id) };
+  return { tenant, status: t ? str(t.status) : "", apps: arr(o.apps).map(appRow).filter((a) => a.app_id), usage: usageFacts(o.usage) };
 }
 
 // app_logs: "<RFC3339 timestamp> <line>" per line (docker logs --timestamps).
@@ -382,3 +439,12 @@ export function matches(row: object, query: string): boolean {
 }
 
 export const ACTIVE_BUILD = new Set(["queued", "provisioning", "coding", "auditing", "checking", "previewing", "pushing", "verifying"]);
+
+// Finished builds whose sandbox can be reopened on their branch (reopen_sandbox).
+export const FINISHED_BUILD = new Set(["succeeded", "blocked", "failed", "stopped", "over_budget"]);
+
+// reopen_sandbox's reply: ready, and until when.
+export function reopenState(data: unknown): { ready: boolean; until: string } {
+  const o = obj(data);
+  return { ready: o.ready === true, until: formatDate(str(o.until)) };
+}
