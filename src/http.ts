@@ -90,12 +90,13 @@ async function handle(
   // Build agents reach Anthropic through Mynt with a per-build token (see agent-proxy.ts).
   if (ctx.builds && url.pathname.startsWith("/agent/")) {
     const builds = ctx.builds;
-    const active = async (t: string) =>
-      (await builds.agentTokenActive(t)) ||
-      (!!ctx.bd && (await ctx.bd.agentTokenActive(t))) ||
-      (!!ctx.desk && (await ctx.desk.agentTokenActive(t))) ||
-      (!!ctx.review && (await ctx.review.agentTokenActive(t)));
-    return agentProxy(builds.config.agentBackend, active, req, res, url);
+    const resolve = async (t: string) =>
+      (await builds.agentRun(t)) ?? (ctx.bd ? await ctx.bd.agentRun(t) : null) ?? (ctx.desk ? await ctx.desk.agentRun(t) : null) ?? (ctx.review ? await ctx.review.agentRun(t) : null);
+    return agentProxy(builds.config.agentBackend, resolve, req, res, url, {
+      meter: builds.meter,
+      model: builds.config.model,
+      models: (process.env.AGENT_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean),
+    });
   }
   // One-click opt-out from the connector's messages.
   if (ctx.bd && url.pathname === "/bd/unsubscribe" && (req.method === "GET" || req.method === "POST")) {

@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { AgentMeter } from "./agent-meter.js";
+import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
 import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentBackend } from "./agent-host.js";
 import { CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
@@ -216,11 +218,19 @@ export class BuildService {
   }
 
   async agentTokenActive(token: string) {
-    const r = await this.one(
-      "SELECT 1 FROM financial_products.build_runs WHERE agent_token_hash = $1 AND status <> ALL($2)",
-      [hashToken(token), TERMINAL],
-    );
-    return !!r;
+    return !!(await this.agentRun(token));
+  }
+
+  // The build a live agent token belongs to, for the proxy's meter: both the coding agent and the auditor
+  // (with whatever they start) spend against the build's cap.
+  meter: AgentMeter | null = null;
+  async agentRun(token: string): Promise<AgentRun | null> {
+    const r = await this.one("SELECT id, cap_usd FROM financial_products.build_runs WHERE agent_token_hash = $1 AND status <> ALL($2)", [hashToken(token), TERMINAL]);
+    return r ? { key: `build:${r.id}`, capUsd: Number(r.cap_usd) } : null;
+  }
+
+  private async metered(id: string) {
+    return this.meter ? this.meter.spent(`build:${id}`) : 0;
   }
 
   // Claude Code in one of the build's sandboxes, with a fresh proxy token for the build.
@@ -554,7 +564,9 @@ export class BuildService {
 
     // The agent is working: follow its status file, its cost, and its runner.
     const agent = await this.agentState(b.sandbox_id!, b.prompt_id!);
-    const cost = (await boat.costDollars(b.sandbox_id!)) + agent.cost;
+    // The model spend is the larger of what the agent reports and what the proxy metered (which also sees any
+    // nested runs the agent started).
+    const cost = (await boat.costDollars(b.sandbox_id!)) + Math.max(agent.cost, await this.metered(b.id));
     if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");
@@ -612,7 +624,8 @@ export class BuildService {
     // Both sandboxes' machine time, plus what the coding agent and the auditor spent on the model.
     const coder = parseJson<AgentState>(await boat.readFile(b.sandbox_id!, `${AGENT_DIR}/state.json`));
     const auditor = b.verify_step === "audit" ? await this.agentState(vid, b.verify_prompt_id!) : null;
-    const cost = (await boat.costDollars(b.sandbox_id!)) + (await boat.costDollars(vid)) + (coder?.cost_usd ?? 0) + (auditor?.cost ?? 0);
+    const cost =
+      (await boat.costDollars(b.sandbox_id!)) + (await boat.costDollars(vid)) + Math.max((coder?.cost_usd ?? 0) + (auditor?.cost ?? 0), await this.metered(b.id));
     if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");

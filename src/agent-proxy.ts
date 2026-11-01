@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { AgentBackend } from "./agent-host.js";
+import { priceUsage, UsageReader, type AgentMeter } from "./agent-meter.js";
 
 // Claude Code in a build sandbox reaches the model only through here, authenticated by its build's
 // token, which works only while that build is running. Mynt adds its own credentials and streams the
@@ -31,20 +32,40 @@ async function readBody(req: IncomingMessage): Promise<Buffer | null> {
 
 export const vertexHost = (region: string) => (region === "global" ? "aiplatform.googleapis.com" : `${region}-aiplatform.googleapis.com`);
 
-// `active` says whether a build's or a connector run's token is live.
-export async function agentProxy(backend: AgentBackend | null, active: (token: string) => Promise<boolean>, req: IncomingMessage, res: ServerResponse, url: URL) {
+// The run a live agent token belongs to (a build, a desk job, a review case, a connector run) and its budget.
+export interface AgentRun {
+  key: string;
+  capUsd: number;
+}
+
+export interface ProxyOptions {
+  // Meters every response against its run, and refuses calls once the run's budget is spent.
+  meter?: AgentMeter | null;
+  // The model agents run on; a request for one outside `models` is sent to this one instead (a tool that pins a
+  // model the deployment doesn't serve would otherwise fail outright).
+  model?: string;
+  models?: string[];
+}
+
+// `resolve` finds the live run behind a token (or null when it isn't live).
+export async function agentProxy(backend: AgentBackend | null, resolve: (token: string) => Promise<AgentRun | null>, req: IncomingMessage, res: ServerResponse, url: URL, opts: ProxyOptions = {}) {
   if (!backend) return reply(res, 503, "Builds aren't enabled");
   if (req.method !== "POST") return reply(res, 404, "Not found");
 
+  const allowed = (m: string) => !opts.model || m === "count-tokens" || [opts.model, ...(opts.models ?? [])].includes(m);
   let token: string;
   let upstream: string;
+  let model = "";
+  let counting = false;
   const headers: Record<string, string> = {};
   if (backend.kind === "vertex") {
     const m = /^\/agent\/t\/([A-Za-z0-9_-]+)(\/.*)$/.exec(url.pathname);
     const route = m && VERTEX_PATH.exec(m[2]);
     if (!m || !route) return reply(res, 404, "Not found");
     token = m[1];
-    upstream = `https://${vertexHost(backend.region)}/v1/projects/${backend.projectId}/locations/${backend.region}/publishers/anthropic/models/${route[1]}:${route[2]}`;
+    model = allowed(route[1]) ? route[1] : opts.model!;
+    counting = route[1] === "count-tokens";
+    upstream = `https://${vertexHost(backend.region)}/v1/projects/${backend.projectId}/locations/${backend.region}/publishers/anthropic/models/${model}:${route[2]}`;
   } else {
     const path = url.pathname.slice("/agent".length);
     if (!ANTHROPIC_PATHS.has(path)) return reply(res, 404, "Not found");
@@ -52,10 +73,25 @@ export async function agentProxy(backend: AgentBackend | null, active: (token: s
     token = auth.startsWith("Bearer ") ? auth.slice(7) : String(req.headers["x-api-key"] ?? "");
     upstream = `https://api.anthropic.com${path}${url.search}`;
     headers["x-api-key"] = backend.apiKey;
+    counting = path.endsWith("/count_tokens");
   }
-  if (!token || !(await active(token))) return reply(res, 401, "This agent token isn't active");
-  const body = await readBody(req);
+  const run = token ? await resolve(token) : null;
+  if (!run) return reply(res, 401, "This agent token isn't active");
+  if (opts.meter && (await opts.meter.spent(run.key)) >= run.capUsd) return reply(res, 402, `This run's model budget (US$${run.capUsd}) is spent`);
+  let body = await readBody(req);
   if (!body) return reply(res, 413, "Request too large");
+  if (backend.kind !== "vertex") {
+    try {
+      const json = JSON.parse(body.toString("utf8")) as { model?: string };
+      model = json.model ?? "";
+      if (model && !allowed(model)) {
+        model = opts.model!;
+        body = Buffer.from(JSON.stringify({ ...json, model }));
+      }
+    } catch {
+      // not JSON: forwarded as is
+    }
+  }
   for (const h of FORWARD_REQUEST) {
     const v = req.headers[h];
     if (typeof v === "string") headers[h] = v;
@@ -83,5 +119,12 @@ export async function agentProxy(backend: AgentBackend | null, active: (token: s
   }
   res.writeHead(up.status, out);
   if (!up.body) return void res.end();
-  Readable.fromWeb(up.body as import("node:stream/web").ReadableStream).on("error", () => res.destroy()).pipe(res);
+  const stream = Readable.fromWeb(up.body as import("node:stream/web").ReadableStream).on("error", () => res.destroy());
+  if (opts.meter && up.ok && !counting) {
+    const meter = opts.meter;
+    const reader = new UsageReader((up.headers.get("content-type") ?? "").includes("event-stream"));
+    stream.on("data", (c: Buffer) => reader.push(c));
+    stream.on("end", () => void meter.add(run.key, priceUsage(model, reader.result())).catch((e) => console.error("agent meter", e)));
+  }
+  stream.pipe(res);
 }

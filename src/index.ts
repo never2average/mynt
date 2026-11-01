@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
+import { AgentMeter } from "./agent-meter.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ClerkAdmin, ClerkAuth, clerkConfigFromEnv } from "./auth.js";
 import { sandboxesFromEnv } from "./freestyle-sandboxes.js";
@@ -90,6 +91,9 @@ const openServices = async () => {
     return installation ? github.readTokenFor(repository, Number(installation)).catch(() => null) : null;
   });
   const modules = await ModuleRegistry.open(db);
+  // Every agent's model calls are metered at the proxy, against its run's cap.
+  const meter = await AgentMeter.open(db);
+  for (const s of [builds, bd, desk, review]) s.meter = meter;
   return { store, builds, bd, desk, review, hosting, modules };
 };
 

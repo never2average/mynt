@@ -9,6 +9,7 @@ import { FreestyleProvider } from "./freestyle.js";
 
 const USER = "user";
 const NODE_VERSION = "22.11.0";
+const SOPS_VERSION = "3.9.4";
 const PROCS = "/home/user/.mynt-procs";
 const CHUNK = 512 * 1024;
 const BATCH = 600 * 1024; // base64 bytes per batch: JSON on stdin stays under Freestyle's 1 MiB
@@ -19,6 +20,19 @@ id ${USER} >/dev/null 2>&1 || sudo -n useradd --create-home --home-dir /home/${U
 sudo -n usermod -aG docker ${USER} 2>/dev/null || true
 if ! command -v node >/dev/null || ! node --version | grep -q '^v2[2-9]'; then
   curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz | sudo -n tar -xJ -C /usr/local --strip-components=1
+fi
+# Tools the security workflows expect: age from Ubuntu's signed archive, sops as a pinned release checked against
+# its published checksums. Best effort: a sandbox without them still runs.
+if ! command -v age >/dev/null || ! command -v sops >/dev/null; then
+  ( set -e
+    export DEBIAN_FRONTEND=noninteractive
+    command -v age >/dev/null || { sudo -n apt-get update -q >/dev/null && sudo -n apt-get install -yq age >/dev/null; }
+    if ! command -v sops >/dev/null; then
+      T=$(mktemp -d); cd "$T"; U=https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}
+      curl -fsSLO "$U/sops-v${SOPS_VERSION}.linux.amd64"; curl -fsSLO "$U/sops-v${SOPS_VERSION}.checksums.txt"
+      sha256sum --ignore-missing -c "sops-v${SOPS_VERSION}.checksums.txt" >/dev/null
+      sudo -n install -m 755 "sops-v${SOPS_VERSION}.linux.amd64" /usr/local/bin/sops; cd /; rm -rf "$T"
+    fi ) || echo "sops/age didn't install"
 fi
 printf '%s' "$MYNT_ENV" | base64 -d | sudo -n tee /home/${USER}/.mynt-env >/dev/null
 sudo -n chown ${USER}:${USER} /home/${USER}/.mynt-env && sudo -n chmod 600 /home/${USER}/.mynt-env

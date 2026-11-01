@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { AgentMeter } from "./agent-meter.js";
+import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -279,7 +281,13 @@ export class DeskService {
   }
 
   async agentTokenActive(token: string) {
-    return !!(await this.one("SELECT 1 FROM financial_products.desk_jobs WHERE token_hash = $1 AND status <> ALL($2)", [hash(token), DONE]));
+    return !!(await this.agentRun(token));
+  }
+
+  meter: AgentMeter | null = null;
+  async agentRun(token: string): Promise<AgentRun | null> {
+    const r = await this.one("SELECT id, cap_usd FROM financial_products.desk_jobs WHERE token_hash = $1 AND status <> ALL($2)", [hash(token), DONE]);
+    return r ? { key: `desk:${r.id}`, capUsd: Number(r.cap_usd) } : null;
   }
 
   // A sandbox job that clones the workspace (at `ref`) and runs the desk runner, credentials removed first.
@@ -353,7 +361,7 @@ export class DeskService {
 
     const cost = (await boat.costDollars(j.sandbox_id as string)) + (j.verify_sandbox_id ? await boat.costDollars(j.verify_sandbox_id as string) : 0);
     const agentCost = j.kind === "agent" && j.process_id ? (await agentState(boat, j.sandbox_id as string, j.process_id as string)).cost : 0;
-    const total = cost + agentCost;
+    const total = cost + Math.max(agentCost, this.meter ? await this.meter.spent(`desk:${j.id}`) : 0);
     if (total !== Number(j.cost_usd)) await this.update(j.id as string, { cost_usd: total });
     if (total > Number(j.cap_usd)) return this.end(j, "stopped", { error: `Stopped at US$${total.toFixed(2)}: over the US$${j.cap_usd} cap`, cost_usd: total });
 
