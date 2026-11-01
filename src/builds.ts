@@ -185,6 +185,12 @@ const toBuild = ({ agent_token_hash: _, ...r }: Row): Build => ({
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
 const FILES = { spec: `${BUILD_JOB}/build.json`, status: `${BUILD_JOB}/status.json`, result: `${BUILD_JOB}/result.json`, sdk: `${BUILD_JOB}/sdk` };
 const WORKSPACE = "/home/user/workspace/app";
+// Errors worth retrying: rate limits, server errors and network failures, as the providers' clients report them.
+export function isTransient(e: unknown): boolean {
+  const m = String((e as Error)?.message ?? e);
+  return /: (429|5\d\d)\b|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
+}
+
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 const OUT = "/home/user/mynt-out";
 
@@ -492,6 +498,11 @@ export class BuildService {
     this.timer = null;
   }
 
+  // A provider's passing hiccup (a 5xx, a rate limit, a dropped connection) mustn't throw away a build that
+  // has already spent money: retry it on the next ticks, and fail only once it has persisted this long.
+  private transient = new Map<string, number>();
+  static TRANSIENT_GRACE_MS = Number(process.env.MYNT_TRANSIENT_GRACE_MS || 600000);
+
   async tick() {
     if (!this.boat) return;
     const active = (await this.db.query(`SELECT * FROM financial_products.build_runs WHERE status <> ALL($1) ORDER BY created_at`, [TERMINAL])).rows as Row[];
@@ -499,7 +510,14 @@ export class BuildService {
       const build = toBuild(r);
       try {
         await this.advance(build);
+        this.transient.delete(build.id);
       } catch (e) {
+        if (isTransient(e)) {
+          const since = this.transient.get(build.id) ?? Date.now();
+          this.transient.set(build.id, since);
+          if (Date.now() - since < BuildService.TRANSIENT_GRACE_MS) continue;
+        }
+        this.transient.delete(build.id);
         const current = (await this.get(build.id)) ?? build;
         // Stopped (or otherwise ended) while this tick was in flight: its sandboxes are gone on purpose, and the
         // build keeps the status it ended with.
