@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { AgentMeter } from "./agent-meter.js";
+import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -297,7 +299,13 @@ export class ReviewService {
   }
 
   async agentTokenActive(token: string) {
-    return !!(await this.one("SELECT 1 FROM financial_products.review_cases WHERE token_hash = $1 AND status = ANY($2)", [hash(token), RUNNING]));
+    return !!(await this.agentRun(token));
+  }
+
+  meter: AgentMeter | null = null;
+  async agentRun(token: string): Promise<AgentRun | null> {
+    const r = await this.one("SELECT id, cap_usd FROM financial_products.review_cases WHERE token_hash = $1 AND status = ANY($2)", [hash(token), RUNNING]);
+    return r ? { key: `review:${r.id}`, capUsd: Number(r.cap_usd) } : null;
   }
 
   private async update(id: string, f: Row) {
@@ -385,7 +393,7 @@ export class ReviewService {
       return;
     }
     const agent = await agentState(boat, c.sandbox_id as string, c.process_id as string);
-    const cost = agent.cost + (await boat.costDollars(c.sandbox_id as string));
+    const cost = Math.max(agent.cost, this.meter ? await this.meter.spent(`review:${c.id}`) : 0) + (await boat.costDollars(c.sandbox_id as string));
     await this.update(c.id as string, { cost_usd: cost });
     if (cost > Number(c.cap_usd) + 0.5) return this.end(c, "stopped", { error: `Over the US$${c.cap_usd} case cap`, cost_usd: cost });
     if (agent.running) return;

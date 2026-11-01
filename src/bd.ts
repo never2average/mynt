@@ -1,4 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { AgentMeter } from "./agent-meter.js";
+import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -588,11 +590,17 @@ export class BdService {
   // ---- agent runs ----
 
   async runForToken(token: string) {
-    return this.one(`SELECT id, status FROM financial_products.bd_runs WHERE token_hash = $1 AND status <> ALL($2)`, [hash(token), RUN_DONE]);
+    return this.one(`SELECT id, status, cap_usd FROM financial_products.bd_runs WHERE token_hash = $1 AND status <> ALL($2)`, [hash(token), RUN_DONE]);
   }
 
   async agentTokenActive(token: string) {
     return !!(await this.runForToken(token));
+  }
+
+  meter: AgentMeter | null = null;
+  async agentRun(token: string): Promise<AgentRun | null> {
+    const r = await this.runForToken(token);
+    return r ? { key: `bd:${r.id}`, capUsd: Number(r.cap_usd) } : null;
   }
 
   async monthSpend() {
@@ -669,7 +677,7 @@ export class BdService {
       return;
     }
     const agent = await agentState(boat, r.sandbox_id as string, r.process_id as string);
-    const cost = agent.cost + (await boat.costDollars(r.sandbox_id as string));
+    const cost = Math.max(agent.cost, this.meter ? await this.meter.spent(`bd:${r.id}`) : 0) + (await boat.costDollars(r.sandbox_id as string));
     await this.db.query("UPDATE financial_products.bd_runs SET cost_usd = $2 WHERE id = $1", [r.id, cost]);
     if (cost > Number(r.cap_usd) + 0.5) return this.finishRun(r, "stopped", { error: `Over the US$${r.cap_usd} run cap`, cost });
     if (agent.running) return;
