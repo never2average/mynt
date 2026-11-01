@@ -2,7 +2,7 @@
 FROM node:22.11-alpine AS build
 WORKDIR /app
 COPY . .
-RUN npm install && npm run build -w mynt-sdk && npm run build -w api
+RUN npm install --no-audit --no-fund -w mynt-sdk -w api && npm run build -w mynt-sdk && npm run build -w api
 
 FROM node:22.11-alpine
 WORKDIR /app
