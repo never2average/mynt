@@ -45,6 +45,28 @@ test("agent sandboxes: boat by default, Freestyle when asked or when it's the on
   assert.equal(sandboxesFromEnv({ BOAT_API_KEY: "b", SANDBOX_PROVIDER: "freestyle" }), null, "asked for Freestyle without its key: none, not boat");
 });
 
+test("Freestyle sandboxes write a workspace in a few batched commands, with big files on their own", async () => {
+  const fs = fakeFreestyle();
+  const sb = new FreestyleSandboxes(fs);
+  const files = {};
+  for (let i = 0; i < 40; i++) files[`/home/user/ws/f${i}.txt`] = "x".repeat(20_000); // ~1 MB in all
+  files["/home/user/ws/big.bin"] = "y".repeat(900_000); // too big for a batch
+  await sb.writeFiles("vm-1", files);
+  const runs = fs.calls.filter(([c]) => c === "run");
+  const batches = runs.filter(([, , cmd]) => cmd.includes("node -e"));
+  assert.ok(batches.length >= 2 && batches.length <= 3, `a handful of batches, not 41 commands (${batches.length})`);
+  const written = {};
+  for (const [, , , opts] of batches) {
+    const stdin = Buffer.from(opts.stdin, "base64");
+    assert.ok(stdin.length < 1024 * 1024, "each batch stays under Freestyle's 1 MiB stdin");
+    for (const [p, b] of Object.entries(JSON.parse(stdin.toString()))) written[p] = Buffer.from(b, "base64").toString();
+    assert.equal(opts.linuxUser, "user");
+  }
+  for (let i = 0; i < 40; i++) assert.equal(written[`/home/user/ws/f${i}.txt`], files[`/home/user/ws/f${i}.txt`]);
+  assert.ok(!("/home/user/ws/big.bin" in written));
+  assert.ok(runs.some(([, , cmd, opts]) => cmd.includes("cat >") && opts.env.MYNT_PATH === "/home/user/ws/big.bin"), "the big file goes on its own, in chunks");
+});
+
 test("the sandbox env file survives quotes and dollars when a shell sources it", () => {
   const env = { A: "it's \"quoted\" $HOME `x`", B: "plain", "BAD-NAME": "dropped" };
   const out = execFileSync("bash", ["-c", 'set -a; eval "$F"; set +a; printf "%s|%s|%s" "$A" "$B" "${BAD_NAME:-none}"'], { env: { F: envFile(env), PATH: process.env.PATH } }).toString();

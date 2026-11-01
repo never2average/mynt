@@ -19,6 +19,8 @@ export interface BoatClient {
   createSandbox(opts: { name: string; type?: string; ttlSeconds?: number; labels?: Record<string, string>; env?: Record<string, string> }): Promise<{ id: string; state: SandboxState }>;
   getSandbox(id: string): Promise<{ id: string; state: SandboxState; error?: string | null }>;
   writeFile(id: string, path: string, content: string): Promise<void>;
+  // Many files at once, when the host can do it faster than one by one.
+  writeFiles?(id: string, files: Record<string, string>): Promise<void>;
   readFile(id: string, path: string): Promise<string | null>;
   host(id: string, port: number): Promise<{ url: string }>;
   costDollars(id: string): Promise<number>;

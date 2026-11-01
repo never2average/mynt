@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { serialLoop } from "./worker.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -449,8 +450,7 @@ export class ReviewService {
 
   startWorker(intervalMs = Number(process.env.REVIEW_POLL_MS ?? 10000)) {
     if (this.timer || !this.enabled) return;
-    this.timer = setInterval(() => void this.tick().catch((e) => console.error("review worker", e)), intervalMs);
-    this.timer.unref();
+    this.timer = serialLoop(() => this.tick(), intervalMs, "review worker");
   }
 
   stopWorker() {

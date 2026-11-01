@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { serialLoop } from "./worker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { agentState, launchAgent, type AgentHostConfig } from "./agent-host.js";
@@ -681,8 +682,7 @@ export class BdService {
 
   startWorker(intervalMs = Number(process.env.BD_POLL_MS ?? 15000)) {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.tick().catch((e) => console.error("bd worker", e)), intervalMs);
-    this.timer.unref();
+    this.timer = serialLoop(() => this.tick(), intervalMs, "bd worker");
   }
 
   stopWorker() {
