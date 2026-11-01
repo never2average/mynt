@@ -82,12 +82,25 @@ mkdirSync(inbox, { recursive: true });
 const seen = new Set();
 const pending = () => readdirSync(inbox).filter((f) => !seen.has(f)).sort();
 let ended = false;
+// After its input is closed, Claude Code exits on its own, unless a background task it started (a preview
+// server, say) keeps it alive: then it only reports on that task, forever. So once it has been quiet this long
+// after its last result, end it; its last result stands.
+const SETTLE_MS = Number(process.env.MYNT_AGENT_SETTLE_MS || 90000);
+let quiet = null;
+const settle = () => {
+  clearTimeout(quiet);
+  quiet = setTimeout(() => {
+    child.kill("SIGTERM");
+    setTimeout(() => child.kill("SIGKILL"), 10000).unref();
+  }, SETTLE_MS);
+};
 // Close stdin once every message has had its turn and nothing is waiting: Claude Code then exits.
 const maybeEnd = () => {
   if (!ended && state.turns >= state.sent && pending().length === 0) {
     ended = true;
     child.stdin.end();
   }
+  if (ended) settle();
 };
 
 let buf = "";
@@ -137,6 +150,7 @@ say(cfg.prompt);
 
 child.on("exit", (code) => {
   clearInterval(timer);
+  clearTimeout(quiet);
   state.done = true;
   state.exit_code = code;
   save();

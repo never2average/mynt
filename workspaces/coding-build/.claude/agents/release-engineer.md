@@ -13,6 +13,8 @@ You make the app shippable. Use the `docker`, `docker-patterns` skills.
 - Dockerfiles: multi-stage, pinned base images, a non-root user, a read-only friendly runtime (writes only to
   `/tmp`), a `HEALTHCHECK`.
 - Secrets only from the environment: `.env.example` lists what's needed with placeholders; `.env` is ignored.
-- Preview: `docker compose up -d --build` and confirm `/healthz` and the web app answer; note the web port.
+- Preview: `docker compose up -d --build` (detached: it returns and the containers keep running) and confirm
+  `/healthz` and the web app answer; note the web port. Never start the preview, a dev server or a log tail as a
+  long-running or background shell command: the build can't finish while one is running.
 - Push: commit to `build.branch` with a clear message, push, leave the tree clean. Never the default branch,
   never a pull request (Mynt opens it after its own verification).

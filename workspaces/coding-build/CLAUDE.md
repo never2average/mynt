@@ -74,8 +74,8 @@ At each phase run `python3 scripts/report_status.py <phase> "<one line>"`. The p
    every critical and high finding. Don't install or run Maxwell: Mynt runs it once, independently, when it
    verifies the build, and only that audit decides.
 3. **Production readiness** (phase `checking`): the `production-readiness` skill, and `qa-engineer`'s tests green.
-4. **Preview** (phase `previewing`): `release-engineer` starts the Compose project in the background and notes
-   the web port (8080 by default).
+4. **Preview** (phase `previewing`): `release-engineer` starts the Compose project detached (`docker compose up -d`)
+   and notes the web port (8080 by default). Nothing may be left running as a background shell command.
 5. **Push** (phase `pushing`).
    - If there's a repository: commit everything to `build.branch`, push it, and leave the working tree clean.
    - **Do not open a pull request.** Mynt re-runs the audit and the checks itself in a clean sandbox, opens the
