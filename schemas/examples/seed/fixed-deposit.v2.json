@@ -1,0 +1,1454 @@
+{
+  "_id": "fixed-deposit",
+  "product_name": "Fixed Deposit",
+  "product_type": "deposits",
+  "descriptions": {
+    "summary": "A lump sum deposited with a bank for a chosen term from 7 days to 10 years, at an interest rate locked in at booking, paid out periodically or with the principal at maturity.",
+    "key_features": [
+      "Rate locked in at booking for the whole term",
+      "Terms from 7 days to 10 years",
+      "Cumulative, quarterly or monthly interest payout",
+      "Premature withdrawal at a disclosed reduced rate",
+      "Deposit insurance by DICGC up to ₹5 lakh per depositor per bank"
+    ],
+    "long": "Mynt reference definition (India). Sources: RBI Master Direction on Interest Rate on Deposits (2016, as amended): term deposits from 7 days to 10 years; the rate is fixed for the term; on premature withdrawal interest is paid at the rate applicable to the period the deposit actually ran, less a penalty disclosed upfront; since October 2023 all individuals' term deposits of ₹1 crore and below must allow premature withdrawal; single deposits of ₹3 crore and above are bulk deposits for scheduled commercial banks, so this retail product stops below that; interest on matured deposits left unclaimed is the lower of the savings rate and the contracted rate. Deposit insurance by DICGC up to ₹5 lakh per depositor per bank, across all accounts in the same capacity. Tax is deducted at source on interest above the statutory threshold unless the depositor files the declaration the Income-tax rules allow. ASSUMPTIONS (indicative; each bank sets its own): the 6.5% card rate, the 50 bps senior-citizen bonus, the 1% premature-withdrawal penalty, the ₹1,000 minimum, no interest when closed within 7 days, and the PAN check on large deposits (thresholds as in the Income-tax rules in 2025). A Mynt reference product names no providers, partners or risk models: the bank that offers it adds its own licence, KYC and funding handoffs (with their consent purposes), and governs its own models in its GRC folder.",
+    "documents": {
+      "deposit_insurance": "https://www.dicgc.org.in/",
+      "complaints_ombudsman": "https://cms.rbi.org.in/"
+    }
+  },
+  "owner_entity_id": null,
+  "version": 1,
+  "access_mode": "open",
+  "plane": {
+    "role": "standalone",
+    "sellable": true
+  },
+  "context": {
+    "currencies": [
+      "INR"
+    ],
+    "calendar": "in_banking",
+    "business_day_convention": "following",
+    "day_count": "actual_365_fixed",
+    "time_zone": "Asia/Kolkata"
+  },
+  "components": [
+    {
+      "key": "deposit",
+      "country": "in",
+      "primitive": "account_operations",
+      "action": "issuance",
+      "underlying": "cash",
+      "block": "term_deposit",
+      "terms": {
+        "principal": {
+          "$term": "principal"
+        },
+        "tenor_days": {
+          "$term": "tenor_days"
+        },
+        "payout_option": {
+          "$term": "payout_option"
+        },
+        "maturity_date": {
+          "$term": "maturity_date"
+        }
+      },
+      "schedules": [
+        {
+          "purpose": "interest_accrual",
+          "anchor": "value_date",
+          "cycle": "P1D",
+          "day_basis": "calendar"
+        },
+        {
+          "purpose": "interest_posting",
+          "anchor": "value_date",
+          "cycle": "P3M",
+          "end": {
+            "$term": "maturity_date"
+          },
+          "day_basis": "calendar"
+        },
+        {
+          "purpose": "payout",
+          "anchor": "value_date",
+          "cycle": {
+            "$term": "payout_cycle"
+          },
+          "end": {
+            "$term": "maturity_date"
+          },
+          "business_day_convention": "following"
+        },
+        {
+          "purpose": "maturity",
+          "anchor": {
+            "$term": "maturity_date"
+          },
+          "business_day_convention": "following"
+        }
+      ],
+      "election": "required"
+    }
+  ],
+  "customer_segments": [
+    {
+      "_id": "resident_individual",
+      "name": "Resident individuals (18+)",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 18,
+        "resident": true
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "aadhaar_ekyc",
+              "v_cip",
+              "ckyc_records",
+              "in_person_ovd"
+            ],
+            "validity": "P10Y",
+            "on_expiry": "periodic_kyc_update"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc"
+        }
+      },
+      "fraud": {
+        "product_risk": "low",
+        "channel_risk": "low",
+        "monitoring": [
+          "post_event"
+        ]
+      },
+      "target_market": {
+        "client_type": "retail",
+        "knowledge_experience": "basic",
+        "loss_capacity": "none",
+        "risk_tolerance": "conservative",
+        "objectives": [
+          "capital_preservation",
+          "fixed_income"
+        ],
+        "holding_period": "P1Y"
+      },
+      "channels": [
+        "app",
+        "web",
+        "branch"
+      ]
+    },
+    {
+      "_id": "senior_citizen",
+      "name": "Resident senior citizens (60+)",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 60,
+        "resident": true
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "aadhaar_ekyc",
+              "v_cip",
+              "ckyc_records",
+              "in_person_ovd"
+            ],
+            "validity": "P10Y",
+            "on_expiry": "periodic_kyc_update"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc"
+        }
+      },
+      "fraud": {
+        "product_risk": "low",
+        "channel_risk": "low",
+        "monitoring": [
+          "post_event"
+        ]
+      },
+      "target_market": {
+        "client_type": "retail",
+        "knowledge_experience": "basic",
+        "loss_capacity": "none",
+        "risk_tolerance": "conservative",
+        "objectives": [
+          "capital_preservation",
+          "income_in_retirement"
+        ],
+        "holding_period": "P1Y"
+      },
+      "channels": [
+        "app",
+        "web",
+        "branch",
+        "phone"
+      ]
+    }
+  ],
+  "core_algorithms": [
+    {
+      "_id": "onboarding_eligibility",
+      "algorithm_name": "Term deposit booking eligibility",
+      "description": "Requires full KYC and a resident individual; asks for PAN (or the declaration the Income-tax rules allow) on large deposits; keeps a single deposit below the bulk-deposit threshold.",
+      "purpose": "eligibility",
+      "repository": "models/fd-booking-eligibility",
+      "version": "1.0.0",
+      "decision": {
+        "knockouts": [
+          {
+            "rule": {
+              "attr": "customer.age",
+              "op": "lt",
+              "value": 18
+            },
+            "reason_code": "below_minimum_age"
+          },
+          {
+            "rule": {
+              "attr": "customer.resident",
+              "op": "eq",
+              "value": false
+            },
+            "reason_code": "non_resident"
+          },
+          {
+            "rule": {
+              "attr": "deposit.principal",
+              "op": "gte",
+              "value": 30000000
+            },
+            "reason_code": "bulk_deposit"
+          }
+        ]
+      }
+    },
+    {
+      "_id": "fd_interest",
+      "algorithm_name": "Term deposit interest, payout and premature closure",
+      "description": "Quarterly compounding for the cumulative option; quarterly payout, or monthly at the discounted equivalent of the quarterly rate; on premature closure recomputes at the rate for the period actually run less the disclosed penalty, recovering any interest already paid above it.",
+      "purpose": "interest_calculation",
+      "repository": "models/fd-interest",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "tds_on_interest",
+      "algorithm_name": "Tax deducted at source on interest",
+      "description": "Aggregates the depositor's interest across deposits in the financial year and deducts tax at source above the statutory threshold (higher for senior citizens), unless a valid declaration is on file.",
+      "purpose": "other",
+      "repository": "models/fd-tds",
+      "version": "1.0.0"
+    }
+  ],
+  "risk_models": [],
+  "partner_handoffs": [],
+  "terms": [
+    {
+      "_id": "principal",
+      "label": "Deposit amount",
+      "type": "money",
+      "currency": "INR",
+      "default": 100000,
+      "range": {
+        "min": 1000,
+        "max": 29999999,
+        "step": 1
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "tenor_days",
+      "label": "Term",
+      "type": "integer",
+      "unit": "days",
+      "default": 365,
+      "range": {
+        "min": 7,
+        "max": 3650,
+        "step": 1
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "deposit_rate",
+      "label": "Interest rate (card rate for the chosen term)",
+      "type": "rate",
+      "unit": "pct_pa",
+      "default": 6.5,
+      "range": {
+        "min": 2.5,
+        "max": 9
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant",
+        "operations"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      },
+      "effective_dated": true
+    },
+    {
+      "_id": "senior_spread_bps",
+      "label": "Senior citizen additional rate",
+      "type": "integer",
+      "unit": "bps",
+      "default": 0,
+      "range": {
+        "min": 0,
+        "max": 100
+      },
+      "set_by": [
+        "template",
+        "segment_override"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "payout_option",
+      "label": "Interest payout",
+      "type": "enum",
+      "default": "cumulative",
+      "allowed": [
+        "cumulative",
+        "quarterly",
+        "monthly"
+      ],
+      "set_by": [
+        "template",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "payout_cycle",
+      "label": "Payout cycle",
+      "type": "cycle",
+      "derived": "payout_option == 'monthly' ? 'P1M' : 'P3M'",
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "premature_penalty_bps",
+      "label": "Rate reduction on premature withdrawal",
+      "type": "integer",
+      "unit": "bps",
+      "default": 100,
+      "range": {
+        "min": 0,
+        "max": 200
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "premature_withdrawal_assured_upto",
+      "label": "Premature withdrawal assured for individuals' deposits up to",
+      "type": "money",
+      "currency": "INR",
+      "default": 10000000,
+      "set_by": [
+        "jurisdiction_variant"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "maturity_instruction",
+      "label": "At maturity",
+      "type": "enum",
+      "default": "pay_out",
+      "allowed": [
+        "pay_out",
+        "renew_principal",
+        "renew_principal_and_interest"
+      ],
+      "set_by": [
+        "template",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "customer_dated_change",
+        "notice": "P1D",
+        "event": "maturity_instruction_changed"
+      }
+    },
+    {
+      "_id": "maturity_date",
+      "label": "Maturity date",
+      "type": "date",
+      "derived": "add_days(value_date, tenor_days)",
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    }
+  ],
+  "rates": [
+    {
+      "_id": "deposit_rate",
+      "kind": "deposit",
+      "rate_type": "fixed",
+      "value": {
+        "$term": "deposit_rate"
+      },
+      "spread": {
+        "$term": "senior_spread_bps"
+      },
+      "day_count": "actual_365_fixed",
+      "compounding": "P3M",
+      "application": "maturity",
+      "method": "cumulative: compounded quarterly and paid with the principal; quarterly: paid each quarter; monthly: paid monthly at the discounted equivalent"
+    },
+    {
+      "_id": "premature_rate",
+      "kind": "penalty",
+      "rate_type": "fixed",
+      "value": {
+        "$term": "premature_penalty_bps"
+      },
+      "method": "rate for the period actually run, less this many bps; no interest if closed within 7 days",
+      "application": "maturity"
+    }
+  ],
+  "fees": [],
+  "limits": [
+    {
+      "_id": "deposit_size",
+      "kind": "constraint",
+      "constraint_type": "OPENING_BALANCE",
+      "min": {
+        "amount": 1000,
+        "currency": "INR"
+      },
+      "max": {
+        "amount": 29999999,
+        "currency": "INR"
+      },
+      "scope": "account"
+    },
+    {
+      "_id": "pan_on_large_deposits",
+      "kind": "control",
+      "event_stream": "funding",
+      "rule_type": "conditional",
+      "conditions": [
+        {
+          "attr": "txn.amount",
+          "op": "gt",
+          "value": 50000
+        },
+        {
+          "attr": "customer.pan",
+          "op": "not_exists"
+        },
+        {
+          "attr": "customer.form_60",
+          "op": "not_exists"
+        }
+      ],
+      "scope": "customer",
+      "outcome": "decline",
+      "purpose": "compliance",
+      "state": "active"
+    }
+  ],
+  "servicing_policies": [
+    {
+      "_id": "early_withdrawal",
+      "kind": "early_withdrawal",
+      "config": {
+        "allowed": "with_penalty",
+        "assured_upto": {
+          "$term": "premature_withdrawal_assured_upto"
+        },
+        "rate_basis": "rate applicable to the period actually run",
+        "penalty_rate_reduction": {
+          "$term": "premature_penalty_bps"
+        },
+        "no_interest_if_closed_within": "P7D",
+        "partial": false,
+        "recover_excess_interest_paid": true
+      }
+    },
+    {
+      "_id": "maturity",
+      "kind": "maturity",
+      "config": {
+        "instructions": [
+          "pay_out",
+          "renew_principal",
+          "renew_principal_and_interest"
+        ],
+        "default_instruction": {
+          "$term": "maturity_instruction"
+        },
+        "payout_to": "linked_account",
+        "renewal_rate": "card rate on the maturity date for the same term",
+        "unclaimed_interest": "lower of the savings rate and the contracted rate until paid"
+      }
+    },
+    {
+      "_id": "statement",
+      "kind": "statement",
+      "config": {
+        "deposit_advice": "on booking and on renewal",
+        "interest_certificate": "P1Y",
+        "tds_certificate": "quarterly"
+      }
+    },
+    {
+      "_id": "service_level",
+      "kind": "service_level",
+      "config": {
+        "grievance_policy": "board-approved grievance redressal policy",
+        "escalate_to": "rbi_integrated_ombudsman",
+        "escalate_if_unresolved_after": "P30D"
+      }
+    }
+  ],
+  "lifecycle_events": [
+    {
+      "_id": "deposit_booked",
+      "actus": "IED",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation",
+        "execution",
+        "transfer"
+      ],
+      "edition": "latest"
+    },
+    {
+      "_id": "interest_paid_out",
+      "actus": "IP",
+      "sequence": 8,
+      "trigger": "scheduled",
+      "when": [
+        {
+          "attr": "payout_option",
+          "op": "in",
+          "value": [
+            "quarterly",
+            "monthly"
+          ]
+        }
+      ],
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "interest_capitalised",
+      "actus": "IPCI",
+      "sequence": 9,
+      "trigger": "scheduled",
+      "when": [
+        {
+          "attr": "payout_option",
+          "op": "eq",
+          "value": "cumulative"
+        }
+      ],
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "tax_deducted",
+      "sequence": 10,
+      "trigger": "linked",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "maturity_instruction_changed",
+      "sequence": 11,
+      "trigger": "customer",
+      "primitives": [
+        "terms_change"
+      ],
+      "edition": "stored"
+    },
+    {
+      "_id": "nominee_updated",
+      "sequence": 11,
+      "trigger": "customer",
+      "primitives": [
+        "party_change"
+      ],
+      "edition": "stored"
+    },
+    {
+      "_id": "premature_closure",
+      "actus": "TD",
+      "sequence": 16,
+      "trigger": "customer",
+      "primitives": [
+        "terms_change",
+        "quantity_change",
+        "transfer"
+      ],
+      "edition": "stored"
+    },
+    {
+      "_id": "matured",
+      "actus": "MD",
+      "sequence": 19,
+      "trigger": "scheduled",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "proceeds_paid_out",
+      "sequence": 20,
+      "trigger": "linked",
+      "when": [
+        {
+          "attr": "maturity_instruction",
+          "op": "eq",
+          "value": "pay_out"
+        }
+      ],
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "renewed",
+      "sequence": 20,
+      "trigger": "linked",
+      "when": [
+        {
+          "attr": "maturity_instruction",
+          "op": "in",
+          "value": [
+            "renew_principal",
+            "renew_principal_and_interest"
+          ]
+        }
+      ],
+      "primitives": [
+        "contract_formation"
+      ],
+      "edition": "latest"
+    }
+  ],
+  "invariants": [
+    {
+      "_id": "tenor_bounds",
+      "expr": "tenor_days >= 7 && tenor_days <= 3650",
+      "message": "Term deposits run 7 days to 10 years",
+      "applies_at": [
+        "design",
+        "origination"
+      ]
+    },
+    {
+      "_id": "retail_not_bulk",
+      "expr": "principal < 30000000",
+      "message": "₹3 crore and above is a bulk deposit, priced separately",
+      "applies_at": [
+        "design",
+        "origination"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "_id": "persona_resident_individual",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "rbi",
+        "id": "rbi_resident_individual"
+      },
+      "attributes": {
+        "fit": "subset"
+      }
+    },
+    {
+      "_id": "persona_senior_citizen",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "rbi",
+        "id": "rbi_senior_citizen"
+      },
+      "attributes": {
+        "fit": "whole_persona"
+      }
+    },
+    {
+      "_id": "use_resident_individual_onboarding_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "onboarding_eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_resident_individual_fd_interest",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "fd_interest"
+      },
+      "attributes": {
+        "stage": "servicing",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_resident_individual_tds_on_interest",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "tds_on_interest"
+      },
+      "attributes": {
+        "stage": "servicing",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_senior_citizen_onboarding_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "onboarding_eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_senior_citizen_fd_interest",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "fd_interest"
+      },
+      "attributes": {
+        "stage": "servicing",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_senior_citizen_tds_on_interest",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "tds_on_interest"
+      },
+      "attributes": {
+        "stage": "servicing",
+        "required": true
+      }
+    },
+    {
+      "_id": "t_principal",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "principal"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_tenor_days",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "tenor_days"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_deposit_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "deposit_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_senior_spread_bps",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "senior_spread_bps"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_payout_option",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "payout_option"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_payout_cycle",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "payout_cycle"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_premature_penalty_bps",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "premature_penalty_bps"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_premature_withdrawal_assured_upto",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "premature_withdrawal_assured_upto"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_maturity_instruction",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "maturity_instruction"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_maturity_date",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "maturity_date"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_senior_spread_bps_senior",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "senior_spread_bps"
+      },
+      "to": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "attributes": {
+        "mode": "override",
+        "override": {
+          "default": 50
+        }
+      }
+    },
+    {
+      "_id": "r_deposit_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "rate",
+        "id": "deposit_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "r_premature_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "rate",
+        "id": "premature_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_deposit_size",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "deposit_size"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_pan_on_large_deposits",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "pan_on_large_deposits"
+      },
+      "to": {
+        "kind": "product",
+        "id": "self"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_early_withdrawal",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "early_withdrawal"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_maturity",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "maturity"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_statement",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "statement"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_service_level",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "product",
+        "id": "self"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "ev_deposit_booked",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "deposit_booked"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_interest_paid_out",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "interest_paid_out"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "schedule_purpose": "payout"
+      }
+    },
+    {
+      "_id": "ev_interest_capitalised",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "interest_capitalised"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "schedule_purpose": "interest_posting"
+      }
+    },
+    {
+      "_id": "ev_tax_deducted",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "tax_deducted"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_maturity_instruction_changed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "maturity_instruction_changed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_nominee_updated",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "nominee_updated"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_premature_closure",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "premature_closure"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_matured",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "schedule_purpose": "maturity"
+      }
+    },
+    {
+      "_id": "ev_proceeds_paid_out",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "proceeds_paid_out"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_renewed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "renewed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "cx_interest_paid_out_tax_deducted",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "interest_paid_out"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "tax_deducted"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_matured_proceeds_paid_out",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "proceeds_paid_out"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_matured_renewed",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "renewed"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "ob_resident_individual_kyc_cdd",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kyc_cdd"
+      },
+      "attributes": {
+        "how": "Full KYC before the deposit is booked"
+      }
+    },
+    {
+      "_id": "ob_senior_citizen_kyc_cdd",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kyc_cdd"
+      },
+      "attributes": {
+        "how": "Full KYC before the deposit is booked"
+      }
+    },
+    {
+      "_id": "ob_fd_interest_deposit_interest",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "fd_interest"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_deposit_interest"
+      },
+      "attributes": {
+        "how": "Rate fixed for the term; premature closure at the rate for the period run less the penalty"
+      }
+    },
+    {
+      "_id": "ob_early_withdrawal_term_deposit_terms",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "early_withdrawal"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_term_deposit_terms"
+      },
+      "attributes": {
+        "how": "Premature withdrawal assured up to ₹1 crore, penalty disclosed upfront"
+      }
+    },
+    {
+      "_id": "ob_maturity_term_deposit_terms",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "maturity"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_term_deposit_terms"
+      },
+      "attributes": {
+        "how": "Unclaimed matured deposits earn the lower of the savings and contracted rate"
+      }
+    },
+    {
+      "_id": "ob_tenor_days_term_deposit_terms",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "term",
+        "id": "tenor_days"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_term_deposit_terms"
+      },
+      "attributes": {
+        "how": "7 days to 10 years"
+      }
+    },
+    {
+      "_id": "ob_service_level_grievance_redressal",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_grievance_redressal"
+      },
+      "attributes": {
+        "how": "Escalation to the RBI Integrated Ombudsman after 30 days"
+      }
+    }
+  ],
+  "versioning": {
+    "change_class": "initial",
+    "summary": "First v2 definition of the reference fixed deposit",
+    "edition_policy": {
+      "origination": "latest",
+      "mid_term_change": "stored",
+      "premature_closure": "stored",
+      "renewal": "latest"
+    }
+  },
+  "governance": {
+    "state": "approved",
+    "review": {
+      "cadence": "P1Y"
+    }
+  },
+  "projection": {
+    "lead_component": "deposit",
+    "risk_level": "low",
+    "liquidity": "low",
+    "typical_horizon": "short_to_medium",
+    "return_type": "fixed_interest"
+  }
+}

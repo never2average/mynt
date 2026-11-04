@@ -738,6 +738,16 @@ Each version's contract carries a `contract_hash`, which changes whenever the co
 
 **Product GRC folders.** Each product has its own GRC folder: `file_grc_record` and `get_grc_folder` with `product_id`. This is where, for example, the governance of the product's risk models lives.
 
+**The reference catalogue's definitions.** Mynt's reference products have no firm, so their definitions name no providers, partner handoffs or risk models (those belong to the firm that offers the product, with its consent purposes and its model governance), but they carry everything else: components, segments, algorithms, terms, rates, fees, limits, servicing, lifecycle events and the register obligations each part satisfies. Admins save one with `set_product_definition`, then `test_product` and `publish_product` publish it as the product's next version, with a developer contract. [`schemas/examples/seed/`](schemas/examples/seed/) holds definitions for `savings-account`, `fixed-deposit`, `recurring-deposit` and `personal-loan` (India), each with its sources and assumptions in `descriptions.long`. They point at an RBI slice of the regulatory model: regulator `rbi` with the personas `rbi_resident_individual`, `rbi_senior_citizen` and `rbi_retail_borrower`, and the licence type `rbi_bank` with the obligations they cite. [`test/seed-regulatory-model.js`](test/seed-regulatory-model.js) builds exactly that slice. To apply them to a server:
+
+```sh
+export MYNT_ADMIN_TOKEN=...   # an admin's token, set in your shell, never on the command line
+node scripts/apply-seed-definitions.mjs --url <the server's MCP URL> --dry-run   # check only
+node scripts/apply-seed-definitions.mjs --url <the server's MCP URL>             # check, save, test, publish
+```
+
+The script checks every file first (`check_product_definition` with the product id) and changes nothing if any is invalid or has publish blockers, printing the errors and blockers. Otherwise it saves, tests and publishes each one and prints one line per product. A product whose live definition already matches is skipped. Pass file paths to apply only some.
+
 Variants (a template plus a patch) can't be saved yet. Save the resolved product as `plane.role: "standalone"`.
 
 Stores created under the original four lines (credit, wealth, insurance and the old cash-and-markets line) are moved onto these lines once, when Mynt starts. Old cash-and-markets products go by category: deposits to account_operations, bonds and money-market instruments to credit, derivatives to derivatives, and funds to wealth. REIT and InvIT units go to securitization. Published products stay published, and their test reports are re-run so they match the migrated data.
