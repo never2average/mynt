@@ -54,5 +54,17 @@
   "consent_purpose": "mandate_setup",
   "fills": [],
   "innovator_licences": [],
-  "vendor_licences": []
+  "vendor_licences": [],
+  "client_result": {
+    "status": {
+      "from": "mandate_status",
+      "map": {
+        "registered": "completed",
+        "pending": "pending",
+        "rejected": "failed"
+      }
+    },
+    "fields": [],
+    "redirect": true
+  }
 }

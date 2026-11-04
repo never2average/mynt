@@ -43,5 +43,17 @@
   "innovator_licences": [],
   "vendor_licences": [
     "cca_esp"
-  ]
+  ],
+  "client_result": {
+    "status": {
+      "from": "signature_status",
+      "map": {
+        "signed": "completed",
+        "pending": "pending",
+        "failed": "failed"
+      }
+    },
+    "fields": [],
+    "redirect": true
+  }
 }

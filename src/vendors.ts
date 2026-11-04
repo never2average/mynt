@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
 import { EntityFactsSchema, partyActive, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
 import { normalizeModel } from "./regulatory.js";
+import { emitFirmEvent, FIRM_WEBHOOK_EVENTS, webhookUrlProblem } from "./runtime.js";
 import type { Db } from "./db.js";
 import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
 import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
@@ -24,8 +25,9 @@ import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions } from "
 // regulatory model). Vendors list offerings of a type; Mynt runs a conformance test against the vendor's
 // test endpoint before an offering can be listed. Innovators subscribe their firm (the vendor joins their
 // roster as a party), bind a product's partner handoff to the subscription, and Mynt calls the vendor at
-// runtime when an app asks to prefill a customer's data. Billing is between vendor and innovator: Mynt only
-// counts calls.
+// runtime: when an app asks to prefill a customer's data, and when a device starts the client action of a
+// bound handoff (the vendor's result goes to the innovator; the device gets only the outcome the service type's
+// client_result allows). Billing is between vendor and innovator: Mynt only counts calls.
 
 export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "other"] as const;
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
@@ -38,6 +40,14 @@ export const PREFILL_SOURCE: Partial<Record<ServiceCategory, CaptureMethod>> = {
   account_data: "account_aggregator",
   analytics: "account_aggregator",
 };
+// What a device may be told of a vendor-served action's outcome.
+export const CLIENT_STATUSES = ["verified", "not_verified", "completed", "failed", "pending"] as const;
+export type ClientStatus = (typeof CLIENT_STATUSES)[number];
+export interface ClientResult {
+  status?: { from: string; map: Record<string, ClientStatus> }; // output property → device status
+  fields: string[]; // output properties the device may see (never personal data)
+  redirect: boolean; // whether the device gets the vendor's redirect_url (e-sign, e-mandate, DigiLocker)
+}
 export const SERVICE_TYPES_DIR = fileURLToPath(new URL("../schemas/service-types/", import.meta.url));
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -88,6 +98,7 @@ export interface ServiceType {
   innovator_licences: string[];
   vendor_licences: string[];
   fixtures: Record<string, unknown>[];
+  client_result: ClientResult | null; // null: the device gets the status and a reference only
   updated_at: string;
 }
 export type OfferingStatus = "draft" | "conformance_passed" | "listed" | "suspended";
@@ -136,6 +147,7 @@ const toType = (r: Row): ServiceType => ({
   innovator_licences: r.innovator_licences as string[],
   vendor_licences: r.vendor_licences as string[],
   fixtures: r.fixtures as Record<string, unknown>[],
+  client_result: (r.client_result as ClientResult | null) ?? null,
   updated_at: iso(r.updated_at)!,
 });
 const toOffering = (r: Row): Offering => ({
@@ -240,6 +252,18 @@ export const ServiceTypeSchema = z
     innovator_licences: z.array(z.string()).max(20).default([]).describe("Licence type ids (regulatory model) the subscribing firm must hold one of; empty for none"),
     vendor_licences: z.array(z.string()).max(20).default([]).describe("Licence type ids the vendor must hold one of; empty for none"),
     fixtures: z.array(z.record(z.string(), z.unknown())).max(5).default([]).describe("Inputs for Mynt's conformance test; by default one built from Mynt's sandbox fixtures"),
+    client_result: z
+      .object({
+        status: z
+          .object({ from: z.string().describe("An output property"), map: z.record(z.string(), z.enum(CLIENT_STATUSES)).describe("Its values → the status the device sees; others are 'completed'") })
+          .strict()
+          .optional(),
+        fields: z.array(z.string()).max(10).default([]).describe("Output properties the device may see; never personal data"),
+        redirect: z.boolean().default(false).describe("true for services the customer finishes on the provider's page (e-sign, e-mandate, DigiLocker): the device gets the vendor's redirect_url"),
+      })
+      .strict()
+      .optional()
+      .describe("What a device that starts an action served by this service is told. The full output goes to the innovator; by default the device gets only a status and a reference"),
   })
   .strict();
 export type ServiceTypeInput = z.infer<typeof ServiceTypeSchema>;
@@ -273,6 +297,15 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
     if (!DATA_DICTIONARY[f]) errors.push(`fills: '${f}' isn't in Mynt's data dictionary`);
     else if (!(f in outputProps)) errors.push(`fills: '${f}' isn't a property of output_schema`);
   }
+  if (t.client_result) {
+    const cr = t.client_result;
+    if (cr.status && !(cr.status.from in outputProps)) errors.push(`client_result.status.from: '${cr.status.from}' isn't a property of output_schema`);
+    for (const f of cr.fields) {
+      if (!(f in outputProps)) errors.push(`client_result.fields: '${f}' isn't a property of output_schema`);
+      else if (DATA_DICTIONARY[f] && DATA_DICTIONARY[f].sensitivity !== "public") errors.push(`client_result.fields: '${f}' is customer data (${DATA_DICTIONARY[f].sensitivity}); it goes to the innovator, never the device`);
+      else if (t.fills.includes(f)) errors.push(`client_result.fields: '${f}' fills the customer's vault; it goes to the innovator, never the device`);
+    }
+  }
   for (const [side, list] of [
     ["innovator_licences", t.innovator_licences],
     ["vendor_licences", t.vendor_licences],
@@ -300,12 +333,12 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
 
 export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtures: Record<string, unknown>[], by: string | null): Promise<ServiceType> {
   const { rows } = await store.db.query(
-    `INSERT INTO ${T}.service_types (region, key, name, category, description, input_schema, output_schema, consent_purpose, fills, innovator_licences, vendor_licences, fixtures, updated_by, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+    `INSERT INTO ${T}.service_types (region, key, name, category, description, input_schema, output_schema, consent_purpose, fills, innovator_licences, vendor_licences, fixtures, updated_by, client_result, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
      ON CONFLICT (region, key) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
        input_schema = EXCLUDED.input_schema, output_schema = EXCLUDED.output_schema, consent_purpose = EXCLUDED.consent_purpose, fills = EXCLUDED.fills,
        innovator_licences = EXCLUDED.innovator_licences, vendor_licences = EXCLUDED.vendor_licences, fixtures = EXCLUDED.fixtures,
-       updated_by = EXCLUDED.updated_by, updated_at = now()
+       updated_by = EXCLUDED.updated_by, client_result = EXCLUDED.client_result, updated_at = now()
      RETURNING *`,
     [
       t.region,
@@ -321,6 +354,7 @@ export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtu
       t.vendor_licences,
       JSON.stringify(fixtures),
       by,
+      t.client_result ? JSON.stringify(t.client_result) : null,
     ],
   );
   return toType(rows[0]);
@@ -458,24 +492,43 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
   return { run_id: id, passed, status, cases, ...(gap ? { licence_gap: gap } : {}) };
 }
 
-// What's wrong with a vendor's response body, as rules only.
-function responseProblems(body: unknown, requestId: string, t: ServiceType): string[] {
-  const b = body as { request_id?: unknown; status?: unknown; output?: unknown } | null;
+// What's wrong with a vendor's response body, as rules only. With allowPending, an asynchronous service may
+// answer "pending" (the customer finishes on the provider's page, then the vendor calls back).
+function responseProblems(body: unknown, requestId: string, t: ServiceType, allowPending = false): string[] {
+  const b = body as { request_id?: unknown; status?: unknown; output?: unknown; redirect_url?: unknown } | null;
   if (!b || typeof b !== "object") return ["the response isn't a JSON object"];
   const problems: string[] = [];
   if (b.request_id !== requestId) problems.push("request_id doesn't echo the request's");
-  if (b.status !== "ok") problems.push(`status is ${JSON.stringify(b.status)}, not "ok"`);
+  if (allowPending && b.status === "pending") {
+    if (b.redirect_url != null && typeof b.redirect_url !== "string") problems.push("redirect_url must be a string");
+  } else if (b.status !== "ok") problems.push(`status is ${JSON.stringify(b.status)}, not "ok"`);
   else problems.push(...schemaProblems(t.output_schema, b.output).map((p) => `output ${p}`));
   return problems;
+}
+
+// A provider's hosted page a device may be sent to: https (plain http only to loopback in tests), no credentials.
+function safeRedirect(raw: unknown, opts: VendorCallOptions): string | null {
+  if (typeof raw !== "string" || raw.length > 2048) return null;
+  try {
+    const u = new URL(raw);
+    if (u.username || u.password) return null;
+    if (u.protocol === "https:") return u.toString();
+    if (u.protocol === "http:" && opts.allowInsecureLoopback && /^(127\.|localhost$|\[::1\]$)/.test(u.hostname)) return u.toString();
+  } catch {
+    /* not a URL */
+  }
+  return null;
 }
 
 // ---- product handoffs bound to subscriptions ----
 
 type Conn = { _id: string; type: string; from: { kind: string; id?: string }; to: { kind: string; id?: string }; attributes?: Record<string, unknown> };
+type HandoffNode = { _id: string; sends?: unknown };
 
 // Checks handoff_to_party connections that name a vendor subscription: the owner's active subscription, to
-// the subscription's vendor party, under the purpose the service type needs.
-export async function checkVendorHandoffs(store: Store, entityId: string | null, connections: Conn[]): Promise<string[]> {
+// the subscription's vendor party, under the purpose the service type needs; and that the handoff asks the
+// customer for every input the service requires (so a device can collect them before starting the action).
+export async function checkVendorHandoffs(store: Store, entityId: string | null, connections: Conn[], handoffs: HandoffNode[] = []): Promise<string[]> {
   const errors: string[] = [];
   for (const c of connections.filter((x) => x.type === "handoff_to_party" && (x.attributes?.vendor_subscription_id || x.attributes?.service_type))) {
     const at = `connection '${c._id}' (handoff_to_party)`;
@@ -498,6 +551,12 @@ export async function checkVendorHandoffs(store: Store, entityId: string | null,
     if (o!.status === "suspended") errors.push(`${at}: the offering is suspended`);
     const gap = (await innovatorLicenceGap(store, sub.entity_id, t)) ?? (await vendorLicenceGap(store, o!, t));
     if (gap) errors.push(`${at}: ${gap}`);
+    const h = handoffs.find((x) => x._id === c.from.id);
+    if (h) {
+      const sends = ((h.sends as { required?: unknown } | undefined)?.required as unknown[] | undefined) ?? [];
+      const missing = ((t.input_schema.required as string[] | undefined) ?? []).filter((f) => !sends.includes(f));
+      if (missing.length) errors.push(`partner handoff '${h._id}': sends.required must include ${missing.join(", ")}, which ${t.name} needs from the customer`);
+    }
   }
   return errors;
 }
@@ -514,7 +573,89 @@ export async function vendorBindingsOf(store: Store, connections: Conn[]): Promi
   return out;
 }
 
-// ---- runtime: a device's prefill through the product's bound vendor ----
+// What the developer contract says of each vendor-served action: the service type, and what a device is told
+// of its outcome. No subscription, vendor, endpoint or secret.
+export type VendorServedActions = Record<string, { service_type: string; client_result: { statuses: ClientStatus[]; fields: string[]; redirect: boolean } }>;
+export async function vendorServedActions(store: Store, connections: Conn[]): Promise<VendorServedActions> {
+  const out: VendorServedActions = {};
+  for (const c of connections.filter((x) => x.type === "handoff_to_party" && x.attributes?.vendor_subscription_id && x.from.id)) {
+    const sub = await getSubscription(store.db, c.attributes!.vendor_subscription_id as string);
+    const o = sub && (await getOffering(store.db, sub.offering_id));
+    const t = o && (await serviceType(store.db, o.region, o.service_type));
+    if (!t) continue;
+    const cr = t.client_result;
+    const statuses = new Set<ClientStatus>(["completed", "failed", "pending", ...Object.values(cr?.status?.map ?? {})]);
+    out[c.from.id!] = { service_type: t.key, client_result: { statuses: CLIENT_STATUSES.filter((s) => statuses.has(s)), fields: cr?.fields ?? [], redirect: cr?.redirect ?? false } };
+  }
+  return out;
+}
+
+// ---- runtime: calls through a product's bound vendor ----
+
+type Bound = { sub: Subscription; o: Offering; t: ServiceType };
+async function resolveSubscription(store: Store, subscriptionId: string): Promise<Bound | null> {
+  const sub = await getSubscription(store.db, subscriptionId);
+  const o = sub && (await getOffering(store.db, sub.offering_id));
+  const t = o && (await serviceType(store.db, o.region, o.service_type));
+  return sub && o && t ? { sub, o, t } : null;
+}
+
+type VendorAnswer =
+  | { kind: "error"; status: number; code: string; message: string }
+  | { kind: "ok"; output: Record<string, unknown> }
+  | { kind: "pending"; redirect_url: string | null };
+
+// One call to a bound vendor's service for a customer, shared by prefill and client actions: the subscription
+// and offering still usable (live calls only to a listed offering, with both sides' licences in force today),
+// the service type's consent recorded, its declared inputs (only those) from the customer's vault, the test
+// endpoint and test credential for sandbox, the live ones for live, and the answer checked against the output
+// schema. Nothing the vendor returned is kept here; the caller decides.
+async function callBoundVendor(
+  store: Store,
+  { sub, o, t }: Bound,
+  a: {
+    sandbox: boolean;
+    request_id: string;
+    held: () => Promise<Record<string, string>>; // the customer's vault, opened
+    consent: (purpose: string) => Promise<{ id: string; created_at: string } | null>; // the active grant in this session
+    allowPending?: boolean;
+  },
+  opts: VendorCallOptions,
+): Promise<VendorAnswer> {
+  const environment = a.sandbox ? "test" : "live";
+  const unavailable = (why = "isn't available right now"): VendorAnswer => ({ kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses ${why}` });
+  if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status)) return unavailable();
+  // Live calls go only to a listed offering, with both sides' licence prerequisites still met today.
+  if (!a.sandbox) {
+    if (o.status !== "listed") return unavailable();
+    if ((await innovatorLicenceGap(store, sub.entity_id, t)) || (await vendorLicenceGap(store, o, t))) return unavailable("can't be used: a licence it needs isn't in force");
+  }
+  const consent = await a.consent(t.consent_purpose);
+  if (!consent) return { kind: "error", status: 409, code: "consent_required", message: `Record consent '${t.consent_purpose}' (POST /v1/client/evidence) before fetching this customer's data` };
+  const held = await a.held();
+  const props = Object.keys((t.input_schema.properties ?? {}) as Record<string, unknown>);
+  const input: Record<string, unknown> = {};
+  for (const p of props) if (p in held) input[p] = DATA_DICTIONARY[p]?.type === "number" || DATA_DICTIONARY[p]?.type === "integer" ? Number(held[p]) : held[p];
+  if (schemaProblems(t.input_schema, input).length) {
+    const need = ((t.input_schema.required as string[] | undefined) ?? []).filter((f) => !(f in held));
+    return { kind: "error", status: 409, code: "data_required", message: `${t.name} needs ${need.join(", ") || "valid inputs"} from the customer first (POST /v1/client/fields)` };
+  }
+  const base = a.sandbox ? o.test_base_url : o.live_base_url;
+  if (!base) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service has no live endpoint` };
+  const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
+  // Sandbox calls carry the test credential and never the live one.
+  const keyId = a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
+  const sealedCredential = keyId ? await sealedColumn(store.db, "key_vault", "sealed", keyId) : null;
+  if (!a.sandbox && o.requires_credential && !sealedCredential) return unavailable("has no live credential set");
+  const body = { request_id: a.request_id, environment, input, consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at } };
+  const r = await callVendor({ base_url: base, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null }, opts);
+  const problems = r.ok ? responseProblems(r.body, body.request_id, t, a.allowPending) : [r.error ?? "failed"];
+  await recordUsage(store.db, sub.id, environment, !problems.length);
+  if (problems.length) return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later` };
+  const answer = r.body as { status: string; output?: Record<string, unknown>; redirect_url?: unknown };
+  if (answer.status === "pending") return { kind: "pending", redirect_url: safeRedirect(answer.redirect_url, opts) };
+  return { kind: "ok", output: answer.output! };
+}
 
 export type VendorPrefill =
   | { kind: "none" } // no vendor bound for this source: today's behaviour
@@ -535,49 +676,17 @@ export async function vendorPrefill(
   opts: VendorCallOptions = {},
 ): Promise<VendorPrefill> {
   for (const b of a.record.pins?.vendor_bindings ?? []) {
-    const sub = await getSubscription(store.db, b.subscription_id);
-    const o = sub && (await getOffering(store.db, sub.offering_id));
-    const t = o && (await serviceType(store.db, o.region, o.service_type));
-    if (!sub || !o || !t) continue;
+    const bound = await resolveSubscription(store, b.subscription_id);
+    if (!bound) continue;
+    const { sub, t } = bound;
     if (PREFILL_SOURCE[t.category] !== a.source || !t.fills.some((f) => a.fields.includes(f))) continue;
-    const environment = a.sandbox ? "test" : "live";
     if (!a.sandbox && !sub.live) return { kind: "none" };
-    const unavailable = (why = "isn't available right now"): VendorPrefill => ({ kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses ${why}` });
-    if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status)) return unavailable();
-    // Live calls go only to a listed offering, with both sides' licence prerequisites still met today.
-    if (!a.sandbox) {
-      if (o.status !== "listed") return unavailable();
-      if ((await innovatorLicenceGap(store, sub.entity_id, t)) || (await vendorLicenceGap(store, o, t))) return unavailable("can't be used: a licence it needs isn't in force");
-    }
-    const consent = await a.consent(t.consent_purpose);
-    if (!consent) return { kind: "error", status: 409, code: "consent_required", message: `Record consent '${t.consent_purpose}' (POST /v1/client/evidence) before fetching this customer's data` };
-    const held = await a.held();
-    const props = Object.keys((t.input_schema.properties ?? {}) as Record<string, unknown>);
-    const input: Record<string, unknown> = {};
-    for (const p of props) if (p in held) input[p] = DATA_DICTIONARY[p]?.type === "number" || DATA_DICTIONARY[p]?.type === "integer" ? Number(held[p]) : held[p];
-    if (schemaProblems(t.input_schema, input).length) {
-      const need = ((t.input_schema.required as string[] | undefined) ?? []).filter((f) => !(f in held));
-      return { kind: "error", status: 409, code: "data_required", message: `${t.name} needs ${need.join(", ") || "valid inputs"} from the customer first (POST /v1/client/fields)` };
-    }
-    const base = a.sandbox ? o.test_base_url : o.live_base_url;
-    if (!base) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service has no live endpoint` };
-    const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
-    // Sandbox calls carry the test credential and never the live one.
-    const keyId = a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
-    const sealedCredential = keyId ? await sealedColumn(store.db, "key_vault", "sealed", keyId) : null;
-    if (!a.sandbox && o.requires_credential && !sealedCredential) return unavailable("has no live credential set");
-    const body = { request_id: randomUUID(), environment, input, consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at } };
-    const r = await callVendor({ base_url: base, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null }, opts);
-    const problems = r.ok ? responseProblems(r.body, body.request_id, t) : [r.error ?? "failed"];
-    if (problems.length) {
-      await recordUsage(store.db, sub.id, environment, false);
-      return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later` };
-    }
-    await recordUsage(store.db, sub.id, environment, true);
-    const output = (r.body as { output: Record<string, unknown> }).output;
+    const answer = await callBoundVendor(store, bound, { sandbox: a.sandbox, request_id: randomUUID(), held: a.held, consent: a.consent }, opts);
+    if (answer.kind === "error") return answer;
+    if (answer.kind !== "ok") return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later` };
     const filled: string[] = [];
     for (const f of a.fields.filter((x) => t.fills.includes(x))) {
-      const v = output[f];
+      const v = answer.output[f];
       if (v == null || validateValue(f, v)) continue;
       await a.save(f, String(v).trim());
       filled.push(f);
@@ -585,6 +694,226 @@ export async function vendorPrefill(
     return { kind: "ok", filled, missing: a.fields.filter((f) => !filled.includes(f)) };
   }
   return { kind: "none" };
+}
+
+// ---- runtime: client actions served by the bound vendor ----
+
+// What a device is told: a status, a reference, and only the output fields (and redirect) the service type allows.
+export interface ClientOutcome {
+  reference: string;
+  action: string;
+  status: ClientStatus;
+  redirect_url?: string;
+  [field: string]: unknown;
+}
+const RESERVED = ["reference", "action", "status", "sandbox", "redirect_url"];
+const deviceStatus = (t: ServiceType, output: Record<string, unknown>): ClientStatus => {
+  const s = t.client_result?.status;
+  return (s && s.map[String(output[s.from])]) || "completed";
+};
+const deviceFields = (t: ServiceType, output: Record<string, unknown>) =>
+  Object.fromEntries((t.client_result?.fields ?? []).filter((f) => f in output && !RESERVED.includes(f)).map((f) => [f, output[f]]));
+
+type RunRow = {
+  id: string;
+  request_id: string;
+  subscription_id: string;
+  entity_id: string;
+  app_id: string;
+  session_id: string;
+  product_id: string;
+  contract_hash: string | null;
+  action: string;
+  service_type: string;
+  customer_ref: string | null;
+  sandbox: boolean;
+  status: "calling" | "pending" | "completed" | "failed";
+  client_outcome: Record<string, unknown>;
+};
+const outcomeOf = (r: RunRow): ClientOutcome & { sandbox: boolean } => ({
+  ...r.client_outcome,
+  reference: r.id,
+  action: r.action,
+  status: r.status === "calling" ? "pending" : ((r.client_outcome.status as ClientStatus | undefined) ?? (r.status === "failed" ? "failed" : "pending")),
+  sandbox: r.sandbox,
+});
+
+// Ends a run once: the full result sealed in Mynt's store, the fields it fills saved to the customer's vault,
+// evidence of the outcome (status only) for the session, and the result to the innovator's webhooks. Returns
+// null when the run had already ended (a replayed callback).
+async function finishRun(store: Store, run: RunRow, t: ServiceType, end: { ok: true; output: Record<string, unknown> } | { ok: false; code: string | null }) {
+  const outcome: Record<string, unknown> = end.ok ? { status: deviceStatus(t, end.output), ...deviceFields(t, end.output) } : { status: "failed" };
+  const sealed = end.ok ? seal(JSON.stringify(end.output), run.sandbox) : null;
+  const { rows } = await store.db.query(
+    `UPDATE ${T}.vendor_action_runs SET status = $2, client_outcome = $3, result_sealed = $4, completed_at = now()
+     WHERE id = $1 AND status IN ('calling', 'pending') RETURNING *`,
+    [run.id, end.ok ? "completed" : "failed", JSON.stringify(outcome), sealed],
+  );
+  if (!rows[0]) return null;
+  const done = rows[0] as RunRow;
+  if (end.ok && run.customer_ref)
+    for (const f of t.fills) {
+      const v = end.output[f];
+      if (v == null || validateValue(f, v)) continue;
+      await store.putVaultField({ app_id: run.app_id, customer_ref: run.customer_ref, sandbox: run.sandbox, field: f, sealed: seal(String(v).trim(), run.sandbox), source: PREFILL_SOURCE[t.category] ?? "vendor" });
+    }
+  await store.recordClientEvidence({
+    app_id: run.app_id,
+    session_id: run.session_id,
+    product_id: run.product_id,
+    contract_hash: run.contract_hash,
+    type: end.ok ? "action_completed" : "action_failed",
+    subject: run.action,
+    content_hash: null,
+    customer_ref: run.customer_ref,
+    sandbox: run.sandbox,
+  });
+  await emitFirmEvent(
+    store,
+    run.entity_id,
+    end.ok ? "vendor_action.completed" : "vendor_action.failed",
+    {
+      reference: run.id,
+      request_id: run.request_id,
+      product_id: run.product_id,
+      action: run.action,
+      service_type: run.service_type,
+      subscription_id: run.subscription_id,
+      app_id: run.app_id,
+      customer_ref: run.customer_ref,
+      sandbox: run.sandbox,
+      status: outcome.status,
+      ...(end.ok ? {} : { error_code: end.code }),
+    },
+    run.sandbox,
+    sealed ?? undefined,
+  );
+  return outcomeOf(done);
+}
+
+async function currentRun(store: Store, id: string) {
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE id = $1`, [id]);
+  return outcomeOf(rows[0] as RunRow);
+}
+
+export type VendorAction =
+  | { kind: "none" } // the action isn't served by a vendor: today's hand-off to the innovator
+  | { kind: "error"; status: number; code: string; message: string }
+  | { kind: "ok"; outcome: ClientOutcome & { sandbox: boolean } };
+
+// A device starts a client action whose handoff is bound to a vendor subscription: Mynt calls the vendor, keeps
+// the result, sends it to the innovator, and tells the device only the outcome.
+export async function vendorAction(
+  store: Store,
+  a: {
+    record: ProductRecord;
+    action: string;
+    sandbox: boolean;
+    app_id: string;
+    session_id: string;
+    customer_ref: string;
+    held: () => Promise<Record<string, string>>;
+    consent: (purpose: string) => Promise<{ id: string; created_at: string } | null>;
+  },
+  opts: VendorCallOptions = {},
+): Promise<VendorAction> {
+  const b = a.record.pins?.vendor_bindings?.find((x) => x.handoff_id === a.action);
+  if (!b) return { kind: "none" };
+  const bound = await resolveSubscription(store, b.subscription_id);
+  if (!bound) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The service behind '${a.action}' isn't available right now` };
+  const { sub, t } = bound;
+  if (!a.sandbox && !sub.live) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses isn't turned on for live use yet` };
+  // The run exists before the call, so a vendor that calls back before answering still finds it.
+  const run: RunRow = {
+    id: randomUUID(),
+    request_id: randomUUID(),
+    subscription_id: sub.id,
+    entity_id: sub.entity_id,
+    app_id: a.app_id,
+    session_id: a.session_id,
+    product_id: a.record.product.id,
+    contract_hash: a.record.pins?.contract?.contract_hash ?? null,
+    action: a.action,
+    service_type: t.key,
+    customer_ref: a.customer_ref,
+    sandbox: a.sandbox,
+    status: "calling",
+    client_outcome: {},
+  };
+  await store.db.query(
+    `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
+    [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
+  );
+  const answer = await callBoundVendor(store, bound, { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true }, opts);
+  if (answer.kind === "error") {
+    // Nothing is kept of a call that was refused, failed or answered badly.
+    await store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
+    return answer;
+  }
+  if (answer.kind === "pending") {
+    const outcome = { status: "pending", ...(t.client_result?.redirect && answer.redirect_url ? { redirect_url: answer.redirect_url } : {}) };
+    const { rows } = await store.db.query(`UPDATE ${T}.vendor_action_runs SET status = 'pending', client_outcome = $2 WHERE id = $1 AND status = 'calling' RETURNING *`, [
+      run.id,
+      JSON.stringify(outcome),
+    ]);
+    // Without a row, the vendor's callback finished it first.
+    return { kind: "ok", outcome: rows[0] ? outcomeOf(rows[0] as RunRow) : await currentRun(store, run.id) };
+  }
+  return { kind: "ok", outcome: (await finishRun(store, run, t, { ok: true, output: answer.output })) ?? (await currentRun(store, run.id)) };
+}
+
+// A run's outcome as a device of the same app and customer may read it (e.g. back from the provider's page).
+export async function vendorActionRun(store: Store, id: string, who: { app_id: string; customer_ref: string | null; sandbox: boolean }) {
+  if (!uuidLike(id) || !who.customer_ref) return undefined;
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE id = $1 AND app_id = $2 AND customer_ref = $3 AND sandbox = $4`, [
+    id,
+    who.app_id,
+    who.customer_ref,
+    who.sandbox,
+  ]);
+  return rows[0] ? outcomeOf(rows[0] as RunRow) : undefined;
+}
+
+// POST /v1/vendor/callback/<subscription_id>: an asynchronous service's final answer, signed like Mynt's
+// requests (Mynt-Signature with the subscription's signing secret, at most 300 s old). Idempotent on request_id.
+export async function vendorCallback(store: Store, subscriptionId: string, raw: string, signature: string | undefined): Promise<{ status: number; body: Record<string, unknown> }> {
+  const refused = { status: 401, body: { error: "bad_signature", message: 'Sign the body with the subscription\'s signing secret (Mynt-Signature: t=<unix>,v1=<hex HMAC-SHA256 of "t.body">), at most 300 s old' } };
+  const sub = await getSubscription(store.db, subscriptionId);
+  const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(signature ?? "");
+  if (!sub || !m || Math.abs(Date.now() / 1000 - Number(m[1])) > 300) return refused;
+  const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
+  const want = createHmac("sha256", secret).update(`${m[1]}.${raw}`).digest();
+  if (!timingSafeEqual(want, Buffer.from(m[2], "hex"))) return refused;
+  let body: { request_id?: unknown; status?: unknown; output?: unknown; error?: unknown };
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return { status: 400, body: { error: "invalid_json", message: "The body must be JSON" } };
+  }
+  if (typeof body?.request_id !== "string" || !uuidLike(body.request_id) || (body.status !== "ok" && body.status !== "error"))
+    return { status: 400, body: { error: "invalid_request", message: 'Send { request_id, status: "ok" | "error", output }' } };
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [body.request_id, sub.id]);
+  const run = rows[0] as RunRow | undefined;
+  if (!run) return { status: 404, body: { error: "unknown_request", message: "No request with that request_id for this subscription" } };
+  if (run.status === "completed" || run.status === "failed") return { status: 200, body: { request_id: run.request_id, status: run.status, duplicate: true } };
+  const bound = await resolveSubscription(store, sub.id);
+  if (!bound) return { status: 409, body: { error: "service_missing", message: "The service type behind this subscription no longer exists" } };
+  let end: { ok: true; output: Record<string, unknown> } | { ok: false; code: string | null };
+  if (body.status === "ok") {
+    const problems = schemaProblems(bound.t.output_schema, body.output);
+    if (problems.length) return { status: 400, body: { error: "invalid_output", message: "output doesn't match the service type's output schema", problems } };
+    end = { ok: true, output: body.output as Record<string, unknown> };
+  } else {
+    const code = (body.error as { code?: unknown } | null)?.code;
+    end = { ok: false, code: typeof code === "string" && /^[a-z0-9_]{1,60}$/.test(code) ? code : null };
+  }
+  const done = await finishRun(store, run, bound.t, end);
+  if (!done) {
+    const { rows: now } = await store.db.query(`SELECT status FROM ${T}.vendor_action_runs WHERE id = $1`, [run.id]);
+    return { status: 200, body: { request_id: run.request_id, status: now[0]?.status, duplicate: true } };
+  }
+  return { status: 200, body: { request_id: run.request_id, status: end.ok ? "completed" : "failed" } };
 }
 
 // ---- tools ----
@@ -1184,6 +1513,72 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       }
       await audit("unsubscribe_vendor_service", s.id, { party_ended: partyEnded });
       return json({ subscription_id: s.id, status: "ended", party_ended: partyEnded, drifted_products: partyEnded ? await driftSweep(store, s.entity_id) : [] });
+    },
+  );
+
+  // ---- the firm's own webhooks: results of client actions its vendor services answered ----
+
+  server.registerTool(
+    "create_firm_webhook",
+    {
+      title: "Receive your vendor services' results",
+      description:
+        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
+      inputSchema: { url: z.string().url(), events: z.array(z.enum(FIRM_WEBHOOK_EVENTS)).min(1).default([...FIRM_WEBHOOK_EVENTS]) },
+    },
+    async ({ url, events }) => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return fail("Register your firm first (create_entity)");
+      const problem = webhookUrlProblem(url);
+      if (problem) return fail(problem);
+      if ((await store.firmWebhooks(entityId)).length >= 5) return fail("A firm can have at most 5 webhooks");
+      const { webhook, secret } = await store.createFirmWebhook(user.id, { entity_id: entityId, url, events: [...new Set(events)] });
+      await audit("create_firm_webhook", webhook.id, { entity_id: entityId, url, events: webhook.events });
+      return json({ id: webhook.id, url: webhook.url, events: webhook.events, created_at: webhook.created_at, secret, note: "Save the signing secret now; it can't be shown again." });
+    },
+  );
+
+  server.registerTool(
+    "list_firm_webhooks",
+    {
+      title: "My firm's webhooks",
+      description: "Innovator: your firm's webhooks for vendor service results, with their recent deliveries (status and response code only).",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return json([]);
+      const hooks = await store.firmWebhooks(entityId);
+      return json(
+        await Promise.all(
+          hooks.map(async (h) => ({
+            id: h.id,
+            url: h.url,
+            events: h.events,
+            created_at: h.created_at,
+            deliveries: (await store.webhookDeliveries(h.id, 20)).map((d) => ({ type: d.type, status: d.status, attempts: d.attempts, last_response_code: d.last_response_code, sandbox: d.sandbox, created_at: d.created_at })),
+          })),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "delete_firm_webhook",
+    {
+      title: "Delete a firm webhook",
+      description: "Innovator: stop sending vendor service results to one of your firm's webhooks, and drop its delivery history.",
+      inputSchema: { webhook_id: z.string() },
+      annotations: { destructiveHint: true },
+    },
+    async ({ webhook_id }) => {
+      const entityId = await entityOf(store, user);
+      const hook = entityId ? (await store.firmWebhooks(entityId)).find((h) => h.id === webhook_id) : undefined;
+      if (!hook) return fail(`No webhook '${webhook_id}' of your firm`);
+      await store.deleteWebhook(hook.id);
+      await audit("delete_firm_webhook", hook.id, { entity_id: entityId, url: hook.url });
+      return json({ deleted: hook.id });
     },
   );
 }

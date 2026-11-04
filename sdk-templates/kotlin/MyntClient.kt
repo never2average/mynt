@@ -151,7 +151,8 @@ class JourneyRunner(private val client: MyntClient, journeyId: String) {
                 go(branch(step, input.outcome))
                 return null
             }
-            return client.startAction(product, step.getString("action")).getString("redirect_url")
+            val started = client.startAction(product, step.getString("action"))
+            return if (started.has("redirect_url")) started.getString("redirect_url") else null
         }
         if (step.has("await_event")) {
             go(branch(step, input.outcome))

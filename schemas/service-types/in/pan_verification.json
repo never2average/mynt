@@ -57,5 +57,19 @@
   "consent_purpose": "identity_verification",
   "fills": [],
   "innovator_licences": [],
-  "vendor_licences": []
+  "vendor_licences": [],
+  "client_result": {
+    "status": {
+      "from": "pan_status",
+      "map": {
+        "valid": "verified",
+        "invalid": "not_verified",
+        "deactivated": "not_verified",
+        "deleted": "not_verified",
+        "not_found": "not_verified"
+      }
+    },
+    "fields": [],
+    "redirect": false
+  }
 }

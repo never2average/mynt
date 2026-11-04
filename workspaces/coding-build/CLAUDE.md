@@ -50,7 +50,9 @@ session endpoint). You own the final decision: if a reviewer and an engineer dis
   sensitive fields (PAN, bank account, SSN, …) only from secure inputs. Never store, log or send it anywhere
   else, including your own database, analytics or error reporting.
 - **Regulated steps are the provider's.** KYC, mandates, e-sign, payments and applications run as the
-  provider's hosted flow (`startAction`); the app never moves money itself.
+  provider's hosted flow (`startAction`); the app never moves money itself. An action the contract marks
+  `served_by` a vendor service answers with a `status` (and a `redirect_url` to send the customer to when it's
+  `pending`), never the result itself: show the status, and don't ask for or expect the customer's data back.
 - **Follow each product's contract and build terms.** Only the actions it lists, where they may run; every
   document it requires shown verbatim (and recorded with `documentShown`); every consent before the action
   that needs it; no banned phrase; its branding.

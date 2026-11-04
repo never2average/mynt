@@ -343,6 +343,18 @@ export function openApiDocument(name: string, version: string, baseUrl: string, 
             flow: { type: "string", enum: ["hosted"] },
             consent_purpose: { type: ["string", "null"] },
             component: { type: "string" },
+            served_by: {
+              type: "object",
+              description: "Served by a vendor's standard service: what the device is told of the outcome",
+              properties: {
+                kind: { type: "string", enum: ["vendor_service"] },
+                service_type: { type: ["string", "null"] },
+                client_result: {
+                  type: "object",
+                  properties: { statuses: { type: "array", items: { type: "string" } }, fields: { type: "array", items: { type: "string" } }, redirect: { type: "boolean" } },
+                },
+              },
+            },
           },
           required: ["id", "name", "surface"],
         },
@@ -395,8 +407,17 @@ export function openApiDocument(name: string, version: string, baseUrl: string, 
         ClientActionRequest: { type: "object", properties: { product_id: { type: "string", enum: productIds } }, required: ["product_id"] },
         ClientActionResult: {
           type: "object",
-          properties: { handoff_id: { type: "string" }, redirect_url: { type: "string", format: "uri" }, action: { type: "string" } },
-          required: ["handoff_id", "redirect_url", "action"],
+          description:
+            "A hand-off to the innovator's flow (handoff_id, redirect_url), or, for an action served by a vendor's standard service (served_by in the contract), its outcome: reference, status and only what the service allows (a redirect_url to the provider's page for e-sign and e-mandate)",
+          properties: {
+            handoff_id: { type: "string" },
+            redirect_url: { type: "string", format: "uri" },
+            action: { type: "string" },
+            reference: { type: "string" },
+            status: { type: "string", enum: ["verified", "not_verified", "completed", "failed", "pending"] },
+            sandbox: { type: "boolean" },
+          },
+          required: ["action"],
         },
         EvidenceRequest: {
           type: "object",

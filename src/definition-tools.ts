@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { FinancialProduct } from "./catalog.js";
 import { deriveContract } from "./contract.js";
+import { vendorServedActions } from "./vendors.js";
 import { checkDefinition, DEFINITION_SCHEMA_PATH, projectCatalogue, toV1Composition, type Definition } from "./definition.js";
 import { blockingComponents, productRegime } from "./regime.js";
 import { normalizeModel } from "./regulatory.js";
@@ -66,7 +67,7 @@ export function registerDefinitionTools(server: McpServer, store: Store, user: U
         ...check,
         publish_blockers: blockingComponents(regime, record.product.region),
         catalogue_record: projectCatalogue(def, await leadRegulator(store, record, def, v1, regime)),
-        developer_contract: deriveContract(def, record.version),
+        developer_contract: deriveContract(def, record.version, await vendorServedActions(store, (def.connections ?? []) as never)),
       });
     },
   );

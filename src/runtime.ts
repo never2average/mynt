@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
 import { DuplicateError, type AccessRequest, type App, type Handoff, type ProductRecord, type Store, type User } from "./store.js";
+import { open } from "./vault.js";
 
 // The runtime layer: what a developer's shipped app talks to. Per-app API keys for the REST API
 // (src/runtime-api.ts), webhooks, a sandbox, app releases and analytics.
@@ -70,6 +71,27 @@ let kick: (() => void) | null = null;
 export async function emitEvent(store: Store, appIds: string[], type: WebhookEvent, data: Record<string, unknown>, sandbox = false) {
   const payload = { id: randomUUID(), type, created_at: new Date().toISOString(), data };
   if ((await store.enqueueEvent([...new Set(appIds)], payload, sandbox)) > 0) kick?.();
+}
+
+// Events a firm (an innovator) gets at its own webhooks, about what Mynt did for it: a client action its
+// product's bound vendor service answered, with the full result (sealed while queued, opened only to send).
+export const FIRM_WEBHOOK_EVENTS = ["vendor_action.completed", "vendor_action.failed"] as const;
+export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
+
+// Queues `type` for every webhook of the firm subscribed to it. `sealedResult` (sealed with the sandbox or live
+// key, as `sandbox` says) goes out as data.result.
+export async function emitFirmEvent(store: Store, entityId: string, type: FirmWebhookEvent, data: Record<string, unknown>, sandbox: boolean, sealedResult?: string) {
+  const payload = { id: randomUUID(), type, created_at: new Date().toISOString(), data: { ...data, ...(sealedResult ? { result_sealed: sealedResult } : {}) } };
+  if ((await store.enqueueFirmEvent(entityId, payload, sandbox)) > 0) kick?.();
+}
+
+// A queued payload as sent: a sealed result is opened into data.result.
+function wireBody(payload: unknown, sandbox: boolean): string {
+  const p = payload as { data?: Record<string, unknown> };
+  const sealed = p?.data?.result_sealed;
+  if (typeof sealed !== "string") return JSON.stringify(payload);
+  const { result_sealed, ...data } = p.data!;
+  return JSON.stringify({ ...p, data: { ...data, result: JSON.parse(open(sealed, sandbox)) } });
 }
 
 // To every app that includes the product.
@@ -145,11 +167,11 @@ export async function deliverDueWebhooks(store: Store, opts: WebhookWorkerOption
     if (due.length === 0) return result;
     await Promise.all(
       due.map(async (d) => {
-        const body = JSON.stringify(d.payload);
         const t = Math.floor(Date.now() / 1000);
         let code: number | null = null;
         let error: string | null = null;
         try {
+          const body = wireBody(d.payload, d.sandbox);
           const res = await doFetch(d.url, {
             method: "POST",
             body,

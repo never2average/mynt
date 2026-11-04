@@ -104,7 +104,8 @@ export interface Handoff {
 
 export interface Webhook {
   id: string;
-  app_id: string;
+  app_id: string; // empty for a firm's webhook
+  entity_id?: string | null; // a firm's webhook (see emitFirmEvent)
   url: string;
   events: string[];
   created_at: string;
@@ -220,7 +221,7 @@ export interface ClientEvidence {
   session_id: string;
   product_id: string;
   contract_hash: string | null;
-  type: "disclosure_shown" | "consent_given" | "consent_withdrawn";
+  type: "disclosure_shown" | "consent_given" | "consent_withdrawn" | "action_completed" | "action_failed";
   subject: string;
   content_hash: string | null;
   customer_ref: string | null;
@@ -1099,6 +1100,37 @@ const TABLES = `
     errors integer NOT NULL DEFAULT 0,
     PRIMARY KEY (subscription_id, day, environment)
   );
+  ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS client_result jsonb;
+  -- Client actions served by a product's bound vendor service: one row per call, the full result sealed (the
+  -- device only ever gets client_outcome, which the service type's client_result allows).
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_action_runs (
+    id uuid PRIMARY KEY,
+    request_id uuid NOT NULL UNIQUE,
+    subscription_id uuid NOT NULL REFERENCES financial_products.vendor_subscriptions(id),
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    app_id uuid NOT NULL REFERENCES financial_products.apps(id),
+    session_id uuid NOT NULL REFERENCES financial_products.client_sessions(id),
+    product_id text NOT NULL,
+    contract_hash text,
+    action text NOT NULL,
+    service_type text NOT NULL,
+    customer_ref text,
+    sandbox boolean NOT NULL,
+    status text NOT NULL CHECK (status IN ('calling', 'pending', 'completed', 'failed')),
+    client_outcome jsonb NOT NULL DEFAULT '{}',
+    result_sealed text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS vendor_action_runs_session_idx ON financial_products.vendor_action_runs (session_id, created_at DESC);
+  -- Evidence of a vendor-served action's end (status only, never the result).
+  ALTER TABLE financial_products.client_evidence DROP CONSTRAINT IF EXISTS client_evidence_type_check;
+  ALTER TABLE financial_products.client_evidence ADD CONSTRAINT client_evidence_type_check
+    CHECK (type IN ('disclosure_shown', 'consent_given', 'consent_withdrawn', 'action_completed', 'action_failed'));
+  -- Firms' (innovators') own webhooks, for what Mynt does on their behalf: a webhook belongs to an app or a firm.
+  ALTER TABLE financial_products.webhooks ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES financial_products.entities(id);
+  ALTER TABLE financial_products.webhooks ALTER COLUMN app_id DROP NOT NULL;
+  CREATE INDEX IF NOT EXISTS webhooks_entity_idx ON financial_products.webhooks (entity_id) WHERE entity_id IS NOT NULL;
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -1152,7 +1184,8 @@ const toHandoff = (r: Row): Handoff => ({
 
 const toWebhook = (r: Row): Webhook => ({
   id: r.id as string,
-  app_id: r.app_id as string,
+  app_id: (r.app_id as string | null) ?? "",
+  ...(r.entity_id ? { entity_id: r.entity_id as string } : {}),
   url: r.url as string,
   events: r.events as string[],
   created_at: iso(r.created_at)!,
@@ -1926,7 +1959,7 @@ export class Store {
   // The latest consent grant or withdrawal for one purpose in one session (disclosures don't count).
   async latestConsent(sessionId: string, productId: string, purpose: string): Promise<ClientEvidence | undefined> {
     const r = await this.one(
-      `SELECT * FROM financial_products.client_evidence WHERE session_id = $1 AND product_id = $2 AND subject = $3 AND type <> 'disclosure_shown'
+      `SELECT * FROM financial_products.client_evidence WHERE session_id = $1 AND product_id = $2 AND subject = $3 AND type IN ('consent_given', 'consent_withdrawn')
        ORDER BY created_at DESC, id DESC LIMIT 1`,
       [sessionId, productId, purpose],
     );
@@ -2071,6 +2104,32 @@ export class Store {
        FROM financial_products.webhooks w WHERE w.app_id::text = ANY($1) AND $3 = ANY(w.events)
        RETURNING id`,
       [appIds, payload.id, payload.type, JSON.stringify(payload), sandbox],
+    );
+    return rows.length;
+  }
+
+  // A firm's own webhooks (innovators): events about what Mynt does for the firm, e.g. vendor-served actions.
+  async createFirmWebhook(createdBy: string, w: { entity_id: string; url: string; events: string[] }): Promise<{ webhook: Webhook; secret: string }> {
+    const secret = `whsec_${randomBytes(24).toString("base64url")}`;
+    const r = await this.one(
+      "INSERT INTO financial_products.webhooks (id, app_id, entity_id, url, events, secret, created_by) VALUES ($1, NULL, $2, $3, $4, $5, $6) RETURNING *",
+      [randomUUID(), w.entity_id, w.url, w.events, secret, createdBy],
+    );
+    return { webhook: toWebhook(r!), secret };
+  }
+
+  async firmWebhooks(entityId: string): Promise<Webhook[]> {
+    return (await this.all("SELECT * FROM financial_products.webhooks WHERE entity_id::text = $1 ORDER BY created_at", [entityId])).map(toWebhook);
+  }
+
+  // Queues one delivery of an event to every webhook of the firm subscribed to its type.
+  async enqueueFirmEvent(entityId: string, payload: { id: string; type: string }, sandbox: boolean): Promise<number> {
+    const rows = await this.all(
+      `INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status, next_attempt_at)
+       SELECT gen_random_uuid(), w.id, $2::uuid, $3, $4::jsonb, $5, 'pending', now()
+       FROM financial_products.webhooks w WHERE w.entity_id::text = $1 AND $3 = ANY(w.events)
+       RETURNING id`,
+      [entityId, payload.id, payload.type, JSON.stringify(payload), sandbox],
     );
     return rows.length;
   }

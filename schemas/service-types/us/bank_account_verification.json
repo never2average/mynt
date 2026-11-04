@@ -50,5 +50,17 @@
   "consent_purpose": "bank_account_verification",
   "fills": [],
   "innovator_licences": [],
-  "vendor_licences": []
+  "vendor_licences": [],
+  "client_result": {
+    "status": {
+      "from": "account_status",
+      "map": {
+        "open": "verified",
+        "closed": "not_verified",
+        "not_found": "not_verified"
+      }
+    },
+    "fields": [],
+    "redirect": false
+  }
 }

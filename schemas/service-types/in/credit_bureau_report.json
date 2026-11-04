@@ -59,5 +59,9 @@
   ],
   "vendor_licences": [
     "rbi_cic"
-  ]
+  ],
+  "client_result": {
+    "fields": [],
+    "redirect": false
+  }
 }
