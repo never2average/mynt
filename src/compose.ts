@@ -16,6 +16,9 @@ export interface ComposeCheck {
   errors: string[];
   services: string[]; // started by default (no profile)
   exposed: ExposedService[];
+  // Services that already set no-new-privileges themselves: compose appends override lists to the base's, so
+  // Mynt adding it again would list it twice, which compose rejects.
+  noNewPrivileges?: string[];
 }
 
 type Obj = Record<string, unknown>;
@@ -47,6 +50,7 @@ export function checkCompose(text: string): ComposeCheck {
   if (!isObj(doc) || !isObj(doc.services) || !Object.keys(doc.services).length) return { errors: ["The compose file has no services"], services: [], exposed: [] };
   const services: string[] = [];
   const exposed: ExposedService[] = [];
+  const noNewPrivileges: string[] = [];
   for (const [name, raw] of Object.entries(doc.services)) {
     if (!isObj(raw)) {
       errors.push(`${name}: not a service definition`);
@@ -61,6 +65,13 @@ export function checkCompose(text: string): ComposeCheck {
     if (svc.device_cgroup_rules) bad("device_cgroup_rules aren't allowed");
     if (Array.isArray(svc.volumes) && svc.volumes.some(hostMount)) bad("host mounts aren't allowed (use named volumes)");
     if (Array.isArray(svc.security_opt) && svc.security_opt.some((o) => /unconfined|label[:=]disable/.test(String(o)))) bad("unconfined security options aren't allowed");
+    // The app's own setting, when it already asks for no-new-privileges (true); "false" isn't a pass: Mynt can't
+    // add the option on top (compose rejects a duplicate key), so a service turning it off is refused.
+    const nnp = Array.isArray(svc.security_opt) ? svc.security_opt.map(String).find((o) => /^no-new-privileges([:=]|$)/.test(o)) : undefined;
+    if (nnp !== undefined) {
+      if (/[:=]\s*false$/i.test(nnp)) bad("no-new-privileges can't be turned off");
+      else noNewPrivileges.push(name);
+    }
     if (Array.isArray(svc.ports))
       for (const p of svc.ports) {
         const s = isObj(p) ? `${p.host_ip ?? ""}:${p.published ?? ""}` : String(p);
@@ -82,7 +93,7 @@ export function checkCompose(text: string): ComposeCheck {
   }
   if (!exposed.length && !errors.length) errors.push("No service is labelled mynt.expose (with mynt.port), so there's nothing to serve");
   if (new Set(exposed.map((e) => e.expose)).size !== exposed.length) errors.push("Two services share a mynt.expose name");
-  return { errors, services, exposed };
+  return { errors, services, exposed, noNewPrivileges };
 }
 
 // What Mynt layers on top: every default service without privilege escalation and limited, and each exposed
@@ -100,7 +111,7 @@ export function composeOverride(check: ComposeCheck, ports: Record<string, numbe
     services[name] = {
       ...(runtime === "runsc" ? { runtime: "runsc" } : {}),
       ...(trustEdge ? { volumes: [`/etc/ssl/certs/ca-certificates.crt:${CA_BUNDLE}:ro`], environment: CA_ENV } : {}),
-      security_opt: ["no-new-privileges:true"],
+      ...(check.noNewPrivileges?.includes(name) ? {} : { security_opt: ["no-new-privileges:true"] }),
       mem_limit: "1g",
       cpus: 1,
       restart: "unless-stopped",
