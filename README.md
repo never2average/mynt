@@ -541,7 +541,7 @@ Every device SDK has the same client and journey runner as `./browser`, and each
 
 The device SDKs are generated from source templates in [`sdk-templates/`](sdk-templates). CI compiles a generated set on every change: Kotlin with `kotlinc`, Dart with `dart analyze`, Swift with `swift build`.
 
-**Hosted runtime.** Developers can run their apps' financial part on Mynt: the server that holds the app key, calls contract actions and handles webhooks. Each developer gets their own VM (`request_hosting`, `hosting_status`). It's never reachable from the internet or from the platform's network:
+**Hosted runtime.** Developers can run their apps' financial part on Mynt: the server that holds the app key, calls contract actions and handles webhooks. There are two modes. **Direct hosting on Freestyle** (below) is the default whenever `FREESTYLE_API_KEY` is set. The legacy **gateway mode** (`HOSTING_GATEWAY_*`, used only without Freestyle) gives each developer one VM (`request_hosting`, `hosting_status`) that's never reachable from the internet or from the platform's network:
 - **First boot:** the VM installs Docker, gVisor and WireGuard, then generates its own WireGuard key, which never leaves it.
 - **Registration:** it registers with a one-time token (`POST /v1/hosting/bootstrap`). Mynt then locks its cloud firewall down to WireGuard to the gateway, and nothing else in or out.
 - **All traffic goes through the tunnel.** The gateway forwards nothing directly. Its egress proxy only reaches Mynt's API, GitHub, package registries and the hand-off hosts of the app's products.
@@ -557,7 +557,7 @@ The device SDKs are generated from source templates in [`sdk-templates/`](sdk-te
 - **The developer logs in:** `vm_access` returns SSH commands for their own Linux user (in the docker group, no sudo) on each of their apps' VMs, valid for a few hours. They work as VS Code Remote-SSH hosts too, and new logins revoke the last. `app_status`, `app_logs`, `app_run` and `restart_app` run at once.
 - **The kill switch** pauses every app VM; `undeploy_app` deletes the app's VM, which takes its rules and key with it.
 
-**Working with a hosted app.** The hosting VM accepts no inbound connections, so developers reach it through Mynt: `app_status` (state, health, restarts, CPU and memory), `app_logs`, `app_run` (a command inside the app's container, under gVisor, never on the VM itself) and `restart_app`. Mynt queues the request; the VM's agent claims it over the tunnel within a few seconds, runs it against that developer's own app container only, and posts the result back, scrubbed of secrets. Every request is audited.
+**Working with a hosted app.** Developers reach their app's container through Mynt: `app_status` (state, health, restarts, CPU and memory), `app_logs`, `app_run` (a command inside the app's container, under gVisor, never on the VM itself) and `restart_app`. Mynt runs it on the app's VM (in gateway mode, the VM's agent claims it over the tunnel within a few seconds), only against that developer's own app container only, and posts the result back, scrubbed of secrets. Every request is audited.
 
 [`deploy/host/hosting-gateway.sh`](deploy/host/hosting-gateway.sh) sets up the gateway on the host that runs Mynt, and a timer re-syncs it every minute from `mynt hosting wg-peers`, `egress-allowlist` and `routes`. Hosting is enabled with `HOSTING_DO_TOKEN`, `HOSTING_GATEWAY_ENDPOINT`, `HOSTING_GATEWAY_PUBLIC_KEY` and `PUBLIC_URL`; DigitalOcean is the first provider.
 

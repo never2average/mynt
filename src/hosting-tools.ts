@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { HostingCommandKind } from "./boxes.js";
-import type { HostingService } from "./hosting.js";
+import { isDirect } from "./freestyle.js";
+import type { HostingService, Tenant } from "./hosting.js";
 import { appProducts, buildTerms } from "./runtime.js";
 import type { Store, User } from "./store.js";
 
@@ -52,20 +53,28 @@ async function verifiedBuild(store: Store, developerId: string, buildId: string)
   return { build: { id: r.id, app_id: r.app_id, repository: r.repository, commit_sha: r.commit_sha } };
 }
 
+// A developer's view of their hosting: the VM and tunnel fields only mean something in the legacy gateway
+// (WireGuard) mode; under direct hosting each app has its own VM, so they're left out.
+export function developerTenant(tenant: Tenant, direct: boolean): Partial<Tenant> {
+  if (!direct) return tenant;
+  const { vm_id: _vm, tunnel_ip: _ip, wg_public_key: _wg, ...rest } = tenant;
+  return rest;
+}
+
 export function registerHostingTools(server: McpServer, store: Store, user: User, hosting: HostingService) {
   server.registerTool(
     "request_hosting",
     {
       title: "Get your isolated hosting",
       description:
-        "Developer: create your own VM for hosting your apps' financial part (the server that holds the app key and calls contract actions). It's never reachable from the internet or the platform's network: it boots, registers with Mynt, and from then on talks only through an encrypted tunnel to Mynt's gateway, which lets it reach Mynt's API and its products' hand-off hosts and nothing else. Apps run there from commits Mynt verified, under gVisor.",
+        "Developer: turn on hosting for your apps. Each app you deploy gets its own VM, and each Compose service with a mynt.port label gets a public HTTPS address on the hosting provider's domain (e.g. https://mynt-<first 8 characters of the app id>.style.dev). The app's Mynt key is never stored on its VM: Mynt adds it at the edge to the app's calls to Mynt. Apps run there only from commits Mynt verified.",
       inputSchema: {},
     },
     async () => {
       if (!hosting.enabled) return fail("Hosting isn't configured on this deployment yet");
       const tenant = await hosting.provision(user.id);
       await store.audit(user.id, "request_hosting", tenant.id, { status: tenant.status });
-      return json(tenant);
+      return json(developerTenant(tenant, isDirect(hosting.provider)));
     },
   );
 
@@ -73,7 +82,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     "hosting_status",
     {
       title: "Your hosting",
-      description: "Developer: your VM's status and tunnel address, the apps it runs (at which verified commit) and where each is served.",
+      description: "Developer: your hosting's status, the apps you host (at which verified commit, on which port) and the public address of each app and service.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -87,7 +96,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         const services = h.services?.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null }));
         return { ...h, ...(services ? { services } : {}), url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
       });
-      return json({ tenant, apps, usage: await hosting.usage(tenant) });
+      return json({ tenant: developerTenant(tenant, isDirect(hosting.provider)), apps, usage: await hosting.usage(tenant) });
     },
   );
 
@@ -96,7 +105,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Host an app",
       description:
-        "Developer: run one of your apps on your VM from a build Mynt verified (build_id from your coding-agent builds). Mynt gives it a dedicated app key (live once the app is published, else sandbox) and the VM fetches exactly that commit, builds it and runs it under gVisor, listening on port 8080 inside its container. Deploying again with a newer build replaces it.",
+        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it.",
       inputSchema: { app_id: z.string(), build_id: z.string() },
     },
     async ({ app_id, build_id }) => {
@@ -137,7 +146,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     "undeploy_app",
     {
       title: "Stop hosting an app",
-      description: "Developer: stop running one of your apps on your VM; the agent removes it on its next check (within 30 seconds).",
+      description: "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted.",
       inputSchema: { app_id: z.string() },
       annotations: { destructiveHint: true },
     },
@@ -216,7 +225,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Run a command in a hosted app",
       description:
-        "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:8080/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited.",
+        "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:<your mynt.port>/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited.",
       inputSchema: { app_id: z.string(), command: z.string().min(1).max(4000), timeout_seconds: z.number().int().min(1).max(120).default(30), service: SERVICE },
     },
     async ({ app_id, command, timeout_seconds, service }) => onVm(app_id, "exec", { command, timeout_seconds, ...(service ? { service } : {}) }, timeout_seconds + 15),

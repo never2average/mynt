@@ -162,6 +162,10 @@ async function runBuild(ctx, { dev, startArgs, agent = agentReport, verification
   const started = (await call(dev, "start_build", startArgs)).data;
   assert.ok(started.id, JSON.stringify(started));
   assert.ok(!("source_url" in started) && !("agent_report" in started), "start_build shows the build as get_build does");
+  const INTERNAL = ["source_url", "agent_report", "developer_id", "sandbox_id", "sandbox_key_id", "verify_sandbox_id", "verify_step", "verify_process_id", "verify_prompt_id", "audit_started_at", "source_sha256", "prompt_id", "box_sandbox_id", "box_until"];
+  for (const k of INTERNAL) assert.ok(!(k in started), `start_build hides ${k}`);
+  for (const k of INTERNAL) assert.ok(!(k in (await call(dev, "list_builds", {})).data.builds[0]), `list_builds hides ${k}`);
+  for (const k of ["id", "goal", "status", "phase_message", "cost_usd", "cap_usd", "sandbox_open_until", "created_at"]) assert.ok(k in started, `start_build shows ${k}`);
   await builds.tick(); // sandbox requested
   const sbx = (await builds.get(started.id)).sandbox_id;
   boat.ready(sbx);
@@ -246,8 +250,8 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   assert.equal(build.status, "succeeded");
   assert.equal(build.pr_url, "https://github.com/acme/savings-app/pull/7");
   assert.equal(build.commit_sha, COMMIT);
-  assert.equal(build.source_sha256, SHA);
-  assert.equal(build.source_url, undefined, "the signed URL is never shown");
+  assert.equal((await builds.get(build.id)).source_sha256, SHA, "the source hash is kept on the record");
+  for (const k of ["source_url", "agent_report", "source_sha256", "sandbox_key_id", "verify_sandbox_id", "verify_step", "audit_started_at", "box_sandbox_id"]) assert.ok(!(k in build), `get_build hides ${k}`);
   assert.match(build.preview_url, /-8080\./);
   assert.equal(repos.prs.length, 1);
   assert.match(repos.prs[0].body, /verified by Mynt/);

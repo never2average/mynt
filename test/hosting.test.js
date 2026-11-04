@@ -101,6 +101,7 @@ test("hosting: a locked-down VM per developer, apps from verified builds, a poli
     const { call, dev, api } = w;
     const tenant = (await call(dev, "request_hosting")).data;
     assert.equal(tenant.status, "provisioning");
+    assert.ok("tunnel_ip" in tenant && "vm_id" in tenant, "gateway mode still shows the VM and its tunnel");
     const [, spec] = w.provider.calls.find(([c]) => c === "create");
     assert.deepEqual([spec.region, spec.size, spec.tags], ["blr1", "s-1vcpu-2gb", ["mynt-tenant"]]);
     assert.match(spec.userData, /wg genkey/, "the VM makes its own WireGuard key");
@@ -298,6 +299,8 @@ test("direct hosting (Freestyle): a VM per app, its key added at the edge and ne
     const { call, dev, api } = w;
     const tenant = (await call(dev, "request_hosting")).data;
     assert.equal(tenant.status, "running", "no bootstrap, no tunnel: ready at once");
+    for (const k of ["vm_id", "tunnel_ip", "wg_public_key"]) assert.ok(!(k in tenant), `no ${k} under direct hosting`);
+    for (const k of ["vm_id", "tunnel_ip", "wg_public_key"]) assert.ok(!(k in (await call(dev, "hosting_status")).data.tenant), `hosting_status shows no ${k}`);
     assert.equal(provider.calls.length, 0, "no VM until an app is deployed");
     assert.equal((await api("POST", "/v1/hosting/bootstrap", null, { token: "x".repeat(32), wg_public_key: WG_KEY })).status, 401, "nothing to bootstrap");
     assert.match((await call(dev, "vm_access", {})).data.error, /deploy one first/);

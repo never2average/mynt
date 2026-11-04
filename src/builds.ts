@@ -915,6 +915,33 @@ const parseJson = <T>(text: string | null): T | null => {
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
 
+// A build as developers see it: what they need to follow and use it, never Mynt's internals (sandbox and
+// process ids, the app's sandbox key id, verification steps) nor the signed source link or the agent's own
+// report. sandbox_open_until says until when a sandbox reopened on the build's branch stays up.
+export function developerBuild(b: Build) {
+  return {
+    id: b.id,
+    app_id: b.app_id,
+    goal: b.goal,
+    repository: b.repository,
+    branch: b.branch,
+    status: b.status,
+    phase_message: b.phase_message,
+    preview_url: b.preview_url,
+    pr_url: b.pr_url,
+    commit_sha: b.commit_sha,
+    readiness: b.readiness,
+    ...(b.maxwell != null ? { maxwell: b.maxwell } : {}),
+    cost_usd: b.cost_usd,
+    cap_usd: b.cap_usd,
+    error: b.error,
+    sandbox_open_until: b.box_sandbox_id && b.box_until ? b.box_until : null,
+    created_at: b.created_at,
+    updated_at: b.updated_at,
+    finished_at: b.finished_at,
+  };
+}
+
 export function registerCodingAgentTools(server: McpServer, store: Store, user: User, builds: BuildService) {
   const own = async (id: string) => {
     const b = await builds.get(id);
@@ -967,9 +994,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       try {
         const b = await builds.start(user, { goal, app_id, repository, cap_usd });
         await store.audit(user.id, "start_build", b.id, { app_id, repository, cap_usd: b.cap_usd });
-        // Shown like get_build shows it: the source link is signed and never shown to users.
-        const { source_url, agent_report, ...shown } = b;
-        return json({ ...shown, track_with: "get_build" });
+        return json({ ...developerBuild(b), track_with: "get_build" });
       } catch (e) {
         return fail((e as Error).message);
       }
@@ -988,7 +1013,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
-        builds: (await builds.listFor(user.id, status)).map(({ goal, source_url, agent_report, ...b }) => ({ ...b, goal: goal.slice(0, 140) })),
+        builds: (await builds.listFor(user.id, status)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
       }),
   );
 
@@ -1004,8 +1029,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async ({ build_id }) => {
       const b = await own(build_id);
       if (!b) return fail(`No build of yours with id '${build_id}'`);
-      const { source_url, ...shown } = b;
-      return json({ ...shown, timeline: await builds.events(b.id) });
+      return json({ ...developerBuild(b), timeline: await builds.events(b.id) });
     },
   );
 
@@ -1052,7 +1076,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     },
     async ({ build_id, reason }) => {
       const b = await own(build_id);
-      return b ? json(await builds.stop(b, reason)) : fail(`No build of yours with id '${build_id}'`);
+      return b ? json(developerBuild(await builds.stop(b, reason))) : fail(`No build of yours with id '${build_id}'`);
     },
   );
 
