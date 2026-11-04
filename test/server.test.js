@@ -50,6 +50,8 @@ const INNOVATOR_TOOLS = [
   "get_product_take_rate",
   // v2 product definitions
   "check_product_definition", "get_product_definition", "set_product_definition",
+  // vendors' standard services
+  "list_my_vendor_subscriptions", "list_service_types", "list_vendor_offerings", "set_subscription_live", "subscribe_vendor_service", "unsubscribe_vendor_service",
 ];
 
 async function connect(store, user = null) {

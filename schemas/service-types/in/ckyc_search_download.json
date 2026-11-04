@@ -1,0 +1,56 @@
+{
+  "region": "IN",
+  "key": "ckyc_search_download",
+  "name": "CKYC search and download",
+  "category": "kyc",
+  "description": "Finds the customer's record in the Central KYC Records Registry by PAN and downloads their KYC identity details. Only a reporting entity registered with the registry may search and download, so the subscribing firm must hold a licence that makes it one; the vendor acts for it.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "pan"
+    ],
+    "properties": {
+      "pan": {
+        "type": "string",
+        "pattern": "^[A-Z]{5}[0-9]{4}[A-Z]$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "ckyc_number",
+      "full_name",
+      "date_of_birth"
+    ],
+    "properties": {
+      "ckyc_number": {
+        "type": "string",
+        "pattern": "^[0-9]{14}$"
+      },
+      "full_name": {
+        "type": "string"
+      },
+      "date_of_birth": {
+        "type": "string",
+        "format": "date"
+      },
+      "address": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "kyc_records_fetch",
+  "fills": [
+    "full_name",
+    "date_of_birth",
+    "address"
+  ],
+  "innovator_licences": [
+    "rbi_bank",
+    "rbi_nbfc"
+  ],
+  "vendor_licences": []
+}

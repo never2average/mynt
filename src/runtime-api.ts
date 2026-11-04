@@ -9,6 +9,8 @@ import { egressFor } from "./hosting-tools.js";
 import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { masked, open, sandboxPrefill, seal, validateValue, vaultAvailable } from "./vault.js";
 import type { ApiKey, App, ProductRecord, Store } from "./store.js";
+import type { VendorCallOptions } from "./vendor-call.js";
+import { vendorPrefill } from "./vendors.js";
 
 // The runtime REST API under /v1, for developers' shipped apps. Authenticated with a per-app key
 // (Authorization: Bearer mynt_live_… / mynt_test_…), read-only over products, plus hand-offs to
@@ -25,6 +27,7 @@ export interface RuntimeApiOptions {
   rateLimit?: { capacity: number; perMinute: number }; // per key (default 60 a minute)
   maxBodyBytes?: number; // default 16 KiB
   hosting?: HostingService | null; // tenant VMs register and fetch their policy here
+  vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
 }
 
 class ApiError extends Error {
@@ -257,6 +260,29 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       const needed = neededFields(record.pins.contract);
       const bad = body.fields.filter((f) => !needed.has(f) || !DATA_DICTIONARY[f]?.capture.includes(body.source));
       if (bad.length) throw new ApiError(400, "invalid_fields", `Can't prefill ${bad.join(", ")} from ${body.source} for '${record.product.id}'`);
+      // A product whose handoff is bound to a vendor's standard service fetches through the vendor: its test
+      // endpoint for sandbox sessions, its live one once the innovator turned the subscription live.
+      const viaVendor = await vendorPrefill(
+        store,
+        {
+          record,
+          sandbox: session.sandbox,
+          source: body.source,
+          fields: body.fields,
+          held: async () => Object.fromEntries((await store.vaultFields(app.id, customer, session.sandbox)).map((h) => [h.field, open(h.sealed, session.sandbox)])),
+          consent: async (purpose) => {
+            const latest = (await store.clientEvidence(app.id, 1000)).find(
+              (e) => e.session_id === session.id && e.product_id === record.product.id && e.subject === purpose && e.type !== "disclosure_shown",
+            );
+            return latest?.type === "consent_given" ? { id: latest.id, created_at: latest.created_at } : null;
+          },
+          save: (field, value) =>
+            store.putVaultField({ app_id: app.id, customer_ref: customer, sandbox: session.sandbox, field, sealed: seal(value, session.sandbox), source: body.source }),
+        },
+        opts.vendors,
+      );
+      if (viaVendor.kind === "error") throw new ApiError(viaVendor.status, viaVendor.code, viaVendor.message);
+      if (viaVendor.kind === "ok") return send(res, 201, { filled: viaVendor.filled, missing: viaVendor.missing, sandbox: session.sandbox }, cors);
       if (!session.sandbox) throw new ApiError(501, "connector_not_configured", `The ${body.source} connector isn't configured on this deployment yet`);
       const filled: string[] = [];
       for (const field of body.fields) {

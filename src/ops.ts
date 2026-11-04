@@ -116,6 +116,27 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
       await db.query("SELECT app_id, updated_at FROM financial_products.hosted_apps WHERE status = 'deploying' AND updated_at < now() - make_interval(mins => $1) LIMIT 10", [45])
     ).rows;
   }
+  // Vendors' standard services: Mynt's conformance runs that failed, and subscriptions whose calls mostly err.
+  const vendors: { failed_conformance: unknown[]; erroring_subscriptions: { subscription_id: string; calls: number; errors: number }[] } = {
+    failed_conformance: [],
+    erroring_subscriptions: [],
+  };
+  if (await exists("vendor_conformance_runs")) {
+    vendors.failed_conformance = (
+      await db.query(
+        `SELECT r.offering_id, o.name AS offering, r.created_at FROM financial_products.vendor_conformance_runs r JOIN financial_products.vendor_offerings o ON o.id = r.offering_id
+         WHERE NOT r.passed AND r.created_at > now() - make_interval(hours => $1) ORDER BY r.created_at DESC LIMIT 10`,
+        [hours],
+      )
+    ).rows;
+    vendors.erroring_subscriptions = (
+      await db.query(
+        `SELECT subscription_id, sum(ok + errors)::int AS calls, sum(errors)::int AS errors FROM financial_products.vendor_usage
+         WHERE day > current_date - $1::int GROUP BY subscription_id HAVING sum(ok + errors) >= 10 AND sum(errors) * 5 > sum(ok + errors) ORDER BY sum(errors) DESC LIMIT 10`,
+        [Math.max(1, Math.ceil(hours / 24))],
+      )
+    ).rows as typeof vendors.erroring_subscriptions;
+  }
   // A provider out of allowance stops everything that needs a machine: say so first, with what to do.
   const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
   const backups = await backupStatus(opts.backupStatusFile);
@@ -129,9 +150,11 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...((hosting.failed_tenants as unknown[] | undefined)?.length ? [`hosting: ${(hosting.failed_tenants as unknown[]).length} VM(s) failed to provision`] : []),
     ...((hosting.stopped_apps as unknown[] | undefined)?.length ? [`hosting: ${(hosting.stopped_apps as unknown[]).length} app(s) stopped`] : []),
     ...((hosting.stuck_deploys as unknown[] | undefined)?.length ? [`hosting: ${(hosting.stuck_deploys as unknown[]).length} deploy(s) running over 45 min`] : []),
+    ...(vendors.failed_conformance.length ? [`vendors: ${vendors.failed_conformance.length} conformance run(s) failed in the last ${hours}h`] : []),
+    ...vendors.erroring_subscriptions.map((v) => `vendors: subscription ${v.subscription_id} erred on ${v.errors} of ${v.calls} calls`),
     ...backups.attention,
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {
@@ -140,7 +163,7 @@ export function registerOpsTools(server: McpServer, db: Db) {
     {
       title: "What needs attention",
       description:
-        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying) and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
+        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail) and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
       inputSchema: { hours: z.number().int().min(1).max(24 * 30).default(24) },
       annotations: { readOnlyHint: true },
     },

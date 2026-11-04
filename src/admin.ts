@@ -26,6 +26,7 @@ import {
   type RegulatoryModel,
 } from "./regulatory.js";
 import { ROLES, type Role, type Store, type User } from "./store.js";
+import type { VendorCallOptions } from "./vendor-call.js";
 import { emitProductEvent } from "./runtime.js";
 import type { HostingService } from "./hosting.js";
 import type { ModuleRegistry } from "./modules.js";
@@ -48,6 +49,7 @@ export interface AdminContext {
   bdRun?: { id: string } | null; // set when the caller is a connector agent run, not a person
   hosting?: HostingService | null; // developers' isolated app hosting, when configured
   modules?: ModuleRegistry | null; // developers' published modules
+  vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
 }
 
 // Admin: everything is managed through Mynt itself, and every change is written to the audit log.
@@ -399,7 +401,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "add_entity_member",
     {
       title: "Add someone to a firm",
-      description: "Admin: make a signed-in user a member of a firm (they then act for it as an innovator).",
+      description: "Admin: make a signed-in user a member of a firm (they then act for it as an innovator or a vendor, by their roles).",
       inputSchema: { email: z.string().email(), entity_id: z.string() },
     },
     async ({ email, entity_id }) => {
@@ -482,7 +484,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     {
       title: "Whitelist someone",
       description:
-        "Admin: allow an email to sign in with the given roles, or change the roles of someone already whitelisted. Roles nest: admin > innovator > developer > consumer.",
+        "Admin: allow an email to sign in with the given roles, or change the roles of someone already whitelisted. Roles nest: admin > innovator > developer > consumer; vendor (firms offering standard services) is a peer of innovator with vendor tools only.",
       inputSchema: {
         email: z.string().email(),
         roles: z.array(z.enum(ROLES)).min(1),

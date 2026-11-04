@@ -1,0 +1,52 @@
+{
+  "region": "IN",
+  "key": "aa_data_fetch",
+  "name": "Account Aggregator data fetch",
+  "category": "account_data",
+  "description": "Fetches the customer's bank account data through an RBI-licensed Account Aggregator under the customer's consent. The subscribing firm is the Financial Information User receiving the data, so it must be regulated by a financial sector regulator; the vendor is the Account Aggregator or the firm's technology provider to one.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "mobile_number"
+    ],
+    "properties": {
+      "mobile_number": {
+        "type": "string",
+        "pattern": "^\\+?[0-9]{10,15}$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "bank_statement_6m"
+    ],
+    "properties": {
+      "bank_account_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9,18}$"
+      },
+      "ifsc": {
+        "type": "string",
+        "pattern": "^[A-Z]{4}0[A-Z0-9]{6}$"
+      },
+      "bank_statement_6m": {
+        "type": "string",
+        "description": "A reference to six months of statements"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "account_data_fetch",
+  "fills": [
+    "bank_account_number",
+    "ifsc",
+    "bank_statement_6m"
+  ],
+  "innovator_licences": [
+    "rbi_bank",
+    "rbi_nbfc"
+  ],
+  "vendor_licences": []
+}

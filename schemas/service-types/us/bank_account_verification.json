@@ -1,0 +1,54 @@
+{
+  "region": "US",
+  "key": "bank_account_verification",
+  "name": "Bank account verification",
+  "category": "account_data",
+  "description": "Checks that a bank account exists and is open, by its routing and account numbers, and whether the name matches its owner.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "bank_account_number",
+      "routing_number"
+    ],
+    "properties": {
+      "bank_account_number": {
+        "type": "string",
+        "pattern": "^[0-9]{4,17}$"
+      },
+      "routing_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9}$"
+      },
+      "full_name": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "account_status"
+    ],
+    "properties": {
+      "account_status": {
+        "enum": [
+          "open",
+          "closed",
+          "not_found"
+        ]
+      },
+      "owner_match": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "bank_account_verification",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": []
+}

@@ -1,0 +1,47 @@
+{
+  "region": "IN",
+  "key": "esign",
+  "name": "Electronic signature (eSign)",
+  "category": "esign",
+  "description": "Has the customer sign a document with an Aadhaar-based eSign. The vendor must be an eSign Service Provider empanelled by the Controller of Certifying Authorities.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "document_ref": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "signature_status"
+    ],
+    "properties": {
+      "signature_status": {
+        "enum": [
+          "signed",
+          "pending",
+          "failed"
+        ]
+      },
+      "signed_document_ref": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "document_esign",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": [
+    "cca_esp"
+  ]
+}

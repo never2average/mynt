@@ -3137,7 +3137,7 @@
   "conn_handoff_to_party": {
    "description": "The roster party a handoff goes to, with the service terms of the exchange",
    "x-cardinality": "exactly one per partner handoff; every component provided by a party needs at least one handoff to that party that also serves that component",
-   "x-pinned": "yes: the party is bound to the served component in the projected v1 parties list, so pins.ts drift-checks it",
+   "x-pinned": "yes: the party is bound to the served component in the projected v1 parties list, so pins.ts drift-checks it; a vendor_subscription_id is pinned as the live version's vendor binding",
    "required": [
     "attributes"
    ],
@@ -3182,6 +3182,15 @@
         "webhook",
         "portal"
        ]
+      },
+      "vendor_subscription_id": {
+       "type": "string",
+       "format": "uuid",
+       "description": "Optional: the owner's vendor subscription (subscribe_vendor_service) this handoff runs through. The party must be that subscription's vendor and consent_purpose the service type's; Mynt then calls the vendor's standard service for this handoff (see Vendors in the README)"
+      },
+      "service_type": {
+       "$ref": "#/$defs/key",
+       "description": "Optional, with vendor_subscription_id: the standard service type the vendor provides here (list_service_types); it must match the subscription's"
       }
      }
     }

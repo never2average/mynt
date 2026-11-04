@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { partyActive } from "./parties.js";
 import { normalizeModel } from "./regulatory.js";
+import { checkVendorHandoffs } from "./vendors.js";
 import type { Component, PartyBinding } from "./regime.js";
 import type { FinancialProduct } from "./catalog.js";
 import type { ProductRecord, Store } from "./store.js";
@@ -226,6 +227,8 @@ export async function checkDefinition(store: Store, record: ProductRecord | null
     const n = of("handoff_to_party").filter((c) => c.from.id === h).length;
     if (n !== 1) errors.push(`partner handoff '${h}' needs exactly one handoff_to_party (has ${n})`);
   }
+  // Handoffs bound to a vendor's standard service (see vendors.ts).
+  errors.push(...(await checkVendorHandoffs(store, entityId ?? def.owner_entity_id, of("handoff_to_party"))));
   for (const a of nodes.get("core_algorithm")!.keys()) {
     const uses = of("algorithm_uses_risk_model").filter((c) => c.from.id === a);
     const primary = uses.filter((c) => c.attributes?.role === "primary").length;

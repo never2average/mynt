@@ -1,0 +1,1072 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { licenseInForce } from "./access.js";
+import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
+import { EntityFactsSchema, partyActive, validateParty } from "./parties.js";
+import { driftSweep } from "./pins.js";
+import { normalizeModel } from "./regulatory.js";
+import type { Db } from "./db.js";
+import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
+import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
+import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions } from "./vendor-call.js";
+
+// Vendors: firms that offer standard services (identity, KYC, account data, bureau reports, e-sign,
+// e-mandates…) which innovators plug into their products instead of each integrating them.
+//
+// Admins define each service type per region: one input and output contract (JSON Schema) every vendor in
+// that region implements, the consent purpose it needs from the customer, the data dictionary fields its
+// output fills, and the licence types the subscribing innovator and the vendor must hold (from the
+// regulatory model). Vendors list offerings of a type; Mynt runs a conformance test against the vendor's
+// test endpoint before an offering can be listed. Innovators subscribe their firm (the vendor joins their
+// roster as a party), bind a product's partner handoff to the subscription, and Mynt calls the vendor at
+// runtime when an app asks to prefill a customer's data. Billing is between vendor and innovator: Mynt only
+// counts calls.
+
+export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "other"] as const;
+export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
+// Types of key a firm's key vault holds.
+export const KEY_TYPES = ["vendor_credential"] as const;
+// The prefill source (POST /v1/client/prefill) a category of service answers.
+export const PREFILL_SOURCE: Partial<Record<ServiceCategory, CaptureMethod>> = {
+  kyc: "ckyc",
+  documents: "digilocker",
+  account_data: "account_aggregator",
+  analytics: "account_aggregator",
+};
+export const SERVICE_TYPES_DIR = fileURLToPath(new URL("../schemas/service-types/", import.meta.url));
+
+const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
+const fail = (error: string, extra: Record<string, unknown> = {}) => ({ ...json({ error, ...extra }), isError: true });
+const today = () => new Date().toISOString().slice(0, 10);
+const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
+
+// ---- JSON Schema checks (the contracts are JSON Schema) ----
+
+const require = createRequire(import.meta.url);
+const Ajv2020 = require("ajv/dist/2020").default as new (opts: object) => { compile: (s: object) => AjvValidate };
+const addFormats = require("ajv-formats").default as (ajv: unknown) => void;
+type AjvValidate = ((data: unknown) => boolean) & { errors?: { instancePath: string; message?: string }[] | null };
+let ajv: InstanceType<typeof Ajv2020> | null = null;
+const compiled = new Map<string, AjvValidate>();
+function validator(schema: object): AjvValidate {
+  const k = JSON.stringify(schema);
+  let v = compiled.get(k);
+  if (!v) {
+    if (!ajv) {
+      ajv = new Ajv2020({ allErrors: true, strict: false });
+      addFormats(ajv);
+    }
+    v = ajv.compile(schema);
+    if (compiled.size > 500) compiled.clear();
+    compiled.set(k, v);
+  }
+  return v;
+}
+// Problems with `data` against `schema`, as paths and rules only (never the values: they may be a customer's).
+export function schemaProblems(schema: object, data: unknown): string[] {
+  const v = validator(schema);
+  return v(data) ? [] : (v.errors ?? []).map((e) => `${e.instancePath || "/"} ${e.message ?? "is invalid"}`).slice(0, 20);
+}
+
+// ---- records ----
+
+export interface ServiceType {
+  region: string;
+  key: string;
+  name: string;
+  category: ServiceCategory;
+  description: string;
+  input_schema: Record<string, unknown>;
+  output_schema: Record<string, unknown>;
+  consent_purpose: string;
+  fills: string[];
+  innovator_licences: string[];
+  vendor_licences: string[];
+  fixtures: Record<string, unknown>[];
+  updated_at: string;
+}
+export type OfferingStatus = "draft" | "conformance_passed" | "listed" | "suspended";
+export interface Offering {
+  id: string;
+  entity_id: string;
+  region: string;
+  service_type: string;
+  name: string;
+  test_base_url: string;
+  live_base_url: string | null;
+  price: { amount: number; currency: string; per: "call" };
+  sla_notes: string;
+  licence_ids: string[];
+  requires_credential: boolean;
+  status: OfferingStatus;
+  status_note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface Subscription {
+  id: string;
+  offering_id: string;
+  entity_id: string;
+  party_id: string;
+  party_created: boolean;
+  live: boolean;
+  credential_key_id: string | null;
+  status: "active" | "ended";
+  secret_shown: boolean;
+  created_at: string;
+  ended_at: string | null;
+}
+type Row = Record<string, unknown>;
+const toType = (r: Row): ServiceType => ({
+  region: r.region as string,
+  key: r.key as string,
+  name: r.name as string,
+  category: r.category as ServiceCategory,
+  description: r.description as string,
+  input_schema: r.input_schema as Record<string, unknown>,
+  output_schema: r.output_schema as Record<string, unknown>,
+  consent_purpose: r.consent_purpose as string,
+  fills: r.fills as string[],
+  innovator_licences: r.innovator_licences as string[],
+  vendor_licences: r.vendor_licences as string[],
+  fixtures: r.fixtures as Record<string, unknown>[],
+  updated_at: iso(r.updated_at)!,
+});
+const toOffering = (r: Row): Offering => ({
+  id: r.id as string,
+  entity_id: r.entity_id as string,
+  region: r.region as string,
+  service_type: r.service_type as string,
+  name: r.name as string,
+  test_base_url: r.test_base_url as string,
+  live_base_url: (r.live_base_url as string | null) ?? null,
+  price: r.price as Offering["price"],
+  sla_notes: r.sla_notes as string,
+  licence_ids: (r.licence_ids as string[]) ?? [],
+  requires_credential: r.requires_credential as boolean,
+  status: r.status as OfferingStatus,
+  status_note: (r.status_note as string | null) ?? null,
+  created_at: iso(r.created_at)!,
+  updated_at: iso(r.updated_at)!,
+});
+const toSubscription = (r: Row): Subscription => ({
+  id: r.id as string,
+  offering_id: r.offering_id as string,
+  entity_id: r.entity_id as string,
+  party_id: r.party_id as string,
+  party_created: r.party_created as boolean,
+  live: r.live as boolean,
+  credential_key_id: (r.credential_key_id as string | null) ?? null,
+  status: r.status as Subscription["status"],
+  secret_shown: r.secret_shown_at != null,
+  created_at: iso(r.created_at)!,
+  ended_at: iso(r.ended_at),
+});
+
+const T = "financial_products";
+const uuidLike = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+export async function serviceTypes(db: Db, f: { region?: string; category?: string } = {}): Promise<ServiceType[]> {
+  const { rows } = await db.query(
+    `SELECT * FROM ${T}.service_types WHERE ($1::text IS NULL OR region = $1) AND ($2::text IS NULL OR category = $2) ORDER BY region, key`,
+    [f.region ?? null, f.category ?? null],
+  );
+  return rows.map(toType);
+}
+export async function serviceType(db: Db, region: string, key: string): Promise<ServiceType | undefined> {
+  const { rows } = await db.query(`SELECT * FROM ${T}.service_types WHERE region = $1 AND key = $2`, [region, key]);
+  return rows[0] ? toType(rows[0]) : undefined;
+}
+export async function getOffering(db: Db, id: string): Promise<Offering | undefined> {
+  if (!uuidLike(id)) return undefined;
+  const { rows } = await db.query(`SELECT * FROM ${T}.vendor_offerings WHERE id = $1`, [id]);
+  return rows[0] ? toOffering(rows[0]) : undefined;
+}
+export async function getSubscription(db: Db, id: string): Promise<Subscription | undefined> {
+  if (!uuidLike(id)) return undefined;
+  const { rows } = await db.query(`SELECT * FROM ${T}.vendor_subscriptions WHERE id = $1`, [id]);
+  return rows[0] ? toSubscription(rows[0]) : undefined;
+}
+async function sealedColumn(db: Db, table: string, column: string, id: string): Promise<string | null> {
+  const { rows } = await db.query(`SELECT ${column} AS v FROM ${T}.${table} WHERE id = $1`, [id]);
+  return (rows[0]?.v as string | undefined) ?? null;
+}
+
+// Calls counted per subscription, day and environment; no customer data.
+export async function recordUsage(db: Db, subscriptionId: string, environment: "test" | "live", ok: boolean): Promise<void> {
+  await db.query(
+    `INSERT INTO ${T}.vendor_usage (subscription_id, day, environment, ok, errors) VALUES ($1, current_date, $2, $3, $4)
+     ON CONFLICT (subscription_id, day, environment) DO UPDATE SET ok = ${T}.vendor_usage.ok + EXCLUDED.ok, errors = ${T}.vendor_usage.errors + EXCLUDED.errors`,
+    [subscriptionId, environment, ok ? 1 : 0, ok ? 0 : 1],
+  );
+}
+export async function usageOf(db: Db, subscriptionIds: string[], days = 30) {
+  if (!subscriptionIds.length) return [];
+  const { rows } = await db.query(
+    `SELECT subscription_id, to_char(day, 'YYYY-MM-DD') AS day, environment, ok, errors FROM ${T}.vendor_usage
+     WHERE subscription_id = ANY($1::uuid[]) AND day > current_date - $2::int ORDER BY day DESC, environment`,
+    [subscriptionIds, days],
+  );
+  return rows as { subscription_id: string; day: string; environment: "test" | "live"; ok: number; errors: number }[];
+}
+const usageFor = (rows: Awaited<ReturnType<typeof usageOf>>, id: string) => {
+  const mine = rows.filter((r) => r.subscription_id === id).map(({ subscription_id, ...r }) => r);
+  return { calls: mine.reduce((n, r) => n + r.ok + r.errors, 0), errors: mine.reduce((n, r) => n + r.errors, 0), by_day: mine };
+};
+
+const newSecret = () => `mvs_${randomBytes(32).toString("base64url")}`;
+
+// ---- service types ----
+
+const Key = z.string().regex(/^[a-z][a-z0-9_]*$/, "Use a lowercase key like 'pan_verification'").max(60);
+export const ServiceTypeSchema = z
+  .object({
+    region: z.string().regex(/^[A-Z]{2}$/, "An ISO country code like IN or US, defined as a region"),
+    key: Key.describe("Unique in the region; vendors serve it at POST <base>/v1/<key>"),
+    name: z.string().min(1).max(200),
+    category: z.enum(SERVICE_CATEGORIES),
+    description: z.string().max(2000).default(""),
+    input_schema: z.record(z.string(), z.unknown()).describe("JSON Schema of `input`. Required properties must be data dictionary fields: Mynt sends them from the customer's vault"),
+    output_schema: z.record(z.string(), z.unknown()).describe("JSON Schema of `output`"),
+    consent_purpose: Key.describe("The consent purpose the customer must give first; a handoff bound to this service uses it"),
+    fills: z.array(z.string()).max(30).default([]).describe("Data dictionary fields the output fills (output properties of the same name), saved to the customer's vault"),
+    innovator_licences: z.array(z.string()).max(20).default([]).describe("Licence type ids (regulatory model) the subscribing firm must hold one of; empty for none"),
+    vendor_licences: z.array(z.string()).max(20).default([]).describe("Licence type ids the vendor must hold one of; empty for none"),
+    fixtures: z.array(z.record(z.string(), z.unknown())).max(5).default([]).describe("Inputs for Mynt's conformance test; by default one built from Mynt's sandbox fixtures"),
+  })
+  .strict();
+export type ServiceTypeInput = z.infer<typeof ServiceTypeSchema>;
+
+// Every licence type id in a region's regulatory model.
+async function licenceTypeIds(store: Store, region: string): Promise<Set<string> | null> {
+  const r = (await store.referenceData(true)).regions.find((x) => x.code === region);
+  if (!r) return null;
+  return new Set(normalizeModel(r.regulatory).regulators.flatMap((g) => g.license_types.map((l) => l._id)));
+}
+
+export async function checkServiceType(store: Store, t: ServiceTypeInput): Promise<{ errors: string[]; fixtures: Record<string, unknown>[] }> {
+  const errors: string[] = [];
+  const ids = await licenceTypeIds(store, t.region);
+  if (!ids) return { errors: [`No region '${t.region}'; see list_regions`], fixtures: [] };
+  for (const [name, schema] of [
+    ["input_schema", t.input_schema],
+    ["output_schema", t.output_schema],
+  ] as const) {
+    if (schema.type !== "object") errors.push(`${name} must be a JSON Schema of type object`);
+    try {
+      validator(schema);
+    } catch (e) {
+      errors.push(`${name} isn't a valid JSON Schema: ${(e as Error).message}`);
+    }
+  }
+  const required = Array.isArray(t.input_schema.required) ? (t.input_schema.required as string[]) : [];
+  for (const f of required) if (!DATA_DICTIONARY[f]) errors.push(`input '${f}' isn't in Mynt's data dictionary: required inputs come from the customer's vault`);
+  const outputProps = (t.output_schema.properties ?? {}) as Record<string, unknown>;
+  for (const f of t.fills) {
+    if (!DATA_DICTIONARY[f]) errors.push(`fills: '${f}' isn't in Mynt's data dictionary`);
+    else if (!(f in outputProps)) errors.push(`fills: '${f}' isn't a property of output_schema`);
+  }
+  for (const [side, list] of [
+    ["innovator_licences", t.innovator_licences],
+    ["vendor_licences", t.vendor_licences],
+  ] as const)
+    for (const id of list) if (!ids.has(id)) errors.push(`${side}: no licence type '${id}' in ${t.region}'s regulatory model (see get_regulator)`);
+  let fixtures = t.fixtures;
+  if (!fixtures.length) {
+    const derived: Record<string, unknown> = {};
+    const missing: string[] = [];
+    for (const f of required) {
+      const v = fixtureValue(f);
+      if (v == null) missing.push(f);
+      else derived[f] = DATA_DICTIONARY[f]?.type === "number" || DATA_DICTIONARY[f]?.type === "integer" ? Number(v) : v;
+    }
+    if (missing.length) errors.push(`Mynt has no sandbox fixture for ${missing.join(", ")}: give fixtures`);
+    fixtures = [derived];
+  }
+  if (!errors.length)
+    fixtures.forEach((f, i) => {
+      const p = schemaProblems(t.input_schema, f);
+      if (p.length) errors.push(`fixture ${i + 1} doesn't match input_schema: ${p.join("; ")}`);
+    });
+  return { errors, fixtures };
+}
+
+export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtures: Record<string, unknown>[], by: string | null): Promise<ServiceType> {
+  const { rows } = await store.db.query(
+    `INSERT INTO ${T}.service_types (region, key, name, category, description, input_schema, output_schema, consent_purpose, fills, innovator_licences, vendor_licences, fixtures, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+     ON CONFLICT (region, key) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
+       input_schema = EXCLUDED.input_schema, output_schema = EXCLUDED.output_schema, consent_purpose = EXCLUDED.consent_purpose, fills = EXCLUDED.fills,
+       innovator_licences = EXCLUDED.innovator_licences, vendor_licences = EXCLUDED.vendor_licences, fixtures = EXCLUDED.fixtures,
+       updated_by = EXCLUDED.updated_by, updated_at = now()
+     RETURNING *`,
+    [
+      t.region,
+      t.key,
+      t.name,
+      t.category,
+      t.description,
+      JSON.stringify(t.input_schema),
+      JSON.stringify(t.output_schema),
+      t.consent_purpose,
+      t.fills,
+      t.innovator_licences,
+      t.vendor_licences,
+      JSON.stringify(fixtures),
+      by,
+    ],
+  );
+  return toType(rows[0]);
+}
+
+// The example definitions shipped in schemas/service-types/<region>/*.json.
+export function exampleServiceTypes(region?: string): { file: string; data: unknown }[] {
+  if (!existsSync(SERVICE_TYPES_DIR)) return [];
+  const out: { file: string; data: unknown }[] = [];
+  for (const dir of readdirSync(SERVICE_TYPES_DIR).sort()) {
+    if (region && dir !== region.toLowerCase()) continue;
+    const path = join(SERVICE_TYPES_DIR, dir);
+    if (!existsSync(path) || !/^[a-z]{2}$/.test(dir)) continue;
+    for (const f of readdirSync(path).filter((x) => x.endsWith(".json")).sort()) out.push({ file: `${dir}/${f}`, data: JSON.parse(readFileSync(join(path, f), "utf8")) });
+  }
+  return out;
+}
+
+// ---- licences ----
+
+// The innovator-side prerequisite: the firm holds a verified, in-force licence of one of the types.
+export async function innovatorLicenceGap(store: Store, entityId: string, t: ServiceType): Promise<string | null> {
+  if (!t.innovator_licences.length) return null;
+  const held = (await store.licensesOf(entityId)).filter((l) => l.region === t.region && licenseInForce(l) && t.innovator_licences.includes(l.license_id));
+  return held.length ? null : `${t.name} in ${t.region} needs your firm to hold a verified licence of one of: ${t.innovator_licences.join(", ")}`;
+}
+// The vendor-side prerequisite, against the licences the offering names.
+async function vendorLicenceGap(store: Store, o: Offering, t: ServiceType): Promise<string | null> {
+  if (!t.vendor_licences.length) return null;
+  const named = (await store.licensesOf(o.entity_id)).filter((l) => o.licence_ids.includes(l.id));
+  const ok = named.some((l) => l.region === t.region && licenseInForce(l) && t.vendor_licences.includes(l.license_id));
+  return ok ? null : `${t.name} in ${t.region} needs the vendor to hold, and name on the offering, a verified licence of one of: ${t.vendor_licences.join(", ")}`;
+}
+const licenceView = (l: HeldLicense) => ({ id: l.id, regulator_id: l.regulator_id, license_id: l.license_id, registration_number: l.registration_number, status: l.status, in_force: licenseInForce(l) });
+
+// ---- conformance ----
+
+type CaseResult = { case: string; passed: boolean; http_status: number | null; latency_ms: number; problems: string[] };
+
+// Mynt's own test of an offering's test endpoint: each fixture input, signed, must come back "ok" with output
+// valid against the service type's schema; a request with a bad signature must be refused.
+export async function runConformance(store: Store, o: Offering, t: ServiceType, opts: VendorCallOptions, by: string | null, credential?: string | null) {
+  const secret = open((await sealedColumn(store.db, "vendor_offerings", "conformance_secret", o.id))!, false);
+  const cases: CaseResult[] = [];
+  const request = (input: Record<string, unknown>) => ({
+    request_id: randomUUID(),
+    environment: "test",
+    input,
+    consent: { purpose: t.consent_purpose, artefact_ref: "mynt_conformance", given_at: new Date().toISOString() },
+  });
+  for (const [i, input] of t.fixtures.entries()) {
+    const body = request(input);
+    const r = await callVendor({ base_url: o.test_base_url, service_type: t.key, body, signing_secret: secret, credential }, opts);
+    const problems: string[] = [];
+    if (!r.ok) problems.push(r.error ?? "failed");
+    else problems.push(...responseProblems(r.body, body.request_id, t));
+    cases.push({ case: `fixture_${i + 1}`, passed: !problems.length, http_status: r.http_status, latency_ms: r.latency_ms, problems });
+  }
+  {
+    const body = request(t.fixtures[0] ?? {});
+    const r = await callVendor(
+      { base_url: o.test_base_url, service_type: t.key, body, signing_secret: secret, credential, signature: signBody(newSecret(), JSON.stringify(body)) },
+      opts,
+    );
+    const refused = (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
+    cases.push({
+      case: "bad_signature_refused",
+      passed: refused,
+      http_status: r.http_status,
+      latency_ms: r.latency_ms,
+      problems: refused ? [] : [r.error && r.http_status == null ? r.error : "a request with a bad Mynt-Signature wasn't refused (answer 401)"],
+    });
+  }
+  const gap = await vendorLicenceGap(store, o, t);
+  const passed = cases.every((c) => c.passed) && !gap;
+  const id = randomUUID();
+  await store.db.query(`INSERT INTO ${T}.vendor_conformance_runs (id, offering_id, passed, cases, run_by) VALUES ($1, $2, $3, $4, $5)`, [
+    id,
+    o.id,
+    passed,
+    JSON.stringify(gap ? [...cases, { case: "vendor_licences", passed: false, http_status: null, latency_ms: 0, problems: [gap] }] : cases),
+    by,
+  ]);
+  // A pass moves a draft on; a failure sends a passed-but-unlisted offering back. Listed or suspended
+  // offerings keep their status (an admin suspends), and ops_status shows the failure.
+  let status = o.status;
+  if (passed && o.status === "draft") status = "conformance_passed";
+  if (!passed && o.status === "conformance_passed") status = "draft";
+  if (status !== o.status) await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, updated_at = now() WHERE id = $1`, [o.id, status]);
+  return { run_id: id, passed, status, cases, ...(gap ? { licence_gap: gap } : {}) };
+}
+
+// What's wrong with a vendor's response body, as rules only.
+function responseProblems(body: unknown, requestId: string, t: ServiceType): string[] {
+  const b = body as { request_id?: unknown; status?: unknown; output?: unknown } | null;
+  if (!b || typeof b !== "object") return ["the response isn't a JSON object"];
+  const problems: string[] = [];
+  if (b.request_id !== requestId) problems.push("request_id doesn't echo the request's");
+  if (b.status !== "ok") problems.push(`status is ${JSON.stringify(b.status)}, not "ok"`);
+  else problems.push(...schemaProblems(t.output_schema, b.output).map((p) => `output ${p}`));
+  return problems;
+}
+
+// ---- product handoffs bound to subscriptions ----
+
+type Conn = { _id: string; type: string; from: { kind: string; id?: string }; to: { kind: string; id?: string }; attributes?: Record<string, unknown> };
+
+// Checks handoff_to_party connections that name a vendor subscription: the owner's active subscription, to
+// the subscription's vendor party, under the purpose the service type needs.
+export async function checkVendorHandoffs(store: Store, entityId: string | null, connections: Conn[]): Promise<string[]> {
+  const errors: string[] = [];
+  for (const c of connections.filter((x) => x.type === "handoff_to_party" && (x.attributes?.vendor_subscription_id || x.attributes?.service_type))) {
+    const at = `connection '${c._id}' (handoff_to_party)`;
+    const subId = c.attributes?.vendor_subscription_id as string | undefined;
+    if (!subId) {
+      errors.push(`${at}: service_type needs vendor_subscription_id, the subscription that provides it`);
+      continue;
+    }
+    const sub = await getSubscription(store.db, subId);
+    if (!entityId || !sub || sub.entity_id !== entityId || sub.status !== "active") {
+      errors.push(`${at}: no active vendor subscription '${subId}' of the product's firm (see list_my_vendor_subscriptions)`);
+      continue;
+    }
+    if (c.to.id !== sub.party_id) errors.push(`${at}: the subscription's vendor is roster party ${sub.party_id}; hand off to it`);
+    const o = await getOffering(store.db, sub.offering_id);
+    const t = o && (await serviceType(store.db, o.region, o.service_type));
+    if (!t) continue;
+    if (c.attributes?.service_type && c.attributes.service_type !== t.key) errors.push(`${at}: the subscription provides '${t.key}', not '${String(c.attributes.service_type)}'`);
+    if (c.attributes?.consent_purpose !== t.consent_purpose) errors.push(`${at}: consent_purpose must be '${t.consent_purpose}', the purpose ${t.name} needs`);
+  }
+  return errors;
+}
+
+// The bindings a live version runs through vendors, pinned at publish.
+export async function vendorBindingsOf(store: Store, connections: Conn[]): Promise<VendorBinding[]> {
+  const out: VendorBinding[] = [];
+  for (const c of connections.filter((x) => x.type === "handoff_to_party" && x.attributes?.vendor_subscription_id)) {
+    const sub = await getSubscription(store.db, c.attributes!.vendor_subscription_id as string);
+    const o = sub && (await getOffering(store.db, sub.offering_id));
+    const t = o && (await serviceType(store.db, o.region, o.service_type));
+    if (sub && t) out.push({ handoff_id: c.from.id!, party_id: sub.party_id, subscription_id: sub.id, service_type: t.key, consent_purpose: t.consent_purpose });
+  }
+  return out;
+}
+
+// ---- runtime: a device's prefill through the product's bound vendor ----
+
+export type VendorPrefill =
+  | { kind: "none" } // no vendor bound for this source: today's behaviour
+  | { kind: "error"; status: number; code: string; message: string }
+  | { kind: "ok"; filled: string[]; missing: string[] };
+
+export async function vendorPrefill(
+  store: Store,
+  a: {
+    record: ProductRecord;
+    sandbox: boolean;
+    source: CaptureMethod;
+    fields: string[];
+    held: () => Promise<Record<string, string>>; // the customer's vault, opened
+    consent: (purpose: string) => Promise<{ id: string; created_at: string } | null>; // the active grant in this session
+    save: (field: string, value: string) => Promise<void>;
+  },
+  opts: VendorCallOptions = {},
+): Promise<VendorPrefill> {
+  for (const b of a.record.pins?.vendor_bindings ?? []) {
+    const sub = await getSubscription(store.db, b.subscription_id);
+    const o = sub && (await getOffering(store.db, sub.offering_id));
+    const t = o && (await serviceType(store.db, o.region, o.service_type));
+    if (!sub || !o || !t) continue;
+    if (PREFILL_SOURCE[t.category] !== a.source || !t.fills.some((f) => a.fields.includes(f))) continue;
+    const environment = a.sandbox ? "test" : "live";
+    if (!a.sandbox && !sub.live) return { kind: "none" };
+    if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status))
+      return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses isn't available right now` };
+    const consent = await a.consent(t.consent_purpose);
+    if (!consent) return { kind: "error", status: 409, code: "consent_required", message: `Record consent '${t.consent_purpose}' (POST /v1/client/evidence) before fetching this customer's data` };
+    const held = await a.held();
+    const props = Object.keys((t.input_schema.properties ?? {}) as Record<string, unknown>);
+    const input: Record<string, unknown> = {};
+    for (const p of props) if (p in held) input[p] = DATA_DICTIONARY[p]?.type === "number" || DATA_DICTIONARY[p]?.type === "integer" ? Number(held[p]) : held[p];
+    if (schemaProblems(t.input_schema, input).length) {
+      const need = ((t.input_schema.required as string[] | undefined) ?? []).filter((f) => !(f in held));
+      return { kind: "error", status: 409, code: "data_required", message: `${t.name} needs ${need.join(", ") || "valid inputs"} from the customer first (POST /v1/client/fields)` };
+    }
+    const base = a.sandbox ? o.test_base_url : o.live_base_url;
+    if (!base) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service has no live endpoint` };
+    const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
+    const sealedCredential = sub.credential_key_id ? await sealedColumn(store.db, "key_vault", "sealed", sub.credential_key_id) : null;
+    const body = { request_id: randomUUID(), environment, input, consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at } };
+    const r = await callVendor({ base_url: base, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null }, opts);
+    const problems = r.ok ? responseProblems(r.body, body.request_id, t) : [r.error ?? "failed"];
+    if (problems.length) {
+      await recordUsage(store.db, sub.id, environment, false);
+      return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later` };
+    }
+    await recordUsage(store.db, sub.id, environment, true);
+    const output = (r.body as { output: Record<string, unknown> }).output;
+    const filled: string[] = [];
+    for (const f of a.fields.filter((x) => t.fills.includes(x))) {
+      const v = output[f];
+      if (v == null || validateValue(f, v)) continue;
+      await a.save(f, String(v).trim());
+      filled.push(f);
+    }
+    return { kind: "ok", filled, missing: a.fields.filter((f) => !filled.includes(f)) };
+  }
+  return { kind: "none" };
+}
+
+// ---- tools ----
+
+const PriceSchema = z.object({ amount: z.number().min(0), currency: z.string().regex(/^[A-Z]{3}$/, "ISO 4217, e.g. INR, USD") });
+const OfferingFields = {
+  name: z.string().min(1).max(200),
+  test_base_url: z.string().url().describe("HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>"),
+  live_base_url: z.string().url().optional().describe("HTTPS base URL of your live endpoint"),
+  price: PriceSchema.describe("Your fixed price per call, for innovators to see; billing is between you and them, not through Mynt"),
+  sla_notes: z.string().max(2000).default(""),
+  licence_ids: z.array(z.string().uuid()).max(10).default([]).describe("Licences your firm holds (get_my_entity) that this offering relies on"),
+  requires_credential: z.boolean().default(false).describe("true when subscribers must give Mynt a credential you issue them; it's sent as Authorization: Bearer"),
+};
+
+async function entityOf(store: Store, user: User) {
+  return ((await store.getUser(user.id)) ?? user).entity_id;
+}
+
+// list_service_types, for vendors and innovators.
+export function registerServiceTypeCatalog(server: McpServer, store: Store) {
+  server.registerTool(
+    "list_service_types",
+    {
+      title: "Standard services",
+      description:
+        "The standard services vendors offer per region (identity, KYC, account data, bureau, e-sign, e-mandate…): the input and output contract every vendor implements, the customer consent it needs, the fields it fills, and the licences subscriber and vendor must hold.",
+      inputSchema: { region: z.string().optional(), category: z.enum(SERVICE_CATEGORIES).optional() },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ region, category }) => json(await serviceTypes(store.db, { region, category })),
+  );
+}
+
+export function registerVendorAdminTools(server: McpServer, store: Store, user: User) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
+
+  server.registerTool(
+    "define_service_type",
+    {
+      title: "Define a standard service",
+      description:
+        "Admin: add or replace a standard service type in a region: the input and output JSON Schemas every vendor implements, the consent purpose, the data dictionary fields its output fills, and the licence types (from the region's regulatory model) the subscribing firm and the vendor must hold.",
+      inputSchema: { service_type: ServiceTypeSchema },
+    },
+    async ({ service_type }) => {
+      const { errors, fixtures } = await checkServiceType(store, service_type);
+      if (errors.length) return fail("The service type can't be saved", { errors });
+      const saved = await upsertServiceType(store, service_type, fixtures, user.id);
+      await audit("define_service_type", `${saved.region}/${saved.key}`, { category: saved.category });
+      return json(saved);
+    },
+  );
+
+  server.registerTool(
+    "load_service_types",
+    {
+      title: "Load the example standard services",
+      description:
+        "Admin: load the example service types shipped with Mynt (IN: PAN verification, CKYC, account aggregator data, bank statement analytics, credit bureau, DigiLocker, e-sign, e-mandate; US: identity, bank account verification, credit bureau). Each is checked like define_service_type; one whose licence types your regulatory model names differently is skipped with the reason, unless licence_map renames them.",
+      inputSchema: {
+        region: z.string().regex(/^[A-Z]{2}$/).optional(),
+        licence_map: z.record(z.string(), z.string()).default({}).describe("Example licence type id → the id in your regulatory model"),
+      },
+    },
+    async ({ region, licence_map }) => {
+      const loaded: string[] = [];
+      const skipped: { file: string; errors: string[] }[] = [];
+      for (const { file, data } of exampleServiceTypes(region)) {
+        const parsed = ServiceTypeSchema.safeParse(data);
+        if (!parsed.success) {
+          skipped.push({ file, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) });
+          continue;
+        }
+        const t = parsed.data;
+        t.innovator_licences = t.innovator_licences.map((id) => licence_map[id] ?? id);
+        t.vendor_licences = t.vendor_licences.map((id) => licence_map[id] ?? id);
+        const { errors, fixtures } = await checkServiceType(store, t);
+        if (errors.length) skipped.push({ file, errors });
+        else {
+          await upsertServiceType(store, t, fixtures, user.id);
+          loaded.push(`${t.region}/${t.key}`);
+        }
+      }
+      await audit("load_service_types", region ?? "all", { loaded, skipped: skipped.map((s) => s.file) });
+      return json({ loaded, skipped });
+    },
+  );
+
+  server.registerTool(
+    "suspend_vendor_offering",
+    {
+      title: "Suspend a vendor's offering",
+      description: "Admin: stop an offering being listed or called (suspended: true), or lift that (false: it goes back to draft and must pass conformance again).",
+      inputSchema: { offering_id: z.string(), suspended: z.boolean().default(true), note: z.string().max(500).optional() },
+      annotations: { destructiveHint: true },
+    },
+    async ({ offering_id, suspended, note }) => {
+      const o = await getOffering(store.db, offering_id);
+      if (!o) return fail(`No offering '${offering_id}'`);
+      const status = suspended ? "suspended" : "draft";
+      if (!suspended && o.status !== "suspended") return fail("That offering isn't suspended");
+      await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, status_note = $3, updated_at = now() WHERE id = $1`, [o.id, status, note ?? null]);
+      await audit("suspend_vendor_offering", o.id, { suspended, note: note ?? null });
+      return json({ ...o, status, status_note: note ?? null });
+    },
+  );
+
+  server.registerTool(
+    "register_firm",
+    {
+      title: "Register a firm",
+      description:
+        "Admin: add a legal entity to Mynt by hand, with no members yet (e.g. a vendor). Then invite_user its people and add_entity_member them to it.",
+      inputSchema: { name: z.string().min(1).max(200), ...EntityFactsSchema, regions: z.array(z.string()).default([]) },
+    },
+    async (e) => {
+      const entity = await store.createEntity(user.id, { ...e, registration_numbers: {} });
+      await audit("register_firm", entity.id, { name: entity.name });
+      return json(entity);
+    },
+  );
+}
+
+export function registerVendorTools(server: McpServer, store: Store, user: User, opts: VendorCallOptions & { admin?: boolean } = {}) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
+  const mine = async (id: string) => {
+    const o = await getOffering(store.db, id);
+    const entity = await entityOf(store, user);
+    return o && (o.entity_id === entity || opts.admin) ? o : undefined;
+  };
+  const checkUrls = async (urls: (string | undefined)[]) => {
+    for (const u of urls.filter((x): x is string => Boolean(x)))
+      try {
+        await resolveVendorUrl(u, opts);
+      } catch (e) {
+        return `${u}: ${(e as Error).message}`;
+      }
+    return null;
+  };
+  const checkLicences = async (entityId: string, region: string, ids: string[]) => {
+    const held = await store.licensesOf(entityId);
+    const bad = ids.filter((id) => !held.some((l) => l.id === id && l.region === region));
+    return bad.length ? `Your firm holds no licence ${bad.join(", ")} in ${region}; see get_my_entity` : null;
+  };
+
+  server.registerTool(
+    "create_vendor_offering",
+    {
+      title: "Offer a standard service",
+      description:
+        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+      inputSchema: { region: z.string().regex(/^[A-Z]{2}$/), service_type: Key, ...OfferingFields },
+    },
+    async (o) => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return fail("You don't belong to a firm yet; an admin adds you to one");
+      const t = await serviceType(store.db, o.region, o.service_type);
+      if (!t) return fail(`No service type '${o.service_type}' in ${o.region}; see list_service_types`);
+      const bad = (await checkUrls([o.test_base_url, o.live_base_url])) ?? (await checkLicences(entityId, o.region, o.licence_ids));
+      if (bad) return fail(bad);
+      if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep signing secrets");
+      const secret = newSecret();
+      const { rows } = await store.db.query(
+        `INSERT INTO ${T}.vendor_offerings (id, entity_id, region, service_type, name, test_base_url, live_base_url, price, sla_notes, licence_ids, requires_credential, conformance_secret, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+        [
+          randomUUID(),
+          entityId,
+          o.region,
+          o.service_type,
+          o.name,
+          o.test_base_url,
+          o.live_base_url ?? null,
+          JSON.stringify({ ...o.price, per: "call" }),
+          o.sla_notes,
+          o.licence_ids,
+          o.requires_credential,
+          seal(secret, false),
+          user.id,
+        ],
+      );
+      const offering = toOffering(rows[0]);
+      await audit("create_vendor_offering", offering.id, { region: o.region, service_type: o.service_type });
+      return json({
+        ...offering,
+        conformance_signing_secret: secret,
+        note: "Shown once. Mynt signs its conformance requests with this secret; each subscriber gets its own (list_my_subscribers).",
+        next: "run_conformance",
+      });
+    },
+  );
+
+  server.registerTool(
+    "update_vendor_offering",
+    {
+      title: "Change or list an offering",
+      description:
+        "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it).",
+      // No defaults here: a field left out keeps its value.
+      inputSchema: {
+        offering_id: z.string(),
+        name: OfferingFields.name.optional(),
+        test_base_url: OfferingFields.test_base_url.optional(),
+        live_base_url: OfferingFields.live_base_url,
+        price: OfferingFields.price.optional(),
+        sla_notes: z.string().max(2000).optional(),
+        licence_ids: z.array(z.string().uuid()).max(10).optional(),
+        requires_credential: z.boolean().optional(),
+        listed: z.boolean().optional(),
+      },
+    },
+    async (args) => {
+      const a = args as Partial<Record<keyof typeof OfferingFields, unknown>> & { offering_id: string; listed?: boolean };
+      const o = await mine(a.offering_id);
+      if (!o) return fail(`No offering of yours '${a.offering_id}'`);
+      const bad =
+        (await checkUrls([a.test_base_url as string | undefined, a.live_base_url as string | undefined])) ??
+        (a.licence_ids ? await checkLicences(o.entity_id, o.region, a.licence_ids as string[]) : null);
+      if (bad) return fail(bad);
+      const next: Offering = {
+        ...o,
+        ...(a.name !== undefined ? { name: a.name as string } : {}),
+        ...(a.test_base_url !== undefined ? { test_base_url: a.test_base_url as string } : {}),
+        ...(a.live_base_url !== undefined ? { live_base_url: a.live_base_url as string } : {}),
+        ...(a.price !== undefined ? { price: { ...(a.price as { amount: number; currency: string }), per: "call" as const } } : {}),
+        ...(a.sla_notes !== undefined ? { sla_notes: a.sla_notes as string } : {}),
+        ...(a.licence_ids !== undefined ? { licence_ids: a.licence_ids as string[] } : {}),
+        ...(a.requires_credential !== undefined ? { requires_credential: a.requires_credential as boolean } : {}),
+      };
+      const reverify = next.test_base_url !== o.test_base_url || next.live_base_url !== o.live_base_url || JSON.stringify(next.licence_ids) !== JSON.stringify(o.licence_ids);
+      if (reverify && o.status !== "suspended") next.status = "draft";
+      if (a.listed !== undefined) {
+        if (o.status === "suspended") return fail("An admin suspended this offering");
+        if (a.listed) {
+          if (next.status !== "conformance_passed" && next.status !== "listed") return fail("Run run_conformance until it passes before listing");
+          const t = (await serviceType(store.db, o.region, o.service_type))!;
+          const gap = await vendorLicenceGap(store, next, t);
+          if (gap) return fail(gap);
+          next.status = "listed";
+        } else if (next.status === "listed") next.status = "conformance_passed";
+      }
+      const { rows } = await store.db.query(
+        `UPDATE ${T}.vendor_offerings SET name = $2, test_base_url = $3, live_base_url = $4, price = $5, sla_notes = $6, licence_ids = $7, requires_credential = $8, status = $9, updated_at = now()
+         WHERE id = $1 RETURNING *`,
+        [o.id, next.name, next.test_base_url, next.live_base_url, JSON.stringify(next.price), next.sla_notes, next.licence_ids, next.requires_credential, next.status],
+      );
+      await audit("update_vendor_offering", o.id, { status: next.status, reverify });
+      return json(toOffering(rows[0]));
+    },
+  );
+
+  server.registerTool(
+    "run_conformance",
+    {
+      title: "Have Mynt test your endpoint",
+      description:
+        "Vendor: Mynt calls your test endpoint with signed fixture requests and checks every answer against the service type's output schema, that a badly signed request is refused, and your licences. A pass lets you list the offering. If you require a credential, pass a test one; it isn't kept.",
+      inputSchema: { offering_id: z.string(), test_credential: z.string().min(1).max(2000).optional() },
+    },
+    async ({ offering_id, test_credential }) => {
+      const o = await mine(offering_id);
+      if (!o) return fail(`No offering of yours '${offering_id}'`);
+      if (o.requires_credential && !test_credential) return fail("This offering requires a credential: pass a test_credential");
+      const t = (await serviceType(store.db, o.region, o.service_type))!;
+      const result = await runConformance(store, o, t, opts, user.id, test_credential ?? null);
+      await audit("run_conformance", o.id, { passed: result.passed });
+      return json(result);
+    },
+  );
+
+  server.registerTool(
+    "list_my_offerings",
+    {
+      title: "My offerings",
+      description: "Vendor: your firm's offerings, their status, the last conformance run and how many firms subscribe.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return fail("You don't belong to a firm yet; an admin adds you to one");
+      const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_offerings WHERE entity_id = $1 ORDER BY created_at`, [entityId]);
+      const out = [];
+      for (const o of rows.map(toOffering)) {
+        const run = (await store.db.query(`SELECT id, passed, cases, created_at FROM ${T}.vendor_conformance_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 1`, [o.id])).rows[0];
+        const subs = (await store.db.query(`SELECT count(*)::int AS n FROM ${T}.vendor_subscriptions WHERE offering_id = $1 AND status = 'active'`, [o.id])).rows[0];
+        out.push({ ...o, last_conformance: run ? { run_id: run.id, passed: run.passed, cases: run.cases, at: iso(run.created_at) } : null, subscribers: subs?.n ?? 0 });
+      }
+      return json(out);
+    },
+  );
+
+  server.registerTool(
+    "list_my_subscribers",
+    {
+      title: "Who subscribes to my offerings",
+      description:
+        "Vendor: firms subscribed to your offerings, whether they're live, and calls per day (counts only). A new subscription's signing secret is shown here once: verify Mynt-Signature with it.",
+      inputSchema: { offering_id: z.string().optional(), days: z.number().int().min(1).max(90).default(30) },
+    },
+    async ({ offering_id, days }) => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return fail("You don't belong to a firm yet; an admin adds you to one");
+      const { rows } = await store.db.query(
+        `SELECT s.*, o.name AS offering_name, e.name AS subscriber FROM ${T}.vendor_subscriptions s
+         JOIN ${T}.vendor_offerings o ON o.id = s.offering_id JOIN ${T}.entities e ON e.id = s.entity_id
+         WHERE o.entity_id = $1 AND ($2::text IS NULL OR o.id::text = $2) ORDER BY s.created_at`,
+        [entityId, offering_id ?? null],
+      );
+      const usage = await usageOf(store.db, rows.map((r) => r.id as string), days);
+      const out = [];
+      for (const r of rows) {
+        const s = toSubscription(r);
+        let signing_secret: string | undefined;
+        if (s.status === "active" && !s.secret_shown) {
+          signing_secret = open(r.signing_secret as string, false);
+          await store.db.query(`UPDATE ${T}.vendor_subscriptions SET secret_shown_at = now() WHERE id = $1`, [s.id]);
+        }
+        out.push({
+          subscription_id: s.id,
+          offering_id: s.offering_id,
+          offering: r.offering_name,
+          subscriber: r.subscriber,
+          live: s.live,
+          status: s.status,
+          created_at: s.created_at,
+          ...(signing_secret ? { signing_secret, note: "Shown once: keep it to verify Mynt-Signature on this subscriber's requests" } : {}),
+          usage: usageFor(usage, s.id),
+        });
+      }
+      return json(out);
+    },
+  );
+}
+
+export function registerVendorInnovatorTools(server: McpServer, store: Store, user: User, opts: { admin?: boolean } = {}) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
+  const mySubscription = async (id: string) => {
+    const s = await getSubscription(store.db, id);
+    const entity = await entityOf(store, user);
+    return s && entity && s.entity_id === entity ? s : undefined;
+  };
+  const subscriptionView = async (s: Subscription) => {
+    const o = (await getOffering(store.db, s.offering_id))!;
+    const vendor = await store.getEntity(o.entity_id);
+    const key = s.credential_key_id ? (await store.db.query(`SELECT id, label, created_at FROM ${T}.key_vault WHERE id = $1`, [s.credential_key_id])).rows[0] : null;
+    return {
+      subscription_id: s.id,
+      offering_id: o.id,
+      offering: o.name,
+      region: o.region,
+      service_type: o.service_type,
+      vendor: vendor?.name ?? o.entity_id,
+      vendor_party_id: s.party_id,
+      live: s.live,
+      status: s.status,
+      offering_status: o.status,
+      credential: key ? { key_id: key.id, label: key.label, set_at: iso(key.created_at) } : null,
+      created_at: s.created_at,
+      ended_at: s.ended_at,
+    };
+  };
+
+  server.registerTool(
+    "list_vendor_offerings",
+    {
+      title: "Standard services you can plug in",
+      description:
+        "Innovator: listed vendors' offerings of standard services, by region, service type or category: price per call, SLA notes, the vendor's licences, and whether your firm meets the licence prerequisites to subscribe.",
+      inputSchema: {
+        region: z.string().optional(),
+        service_type: z.string().optional(),
+        category: z.enum(SERVICE_CATEGORIES).optional(),
+        include_unlisted: z.boolean().default(false).describe("Admins: every offering, whatever its status"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ region, service_type, category, include_unlisted }) => {
+      const entityId = await entityOf(store, user);
+      const { rows } = await store.db.query(
+        `SELECT o.* FROM ${T}.vendor_offerings o JOIN ${T}.service_types t ON t.region = o.region AND t.key = o.service_type
+         WHERE ($1::boolean OR o.status = 'listed') AND ($2::text IS NULL OR o.region = $2) AND ($3::text IS NULL OR o.service_type = $3) AND ($4::text IS NULL OR t.category = $4)
+         ORDER BY o.region, o.service_type, o.created_at`,
+        [Boolean(include_unlisted && opts.admin), region ?? null, service_type ?? null, category ?? null],
+      );
+      const out = [];
+      for (const o of rows.map(toOffering)) {
+        const t = (await serviceType(store.db, o.region, o.service_type))!;
+        const vendor = await store.getEntity(o.entity_id);
+        const licences = (await store.licensesOf(o.entity_id)).filter((l) => o.licence_ids.includes(l.id)).map(licenceView);
+        const gap = entityId ? await innovatorLicenceGap(store, entityId, t) : "You don't belong to a firm";
+        out.push({
+          offering_id: o.id,
+          name: o.name,
+          vendor: vendor?.name ?? o.entity_id,
+          region: o.region,
+          service_type: { key: t.key, name: t.name, category: t.category, consent_purpose: t.consent_purpose, fills: t.fills },
+          price: o.price,
+          sla_notes: o.sla_notes,
+          live_available: Boolean(o.live_base_url),
+          requires_credential: o.requires_credential,
+          vendor_licences: licences,
+          ...(include_unlisted && opts.admin ? { status: o.status } : {}),
+          you_can_subscribe: !gap,
+          ...(gap ? { prerequisite: gap } : {}),
+        });
+      }
+      return json(out);
+    },
+  );
+
+  server.registerTool(
+    "subscribe_vendor_service",
+    {
+      title: "Subscribe to a vendor's service",
+      description:
+        "Innovator: subscribe your firm to a listed offering (in the sandbox first). Checks the licences the service needs your firm to hold, keeps the credential the vendor gave you (if it needs one) in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id.",
+      inputSchema: {
+        offering_id: z.string(),
+        credential: z.string().min(1).max(2000).optional().describe("The API credential the vendor issued your firm, if the offering requires one"),
+        credential_label: z.string().min(1).max(100).optional(),
+      },
+    },
+    async ({ offering_id, credential, credential_label }) => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return fail("You don't belong to an entity yet; create one with create_entity");
+      const o = await getOffering(store.db, offering_id);
+      if (!o || o.status !== "listed") return fail(`No listed offering '${offering_id}'; see list_vendor_offerings`);
+      const t = (await serviceType(store.db, o.region, o.service_type))!;
+      const gap = await innovatorLicenceGap(store, entityId, t);
+      if (gap) return fail(gap);
+      if (o.requires_credential && !credential) return fail(`${o.name} requires a credential the vendor issues you: pass it as credential`);
+      const existing = (await store.db.query(`SELECT id FROM ${T}.vendor_subscriptions WHERE offering_id = $1 AND entity_id = $2 AND status = 'active'`, [o.id, entityId])).rows[0];
+      if (existing) return fail(`Your firm already subscribes to this offering (${existing.id})`);
+      if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep credentials or signing secrets");
+      // The vendor stands behind the handoffs bound to it, so it goes on the roster (an existing party is reused).
+      let party = (await store.partiesOf(entityId)).find((p) => p.kind === "external" && p.legal_entity_id === o.entity_id && partyActive(p));
+      let created = false;
+      if (!party) {
+        const errors = await validateParty(store, entityId, { kind: "external", legal_entity_id: o.entity_id, fills: [] });
+        if (errors.length) return fail("The vendor can't join your roster", { errors });
+        party = await store.addParty(user.id, { entity_id: entityId, kind: "external", person: null, legal_entity_id: o.entity_id, attributes: {}, fills: [], relationship: "vendor_service_agreement", since: today() });
+        created = true;
+        await audit("add_party", party.id, { entity_id: entityId, kind: "external", via: "subscribe_vendor_service" });
+      }
+      let keyId: string | null = null;
+      if (credential) {
+        keyId = randomUUID();
+        await store.db.query(`INSERT INTO ${T}.key_vault (id, entity_id, type, label, sealed, created_by) VALUES ($1, $2, 'vendor_credential', $3, $4, $5)`, [
+          keyId,
+          entityId,
+          credential_label ?? `${o.name} credential`,
+          seal(credential, false),
+          user.id,
+        ]);
+      }
+      const { rows } = await store.db.query(
+        `INSERT INTO ${T}.vendor_subscriptions (id, offering_id, entity_id, party_id, party_created, signing_secret, credential_key_id, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [randomUUID(), o.id, entityId, party.id, created, seal(newSecret(), false), keyId, user.id],
+      );
+      const s = toSubscription(rows[0]);
+      await audit("subscribe_vendor_service", s.id, { offering_id: o.id, credential: Boolean(keyId) });
+      return json({
+        ...(await subscriptionView(s)),
+        next: `Bind a partner handoff: handoff_to_party to party ${party.id} with attributes { vendor_subscription_id: '${s.id}', service_type: '${t.key}', consent_purpose: '${t.consent_purpose}' }. Sandbox sessions then call the vendor's test endpoint; set_subscription_live when you're ready for live.`,
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_my_vendor_subscriptions",
+    {
+      title: "My firm's vendor services",
+      description: "Innovator: the vendor services your firm subscribes to, whether each is live, its credential (label only) and calls per day (counts only).",
+      inputSchema: { days: z.number().int().min(1).max(90).default(30), include_ended: z.boolean().default(false) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ days, include_ended }) => {
+      const entityId = await entityOf(store, user);
+      if (!entityId) return fail("You don't belong to an entity yet; create one with create_entity");
+      const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_subscriptions WHERE entity_id = $1 AND ($2::boolean OR status = 'active') ORDER BY created_at`, [entityId, include_ended]);
+      const subs = rows.map(toSubscription);
+      const usage = await usageOf(store.db, subs.map((s) => s.id), days);
+      const out = [];
+      for (const s of subs) out.push({ ...(await subscriptionView(s)), usage: usageFor(usage, s.id) });
+      return json(out);
+    },
+  );
+
+  server.registerTool(
+    "set_subscription_live",
+    {
+      title: "Turn a vendor service live",
+      description: "Innovator: let live sessions call the vendor's live endpoint (live: true), or stop that (false). Sandbox sessions always use its test endpoint.",
+      inputSchema: { subscription_id: z.string(), live: z.boolean() },
+    },
+    async ({ subscription_id, live }) => {
+      const s = await mySubscription(subscription_id);
+      if (!s || s.status !== "active") return fail(`No active subscription of your firm '${subscription_id}'`);
+      if (live) {
+        const o = (await getOffering(store.db, s.offering_id))!;
+        if (o.status !== "listed") return fail(`The offering is ${o.status}, not listed`);
+        if (!o.live_base_url) return fail("The vendor hasn't given a live endpoint yet");
+        const gap = await innovatorLicenceGap(store, s.entity_id, (await serviceType(store.db, o.region, o.service_type))!);
+        if (gap) return fail(gap);
+      }
+      await store.db.query(`UPDATE ${T}.vendor_subscriptions SET live = $2 WHERE id = $1`, [s.id, live]);
+      await audit("set_subscription_live", s.id, { live });
+      return json(await subscriptionView({ ...s, live }));
+    },
+  );
+
+  server.registerTool(
+    "unsubscribe_vendor_service",
+    {
+      title: "End a vendor service",
+      description:
+        "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credential is deleted from your key vault, and the vendor leaves your roster if it joined for this subscription.",
+      inputSchema: { subscription_id: z.string() },
+      annotations: { destructiveHint: true },
+    },
+    async ({ subscription_id }) => {
+      const s = await mySubscription(subscription_id);
+      if (!s || s.status !== "active") return fail(`No active subscription of your firm '${subscription_id}'`);
+      const using = (await store.pinnedProducts(s.entity_id)).filter((r) => r.status === "published" && r.pins?.vendor_bindings?.some((b) => b.subscription_id === s.id));
+      if (using.length) return fail(`Live products hand off through it: ${using.map((r) => r.product.id).join(", ")}. Publish versions without it first.`);
+      await store.db.query(`UPDATE ${T}.vendor_subscriptions SET status = 'ended', live = false, ended_at = now(), credential_key_id = NULL WHERE id = $1`, [s.id]);
+      if (s.credential_key_id) await store.db.query(`DELETE FROM ${T}.key_vault WHERE id = $1`, [s.credential_key_id]);
+      let partyEnded = false;
+      if (s.party_created) {
+        const others = (await store.db.query(`SELECT 1 FROM ${T}.vendor_subscriptions WHERE party_id = $1 AND status = 'active'`, [s.party_id])).rows.length;
+        if (!others) {
+          await store.endParty(s.party_id, today());
+          partyEnded = true;
+        }
+      }
+      await audit("unsubscribe_vendor_service", s.id, { party_ended: partyEnded });
+      return json({ subscription_id: s.id, status: "ended", party_ended: partyEnded, drifted_products: partyEnded ? await driftSweep(store, s.entity_id) : [] });
+    },
+  );
+}

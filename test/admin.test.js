@@ -57,7 +57,7 @@ test("admins sit above innovators and alone see the admin tools", async () => {
   const admin = await connect(await as("Ada", ["admin"]));
   const adminTools = await tools(admin);
   for (const t of [...ADMIN_TOOLS, "create_product", "create_campaign", "enroll_in_product"]) assert.ok(adminTools.includes(t), t);
-  assert.deepEqual((await call(admin, "whoami")).data.effective_roles, ["consumer", "developer", "innovator", "admin"]);
+  assert.deepEqual((await call(admin, "whoami")).data.effective_roles, ["consumer", "developer", "innovator", "vendor", "admin"]);
   const innoTools = await tools(await connect(await as("Ines", ["innovator"])));
   assert.ok(ADMIN_TOOLS.every((t) => !innoTools.includes(t)));
 });

@@ -1,7 +1,7 @@
 {
   "name": "mynt",
   "version": "0.3.0",
-  "description": "Mynt: MCP server for financial products across credit, payments, accounts, custody, wealth, insurance, trade, exchange, derivatives and information, with consumer, developer, innovator and admin roles",
+  "description": "Mynt: MCP server for financial products across credit, payments, accounts, custody, wealth, insurance, trade, exchange, derivatives and information, with consumer, developer, innovator, vendor and admin roles",
   "type": "module",
   "license": "MIT",
   "bin": {
