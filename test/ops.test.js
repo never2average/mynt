@@ -52,4 +52,8 @@ test("ops_status: admins see failures, stuck runs, spend and hosting trouble at 
   assert.equal(s.agents.builds.spend_this_month_usd, month, "this calendar month's spend (6.75 unless run just after a month starts)");
   assert.equal(s.hosting.failed_tenants[0].error, "VM setup failed: no space left");
   assert.equal((await status({ hours: 96 })).agents.builds.failures.length, 2, "a wider window reaches the older failure");
+
+  // The sandbox provider out of allowance: said first, with what to do.
+  await add("failed", 'The sandbox provider has used up this account\'s allowance; an admin must add billing in its dashboard. (Freestyle POST /vms/vm-1/exec-await: 429 {"code":"LIMIT_EXCEEDED","message":"Cannot start this VM because the allowance for vcpu_time, memory_time has been used."})', 1, "10 minutes");
+  assert.match((await status()).attention[0], /^sandbox provider: the account's allowance is used up/);
 });
