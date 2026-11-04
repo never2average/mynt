@@ -40,11 +40,17 @@ class _JourneyScreenState extends State<JourneyScreen> with WidgetsBindingObserv
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    () async {
+    _start();
+  }
+
+  Future<void> _start() async {
+    try {
       final client = MyntClient(clientSecret: await mintSession(), baseUrl: myntUrl);
       final r = await JourneyRunner.start(client, journeyId);
-      setState(() => runner = r);
-    }().catchError((Object e) => setState(() => error = '$e'));
+      if (mounted) setState(() => runner = r);
+    } catch (e) {
+      if (mounted) setState(() => error = '$e');
+    }
   }
 
   @override
