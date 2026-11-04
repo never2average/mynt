@@ -36,6 +36,7 @@ export const vertexHost = (region: string) => (region === "global" ? "aiplatform
 export interface AgentRun {
   key: string;
   capUsd: number;
+  model?: string; // every request on this run goes to this model, whatever it asks for (a cheaper tier for an audit)
 }
 
 export interface ProxyOptions {
@@ -57,6 +58,7 @@ export async function agentProxy(backend: AgentBackend | null, resolve: (token: 
   let upstream: string;
   let model = "";
   let counting = false;
+  let vertexAction = "";
   const headers: Record<string, string> = {};
   if (backend.kind === "vertex") {
     const m = /^\/agent\/t\/([A-Za-z0-9_-]+)(\/.*)$/.exec(url.pathname);
@@ -65,6 +67,7 @@ export async function agentProxy(backend: AgentBackend | null, resolve: (token: 
     token = m[1];
     model = allowed(route[1]) ? route[1] : opts.model!;
     counting = route[1] === "count-tokens";
+    vertexAction = route[2];
     upstream = `https://${vertexHost(backend.region)}/v1/projects/${backend.projectId}/locations/${backend.region}/publishers/anthropic/models/${model}:${route[2]}`;
   } else {
     const path = url.pathname.slice("/agent".length);
@@ -77,6 +80,10 @@ export async function agentProxy(backend: AgentBackend | null, resolve: (token: 
   }
   const run = token ? await resolve(token) : null;
   if (!run) return reply(res, 401, "This agent token isn't active");
+  if (run.model && backend.kind === "vertex") {
+    model = run.model;
+    upstream = `https://${vertexHost(backend.region)}/v1/projects/${backend.projectId}/locations/${backend.region}/publishers/anthropic/models/${model}:${vertexAction}`;
+  }
   if (opts.meter && (await opts.meter.spent(run.key)) >= run.capUsd) return reply(res, 402, `This run's model budget (US$${run.capUsd}) is spent`);
   let body = await readBody(req);
   if (!body) return reply(res, 413, "Request too large");
@@ -84,8 +91,8 @@ export async function agentProxy(backend: AgentBackend | null, resolve: (token: 
     try {
       const json = JSON.parse(body.toString("utf8")) as { model?: string };
       model = json.model ?? "";
-      if (model && !allowed(model)) {
-        model = opts.model!;
+      if (model && (run.model ? model !== run.model : !allowed(model))) {
+        model = run.model ?? opts.model!;
         body = Buffer.from(JSON.stringify({ ...json, model }));
       }
     } catch {

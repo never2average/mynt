@@ -89,6 +89,7 @@ export async function launchAgent(
     mcp?: boolean;
     workspace?: string; // a Mynt workspace to load as the agent's working directory
     jobFiles?: Record<string, string>; // job data, by path relative to the workspace (e.g. job/case.json)
+    model?: string; // instead of the deployment's model (the proxy enforces it for the run's token)
   },
 ) {
   const budgetUsd = Math.max(0.5, Math.floor(o.budgetUsd * 100) / 100);
@@ -99,7 +100,7 @@ export async function launchAgent(
     if (boat.writeFiles) await boat.writeFiles(sandbox, files);
     else for (const [path, content] of Object.entries(files)) await boat.writeFile(sandbox, path, content);
   }
-  const run = { prompt: o.prompt, cwd, model: config.model, budgetUsd, version: CLAUDE_CODE_VERSION };
+  const run = { prompt: o.prompt, cwd, model: o.model ?? config.model, budgetUsd, version: CLAUDE_CODE_VERSION };
   await boat.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, AGENT_RUNNER);
   await boat.writeFile(sandbox, `${AGENT_DIR}/config.json`, JSON.stringify(run));
   await boat.writeFile(sandbox, `${AGENT_DIR}/auth.json`, JSON.stringify(agentAuth(config, o.token, { mcp: o.mcp })));

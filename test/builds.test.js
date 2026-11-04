@@ -229,8 +229,18 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   assert.match(verifier.files.get(`${V}/verify.sh`), /gitleaks/);
   assert.match(verifier.commands.find((c) => c.detached).command, new RegExp(`verify\\.sh 'https://files\\.example/${sbx}/home/user/mynt-out/app\\.tgz\\?sig=x' ${SHA}`));
   assert.match(verifier.files.get(`${AUDIT}/CLAUDE.md`), /Do not modify anything inside `app_dir`/);
-  assert.deepEqual(JSON.parse(verifier.files.get(`${AUDIT}/job/audit.json`)), { app_dir: "/home/user/app", maxwell_repo: "https://github.com/OnFinance/Maxwell", output: `${V}/maxwell.json` });
+  assert.deepEqual(JSON.parse(verifier.files.get(`${AUDIT}/job/audit.json`)), {
+    app_dir: "/home/user/app",
+    maxwell_repo: "https://github.com/OnFinance/Maxwell",
+    output: `${V}/maxwell.json`,
+    workflows: ["execute-scr", "probe-cicd-env"],
+    minutes: 20,
+  });
   assert.equal(boat.agentConfig(vid).cwd, AUDIT);
+  // Mynt's audit runs on its own model and budget, not the developer's: the coding agent's runs on the deployment's.
+  assert.equal(boat.agentConfig(vid).model, "claude-sonnet-5-5");
+  assert.equal(boat.agentConfig(vid).budgetUsd, 5);
+  assert.notEqual(boat.agentConfig(sbx).model, "claude-sonnet-5-5");
   assert.ok(verifier.stopped, "the verifier is stopped once it has reported");
 
   assert.equal(build.status, "succeeded");
@@ -858,4 +868,45 @@ test("the runner waits out a silent background task the agent is waiting on, up 
   const capped = await runWithBackgroundTask({ taskMs: 60000, env: { MYNT_AGENT_SETTLE_MS: "300", MYNT_AGENT_BACKGROUND_MAX_MS: "1000" } });
   assert.notEqual(capped.exit_code, 0);
   assert.match(capped.summary, /scans running/);
+});
+
+test("Mynt's audit has its own token, budget and model, isn't charged to the developer, and times out", async () => {
+  const ctx = await setup();
+  const { builds, boat, call, pg } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const coderToken = JSON.parse(boat.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
+  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  boat.finishAgent(sbx);
+  await builds.tick();
+  const vid = (await builds.get(started.id)).verify_sandbox_id;
+  boat.ready(vid);
+  await builds.tick();
+  boat.sandboxes.get(vid).checksRunning = false;
+  boat.write(vid, `${V}/before.sha`, "tree\n");
+  boat.write(vid, `${V}/report.json`, { checks: passingChecks });
+  await builds.tick(); // auditor started
+
+  // Its own token: its own meter key, Mynt's budget, the audit model; the coding agent's token is retired.
+  const auditToken = JSON.parse(boat.sandboxes.get(vid).files.get(`${A}/auth.json`)).token;
+  assert.deepEqual(await builds.agentRun(auditToken), { key: `audit:${started.id}`, capUsd: 5, model: "claude-sonnet-5-5" });
+  assert.equal(await builds.agentRun(coderToken), null);
+
+  // What the audit spends on the model isn't the developer's: its runner reports US$4 so far.
+  boat.write(vid, `${A}/state.json`, { cost_usd: 4, turns: 1, sent: 1, last_subtype: "success", done: false });
+  const before = (await builds.get(started.id)).cost_usd;
+  await builds.tick();
+  assert.equal((await builds.get(started.id)).cost_usd, before);
+
+  // Still running past its time limit: Mynt stops waiting, and the build doesn't ship without its report.
+  await pg.query("UPDATE financial_products.build_runs SET audit_started_at = now() - interval '25 minutes' WHERE id = $1", [started.id]);
+  await builds.tick();
+  const b = await builds.get(started.id);
+  assert.equal(b.status, "blocked");
+  assert.match(b.error, /No independent Maxwell audit result \(auditor: timed out after 20 min/);
+  assert.equal(await builds.agentRun(auditToken), null, "the audit token dies with the build");
 });

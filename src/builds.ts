@@ -61,6 +61,9 @@ export interface BuildConfig {
   ttlSeconds: number;
   maxwellRepo: string;
   publicUrl: string;
+  // Mynt's independent audit: its own model, budget (paid by Mynt, outside the developer's cap), time limit and
+  // the Maxwell workflows it runs.
+  audit: { model: string; capUsd: number; minutes: number; workflows: string[] };
 }
 
 export function buildConfigFromEnv(env = process.env): BuildConfig {
@@ -73,6 +76,12 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
     ttlSeconds: Number(env.BUILD_SANDBOX_TTL_SECONDS ?? 4 * 3600),
     maxwellRepo: env.BUILD_MAXWELL_REPO ?? "https://github.com/OnFinance/Maxwell",
     publicUrl: (env.PUBLIC_URL ?? "").replace(/\/+$/, ""),
+    audit: {
+      model: env.BUILD_AUDIT_MODEL ?? "claude-sonnet-5-5",
+      capUsd: Number(env.BUILD_AUDIT_CAP_USD ?? 5),
+      minutes: Number(env.BUILD_AUDIT_MINUTES ?? 20),
+      workflows: (env.BUILD_AUDIT_WORKFLOWS ?? "execute-scr,probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean),
+    },
   };
 }
 
@@ -90,6 +99,7 @@ export interface Build {
   verify_step: "provisioning" | "checks" | "audit" | null;
   verify_process_id: number | null;
   verify_prompt_id: string | null; // the auditor's runner process in the verify sandbox
+  audit_started_at: string | null;
   source_sha256: string | null;
   source_url: string | null; // signed, short-lived; never shown to users
   agent_report: unknown; // the coding agent's own report: advisory only
@@ -148,6 +158,9 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS agent_report jsonb;
   -- sha256 of the token the build's agent uses with Mynt's agent proxy; cleared when the build ends.
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS agent_token_hash text;
+  -- The auditor's own token: a separate meter key, budget and model; cleared when the build ends.
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_token_hash text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_started_at timestamptz;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -168,7 +181,7 @@ const TABLES = `
 
 const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
 type Row = Record<string, unknown>;
-const toBuild = ({ agent_token_hash: _, ...r }: Row): Build => ({
+const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Build => ({
   ...(r as unknown as Build),
   cost_usd: Number(r.cost_usd ?? 0),
   cap_usd: Number(r.cap_usd),
@@ -177,6 +190,7 @@ const toBuild = ({ agent_token_hash: _, ...r }: Row): Build => ({
   finished_at: iso(r.finished_at),
   box_sandbox_id: (r.box_sandbox_id as string | null) ?? null,
   box_until: iso(r.box_until),
+  audit_started_at: iso(r.audit_started_at),
 });
 
 // Files the agent reads and writes inside the sandbox. boat.dev's file API only accepts paths under
@@ -237,12 +251,22 @@ export class BuildService {
     return !!(await this.agentRun(token));
   }
 
-  // The build a live agent token belongs to, for the proxy's meter: both the coding agent and the auditor
-  // (with whatever they start) spend against the build's cap.
+  // The run a live agent token belongs to, for the proxy's meter. The coding agent (with whatever it starts)
+  // spends against the build's cap; Mynt's auditor against its own budget, on its own model.
   meter: AgentMeter | null = null;
   async agentRun(token: string): Promise<AgentRun | null> {
-    const r = await this.one("SELECT id, cap_usd FROM financial_products.build_runs WHERE agent_token_hash = $1 AND status <> ALL($2)", [hashToken(token), TERMINAL]);
-    return r ? { key: `build:${r.id}`, capUsd: Number(r.cap_usd) } : null;
+    const h = hashToken(token);
+    const r = await this.one("SELECT id, cap_usd FROM financial_products.build_runs WHERE agent_token_hash = $1 AND status <> ALL($2)", [h, TERMINAL]);
+    if (r) return { key: `build:${r.id}`, capUsd: Number(r.cap_usd) };
+    const a = await this.one("SELECT id FROM financial_products.build_runs WHERE audit_token_hash = $1 AND status <> ALL($2)", [h, TERMINAL]);
+    return a ? { key: `audit:${a.id}`, capUsd: this.config.audit.capUsd, model: this.config.audit.model } : null;
+  }
+
+  // Mynt's auditor: its own token (the coding agent's is retired), budget and model.
+  private async startAuditor(b: Build, sandbox: string, o: { prompt: string; workspace: string; jobFiles: Record<string, string> }) {
+    const token = `mynt_agent_${randomBytes(24).toString("base64url")}`;
+    await this.db.query("UPDATE financial_products.build_runs SET agent_token_hash = NULL, audit_token_hash = $2, audit_started_at = now() WHERE id = $1", [b.id, hashToken(token)]);
+    return launchAgent(this.boat!, this.config, sandbox, { ...o, budgetUsd: this.config.audit.capUsd, model: this.config.audit.model, token });
   }
 
   private async metered(id: string) {
@@ -356,7 +380,7 @@ export class BuildService {
   }
 
   private async retireKey(build: Build) {
-    await this.db.query("UPDATE financial_products.build_runs SET agent_token_hash = NULL WHERE id = $1", [build.id]);
+    await this.db.query("UPDATE financial_products.build_runs SET agent_token_hash = NULL, audit_token_hash = NULL WHERE id = $1", [build.id]);
     if (build.sandbox_key_id) await this.store.revokeApiKey(build.sandbox_key_id).catch(() => {});
   }
 
@@ -653,11 +677,11 @@ export class BuildService {
   private async verify(b: Build) {
     const boat = this.boat!;
     const vid = b.verify_sandbox_id!;
-    // Both sandboxes' machine time, plus what the coding agent and the auditor spent on the model.
+    // Both sandboxes' machine time, plus what the coding agent spent on the model. Mynt's audit is on Mynt.
     const coder = parseJson<AgentState>(await boat.readFile(b.sandbox_id!, `${AGENT_DIR}/state.json`));
     const auditor = b.verify_step === "audit" ? await this.agentState(vid, b.verify_prompt_id!) : null;
     const cost =
-      (await boat.costDollars(b.sandbox_id!)) + (await boat.costDollars(vid)) + Math.max((coder?.cost_usd ?? 0) + (auditor?.cost ?? 0), await this.metered(b.id));
+      (await boat.costDollars(b.sandbox_id!)) + (await boat.costDollars(vid)) + Math.max(coder?.cost_usd ?? 0, await this.metered(b.id));
     if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");
@@ -678,19 +702,30 @@ export class BuildService {
 
     if (b.verify_step === "checks") {
       if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
-      const processId = await this.startAgent(b, vid, {
+      const { audit } = this.config;
+      const processId = await this.startAuditor(b, vid, {
         prompt: "Audit the application described in job/audit.json, following CLAUDE.md and its skills.",
-        budgetUsd: b.cap_usd - cost,
         workspace: "build-audit",
-        jobFiles: { "job/audit.json": JSON.stringify({ app_dir: VERIFY_APP, maxwell_repo: this.config.maxwellRepo, output: `${VERIFY_DIR}/maxwell.json` }, null, 2) },
+        jobFiles: {
+          "job/audit.json": JSON.stringify(
+            { app_dir: VERIFY_APP, maxwell_repo: this.config.maxwellRepo, output: `${VERIFY_DIR}/maxwell.json`, workflows: audit.workflows, minutes: audit.minutes },
+            null,
+            2,
+          ),
+        },
       });
       await this.update(b.id, { verify_step: "audit", verify_prompt_id: processId });
-      await this.event(b.id, "verifying", "Checks finished; independent Maxwell audit started");
+      await this.event(b.id, "verifying", `Checks finished; independent Maxwell audit started (${audit.workflows.join(", ")}; up to ${audit.minutes} min)`, {
+        model: audit.model,
+        cap_usd: audit.capUsd,
+      });
       return;
     }
 
     if (b.verify_step === "audit") {
-      if (auditor!.running) return;
+      const started = b.audit_started_at ? Date.parse(b.audit_started_at) : Date.now();
+      const timedOut = auditor!.running && Date.now() - started > this.config.audit.minutes * 60_000;
+      if (auditor!.running && !timedOut) return;
       await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 });
       const [report, maxwell, before, after, changed] = await Promise.all([
         boat.readFile(vid, `${VERIFY_DIR}/report.json`).then((t) => parseJson<{ checks: Check[] }>(t)),
@@ -707,10 +742,17 @@ export class BuildService {
           .then((r) => r.stdout ?? "")
           .catch(() => "");
         const st = auditor!.state;
-        audit = { result: st?.last_subtype ?? null, exit_code: st?.exit_code ?? null, error: st?.error ?? null, summary: st?.summary?.slice(0, 1500) ?? null, log: log.slice(-3000) || null, report_written: !!maxwell };
+        audit = { result: timedOut ? `timed out after ${this.config.audit.minutes} min` : (st?.last_subtype ?? null), exit_code: st?.exit_code ?? null, error: st?.error ?? null, summary: st?.summary?.slice(0, 1500) ?? null, log: log.slice(-3000) || null, report_written: !!maxwell };
       }
       await boat.stop(vid).catch(() => {});
-      await this.decide(b, { report, maxwell, unchanged: !!before && before.trim() === after?.trim(), changed: (changed ?? "").split("\n").map((l) => l.trim()).filter(Boolean), auditFinished: auditor!.ok, audit });
+      await this.decide(b, {
+        report,
+        maxwell,
+        unchanged: !!before && before.trim() === after?.trim(),
+        changed: (changed ?? "").split("\n").map((l) => l.trim()).filter(Boolean),
+        auditFinished: !timedOut && auditor!.ok,
+        audit,
+      });
     }
   }
 
