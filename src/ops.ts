@@ -1,5 +1,5 @@
 // What admins check first: is anything failing, stuck or costing more than it should, across the agents (builds,
-// the product desk, governance review, the connector) and developers' hosting. Read-only.
+// the product desk and its algorithm explorers, governance review, the connector) and developers' hosting. Read-only.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
@@ -12,6 +12,7 @@ const RUNS = [
   { name: "builds", table: "build_runs", done: ["succeeded", "blocked", "failed", "stopped", "over_budget"], bad: ["failed", "blocked", "over_budget"] },
   { name: "desk", table: "desk_jobs", done: ["succeeded", "failed", "stopped", "over_budget", "done"], bad: ["failed", "over_budget"] },
   { name: "reviews", table: "review_cases", done: ["ready", "decided", "failed", "stopped", "over_budget"], bad: ["failed", "over_budget"] },
+  { name: "explorers", table: "explore_jobs", done: ["finished", "failed", "stopped", "over_budget"], bad: ["failed", "over_budget"] },
   { name: "connector", table: "bd_runs", done: ["succeeded", "failed", "stopped", "over_budget", "done"], bad: ["failed", "over_budget"] },
 ] as const;
 
@@ -83,7 +84,7 @@ export function registerOpsTools(server: McpServer, db: Db) {
     {
       title: "What needs attention",
       description:
-        "Admin: failures, stuck runs and this month's spend across builds, the product desk, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying). Read-only.",
+        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying). Read-only.",
       inputSchema: { hours: z.number().int().min(1).max(24 * 30).default(24) },
       annotations: { readOnlyHint: true },
     },

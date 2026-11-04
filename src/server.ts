@@ -16,6 +16,7 @@ import { registerCodingAgentAdminTools, registerCodingAgentTools } from "./build
 import { registerBdAdminTools, registerBdAgentTools, registerConnectTools } from "./bd.js";
 import { feasibilityCheck, registerDeskTools, type DeskService } from "./desk.js";
 import { registerReviewTools } from "./review.js";
+import { registerExploreTools } from "./explore.js";
 import { deriveContract } from "./contract.js";
 import { checkDefinition, definitionHash, type Definition } from "./definition.js";
 import { registerDefinitionTools } from "./definition-tools.js";
@@ -97,6 +98,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("innovator")) {
     registerInnovatorTools(server, store, user!, ctx.desk ?? null);
     if (ctx.desk) registerDeskTools(server, store, user!, ctx.desk);
+    if (ctx.explore) registerExploreTools(server, store, user!, ctx.explore);
     registerVersioningTools(server, store, user!, productFields);
     registerMarketplaceTools(server, store, user!);
     registerProductRequestInnovatorTools(server, store, user!);

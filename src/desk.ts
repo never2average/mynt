@@ -197,7 +197,7 @@ export class DeskService {
 
   // What the regulation says about this kind of product, from the admins' regulatory model, so models
   // can check limits and cite them by legal_ref.
-  private async regulatoryContext(p: ProductRecord) {
+  async regulatoryContext(p: ProductRecord) {
     const region = (await this.store.referenceData(true)).regions.find((r) => r.code === p.product.region);
     if (!region) return [];
     const model = normalizeModel(region.regulatory);
@@ -217,13 +217,17 @@ export class DeskService {
 
   // What this month is committed to: finished jobs at what they cost, unfinished ones at their cap.
   async monthCommitted(entityId: string) {
+    const extra = this.alsoCommitted ? await this.alsoCommitted(entityId) : 0;
     const r = await this.one(
       `SELECT COALESCE(SUM(CASE WHEN status = ANY($2) THEN cost_usd ELSE cap_usd END), 0) AS s FROM financial_products.desk_jobs
        WHERE entity_id = $1 AND created_at >= date_trunc('month', now())`,
       [entityId, DONE],
     );
-    return Number(r?.s ?? 0);
+    return Number(r?.s ?? 0) + extra;
   }
+
+  // Other desk work that shares the firm's monthly budget (algorithm explorations, see explore.ts).
+  alsoCommitted: ((entityId: string) => Promise<number>) | null = null;
 
   async job(id: string) {
     const r = await this.one("SELECT * FROM financial_products.desk_jobs WHERE id::text = $1", [id]);

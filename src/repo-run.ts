@@ -28,12 +28,18 @@ export async function startRepoRun(
   for (const [path, content] of Object.entries(o.files)) await boat.writeFile(sandbox, path, content);
   await boat.writeFile(sandbox, `${o.dir}/clone-failed.json`, JSON.stringify(o.cloneFailure));
   await boat.writeFile(sandbox, CREDENTIALS, `https://x-access-token:${token}@github.com\n`);
-  const branch = o.ref ? `--branch '${o.ref.replace(/[^\w./-]/g, "")}' ` : "";
+  // A full commit SHA can't be cloned with --branch: clone, then fetch that exact commit and check it out.
+  const sha = o.ref && /^[0-9a-f]{40}$/.test(o.ref) ? o.ref : null;
+  const branch = o.ref && !sha ? `--branch '${o.ref.replace(/[^\w./-]/g, "")}' ` : "";
+  const helper = `credential.helper='store --file=${CREDENTIALS}'`;
   const script = [
     "set -u",
     `rm -rf ${REPO_DIR}`,
-    `git -c credential.helper='store --file=${CREDENTIALS}' clone -q --depth 1 ${branch}https://github.com/${o.repository}.git ${REPO_DIR} > ${o.dir}/clone.log 2>&1`,
+    `git -c ${helper} clone -q --depth 1 ${branch}https://github.com/${o.repository}.git ${REPO_DIR} > ${o.dir}/clone.log 2>&1`,
     "status=$?",
+    ...(sha
+      ? [`if [ $status -eq 0 ]; then git -C ${REPO_DIR} -c ${helper} fetch -q --depth 1 origin ${sha} >> ${o.dir}/clone.log 2>&1 && git -C ${REPO_DIR} checkout -q ${sha} >> ${o.dir}/clone.log 2>&1; status=$?; fi`]
+      : []),
     `rm -f ${CREDENTIALS}`,
     `if [ $status -ne 0 ]; then cp ${o.dir}/clone-failed.json ${o.outcome}; exit 0; fi`,
     o.command,
