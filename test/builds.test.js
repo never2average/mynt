@@ -789,6 +789,16 @@ test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real
   assert.equal((await ctx.builds.get(b.id)).status, "failed");
   assert.match((await ctx.builds.get(b.id)).error, /503/);
 
+  // A provider out of allowance fails at once, saying what to do; retrying wouldn't help.
+  const q = await start();
+  await ctx.builds.tick();
+  ctx.boat.ready((await ctx.builds.get(q.id)).sandbox_id);
+  failWith('Freestyle POST /vms/vm-1/exec-await: 429 {"code":"LIMIT_EXCEEDED","message":"Cannot start this VM because the allowance for vcpu_time, memory_time has been used."}');
+  await ctx.builds.tick();
+  heal();
+  assert.equal((await ctx.builds.get(q.id)).status, "failed");
+  assert.match((await ctx.builds.get(q.id)).error, /^The sandbox provider has used up this account's allowance; an admin must add billing/);
+
   // A real error fails at once.
   const c = await start();
   await ctx.builds.tick();

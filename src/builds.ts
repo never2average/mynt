@@ -185,8 +185,15 @@ const toBuild = ({ agent_token_hash: _, ...r }: Row): Build => ({
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
 const FILES = { spec: `${BUILD_JOB}/build.json`, status: `${BUILD_JOB}/status.json`, result: `${BUILD_JOB}/result.json`, sdk: `${BUILD_JOB}/sdk` };
 const WORKSPACE = "/home/user/workspace/app";
+// A provider that has used up the account's allowance (compute, credits): retrying won't help until someone
+// adds billing, so it isn't transient, and ops_status calls it out.
+export const QUOTA_PATTERN = /LIMIT_EXCEEDED|allowance for [\w_, ]+ has been used|insufficient (credits|balance)|quota exceeded/i;
+export const isQuotaExhausted = (e: unknown) => QUOTA_PATTERN.test(String((e as Error)?.message ?? e));
+export const QUOTA_MESSAGE = "The sandbox provider has used up this account's allowance; an admin must add billing in its dashboard.";
+
 // Errors worth retrying: rate limits, server errors and network failures, as the providers' clients report them.
 export function isTransient(e: unknown): boolean {
+  if (isQuotaExhausted(e)) return false;
   const m = String((e as Error)?.message ?? e);
   return /: (429|5\d\d)\b|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
 }
@@ -528,8 +535,9 @@ export class BuildService {
         await this.retireKey(current);
         // Don't leave a failed build's machines running until their TTL.
         for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.boat.stop(id).catch(() => {});
-        await this.update(build.id, { status: "failed", error: (e as Error).message });
-        await this.event(build.id, "failed", (e as Error).message);
+        const error = isQuotaExhausted(e) ? `${QUOTA_MESSAGE} (${(e as Error).message})` : (e as Error).message;
+        await this.update(build.id, { status: "failed", error });
+        await this.event(build.id, "failed", error);
       }
     }
   }

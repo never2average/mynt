@@ -3,6 +3,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
+import { QUOTA_PATTERN } from "./builds.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 
@@ -60,7 +61,11 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
       await db.query("SELECT app_id, updated_at FROM financial_products.hosted_apps WHERE status = 'deploying' AND updated_at < now() - make_interval(mins => $1) LIMIT 10", [45])
     ).rows;
   }
+  // A provider out of allowance stops everything that needs a machine: say so first, with what to do.
+  const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
+  const quota = Object.values(agents).some((a) => hit((a as { failures: unknown }).failures)) || hit(hosting.failed_tenants) || hit(hosting.stopped_apps);
   const attention = [
+    ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
     ...Object.entries(agents).flatMap(([name, a]) => {
       const x = a as { failures: unknown[]; stuck: unknown[] };
       return [...(x.failures.length ? [`${name}: ${x.failures.length} failed in the last ${hours}h`] : []), ...(x.stuck.length ? [`${name}: ${x.stuck.length} running over ${stuck} min`] : [])];
