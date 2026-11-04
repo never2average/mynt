@@ -5,6 +5,8 @@ export const VERIFY_DIR = "/home/user/mynt-verify";
 export const VERIFY_APP = "/home/user/app";
 const GITLEAKS_VERSION = "8.21.2";
 const SYFT_VERSION = "1.18.1";
+const NJSSCAN_VERSION = "1.0.1";
+const BANDIT_VERSION = "1.9.4";
 
 export const VERIFY_SCRIPT = String.raw`#!/usr/bin/env bash
 # Mynt build verification. Usage: verify.sh <source-url> <sha256>   |   verify.sh --rehash
@@ -106,6 +108,39 @@ elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then
   if pip-audit >"$V/audit.log" 2>&1; then check dependency_audit pass "no known vulnerabilities"; else check dependency_audit fail "$(tail -c 1500 "$V/audit.log")"; fi
 else
   check dependency_audit warn "no dependency manifest"
+fi
+
+# --- static security scan: njsscan (LGPL-3.0+) for JavaScript and TypeScript, bandit (Apache-2.0) for Python.
+# High-severity findings fail it. Both run from a venv of their own, pinned.
+if python3 -m venv "$V/scan-venv" >/dev/null 2>&1 && . "$V/scan-venv/bin/activate" \
+   && pip install -q "njsscan==${NJSSCAN_VERSION}" "bandit==${BANDIT_VERSION}" >"$V/scan-install.log" 2>&1; then
+  SCAN_FINDINGS=""
+  if find "$APP" -path '*/node_modules' -prune -o \( -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' -o -name '*.mjs' \) -print -quit | grep -q .; then
+    njsscan --json -o "$V/njsscan.json" "$APP" >"$V/njsscan.log" 2>&1
+    SCAN_FINDINGS+=$(python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+out = []
+for group in ("nodejs", "templates"):
+    for rule, f in (r.get(group) or {}).items():
+        if (f.get("metadata") or {}).get("severity") == "ERROR":
+            files = sorted({x.get("file_path", "?").split("/home/user/app/")[-1] for x in f.get("files", [])})
+            out.append(rule + " in " + ", ".join(files[:3]))
+print("; ".join(out))' "$V/njsscan.json" 2>/dev/null || echo "njsscan produced no report")
+  fi
+  if find "$APP" -path '*/node_modules' -prune -o -name '*.py' -print -quit | grep -q .; then
+    bandit -r "$APP" -x '*/node_modules/*,*/.venv/*,*/venv/*,*/tests/*' -lll -iii -f json -o "$V/bandit.json" >"$V/bandit.log" 2>&1
+    B=$(python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+print("; ".join(sorted({x["test_id"] + " " + x["test_name"] + " in " + x["filename"].split("/home/user/app/")[-1] for x in r.get("results", [])})))' "$V/bandit.json" 2>/dev/null || echo "bandit produced no report")
+    if [ -n "$B" ] && [ -n "$SCAN_FINDINGS" ]; then SCAN_FINDINGS="$SCAN_FINDINGS; $B"; elif [ -n "$B" ]; then SCAN_FINDINGS="$B"; fi
+  fi
+  deactivate 2>/dev/null
+  if [ -z "$SCAN_FINDINGS" ]; then check static_scan pass "no high-severity findings (njsscan ${NJSSCAN_VERSION}, bandit ${BANDIT_VERSION})"
+  else check static_scan fail "high-severity: $SCAN_FINDINGS"; fi
+else
+  check static_scan fail "could not install the static scanners: $(tail -c 600 "$V/scan-install.log" 2>/dev/null)"
 fi
 
 # --- SBOM ---
