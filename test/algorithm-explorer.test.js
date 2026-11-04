@@ -558,13 +558,20 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
 
   // Adoption: a pull request for the branch, with Mynt's holdout numbers; the product itself is untouched.
   assert.match((await call(client, "adopt_variant", { job_id: job.id, explorer: 3 })).data.error, /wasn't scored/);
+  // A pull request GitHub refuses the first time: the retry reuses Mynt's branch rather than leaving another behind.
+  const open = repos.openPullRequest;
+  repos.openPullRequest = async () => {
+    throw new Error("GitHub refused the pull request (502)");
+  };
+  assert.match((await call(client, "adopt_variant", { job_id: job.id, explorer: 1 })).data.error, /502/);
+  repos.openPullRequest = open;
   const adopted = await call(client, "adopt_variant", { job_id: job.id, explorer: 1 });
   assert.equal(adopted.isError, false, JSON.stringify(adopted.data));
   assert.equal(adopted.data.pr_url, "https://github.com/acme/desk/pull/1");
   // From a branch Mynt made at the scored commit, not the explorer's branch (which has moved since).
   assert.equal(repos.created.length, 1);
   assert.equal(repos.created[0].commit, C1);
-  assert.match(repos.created[0].branch, new RegExp(`^mynt/adopt-${job.id.slice(0, 8)}-1-[0-9a-f]{12}$`));
+  assert.equal(repos.created[0].branch, `mynt/adopt-${job.id.slice(0, 8)}-1-${C1.slice(0, 12)}`);
   assert.equal(repos.prs[0].head, repos.created[0].branch);
   assert.match(repos.prs[0].body, /scored by Mynt/);
   assert.match(repos.prs[0].body, /\| apr_cap \| pass \|/);
@@ -655,6 +662,37 @@ test("a passing provider error doesn't fail an exploration; a lasting one does",
   assert.equal(failed.status, "failed", "past the grace period it fails");
   assert.match(failed.error, /503/);
   boat.costDollars = cost;
+});
+
+test("an explorer's end is recorded before its sandbox stops, so a GitHub hiccup reading its branch is retried", async () => {
+  const { db, explore, boat, repos, call, ready } = await setup();
+  const { client } = await ready();
+  const job = (await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", explorers: 1 })).data;
+  await explore.tick();
+  const sbx = await sandboxOf(db, job.id, 1);
+  boat.ready(sbx);
+  await explore.tick();
+  const branch = boat.sandboxes.get(sbx).opts.env.MYNT_BRANCH;
+  repos.refs.set(branch, "1".repeat(40));
+  boat.finishAgent(sbx, 1, "Re-cut the grades");
+  const resolve = repos.resolveRef;
+  repos.resolveRef = async () => {
+    throw new Error("GitHub couldn't resolve the branch (502)");
+  };
+  await explore.tick();
+  assert.equal((await explore.get(job.id)).status, "exploring", "ridden out, not failed");
+  const v = (await variants(explore, job.id)).find((x) => x.k === 1);
+  assert.equal(v.status, "finishing");
+  assert.equal(v.summary, "Re-cut the grades", "the agent's result is kept");
+  assert.ok(boat.sandboxes.get(sbx).stopped);
+  // The sandbox is gone now; reading the agent again would fail. The next tick only asks GitHub.
+  boat.sandboxes.get(sbx).files.delete(`${A}/state.json`);
+  repos.resolveRef = resolve;
+  await explore.tick();
+  const after = (await variants(explore, job.id)).find((x) => x.k === 1);
+  assert.equal(after.status, "scoring");
+  assert.equal(after.commit_sha, "1".repeat(40));
+  assert.equal((await explore.get(job.id)).status, "scoring");
 });
 
 test("Mynt's checkout of a pinned commit works on a real repository (a SHA can't be cloned with --branch)", async () => {

@@ -11,7 +11,8 @@ export const QUOTA_MESSAGE = "The sandbox provider has used up this account's al
 export function isTransient(e: unknown): boolean {
   if (isQuotaExhausted(e)) return false;
   const m = String((e as Error)?.message ?? e);
-  return /: (429|5\d\d)\b|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
+  // "boat: 503 ..." from the sandbox clients, "GitHub couldn't resolve x (502)" from the GitHub App.
+  return /: (429|5\d\d)\b|\((429|5\d\d)\)|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
 }
 
 // The message to record when an error does fail the work: quota exhaustion says what an admin must do.

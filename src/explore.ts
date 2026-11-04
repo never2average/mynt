@@ -9,13 +9,13 @@ import { agentState, launchAgent, WORKSPACES_ROOT } from "./agent-host.js";
 import type { BoatClient } from "./boat.js";
 import type { Db } from "./db.js";
 import type { DeskConfig, DeskService } from "./desk.js";
-import { isQuotaExhausted, isTransient, QUOTA_MESSAGE } from "./builds.js";
 import { DATASET_SIZE, datasetInputs, generateDataset, jsonl, newDatasetSecret, splitKeys, type Economics, type GeneratorParams } from "./explore-data.js";
 import { OBJECTIVES, SCORER_SCRIPT, scoreWithStability, type Objective, type ScoringSpec } from "./explore-score.js";
 import type { RepoAccess } from "./github.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import type { ReviewService } from "./review.js";
 import type { Store, User } from "./store.js";
+import { failureMessage, GraceTracker } from "./transient.js";
 import { serialLoop } from "./worker.js";
 
 // Algorithm explorations, an extension of the product desk. A product's core_algorithms (eligibility, underwriting,
@@ -90,6 +90,7 @@ const TABLES = `
     token_hash text,
     started_at timestamptz,
     token_minted_at timestamptz,
+    agent_ok boolean,
     agent_cost_usd numeric NOT NULL DEFAULT 0,
     summary text,
     score_sandbox_id text,
@@ -104,6 +105,7 @@ const TABLES = `
     proposed_at timestamptz,
     PRIMARY KEY (job_id, k)
   );
+  ALTER TABLE financial_products.explore_variants ADD COLUMN IF NOT EXISTS agent_ok boolean;
   -- One active exploration per product algorithm, enforced by the database so two starts can't race.
   CREATE UNIQUE INDEX IF NOT EXISTS explore_jobs_active_idx ON financial_products.explore_jobs (product_id, algorithm_id)
     WHERE status NOT IN ('finished', 'failed', 'stopped', 'over_budget');
@@ -399,6 +401,10 @@ export class ExploreService {
     ]);
   }
 
+  private async variant(jobId: string, k: number) {
+    return (await this.one("SELECT * FROM financial_products.explore_variants WHERE job_id = $1 AND k = $2", [jobId, k]))!;
+  }
+
   private async variants(jobId: string) {
     return this.all("SELECT * FROM financial_products.explore_variants WHERE job_id = $1 ORDER BY k", [jobId]);
   }
@@ -427,25 +433,20 @@ export class ExploreService {
 
   // A provider's passing hiccup (a 5xx, a rate limit, a dropped connection) mustn't throw away an exploration that
   // has already spent money: retry on the next ticks, as builds do, and fail only once it has lasted this long.
-  private transient = new Map<string, number>();
   static TRANSIENT_GRACE_MS = Number(process.env.MYNT_TRANSIENT_GRACE_MS || 600000);
+  private grace = new GraceTracker(() => ExploreService.TRANSIENT_GRACE_MS);
 
   async tick() {
     if (!this.enabled) return;
     for (const j of await this.all("SELECT * FROM financial_products.explore_jobs WHERE status <> ALL($1) ORDER BY created_at", [DONE])) {
       try {
         await this.advance(j);
-        this.transient.delete(j.id as string);
+        this.grace.clear(j.id as string);
       } catch (e) {
-        if (isTransient(e)) {
-          const since = this.transient.get(j.id as string) ?? Date.now();
-          this.transient.set(j.id as string, since);
-          if (Date.now() - since < ExploreService.TRANSIENT_GRACE_MS) continue;
-        }
-        this.transient.delete(j.id as string);
+        if (this.grace.rideOut(j.id as string, e)) continue;
         const current = await this.one("SELECT status FROM financial_products.explore_jobs WHERE id = $1", [j.id]);
         if (current && DONE.includes(current.status as string)) continue; // stopped while this tick was in flight
-        await this.end(j, "failed", { error: isQuotaExhausted(e) ? `${QUOTA_MESSAGE} (${(e as Error).message})` : (e as Error).message });
+        await this.end(j, "failed", { error: failureMessage(e) });
       }
     }
   }
@@ -522,17 +523,23 @@ export class ExploreService {
             if (Date.now() - new Date(v.token_minted_at as string).getTime() > TOKEN_REFRESH_MS) await this.writeToken(j, v);
             continue;
           }
-          await boat.stop(v.sandbox_id as string).catch(() => {});
-          // Pin what the explorer pushed now: whatever lands on its branch later isn't what gets scored or adopted.
-          const ws = await this.workspaceOf(j);
-          const head = await this.repos!.resolveRef(ws.repository, ws.installation_id, v.branch as string);
+          // Record how the explorer ended before stopping its sandbox: after the stop its state can't be read again, and
+          // the next step (asking GitHub for the branch head) may need retrying.
           await this.updateVariant(id, k, {
-            status: agent.ok ? "explored" : "failed",
+            status: "finishing",
+            agent_ok: agent.ok,
             token_hash: null,
-            commit_sha: head,
             summary: agent.state?.summary?.slice(0, 4000) ?? null,
             error: agent.ok ? null : overtime && agent.running ? "Over the time limit" : `Explorer ${agent.state?.error ?? agent.state?.last_subtype ?? "exited"}`,
           });
+          await boat.stop(v.sandbox_id as string).catch(() => {});
+          v.status = "finishing";
+        }
+        if (v.status === "finishing") {
+          // Pin what the explorer pushed now: whatever lands on its branch later isn't what gets scored or adopted.
+          const ws = await this.workspaceOf(j);
+          const head = await this.repos!.resolveRef(ws.repository, ws.installation_id, v.branch as string);
+          await this.updateVariant(id, k, { status: (await this.variant(id, k)).agent_ok ? "explored" : "failed", commit_sha: head });
         }
       }
       vs = await this.variants(id);
@@ -692,8 +699,12 @@ export class ExploreService {
       `Merging this doesn't change the product. To use it, merge, then set this algorithm's \`version\` in the product's definition to the merged ref. Opened by Mynt (exploration ${j.id}); the numbers come from Mynt scoring synthetic holdout applicants the explorer never saw.`,
     ].join("\n");
     // From a branch Mynt creates at the commit it scored: whatever was pushed to the explorer's branch since isn't in it.
-    const head = `mynt/adopt-${String(j.id).slice(0, 8)}-${k}-${suffix()}`;
-    await this.repos!.createBranch(ws.repository, ws.installation_id, head, v.commit_sha as string);
+    // Its name is fixed per variant and commit, so a retry after a failed pull request reuses it rather than leaving
+    // another branch behind; a branch of that name at any other commit is refused.
+    const head = `mynt/adopt-${String(j.id).slice(0, 8)}-${k}-${String(v.commit_sha).slice(0, 12)}`;
+    const existing = await this.repos!.resolveRef(ws.repository, ws.installation_id, head);
+    if (existing && existing !== v.commit_sha) throw new Error(`Branch ${head} exists at another commit; delete it and adopt again`);
+    if (!existing) await this.repos!.createBranch(ws.repository, ws.installation_id, head, v.commit_sha as string);
     const pr = await this.repos!.openPullRequest(ws.repository, ws.installation_id, {
       head,
       title: `Mynt explorer: ${j.algorithm_id} (${v.angle})`,
