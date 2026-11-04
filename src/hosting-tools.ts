@@ -202,7 +202,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     "app_status",
     {
       title: "How a hosted app is doing",
-      description: "Developer: your hosted app's container on your VM: running or not, since when, health, restarts, image (the verified commit), CPU and memory.",
+      description: "Developer: your hosted app on your VM, each Compose service (or its one container): running or not, since when, health, how many times it restarted, image (the verified commit), CPU and memory.",
       inputSchema: { app_id: z.string() },
       annotations: { readOnlyHint: true },
     },
