@@ -38,7 +38,7 @@ import {
   type User,
 } from "./store.js";
 import { registerFirmTools, registerMarketplaceTools } from "./marketplace.js";
-import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorStateOf } from "./vendors.js";
+import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { registerTakeRateAdminTools, registerTakeRateTools } from "./take-rates.js";
@@ -1065,8 +1065,9 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
         const pins = await buildPins(store, record, live.version, regime);
         if (record.definition) {
           pins.definition_hash = definitionHash(record.definition as unknown as Definition);
-          pins.contract = deriveContract(record.definition as unknown as Definition, live.version);
-          const bindings = await vendorBindingsOf(store, ((record.definition as unknown as Definition).connections ?? []) as never);
+          const connections = ((record.definition as unknown as Definition).connections ?? []) as never;
+          pins.contract = deriveContract(record.definition as unknown as Definition, live.version, await vendorServedActions(store, connections));
+          const bindings = await vendorBindingsOf(store, connections);
           if (bindings.length) {
             pins.vendor_bindings = bindings;
             pins.state.vendors = {};

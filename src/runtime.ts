@@ -4,6 +4,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
 import { DuplicateError, type AccessRequest, type App, type Handoff, type ProductRecord, type Store, type User } from "./store.js";
+import { open } from "./vault.js";
+import { isBlockedAddress, resolveVendorUrl, safePost, type VendorCallOptions } from "./vendor-call.js";
 
 // The runtime layer: what a developer's shipped app talks to. Per-app API keys for the REST API
 // (src/runtime-api.ts), webhooks, a sandbox, app releases and analytics.
@@ -72,6 +74,27 @@ export async function emitEvent(store: Store, appIds: string[], type: WebhookEve
   if ((await store.enqueueEvent([...new Set(appIds)], payload, sandbox)) > 0) kick?.();
 }
 
+// Events a firm (an innovator) gets at its own webhooks, about what Mynt did for it: a client action its
+// product's bound vendor service answered, with the full result (sealed while queued, opened only to send).
+export const FIRM_WEBHOOK_EVENTS = ["vendor_action.completed", "vendor_action.failed"] as const;
+export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
+
+// Queues `type` for every webhook of the firm subscribed to it. `sealedResult` (sealed with the sandbox or live
+// key, as `sandbox` says) goes out as data.result.
+export async function emitFirmEvent(store: Store, entityId: string, type: FirmWebhookEvent, data: Record<string, unknown>, sandbox: boolean, sealedResult?: string) {
+  const payload = { id: randomUUID(), type, created_at: new Date().toISOString(), data: { ...data, ...(sealedResult ? { result_sealed: sealedResult } : {}) } };
+  if ((await store.enqueueFirmEvent(entityId, payload, sandbox)) > 0) kick?.();
+}
+
+// A queued payload as sent: a sealed result is opened into data.result.
+function wireBody(payload: unknown, sandbox: boolean): string {
+  const p = payload as { data?: Record<string, unknown> };
+  const sealed = p?.data?.result_sealed;
+  if (typeof sealed !== "string") return JSON.stringify(payload);
+  const { result_sealed, ...data } = p.data!;
+  return JSON.stringify({ ...p, data: { ...data, result: JSON.parse(open(sealed, sandbox)) } });
+}
+
 // To every app that includes the product.
 export async function emitProductEvent(store: Store, productId: string, type: WebhookEvent, data: Record<string, unknown> = {}) {
   const apps = await store.appsUsingProduct(productId);
@@ -113,13 +136,32 @@ export function webhookUrlProblem(raw: string, production = process.env.NODE_ENV
   if (url.username || url.password) return "URLs with credentials aren't allowed";
   if (url.protocol === "http:" && loopback && !production) return null;
   if (url.protocol !== "https:") return "Webhook URLs must use https";
-  const privateIp =
-    isIP(host) &&
-    (/^(10|127|0)\./.test(host) || /^169\.254\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      host === "::1" || /^f[cd]/.test(host) || /^fe80:/.test(host));
+  // Every private, loopback, link-local, carrier-grade NAT or reserved address, in any notation (IPv4-mapped
+  // IPv6 included), by the same rules as calls to vendors.
+  const privateIp = isIP(host) !== 0 && isBlockedAddress(host);
   if (loopback || privateIp || host.endsWith(".internal") || host.endsWith(".local")) return "Webhook URLs must be publicly reachable";
   return null;
 }
+
+// The same rules, plus what the host resolves to now (a public name pointing at a private address is refused).
+// Deliveries check again at send time and connect only to the address they checked.
+export async function checkWebhookUrl(raw: string, production = process.env.NODE_ENV === "production"): Promise<string | null> {
+  const problem = webhookUrlProblem(raw, production);
+  if (problem) return problem;
+  try {
+    await resolveVendorUrl(raw, webhookOutbound(production));
+  } catch (e) {
+    return `Webhook URLs must be publicly reachable (${(e as Error).message})`;
+  }
+  return null;
+}
+// How webhooks go out: the vendors' outbound guard, on any https port; plain http to loopback only outside production.
+const webhookOutbound = (production = process.env.NODE_ENV === "production", timeoutMs?: number): VendorCallOptions => ({
+  anyPort: true,
+  anyBody: true,
+  allowInsecureLoopback: !production,
+  timeoutMs,
+});
 
 export const signWebhook = (secret: string, timestamp: number, body: string) =>
   createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
@@ -129,7 +171,6 @@ export interface WebhookWorkerOptions {
   timeoutMs?: number; // per request (default 10s)
   maxAttempts?: number; // then the delivery is marked failed (default 8)
   batch?: number;
-  fetch?: typeof fetch;
 }
 
 // Seconds before retry n (1-based): 30s, 1m, 2m, 4m … capped at 6h.
@@ -138,27 +179,21 @@ export const retryDelay = (attempt: number) => Math.min(30 * 2 ** (attempt - 1),
 // Sends every delivery due at `now` once. Tests pass a later `now` to skip the backoff.
 export async function deliverDueWebhooks(store: Store, opts: WebhookWorkerOptions & { now?: Date } = {}) {
   const now = opts.now ?? new Date();
-  const doFetch = opts.fetch ?? fetch;
   const result = { attempted: 0, delivered: 0, failed: 0 };
   for (;;) {
     const due = await store.claimDueDeliveries(now, opts.batch ?? 20);
     if (due.length === 0) return result;
     await Promise.all(
       due.map(async (d) => {
-        const body = JSON.stringify(d.payload);
         const t = Math.floor(Date.now() / 1000);
         let code: number | null = null;
         let error: string | null = null;
         try {
-          const res = await doFetch(d.url, {
-            method: "POST",
-            body,
-            redirect: "manual",
-            signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
-            headers: { "Content-Type": "application/json", "User-Agent": "Mynt-Webhooks/1", "Mynt-Signature": `t=${t},v1=${signWebhook(d.secret, t, body)}` },
-          });
-          code = res.status;
-          await res.body?.cancel().catch(() => {});
+          const body = wireBody(d.payload, d.sandbox);
+          // Resolved, checked and pinned like a call to a vendor: never a private address, never a redirect.
+          const res = await safePost(d.url, body, { "User-Agent": "Mynt-Webhooks/1", "Mynt-Signature": `t=${t},v1=${signWebhook(d.secret, t, body)}` }, webhookOutbound(undefined, opts.timeoutMs));
+          code = res.http_status;
+          error = res.error;
         } catch (e) {
           error = (e as Error).message.slice(0, 500);
         }
@@ -402,7 +437,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ app_id, url, events }) => {
       const app = await ownApp(app_id);
       if (!app) return fail(`No app with id '${app_id}'`);
-      const problem = webhookUrlProblem(url);
+      const problem = await checkWebhookUrl(url);
       if (problem) return fail(problem);
       if ((await store.webhooksForApps([app.id])).length >= 10) return fail("An app can have at most 10 webhooks");
       const { webhook, secret } = await store.createWebhook(user.id, { app_id: app.id, url, events: [...new Set(events)] });

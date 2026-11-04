@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
 
 // The customer vault: data a customer gave (or let Mynt fetch) once, kept per app and customer reference,
@@ -18,20 +18,29 @@ function keyFor(sandbox: boolean): Buffer | null {
 
 export const vaultAvailable = (sandbox: boolean) => keyFor(sandbox) !== null;
 
-export function seal(value: string, sandbox: boolean): string {
-  const key = keyFor(sandbox);
+// Sandbox data that must outlive a restart (vendors' results queued for an innovator's webhook): a key derived
+// from MYNT_VAULT_KEY under its own label, so it never opens live data and live data never opens with it.
+function durableSandboxKey(): Buffer | null {
+  const live = keyFor(false);
+  return live ? Buffer.from(hkdfSync("sha256", live, Buffer.alloc(0), "mynt-sandbox-durable-v1", 32)) : null;
+}
+
+// `durable` matters for sandbox only: sealed with the derived key (marked v1s) when MYNT_VAULT_KEY is set.
+export function seal(value: string, sandbox: boolean, durable = false): string {
+  const derived = sandbox && durable ? durableSandboxKey() : null;
+  const key = derived ?? keyFor(sandbox);
   if (!key) throw new Error("vault key not configured");
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ct = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-  return ["v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), ct.toString("base64")].join(":");
+  return [derived ? "v1s" : "v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), ct.toString("base64")].join(":");
 }
 
 export function open(sealed: string, sandbox: boolean): string {
-  const key = keyFor(sandbox);
-  if (!key) throw new Error("vault key not configured");
   const [v, iv, tag, ct] = sealed.split(":");
-  if (v !== "v1") throw new Error("unknown vault format");
+  if (v !== "v1" && !(v === "v1s" && sandbox)) throw new Error("unknown vault format");
+  const key = v === "v1s" ? durableSandboxKey() : keyFor(sandbox);
+  if (!key) throw new Error("vault key not configured");
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64"));
   decipher.setAuthTag(Buffer.from(tag, "base64"));
   return Buffer.concat([decipher.update(Buffer.from(ct, "base64")), decipher.final()]).toString("utf8");

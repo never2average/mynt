@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { createMcpHttpServer } from "../dist/http.js";
-import { compareSemver, deliverDueWebhooks, retryDelay, webhookUrlProblem } from "../dist/runtime.js";
+import { checkWebhookUrl, compareSemver, deliverDueWebhooks, emitEvent, retryDelay, webhookUrlProblem } from "../dist/runtime.js";
 import { Store } from "../dist/store.js";
 import { CATALOG, licensed } from "./helpers.js";
 
@@ -619,6 +619,58 @@ test("releases enforce the experience structure checks, like publish_app", async
     assert.ok(refused.data.failed_checks.some((c) => /disclosure/.test(c.name)), JSON.stringify(refused.data));
     assert.equal((await ctx.call(dev, "publish_app", { app_id: app.id })).isError, true);
   } finally {
+    ctx.close();
+  }
+});
+
+test("webhook URLs: private, metadata and carrier-grade NAT addresses refused in any notation", async () => {
+  for (const url of [
+    "https://[::ffff:10.0.0.1]/hook",
+    "https://[::ffff:a9fe:a9fe]/hook",
+    "https://[::ffff:169.254.169.254]/hook",
+    "https://100.64.0.1/hook",
+    "https://169.254.169.254/latest/meta-data/",
+    "https://[fd00:ec2::254]/",
+    "https://0.0.0.0/",
+  ])
+    assert.match(webhookUrlProblem(url, true), /publicly/, url);
+  assert.equal(await checkWebhookUrl("https://8.8.8.8:8443/hook", true), null, "a public address on another https port is fine (not called)");
+  assert.match(await checkWebhookUrl("https://[::ffff:7f00:1]/hook", true), /publicly/);
+  assert.match(await checkWebhookUrl("http://127.0.0.1:8080/hook", true), /https/);
+  assert.equal(await checkWebhookUrl("http://127.0.0.1:8080/hook", false), null, "loopback http outside production, for local testing");
+});
+
+test("webhook deliveries go through the outbound guard: no private addresses, no redirects", async () => {
+  const ctx = await setup();
+  const redirecting = createHttpServer((req, res) => {
+    req.resume();
+    req.on("end", () => res.writeHead(302, { Location: "http://169.254.169.254/latest/meta-data/" }).end());
+  }).listen(0, "127.0.0.1");
+  await new Promise((r) => redirecting.once("listening", r));
+  try {
+    await publishedBy(ctx, "Ines");
+    const { client: dev, app } = await devWithApp(ctx);
+    // At creation: refused before anything is stored.
+    for (const url of ["https://[::ffff:169.254.169.254]/hook", "https://100.64.0.9/hook"])
+      assert.match((await ctx.call(dev, "create_webhook", { app_id: app.id, url, events: ["product.unpublished"] })).data.error, /publicly/, url);
+    // Rows that got in another way (or a name that later points somewhere private) are refused at send time,
+    // with no response code to learn from.
+    const owner = (await ctx.store.getApp(app.id)).owner_id;
+    const hooks = [];
+    for (const url of ["https://10.0.0.7:8443/x", "https://[::ffff:169.254.169.254]/latest/meta-data/", `http://127.0.0.1:${redirecting.address().port}/hook`])
+      hooks.push((await ctx.store.createWebhook(owner, { app_id: app.id, url, events: ["product.unpublished"] })).webhook);
+    await emitEvent(ctx.store, [app.id], "product.unpublished", { product_id: "green-fd" });
+    await deliverDueWebhooks(ctx.store, { maxAttempts: 1 });
+    const [privateHook, metadataHook, redirectHook] = await Promise.all(hooks.map(async (h) => (await ctx.store.webhookDeliveries(h.id))[0]));
+    for (const d of [privateHook, metadataHook]) {
+      assert.equal(d.status, "failed");
+      assert.equal(d.last_response_code, null);
+      assert.match(d.last_error, /^refused: .*private/);
+    }
+    assert.equal(redirectHook.status, "failed");
+    assert.equal(redirectHook.last_error, "redirects aren't followed");
+  } finally {
+    redirecting.close();
     ctx.close();
   }
 });

@@ -3186,7 +3186,7 @@
       "vendor_subscription_id": {
        "type": "string",
        "format": "uuid",
-       "description": "Optional: the owner's vendor subscription (subscribe_vendor_service) this handoff runs through. The party must be that subscription's vendor and consent_purpose the service type's; Mynt then calls the vendor's standard service for this handoff (see Vendors in the README)"
+       "description": "Optional: the owner's vendor subscription (subscribe_vendor_service) this handoff runs through. The party must be that subscription's vendor, consent_purpose the service type's, and the handoff's sends.required must include the service type's required inputs. Mynt then calls the vendor's standard service for this handoff: for prefill, and when a device starts the handoff's client action (the full result goes to the owner's firm webhooks; the device gets only the outcome the service type's client_result allows). See Vendors in the README"
       },
       "service_type": {
        "$ref": "#/$defs/key",

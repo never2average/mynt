@@ -228,7 +228,7 @@ export async function checkDefinition(store: Store, record: ProductRecord | null
     if (n !== 1) errors.push(`partner handoff '${h}' needs exactly one handoff_to_party (has ${n})`);
   }
   // Handoffs bound to a vendor's standard service (see vendors.ts).
-  errors.push(...(await checkVendorHandoffs(store, entityId ?? def.owner_entity_id, of("handoff_to_party"))));
+  errors.push(...(await checkVendorHandoffs(store, entityId ?? def.owner_entity_id, of("handoff_to_party"), [...nodes.get("partner_handoff")!.values()] as never)));
   for (const a of nodes.get("core_algorithm")!.keys()) {
     const uses = of("algorithm_uses_risk_model").filter((c) => c.from.id === a);
     const primary = uses.filter((c) => c.attributes?.role === "primary").length;

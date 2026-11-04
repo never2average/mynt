@@ -31,7 +31,13 @@ export interface ContractAction {
   idempotent?: boolean;
   data: "public" | "personal";
   data_requirements?: { field: string; known: boolean; sensitivity?: Sensitivity; capture?: CaptureMethod[] }[];
+  // Served by a vendor's standard service Mynt calls for the product: the device gets back only this outcome
+  // (a status, a reference, the listed fields, and a redirect_url to the provider's page when `redirect`).
+  served_by?: { kind: "vendor_service"; service_type: string | null; client_result: { statuses: string[]; fields: string[]; redirect: boolean } };
 }
+
+// Per handoff id, the vendor service that serves it (see vendorServedActions in vendors.ts).
+export type ServedActions = Record<string, { service_type: string; client_result: { statuses: string[]; fields: string[]; redirect: boolean } }>;
 
 export interface DeveloperContract {
   product_id: string;
@@ -55,7 +61,7 @@ export interface DeveloperContract {
   contract_hash: string;
 }
 
-export function deriveContract(def: Definition, version: number): DeveloperContract {
+export function deriveContract(def: Definition, version: number, served: ServedActions = {}): DeveloperContract {
   const conns = (def.connections ?? []) as Conn[];
   const nodes = (field: string) => ((def[field] as Node[] | undefined) ?? []).filter((n) => n && typeof n._id === "string");
   const applies = conns.filter((c) => c.type === "applies_to");
@@ -88,6 +94,10 @@ export function deriveContract(def: Definition, version: number): DeveloperContr
     const party = conns.find((c) => c.type === "handoff_to_party" && c.from.id === h._id);
     const serves = conns.find((c) => c.type === "handoff_serves_component" && c.from.id === h._id)?.to.id;
     const purpose = (party?.attributes?.consent_purpose as string | null | undefined) ?? null;
+    // Bound to a vendor subscription: Mynt calls the vendor; which one, and how, stays out of the contract.
+    const vendor = party?.attributes?.vendor_subscription_id
+      ? (served[h._id] ?? { service_type: (party.attributes.service_type as string | undefined) ?? null, client_result: { statuses: ["completed", "failed", "pending"], fields: [], redirect: false } })
+      : null;
     actions.push({
       id: h._id,
       name: String(h.name ?? h._id),
@@ -104,6 +114,7 @@ export function deriveContract(def: Definition, version: number): DeveloperContr
       data_requirements: ((h.sends as { required?: unknown } | undefined)?.required as string[] | undefined ?? [])
         .filter((f) => typeof f === "string")
         .map((f) => (isDataField(f) ? { field: f, known: true, sensitivity: DATA_DICTIONARY[f].sensitivity, capture: DATA_DICTIONARY[f].capture } : { field: f, known: false })),
+      ...(vendor ? { served_by: { kind: "vendor_service" as const, ...vendor } } : {}),
     });
   }
   const occursOn = (id: string) => conns.find((c) => c.type === "occurs_on" && c.from.id === id)?.to.id;

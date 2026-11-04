@@ -55,5 +55,9 @@
   "consent_purpose": "credit_report_pull",
   "fills": [],
   "innovator_licences": [],
-  "vendor_licences": []
+  "vendor_licences": [],
+  "client_result": {
+    "fields": [],
+    "redirect": false
+  }
 }

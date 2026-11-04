@@ -10,7 +10,7 @@ import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { masked, open, sandboxPrefill, seal, validateValue, vaultAvailable } from "./vault.js";
 import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import type { VendorCallOptions } from "./vendor-call.js";
-import { vendorPrefill } from "./vendors.js";
+import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
 
 // The runtime REST API under /v1, for developers' shipped apps. Authenticated with a per-app key
 // (Authorization: Bearer mynt_live_… / mynt_test_…), read-only over products, plus hand-offs to
@@ -20,7 +20,8 @@ import { vendorPrefill } from "./vendors.js";
 // server mints it (POST /v1/client_sessions) for one customer, some products and some client-safe
 // contract actions, for at most an hour, and the device calls /v1/client/* with its mcs_… secret: the
 // contract's offers, the provider-hosted actions (only once their consent is recorded), and evidence of
-// what was shown and agreed.
+// what was shown and agreed. An action whose handoff is bound to a vendor's standard service is served by
+// Mynt calling the vendor: the full result goes to the innovator, the device gets only a minimal outcome.
 
 export interface RuntimeApiOptions {
   publicUrl?: string; // origin used for sandbox hand-off URLs (default PUBLIC_URL, else the Host header)
@@ -28,6 +29,7 @@ export interface RuntimeApiOptions {
   maxBodyBytes?: number; // default 16 KiB
   hosting?: HostingService | null; // tenant VMs register and fetch their policy here
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
+  callbackRateLimit?: { perSubscription?: number; perCaller?: number }; // vendor callbacks a minute (default 600 per signed subscription, 1200 per caller)
 }
 
 class ApiError extends Error {
@@ -65,7 +67,7 @@ class RateLimiter {
   }
 }
 
-async function readJson(req: IncomingMessage, limit: number): Promise<unknown> {
+async function readRaw(req: IncomingMessage, limit: number): Promise<string> {
   if (Number(req.headers["content-length"] ?? 0) > limit) throw new ApiError(413, "payload_too_large", `Request bodies are limited to ${limit} bytes`);
   const chunks: Buffer[] = [];
   let size = 0;
@@ -74,8 +76,13 @@ async function readJson(req: IncomingMessage, limit: number): Promise<unknown> {
     if (size > limit) throw new ApiError(413, "payload_too_large", `Request bodies are limited to ${limit} bytes`);
     chunks.push(chunk as Buffer);
   }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readJson(req: IncomingMessage, limit: number): Promise<unknown> {
+  const raw = await readRaw(req, limit);
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(raw);
   } catch {
     throw new ApiError(400, "invalid_json", "The request body must be JSON");
   }
@@ -146,6 +153,8 @@ const productView = (r: ProductRecord) => {
 
 export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
   const limiter = new RateLimiter(opts.rateLimit?.capacity ?? 60, opts.rateLimit?.perMinute ?? 60);
+  const callbackLimiter = new RateLimiter(opts.callbackRateLimit?.perSubscription ?? 600, opts.callbackRateLimit?.perSubscription ?? 600); // vendor callbacks, per subscription once signed
+  const callerLimiter = new RateLimiter(opts.callbackRateLimit?.perCaller ?? 1200, opts.callbackRateLimit?.perCaller ?? 1200); // vendor callbacks, per caller address before the signature check
   const maxBody = opts.maxBodyBytes ?? 16 * 1024;
 
   const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
@@ -331,6 +340,30 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       if (a.consent_purpose) {
         if (!(await consentFor(record.product.id, a.consent_purpose))) throw new ApiError(409, "consent_required", `Record consent '${a.consent_purpose}' (POST /v1/client/evidence) before starting '${a.id}'`);
       }
+      // Served by the product's bound vendor: Mynt calls it with the service type's declared inputs from the
+      // vault; the device gets only the outcome the service type allows.
+      if (record.pins.vendor_bindings?.some((b) => b.handoff_id === a.id)) {
+        const customer = requireCustomer();
+        const served = await vendorAction(
+          store,
+          {
+            record,
+            action: a.id,
+            sandbox: session.sandbox,
+            app_id: app.id,
+            session_id: session.id,
+            customer_ref: customer,
+            held: async () => Object.fromEntries((await store.vaultFields(app.id, customer, session.sandbox)).map((h) => [h.field, open(h.sealed, session.sandbox)])),
+            consent: async (purpose) => {
+              const latest = await consentFor(record.product.id, purpose);
+              return latest ? { id: latest.id, created_at: latest.created_at } : null;
+            },
+          },
+          opts.vendors,
+        );
+        if (served.kind === "error") throw new ApiError(served.status, served.code, served.message);
+        if (served.kind === "ok") return send(res, 201, served.outcome, cors);
+      }
       // The personal data the action sends must be held for this customer first.
       const required = (a.data_requirements ?? []).filter((r) => r.known && r.sensitivity !== "public" && !r.capture?.includes("derived")).map((r) => r.field);
       if (required.length) {
@@ -363,6 +396,13 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         redirect_url: redirect,
       });
       return send(res, 201, { handoff_id: h.id, redirect_url: h.redirect_url, action: a.id, sandbox: session.sandbox }, cors);
+    }
+    const run = path.match(/^\/v1\/client\/action_runs\/([^/]+)$/);
+    if (run) {
+      allow("GET");
+      const outcome = await vendorActionRun(store, run[1], { app_id: app.id, customer_ref: session.customer_ref, sandbox: session.sandbox });
+      if (!outcome) throw new ApiError(404, "not_found", "No such action for this customer");
+      return send(res, 200, outcome, cors);
     }
     const journey = path.match(/^\/v1\/client\/journeys\/([a-z][a-z0-9_]*)$/);
     if (journey) {
@@ -421,6 +461,21 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     }
 
     if (path.startsWith("/v1/client/")) return clientRoute(req, res, url, path, method, cors, allow);
+
+    // A vendor's final answer to an asynchronous request (e-sign, e-mandate, DigiLocker), signed with the
+    // subscription's signing secret. Server to server: no browser origin, no app key.
+    const callback = path.match(/^\/v1\/vendor\/callback\/([^/]+)$/);
+    if (callback) {
+      allow("POST");
+      // Before the signature is checked, a limit per caller address; after, per subscription (so nobody without the
+      // secret can use up a vendor's allowance).
+      const wait = callerLimiter.take(req.socket.remoteAddress ?? "unknown");
+      if (wait) throw new ApiError(429, "rate_limited", "Too many requests", { "Retry-After": String(wait) });
+      const raw = await readRaw(req, Math.max(maxBody, 256 * 1024));
+      const sig = req.headers["mynt-signature"];
+      const r = await vendorCallback(store, callback[1], raw, typeof sig === "string" ? sig : undefined, () => callbackLimiter.take(callback[1]) === 0);
+      return send(res, r.status, r.body);
+    }
 
     // Tenant VMs: a one-time registration, then their policy on their agent token.
     if (path === "/v1/hosting/bootstrap") {
