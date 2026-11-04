@@ -894,6 +894,12 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     const record = await store.getProduct(id);
     return record && record.owner_id === user.id ? record : undefined;
   };
+  // Admins keep Mynt's reference catalogue (products with no owner): after set_product_definition they
+  // test and publish its new version, as an innovator does for their own products.
+  const publishableProduct = async (id: string) => {
+    const record = await store.getProduct(id);
+    return record && (record.owner_id === user.id || (record.owner_id === null && user.roles.includes("admin"))) ? record : undefined;
+  };
 
   server.registerTool(
     "create_product",
@@ -966,11 +972,11 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     {
       title: "Test a financial product",
       description:
-        "Innovator: run disclosure, consistency and misleading-claim checks on one of your products. A passing report is required to publish.",
+        "Innovator: run disclosure, consistency and misleading-claim checks on one of your products (admins: also Mynt's reference products). A passing report is required to publish.",
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const record = await ownProduct(id);
+      const record = await publishableProduct(id);
       if (!record) return fail(`No product of yours with id '${id}'`);
       // A pending draft version is what gets tested; otherwise the product itself.
       const draft = await store.draftVersion(id);
@@ -1014,11 +1020,12 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     "publish_product",
     {
       title: "Publish a financial product",
-      description: "Innovator: list one of your tested products in the public catalog so consumers and developers can use it.",
+      description:
+        "Innovator: list one of your tested products in the public catalog so consumers and developers can use it (admins: also publish the next version of a Mynt reference product after set_product_definition).",
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const record = await ownProduct(id);
+      const record = await publishableProduct(id);
       if (!record) return fail(`No product of yours with id '${id}'`);
       // A pending draft version goes live in place of the current one; otherwise the product itself.
       const draft = await store.draftVersion(id);

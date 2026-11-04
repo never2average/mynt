@@ -1,0 +1,1501 @@
+{
+  "_id": "recurring-deposit",
+  "product_name": "Recurring Deposit",
+  "product_type": "deposits",
+  "descriptions": {
+    "summary": "A fixed amount saved every month for a chosen term, collected automatically by a recurring debit instruction into a term deposit whose interest rate is locked in at opening.",
+    "key_features": [
+      "Fixed monthly instalment collected automatically on the day you choose",
+      "Rate locked in at opening for the whole term",
+      "Terms from 6 months to 10 years",
+      "Premature closure at a disclosed reduced rate",
+      "Deposit insurance by DICGC up to ₹5 lakh per depositor per bank"
+    ],
+    "long": "Mynt reference definition (India), composed of two regulated primitives: a recurring debit mandate (a standing instruction on the customer's account with the bank, or an NACH or UPI AutoPay mandate on another bank's account) that funds a recurring term deposit. A recurring deposit is a term deposit under the RBI Master Direction on Interest Rate on Deposits (2016): the rate is fixed at opening; on premature closure interest is paid at the rate for the period run less a penalty disclosed upfront; individuals' deposits up to ₹1 crore must allow premature withdrawal. Interest is commonly compounded quarterly on each instalment from the date it is credited, and is subject to tax deducted at source above the statutory threshold. Deposit insurance by DICGC up to ₹5 lakh per depositor per bank. ASSUMPTIONS (indicative; each bank sets its own): the 6.5% rate, the 50 bps senior-citizen bonus, the 1% premature-closure penalty, the ₹100 minimum instalment, the late-instalment charge of ₹1.50 per ₹100 per month of delay, one retry three days after a failed debit, and closing the deposit after six consecutive missed instalments. A Mynt reference product names no providers, partners or risk models: the bank that offers it adds its own licence, mandate-registration handoff (with its consent purpose) and governs its own models in its GRC folder.",
+    "documents": {
+      "deposit_insurance": "https://www.dicgc.org.in/",
+      "complaints_ombudsman": "https://cms.rbi.org.in/"
+    }
+  },
+  "owner_entity_id": null,
+  "version": 1,
+  "access_mode": "open",
+  "plane": {
+    "role": "standalone",
+    "sellable": true
+  },
+  "context": {
+    "currencies": [
+      "INR"
+    ],
+    "calendar": "in_banking",
+    "business_day_convention": "following",
+    "day_count": "actual_365_fixed",
+    "time_zone": "Asia/Kolkata"
+  },
+  "components": [
+    {
+      "key": "deposit",
+      "country": "in",
+      "primitive": "account_operations",
+      "action": "issuance",
+      "underlying": "cash",
+      "block": "recurring_term_deposit",
+      "terms": {
+        "instalment_amount": {
+          "$term": "instalment_amount"
+        },
+        "tenor_months": {
+          "$term": "tenor_months"
+        },
+        "maturity_date": {
+          "$term": "maturity_date"
+        }
+      },
+      "schedules": [
+        {
+          "purpose": "interest_posting",
+          "anchor": "first_instalment_date",
+          "cycle": "P3M",
+          "end": {
+            "$term": "maturity_date"
+          },
+          "day_basis": "calendar"
+        },
+        {
+          "purpose": "maturity",
+          "anchor": {
+            "$term": "maturity_date"
+          },
+          "business_day_convention": "following"
+        }
+      ],
+      "election": "required"
+    },
+    {
+      "key": "mandate",
+      "country": "in",
+      "primitive": "payments",
+      "action": "sale",
+      "block": "mandate",
+      "terms": {
+        "mandate_type": "recurring_debit",
+        "rails": [
+          "standing_instruction",
+          "nach",
+          "upi_autopay"
+        ],
+        "amount": {
+          "$term": "instalment_amount"
+        },
+        "debit_day": {
+          "$term": "debit_day"
+        },
+        "source": "customer_bank_account"
+      },
+      "schedules": [
+        {
+          "purpose": "mandate_debit",
+          "anchor": "first_instalment_date",
+          "cycle": {
+            "$term": "instalment_cycle"
+          },
+          "count": {
+            "$term": "tenor_months"
+          },
+          "day_basis": "business",
+          "business_day_convention": "following"
+        }
+      ],
+      "election": "required"
+    }
+  ],
+  "customer_segments": [
+    {
+      "_id": "resident_individual",
+      "name": "Resident individuals (18+)",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 18,
+        "resident": true
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "aadhaar_ekyc",
+              "v_cip",
+              "ckyc_records",
+              "in_person_ovd"
+            ],
+            "validity": "P10Y",
+            "on_expiry": "periodic_kyc_update"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc"
+        }
+      },
+      "fraud": {
+        "product_risk": "low",
+        "channel_risk": "low",
+        "monitoring": [
+          "post_event"
+        ]
+      },
+      "target_market": {
+        "client_type": "retail",
+        "knowledge_experience": "basic",
+        "loss_capacity": "none",
+        "risk_tolerance": "conservative",
+        "objectives": [
+          "regular_saving"
+        ],
+        "holding_period": "P1Y"
+      },
+      "channels": [
+        "app",
+        "web",
+        "branch"
+      ]
+    },
+    {
+      "_id": "senior_citizen",
+      "name": "Resident senior citizens (60+)",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 60,
+        "resident": true
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "aadhaar_ekyc",
+              "v_cip",
+              "ckyc_records",
+              "in_person_ovd"
+            ],
+            "validity": "P10Y",
+            "on_expiry": "periodic_kyc_update"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc"
+        }
+      },
+      "fraud": {
+        "product_risk": "low",
+        "channel_risk": "low",
+        "monitoring": [
+          "post_event"
+        ]
+      },
+      "target_market": {
+        "client_type": "retail",
+        "knowledge_experience": "basic",
+        "loss_capacity": "none",
+        "risk_tolerance": "conservative",
+        "objectives": [
+          "regular_saving",
+          "income_in_retirement"
+        ],
+        "holding_period": "P1Y"
+      },
+      "channels": [
+        "app",
+        "web",
+        "branch",
+        "phone"
+      ]
+    }
+  ],
+  "core_algorithms": [
+    {
+      "_id": "onboarding_eligibility",
+      "algorithm_name": "Recurring deposit opening eligibility",
+      "description": "Requires full KYC, a resident individual and a registered debit instruction on an account in the customer's own name before the first instalment.",
+      "purpose": "eligibility",
+      "repository": "models/rd-opening-eligibility",
+      "version": "1.0.0",
+      "decision": {
+        "knockouts": [
+          {
+            "rule": {
+              "attr": "customer.age",
+              "op": "lt",
+              "value": 18
+            },
+            "reason_code": "below_minimum_age"
+          },
+          {
+            "rule": {
+              "attr": "customer.resident",
+              "op": "eq",
+              "value": false
+            },
+            "reason_code": "non_resident"
+          },
+          {
+            "rule": {
+              "attr": "mandate.account_holder_matches",
+              "op": "eq",
+              "value": false
+            },
+            "reason_code": "mandate_account_not_customers"
+          }
+        ]
+      }
+    },
+    {
+      "_id": "rd_interest",
+      "algorithm_name": "Recurring deposit interest and premature-closure calculator",
+      "description": "Quarterly compounding on each instalment from its credit date; recomputes at the rate for the period run less the penalty on premature closure; charges late instalments per month of delay.",
+      "purpose": "interest_calculation",
+      "repository": "models/rd-interest",
+      "version": "1.0.0"
+    }
+  ],
+  "risk_models": [],
+  "partner_handoffs": [],
+  "terms": [
+    {
+      "_id": "instalment_amount",
+      "label": "Monthly instalment",
+      "type": "money",
+      "currency": "INR",
+      "default": 1000,
+      "range": {
+        "min": 100,
+        "max": 1000000,
+        "step": 10
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "tenor_months",
+      "label": "Term",
+      "type": "integer",
+      "unit": "months",
+      "default": 12,
+      "range": {
+        "min": 6,
+        "max": 120,
+        "step": 3
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "instalment_cycle",
+      "label": "Instalment cycle",
+      "type": "cycle",
+      "default": "P1M",
+      "allowed": [
+        "P1M"
+      ],
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "debit_day",
+      "label": "Debit day of the month",
+      "type": "integer",
+      "default": 5,
+      "range": {
+        "min": 1,
+        "max": 28,
+        "step": 1
+      },
+      "set_by": [
+        "template",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "customer_dated_change",
+        "notice": "P5D",
+        "max_changes": 2,
+        "event": "mandate_amended"
+      }
+    },
+    {
+      "_id": "deposit_rate",
+      "label": "Interest rate",
+      "type": "rate",
+      "unit": "pct_pa",
+      "default": 6.5,
+      "range": {
+        "min": 2.5,
+        "max": 9
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant",
+        "operations"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      },
+      "effective_dated": true
+    },
+    {
+      "_id": "senior_spread_bps",
+      "label": "Senior citizen additional rate",
+      "type": "integer",
+      "unit": "bps",
+      "default": 0,
+      "range": {
+        "min": 0,
+        "max": 100
+      },
+      "set_by": [
+        "template",
+        "segment_override"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "premature_penalty_bps",
+      "label": "Rate reduction on premature closure",
+      "type": "integer",
+      "unit": "bps",
+      "default": 100,
+      "range": {
+        "min": 0,
+        "max": 200
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "late_instalment_charge",
+      "label": "Late instalment charge (₹ per ₹100 of instalment per month of delay)",
+      "type": "percent",
+      "unit": "pct_of_instalment_per_month",
+      "default": 1.5,
+      "range": {
+        "min": 0,
+        "max": 2
+      },
+      "set_by": [
+        "template",
+        "jurisdiction_variant"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change",
+        "notice": "P1M"
+      }
+    },
+    {
+      "_id": "max_missed_instalments",
+      "label": "Consecutive missed instalments before closure",
+      "type": "integer",
+      "default": 6,
+      "range": {
+        "min": 1,
+        "max": 12
+      },
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "maturity_date",
+      "label": "Maturity date",
+      "type": "date",
+      "derived": "add_months(first_instalment_date, tenor_months)",
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    }
+  ],
+  "rates": [
+    {
+      "_id": "deposit_rate",
+      "kind": "deposit",
+      "rate_type": "fixed",
+      "value": {
+        "$term": "deposit_rate"
+      },
+      "spread": {
+        "$term": "senior_spread_bps"
+      },
+      "day_count": "actual_365_fixed",
+      "compounding": "P3M",
+      "application": "maturity",
+      "method": "each instalment compounds quarterly from its credit date"
+    },
+    {
+      "_id": "premature_rate",
+      "kind": "penalty",
+      "rate_type": "fixed",
+      "value": {
+        "$term": "premature_penalty_bps"
+      },
+      "method": "rate for the period actually run, less this many bps",
+      "application": "maturity"
+    }
+  ],
+  "fees": [
+    {
+      "_id": "late_instalment",
+      "type": "LATE_PAYMENT",
+      "method": "rate_based",
+      "rate": {
+        "$term": "late_instalment_charge"
+      },
+      "rate_base": "instalment",
+      "payer": "customer",
+      "tax": [
+        "in_gst"
+      ]
+    }
+  ],
+  "limits": [
+    {
+      "_id": "instalment_size",
+      "kind": "constraint",
+      "constraint_type": "MIN_LIMIT",
+      "min": {
+        "amount": 100,
+        "currency": "INR"
+      },
+      "max": {
+        "amount": 1000000,
+        "currency": "INR"
+      },
+      "scope": "account"
+    },
+    {
+      "_id": "debit_equals_instalment",
+      "kind": "control",
+      "event_stream": "mandate_debit",
+      "rule_type": "conditional",
+      "conditions": [
+        {
+          "attr": "txn.amount",
+          "op": "ne",
+          "value": {
+            "$term": "instalment_amount"
+          }
+        }
+      ],
+      "scope": "account",
+      "outcome": "decline",
+      "purpose": "policy",
+      "state": "active"
+    }
+  ],
+  "servicing_policies": [
+    {
+      "_id": "early_withdrawal",
+      "kind": "early_withdrawal",
+      "config": {
+        "allowed": "with_penalty",
+        "rate_basis": "rate applicable to the period actually run",
+        "penalty_rate_reduction": {
+          "$term": "premature_penalty_bps"
+        },
+        "partial": false
+      }
+    },
+    {
+      "_id": "missed_instalments",
+      "kind": "missed_instalments",
+      "config": {
+        "retry": "once, three days after a failed debit",
+        "catch_up": "missed instalments can be paid later with the late charge",
+        "max_consecutive": {
+          "$term": "max_missed_instalments"
+        },
+        "on_breach": "close_and_pay_out"
+      }
+    },
+    {
+      "_id": "maturity",
+      "kind": "maturity",
+      "config": {
+        "instructions": [
+          "pay_out"
+        ],
+        "default_instruction": "pay_out",
+        "payout_to": "linked_account",
+        "unclaimed_interest": "lower of the savings rate and the contracted rate until paid"
+      }
+    },
+    {
+      "_id": "service_level",
+      "kind": "service_level",
+      "config": {
+        "grievance_policy": "board-approved grievance redressal policy",
+        "escalate_to": "rbi_integrated_ombudsman",
+        "escalate_if_unresolved_after": "P30D"
+      }
+    }
+  ],
+  "lifecycle_events": [
+    {
+      "_id": "mandate_registered",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation"
+      ]
+    },
+    {
+      "_id": "account_opened",
+      "actus": "IED",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation",
+        "execution"
+      ],
+      "edition": "latest"
+    },
+    {
+      "_id": "mandate_debit_succeeded",
+      "sequence": 4,
+      "trigger": "scheduled",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "instalment_credited",
+      "actus": "PD",
+      "sequence": 4,
+      "trigger": "linked",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "mandate_debit_failed",
+      "sequence": 6,
+      "trigger": "condition"
+    },
+    {
+      "_id": "late_instalment_paid",
+      "actus": "PD",
+      "sequence": 6,
+      "trigger": "customer",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "interest_capitalised",
+      "actus": "IPCI",
+      "sequence": 9,
+      "trigger": "scheduled",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "mandate_amended",
+      "sequence": 11,
+      "trigger": "customer",
+      "primitives": [
+        "terms_change"
+      ],
+      "edition": "stored"
+    },
+    {
+      "_id": "premature_closure",
+      "actus": "TD",
+      "sequence": 16,
+      "trigger": "customer",
+      "primitives": [
+        "terms_change",
+        "quantity_change",
+        "transfer"
+      ],
+      "edition": "stored"
+    },
+    {
+      "_id": "closed_for_missed_instalments",
+      "actus": "TD",
+      "sequence": 16,
+      "trigger": "condition",
+      "when": [
+        {
+          "expr": "consecutive_missed_instalments >= max_missed_instalments"
+        }
+      ],
+      "primitives": [
+        "terms_change",
+        "quantity_change",
+        "transfer"
+      ]
+    },
+    {
+      "_id": "matured",
+      "actus": "MD",
+      "sequence": 19,
+      "trigger": "scheduled",
+      "primitives": [
+        "quantity_change",
+        "transfer"
+      ]
+    },
+    {
+      "_id": "mandate_cancelled",
+      "sequence": 19,
+      "trigger": "linked",
+      "primitives": [
+        "terms_change"
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "_id": "mandate_ends_by_maturity",
+      "expr": "mandate.last_debit_date <= deposit.maturity_date",
+      "applies_at": [
+        "design",
+        "origination"
+      ]
+    },
+    {
+      "_id": "same_currency",
+      "expr": "mandate.currency == deposit.currency",
+      "applies_at": [
+        "design"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "_id": "mandate_funds_deposit",
+      "type": "funds",
+      "from": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "amount_rule": "from_term",
+        "amount": {
+          "$term": "instalment_amount"
+        },
+        "schedule_purpose": "mandate_debit",
+        "count": {
+          "$term": "tenor_months"
+        },
+        "shares": [
+          "currency",
+          "instalment_amount"
+        ],
+        "failure_handling": {
+          "retries": 1,
+          "retry_after": "P3D",
+          "on_exhaustion": "raise_event",
+          "event": "mandate_debit_failed"
+        }
+      }
+    },
+    {
+      "_id": "persona_resident_individual",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "rbi",
+        "id": "rbi_resident_individual"
+      },
+      "attributes": {
+        "fit": "subset"
+      }
+    },
+    {
+      "_id": "persona_senior_citizen",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "rbi",
+        "id": "rbi_senior_citizen"
+      },
+      "attributes": {
+        "fit": "whole_persona"
+      }
+    },
+    {
+      "_id": "use_resident_individual_onboarding_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "onboarding_eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_resident_individual_rd_interest",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "rd_interest"
+      },
+      "attributes": {
+        "stage": "servicing",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_senior_citizen_onboarding_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "onboarding_eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_senior_citizen_rd_interest",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "rd_interest"
+      },
+      "attributes": {
+        "stage": "servicing",
+        "required": true
+      }
+    },
+    {
+      "_id": "t_instalment_amount",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "instalment_amount"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_tenor_months",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "tenor_months"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_deposit_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "deposit_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_senior_spread_bps",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "senior_spread_bps"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_premature_penalty_bps",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "premature_penalty_bps"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_max_missed_instalments",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "max_missed_instalments"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_maturity_date",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "maturity_date"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_instalment_cycle",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "instalment_cycle"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_debit_day",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "debit_day"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_late_instalment_charge",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "late_instalment_charge"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_senior_spread_bps_senior",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "senior_spread_bps"
+      },
+      "to": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "attributes": {
+        "mode": "override",
+        "override": {
+          "default": 50
+        }
+      }
+    },
+    {
+      "_id": "r_deposit_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "rate",
+        "id": "deposit_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "r_premature_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "rate",
+        "id": "premature_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "f_late_instalment",
+      "type": "applies_to",
+      "from": {
+        "kind": "fee",
+        "id": "late_instalment"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_instalment_size",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "instalment_size"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_debit_equals_instalment",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "debit_equals_instalment"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_early_withdrawal",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "early_withdrawal"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_missed_instalments",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "missed_instalments"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_maturity",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "maturity"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_service_level",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "product",
+        "id": "self"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "ev_mandate_registered",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_registered"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      }
+    },
+    {
+      "_id": "ev_account_opened",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "account_opened"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_mandate_debit_succeeded",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_debit_succeeded"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      },
+      "attributes": {
+        "schedule_purpose": "mandate_debit"
+      }
+    },
+    {
+      "_id": "ev_instalment_credited",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "instalment_credited"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_mandate_debit_failed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_debit_failed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      }
+    },
+    {
+      "_id": "ev_late_instalment_paid",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "late_instalment_paid"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_interest_capitalised",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "interest_capitalised"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "schedule_purpose": "interest_posting"
+      }
+    },
+    {
+      "_id": "ev_mandate_amended",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_amended"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      }
+    },
+    {
+      "_id": "ev_premature_closure",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "premature_closure"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_closed_for_missed_instalments",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "closed_for_missed_instalments"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      }
+    },
+    {
+      "_id": "ev_matured",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "component",
+        "id": "deposit"
+      },
+      "attributes": {
+        "schedule_purpose": "maturity"
+      }
+    },
+    {
+      "_id": "ev_mandate_cancelled",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "to": {
+        "kind": "component",
+        "id": "mandate"
+      }
+    },
+    {
+      "_id": "cx_mandate_debit_succeeded_instalment_credited",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_debit_succeeded"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "instalment_credited"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_premature_closure_mandate_cancelled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "premature_closure"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_closed_for_missed_instalments_mandate_cancelled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "closed_for_missed_instalments"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_matured_mandate_cancelled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "fee_late_instalment_on_late_instalment_paid",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "late_instalment_paid"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "late_instalment"
+      }
+    },
+    {
+      "_id": "ob_resident_individual_kyc_cdd",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "resident_individual"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kyc_cdd"
+      },
+      "attributes": {
+        "how": "Full KYC before the deposit opens"
+      }
+    },
+    {
+      "_id": "ob_senior_citizen_kyc_cdd",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "senior_citizen"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kyc_cdd"
+      },
+      "attributes": {
+        "how": "Full KYC before the deposit opens"
+      }
+    },
+    {
+      "_id": "ob_rd_interest_deposit_interest",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "rd_interest"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_deposit_interest"
+      },
+      "attributes": {
+        "how": "Rate fixed at opening; premature closure at the rate for the period run less the penalty"
+      }
+    },
+    {
+      "_id": "ob_early_withdrawal_term_deposit_terms",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "early_withdrawal"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_term_deposit_terms"
+      },
+      "attributes": {
+        "how": "Premature closure allowed, penalty disclosed upfront"
+      }
+    },
+    {
+      "_id": "ob_maturity_term_deposit_terms",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "maturity"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_term_deposit_terms"
+      },
+      "attributes": {
+        "how": "Unclaimed matured deposits earn the lower of the savings and contracted rate"
+      }
+    },
+    {
+      "_id": "ob_service_level_grievance_redressal",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_grievance_redressal"
+      },
+      "attributes": {
+        "how": "Escalation to the RBI Integrated Ombudsman after 30 days"
+      }
+    }
+  ],
+  "versioning": {
+    "change_class": "initial",
+    "summary": "First v2 definition of the reference recurring deposit",
+    "edition_policy": {
+      "origination": "latest",
+      "mid_term_change": "stored",
+      "premature_closure": "stored"
+    }
+  },
+  "governance": {
+    "state": "approved",
+    "review": {
+      "cadence": "P1Y"
+    }
+  },
+  "projection": {
+    "lead_component": "deposit",
+    "risk_level": "low",
+    "liquidity": "low",
+    "typical_horizon": "short_to_medium",
+    "return_type": "fixed_interest"
+  }
+}

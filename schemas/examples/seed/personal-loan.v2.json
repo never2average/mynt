@@ -1,0 +1,2467 @@
+{
+  "_id": "personal-loan",
+  "product_name": "Personal Loan",
+  "product_type": "credit",
+  "descriptions": {
+    "summary": "An unsecured loan to a resident individual for any personal purpose, disbursed to the borrower's own bank account and repaid in equated monthly instalments collected by a recurring mandate, at a rate fixed for the loan's life.",
+    "key_features": [
+      "No collateral: the decision rests on income and credit history",
+      "Rate fixed for the loan's life, set by the borrower's credit profile",
+      "Equated monthly instalments over 12 to 60 months, collected by mandate",
+      "Key Facts Statement with the annual percentage rate before signing",
+      "Cooling-off period to exit without penalty"
+    ],
+    "long": "Mynt reference definition (India), composed of three regulated primitives: the loan itself, a recurring repayment mandate (NACH or UPI AutoPay) the instalments are collected through, and a credit information pull from the credit information companies that feeds underwriting. Sources: RBI Key Facts Statement instructions (2024): a KFS with the annual percentage rate and every charge before the contract is executed; RBI directions on penal charges in loan accounts (effective 1 January 2024): penal charges, not penal interest, never capitalised; RBI Digital Lending Directions: disbursement to and repayment from the borrower's own bank account with no pass-through account, and a cooling-off period of at least three days for loans of seven days or more in which the borrower can exit by repaying principal and proportionate APR without penalty; RBI Fair Practices Code and instructions on recovery: no harassment, calls only between 08:00 and 19:00; the Credit Information Companies (Regulation) Act, 2005: lenders are members of every credit information company and report borrower data; prudential norms: SMA-0 (1-30 days overdue), SMA-1 (31-60), SMA-2 (61-90), non-performing after 90 days. A fixed-rate loan may carry a foreclosure charge (RBI bars them on floating-rate loans to individuals for non-business purposes). ASSUMPTIONS (indicative; each lender sets its own credit policy): ₹50,000 to ₹40 lakh, 12 to 60 months, 10.5% to 24% a year, 2% processing fee, 4% foreclosure charge after 6 instalments, ₹500 penal charge per missed instalment and ₹500 per dishonoured mandate debit, the age, income and credit-score thresholds, 50% fixed-obligation-to-income cap, and the waterfall order. A Mynt reference product names no providers, partners or risk models: the lender that offers it adds its own licence, KYC, credit-bureau and mandate handoffs (with their consent purposes) and its scorecards, governed in its GRC folder. Fees are subject to GST.",
+    "documents": {
+      "complaints_ombudsman": "https://cms.rbi.org.in/"
+    }
+  },
+  "owner_entity_id": null,
+  "version": 1,
+  "access_mode": "open",
+  "plane": {
+    "role": "standalone",
+    "sellable": true
+  },
+  "context": {
+    "currencies": [
+      "INR"
+    ],
+    "calendar": "in_banking",
+    "business_day_convention": "following",
+    "day_count": "actual_365_fixed",
+    "time_zone": "Asia/Kolkata"
+  },
+  "components": [
+    {
+      "key": "loan",
+      "country": "in",
+      "primitive": "credit",
+      "action": "issuance",
+      "underlying": "cash",
+      "block": "term_loan",
+      "terms": {
+        "amortisation": "equated_monthly_instalment",
+        "interest_method": "reducing_balance",
+        "secured": false,
+        "principal": {
+          "$term": "loan_amount"
+        },
+        "tenor_months": {
+          "$term": "tenor_months"
+        },
+        "emi": {
+          "$term": "emi_amount"
+        }
+      },
+      "schedules": [
+        {
+          "purpose": "interest_accrual",
+          "anchor": "disbursement_date",
+          "cycle": "P1D",
+          "day_basis": "calendar"
+        },
+        {
+          "purpose": "instalment_due",
+          "anchor": {
+            "$term": "first_emi_date"
+          },
+          "cycle": "P1M",
+          "count": {
+            "$term": "tenor_months"
+          },
+          "day_basis": "business",
+          "business_day_convention": "following"
+        },
+        {
+          "purpose": "statement",
+          "anchor": "financial_year_end",
+          "cycle": "P1Y"
+        }
+      ],
+      "election": "required"
+    },
+    {
+      "key": "repayment_mandate",
+      "country": "in",
+      "primitive": "payments",
+      "action": "sale",
+      "block": "mandate",
+      "terms": {
+        "mandate_type": "recurring_debit",
+        "rails": [
+          "nach",
+          "upi_autopay"
+        ],
+        "amount": {
+          "$term": "emi_amount"
+        },
+        "debit_day": {
+          "$term": "debit_day"
+        },
+        "source": "borrower_own_bank_account"
+      },
+      "schedules": [
+        {
+          "purpose": "mandate_debit",
+          "anchor": {
+            "$term": "first_emi_date"
+          },
+          "cycle": "P1M",
+          "count": {
+            "$term": "tenor_months"
+          },
+          "day_basis": "business",
+          "business_day_convention": "following"
+        }
+      ],
+      "election": "required"
+    },
+    {
+      "key": "bureau_pull",
+      "country": "in",
+      "primitive": "information",
+      "action": "purchase",
+      "underlying": "data",
+      "block": "data_pull",
+      "terms": {
+        "source": "credit_information_companies",
+        "report": "credit_report_and_score",
+        "inquiry": "hard_on_application"
+      },
+      "election": "required"
+    }
+  ],
+  "customer_segments": [
+    {
+      "_id": "salaried",
+      "name": "Salaried residents",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 21,
+        "resident": true,
+        "employment_type": "salaried",
+        "min_net_monthly_income": 25000
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "aadhaar_ekyc",
+              "v_cip",
+              "ckyc_records",
+              "in_person_ovd"
+            ],
+            "validity": "P10Y",
+            "on_expiry": "periodic_kyc_update"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc"
+        }
+      },
+      "fraud": {
+        "product_risk": "high",
+        "channel_risk": "high",
+        "monitoring": [
+          "real_time",
+          "portfolio"
+        ],
+        "risk_appetite": [
+          {
+            "metric": "first_payment_default_rate",
+            "threshold": 2,
+            "unit": "pct",
+            "breach_action": "tighten_limits"
+          },
+          {
+            "metric": "confirmed_application_fraud_rate",
+            "threshold": 0.5,
+            "unit": "pct",
+            "breach_action": "suspend_new_business"
+          }
+        ]
+      },
+      "target_market": {
+        "client_type": "retail",
+        "knowledge_experience": "basic",
+        "loss_capacity": "limited",
+        "risk_tolerance": "conservative",
+        "objectives": [
+          "personal_expenses",
+          "debt_consolidation",
+          "emergencies"
+        ],
+        "holding_period": "P3Y"
+      },
+      "channels": [
+        "app",
+        "web",
+        "branch",
+        "partner_embedded"
+      ]
+    },
+    {
+      "_id": "self_employed",
+      "name": "Self-employed residents",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 25,
+        "resident": true,
+        "employment_type": "self_employed",
+        "min_years_in_business": 3,
+        "min_annual_income": 500000
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "aadhaar_ekyc",
+              "v_cip",
+              "ckyc_records",
+              "in_person_ovd"
+            ],
+            "validity": "P10Y",
+            "on_expiry": "periodic_kyc_update"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc"
+        }
+      },
+      "fraud": {
+        "product_risk": "high",
+        "channel_risk": "high",
+        "monitoring": [
+          "real_time",
+          "portfolio"
+        ],
+        "risk_appetite": [
+          {
+            "metric": "first_payment_default_rate",
+            "threshold": 2,
+            "unit": "pct",
+            "breach_action": "tighten_limits"
+          },
+          {
+            "metric": "confirmed_application_fraud_rate",
+            "threshold": 0.5,
+            "unit": "pct",
+            "breach_action": "suspend_new_business"
+          }
+        ]
+      },
+      "target_market": {
+        "client_type": "retail",
+        "knowledge_experience": "basic",
+        "loss_capacity": "limited",
+        "risk_tolerance": "conservative",
+        "objectives": [
+          "personal_expenses",
+          "debt_consolidation"
+        ],
+        "holding_period": "P3Y"
+      },
+      "channels": [
+        "app",
+        "web",
+        "branch"
+      ]
+    }
+  ],
+  "core_algorithms": [
+    {
+      "_id": "fraud_screening",
+      "algorithm_name": "Application fraud screening",
+      "description": "Checks identity and income documents for tampering, device and application velocity, and the disbursement account's name against the borrower's before anything is decided.",
+      "purpose": "fraud_screening",
+      "repository": "models/pl-application-fraud",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "eligibility",
+      "algorithm_name": "Personal loan eligibility",
+      "description": "Knock-outs before the credit decision: age at maturity, recent serious delinquency, written-off or settled accounts, and a credit score below the floor.",
+      "purpose": "eligibility",
+      "repository": "models/pl-eligibility",
+      "version": "1.0.0",
+      "decision": {
+        "knockouts": [
+          {
+            "rule": {
+              "expr": "customer.age + tenor_months / 12 > 60 && segment == 'salaried'"
+            },
+            "reason_code": "age_at_maturity"
+          },
+          {
+            "rule": {
+              "expr": "customer.age + tenor_months / 12 > 65 && segment == 'self_employed'"
+            },
+            "reason_code": "age_at_maturity"
+          },
+          {
+            "rule": {
+              "attr": "bureau.max_dpd_last_12m",
+              "op": "gt",
+              "value": 30
+            },
+            "reason_code": "recent_delinquency"
+          },
+          {
+            "rule": {
+              "attr": "bureau.written_off_or_settled",
+              "op": "eq",
+              "value": true
+            },
+            "reason_code": "written_off_or_settled"
+          },
+          {
+            "rule": {
+              "attr": "bureau.score",
+              "op": "lt",
+              "value": 650
+            },
+            "reason_code": "score_below_floor"
+          }
+        ]
+      }
+    },
+    {
+      "_id": "underwriting",
+      "algorithm_name": "Personal loan credit decision and sanctioned amount",
+      "description": "Grades the applicant on bureau and income data, caps the amount by affordability (fixed obligations including the new EMI within the income cap), the grade and the product maximum, and approves, refers or declines.",
+      "purpose": "underwriting",
+      "repository": "models/pl-underwriting",
+      "version": "1.0.0",
+      "decision": {
+        "grades": [
+          {
+            "grade": "A",
+            "min": 750,
+            "on": "bureau.score"
+          },
+          {
+            "grade": "B",
+            "min": 700,
+            "max": 750,
+            "on": "bureau.score"
+          },
+          {
+            "grade": "C",
+            "min": 650,
+            "max": 700,
+            "on": "bureau.score"
+          }
+        ],
+        "limit_caps": [
+          {
+            "kind": "affordability",
+            "expr": "(existing_emis + emi(amount, interest_rate, tenor_months)) <= 0.5 * net_monthly_income"
+          },
+          {
+            "kind": "grade_max",
+            "expr": "grade == 'C' ? 500000 : grade == 'B' ? 1500000 : 4000000"
+          },
+          {
+            "kind": "product_max",
+            "expr": "4000000"
+          }
+        ],
+        "matrix": [
+          {
+            "when": [
+              {
+                "attr": "grade",
+                "op": "in",
+                "value": [
+                  "A",
+                  "B"
+                ]
+              },
+              {
+                "attr": "income.verified",
+                "op": "eq",
+                "value": true
+              }
+            ],
+            "outcome": "approve"
+          },
+          {
+            "when": [
+              {
+                "attr": "grade",
+                "op": "eq",
+                "value": "C"
+              }
+            ],
+            "outcome": "refer"
+          },
+          {
+            "when": [
+              {
+                "attr": "income.verified",
+                "op": "eq",
+                "value": false
+              }
+            ],
+            "outcome": "decline"
+          }
+        ],
+        "sources_of_value": [
+          {
+            "kind": "cash_flow",
+            "required": true
+          },
+          {
+            "kind": "none"
+          }
+        ]
+      }
+    },
+    {
+      "_id": "pricing",
+      "algorithm_name": "Risk-based pricing",
+      "description": "Sets the fixed annual rate within the published range by grade, tenor and segment; the KFS shows the result as an annual percentage rate including every fee.",
+      "purpose": "pricing",
+      "repository": "models/pl-pricing",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "emi_schedule",
+      "algorithm_name": "EMI, repayment schedule and APR",
+      "description": "Equated monthly instalment on the reducing balance, broken-period interest to the first EMI date, the full repayment schedule and the annual percentage rate for the Key Facts Statement.",
+      "purpose": "interest_calculation",
+      "repository": "models/pl-emi-schedule",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "collections",
+      "algorithm_name": "Collections strategy",
+      "description": "Chooses reminders, mandate re-presentation and contact by days past due and bucket, only through permitted channels and between 08:00 and 19:00.",
+      "purpose": "collections_strategy",
+      "repository": "models/pl-collections",
+      "version": "1.0.0"
+    }
+  ],
+  "risk_models": [],
+  "partner_handoffs": [],
+  "terms": [
+    {
+      "_id": "loan_amount",
+      "label": "Sanctioned amount",
+      "type": "money",
+      "currency": "INR",
+      "default": 300000,
+      "range": {
+        "min": 50000,
+        "max": 4000000,
+        "step": 1000
+      },
+      "set_by": [
+        "template",
+        "customer",
+        "decision_engine"
+      ],
+      "negotiable": "decision_engine",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "tenor_months",
+      "label": "Term",
+      "type": "integer",
+      "unit": "months",
+      "default": 36,
+      "range": {
+        "min": 12,
+        "max": 60,
+        "step": 1
+      },
+      "set_by": [
+        "template",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "customer_with_approval"
+      }
+    },
+    {
+      "_id": "interest_rate",
+      "label": "Interest rate (fixed)",
+      "type": "rate",
+      "unit": "pct_pa",
+      "default": 14,
+      "range": {
+        "min": 10.5,
+        "max": 24
+      },
+      "set_by": [
+        "template",
+        "decision_engine"
+      ],
+      "negotiable": "decision_engine",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "processing_fee_pct",
+      "label": "Processing fee (of the sanctioned amount)",
+      "type": "percent",
+      "default": 2,
+      "range": {
+        "min": 0,
+        "max": 3
+      },
+      "set_by": [
+        "template",
+        "promotional_overlay"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "foreclosure_fee_pct",
+      "label": "Foreclosure charge (of the principal outstanding)",
+      "type": "percent",
+      "default": 4,
+      "range": {
+        "min": 0,
+        "max": 5
+      },
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "foreclosure_lock_in_emis",
+      "label": "Instalments before foreclosure is allowed",
+      "type": "integer",
+      "default": 6,
+      "range": {
+        "min": 0,
+        "max": 12
+      },
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "penal_charge",
+      "label": "Penal charge per missed instalment",
+      "type": "money",
+      "currency": "INR",
+      "default": 500,
+      "range": {
+        "min": 0,
+        "max": 1000
+      },
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change",
+        "notice": "P1M"
+      }
+    },
+    {
+      "_id": "dishonour_charge",
+      "label": "Charge per dishonoured mandate debit",
+      "type": "money",
+      "currency": "INR",
+      "default": 500,
+      "range": {
+        "min": 0,
+        "max": 750
+      },
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change",
+        "notice": "P1M"
+      }
+    },
+    {
+      "_id": "cooling_off_days",
+      "label": "Cooling-off period to exit without penalty",
+      "type": "integer",
+      "unit": "days",
+      "default": 3,
+      "range": {
+        "min": 3,
+        "max": 30
+      },
+      "set_by": [
+        "jurisdiction_variant",
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "debit_day",
+      "label": "EMI date of the month",
+      "type": "integer",
+      "default": 5,
+      "range": {
+        "min": 1,
+        "max": 28
+      },
+      "set_by": [
+        "template",
+        "customer"
+      ],
+      "negotiable": "customer_choice",
+      "post_issue": {
+        "rule": "customer_with_approval",
+        "max_changes": 1
+      }
+    },
+    {
+      "_id": "emi_amount",
+      "label": "Equated monthly instalment",
+      "type": "money",
+      "currency": "INR",
+      "derived": "emi(loan_amount, interest_rate, tenor_months)",
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    },
+    {
+      "_id": "first_emi_date",
+      "label": "First EMI date",
+      "type": "date",
+      "derived": "next(debit_day, add_months(disbursement_date, 1))",
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "immutable"
+      }
+    }
+  ],
+  "rates": [
+    {
+      "_id": "lending_rate",
+      "kind": "lending",
+      "rate_type": "fixed",
+      "value": {
+        "$term": "interest_rate"
+      },
+      "day_count": "actual_365_fixed",
+      "compounding": "P1M",
+      "application": "periodic",
+      "method": "reducing_balance_emi"
+    }
+  ],
+  "fees": [
+    {
+      "_id": "processing_fee",
+      "type": "UPFRONT",
+      "method": "rate_based",
+      "rate": {
+        "$term": "processing_fee_pct"
+      },
+      "rate_base": "principal",
+      "payer": "customer",
+      "tax": [
+        "in_gst"
+      ]
+    },
+    {
+      "_id": "foreclosure_fee",
+      "type": "EXIT",
+      "method": "rate_based",
+      "rate": {
+        "$term": "foreclosure_fee_pct"
+      },
+      "rate_base": "principal",
+      "payer": "customer",
+      "tax": [
+        "in_gst"
+      ],
+      "waivers": [
+        {
+          "expr": "days_since_disbursement <= cooling_off_days"
+        }
+      ]
+    },
+    {
+      "_id": "penal_charge",
+      "type": "LATE_PAYMENT",
+      "method": "fixed",
+      "amount": {
+        "$term": "penal_charge"
+      },
+      "payer": "customer",
+      "tax": [
+        "in_gst"
+      ]
+    },
+    {
+      "_id": "dishonour_charge",
+      "type": "DISHONOUR",
+      "method": "fixed",
+      "amount": {
+        "$term": "dishonour_charge"
+      },
+      "payer": "customer",
+      "tax": [
+        "in_gst"
+      ]
+    }
+  ],
+  "limits": [
+    {
+      "_id": "loan_size",
+      "kind": "constraint",
+      "constraint_type": "MAX_LIMIT",
+      "min": {
+        "amount": 50000,
+        "currency": "INR"
+      },
+      "max": {
+        "amount": 4000000,
+        "currency": "INR"
+      },
+      "scope": "account"
+    },
+    {
+      "_id": "disburse_to_own_account",
+      "kind": "control",
+      "event_stream": "disbursement",
+      "rule_type": "conditional",
+      "conditions": [
+        {
+          "attr": "beneficiary.holder_matches_borrower",
+          "op": "eq",
+          "value": false
+        }
+      ],
+      "scope": "account",
+      "outcome": "decline",
+      "purpose": "compliance",
+      "state": "active"
+    },
+    {
+      "_id": "application_velocity",
+      "kind": "control",
+      "event_stream": "onboarding",
+      "rule_type": "velocity",
+      "window": {
+        "type": "rolling",
+        "duration": "P30D"
+      },
+      "limit_count": 3,
+      "scope": "customer",
+      "outcome": "decline",
+      "purpose": "fraud",
+      "state": "active"
+    }
+  ],
+  "servicing_policies": [
+    {
+      "_id": "repayment_waterfall",
+      "kind": "waterfall",
+      "config": {
+        "scheduled": [
+          "charges",
+          "overdue_interest",
+          "overdue_principal",
+          "current_interest",
+          "current_principal"
+        ],
+        "excess": [
+          "principal_prepayment"
+        ],
+        "residual_to": "borrower"
+      }
+    },
+    {
+      "_id": "prepayment",
+      "kind": "prepayment",
+      "config": {
+        "cooling_off": {
+          "days": {
+            "$term": "cooling_off_days"
+          },
+          "exit": "repay principal and proportionate APR, no penalty"
+        },
+        "foreclosure": {
+          "after_emis": {
+            "$term": "foreclosure_lock_in_emis"
+          },
+          "charge": {
+            "$term": "foreclosure_fee_pct"
+          }
+        },
+        "part_prepayment": "after the lock-in; reduces the tenor unless the borrower asks to reduce the EMI"
+      }
+    },
+    {
+      "_id": "sma_0",
+      "kind": "delinquency_bucket",
+      "config": {
+        "from_dpd": 1,
+        "to_dpd": 30,
+        "classification": "SMA-0",
+        "actions": [
+          "reminder",
+          "mandate_re_presentation",
+          "penal_charge"
+        ]
+      }
+    },
+    {
+      "_id": "sma_1",
+      "kind": "delinquency_bucket",
+      "config": {
+        "from_dpd": 31,
+        "to_dpd": 60,
+        "classification": "SMA-1",
+        "actions": [
+          "call",
+          "field_visit_with_notice"
+        ]
+      }
+    },
+    {
+      "_id": "sma_2",
+      "kind": "delinquency_bucket",
+      "config": {
+        "from_dpd": 61,
+        "to_dpd": 90,
+        "classification": "SMA-2",
+        "actions": [
+          "recovery_notice",
+          "restructure_review"
+        ]
+      }
+    },
+    {
+      "_id": "npa",
+      "kind": "delinquency_bucket",
+      "config": {
+        "from_dpd": 91,
+        "classification": "NPA",
+        "actions": [
+          "provisioning",
+          "legal_recovery"
+        ]
+      }
+    },
+    {
+      "_id": "arrears_conduct",
+      "kind": "arrears",
+      "config": {
+        "contact_window": "08:00-19:00",
+        "time_zone": "Asia/Kolkata",
+        "no_harassment": true,
+        "recovery_agents": "identified, trained and named to the borrower in advance",
+        "penal_charges_capitalised": false
+      }
+    },
+    {
+      "_id": "statement",
+      "kind": "statement",
+      "config": {
+        "repayment_schedule": "with the KFS and on any change",
+        "interest_certificate": "P1Y",
+        "account_statement": "on request"
+      }
+    },
+    {
+      "_id": "service_level",
+      "kind": "service_level",
+      "config": {
+        "grievance_policy": "board-approved grievance redressal policy",
+        "escalate_to": "rbi_integrated_ombudsman",
+        "escalate_if_unresolved_after": "P30D",
+        "no_dues_certificate": "on closure"
+      }
+    }
+  ],
+  "lifecycle_events": [
+    {
+      "_id": "application_submitted",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation"
+      ],
+      "edition": "latest"
+    },
+    {
+      "_id": "bureau_report_pulled",
+      "sequence": 1,
+      "trigger": "linked",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "credit_decision_made",
+      "sequence": 1,
+      "trigger": "decision"
+    },
+    {
+      "_id": "kfs_issued",
+      "sequence": 1,
+      "trigger": "linked"
+    },
+    {
+      "_id": "loan_accepted",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation"
+      ],
+      "edition": "latest"
+    },
+    {
+      "_id": "mandate_registered",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation"
+      ]
+    },
+    {
+      "_id": "disbursed",
+      "actus": "IED",
+      "sequence": 1,
+      "trigger": "operations",
+      "primitives": [
+        "execution",
+        "transfer"
+      ]
+    },
+    {
+      "_id": "cooling_off_exit",
+      "actus": "TD",
+      "sequence": 16,
+      "trigger": "customer",
+      "when": [
+        {
+          "expr": "days_since_disbursement <= cooling_off_days"
+        }
+      ],
+      "primitives": [
+        "terms_change",
+        "quantity_change",
+        "transfer"
+      ]
+    },
+    {
+      "_id": "emi_collected",
+      "sequence": 3,
+      "trigger": "scheduled",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "instalment_paid",
+      "actus": "PR",
+      "sequence": 3,
+      "trigger": "linked",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "emi_debit_returned",
+      "sequence": 6,
+      "trigger": "condition",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "instalment_missed",
+      "actus": "PY",
+      "sequence": 6,
+      "trigger": "condition",
+      "when": [
+        {
+          "expr": "instalment.unpaid_after_retries"
+        }
+      ]
+    },
+    {
+      "_id": "bucket_changed",
+      "sequence": 7,
+      "trigger": "condition",
+      "primitives": [
+        "terms_change"
+      ]
+    },
+    {
+      "_id": "part_prepaid",
+      "actus": "PP",
+      "sequence": 5,
+      "trigger": "customer",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "foreclosed",
+      "actus": "TD",
+      "sequence": 16,
+      "trigger": "customer",
+      "primitives": [
+        "quantity_change",
+        "terms_change"
+      ]
+    },
+    {
+      "_id": "matured",
+      "actus": "MD",
+      "sequence": 19,
+      "trigger": "scheduled",
+      "primitives": [
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "mandate_cancelled",
+      "sequence": 19,
+      "trigger": "linked",
+      "primitives": [
+        "terms_change"
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "_id": "emi_within_affordability",
+      "expr": "existing_emis + emi_amount <= 0.5 * net_monthly_income",
+      "applies_at": [
+        "origination"
+      ]
+    },
+    {
+      "_id": "kfs_before_acceptance",
+      "expr": "kfs_issued.at < loan_accepted.at",
+      "message": "The borrower sees the KFS with the APR before accepting",
+      "applies_at": [
+        "origination"
+      ]
+    },
+    {
+      "_id": "mandate_before_disbursal",
+      "expr": "mandate_registered.at <= disbursed.at",
+      "applies_at": [
+        "origination"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "_id": "repaid_by_mandate",
+      "type": "repays_from",
+      "from": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      },
+      "attributes": {
+        "amount_rule": "instalment_due",
+        "schedule_purpose": "instalment_due",
+        "waterfall": "repayment_waterfall",
+        "failure_handling": {
+          "retries": 1,
+          "retry_after": "P3D",
+          "on_exhaustion": "raise_event",
+          "event": "instalment_missed"
+        }
+      }
+    },
+    {
+      "_id": "loan_needs_mandate",
+      "type": "requires",
+      "from": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      },
+      "attributes": {
+        "scope": "same_contract",
+        "stage": "origination",
+        "on_break": "notify"
+      }
+    },
+    {
+      "_id": "bureau_feeds_eligibility",
+      "type": "feeds_data",
+      "from": {
+        "kind": "component",
+        "id": "bureau_pull"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "eligibility"
+      },
+      "attributes": {
+        "fields": [
+          "score",
+          "max_dpd_last_12m",
+          "written_off_or_settled"
+        ],
+        "stage": "application",
+        "consent_purpose": "credit_assessment",
+        "freshness": "P30D",
+        "on_unavailable": "refer"
+      }
+    },
+    {
+      "_id": "bureau_feeds_underwriting",
+      "type": "feeds_data",
+      "from": {
+        "kind": "component",
+        "id": "bureau_pull"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "underwriting"
+      },
+      "attributes": {
+        "fields": [
+          "score",
+          "active_loans",
+          "existing_emis",
+          "enquiries_last_6m"
+        ],
+        "stage": "application",
+        "consent_purpose": "credit_assessment",
+        "freshness": "P30D",
+        "on_unavailable": "refer"
+      }
+    },
+    {
+      "_id": "persona_salaried",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "rbi",
+        "id": "rbi_retail_borrower"
+      },
+      "attributes": {
+        "fit": "subset"
+      }
+    },
+    {
+      "_id": "persona_self_employed",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "rbi",
+        "id": "rbi_retail_borrower"
+      },
+      "attributes": {
+        "fit": "subset"
+      }
+    },
+    {
+      "_id": "use_salaried_fraud_screening",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "fraud_screening"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_salaried_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 2,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_salaried_underwriting",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "underwriting"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 3,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_salaried_pricing",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "pricing"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 4,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_salaried_emi_schedule",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "emi_schedule"
+      },
+      "attributes": {
+        "stage": "booking",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_salaried_collections",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "collections"
+      },
+      "attributes": {
+        "stage": "collections",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_self_employed_fraud_screening",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "fraud_screening"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_self_employed_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 2,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_self_employed_underwriting",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "underwriting"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 3,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_self_employed_pricing",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "pricing"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 4,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_self_employed_emi_schedule",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "emi_schedule"
+      },
+      "attributes": {
+        "stage": "booking",
+        "required": true
+      }
+    },
+    {
+      "_id": "use_self_employed_collections",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "collections"
+      },
+      "attributes": {
+        "stage": "collections",
+        "required": true
+      }
+    },
+    {
+      "_id": "underwriting_sets_amount",
+      "type": "algorithm_writes_term",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "underwriting"
+      },
+      "to": {
+        "kind": "term",
+        "id": "loan_amount"
+      },
+      "attributes": {
+        "clamp": "to_range"
+      }
+    },
+    {
+      "_id": "pricing_sets_rate",
+      "type": "algorithm_writes_term",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "pricing"
+      },
+      "to": {
+        "kind": "term",
+        "id": "interest_rate"
+      },
+      "attributes": {
+        "clamp": "reject_outside_range"
+      }
+    },
+    {
+      "_id": "t_loan_amount",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "loan_amount"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_tenor_months",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "tenor_months"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_interest_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "interest_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_processing_fee_pct",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "processing_fee_pct"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_foreclosure_fee_pct",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "foreclosure_fee_pct"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_foreclosure_lock_in_emis",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "foreclosure_lock_in_emis"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_penal_charge",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "penal_charge"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_cooling_off_days",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "cooling_off_days"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_emi_amount",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "emi_amount"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_first_emi_date",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "first_emi_date"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_debit_day",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "debit_day"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_dishonour_charge",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "dishonour_charge"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "r_lending_rate",
+      "type": "applies_to",
+      "from": {
+        "kind": "rate",
+        "id": "lending_rate"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "f_processing_fee",
+      "type": "applies_to",
+      "from": {
+        "kind": "fee",
+        "id": "processing_fee"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "f_foreclosure_fee",
+      "type": "applies_to",
+      "from": {
+        "kind": "fee",
+        "id": "foreclosure_fee"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "f_penal_charge",
+      "type": "applies_to",
+      "from": {
+        "kind": "fee",
+        "id": "penal_charge"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "f_dishonour_charge",
+      "type": "applies_to",
+      "from": {
+        "kind": "fee",
+        "id": "dishonour_charge"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_loan_size",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "loan_size"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_disburse_to_own_account",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "disburse_to_own_account"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_application_velocity",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "application_velocity"
+      },
+      "to": {
+        "kind": "product",
+        "id": "self"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_repayment_waterfall",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "repayment_waterfall"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_prepayment",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "prepayment"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_sma_0",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "sma_0"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_sma_1",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "sma_1"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_sma_2",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "sma_2"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_npa",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "npa"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_arrears_conduct",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "arrears_conduct"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_statement",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "statement"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_service_level",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "product",
+        "id": "self"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "ev_application_submitted",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "application_submitted"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_bureau_report_pulled",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "bureau_report_pulled"
+      },
+      "to": {
+        "kind": "component",
+        "id": "bureau_pull"
+      }
+    },
+    {
+      "_id": "ev_credit_decision_made",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "credit_decision_made"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_kfs_issued",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "kfs_issued"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_loan_accepted",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "loan_accepted"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_mandate_registered",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_registered"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      }
+    },
+    {
+      "_id": "ev_disbursed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "disbursed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_cooling_off_exit",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "cooling_off_exit"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_emi_collected",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "emi_collected"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      },
+      "attributes": {
+        "schedule_purpose": "mandate_debit"
+      }
+    },
+    {
+      "_id": "ev_instalment_paid",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "instalment_paid"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "schedule_purpose": "instalment_due"
+      }
+    },
+    {
+      "_id": "ev_emi_debit_returned",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "emi_debit_returned"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      }
+    },
+    {
+      "_id": "ev_instalment_missed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "instalment_missed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "schedule_purpose": "instalment_due"
+      }
+    },
+    {
+      "_id": "ev_bucket_changed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "bucket_changed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_part_prepaid",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "part_prepaid"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_foreclosed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "foreclosed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      }
+    },
+    {
+      "_id": "ev_matured",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "component",
+        "id": "loan"
+      },
+      "attributes": {
+        "schedule_purpose": "instalment_due"
+      }
+    },
+    {
+      "_id": "ev_mandate_cancelled",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "to": {
+        "kind": "component",
+        "id": "repayment_mandate"
+      }
+    },
+    {
+      "_id": "cx_application_submitted_bureau_report_pulled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "application_submitted"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "bureau_report_pulled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_credit_decision_made_kfs_issued",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "credit_decision_made"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "kfs_issued"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_emi_collected_instalment_paid",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "emi_collected"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "instalment_paid"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_cooling_off_exit_mandate_cancelled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "cooling_off_exit"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_foreclosed_mandate_cancelled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "foreclosed"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_matured_mandate_cancelled",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "matured"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "mandate_cancelled"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "fee_processing_fee_on_disbursed",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "disbursed"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "processing_fee"
+      }
+    },
+    {
+      "_id": "fee_foreclosure_fee_on_foreclosed",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "foreclosed"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "foreclosure_fee"
+      }
+    },
+    {
+      "_id": "fee_penal_charge_on_instalment_missed",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "instalment_missed"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "penal_charge"
+      }
+    },
+    {
+      "_id": "fee_dishonour_charge_on_emi_debit_returned",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "emi_debit_returned"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "dishonour_charge"
+      }
+    },
+    {
+      "_id": "ob_salaried_kyc_cdd",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "salaried"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kyc_cdd"
+      },
+      "attributes": {
+        "how": "Full KYC before the loan is sanctioned"
+      }
+    },
+    {
+      "_id": "ob_self_employed_kyc_cdd",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "self_employed"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kyc_cdd"
+      },
+      "attributes": {
+        "how": "Full KYC before the loan is sanctioned"
+      }
+    },
+    {
+      "_id": "ob_fraud_screening_aml_monitoring",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "fraud_screening"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_aml_monitoring"
+      },
+      "attributes": {
+        "how": "Application fraud and mule-account signals feed suspicious transaction reporting"
+      }
+    },
+    {
+      "_id": "ob_emi_schedule_kfs_apr",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "emi_schedule"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_kfs_apr"
+      },
+      "attributes": {
+        "how": "KFS with the APR, every charge and the repayment schedule before acceptance"
+      }
+    },
+    {
+      "_id": "ob_penal_charge_penal_charges",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "term",
+        "id": "penal_charge"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_penal_charges"
+      },
+      "attributes": {
+        "how": "A fixed penal charge, not penal interest, never capitalised"
+      }
+    },
+    {
+      "_id": "ob_disburse_to_own_account_digital_lending",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "limit",
+        "id": "disburse_to_own_account"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_digital_lending"
+      },
+      "attributes": {
+        "how": "Disbursement only to the borrower's own account"
+      }
+    },
+    {
+      "_id": "ob_prepayment_digital_lending",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "prepayment"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_digital_lending"
+      },
+      "attributes": {
+        "how": "Cooling-off exit without penalty"
+      }
+    },
+    {
+      "_id": "ob_arrears_conduct_fair_recovery",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "arrears_conduct"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_fair_recovery"
+      },
+      "attributes": {
+        "how": "Contact only between 08:00 and 19:00, no harassment"
+      }
+    },
+    {
+      "_id": "ob_bureau_pull_credit_info_reporting",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "component",
+        "id": "bureau_pull"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_credit_info_reporting"
+      },
+      "attributes": {
+        "how": "Member of every credit information company; reports borrower data"
+      }
+    },
+    {
+      "_id": "ob_sma_0_asset_classification",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "sma_0"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_asset_classification"
+      },
+      "attributes": {
+        "how": "SMA-0 at 1-30 days overdue"
+      }
+    },
+    {
+      "_id": "ob_npa_asset_classification",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "npa"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_asset_classification"
+      },
+      "attributes": {
+        "how": "Non-performing after 90 days overdue"
+      }
+    },
+    {
+      "_id": "ob_service_level_grievance_redressal",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "rbi",
+        "license_type_id": "rbi_bank",
+        "section": "obligations",
+        "id": "rbi_grievance_redressal"
+      },
+      "attributes": {
+        "how": "Escalation to the RBI Integrated Ombudsman after 30 days"
+      }
+    }
+  ],
+  "versioning": {
+    "change_class": "initial",
+    "summary": "First v2 definition of the reference personal loan",
+    "edition_policy": {
+      "origination": "latest",
+      "mid_term_change": "stored"
+    }
+  },
+  "governance": {
+    "state": "approved",
+    "review": {
+      "cadence": "P1Y",
+      "triggers": [
+        {
+          "metric": "first_payment_default_rate_pct",
+          "threshold": 2
+        }
+      ]
+    }
+  },
+  "projection": {
+    "lead_component": "loan",
+    "risk_level": "not_applicable",
+    "liquidity": "not_applicable",
+    "typical_horizon": "short_to_medium",
+    "return_type": "cost_of_credit"
+  }
+}
