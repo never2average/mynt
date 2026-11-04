@@ -101,3 +101,80 @@ jobs:
       - name: Swift builds
         working-directory: sdk-out/swift
         run: swift build
+  # The native mobile starters (templates/mynt-app-mobile), scaffolded the way the coding agents do it against a
+  # freshly generated SDK, and compiled with each platform's own toolchain.
+  starter-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node test/fixtures/generate-client-sdks.mjs sdk-out
+      - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out --mobile kotlin
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Android app builds
+        working-directory: starter/mobile
+        run: |
+          gradle wrapper --gradle-version 8.9
+          ./gradlew :app:assembleDebug --stacktrace
+          test -f app/build/outputs/apk/debug/app-debug.apk
+  starter-flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node test/fixtures/generate-client-sdks.mjs sdk-out
+      - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out --mobile flutter
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+      - name: Flutter app analyzes, tests and builds
+        working-directory: starter/mobile
+        run: |
+          flutter create --platforms=android,ios --project-name mynt_starter .
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build apk --debug
+  starter-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node test/fixtures/generate-client-sdks.mjs sdk-out
+      - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out --mobile swift
+      - name: SwiftUI app builds (macOS)
+        working-directory: starter/mobile
+        run: swift build
+      - name: SwiftUI app builds (iOS simulator)
+        working-directory: starter/mobile
+        run: xcodebuild -scheme MyntStarter -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
