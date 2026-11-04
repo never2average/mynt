@@ -41,7 +41,7 @@ import { registerMarketplaceTools } from "./marketplace.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { registerTakeRateAdminTools, registerTakeRateTools } from "./take-rates.js";
-import { emitProductEvent, ensureRelease, registerRuntimeInnovatorTools, registerRuntimeTools } from "./runtime.js";
+import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInnovatorTools, registerRuntimeTools } from "./runtime.js";
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
@@ -383,13 +383,22 @@ function registerCatalogTools(server: McpServer, store: Store, user: User | null
         region: z.string().optional().describe("IN, US or global; global products are included for every region"),
         risk_level: z.string().optional().describe("low, moderate, high, very_high, not_applicable"),
         query: z.string().optional().describe("Case-insensitive match on name, description and features"),
+        developer_ready: z
+          .boolean()
+          .optional()
+          .describe("Developers: true lists only products an app can be built on (developer contract, real regulator, consistent rate data)"),
         limit: z.number().int().min(1).max(100).default(50),
         offset: z.number().int().min(0).default(0),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ limit, offset, ...filter }) => {
-      const matches = filterProducts(await store.publishedProducts(), filter);
+    async ({ limit, offset, developer_ready, ...filter }) => {
+      let matches = filterProducts(await store.publishedProducts(), filter);
+      if (developer_ready !== undefined) {
+        const ready = new Set<string>();
+        for (const r of await store.pinnedProducts()) if (developerReadiness(r).ready) ready.add(r.product.id);
+        matches = matches.filter((p) => ready.has(p.id) === developer_ready);
+      }
       return json({ total: matches.length, offset, limit, products: matches.slice(offset, offset + limit) });
     },
   );

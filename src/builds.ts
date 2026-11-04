@@ -63,7 +63,9 @@ export interface BuildConfig {
   publicUrl: string;
   // Mynt's independent audit: its own model, budget (paid by Mynt, outside the developer's cap), time limit and
   // the Maxwell workflows it runs.
-  audit: { model: string; capUsd: number; minutes: number; workflows: string[] };
+  // `mode`: "none" ships on Mynt's own checks (tests, types, secrets, static scan, dependencies, SBOM,
+  // disclosures); "maxwell" adds the agent-run Maxwell audit as a further gate.
+  audit: { mode: "none" | "maxwell"; model: string; capUsd: number; minutes: number; workflows: string[] };
 }
 
 export function buildConfigFromEnv(env = process.env): BuildConfig {
@@ -77,6 +79,7 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
     maxwellRepo: env.BUILD_MAXWELL_REPO ?? "https://github.com/OnFinance/Maxwell",
     publicUrl: (env.PUBLIC_URL ?? "").replace(/\/+$/, ""),
     audit: {
+      mode: env.BUILD_AUDIT === "maxwell" ? "maxwell" : "none",
       model: env.BUILD_AUDIT_MODEL ?? "claude-sonnet-5-5",
       capUsd: Number(env.BUILD_AUDIT_CAP_USD ?? 5),
       minutes: Number(env.BUILD_AUDIT_MINUTES ?? 20),
@@ -365,8 +368,14 @@ export class BuildService {
   async start(developer: User, opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number }) {
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
     const spent = await this.monthSpend(developer.id);
-    if (spent + cap > this.config.monthlyCapUsd)
-      throw new Error(`Monthly build budget reached (US$${spent.toFixed(2)} of US$${this.config.monthlyCapUsd} spent this month)`);
+    // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
+    // what's left (and how much a smaller cap may be).
+    const left = Math.max(0, this.config.monthlyCapUsd - spent);
+    if (left < 0.5) throw new Error(`Monthly build budget used up (US$${spent.toFixed(2)} of US$${this.config.monthlyCapUsd} spent this month)`);
+    if (cap > left)
+      throw new Error(
+        `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
+      );
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
     const id = randomUUID();
@@ -703,6 +712,14 @@ export class BuildService {
     if (b.verify_step === "checks") {
       if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
       const { audit } = this.config;
+      if (audit.mode === "none") {
+        // No agent audit: the source can't change after Mynt's checks, so decide on their report alone.
+        const report = parseJson<{ checks: Check[] }>(await boat.readFile(vid, `${VERIFY_DIR}/report.json`));
+        await boat.stop(vid).catch(() => {});
+        await this.event(b.id, "verifying", "Checks finished; deciding on Mynt's checks (no agent audit configured)");
+        await this.decide(b, { report, maxwell: null, unchanged: true, auditFinished: false, auditRequired: false });
+        return;
+      }
       const processId = await this.startAuditor(b, vid, {
         prompt: "Audit the application described in job/audit.json, following CLAUDE.md and its skills.",
         workspace: "build-audit",
@@ -760,7 +777,7 @@ export class BuildService {
   // findings, every check passing, and a pushed branch identical to the verified source.
   private async decide(
     b: Build,
-    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean; audit?: AuditRun },
+    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean; audit?: AuditRun; auditRequired?: boolean },
   ) {
     const boat = this.boat!;
     const counts = v.maxwell?.counts ?? {};
@@ -777,7 +794,7 @@ export class BuildService {
       const files = v.changed?.length ? `: ${v.changed.slice(0, 5).join(", ")}${v.changed.length > 5 ? ", …" : ""}` : "";
       return end("blocked", `The source changed during the audit${files}; the result can't be trusted`, { changed: v.changed ?? [] });
     }
-    if (!v.auditFinished || !v.maxwell) {
+    if (v.auditRequired !== false && (!v.auditFinished || !v.maxwell)) {
       const a = v.audit;
       const why = !a ? "" : !a.report_written && a.result === "success" ? " (the auditor finished without writing its report)" : ` (auditor: ${[a.result ?? "no result", a.exit_code != null ? `exit ${a.exit_code}` : "", a.error ?? ""].filter(Boolean).join(", ")})`;
       return end("blocked", `No independent Maxwell audit result${why}; a build can't ship without one`, { audit: a ?? null });

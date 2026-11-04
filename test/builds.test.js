@@ -121,7 +121,7 @@ async function setup({ boat = fakeBoat(), config = {} } = {}) {
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
-  const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
+  const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
   const as = async (name, roles) => (await store.createUser(name, roles)).user;
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -333,7 +333,20 @@ test("spend caps count both sandboxes, and the monthly budget refuses new builds
   assert.equal(b.status, "over_budget");
   assert.equal(b.cost_usd, 5.5);
   assert.ok(boat.sandboxes.get(sbx).stopped && boat.sandboxes.get(vid).stopped);
-  assert.match((await call(dev, "start_build", { goal: "Another build please" })).data.error, /Monthly build budget/);
+  // US$2.50 of the US$8 month is left: the default US$5 cap doesn't fit, and the error says how much would.
+  assert.equal(
+    (await call(dev, "start_build", { goal: "Another build please" })).data.error,
+    "This build's cap (US$5) is more than this month's remaining build budget (US$2.50 of US$8); start it with cap_usd of at most 2.5",
+  );
+  const small = (await call(dev, "start_build", { goal: "A smaller build please", cap_usd: 2.5 })).data;
+  assert.equal(small.cap_usd, 2.5, "a cap within what's left is accepted");
+  await builds.stop(await builds.get(small.id), "test");
+});
+
+test("a used-up month says so", async () => {
+  const ctx = await setup({ config: { capUsd: 5, monthlyCapUsd: 0.25 } });
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  assert.match((await ctx.call(dev, "start_build", { goal: "Build a savings page please" })).data.error, /^Monthly build budget used up \(US\$0\.00 of US\$0\.25/);
 });
 
 test("developers track, steer and stop their own builds; admins see all", async () => {
@@ -909,4 +922,36 @@ test("Mynt's audit has its own token, budget and model, isn't charged to the dev
   assert.equal(b.status, "blocked");
   assert.match(b.error, /No independent Maxwell audit result \(auditor: timed out after 20 min/);
   assert.equal(await builds.agentRun(auditToken), null, "the audit token dies with the build");
+});
+
+test("by default a build ships on Mynt's own checks, with no agent audit; a failing static scan stops it", async () => {
+  for (const [checks, status] of [
+    [passingChecks.concat({ name: "static_scan", status: "pass" }), "succeeded"],
+    [passingChecks.concat({ name: "static_scan", status: "fail", detail: "high-severity: node_eval in api/server.js" }), "failed"],
+  ]) {
+    const ctx = await setup({ config: { audit: buildConfigFromEnv({}).audit } });
+    assert.equal(ctx.builds.config.audit.mode, "none");
+    const { builds, boat, call } = ctx;
+    const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+    const app = (await call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
+    assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
+    const started = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id, repository: "acme/savings-app" })).data;
+    await builds.tick();
+    const sbx = (await builds.get(started.id)).sandbox_id;
+    boat.ready(sbx);
+    await builds.tick();
+    boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
+    boat.finishAgent(sbx);
+    await builds.tick();
+    const vid = (await builds.get(started.id)).verify_sandbox_id;
+    boat.ready(vid);
+    await builds.tick();
+    boat.sandboxes.get(vid).checksRunning = false;
+    boat.write(vid, `${V}/report.json`, { checks });
+    await builds.tick(); // decided on the checks alone
+    const b = await builds.get(started.id);
+    assert.equal(b.status, status, b.error ?? "");
+    assert.ok(!boat.sandboxes.get(vid).files.has(`${A}/auth.json`), "no auditor was started");
+    if (status === "failed") assert.match(b.error, /Not production-ready: static_scan/);
+  }
 });
