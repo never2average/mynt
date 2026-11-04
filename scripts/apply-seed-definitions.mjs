@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Gives Mynt reference products their v2 definitions, as an admin, over MCP.
 //
+//   node scripts/apply-seed-definitions.mjs --url <mynt MCP URL> --login [--dry-run] [file.v2.json ...]
 //   MYNT_ADMIN_TOKEN=... node scripts/apply-seed-definitions.mjs --url <mynt MCP URL> [--dry-run] [file.v2.json ...]
 //
 // With no files it applies every schemas/examples/seed/*.v2.json. It checks all of them first
@@ -9,12 +10,15 @@
 // publish_product, one line per product. A product whose live definition already matches the file is
 // skipped. --dry-run stops after the checks.
 //
-// The admin token is read from MYNT_ADMIN_TOKEN only: never pass it on the command line, and it is never
-// printed. The MCP URL can also come from MYNT_MCP_URL.
+// Signing in: --login signs you in through the browser (see mynt-login.mjs) and keeps the access token
+// in memory only; otherwise the token is read from MYNT_ADMIN_TOKEN. Either way it is never accepted on
+// the command line, never printed and never written to disk. The MCP URL can also come from MYNT_MCP_URL.
 
 import { readFileSync, readdirSync } from "node:fs";
+import { basename } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { login } from "./mynt-login.mjs";
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -22,16 +26,17 @@ const option = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const usage = "usage: MYNT_ADMIN_TOKEN=... node scripts/apply-seed-definitions.mjs --url <mynt MCP URL> [--dry-run] [file.v2.json ...]";
+const usage = "usage: node scripts/apply-seed-definitions.mjs --url <mynt MCP URL> (--login | with MYNT_ADMIN_TOKEN set) [--dry-run] [file.v2.json ...]";
 
 if (args.some((a) => /^--?(token|bearer|auth)/i.test(a))) {
-  console.error("Refusing a token on the command line (it would land in shell history and process lists). Set MYNT_ADMIN_TOKEN instead.");
+  console.error("Refusing a token on the command line (it would land in shell history and process lists). Use --login, or set MYNT_ADMIN_TOKEN.");
   process.exit(2);
 }
-const token = process.env.MYNT_ADMIN_TOKEN?.trim();
 const url = option("--url") ?? process.env.MYNT_MCP_URL;
-if (!token || !url) {
-  console.error(`${!token ? "MYNT_ADMIN_TOKEN isn't set. " : ""}${!url ? "No MCP URL. " : ""}\n${usage}`);
+const useLogin = flag("--login");
+const envToken = process.env.MYNT_ADMIN_TOKEN?.trim();
+if (!url || (!useLogin && !envToken)) {
+  console.error(`${!url ? "No MCP URL (--url). " : ""}${!useLogin && !envToken ? "Add --login to sign in through your browser, or set MYNT_ADMIN_TOKEN. " : ""}\n${usage}`);
   process.exit(2);
 }
 const dryRun = flag("--dry-run");
@@ -45,13 +50,26 @@ if (!files.length) {
     .map((f) => new URL(f, dir).pathname);
 }
 
+let token;
+try {
+  token = useLogin ? await login({ mcpUrl: url }) : envToken;
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exit(1);
+}
+
 // Anything shown to the operator has the token scrubbed, whatever the server echoes back.
-const scrub = (s) => String(s).split(token).join("[MYNT_ADMIN_TOKEN]");
+const scrub = (s) => String(s).split(token).join("[access token]");
 const say = (s) => console.log(scrub(s));
 const shout = (s) => console.error(scrub(s));
 
 const client = new Client({ name: "apply-seed-definitions", version: "1" });
-await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+try {
+  await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+} catch (e) {
+  shout(`Couldn't connect to Mynt at ${url}: ${e instanceof Error ? e.message : e}`);
+  process.exit(1);
+}
 
 async function call(name, input) {
   const res = await client.callTool({ name, arguments: input });
@@ -79,7 +97,7 @@ try {
     const blockers = r.data.publish_blockers ?? [];
     if (r.isError || !r.data.valid || blockers.length) {
       refused = true;
-      shout(`${def._id}: NOT READY (${file})`);
+      shout(`${def._id}: NOT READY (${basename(file)})`);
       if (r.data.error) shout(`  ${r.data.error}`);
       for (const e of r.data.errors ?? []) shout(`  error: ${e}`);
       for (const b of blockers) shout(`  publish blocker: ${b.key} (${b.primitive} ${b.action}, ${b.region}): ${b.reason}`);

@@ -741,12 +741,38 @@ Each version's contract carries a `contract_hash`, which changes whenever the co
 **The reference catalogue's definitions.** Mynt's reference products have no firm, so their definitions name no providers, partner handoffs or risk models (those belong to the firm that offers the product, with its consent purposes and its model governance), but they carry everything else: components, segments, algorithms, terms, rates, fees, limits, servicing, lifecycle events and the register obligations each part satisfies. Admins save one with `set_product_definition`, then `test_product` and `publish_product` publish it as the product's next version, with a developer contract. [`schemas/examples/seed/`](schemas/examples/seed/) holds definitions for `savings-account`, `fixed-deposit`, `recurring-deposit` and `personal-loan` (India), each with its sources and assumptions in `descriptions.long`. They point at an RBI slice of the regulatory model: regulator `rbi` with the personas `rbi_resident_individual`, `rbi_senior_citizen` and `rbi_retail_borrower`, and the licence type `rbi_bank` with the obligations they cite. [`test/seed-regulatory-model.js`](test/seed-regulatory-model.js) builds exactly that slice. To apply them to a server:
 
 ```sh
-export MYNT_ADMIN_TOKEN=...   # an admin's token, set in your shell, never on the command line
-node scripts/apply-seed-definitions.mjs --url <the server's MCP URL> --dry-run   # check only
-node scripts/apply-seed-definitions.mjs --url <the server's MCP URL>             # check, save, test, publish
+node scripts/apply-seed-definitions.mjs --url <the server's MCP URL> --login --dry-run   # sign in in the browser, check only
+node scripts/apply-seed-definitions.mjs --url <the server's MCP URL> --login             # check, save, test, publish
 ```
 
+`--login` signs you in through your browser the way an MCP client does: OAuth discovery from the MCP URL, dynamic client registration, the authorization code flow with PKCE and a state check, the callback on `127.0.0.1` only. The access token stays in memory: it is never printed or saved. Instead of `--login`, an admin token can be set in the shell as `MYNT_ADMIN_TOKEN`; a token is never accepted on the command line.
+
 The script checks every file first (`check_product_definition` with the product id) and changes nothing if any is invalid or has publish blockers, printing the errors and blockers. Otherwise it saves, tests and publishes each one and prints one line per product. A product whose live definition already matches is skipped. Pass file paths to apply only some.
+
+#### Run it yourself: check the seed definitions against a Mynt server
+
+This checks the four definitions against the server and changes nothing. It takes about ten minutes the first time. You need an admin account on that Mynt server and its MCP address (it ends in `/mcp`).
+
+1. Install Node.js version 22 or newer from [nodejs.org](https://nodejs.org/en/download) (the "LTS" download). Mynt needs 22.13 or later. To check it worked, open a terminal (Terminal on a Mac, PowerShell on Windows) and type `node --version`: it should print `v22.13` or higher.
+2. Download Mynt's code. In the terminal, type:
+   ```sh
+   git clone https://github.com/never2average/mynt.git
+   cd mynt
+   ```
+   If `git` isn't installed, download the ZIP from the repository's green **Code** button instead, unzip it, and `cd` into the folder.
+3. Install what the script needs:
+   ```sh
+   npm ci
+   ```
+4. Run the check, putting the server's MCP address in place of `<Mynt MCP URL>`:
+   ```sh
+   node scripts/apply-seed-definitions.mjs --url <Mynt MCP URL> --login --dry-run
+   ```
+5. Your browser opens on Mynt's sign-in page. If it doesn't, copy the link the terminal printed into your browser. Sign in with your admin account. The browser then says you can close the tab.
+6. Back in the terminal you'll see `Signed in.`, then one line per product. `valid, no publish blockers` means it's ready. `NOT READY` is followed by the reasons, such as a regulator or persona the server doesn't have yet. The last line is `Dry run: 4 definition(s) checked, nothing changed.` or `Stopped: nothing was changed.`
+7. Copy everything the terminal printed and send it back. It contains no password or token. The only link in it is the sign-in link, which worked once and has already been used.
+
+With `--dry-run`, the script only reads: it makes no change to the server's products, whatever it prints. The only thing it leaves behind is the sign-in itself: the sign-in service records it and the script's registration as a sign-in client.
 
 Variants (a template plus a patch) can't be saved yet. Save the resolved product as `plane.role: "standalone"`.
 
