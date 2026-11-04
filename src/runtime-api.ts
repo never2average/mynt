@@ -29,6 +29,7 @@ export interface RuntimeApiOptions {
   maxBodyBytes?: number; // default 16 KiB
   hosting?: HostingService | null; // tenant VMs register and fetch their policy here
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
+  callbackRateLimit?: { perSubscription?: number; perCaller?: number }; // vendor callbacks a minute (default 600 per signed subscription, 1200 per caller)
 }
 
 class ApiError extends Error {
@@ -152,7 +153,8 @@ const productView = (r: ProductRecord) => {
 
 export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
   const limiter = new RateLimiter(opts.rateLimit?.capacity ?? 60, opts.rateLimit?.perMinute ?? 60);
-  const callbackLimiter = new RateLimiter(600, 600); // per vendor subscription
+  const callbackLimiter = new RateLimiter(opts.callbackRateLimit?.perSubscription ?? 600, opts.callbackRateLimit?.perSubscription ?? 600); // vendor callbacks, per subscription once signed
+  const callerLimiter = new RateLimiter(opts.callbackRateLimit?.perCaller ?? 1200, opts.callbackRateLimit?.perCaller ?? 1200); // vendor callbacks, per caller address before the signature check
   const maxBody = opts.maxBodyBytes ?? 16 * 1024;
 
   const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
@@ -465,11 +467,13 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     const callback = path.match(/^\/v1\/vendor\/callback\/([^/]+)$/);
     if (callback) {
       allow("POST");
-      const wait = callbackLimiter.take(callback[1]);
-      if (wait) throw new ApiError(429, "rate_limited", "Too many callbacks for this subscription", { "Retry-After": String(wait) });
+      // Before the signature is checked, a limit per caller address; after, per subscription (so nobody without the
+      // secret can use up a vendor's allowance).
+      const wait = callerLimiter.take(req.socket.remoteAddress ?? "unknown");
+      if (wait) throw new ApiError(429, "rate_limited", "Too many requests", { "Retry-After": String(wait) });
       const raw = await readRaw(req, Math.max(maxBody, 256 * 1024));
       const sig = req.headers["mynt-signature"];
-      const r = await vendorCallback(store, callback[1], raw, typeof sig === "string" ? sig : undefined);
+      const r = await vendorCallback(store, callback[1], raw, typeof sig === "string" ? sig : undefined, () => callbackLimiter.take(callback[1]) === 0);
       return send(res, r.status, r.body);
     }
 

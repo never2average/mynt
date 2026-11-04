@@ -1106,23 +1106,26 @@ const TABLES = `
   CREATE TABLE IF NOT EXISTS financial_products.vendor_action_runs (
     id uuid PRIMARY KEY,
     request_id uuid NOT NULL UNIQUE,
-    subscription_id uuid NOT NULL REFERENCES financial_products.vendor_subscriptions(id),
-    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
-    app_id uuid NOT NULL REFERENCES financial_products.apps(id),
-    session_id uuid NOT NULL REFERENCES financial_products.client_sessions(id),
+    subscription_id uuid NOT NULL REFERENCES financial_products.vendor_subscriptions(id) ON DELETE CASCADE,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id) ON DELETE CASCADE,
+    app_id uuid NOT NULL REFERENCES financial_products.apps(id) ON DELETE CASCADE,
+    session_id uuid NOT NULL REFERENCES financial_products.client_sessions(id) ON DELETE CASCADE,
     product_id text NOT NULL,
     contract_hash text,
     action text NOT NULL,
     service_type text NOT NULL,
     customer_ref text,
     sandbox boolean NOT NULL,
-    status text NOT NULL CHECK (status IN ('calling', 'pending', 'completed', 'failed')),
+    -- withdrawn: the customer withdrew consent or erased their data before it finished; expired: never finished.
+    status text NOT NULL CHECK (status IN ('calling', 'pending', 'completed', 'failed', 'withdrawn', 'expired')),
     client_outcome jsonb NOT NULL DEFAULT '{}',
     result_sealed text,
     created_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz
   );
   CREATE INDEX IF NOT EXISTS vendor_action_runs_session_idx ON financial_products.vendor_action_runs (session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS vendor_action_runs_customer_idx ON financial_products.vendor_action_runs (app_id, customer_ref, sandbox);
+  CREATE INDEX IF NOT EXISTS vendor_action_runs_open_idx ON financial_products.vendor_action_runs (created_at) WHERE status IN ('calling', 'pending');
   -- Evidence of a vendor-served action's end (status only, never the result).
   ALTER TABLE financial_products.client_evidence DROP CONSTRAINT IF EXISTS client_evidence_type_check;
   ALTER TABLE financial_products.client_evidence ADD CONSTRAINT client_evidence_type_check
@@ -1928,8 +1931,23 @@ export class Store {
     return rows.map((r) => ({ field: r.field as string, sealed: r.sealed as string, source: r.source as string, updated_at: iso(r.updated_at)! }));
   }
 
+  // Erases what's held for a customer: their vault, the vendor results kept for them (and any still queued for an
+  // innovator's webhook), and stops their unfinished vendor actions from filling anything later.
   async eraseVault(appId: string, customerRef: string, sandbox: boolean): Promise<number> {
-    return (await this.all("DELETE FROM financial_products.customer_vault WHERE app_id = $1 AND customer_ref = $2 AND sandbox = $3 RETURNING field", [appId, customerRef, sandbox])).length;
+    const n = (await this.all("DELETE FROM financial_products.customer_vault WHERE app_id = $1 AND customer_ref = $2 AND sandbox = $3 RETURNING field", [appId, customerRef, sandbox])).length;
+    await this.db.query(
+      `UPDATE financial_products.vendor_action_runs SET result_sealed = NULL,
+         status = CASE WHEN status IN ('calling', 'pending') THEN 'withdrawn' ELSE status END,
+         completed_at = CASE WHEN status IN ('calling', 'pending') THEN now() ELSE completed_at END
+       WHERE app_id = $1 AND customer_ref = $2 AND sandbox = $3`,
+      [appId, customerRef, sandbox],
+    );
+    await this.db.query(
+      `UPDATE financial_products.webhook_deliveries SET payload = payload #- '{data,result_sealed}'
+       WHERE payload->'data' ? 'result_sealed' AND payload->'data'->>'app_id' = $1 AND payload->'data'->>'customer_ref' = $2 AND sandbox = $3`,
+      [appId, customerRef, sandbox],
+    );
+    return n;
   }
 
   // A coding-agent build's outcome (the builds service owns the table; it's absent when builds are off).

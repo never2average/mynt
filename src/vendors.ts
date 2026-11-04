@@ -10,7 +10,7 @@ import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
 import { EntityFactsSchema, partyActive, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
 import { normalizeModel } from "./regulatory.js";
-import { emitFirmEvent, FIRM_WEBHOOK_EVENTS, webhookUrlProblem } from "./runtime.js";
+import { checkWebhookUrl, emitFirmEvent, emitEvent, FIRM_WEBHOOK_EVENTS } from "./runtime.js";
 import type { Db } from "./db.js";
 import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
 import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
@@ -275,6 +275,20 @@ async function licenceTypeIds(store: Store, region: string): Promise<Set<string>
   return new Set(normalizeModel(r.regulatory).regulators.flatMap((g) => g.license_types.map((l) => l._id)));
 }
 
+// A property a device may be shown: one plain scalar type (or several, null included), a scalar enum or a scalar
+// const, and nothing that can nest (no $ref, combinators, items or properties).
+const SCALAR_TYPES = new Set(["string", "number", "integer", "boolean", "null"]);
+const isScalar = (v: unknown) => v === null || ["string", "number", "boolean"].includes(typeof v);
+function scalarSchema(prop: unknown): boolean {
+  if (!prop || typeof prop !== "object" || Array.isArray(prop)) return false;
+  const p = prop as Record<string, unknown>;
+  if (["$ref", "allOf", "anyOf", "oneOf", "not", "if", "items", "prefixItems", "properties", "patternProperties", "additionalProperties"].some((k) => k in p)) return false;
+  if (Array.isArray(p.enum)) return p.enum.every(isScalar) && (p.type === undefined || scalarSchema({ type: p.type }));
+  if ("const" in p) return isScalar(p.const);
+  const types = Array.isArray(p.type) ? p.type : [p.type];
+  return types.length > 0 && types.every((x) => typeof x === "string" && SCALAR_TYPES.has(x));
+}
+
 export async function checkServiceType(store: Store, t: ServiceTypeInput): Promise<{ errors: string[]; fixtures: Record<string, unknown>[] }> {
   const errors: string[] = [];
   const ids = await licenceTypeIds(store, t.region);
@@ -302,6 +316,7 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
     if (cr.status && !(cr.status.from in outputProps)) errors.push(`client_result.status.from: '${cr.status.from}' isn't a property of output_schema`);
     for (const f of cr.fields) {
       if (!(f in outputProps)) errors.push(`client_result.fields: '${f}' isn't a property of output_schema`);
+      else if (!scalarSchema(outputProps[f])) errors.push(`client_result.fields: '${f}' must be a plain string, number, boolean or enum property; objects and arrays never go to the device`);
       else if (DATA_DICTIONARY[f] && DATA_DICTIONARY[f].sensitivity !== "public") errors.push(`client_result.fields: '${f}' is customer data (${DATA_DICTIONARY[f].sensitivity}); it goes to the innovator, never the device`);
       else if (t.fills.includes(f)) errors.push(`client_result.fields: '${f}' fills the customer's vault; it goes to the innovator, never the device`);
     }
@@ -714,6 +729,8 @@ const deviceStatus = (t: ServiceType, output: Record<string, unknown>): ClientSt
 const deviceFields = (t: ServiceType, output: Record<string, unknown>) =>
   Object.fromEntries((t.client_result?.fields ?? []).filter((f) => f in output && !RESERVED.includes(f)).map((f) => [f, output[f]]));
 
+type RunStatus = "calling" | "pending" | "completed" | "failed" | "withdrawn" | "expired";
+const OPEN: RunStatus[] = ["calling", "pending"];
 type RunRow = {
   id: string;
   request_id: string;
@@ -727,33 +744,51 @@ type RunRow = {
   service_type: string;
   customer_ref: string | null;
   sandbox: boolean;
-  status: "calling" | "pending" | "completed" | "failed";
+  status: RunStatus;
   client_outcome: Record<string, unknown>;
 };
 const outcomeOf = (r: RunRow): ClientOutcome & { sandbox: boolean } => ({
   ...r.client_outcome,
   reference: r.id,
   action: r.action,
-  status: r.status === "calling" ? "pending" : ((r.client_outcome.status as ClientStatus | undefined) ?? (r.status === "failed" ? "failed" : "pending")),
+  status: OPEN.includes(r.status) ? "pending" : ((r.client_outcome.status as ClientStatus | undefined) ?? "failed"),
   sandbox: r.sandbox,
 });
 
-// Ends a run once: the full result sealed in Mynt's store, the fields it fills saved to the customer's vault,
-// evidence of the outcome (status only) for the session, and the result to the innovator's webhooks. Returns
-// null when the run had already ended (a replayed callback).
-async function finishRun(store: Store, run: RunRow, t: ServiceType, end: { ok: true; output: Record<string, unknown> } | { ok: false; code: string | null }) {
-  const outcome: Record<string, unknown> = end.ok ? { status: deviceStatus(t, end.output), ...deviceFields(t, end.output) } : { status: "failed" };
-  const sealed = end.ok ? seal(JSON.stringify(end.output), run.sandbox) : null;
+// How a run ends: the vendor's valid output, its error, the customer's consent withdrawn (or their data erased)
+// before it finished, or no answer in time.
+type End = { kind: "output"; output: Record<string, unknown> } | { kind: "error"; code: string | null } | { kind: "withdrawn" } | { kind: "expired" };
+
+// Ends a run once. A valid output whose status maps to "pending" (the customer hasn't finished on the provider's
+// page) keeps it open for the vendor's callback. Otherwise: the full result sealed in Mynt's store, the fields it
+// fills saved to the customer's vault (only when it completed), evidence of the outcome (status only) for the
+// session, the result to the innovator's webhooks, and, for an action that finished after the device's call
+// (`async`), a data-free handoff.completed or handoff.failed to the app's webhooks. Returns null when the run had
+// already ended (a replayed callback).
+async function finishRun(store: Store, run: RunRow, t: ServiceType | null, end: End, async: boolean): Promise<(ClientOutcome & { sandbox: boolean }) | null> {
+  if (end.kind === "output" && t && deviceStatus(t, end.output) === "pending") {
+    const { rows } = await store.db.query(
+      `UPDATE ${T}.vendor_action_runs SET status = 'pending', client_outcome = client_outcome || $2::jsonb WHERE id = $1 AND status IN ('calling', 'pending') RETURNING *`,
+      [run.id, JSON.stringify({ status: "pending", ...deviceFields(t, end.output) })],
+    );
+    return rows[0] ? outcomeOf(rows[0] as RunRow) : null;
+  }
+  const output = end.kind === "output" ? end.output : null;
+  const shown: ClientStatus = output && t ? deviceStatus(t, output) : "failed";
+  const status: RunStatus = end.kind === "withdrawn" ? "withdrawn" : end.kind === "expired" ? "expired" : shown === "failed" ? "failed" : "completed";
+  const outcome: Record<string, unknown> = output && t ? { status: shown, ...deviceFields(t, output) } : { status: "failed" };
+  // Sandbox results are sealed with a key that survives restarts, so a queued delivery can still be sent.
+  const sealed = output ? seal(JSON.stringify(output), run.sandbox, true) : null;
   const { rows } = await store.db.query(
     `UPDATE ${T}.vendor_action_runs SET status = $2, client_outcome = $3, result_sealed = $4, completed_at = now()
      WHERE id = $1 AND status IN ('calling', 'pending') RETURNING *`,
-    [run.id, end.ok ? "completed" : "failed", JSON.stringify(outcome), sealed],
+    [run.id, status, JSON.stringify(outcome), sealed],
   );
   if (!rows[0]) return null;
   const done = rows[0] as RunRow;
-  if (end.ok && run.customer_ref)
+  if (status === "completed" && output && t && run.customer_ref)
     for (const f of t.fills) {
-      const v = end.output[f];
+      const v = output[f];
       if (v == null || validateValue(f, v)) continue;
       await store.putVaultField({ app_id: run.app_id, customer_ref: run.customer_ref, sandbox: run.sandbox, field: f, sealed: seal(String(v).trim(), run.sandbox), source: PREFILL_SOURCE[t.category] ?? "vendor" });
     }
@@ -762,16 +797,17 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType, end: { ok: t
     session_id: run.session_id,
     product_id: run.product_id,
     contract_hash: run.contract_hash,
-    type: end.ok ? "action_completed" : "action_failed",
+    type: status === "completed" ? "action_completed" : "action_failed",
     subject: run.action,
     content_hash: null,
     customer_ref: run.customer_ref,
     sandbox: run.sandbox,
   });
+  const errorCode = end.kind === "error" ? end.code : end.kind === "withdrawn" ? "consent_withdrawn" : end.kind === "expired" ? "expired" : null;
   await emitFirmEvent(
     store,
     run.entity_id,
-    end.ok ? "vendor_action.completed" : "vendor_action.failed",
+    status === "completed" ? "vendor_action.completed" : "vendor_action.failed",
     {
       reference: run.id,
       request_id: run.request_id,
@@ -783,11 +819,19 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType, end: { ok: t
       customer_ref: run.customer_ref,
       sandbox: run.sandbox,
       status: outcome.status,
-      ...(end.ok ? {} : { error_code: end.code }),
+      ...(errorCode ? { error_code: errorCode } : {}),
     },
     run.sandbox,
     sealed ?? undefined,
   );
+  if (async)
+    await emitEvent(
+      store,
+      [run.app_id],
+      status === "completed" ? "handoff.completed" : "handoff.failed",
+      { product_id: run.product_id, reference: run.id, action: run.action, status: outcome.status, sandbox: run.sandbox },
+      run.sandbox,
+    );
   return outcomeOf(done);
 }
 
@@ -845,10 +889,17 @@ export async function vendorAction(
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
     [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
   );
-  const answer = await callBoundVendor(store, bound, { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true }, opts);
+  // Nothing is kept of a call that was refused, failed, answered badly or threw.
+  const discard = () => store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
+  let answer: VendorAnswer;
+  try {
+    answer = await callBoundVendor(store, bound, { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true }, opts);
+  } catch (e) {
+    await discard();
+    throw e;
+  }
   if (answer.kind === "error") {
-    // Nothing is kept of a call that was refused, failed or answered badly.
-    await store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
+    await discard();
     return answer;
   }
   if (answer.kind === "pending") {
@@ -860,7 +911,7 @@ export async function vendorAction(
     // Without a row, the vendor's callback finished it first.
     return { kind: "ok", outcome: rows[0] ? outcomeOf(rows[0] as RunRow) : await currentRun(store, run.id) };
   }
-  return { kind: "ok", outcome: (await finishRun(store, run, t, { ok: true, output: answer.output })) ?? (await currentRun(store, run.id)) };
+  return { kind: "ok", outcome: (await finishRun(store, run, t, { kind: "output", output: answer.output }, false)) ?? (await currentRun(store, run.id)) };
 }
 
 // A run's outcome as a device of the same app and customer may read it (e.g. back from the provider's page).
@@ -877,7 +928,14 @@ export async function vendorActionRun(store: Store, id: string, who: { app_id: s
 
 // POST /v1/vendor/callback/<subscription_id>: an asynchronous service's final answer, signed like Mynt's
 // requests (Mynt-Signature with the subscription's signing secret, at most 300 s old). Idempotent on request_id.
-export async function vendorCallback(store: Store, subscriptionId: string, raw: string, signature: string | undefined): Promise<{ status: number; body: Record<string, unknown> }> {
+// `admit` is asked only once the signature verified (a per-subscription rate limit).
+export async function vendorCallback(
+  store: Store,
+  subscriptionId: string,
+  raw: string,
+  signature: string | undefined,
+  admit: () => boolean = () => true,
+): Promise<{ status: number; body: Record<string, unknown> }> {
   const refused = { status: 401, body: { error: "bad_signature", message: 'Sign the body with the subscription\'s signing secret (Mynt-Signature: t=<unix>,v1=<hex HMAC-SHA256 of "t.body">), at most 300 s old' } };
   const sub = await getSubscription(store.db, subscriptionId);
   const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(signature ?? "");
@@ -885,6 +943,7 @@ export async function vendorCallback(store: Store, subscriptionId: string, raw: 
   const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
   const want = createHmac("sha256", secret).update(`${m[1]}.${raw}`).digest();
   if (!timingSafeEqual(want, Buffer.from(m[2], "hex"))) return refused;
+  if (!admit()) return { status: 429, body: { error: "rate_limited", message: "Too many callbacks for this subscription" } };
   let body: { request_id?: unknown; status?: unknown; output?: unknown; error?: unknown };
   try {
     body = JSON.parse(raw);
@@ -896,24 +955,45 @@ export async function vendorCallback(store: Store, subscriptionId: string, raw: 
   const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [body.request_id, sub.id]);
   const run = rows[0] as RunRow | undefined;
   if (!run) return { status: 404, body: { error: "unknown_request", message: "No request with that request_id for this subscription" } };
-  if (run.status === "completed" || run.status === "failed") return { status: 200, body: { request_id: run.request_id, status: run.status, duplicate: true } };
+  if (!OPEN.includes(run.status)) return { status: 200, body: { request_id: run.request_id, status: run.status, duplicate: true } };
   const bound = await resolveSubscription(store, sub.id);
   if (!bound) return { status: 409, body: { error: "service_missing", message: "The service type behind this subscription no longer exists" } };
-  let end: { ok: true; output: Record<string, unknown> } | { ok: false; code: string | null };
+  let end: End;
   if (body.status === "ok") {
     const problems = schemaProblems(bound.t.output_schema, body.output);
     if (problems.length) return { status: 400, body: { error: "invalid_output", message: "output doesn't match the service type's output schema", problems } };
-    end = { ok: true, output: body.output as Record<string, unknown> };
+    end = { kind: "output", output: body.output as Record<string, unknown> };
   } else {
     const code = (body.error as { code?: unknown } | null)?.code;
-    end = { ok: false, code: typeof code === "string" && /^[a-z0-9_]{1,60}$/.test(code) ? code : null };
+    end = { kind: "error", code: typeof code === "string" && /^[a-z0-9_]{1,60}$/.test(code) ? code : null };
   }
-  const done = await finishRun(store, run, bound.t, end);
+  // A late answer counts only while the customer's consent still stands; withdrawn, nothing of it is kept.
+  const consent = await store.latestConsent(run.session_id, run.product_id, bound.t.consent_purpose);
+  if (consent?.type !== "consent_given") end = { kind: "withdrawn" };
+  const done = await finishRun(store, run, bound.t, end, true);
   if (!done) {
     const { rows: now } = await store.db.query(`SELECT status FROM ${T}.vendor_action_runs WHERE id = $1`, [run.id]);
     return { status: 200, body: { request_id: run.request_id, status: now[0]?.status, duplicate: true } };
   }
-  return { status: 200, body: { request_id: run.request_id, status: end.ok ? "completed" : "failed" } };
+  const { rows: now } = await store.db.query(`SELECT status FROM ${T}.vendor_action_runs WHERE id = $1`, [run.id]);
+  return { status: 200, body: { request_id: run.request_id, status: now[0]?.status } };
+}
+
+// Ends runs that will never finish: a call still "calling" after `callingMinutes` (the process died mid-call) and
+// a "pending" one older than `pendingHours` (VENDOR_PENDING_EXPIRY_HOURS, default 24). Each ends as expired, and
+// the innovator and the app are told (without data).
+export async function sweepVendorActionRuns(store: Store, o: { callingMinutes?: number; pendingHours?: number; now?: Date } = {}): Promise<number> {
+  const now = o.now ?? new Date();
+  const pendingHours = o.pendingHours ?? (Number(process.env.VENDOR_PENDING_EXPIRY_HOURS) || 24);
+  const { rows } = await store.db.query(
+    `SELECT * FROM ${T}.vendor_action_runs
+     WHERE (status = 'calling' AND created_at < $1::timestamptz - make_interval(mins => $2)) OR (status = 'pending' AND created_at < $1::timestamptz - make_interval(hours => $3))
+     ORDER BY created_at LIMIT 500`,
+    [now.toISOString(), o.callingMinutes ?? 5, pendingHours],
+  );
+  let n = 0;
+  for (const run of rows as RunRow[]) if (await finishRun(store, run, null, { kind: "expired" }, true)) n++;
+  return n;
 }
 
 // ---- tools ----
@@ -1529,7 +1609,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     async ({ url, events }) => {
       const entityId = await entityOf(store, user);
       if (!entityId) return fail("Register your firm first (create_entity)");
-      const problem = webhookUrlProblem(url);
+      const problem = await checkWebhookUrl(url);
       if (problem) return fail(problem);
       if ((await store.firmWebhooks(entityId)).length >= 5) return fail("A firm can have at most 5 webhooks");
       const { webhook, secret } = await store.createFirmWebhook(user.id, { entity_id: entityId, url, events: [...new Set(events)] });

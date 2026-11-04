@@ -17,6 +17,7 @@ import { connectPostgres } from "./db.js";
 import { createMcpHttpServer } from "./http.js";
 import { GitHubApp } from "./github.js";
 import { startWebhookWorker } from "./runtime.js";
+import { sweepVendorActionRuns } from "./vendors.js";
 import { createServer } from "./server.js";
 import { ROLES, Store, type Role } from "./store.js";
 
@@ -144,8 +145,12 @@ if (values.help) {
   // Licences lapse with time: re-check pinned products hourly (changes made through Mynt re-check at once).
   const drift = setInterval(() => driftSweep(store).catch((e) => console.error("drift sweep:", e)), 60 * 60 * 1000);
   drift.unref();
+  // Vendor-served actions that will never finish (a call cut short, a customer who never came back) end as expired.
+  const vendorRuns = setInterval(() => sweepVendorActionRuns(store).catch((e) => console.error("vendor action sweep:", (e as Error).message)), 60 * 1000);
+  vendorRuns.unref();
   process.on("SIGTERM", () => {
     clearInterval(drift);
+    clearInterval(vendorRuns);
     webhooks.stop();
     builds.stopWorker();
     bd.stopWorker();

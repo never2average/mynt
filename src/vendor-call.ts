@@ -13,6 +13,8 @@ import { BlockList, isIP } from "node:net";
 
 export interface VendorCallOptions {
   allowInsecureLoopback?: boolean; // tests only: http:// to 127.0.0.0/8 or ::1
+  anyPort?: boolean; // webhooks: https on any port (vendors serve on 443 only)
+  anyBody?: boolean; // webhooks: the receiver's answer needn't be JSON
   timeoutMs?: number; // default 10 s
   maxResponseBytes?: number; // default 256 KiB
 }
@@ -103,7 +105,7 @@ export async function resolveVendorUrl(raw: string, opts: VendorCallOptions = {}
     if (insecure) throw new OutboundRefused("HTTPS only");
   }
   // Vendors serve on 443; another port is a way to reach services that aren't theirs.
-  if (url.port && url.port !== "443" && !testLoopback) throw new OutboundRefused("only port 443");
+  if (url.port && url.port !== "443" && !testLoopback && !opts.anyPort) throw new OutboundRefused("only port 443");
   return { url, address: addresses[0].address, family: addresses[0].family === 6 ? 6 : 4 };
 }
 
@@ -126,23 +128,25 @@ export async function callVendor(
   req: { base_url: string; service_type: string; body: unknown; signing_secret: string; credential?: string | null; signature?: string },
   opts: VendorCallOptions = {},
 ): Promise<VendorResult> {
+  const payload = JSON.stringify(req.body);
+  const headers: Record<string, string> = { "User-Agent": "Mynt-Vendor-Client/1", "Mynt-Signature": req.signature ?? signBody(req.signing_secret, payload) };
+  if (req.credential) headers.Authorization = `Bearer ${req.credential}`;
+  return safePost(`${req.base_url.replace(/\/+$/, "")}/v1/${req.service_type}`, payload, headers, opts);
+}
+
+// One JSON POST under the outbound rules above: resolved and checked first, connected to the checked address
+// (so DNS can't be switched under us), no redirects, a time limit and a size cap. Used for vendors' services
+// and for webhooks (anyPort, anyBody).
+export async function safePost(endpoint: string, payload: string, extraHeaders: Record<string, string>, opts: VendorCallOptions = {}): Promise<VendorResult> {
   const started = Date.now();
   const done = (r: Omit<VendorResult, "latency_ms">): VendorResult => ({ ...r, latency_ms: Date.now() - started });
   let target: Awaited<ReturnType<typeof resolveVendorUrl>>;
-  const endpoint = `${req.base_url.replace(/\/+$/, "")}/v1/${req.service_type}`;
   try {
     target = await resolveVendorUrl(endpoint, opts);
   } catch (e) {
     return done({ ok: false, http_status: null, body: null, error: `refused: ${(e as Error).message}` });
   }
-  const payload = JSON.stringify(req.body);
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "Content-Length": String(Buffer.byteLength(payload)),
-    "User-Agent": "Mynt-Vendor-Client/1",
-    "Mynt-Signature": req.signature ?? signBody(req.signing_secret, payload),
-  };
-  if (req.credential) headers.Authorization = `Bearer ${req.credential}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(payload)), ...extraHeaders };
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const maxBytes = opts.maxResponseBytes ?? 256 * 1024;
   const { url, address, family: fam } = target;
@@ -191,7 +195,7 @@ export async function callVendor(
           try {
             body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           } catch {
-            return finish({ ok: false, http_status: status, body: null, error: "response isn't JSON" });
+            if (!opts.anyBody) return finish({ ok: false, http_status: status, body: null, error: "response isn't JSON" });
           }
           finish({ ok: status >= 200 && status < 300, http_status: status, body, error: status >= 200 && status < 300 ? null : `http ${status}` });
         });

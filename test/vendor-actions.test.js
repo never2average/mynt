@@ -1,6 +1,6 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createDecipheriv, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -8,6 +8,7 @@ import { createMcpHttpServer } from "../dist/http.js";
 import { deliverDueWebhooks, signWebhook } from "../dist/runtime.js";
 import { createServer } from "../dist/server.js";
 import { signBody } from "../dist/vendor-call.js";
+import { sweepVendorActionRuns } from "../dist/vendors.js";
 import { definitionFor, publishDefined, setup } from "./v2-helpers.js";
 
 // A product's client action served by its bound vendor service: a device starts a PAN check or an e-sign, Mynt
@@ -59,6 +60,8 @@ async function vendorServer() {
     }
     if (req.url.endsWith("/v1/esign")) {
       if (conformance || state.esign === "ok") return reply(200, { request_id: body.request_id, status: "ok", output: { signature_status: "signed", signed_document_ref: "doc-signed-1" } });
+      // Answered at once, but the customer hasn't signed yet: the service's own status says pending.
+      if (state.esign === "ok_pending") return reply(200, { request_id: body.request_id, status: "ok", output: { signature_status: "pending" } });
       return reply(200, { request_id: body.request_id, status: "pending", redirect_url: REDIRECT });
     }
     reply(404, { status: "error" });
@@ -98,6 +101,7 @@ test("client actions served by the bound vendor: the device gets a status, the i
   const innovator = await connect(ctx.user);
   const vendor = await vendorServer();
   const firmHook = await innovatorServer();
+  const appHook = await innovatorServer(); // the developer's app server, for its own (data-free) webhooks
 
   // ---- service types: what a device may be told is part of each one ----
   const loaded = await ok(admin, "load_service_types", { region: "IN", licence_map: { rbi_nbfc: "rbi_bank", rbi_cic: "rbi_pa", cca_esp: "rbi_pa" } });
@@ -120,6 +124,28 @@ test("client actions served by the bound vendor: the device gets a status, the i
   assert.match(leakErrors, /'full_name' is customer data/);
   assert.match(leakErrors, /'shoe_size' isn't a property of output_schema/);
   assert.match(leakErrors, /status.from: 'colour' isn't a property/);
+  // Only plain scalar properties may go to the device: never objects, arrays or anything that can nest.
+  const nested = await call(admin, "define_service_type", {
+    service_type: {
+      ...ckyc,
+      output_schema: {
+        ...ckyc.output_schema,
+        properties: {
+          ...ckyc.output_schema.properties,
+          match_detail: { type: "object" },
+          flags: { type: "array", items: { type: "string" } },
+          either: { anyOf: [{ type: "string" }, { type: "object" }] },
+          band: { enum: ["a", "b"] },
+          score_band: { type: ["integer", "null"] },
+        },
+      },
+      client_result: { fields: ["match_detail", "flags", "either", "band", "score_band"] },
+    },
+  });
+  assert.equal(nested.isError, true);
+  const nestedErrors = nested.data.errors.join("\n");
+  for (const f of ["match_detail", "flags", "either"]) assert.match(nestedErrors, new RegExp(`'${f}' must be a plain string, number, boolean or enum`), f);
+  for (const f of ["band", "score_band"]) assert.doesNotMatch(nestedErrors, new RegExp(`'${f}'`), `${f} is a plain scalar`);
 
   // ---- a vendor with two listed offerings ----
   await ok(admin, "invite_user", { email: "vic@signworks.example", roles: ["vendor"] });
@@ -212,12 +238,14 @@ test("client actions served by the bound vendor: the device gets a status, the i
   const dev = await connect(devUser);
   const app = await ok(dev, "create_app", { name: "Saver", description: "Daily saving", audience: "Savers", product_ids: ["everyday-rd"] });
   const key = (await ok(dev, "create_api_key", { app_id: app.id, environment: "sandbox", label: "test" })).key;
-  const apiBase = await (async () => {
-    const s = createMcpHttpServer(store, null, { vendors: VENDOR_OPTS }, { publicUrl: "https://mynt.test", vendors: VENDOR_OPTS }).listen(0, "127.0.0.1");
+  await ok(dev, "create_webhook", { app_id: app.id, url: `${appHook.url}/hook`, events: ["handoff.completed", "handoff.failed"] });
+  const runtimeServer = async (extra = {}) => {
+    const s = createMcpHttpServer(store, null, { vendors: VENDOR_OPTS }, { publicUrl: "https://mynt.test", vendors: VENDOR_OPTS, ...extra }).listen(0, "127.0.0.1");
     await new Promise((r) => s.once("listening", r));
     servers.push({ close: () => (s.closeAllConnections(), s.close()) });
     return `http://127.0.0.1:${s.address().port}`;
-  })();
+  };
+  const apiBase = await runtimeServer();
   const deviceResponses = [];
   const api = async (method, path, secret, body, headers = {}) => {
     const res = await fetch(`${apiBase}${path}`, {
@@ -284,7 +312,13 @@ test("client actions served by the bound vendor: the device gets a status, the i
     // Kept sealed, with evidence (status only) for the session.
     const run = (await store.db.query("SELECT * FROM financial_products.vendor_action_runs WHERE id = $1", [verified.body.reference])).rows[0];
     assert.equal(run.status, "completed");
-    assert.ok(run.result_sealed.startsWith("v1:") && !run.result_sealed.includes("name_match"), "sealed at rest");
+    assert.ok(run.result_sealed.startsWith("v1s:") && !run.result_sealed.includes("name_match"), "sealed at rest");
+    // Sandbox results are sealed with a key derived from MYNT_VAULT_KEY, so they open after a restart too.
+    const durable = Buffer.from(hkdfSync("sha256", Buffer.from(process.env.MYNT_VAULT_KEY, "base64"), Buffer.alloc(0), "mynt-sandbox-durable-v1", 32));
+    const [, iv, tag, ct] = run.result_sealed.split(":");
+    const decipher = createDecipheriv("aes-256-gcm", durable, Buffer.from(iv, "base64"));
+    decipher.setAuthTag(Buffer.from(tag, "base64"));
+    assert.deepEqual(JSON.parse(Buffer.concat([decipher.update(Buffer.from(ct, "base64")), decipher.final()]).toString("utf8")), { pan_status: "valid", name_match: true, dob_match: null });
     assert.deepEqual(run.client_outcome, { status: "verified" });
     const evidence = (await store.db.query("SELECT * FROM financial_products.client_evidence WHERE type = 'action_completed'")).rows;
     assert.equal(evidence.length, 1);
@@ -360,13 +394,119 @@ test("client actions served by the bound vendor: the device gets a status, the i
     assert.equal(replay.body.duplicate, true, "a replay is answered, not applied twice");
     const afterCallback = await counts();
     assert.equal(afterCallback.evidence, pendingCounts.evidence + 1);
-    assert.equal(afterCallback.deliveries, pendingCounts.deliveries + 1);
+    assert.equal(afterCallback.deliveries, pendingCounts.deliveries + 2, "one to the innovator, one (data-free) to the app");
     const finished = (await api("GET", `/v1/client/action_runs/${pending.body.reference}`, s)).body;
     assert.equal(finished.status, "completed");
     assert.equal(finished.redirect_url, undefined, "once finished, there is no page to send the device to");
     await deliverDueWebhooks(store);
     const signedHook = firmHook.received.find((r) => r.body.data.action === "esign_agreement");
     assert.deepEqual(signedHook.body.data.result, { signature_status: "signed", signed_document_ref: "doc-signed-9" });
+    // The app hears that the asynchronous action finished: reference, action and status, no data.
+    const appDone = appHook.received.find((r) => r.body.data.reference === pending.body.reference);
+    assert.equal(appDone.body.type, "handoff.completed");
+    assert.deepEqual(appDone.body.data, { product_id: "everyday-rd", reference: pending.body.reference, action: "esign_agreement", status: "completed", sandbox: true, app_id: app.id });
+    const lastFirm = () => firmHook.received.at(-1).body;
+    const lastApp = () => appHook.received.at(-1).body;
+    const runOf = async (reference) => (await store.db.query("SELECT * FROM financial_products.vendor_action_runs WHERE id = $1", [reference])).rows[0];
+    const requestOf = () => vendor.state.seen.at(-1).body.request_id;
+
+    // ---- a service that answers at once but whose own status is pending stays open for the callback ----
+    vendor.state.esign = "ok_pending";
+    const before3 = await counts();
+    const notYet = await start(s, "esign_agreement");
+    assert.equal(notYet.status, 201, notYet.text);
+    assert.equal(notYet.body.status, "pending");
+    const notYetRequest = requestOf();
+    assert.equal((await runOf(notYet.body.reference)).status, "pending");
+    assert.equal((await runOf(notYet.body.reference)).result_sealed, null);
+    const after3 = await counts();
+    assert.equal(after3.evidence, before3.evidence, "no evidence until it finishes");
+    assert.equal(after3.deliveries, before3.deliveries, "no event until it finishes");
+    // ...and a signature that failed ends it as failed: action_failed evidence, vendor_action.failed with the result.
+    const failedSig = await callback(esignSub, { request_id: notYetRequest, status: "ok", output: { signature_status: "failed" } });
+    assert.deepEqual(failedSig.body, { request_id: notYetRequest, status: "failed" });
+    assert.equal((await api("GET", `/v1/client/action_runs/${notYet.body.reference}`, s)).body.status, "failed");
+    const failedEvidence = (await store.db.query("SELECT type FROM financial_products.client_evidence WHERE type IN ('action_completed', 'action_failed') ORDER BY created_at DESC LIMIT 1")).rows[0];
+    assert.equal(failedEvidence.type, "action_failed");
+    await deliverDueWebhooks(store);
+    assert.equal(lastFirm().type, "vendor_action.failed");
+    assert.deepEqual(lastFirm().data.result, { signature_status: "failed" });
+    assert.equal(lastApp().type, "handoff.failed");
+    assert.equal(lastApp().data.status, "failed");
+
+    // ---- consent withdrawn before the callback: nothing of the late answer is kept ----
+    vendor.state.esign = "pending";
+    const late = await start(s, "esign_agreement");
+    const lateRequest = requestOf();
+    await api("POST", "/v1/client/evidence", s, { product_id: "everyday-rd", type: "consent_withdrawn", subject: "document_esign" });
+    const lateAnswer = await callback(esignSub, { request_id: lateRequest, status: "ok", output: { signature_status: "signed", signed_document_ref: "doc-signed-late" } });
+    assert.deepEqual(lateAnswer.body, { request_id: lateRequest, status: "withdrawn" });
+    const lateRun = await runOf(late.body.reference);
+    assert.equal(lateRun.status, "withdrawn");
+    assert.equal(lateRun.result_sealed, null);
+    assert.equal((await api("GET", `/v1/client/action_runs/${late.body.reference}`, s)).body.status, "failed");
+    await deliverDueWebhooks(store);
+    assert.equal(lastFirm().type, "vendor_action.failed");
+    assert.equal(lastFirm().data.error_code, "consent_withdrawn");
+    assert.equal(lastFirm().data.result, undefined, "the innovator isn't sent what came after the withdrawal");
+    assert.equal(lastApp().type, "handoff.failed");
+    await consent(s, "document_esign");
+
+    // ---- erasure: the customer's kept results and queued results go, and open actions can't fill anything ----
+    const se = await session(key, "cust_erase");
+    await consent(se, "identity_verification");
+    await consent(se, "document_esign");
+    await api("POST", "/v1/client/fields", se, { product_id: "everyday-rd", values: { pan: PAN }, source: "secure_field" });
+    await api("POST", "/v1/client/fields", se, { product_id: "everyday-rd", values: { full_name: NAME } });
+    const erasedDone = await start(se, "pan_check");
+    assert.equal(erasedDone.body.status, "verified");
+    const erasedOpen = await start(se, "esign_agreement");
+    const erasedRequest = requestOf();
+    const queuedFor = async () =>
+      (await store.db.query("SELECT payload FROM financial_products.webhook_deliveries WHERE payload->'data'->>'customer_ref' = 'cust_erase'")).rows.map((r) => r.payload);
+    assert.ok((await queuedFor()).some((p) => p.data.result_sealed), "queued sealed before erasure");
+    assert.equal((await api("DELETE", "/v1/client/fields", se)).status, 200);
+    assert.equal((await runOf(erasedDone.body.reference)).result_sealed, null, "the kept result is erased");
+    assert.equal((await runOf(erasedOpen.body.reference)).status, "withdrawn", "an open action is stopped");
+    assert.ok((await queuedFor()).every((p) => !p.data.result_sealed), "the queued result is erased");
+    const afterErasure = await callback(esignSub, { request_id: erasedRequest, status: "ok", output: { signature_status: "signed" } });
+    assert.equal(afterErasure.body.duplicate, true);
+    assert.equal(afterErasure.body.status, "withdrawn");
+    assert.deepEqual((await api("GET", "/v1/client/fields", se)).body.fields, []);
+    await deliverDueWebhooks(store);
+    const erasedEvent = firmHook.received.find((r) => r.body.data.reference === erasedDone.body.reference);
+    assert.equal(erasedEvent.body.data.result, undefined, "delivered without the erased result");
+
+    // ---- runs that never finish expire: a pending one after the expiry, a call cut short after minutes ----
+    const stale = await start(s, "esign_agreement");
+    await store.db.query(
+      `INSERT INTO financial_products.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status, created_at)
+       SELECT $2, $3, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, 'calling', now() - interval '10 minutes'
+       FROM financial_products.vendor_action_runs WHERE id = $1`,
+      [stale.body.reference, randomUUID(), randomUUID()],
+    );
+    assert.equal(await sweepVendorActionRuns(store), 1, "the cut-short call expires after minutes; the fresh pending one waits");
+    assert.equal((await runOf(stale.body.reference)).status, "pending");
+    assert.equal(await sweepVendorActionRuns(store, { now: new Date(Date.now() + 25 * 3600e3) }), 1);
+    assert.equal((await runOf(stale.body.reference)).status, "expired");
+    assert.equal((await api("GET", `/v1/client/action_runs/${stale.body.reference}`, s)).body.status, "failed");
+    await deliverDueWebhooks(store);
+    assert.equal(lastFirm().type, "vendor_action.failed");
+    assert.equal(lastFirm().data.error_code, "expired");
+    assert.equal(lastApp().type, "handoff.failed");
+    assert.equal((await counts()).runs, (await store.db.query("SELECT count(*)::int AS n FROM financial_products.vendor_action_runs WHERE status NOT IN ('calling', 'pending')")).rows[0].n, "nothing left open");
+
+    // ---- callback rate limits: per caller before the signature check, per subscription only once signed ----
+    const forged = { request_id: randomUUID(), status: "ok", output: { signature_status: "signed" } };
+    const post = (base, payload, sig) =>
+      fetch(`${base}/v1/vendor/callback/${esignSub}`, { method: "POST", headers: { "Content-Type": "application/json", "Mynt-Signature": sig }, body: JSON.stringify(payload) }).then((r) => r.status);
+    const perCaller = await runtimeServer({ callbackRateLimit: { perCaller: 3 } });
+    const forgedSig = "t=1,v1=" + "0".repeat(64);
+    assert.deepEqual([await post(perCaller, forged, forgedSig), await post(perCaller, forged, forgedSig), await post(perCaller, forged, forgedSig), await post(perCaller, forged, forgedSig)], [401, 401, 401, 429]);
+    const perSub = await runtimeServer({ callbackRateLimit: { perSubscription: 1 } });
+    for (let i = 0; i < 3; i++) assert.equal(await post(perSub, forged, forgedSig), 401, "unsigned callers don't use up the vendor's allowance");
+    assert.equal(await post(perSub, forged, signBody(secrets.esign, JSON.stringify(forged))), 404);
+    assert.equal(await post(perSub, forged, signBody(secrets.esign, JSON.stringify(forged))), 429);
 
     // ---- an unbound action keeps today's hand-off to the innovator's own flow ----
     await consent(s, "mandate_setup");
