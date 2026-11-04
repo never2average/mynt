@@ -566,3 +566,52 @@ test("modules: manifests checked against live contracts, namespaces owned, outda
     w.close();
   }
 });
+
+test("direct hosting: a provider's passing 5xx while a deploy runs is ridden out; a persistent one, quota exhaustion or a real error fails the app", async () => {
+  const outage = 'Freestyle POST /vms/vm-1/exec-await: 503 {"code":"INTERNAL_ERROR"}';
+  // Each case deploys a fresh app; the provider's status poll throws `failures` times with `msg` (Infinity: always).
+  const deployWith = async (msg, failures) => {
+    const provider = fakeDirect();
+    const run = provider.run.bind(provider);
+    let polls = 0;
+    provider.run = async (vmId, command, opts) => {
+      if (command.startsWith("cat ") && command.includes(".exit") && polls++ < failures) throw new Error(msg);
+      return run(vmId, command, opts);
+    };
+    const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
+    try {
+      await w.call(w.dev, "request_hosting");
+      await w.call(w.dev, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") });
+      await w.hosting.pending;
+      const row = (await w.store.db.query("SELECT status, error FROM financial_products.hosted_apps WHERE app_id = $1", [w.app.id])).rows[0];
+      return { ...row, polls };
+    } finally {
+      w.close();
+    }
+  };
+
+  const passing = await deployWith(outage, 3);
+  assert.equal(passing.status, "running", "a passing outage is ridden out");
+  assert.equal(passing.polls, 4);
+
+  const grace = HostingService.TRANSIENT_GRACE_MS;
+  HostingService.TRANSIENT_GRACE_MS = 30;
+  try {
+    const persistent = await deployWith(outage, Infinity);
+    assert.equal(persistent.status, "stopped", "an outage past the grace fails the app");
+    assert.match(persistent.error, /503/);
+    assert.ok(persistent.polls > 1);
+  } finally {
+    HostingService.TRANSIENT_GRACE_MS = grace;
+  }
+
+  const quota = await deployWith("Freestyle: LIMIT_EXCEEDED: allowance for vms has been used", Infinity);
+  assert.equal(quota.status, "stopped", "quota exhaustion fails at once");
+  assert.match(quota.error, /add billing/);
+  assert.equal(quota.polls, 1);
+
+  const bad = await deployWith("Freestyle POST /vms/vm-1/exec-await: 400 bad request", Infinity);
+  assert.equal(bad.status, "stopped", "a real error fails at once");
+  assert.match(bad.error, /400/);
+  assert.equal(bad.polls, 1);
+});

@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
+import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
 import { EDGE_KEY_HEADER, edgePlaceholder, FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
@@ -591,6 +592,8 @@ export class HostingService {
   // Runs a script on a direct VM as a detached job and waits for it, so a long build isn't cut off at the
   // provider's per-command limit. Secrets go in env; the script text holds none.
   jobPollMs = 5_000;
+  static TRANSIENT_GRACE_MS = defaultGraceMs();
+  private transient = new GraceTracker(() => HostingService.TRANSIENT_GRACE_MS);
   private async runJob(p: DirectHostingProvider, vmId: string, script: string, env: Record<string, string>, timeoutMs = 30 * 60_000) {
     const job = `job-${randomUUID().slice(0, 8)}`;
     const dir = "$HOME/.mynt-jobs";
@@ -603,7 +606,15 @@ export class HostingService {
     const until = Date.now() + timeoutMs;
     for (;;) {
       await new Promise((r) => setTimeout(r, this.jobPollMs));
-      const r = await p.run(vmId, `cat ${dir}/${job}.exit 2>/dev/null || echo running`, { timeoutMs: 30_000 });
+      let r: { stdout: string };
+      try {
+        r = await p.run(vmId, `cat ${dir}/${job}.exit 2>/dev/null || echo running`, { timeoutMs: 30_000 });
+        this.transient.clear(job);
+      } catch (e) {
+        // The job keeps running on the VM through the provider's passing 5xx or dropped connection: keep polling.
+        if (this.transient.rideOut(job, e) && Date.now() < until) continue;
+        throw new Error(failureMessage(e));
+      }
       const state = r.stdout.trim();
       if (state !== "running" || Date.now() >= until) {
         const log = await p.run(vmId, `tail -c 8000 ${dir}/${job}.log 2>/dev/null; rm -f ${dir}/${job}.*`, { timeoutMs: 30_000 });

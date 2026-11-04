@@ -370,3 +370,67 @@ test("people can have the connector forget them; the agent erases on request onl
   assert.equal((await call(agent, "bd_erase_on_request", { prospect_id: id, evidence_message_id: asked })).data.erased, true);
   assert.equal((await call(agent, "bd_check_consent", { prospect_id: id, purpose: "contact_email" })).data.allowed, false);
 });
+
+test("a provider's passing 5xx doesn't fail a connector run; a persistent one, quota exhaustion or a real error does", async () => {
+  const { bd, boat, clock } = await setup();
+  const real = boat.getSandbox;
+  const failWith = (msg) => {
+    boat.getSandbox = async () => {
+      throw new Error(msg);
+    };
+  };
+  const heal = () => {
+    boat.getSandbox = real;
+  };
+  const outage = 'boat GET /sandboxes/sbx: 503 {"code":"INTERNAL_ERROR"}';
+  const latest = async () => (await bd.runs())[0];
+  const start = async () => {
+    clock.now = new Date(clock.now.getTime() + 60e3); // runs are ordered by their start
+    await bd.requestRun();
+    await bd.tick(); // sandbox requested
+    return latest();
+  };
+
+  // A passing outage: the run rides it out and carries on.
+  const a = await start();
+  failWith(outage);
+  await bd.tick();
+  await bd.tick();
+  assert.equal((await latest()).status, a.status, "a passing outage is ridden out");
+  heal();
+  boat.sandboxes.get([...boat.sandboxes.keys()].at(-1)).state = "ready";
+  await bd.tick();
+  assert.notEqual((await latest()).status, "failed");
+  assert.notEqual((await latest()).status, a.status, "the run carried on");
+  await bd.stopRuns("done with it");
+
+  // An outage that outlasts the grace period fails the run, with the provider's error.
+  const grace = BdService.TRANSIENT_GRACE_MS;
+  BdService.TRANSIENT_GRACE_MS = 30;
+  const b = await start();
+  failWith(outage);
+  await bd.tick();
+  assert.equal((await latest()).status, b.status);
+  await new Promise((r) => setTimeout(r, 50));
+  await bd.tick();
+  BdService.TRANSIENT_GRACE_MS = grace;
+  heal();
+  assert.equal((await latest()).status, "failed", "an outage past the grace fails the run");
+  assert.match((await latest()).error, /503/);
+
+  // A provider out of allowance fails at once, saying what to do.
+  await start();
+  failWith("boat: LIMIT_EXCEEDED: allowance for sandboxes has been used");
+  await bd.tick();
+  heal();
+  assert.equal((await latest()).status, "failed", "quota exhaustion fails at once");
+  assert.match((await latest()).error, /add billing/);
+
+  // Any other error fails at once.
+  await start();
+  failWith("boat GET /sandboxes/sbx: 400 bad request");
+  await bd.tick();
+  heal();
+  assert.equal((await latest()).status, "failed", "a real error fails at once");
+  assert.match((await latest()).error, /400/);
+});

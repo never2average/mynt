@@ -8,6 +8,7 @@ import { agentState, launchAgent, type AgentHostConfig } from "./agent-host.js";
 import type { BoatClient } from "./boat.js";
 import type { Db } from "./db.js";
 import type { User } from "./store.js";
+import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 
 // Business development: Mynt's connector agent finds innovators (licensed firms that bring products)
 // and developers (who build on them), talks with them, and introduces them to each other. It runs
@@ -628,6 +629,9 @@ export class BdService {
     for (const r of await this.all("SELECT * FROM financial_products.bd_runs WHERE status <> ALL($1)", [RUN_DONE])) await this.finishRun(r, "stopped", { error: reason });
   }
 
+  static TRANSIENT_GRACE_MS = defaultGraceMs();
+  private transient = new GraceTracker(() => BdService.TRANSIENT_GRACE_MS);
+
   async tick() {
     await this.sweepRetention();
     if (!this.runnable) return;
@@ -635,8 +639,11 @@ export class BdService {
     if (active) {
       try {
         await this.advance(active);
+        this.transient.clear(active.id as string);
       } catch (e) {
-        await this.finishRun(active, "failed", { error: (e as Error).message });
+        // A provider's passing 5xx, rate limit or dropped connection is retried on later ticks.
+        if (this.transient.rideOut(active.id as string, e)) return;
+        await this.finishRun(active, "failed", { error: failureMessage(e) });
       }
       return;
     }
