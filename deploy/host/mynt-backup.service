@@ -1,0 +1,11 @@
+[Unit]
+Description=Mynt: back up Supabase (every database and role, and Storage's files)
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/mynt/current/deploy/host/backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h
