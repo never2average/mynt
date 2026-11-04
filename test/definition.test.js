@@ -17,6 +17,7 @@ test("a v2 definition is checked, sets the composition and catalogue record, and
   const checked = await call(client, "check_product_definition", { product_id: "everyday-rd", definition: def });
   assert.equal(checked.data.valid, true, JSON.stringify(checked.data.errors));
   assert.equal(checked.data.catalogue_record.product_line, "account_operations", "the lead component is the first: the deposit");
+  assert.deepEqual(checked.data.publish_blockers, [], "nothing in its regime would stop it publishing");
 
   const saved = await call(client, "set_product_definition", { product_id: "everyday-rd", definition: def });
   assert.equal(saved.isError, false, JSON.stringify(saved.data));
