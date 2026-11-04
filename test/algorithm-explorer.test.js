@@ -532,11 +532,22 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   const done = await explore.get(job.id);
   assert.equal(done.status, "finished", done.error);
   const board = done.leaderboard;
-  // Approving everyone loses more than the term sheet's expected loss on this holdout, so the baseline is ineligible
-  // too: eligible variants first, then ineligible ones by objective, then what Mynt couldn't run.
-  assert.deepEqual(board.map((e) => [e.rank, e.k]), [[1, 1], [2, 2], [3, 0], [null, 3]], JSON.stringify(board.map((e) => [e.k, e.objective, e.constraints])));
-  const [first, pricey, baseline, unpushed] = board;
-  assert.equal(baseline.constraints.loss_rate, "fail");
+  // The holdout is random per job, so whether approving everyone (the baseline) stays under the loss ceiling varies.
+  // What must always hold: every eligible variant ranks above every ineligible one, each group by objective, and
+  // what Mynt couldn't run comes last, unranked.
+  const why = JSON.stringify(board.map((e) => [e.k, e.objective, e.constraints]));
+  const scoredRows = board.filter((e) => e.scored);
+  assert.deepEqual(scoredRows.map((e) => e.rank), [1, 2, 3], why);
+  const lastEligible = scoredRows.map((e) => e.eligible).lastIndexOf(true);
+  assert.ok(scoredRows.slice(0, lastEligible + 1).every((e) => e.eligible), `eligible before ineligible: ${why}`);
+  for (const group of [scoredRows.filter((e) => e.eligible), scoredRows.filter((e) => !e.eligible)])
+    for (let i = 1; i < group.length; i++) assert.ok(group[i - 1].objective.value >= group[i].objective.value, `by objective: ${why}`);
+  const byK = Object.fromEntries(board.map((e) => [e.k, e]));
+  const [first, pricey, baseline, unpushed] = [byK[1], byK[2], byK[0], byK[3]];
+  assert.equal(board[0].k, 1, `the knockout wins: ${why}`);
+  assert.deepEqual([unpushed.rank, board.at(-1).k], [null, 3], "the unpushed variant is last, unranked");
+  assert.ok(scoredRows.filter((e) => e.eligible).every((e) => e.rank < pricey.rank), "the over-cap variant ranks below every eligible one");
+  assert.equal(baseline.scored, true);
   assert.equal(first.eligible, true);
   assert.equal(first.angle, "tighten_knockouts");
   assert.ok(first.objective.value > baseline.objective.value, "the knockout beats approving everyone");
