@@ -1,0 +1,10 @@
+[Unit]
+Description=Mynt: daily Supabase backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

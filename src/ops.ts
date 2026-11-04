@@ -1,5 +1,7 @@
 // What admins check first: is anything failing, stuck or costing more than it should, across the agents (builds,
-// the product desk and its algorithm explorers, governance review, the connector) and developers' hosting. Read-only.
+// the product desk and its algorithm explorers, governance review, the connector), developers' hosting and the
+// server's backups. Read-only.
+import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
@@ -16,7 +18,59 @@ const RUNS = [
   { name: "connector", table: "bd_runs", done: ["succeeded", "failed", "stopped", "over_budget", "done"], bad: ["failed", "over_budget"] },
 ] as const;
 
-export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: number } = {}) {
+// Backups of Supabase are made on the host by deploy/host/backup.sh, which writes a small status file for this.
+export const DEFAULT_BACKUP_STATUS_FILE = "/var/lib/mynt/backup-status.json";
+const BACKUP_STALE_HOURS = 26;
+
+type BackupFile = {
+  at?: string;
+  ok?: boolean;
+  local?: string | null;
+  offsite?: "uploaded" | "local_only" | "failed" | null;
+  bytes?: number | null;
+  error?: string | null;
+  last_success_at?: string;
+  verify?: { at?: string; ok?: boolean; backup?: string | null; tables?: Record<string, number>; storage_files?: number | null; error?: string | null };
+};
+
+export async function backupStatus(file = process.env.MYNT_BACKUP_STATUS_FILE || DEFAULT_BACKUP_STATUS_FILE, now = Date.now()) {
+  let s: BackupFile;
+  try {
+    s = JSON.parse(await readFile(file, "utf8")) as BackupFile;
+  } catch (e) {
+    const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
+    return {
+      section: { status: missing ? "no status file" : "status file unreadable" },
+      attention: [missing ? "backups: no backup has run on this server (no status file); see Backups in the README" : "backups: the status file can't be read"],
+    };
+  }
+  const age = s.last_success_at ? (now - Date.parse(s.last_success_at)) / 3_600_000 : null;
+  const attention = [
+    ...(age === null || Number.isNaN(age)
+      ? ["backups: no backup has succeeded yet"]
+      : age > BACKUP_STALE_HOURS
+        ? [`backups: the last successful backup was ${Math.floor(age)}h ago`]
+        : []),
+    ...(s.ok === false ? [`backups: the last run failed${s.error ? `: ${s.error}` : ""}`] : []),
+    ...(s.offsite === "local_only" ? ["backups are on this server only; add an off-site bucket"] : []),
+    ...(s.verify?.ok === false ? [`backups: the last restore test failed${s.verify.error ? `: ${s.verify.error}` : ""}`] : []),
+  ];
+  return {
+    section: {
+      last_run_at: s.at ?? null,
+      ok: s.ok ?? null,
+      last_success_at: s.last_success_at ?? null,
+      offsite: s.offsite ?? null,
+      bytes: s.bytes ?? null,
+      local: s.local ?? null,
+      error: s.error ?? null,
+      last_verify: s.verify ? { at: s.verify.at ?? null, ok: s.verify.ok ?? null, tables: s.verify.tables ?? {}, error: s.verify.error ?? null } : null,
+    },
+    attention,
+  };
+}
+
+export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: number; backupStatusFile?: string } = {}) {
   const hours = opts.hours ?? 24;
   const stuck = opts.stuckMinutes ?? 120;
   const exists = async (table: string) => !!(await db.query(`SELECT to_regclass('financial_products.${table}') AS t`)).rows[0]?.t;
@@ -64,6 +118,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   }
   // A provider out of allowance stops everything that needs a machine: say so first, with what to do.
   const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
+  const backups = await backupStatus(opts.backupStatusFile);
   const quota = Object.values(agents).some((a) => hit((a as { failures: unknown }).failures)) || hit(hosting.failed_tenants) || hit(hosting.stopped_apps);
   const attention = [
     ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
@@ -74,8 +129,9 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...((hosting.failed_tenants as unknown[] | undefined)?.length ? [`hosting: ${(hosting.failed_tenants as unknown[]).length} VM(s) failed to provision`] : []),
     ...((hosting.stopped_apps as unknown[] | undefined)?.length ? [`hosting: ${(hosting.stopped_apps as unknown[]).length} app(s) stopped`] : []),
     ...((hosting.stuck_deploys as unknown[] | undefined)?.length ? [`hosting: ${(hosting.stuck_deploys as unknown[]).length} deploy(s) running over 45 min`] : []),
+    ...backups.attention,
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {
@@ -84,7 +140,7 @@ export function registerOpsTools(server: McpServer, db: Db) {
     {
       title: "What needs attention",
       description:
-        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying). Read-only.",
+        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying) and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
       inputSchema: { hours: z.number().int().min(1).max(24 * 30).default(24) },
       annotations: { readOnlyHint: true },
     },

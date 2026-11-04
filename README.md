@@ -846,6 +846,54 @@ docker compose -f /opt/mynt/src/deploy/docker-compose.yml exec mcp \
   node dist/index.js users add --name "Ines" --role innovator
 ```
 
+### Backups
+
+On a host installed with [`deploy/host/install-host.sh`](deploy/host/install-host.sh), Supabase is backed up every night and a backup is test-restored every week. The installer sets this up on every deploy; nothing to switch on.
+
+- **What:** every database and role in Supabase's Postgres (`pg_dumpall`, so Mynt's `financial_products` schema, sign-ins and Storage's records all come along), plus Storage's files (`volumes/storage` in the Supabase directory).
+- **When:** daily around 02:30 UTC (`mynt-backup.timer`); a restore test on Sundays around 04:30 UTC (`mynt-backup-verify.timer`), which restores the newest backup into a throwaway `postgres:17` container with no network, counts the tables in `financial_products`, `auth`, `storage` and `public`, and removes the container.
+- **Where:** `/var/backups/mynt/<time>/` on the server, readable by root only, kept 7 days. Off-site, if you set it up: encrypted copies in your own bucket, 14 daily and 8 weekly (Sunday's). Nothing leaves the server unencrypted; without an encryption key the backups stay on the server.
+- **Checking:** `ops_status` has a `backups` section and says when something needs attention: no backup in 26 hours, a failed run, a failed restore test, or "backups are on this server only; add an off-site bucket". The details are in `/var/log/mynt/backup.log`.
+
+**Turning on off-site copies.** You need a bucket at any S3-compatible storage service (Cloudflare R2, Backblaze B2 and DigitalOcean Spaces all work) and an encryption key pair that you keep.
+
+1. On your own computer (not the server), install [age](https://github.com/FiloSottile/age) and make a key pair:
+   ```bash
+   age-keygen -o mynt-backup-identity.txt
+   ```
+   It prints a public key starting `age1…`; that one goes on the server. The file `mynt-backup-identity.txt` is the only thing that can decrypt the backups: keep it in your password manager or another safe place, never on the server.
+2. At your storage service, create a private bucket and an access key that can read, write and delete in that bucket only.
+3. On the server, as root, open `/etc/mynt/backup.env` (the installer created it with these lines commented out; it is readable by root only and the installer never changes it once it exists) and fill it in:
+   ```
+   BACKUP_AGE_RECIPIENT=age1…your public key…
+   BACKUP_REMOTE=myntbackup:your-bucket/mynt
+   RCLONE_CONFIG_MYNTBACKUP_TYPE=s3
+   RCLONE_CONFIG_MYNTBACKUP_PROVIDER=Cloudflare
+   RCLONE_CONFIG_MYNTBACKUP_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+   RCLONE_CONFIG_MYNTBACKUP_ACCESS_KEY_ID=…
+   RCLONE_CONFIG_MYNTBACKUP_SECRET_ACCESS_KEY=…
+   ```
+   For DigitalOcean Spaces use `PROVIDER=DigitalOcean` and `ENDPOINT=https://<region>.digitaloceanspaces.com`; for Backblaze B2 use `PROVIDER=Other` and `ENDPOINT=https://s3.<region>.backblazeb2.com`.
+4. Run one backup now and check it: `systemctl start mynt-backup.service`, then `ops_status` should show `offsite: "uploaded"`.
+
+**Restoring.** Try a test restore first; it never touches production:
+
+```bash
+bash /opt/mynt/current/deploy/host/restore.sh --test /var/backups/mynt/<time>
+```
+
+To use an off-site copy, download it on the server and copy your identity file over just for the restore:
+
+```bash
+set -a; . /etc/mynt/backup.env; set +a     # in a root shell: rclone reads the bucket settings from these
+rclone --config /dev/null copy myntbackup:your-bucket/mynt/daily/<time> /root/restore-<time>
+bash /opt/mynt/current/deploy/host/restore.sh --test /root/restore-<time> --identity /root/mynt-backup-identity.txt
+```
+
+To replace production with a backup, use `--yes-replace-production` instead of `--test`. It takes a safety backup of the current state first, stops Mynt and Supabase's other services, replaces every database and Storage's files (the old files are moved aside, not deleted), starts everything again and prints the table counts. Delete the identity file and the downloaded copy from the server afterwards (`shred -u /root/mynt-backup-identity.txt`).
+
+Settings such as the Supabase directory (`SUPABASE_DIR`, default `/opt/supabase`) or Postgres container (`BACKUP_DB_CONTAINER`, default `supabase-db`) can be changed in the same file; they are listed at the top of [`deploy/host/backup.sh`](deploy/host/backup.sh).
+
 ## Starting empty
 
 A new deployment starts with no products, regions or categories: admins define regions, categories and the regulatory model, and innovators publish products. Mynt's reference catalogue (owner-less, read-only products open to every developer) is kept in the database; its products are composed of regulated primitives like any other (`admin_set_product_composition`, `get_product_regime`).
