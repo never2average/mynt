@@ -43,6 +43,22 @@ export async function appProducts(store: Store, app: App): Promise<ProductRecord
   return out;
 }
 
+// Whether developers can build on a product: it's published with a developer contract (a v2 definition),
+// names a real regulator, and its rate data agrees with itself. Anything else is hidden from developers'
+// catalogue (list_products with developer_ready) until its firm fixes it; the reasons say what to fix.
+const PLACEHOLDER_REGULATOR = /\be\.g\.|^banking regulator$|\b(unknown|tbd|todo|placeholder|n\/a)\b/i;
+export function developerReadiness(record: ProductRecord): { ready: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const p = record.product;
+  if (record.status !== "published") reasons.push("not published");
+  if (!record.pins?.contract) reasons.push("no developer contract (published without a v2 definition)");
+  if (!p.regulator?.trim() || PLACEHOLDER_REGULATOR.test(p.regulator.trim())) reasons.push(`placeholder regulator '${p.regulator ?? ""}'`);
+  const features = p.key_features.join(" ").toLowerCase();
+  if (p.return_type === "fixed_interest" && /\b(variable|floating)\b[^.]*\brate\b/.test(features)) reasons.push("return_type is fixed_interest but its features say the rate is variable");
+  if (p.return_type === "variable_interest" && /\b(fixed|locked)\b[^.]*\brate\b|\brate (is )?(fixed|locked)\b/.test(features)) reasons.push("return_type is variable_interest but its features say the rate is fixed");
+  return { ready: reasons.length === 0, reasons };
+}
+
 export const buildTerms = (record: ProductRecord) => ({ ...BuildTermsSchema.parse({}), ...record.build_terms });
 
 // ---- webhook events ----
