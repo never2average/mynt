@@ -91,7 +91,19 @@ else check lint_typecheck fail "$(tail -c 1500 "$V"/lint.log "$V"/typecheck.log 
 ARCH=$(uname -m); case "$ARCH" in x86_64) GA=x64; SA=amd64;; aarch64|arm64) GA=arm64; SA=arm64;; *) GA=$ARCH; SA=$ARCH;; esac
 if fetch_tool gitleaks ${GITLEAKS_VERSION} "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}" "gitleaks_${GITLEAKS_VERSION}_linux_$GA.tar.gz" "gitleaks_${GITLEAKS_VERSION}_checksums.txt"; then
   GIT_FLAG=""; [ -d .git ] || GIT_FLAG="--no-git"
-  if "$V/bin/gitleaks" detect --source "$APP" $GIT_FLAG --no-banner --redact --report-path "$V/gitleaks.json" >"$V/gitleaks.log" 2>&1; then
+  # Default rules, plus one narrow allowlist: a value in a test file that reads as a placeholder. A real-looking
+  # key anywhere, tests included, still fails.
+  cat > "$V/gitleaks.toml" <<'TOML'
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Obvious placeholders in test files"
+condition = "AND"
+paths = ['''(^|/)(tests?|__tests__)/''', '''\.(test|spec)\.[cm]?[jt]sx?$''', '''(^|/)test_[^/]+\.py$''']
+regexes = ['''(?i)(test|fake|dummy|example|placeholder|sample|wrong|invalid|bad)''']
+TOML
+  if "$V/bin/gitleaks" detect --source "$APP" $GIT_FLAG --config "$V/gitleaks.toml" --no-banner --redact --report-path "$V/gitleaks.json" >"$V/gitleaks.log" 2>&1; then
     check secrets_scan pass "no secrets found"
   else
     check secrets_scan fail "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(len(r), "secret(s):", ", ".join(sorted({x.get("RuleID","?")+" in "+x.get("File","?") for x in r}))[:1200])' "$V/gitleaks.json" 2>/dev/null || tail -c 800 "$V/gitleaks.log")"
@@ -112,11 +124,16 @@ fi
 
 # --- static security scan: njsscan (LGPL-3.0+) for JavaScript and TypeScript, bandit (Apache-2.0) for Python.
 # High-severity findings fail it. Both run from a venv of their own, pinned.
+# It reads a fresh extraction of the verified archive, so generated output (dist, coverage) is never scanned,
+# with test files left out: fixtures aren't shipped code.
+SRC="$V/scan-src"; rm -rf "$SRC"; mkdir -p "$SRC" && tar -xzf "$V/app.tgz" -C "$SRC"
+find "$SRC" \( -path '*/node_modules' -o -path '*/.git' -o -name tests -o -name test -o -name __tests__ \) -prune -exec rm -rf {} + 2>/dev/null
+find "$SRC" -type f \( -name '*.test.*' -o -name '*.spec.*' -o -name 'test_*.py' \) -delete 2>/dev/null
 if python3 -m venv "$V/scan-venv" >/dev/null 2>&1 && . "$V/scan-venv/bin/activate" \
    && pip install -q "njsscan==${NJSSCAN_VERSION}" "bandit==${BANDIT_VERSION}" >"$V/scan-install.log" 2>&1; then
   SCAN_FINDINGS=""
-  if find "$APP" -path '*/node_modules' -prune -o \( -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' -o -name '*.mjs' \) -print -quit | grep -q .; then
-    njsscan --json -o "$V/njsscan.json" "$APP" >"$V/njsscan.log" 2>&1
+  if find "$SRC" \( -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' -o -name '*.mjs' \) -print -quit | grep -q .; then
+    njsscan --json -o "$V/njsscan.json" "$SRC" >"$V/njsscan.log" 2>&1
     SCAN_FINDINGS+=$(python3 -c '
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -124,16 +141,16 @@ out = []
 for group in ("nodejs", "templates"):
     for rule, f in (r.get(group) or {}).items():
         if (f.get("metadata") or {}).get("severity") == "ERROR":
-            files = sorted({x.get("file_path", "?").split("/home/user/app/")[-1] for x in f.get("files", [])})
+            files = sorted({x.get("file_path", "?").split("/scan-src/")[-1] for x in f.get("files", [])})
             out.append(rule + " in " + ", ".join(files[:3]))
 print("; ".join(out))' "$V/njsscan.json" 2>/dev/null || echo "njsscan produced no report")
   fi
-  if find "$APP" -path '*/node_modules' -prune -o -name '*.py' -print -quit | grep -q .; then
-    bandit -r "$APP" -x '*/node_modules/*,*/.venv/*,*/venv/*,*/tests/*' -lll -iii -f json -o "$V/bandit.json" >"$V/bandit.log" 2>&1
+  if find "$SRC" -name '*.py' -print -quit | grep -q .; then
+    bandit -r "$SRC" -x '*/.venv/*,*/venv/*' -lll -iii -f json -o "$V/bandit.json" >"$V/bandit.log" 2>&1
     B=$(python3 -c '
 import json, sys
 r = json.load(open(sys.argv[1]))
-print("; ".join(sorted({x["test_id"] + " " + x["test_name"] + " in " + x["filename"].split("/home/user/app/")[-1] for x in r.get("results", [])})))' "$V/bandit.json" 2>/dev/null || echo "bandit produced no report")
+print("; ".join(sorted({x["test_id"] + " " + x["test_name"] + " in " + x["filename"].split("/scan-src/")[-1] for x in r.get("results", [])})))' "$V/bandit.json" 2>/dev/null || echo "bandit produced no report")
     if [ -n "$B" ] && [ -n "$SCAN_FINDINGS" ]; then SCAN_FINDINGS="$SCAN_FINDINGS; $B"; elif [ -n "$B" ]; then SCAN_FINDINGS="$B"; fi
   fi
   deactivate 2>/dev/null
