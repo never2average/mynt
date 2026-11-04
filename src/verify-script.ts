@@ -103,10 +103,21 @@ condition = "AND"
 paths = ['''(^|/)(tests?|__tests__)/''', '''\.(test|spec)\.[cm]?[jt]sx?$''', '''(^|/)test_[^/]+\.py$''']
 regexes = ['''(?i)(test|fake|dummy|example|placeholder|sample|wrong|invalid|bad)''']
 TOML
-  if "$V/bin/gitleaks" detect --source "$APP" $GIT_FLAG --config "$V/gitleaks.toml" --no-banner --redact --report-path "$V/gitleaks.json" >"$V/gitleaks.log" 2>&1; then
-    check secrets_scan pass "no secrets found"
+  # The gate is what ships: the files of the verified source, scanned as they are (a fresh extraction, without
+  # .git). A secret found only in the repository's history (other branches, old commits) doesn't ship with this
+  # build, but it has leaked all the same, so it's reported as a warning to rotate it, not a block.
+  SECRETS_SRC="$V/secrets-src"; rm -rf "$SECRETS_SRC"; mkdir -p "$SECRETS_SRC" && tar -xzf "$V/app.tgz" -C "$SECRETS_SRC" && rm -rf "$SECRETS_SRC/.git"
+  if "$V/bin/gitleaks" detect --source "$SECRETS_SRC" --no-git --config "$V/gitleaks.toml" --no-banner --redact --report-path "$V/gitleaks.json" >"$V/gitleaks.log" 2>&1; then
+    check secrets_scan pass "no secrets in the source"
   else
-    check secrets_scan fail "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(len(r), "secret(s):", ", ".join(sorted({x.get("RuleID","?")+" in "+x.get("File","?") for x in r}))[:1200])' "$V/gitleaks.json" 2>/dev/null || tail -c 800 "$V/gitleaks.log")"
+    check secrets_scan fail "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(len(r), "secret(s):", ", ".join(sorted({x.get("RuleID","?")+" in "+x.get("File","?").split("/secrets-src/")[-1] for x in r}))[:1200])' "$V/gitleaks.json" 2>/dev/null || tail -c 800 "$V/gitleaks.log")"
+  fi
+  if [ -z "$GIT_FLAG" ]; then
+    if "$V/bin/gitleaks" detect --source "$APP" --config "$V/gitleaks.toml" --no-banner --redact --report-path "$V/gitleaks-history.json" >"$V/gitleaks-history.log" 2>&1; then
+      check secrets_history pass "no secrets in the repository's history"
+    else
+      check secrets_history warn "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(len(r), "secret(s) in history, not in this build; rotate them:", ", ".join(sorted({x.get("RuleID","?")+" in "+x.get("File","?")+" @ "+x.get("Commit","?")[:10] for x in r}))[:1200])' "$V/gitleaks-history.json" 2>/dev/null || tail -c 800 "$V/gitleaks-history.log")"
+    fi
   fi
 else
   check secrets_scan fail "could not install a verified gitleaks"
