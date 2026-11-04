@@ -267,3 +267,66 @@ test("only admins get the governance desk", async () => {
     assert.ok(!tools.some((t) => t.includes("review_case")), role);
   }
 });
+
+test("a provider's passing 5xx doesn't fail a review; a persistent one, quota exhaustion or a real error does", async () => {
+  const { store, review, boat } = await setup();
+  const { user: adminUser } = await store.createUser("Ada", ["admin"]);
+  const product = CATALOG.find((p) => p.region === "IN").id;
+  const real = boat.getSandbox;
+  const failWith = (msg) => {
+    boat.getSandbox = async () => {
+      throw new Error(msg);
+    };
+  };
+  const heal = () => {
+    boat.getSandbox = real;
+  };
+  const outage = 'boat GET /sandboxes/sbx: 503 {"code":"INTERNAL_ERROR"}';
+  const open = async () => {
+    const c = await review.openCase("product", product, adminUser.id);
+    await review.tick(); // sandbox requested
+    return c;
+  };
+
+  // A passing outage: the case rides it out and carries on.
+  const a = await open();
+  failWith(outage);
+  await review.tick();
+  await review.tick();
+  assert.equal((await review.get(a.id)).status, "provisioning", "a passing outage is ridden out");
+  heal();
+  boat.ready((await review.get(a.id)).sandbox_id);
+  await review.tick();
+  assert.equal((await review.get(a.id)).status, "reviewing");
+  await review.stop(a.id, "done with it");
+
+  // An outage that outlasts the grace period fails the case, with the provider's error.
+  const grace = ReviewService.TRANSIENT_GRACE_MS;
+  ReviewService.TRANSIENT_GRACE_MS = 30;
+  const b = await open();
+  failWith(outage);
+  await review.tick();
+  assert.equal((await review.get(b.id)).status, "provisioning");
+  await new Promise((r) => setTimeout(r, 50));
+  await review.tick();
+  ReviewService.TRANSIENT_GRACE_MS = grace;
+  heal();
+  assert.equal((await review.get(b.id)).status, "failed", "an outage past the grace fails the case");
+  assert.match((await review.get(b.id)).error, /503/);
+
+  // A provider out of allowance fails at once, saying what to do.
+  const q = await open();
+  failWith("boat: LIMIT_EXCEEDED: allowance for sandboxes has been used");
+  await review.tick();
+  heal();
+  assert.equal((await review.get(q.id)).status, "failed", "quota exhaustion fails at once");
+  assert.match((await review.get(q.id)).error, /add billing/);
+
+  // Any other error fails at once.
+  const bad = await open();
+  failWith("boat GET /sandboxes/sbx: 400 bad request");
+  await review.tick();
+  heal();
+  assert.equal((await review.get(bad.id)).status, "failed", "a real error fails at once");
+  assert.match((await review.get(bad.id)).error, /400/);
+});
