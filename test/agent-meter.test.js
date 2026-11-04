@@ -77,6 +77,10 @@ test("the proxy meters every call against its run, refuses once the budget is sp
     assert.equal(seen[1].model, "claude-haiku-5-5");
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(await meter.spent("desk:d1"), 0.05, "100k output tokens of Haiku 5.5");
+    // A run with a forced model (Mynt's audit): every request goes to it, even an allowed or pinned one.
+    runs.tok_audit = { key: "audit:b1", capUsd: 5, model: "claude-sonnet-5-5" };
+    for (const asked of ["claude-opus-5-5", "claude-haiku-5-5"]) await (await post({ model: asked, messages: [] }, "tok_audit")).text();
+    assert.deepEqual(seen.slice(2).map((s) => s.model), ["claude-sonnet-5-5", "claude-sonnet-5-5"]);
     assert.equal((await post({ model: "x" }, "tok_dead")).status, 401);
   } finally {
     globalThis.fetch = realFetch;
