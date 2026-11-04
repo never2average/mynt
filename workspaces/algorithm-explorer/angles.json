@@ -1,0 +1,30 @@
+{
+  "description": "The exploration angles Mynt hands out, one per explorer, in this order. Each explorer gets one and stays on it.",
+  "angles": [
+    {
+      "id": "tighten_knockouts",
+      "title": "Tighten or add knockouts",
+      "brief": "Find where defaults concentrate in the dev set and decline those applicants up front with clear knockout rules and reason codes, without declining good applicants wholesale."
+    },
+    {
+      "id": "regrade_limits",
+      "title": "Re-cut grades and limits",
+      "brief": "Re-draw the risk grades and the limit assigned to each grade (for example against income and existing obligations), so approved amounts match what applicants can repay."
+    },
+    {
+      "id": "risk_based_pricing",
+      "title": "Re-price by risk",
+      "brief": "Set the APR by risk grade so riskier approvals pay for their expected loss, staying within the APR cap in the job."
+    },
+    {
+      "id": "expand_approvals",
+      "title": "Approve more good applicants",
+      "brief": "Look for applicants the current algorithm declines who repay in the dev set, and approve them where the loss ceiling and fairness threshold still hold."
+    },
+    {
+      "id": "recalibrate_score",
+      "title": "Recalibrate the score",
+      "brief": "Refit the weights or cut-offs of the algorithm's score on the dev set's features, keeping it simple enough to explain with reason codes."
+    }
+  ]
+}

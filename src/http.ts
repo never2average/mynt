@@ -91,7 +91,7 @@ async function handle(
   if (ctx.builds && url.pathname.startsWith("/agent/")) {
     const builds = ctx.builds;
     const resolve = async (t: string) =>
-      (await builds.agentRun(t)) ?? (ctx.bd ? await ctx.bd.agentRun(t) : null) ?? (ctx.desk ? await ctx.desk.agentRun(t) : null) ?? (ctx.review ? await ctx.review.agentRun(t) : null);
+      (await builds.agentRun(t)) ?? (ctx.bd ? await ctx.bd.agentRun(t) : null) ?? (ctx.desk ? await ctx.desk.agentRun(t) : null) ?? (ctx.review ? await ctx.review.agentRun(t) : null) ?? (ctx.explore ? await ctx.explore.agentRun(t) : null);
     return agentProxy(builds.config.agentBackend, resolve, req, res, url, {
       meter: builds.meter,
       model: builds.config.model,

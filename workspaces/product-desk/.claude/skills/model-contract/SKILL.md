@@ -42,3 +42,15 @@ Each model lives in `models/<name>/` in the firm's repository.
 - `feasible`: holds under the stress scenarios.
 - `marginal`: positive in the base case, but not under stress.
 - `infeasible`: doesn't work even in the base case, or breaches a regulatory limit.
+
+**Decision algorithms (optional `decide`).** A model a product's `core_algorithms` points at (eligibility,
+underwriting, limit assignment, pricing, fraud screening) may also declare `"decide": "python3 decide.py"` in
+`model.json`. Mynt runs it with:
+- `$MYNT_APPLICANTS`: a JSONL file, one applicant per line: `id` plus features (`segment`, `employment_type`,
+  `monthly_income`, `bureau_score` (null when there is no history), `existing_obligations`, `tenure_months`,
+  `region`, `requested_amount`, `application_month`);
+- and it must write `$MYNT_DECISIONS`: JSONL, one line per applicant:
+  `{ "id": "...", "approve": true, "limit": 150000, "apr_pct": 19.5, "grade": "B", "reason_codes": [] }`.
+  `limit`, `apr_pct` and `grade` as they apply; every decline carries at least one reason code.
+
+The algorithm never receives outcome labels or protected attributes, and must not try to infer them.

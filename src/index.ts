@@ -10,6 +10,7 @@ import { egressFor } from "./hosting-tools.js";
 import { ModuleRegistry } from "./modules.js";
 import { driftSweep } from "./pins.js";
 import { DeskService, deskConfigFromEnv } from "./desk.js";
+import { ExploreService, exploreConfigFromEnv } from "./explore.js";
 import { ReviewService, reviewConfigFromEnv } from "./review.js";
 import { BuildService, buildConfigFromEnv } from "./builds.js";
 import { connectPostgres } from "./db.js";
@@ -43,6 +44,7 @@ Environment:
   FREESTYLE_API_KEY         Developers' hosting on Freestyle VMs (direct: per-domain egress, public routes, SSH logins)
   GOOGLE_APPLICATION_CREDENTIALS  Service account key file: build agents use Claude on Vertex AI (VERTEX_PROJECT_ID, VERTEX_REGION=global)
   DESK_JOB_CAP_USD          Innovators' product desk (with BOAT_API_KEY and the GitHub App): per-job and DESK_MONTHLY_CAP_USD per-firm caps
+  EXPLORE_CAP_USD           Algorithm explorations (with the desk and a model backend): per-exploration cap shared by its explorers (default 20); EXPLORE_MAX_ITERATIONS, EXPLORE_MAX_MINUTES
   REVIEW_AUTO_OPEN=1        Open a governance review for every licence awaiting review (REVIEW_CASE_CAP_USD, REVIEW_MONTHLY_CAP_USD)
   BD_ENABLED=1              Runs Mynt's connector agent (business development) on the same harness (BD_DAILY_CAP, BD_RUN_CAP_USD, ...)
   ANTHROPIC_API_KEY         Otherwise, build agents use the Anthropic API. Either way the credentials stay on Mynt's server
@@ -78,11 +80,14 @@ const openServices = async () => {
   const github = GitHubApp.fromEnv();
   const builds = await BuildService.open(db, store, boat, github, buildConfig);
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
-  const desk = await DeskService.open(db, store, boat, github, deskConfigFromEnv(buildConfig));
+  const deskConfig = deskConfigFromEnv(buildConfig);
+  const desk = await DeskService.open(db, store, boat, github, deskConfig);
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
   const bd = await BdService.open(db, boat, bdConfigFromEnv(buildConfig));
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.
   const review = await ReviewService.open(db, store, boat, reviewConfigFromEnv(buildConfig), desk);
+  // The desk's algorithm explorations: explorer agents steered by workspaces/algorithm-explorer; Mynt scores.
+  const explore = await ExploreService.open(db, store, boat, github, exploreConfigFromEnv(deskConfig), desk, review);
   // Developers' hosting: a VM each, fetching their verified commits with a read-only GitHub token.
   const hosting = await HostingService.open(db, hostingProviderFromEnv(), hostingConfigFromEnv(), async (developerId, repository) => {
     if (!github) return null;
@@ -93,8 +98,8 @@ const openServices = async () => {
   const modules = await ModuleRegistry.open(db);
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
-  for (const s of [builds, bd, desk, review]) s.meter = meter;
-  return { store, builds, bd, desk, review, hosting, modules };
+  for (const s of [builds, bd, desk, review, explore]) s.meter = meter;
+  return { store, builds, bd, desk, review, explore, hosting, modules };
 };
 
 const parseRoles = (): Role[] => {
@@ -117,20 +122,21 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, hosting, modules } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, hosting, modules }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, hosting, modules } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules } = await openServices();
   builds.startWorker();
   bd.startWorker();
   desk.startWorker();
+  explore.startWorker();
   review.startWorker();
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, hosting, modules }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Sends queued webhook deliveries (events from any process sharing the database).
@@ -144,6 +150,7 @@ if (values.help) {
     builds.stopWorker();
     bd.stopWorker();
     desk.stopWorker();
+    explore.stopWorker();
     review.stopWorker();
     http.close(() => process.exit(0));
   });

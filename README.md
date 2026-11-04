@@ -92,7 +92,7 @@ Mynt:  ┌───────────────────────�
 
 - **Primitives** are the regulated building blocks: a line of business and an action on it.
 - **Products** are compositions of primitives, versioned, with a definition, a developer contract and build terms.
-- **Workspaces** (`workspaces/<agent>/`) steer the hosted agents: the coding team, the product desk, the governance desk and the business-development agent.
+- **Workspaces** (`workspaces/<agent>/`) steer the hosted agents: the coding team, the product desk and its algorithm explorers, the governance desk and the business-development agent.
 
 ## What a developer ships
 
@@ -287,6 +287,14 @@ Work is split by what it needs:
 `test_product` adds an advisory `feasibility` check from the latest report for the current term sheet. It reports stale when the terms changed. `get_product_terms` shows the term sheet and its analysis; `list_desk_jobs`, `get_desk_job` and `stop_desk_job` track the work.
 
 **Configuration:** a boat.dev key and the GitHub App, plus a model backend for agent tasks. Optional: `DESK_JOB_CAP_USD` (per agent task, default 5), `DESK_RUN_CAP_USD` (per code run, default 1) and `DESK_MONTHLY_CAP_USD` (per firm, default 50; unfinished jobs count at their cap).
+
+**Algorithm explorations.** A product's decision algorithms (the eligibility, underwriting, limit, pricing and fraud-screening entries in its `core_algorithms`) can be improved by experiment. `start_exploration` names one algorithm, an objective to maximise (`net_margin`, `approved_volume`, …) and its constraints: a loss-rate ceiling, an APR cap, a minimum adverse-impact ratio (default 0.8), and reason codes on every decline.
+- **Synthetic data.** Mynt generates applicants from the product, deterministically and from a seed (`src/explore-data.ts`). It makes a dev set with outcomes for the explorers, and a holdout only Mynt sees. Its assumptions are saved on the job.
+- **The explorers.** Up to five run, each taking a different angle (`workspaces/algorithm-explorer/angles.json`). They loop in the autoresearch style: one change to the algorithm's folder, a short experiment with Mynt's scorer on the dev set, then keep the change or revert it, logged in `explore-log.tsv`. Each pushes its best state to its own branch.
+- **Mynt's ranking.** Mynt runs each branch's `decide`, and the pinned version as a baseline, on the holdout in clean sandboxes. It scores the decisions itself (`src/explore-score.ts`): the objective, the constraints, and stability over three time slices. Variants that fail a constraint rank below those that pass.
+- **Adoption.** `adopt_variant` opens a pull request. The product changes only when you merge it and pin the new `version`.
+
+`get_exploration` and `stop_exploration` track the work. Explorers share one cap (`EXPLORE_CAP_USD`, default 20) within the firm's monthly desk budget. `EXPLORE_MAX_ITERATIONS` and `EXPLORE_MAX_MINUTES` bound each explorer's loop.
 
 ### Agent workspaces
 

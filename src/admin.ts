@@ -4,6 +4,7 @@ import type { ClerkAdmin } from "./auth.js";
 import type { BuildService } from "./builds.js";
 import type { BdService } from "./bd.js";
 import type { DeskService } from "./desk.js";
+import type { ExploreService } from "./explore.js";
 import type { ReviewService } from "./review.js";
 import { PRODUCT_LINES } from "./catalog.js";
 import { runProductTests } from "./product-tests.js";
@@ -43,6 +44,7 @@ export interface AdminContext {
   bd?: BdService | null; // the business-development connector agent
   desk?: DeskService | null; // innovators' product desk: workspaces, term sheets, feasibility
   review?: ReviewService | null; // the governance desk: agent-researched review cases admins decide
+  explore?: ExploreService | null; // the desk's algorithm explorations
   bdRun?: { id: string } | null; // set when the caller is a connector agent run, not a person
   hosting?: HostingService | null; // developers' isolated app hosting, when configured
   modules?: ModuleRegistry | null; // developers' published modules
