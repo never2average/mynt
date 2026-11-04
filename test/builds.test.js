@@ -121,7 +121,7 @@ async function setup({ boat = fakeBoat(), config = {} } = {}) {
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
-  const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
+  const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
   const as = async (name, roles) => (await store.createUser(name, roles)).user;
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -909,4 +909,36 @@ test("Mynt's audit has its own token, budget and model, isn't charged to the dev
   assert.equal(b.status, "blocked");
   assert.match(b.error, /No independent Maxwell audit result \(auditor: timed out after 20 min/);
   assert.equal(await builds.agentRun(auditToken), null, "the audit token dies with the build");
+});
+
+test("by default a build ships on Mynt's own checks, with no agent audit; a failing static scan stops it", async () => {
+  for (const [checks, status] of [
+    [passingChecks.concat({ name: "static_scan", status: "pass" }), "succeeded"],
+    [passingChecks.concat({ name: "static_scan", status: "fail", detail: "high-severity: node_eval in api/server.js" }), "failed"],
+  ]) {
+    const ctx = await setup({ config: { audit: buildConfigFromEnv({}).audit } });
+    assert.equal(ctx.builds.config.audit.mode, "none");
+    const { builds, boat, call } = ctx;
+    const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+    const app = (await call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
+    assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
+    const started = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id, repository: "acme/savings-app" })).data;
+    await builds.tick();
+    const sbx = (await builds.get(started.id)).sandbox_id;
+    boat.ready(sbx);
+    await builds.tick();
+    boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
+    boat.finishAgent(sbx);
+    await builds.tick();
+    const vid = (await builds.get(started.id)).verify_sandbox_id;
+    boat.ready(vid);
+    await builds.tick();
+    boat.sandboxes.get(vid).checksRunning = false;
+    boat.write(vid, `${V}/report.json`, { checks });
+    await builds.tick(); // decided on the checks alone
+    const b = await builds.get(started.id);
+    assert.equal(b.status, status, b.error ?? "");
+    assert.ok(!boat.sandboxes.get(vid).files.has(`${A}/auth.json`), "no auditor was started");
+    if (status === "failed") assert.match(b.error, /Not production-ready: static_scan/);
+  }
 });
