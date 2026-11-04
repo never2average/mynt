@@ -916,7 +916,9 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       try {
         const b = await builds.start(user, { goal, app_id, repository, cap_usd });
         await store.audit(user.id, "start_build", b.id, { app_id, repository, cap_usd: b.cap_usd });
-        return json({ ...b, track_with: "get_build" });
+        // Shown like get_build shows it: the source link is signed and never shown to users.
+        const { source_url, agent_report, ...shown } = b;
+        return json({ ...shown, track_with: "get_build" });
       } catch (e) {
         return fail((e as Error).message);
       }
