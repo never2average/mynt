@@ -16,6 +16,7 @@ import { fingerprint } from "./product-tests.js";
 import { blockingComponents, productRegime } from "./regime.js";
 import { normalizeModel } from "./regulatory.js";
 import type { Store, User } from "./store.js";
+import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 
 // The governance desk: an agent reviews a firm, a licence it claims or a product it offers, and admins
 // decide. The agent is steered by Mynt's workspaces/governance-review folder (its CLAUDE.md, skills,
@@ -350,6 +351,9 @@ export class ReviewService {
 
   // ---- the worker ----
 
+  static TRANSIENT_GRACE_MS = defaultGraceMs();
+  private transient = new GraceTracker(() => ReviewService.TRANSIENT_GRACE_MS);
+
   async tick() {
     if (!this.enabled) return;
     if (this.config.autoOpen) {
@@ -363,8 +367,11 @@ export class ReviewService {
     for (const c of await this.all("SELECT * FROM financial_products.review_cases WHERE status = ANY($1) ORDER BY created_at", [RUNNING])) {
       try {
         await this.advance(c);
+        this.transient.clear(c.id as string);
       } catch (e) {
-        await this.end(c, "failed", { error: (e as Error).message });
+        // A provider's passing 5xx, rate limit or dropped connection is retried on later ticks.
+        if (this.transient.rideOut(c.id as string, e)) continue;
+        await this.end(c, "failed", { error: failureMessage(e) });
       }
     }
   }

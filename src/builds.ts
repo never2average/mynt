@@ -15,6 +15,8 @@ import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
 import type { Store, User } from "./store.js";
+import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
+export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
 
 // Coding-agent builds: a developer asks Mynt to build or ship one of their experiences; Mynt runs a coding
 // agent (Claude Code, run by Mynt itself) in a boat.dev sandbox that writes the code, passes a Maxwell security audit and a production-
@@ -202,19 +204,6 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
 const FILES = { spec: `${BUILD_JOB}/build.json`, status: `${BUILD_JOB}/status.json`, result: `${BUILD_JOB}/result.json`, sdk: `${BUILD_JOB}/sdk` };
 const WORKSPACE = "/home/user/workspace/app";
-// A provider that has used up the account's allowance (compute, credits): retrying won't help until someone
-// adds billing, so it isn't transient, and ops_status calls it out.
-export const QUOTA_PATTERN = /LIMIT_EXCEEDED|allowance for [\w_, ]+ has been used|insufficient (credits|balance)|quota exceeded/i;
-export const isQuotaExhausted = (e: unknown) => QUOTA_PATTERN.test(String((e as Error)?.message ?? e));
-export const QUOTA_MESSAGE = "The sandbox provider has used up this account's allowance; an admin must add billing in its dashboard.";
-
-// Errors worth retrying: rate limits, server errors and network failures, as the providers' clients report them.
-export function isTransient(e: unknown): boolean {
-  if (isQuotaExhausted(e)) return false;
-  const m = String((e as Error)?.message ?? e);
-  return /: (429|5\d\d)\b|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
-}
-
 // What a failed audit left behind, kept on the build before its sandbox is deleted.
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
@@ -537,8 +526,8 @@ export class BuildService {
 
   // A provider's passing hiccup (a 5xx, a rate limit, a dropped connection) mustn't throw away a build that
   // has already spent money: retry it on the next ticks, and fail only once it has persisted this long.
-  private transient = new Map<string, number>();
-  static TRANSIENT_GRACE_MS = Number(process.env.MYNT_TRANSIENT_GRACE_MS || 600000);
+  static TRANSIENT_GRACE_MS = defaultGraceMs();
+  private transient = new GraceTracker(() => BuildService.TRANSIENT_GRACE_MS);
 
   async tick() {
     if (!this.boat) return;
@@ -547,14 +536,9 @@ export class BuildService {
       const build = toBuild(r);
       try {
         await this.advance(build);
-        this.transient.delete(build.id);
+        this.transient.clear(build.id);
       } catch (e) {
-        if (isTransient(e)) {
-          const since = this.transient.get(build.id) ?? Date.now();
-          this.transient.set(build.id, since);
-          if (Date.now() - since < BuildService.TRANSIENT_GRACE_MS) continue;
-        }
-        this.transient.delete(build.id);
+        if (this.transient.rideOut(build.id, e)) continue;
         const current = (await this.get(build.id)) ?? build;
         // Stopped (or otherwise ended) while this tick was in flight: its sandboxes are gone on purpose, and the
         // build keeps the status it ended with.
@@ -562,7 +546,7 @@ export class BuildService {
         await this.retireKey(current);
         // Don't leave a failed build's machines running until their TTL.
         for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.boat.stop(id).catch(() => {});
-        const error = isQuotaExhausted(e) ? `${QUOTA_MESSAGE} (${(e as Error).message})` : (e as Error).message;
+        const error = failureMessage(e);
         await this.update(build.id, { status: "failed", error });
         await this.event(build.id, "failed", error);
       }
