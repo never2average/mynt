@@ -675,7 +675,7 @@ A product's full definition follows [`schemas/financial-product.v2.schema.json`]
   - exactly one primary risk model per algorithm;
   - every risk model governed by a GRC record, owned by an internal party.
 
-Every error comes back at once.
+Every error comes back at once. A valid definition checked against a product (`product_id`) also lists `publish_blockers`: what its regime would refuse at publish, such as an uncovered component or a mandated stakeholder who isn't bound to the component it serves. Innovators and their agents read the schema itself over MCP as the resource `mynt://schemas/financial-product.v2`.
 
 **What saving does**
 - It sets the product's composition and parties, so the regime, the publish checks, pins and drift all work as before.
