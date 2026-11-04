@@ -15,7 +15,7 @@ import { regulatoryModel } from "./seed-regulatory-model.js";
 
 // scripts/apply-seed-definitions.mjs --login signs a person in the way an MCP client does: Mynt's
 // protected-resource metadata, the authorization server's metadata, dynamic client registration, then
-// the authorization code flow with PKCE (S256) and a state check, with the callback on 127.0.0.1. Here
+// the authorization code flow with PKCE (S256) and a state check, with the callback at localhost (loopback only). Here
 // the authorization server is a fake that enforces each of those (no real Clerk calls), and Mynt is the
 // real HTTP server with a stand-in for its Clerk verifier.
 
@@ -50,7 +50,7 @@ function fakeAuthServer(expectedResource) {
     if (url.pathname === "/register" && req.method === "POST") {
       const b = JSON.parse(await readBody(req));
       seen.registrations.push(b);
-      if (b.token_endpoint_auth_method !== "none" || !b.redirect_uris?.every((u) => /^http:\/\/127\.0\.0\.1:\d+\/callback$/.test(u)))
+      if (b.token_endpoint_auth_method !== "none" || !b.redirect_uris?.every((u) => /^http:\/\/localhost:\d+\/callback$/.test(u)))
         return json(400, { error: "invalid_client_metadata" });
       const id = `client_${randomBytes(4).toString("hex")}`;
       clients.set(id, b);
@@ -116,7 +116,7 @@ async function world() {
 // The browser: follows the sign-in link, and the fake server's redirect, back to the script's callback.
 const browser = (url) => void fetch(url).catch(() => {});
 
-test("--login: discovery, registration, PKCE and state, callback on 127.0.0.1, token kept out of the output", async () => {
+test("--login: discovery, registration, PKCE and state, callback on localhost (IPv4 and IPv6 loopback), token kept out of the output", async () => {
   const w = await world();
   try {
     const lines = [];
@@ -126,7 +126,7 @@ test("--login: discovery, registration, PKCE and state, callback on 127.0.0.1, t
     const [reg] = w.as.seen.registrations;
     assert.equal(reg.token_endpoint_auth_method, "none");
     assert.equal(reg.scope, "openid profile email");
-    assert.match(reg.redirect_uris[0], /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+    assert.match(reg.redirect_uris[0], /^http:\/\/localhost:\d+\/callback$/);
     const link = new URL(lines.find((l) => l.trim().startsWith("http")).trim());
     assert.equal(link.searchParams.get("code_challenge_method"), "S256");
     assert.equal(link.searchParams.get("resource"), w.resource);
@@ -135,6 +135,30 @@ test("--login: discovery, registration, PKCE and state, callback on 127.0.0.1, t
     w.close();
   }
 });
+
+// The browser may resolve localhost to either loopback address: the callback answers on both.
+for (const host of ["127.0.0.1", "[::1]"]) {
+  test(`--login takes the callback on ${host}`, async (t) => {
+    if (host === "[::1]") {
+      const probe = createServer();
+      const v6 = await new Promise((r) => probe.once("error", () => r(false)).listen(0, "::1", () => (probe.close(), r(true))));
+      if (!v6) return t.skip("no IPv6 loopback on this machine");
+    }
+    const w = await world();
+    try {
+      const via = async (url) => {
+        const r = await fetch(url, { redirect: "manual" });
+        const back = new URL(r.headers.get("location"));
+        assert.equal(back.hostname, "localhost");
+        back.hostname = host;
+        await fetch(back).catch(() => {});
+      };
+      assert.match(await login({ mcpUrl: w.resource, log: () => {}, openBrowser: (u) => void via(u) }), /^at_/);
+    } finally {
+      w.close();
+    }
+  });
+}
 
 test("--login refuses a callback whose state isn't its own, and never exchanges the code", async () => {
   const w = await world();

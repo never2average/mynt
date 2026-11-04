@@ -745,7 +745,7 @@ node scripts/apply-seed-definitions.mjs --url <the server's MCP URL> --login --d
 node scripts/apply-seed-definitions.mjs --url <the server's MCP URL> --login             # check, save, test, publish
 ```
 
-`--login` signs you in through your browser the way an MCP client does: OAuth discovery from the MCP URL, dynamic client registration, the authorization code flow with PKCE and a state check, the callback on `127.0.0.1` only. The access token stays in memory: it is never printed or saved. Instead of `--login`, an admin token can be set in the shell as `MYNT_ADMIN_TOKEN`; a token is never accepted on the command line.
+`--login` signs you in through your browser the way an MCP client does: OAuth discovery from the MCP URL, dynamic client registration, the authorization code flow with PKCE and a state check, the callback at `http://localhost:<port>/callback`, listening on the loopback addresses (`127.0.0.1` and `::1`) only. The access token stays in memory: it is never printed or saved. Instead of `--login`, an admin token can be set in the shell as `MYNT_ADMIN_TOKEN`; a token is never accepted on the command line.
 
 The script checks every file first (`check_product_definition` with the product id) and changes nothing if any is invalid or has publish blockers, printing the errors and blockers. Otherwise it saves, tests and publishes each one and prints one line per product. A product whose live definition already matches is skipped. Pass file paths to apply only some.
 

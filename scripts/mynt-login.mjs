@@ -2,7 +2,7 @@
 // only. It does what an MCP client does: reads the server's OAuth protected-resource metadata, then
 // its authorization server's metadata (Clerk, on Mynt), registers itself as a public client (dynamic
 // client registration), and runs the authorization code flow with PKCE (S256) and a state check,
-// receiving the callback on 127.0.0.1 only. The token is returned, never printed or written anywhere.
+// receiving the callback at http://localhost:<port>/callback, on the loopback addresses only. The token is returned, never printed or written anywhere.
 
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -55,7 +55,7 @@ export function openInBrowser(url) {
   }
 }
 
-// Waits on 127.0.0.1 for the browser to come back with ?code&state. Resolves with the code; rejects on an
+// Waits on loopback (127.0.0.1 and ::1) for the browser to come back with ?code&state. Resolves with the code; rejects on an
 // error from the sign-in service, a state that isn't ours, or the timeout.
 function callbackServer(state, timeoutMs) {
   let resolveCode;
@@ -70,8 +70,8 @@ function callbackServer(state, timeoutMs) {
     res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(`<!doctype html><meta charset="utf-8"><title>Mynt sign-in</title><body style="font-family:system-ui;padding:2rem"><p>${text}</p></body>`);
   };
-  const server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  const handler = (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/callback") return void page(res, 404, "Not found.");
     const error = url.searchParams.get("error");
     if (url.searchParams.get("state") !== state) {
@@ -90,17 +90,44 @@ function callbackServer(state, timeoutMs) {
     }
     page(res, 200, "Signed in to Mynt. You can close this tab and go back to the terminal.");
     resolveCode(c);
-  });
+  };
   const timer = setTimeout(() => rejectCode(new Error(`Sign-in timed out after ${Math.round(timeoutMs / 60000)} minutes. Run the script again.`)), timeoutMs);
+  const servers = [];
+  const closeServers = () => {
+    for (const s of servers.splice(0)) {
+      s.closeAllConnections?.();
+      s.close();
+    }
+  };
   const close = () => {
     clearTimeout(timer);
-    server.closeAllConnections?.();
-    server.close();
+    closeServers();
   };
-  const listening = new Promise((res, rej) => {
-    server.once("error", rej);
-    server.listen(0, "127.0.0.1", () => res(server.address().port));
-  });
+  const bind = (port, host) =>
+    new Promise((res, rej) => {
+      const s = createServer(handler);
+      s.once("error", rej);
+      s.listen({ port, host, ipv6Only: host === "::1" }, () => {
+        servers.push(s);
+        res(s.address().port);
+      });
+    });
+  // The redirect says localhost, which the browser may resolve to 127.0.0.1 or ::1: listen on both
+  // loopback addresses, on one port, and on nothing else.
+  const listening = (async () => {
+    for (let attempt = 0; ; attempt++) {
+      const port = await bind(0, "127.0.0.1");
+      try {
+        await bind(port, "::1");
+        return port;
+      } catch (e) {
+        if (e.code === "EADDRNOTAVAIL" || e.code === "EAFNOSUPPORT") return port; // no IPv6 here: 127.0.0.1 is enough
+        closeServers();
+        if (e.code !== "EADDRINUSE" || attempt >= 4) throw e;
+      }
+    }
+  })();
+  listening.catch(() => {});
   return { listening, code, close };
 }
 
@@ -130,7 +157,7 @@ export async function login({ mcpUrl, log = (l) => console.error(l), openBrowser
   const cb = callbackServer(state, timeoutMs);
   try {
     const port = await cb.listening;
-    const redirectUri = `http://127.0.0.1:${port}/callback`;
+    const redirectUri = `http://localhost:${port}/callback`;
 
     const reg = await fetchFn(as.registration_endpoint, {
       method: "POST",
