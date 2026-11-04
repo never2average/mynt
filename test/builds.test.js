@@ -333,7 +333,20 @@ test("spend caps count both sandboxes, and the monthly budget refuses new builds
   assert.equal(b.status, "over_budget");
   assert.equal(b.cost_usd, 5.5);
   assert.ok(boat.sandboxes.get(sbx).stopped && boat.sandboxes.get(vid).stopped);
-  assert.match((await call(dev, "start_build", { goal: "Another build please" })).data.error, /Monthly build budget/);
+  // US$2.50 of the US$8 month is left: the default US$5 cap doesn't fit, and the error says how much would.
+  assert.equal(
+    (await call(dev, "start_build", { goal: "Another build please" })).data.error,
+    "This build's cap (US$5) is more than this month's remaining build budget (US$2.50 of US$8); start it with cap_usd of at most 2.5",
+  );
+  const small = (await call(dev, "start_build", { goal: "A smaller build please", cap_usd: 2.5 })).data;
+  assert.equal(small.cap_usd, 2.5, "a cap within what's left is accepted");
+  await builds.stop(await builds.get(small.id), "test");
+});
+
+test("a used-up month says so", async () => {
+  const ctx = await setup({ config: { capUsd: 5, monthlyCapUsd: 0.25 } });
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  assert.match((await ctx.call(dev, "start_build", { goal: "Build a savings page please" })).data.error, /^Monthly build budget used up \(US\$0\.00 of US\$0\.25/);
 });
 
 test("developers track, steer and stop their own builds; admins see all", async () => {
