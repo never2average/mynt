@@ -270,6 +270,10 @@ fi
 ls -1dt "$HOME/apps/$NAME"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
 echo "running $NAME at $SHA"`;
 
+// One line per compose service: its state and since when, health, how often Docker restarted it, its image.
+const SERVICE_STATUS =
+  '{{index .Config.Labels "com.docker.compose.service"}}: {{.State.Status}} since {{.State.StartedAt}}, health {{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}, restarts {{.RestartCount}}, image {{.Config.Image}}';
+
 // The same commands the tunnel agent runs, for a direct VM: against the compose project when the app is one
 // (a service can be named in $SERVICE), otherwise its container. exec's command arrives as $CMD.
 export function directCommand(kind: HostingCommandKind, name: string, args: Record<string, unknown>): string {
@@ -279,7 +283,8 @@ export function directCommand(kind: HostingCommandKind, name: string, args: Reco
   const project = `[ -n "$(docker compose -p ${name} ps -aq 2>/dev/null)" ]`;
   const cmd: Record<HostingCommandKind, [string, string]> = {
     status: [
-      `docker compose -p ${name} ps --format '{{.Service}}: {{.State}} {{.Status}}' && docker stats --no-stream --format '{{.Name}}: {{.CPUPerc}} CPU, {{.MemUsage}} memory' $(docker compose -p ${name} ps -q)`,
+      // Every service's container, stopped ones too (a crash loop shows in its restarts).
+      `docker inspect -f '${SERVICE_STATUS}' $(docker compose -p ${name} ps -aq) && docker stats --no-stream --format '{{.Name}}: {{.CPUPerc}} CPU, {{.MemUsage}} memory' $(docker compose -p ${name} ps -q)`,
       `docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, health {{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}, restarts {{.RestartCount}}, image {{.Config.Image}}' ${name} && docker stats --no-stream --format '{{.CPUPerc}} CPU, {{.MemUsage}} memory' ${name}`,
     ],
     logs: [`docker compose -p ${name} logs --timestamps --tail ${tail} $SERVICE`, `docker logs --timestamps --tail ${tail} ${name}`],

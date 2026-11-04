@@ -481,6 +481,18 @@ test("direct hosting: a compose app runs as a project, each labelled service on 
     assert.equal(logs[3].env.SERVICE, "api");
     assert.match((await call(dev, "app_run", { app_id: w.app.id, service: "api; rm -rf /", command: "id" })).data.error ?? "", /Invalid|invalid|match/i, "service names are checked");
 
+    // Status covers every service's container, stopped ones too, with how often Docker restarted it.
+    const run = provider.run.bind(provider);
+    let statusCmd;
+    provider.run = async (vmId, command, opts) => {
+      statusCmd = command;
+      return { exitCode: 0, stdout: "api: restarting since 2026-01-01T00:00:00Z, health unhealthy, restarts 7, image app-api\n", stderr: "" };
+    };
+    const status2 = (await call(dev, "app_status", { app_id: w.app.id })).data;
+    assert.match(statusCmd, new RegExp(`then docker inspect -f '\\{\\{index \\.Config\\.Labels "com\\.docker\\.compose\\.service"\\}\\}: [^']*restarts \\{\\{\\.RestartCount\\}\\}[^']*' \\$\\(docker compose -p mynt-app-${id} ps -aq\\)`));
+    assert.match(status2.output, /^api: restarting .*, restarts 7, /);
+    provider.run = run;
+
     assert.equal((await call(dev, "undeploy_app", { app_id: w.app.id })).isError, false);
     assert.equal(provider.routes.size, 0, "every service's route is removed");
     assert.deepEqual(provider.deleted, [`vm-mynt-a-${id}`], "undeploy deletes the app's VM");
