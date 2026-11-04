@@ -368,8 +368,14 @@ export class BuildService {
   async start(developer: User, opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number }) {
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
     const spent = await this.monthSpend(developer.id);
-    if (spent + cap > this.config.monthlyCapUsd)
-      throw new Error(`Monthly build budget reached (US$${spent.toFixed(2)} of US$${this.config.monthlyCapUsd} spent this month)`);
+    // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
+    // what's left (and how much a smaller cap may be).
+    const left = Math.max(0, this.config.monthlyCapUsd - spent);
+    if (left < 0.5) throw new Error(`Monthly build budget used up (US$${spent.toFixed(2)} of US$${this.config.monthlyCapUsd} spent this month)`);
+    if (cap > left)
+      throw new Error(
+        `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
+      );
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
     const id = randomUUID();
