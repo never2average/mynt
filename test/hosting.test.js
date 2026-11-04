@@ -392,7 +392,8 @@ test("compose files: what Mynt refuses, which services it serves, and the overri
       { service: "api", expose: "api", port: 3000 },
       { service: "web", expose: "web", port: 8080 },
     ],
-  }, "the starter app is accepted; mobile is behind a profile");
+    noNewPrivileges: ["api", "web", "mobile"],
+  }, "the starter app is accepted; mobile is behind a profile; its services already set no-new-privileges");
   const bad = checkCompose(`services:
   a:
     image: x
@@ -420,9 +421,17 @@ test("compose files: what Mynt refuses, which services it serves, and the overri
   ]);
   assert.match(checkCompose("services: [").errors[0], /isn't valid YAML/);
   assert.deepEqual(checkCompose("services:\n  a:\n    image: x\n").errors, ["No service is labelled mynt.expose (with mynt.port), so there's nothing to serve"]);
+  // The template's services set no-new-privileges themselves: compose appends override lists, so Mynt adding it
+  // again would list it twice and compose would refuse the project. A service without it gets it from Mynt.
   const override = JSON.parse(composeOverride(template, { api: 9000, web: 9001 }));
-  assert.deepEqual(override.services.web, { security_opt: ["no-new-privileges:true"], mem_limit: "1g", cpus: 1, restart: "unless-stopped", ports: ["9001:8080"] });
+  assert.deepEqual(override.services.web, { mem_limit: "1g", cpus: 1, restart: "unless-stopped", ports: ["9001:8080"] });
   assert.deepEqual(override.services.api.ports, ["9000:3000"]);
+  const plain = checkCompose("services:\n  web:\n    image: x\n    labels: { mynt.expose: web, mynt.port: \"80\" }\n");
+  assert.deepEqual(JSON.parse(composeOverride(plain, { web: 9001 })).services.web.security_opt, ["no-new-privileges:true"]);
+  assert.deepEqual(
+    checkCompose("services:\n  web:\n    image: x\n    security_opt: [\"no-new-privileges:false\"]\n    labels: { mynt.expose: web, mynt.port: \"80\" }\n").errors,
+    ["web: no-new-privileges can't be turned off"],
+  );
 });
 
 test("direct hosting: a compose app runs as a project, each labelled service on its own address", async () => {
