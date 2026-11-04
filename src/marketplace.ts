@@ -5,6 +5,7 @@ import { lintCampaign } from "./gtm.js";
 import { folder, folderOf, GrcRecordInputSchema, reconcileEntityGrc, validateGrcRecord } from "./entity-grc.js";
 import { EntityFactsSchema, PartyInputSchema, reconcileEntity, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
+import { vendorDriftSweep } from "./vendors.js";
 import { normalizeModel } from "./regulatory.js";
 import { emitProductEvent, emitRequestEvent } from "./runtime.js";
 import { ACCESS_MODES, type AccessRequest, type Store, type User } from "./store.js";
@@ -22,6 +23,8 @@ export function registerMarketplaceTools(server: McpServer, store: Store, user: 
   const me = async () => (await store.getUser(user.id)) ?? user;
 
   // ---- entity and licences ----
+
+  registerFirmTools(server, store, user);
 
   server.registerTool(
     "create_entity",
@@ -43,30 +46,6 @@ export function registerMarketplaceTools(server: McpServer, store: Store, user: 
       user.entity_id = entity.id;
       await audit("create_entity", entity.id, { name: entity.name });
       return json(entity);
-    },
-  );
-
-  server.registerTool(
-    "get_my_entity",
-    {
-      title: "My firm",
-      description: "Innovator: your entity, its members, and its licences with their review status.",
-      inputSchema: {},
-      annotations: { readOnlyHint: true },
-    },
-    async () => {
-      const { entity_id } = await me();
-      if (!entity_id) return fail("You don't belong to an entity yet; create one with create_entity");
-      const entity = await store.getEntity(entity_id);
-      const members = (await store.entityMembers(entity_id)).map((m) => ({ id: m.id, name: m.name, email: m.email }));
-      return json({
-        ...entity,
-        members,
-        licenses: await store.licensesOf(entity_id),
-        parties: await store.partiesOf(entity_id),
-        reconciliation: await reconcileEntity(store, entity_id),
-        grc: await reconcileEntityGrc(store, entity_id),
-      });
     },
   );
 
@@ -192,35 +171,6 @@ export function registerMarketplaceTools(server: McpServer, store: Store, user: 
       const ended = await store.endParty(party_id, until ?? new Date().toISOString().slice(0, 10));
       await audit("end_party", party_id, { entity_id, until: ended.until });
       return json({ ...ended, drifted_products: await driftSweep(store, entity_id) });
-    },
-  );
-
-  server.registerTool(
-    "register_license",
-    {
-      title: "Register a licence your firm holds",
-      description:
-        "Innovator: record a licence your entity holds (a licence type from the regulatory model, see find_licenses) with its registration number and validity. An admin verifies it before it counts.",
-      inputSchema: {
-        region: z.string(),
-        regulator_id: z.string(),
-        license_id: z.string(),
-        registration_number: z.string().min(1),
-        valid_from: z.string().optional().describe("YYYY-MM-DD"),
-        valid_to: z.string().optional().describe("YYYY-MM-DD"),
-      },
-    },
-    async (l) => {
-      const { entity_id } = await me();
-      if (!entity_id) return fail("You don't belong to an entity yet; create one with create_entity");
-      const region = (await store.referenceData(true)).regions.find((r) => r.code === l.region);
-      const regulator = normalizeModel(region?.regulatory).regulators.find((r) => r.id === l.regulator_id);
-      if (!regulator?.license_types.some((t) => t._id === l.license_id))
-        return fail(`No licence type '${l.license_id}' under '${l.regulator_id}' in ${l.region}; see get_regulator`);
-      const held = await store.registerLicense(user.id, { ...l, entity_id, valid_from: l.valid_from ?? null, valid_to: l.valid_to ?? null });
-      await audit("register_license", held.id, { region: l.region, regulator: l.regulator_id, license: l.license_id });
-      // Re-registering sends a licence back for review, so products resting on it are re-checked.
-      return json({ ...held, drifted_products: await driftSweep(store, entity_id) });
     },
   );
 
@@ -414,4 +364,67 @@ export async function settleCampaign(store: Store, campaignId: string): Promise<
   const products = (await Promise.all(c.product_ids.map((id) => store.getProduct(id)))).filter((r) => r?.status === "published").map((r) => r!.product);
   const lint = lintCampaign(c.variants, products);
   return (await store.saveCampaign({ ...c, status: lint.passed ? "live" : "draft", last_lint: lint })).status;
+}
+
+// A firm's own record and licences: innovators', and vendors' (whose firm an admin registers).
+export function registerFirmTools(server: McpServer, store: Store, user: User) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
+  const me = async () => (await store.getUser(user.id)) ?? user;
+  const noFirm = user.roles.some((r) => r === "innovator" || r === "admin")
+    ? "You don't belong to an entity yet; create one with create_entity"
+    : "You don't belong to a firm yet; an admin adds you to one";
+
+  server.registerTool(
+    "get_my_entity",
+    {
+      title: "My firm",
+      description: "Your firm: its members, its licences with their review status, its roster and GRC.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const { entity_id } = await me();
+      if (!entity_id) return fail(noFirm);
+      const entity = await store.getEntity(entity_id);
+      const members = (await store.entityMembers(entity_id)).map((m) => ({ id: m.id, name: m.name, email: m.email }));
+      return json({
+        ...entity,
+        members,
+        licenses: await store.licensesOf(entity_id),
+        parties: await store.partiesOf(entity_id),
+        reconciliation: await reconcileEntity(store, entity_id),
+        grc: await reconcileEntityGrc(store, entity_id),
+      });
+    },
+  );
+
+  server.registerTool(
+    "register_license",
+    {
+      title: "Register a licence your firm holds",
+      description:
+        "Record a licence your firm holds (a licence type from the regulatory model, see find_licenses) with its registration number and validity. An admin verifies it before it counts.",
+      inputSchema: {
+        region: z.string(),
+        regulator_id: z.string(),
+        license_id: z.string(),
+        registration_number: z.string().min(1),
+        valid_from: z.string().optional().describe("YYYY-MM-DD"),
+        valid_to: z.string().optional().describe("YYYY-MM-DD"),
+      },
+    },
+    async (l) => {
+      const { entity_id } = await me();
+      if (!entity_id) return fail(noFirm);
+      const region = (await store.referenceData(true)).regions.find((r) => r.code === l.region);
+      const regulator = normalizeModel(region?.regulatory).regulators.find((r) => r.id === l.regulator_id);
+      if (!regulator?.license_types.some((t) => t._id === l.license_id))
+        return fail(`No licence type '${l.license_id}' under '${l.regulator_id}' in ${l.region}; see get_regulator`);
+      const held = await store.registerLicense(user.id, { ...l, entity_id, valid_from: l.valid_from ?? null, valid_to: l.valid_to ?? null });
+      await audit("register_license", held.id, { region: l.region, regulator: l.regulator_id, license: l.license_id });
+      // Re-registering sends a licence back for review, so products resting on it are re-checked.
+      const drifted = [...(await driftSweep(store, entity_id)), ...(await vendorDriftSweep(store, { vendor_entity_id: entity_id }))];
+      return json({ ...held, drifted_products: [...new Set(drifted)] });
+    },
+  );
 }

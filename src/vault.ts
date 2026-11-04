@@ -73,6 +73,10 @@ const FIXTURES: Record<string, string> = {
   bank_statement_6m: "aa://sandbox/statements/6m",
   annual_turnover: "4200000",
 };
+// A fixture value for any dictionary field, for Mynt's conformance tests of vendors' services.
+const EXTRA_FIXTURES: Record<string, string> = { ssn: "123-45-6789", routing_number: "021000021", mobile_number: "+919800000001", email: "asha@example.com", amount: "5000" };
+export const fixtureValue = (field: string): string | null => FIXTURES[field] ?? EXTRA_FIXTURES[field] ?? null;
+
 export function sandboxPrefill(field: string, source: CaptureMethod): string | null {
   const f = DATA_DICTIONARY[field];
   return f?.capture.includes(source) ? (FIXTURES[field] ?? null) : null;

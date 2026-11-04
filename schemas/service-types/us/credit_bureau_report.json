@@ -1,0 +1,59 @@
+{
+  "region": "US",
+  "key": "credit_bureau_report",
+  "name": "Credit bureau report",
+  "category": "credit_bureau",
+  "description": "Pulls the customer's consumer report and credit score from a consumer reporting agency. The subscribing firm needs a permissible purpose under the Fair Credit Reporting Act.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name",
+      "date_of_birth",
+      "ssn",
+      "address"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "date_of_birth": {
+        "type": "string",
+        "format": "date"
+      },
+      "ssn": {
+        "type": "string",
+        "pattern": "^[0-9]{3}-?[0-9]{2}-?[0-9]{4}$"
+      },
+      "address": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "score",
+      "report_ref"
+    ],
+    "properties": {
+      "score": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 300,
+        "maximum": 850,
+        "description": "null when the customer has no scoreable history"
+      },
+      "report_ref": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "credit_report_pull",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": []
+}

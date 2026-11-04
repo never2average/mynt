@@ -1,0 +1,58 @@
+{
+  "region": "IN",
+  "key": "emandate_registration",
+  "name": "e-mandate registration",
+  "category": "mandate",
+  "description": "Registers a recurring debit mandate on the customer's bank account through NPCI's e-mandate (eNACH) rails, through the firm's sponsor bank, and returns the mandate reference.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name",
+      "bank_account_number",
+      "ifsc",
+      "amount"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "bank_account_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9,18}$"
+      },
+      "ifsc": {
+        "type": "string",
+        "pattern": "^[A-Z]{4}0[A-Z0-9]{6}$"
+      },
+      "amount": {
+        "type": "number",
+        "exclusiveMinimum": 0
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "mandate_status"
+    ],
+    "properties": {
+      "mandate_status": {
+        "enum": [
+          "registered",
+          "pending",
+          "rejected"
+        ]
+      },
+      "umrn": {
+        "type": "string",
+        "description": "The Unique Mandate Reference Number, once registered"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "mandate_setup",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": []
+}

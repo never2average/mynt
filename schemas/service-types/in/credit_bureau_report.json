@@ -1,0 +1,63 @@
+{
+  "region": "IN",
+  "key": "credit_bureau_report",
+  "name": "Credit bureau report",
+  "category": "credit_bureau",
+  "description": "Pulls the customer's credit report and score from a credit information company. Only a credit institution that is a member of the company may pull it, and the company must hold a certificate of registration from the RBI.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "pan",
+      "full_name",
+      "date_of_birth"
+    ],
+    "properties": {
+      "pan": {
+        "type": "string",
+        "pattern": "^[A-Z]{5}[0-9]{4}[A-Z]$"
+      },
+      "full_name": {
+        "type": "string"
+      },
+      "date_of_birth": {
+        "type": "string",
+        "format": "date"
+      },
+      "mobile_number": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "score",
+      "report_ref"
+    ],
+    "properties": {
+      "score": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 300,
+        "maximum": 900,
+        "description": "null when the customer has no credit history"
+      },
+      "report_ref": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "credit_report_pull",
+  "fills": [],
+  "innovator_licences": [
+    "rbi_bank",
+    "rbi_nbfc"
+  ],
+  "vendor_licences": [
+    "rbi_cic"
+  ]
+}

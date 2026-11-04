@@ -1,0 +1,45 @@
+{
+  "region": "IN",
+  "key": "bank_statement_analytics",
+  "name": "Bank statement analytics",
+  "category": "analytics",
+  "description": "Reads six months of bank statements the customer shared and returns their monthly income and banking behaviour.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "bank_statement_6m"
+    ],
+    "properties": {
+      "bank_statement_6m": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "monthly_income"
+    ],
+    "properties": {
+      "monthly_income": {
+        "type": "number",
+        "minimum": 0
+      },
+      "average_balance": {
+        "type": "number"
+      },
+      "bounced_payments": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "bank_statement_analysis",
+  "fills": [
+    "monthly_income"
+  ],
+  "innovator_licences": [],
+  "vendor_licences": []
+}

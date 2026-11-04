@@ -146,6 +146,7 @@ Mynt's platform, published as an MCP server. It covers eleven lines, grouped by 
 | **Consumers** | Products and offers they can use, and a way to say what they need |
 | **Innovators** (licensed firms) | The product foundry: composition from regulated primitives, term sheets and feasibility analysis in their own model repository, versioning, licensing checks, distribution |
 | **Developers** | Apps on top of products: SDKs, APIs, webhooks, a sandbox, GTM campaigns, and coding agents that build, verify and host them |
+| **Vendors** | A place to offer standard services (identity, KYC, account data, bureau, e-sign, e-mandate) that innovators plug into their products, tested by Mynt before they're listed |
 | **Admins** | The regulatory model (regulators, licences, law, GRC), the governance desk that reviews firms, licences and products, and `ops_status` for what needs attention |
 
 **Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](#install--build) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md)
@@ -156,14 +157,15 @@ The rest of this README is the technical reference.
 
 ## Reference
 
-Mynt has four kinds of user:
+Mynt has five kinds of user:
 
 | User type | Can | Tools (in addition to the catalog tools) |
 | --- | --- | --- |
 | **Consumer** | Use financial products, respond to offers and request products that don't exist yet | `enroll_in_product`, `list_my_enrollments`, `cancel_enrollment`, `list_offers`, `upgrade_enrollment`, `request_product`, `list_my_product_requests` (the last two for any signed-in user) |
 | **Developer** | Build app experiences and do GTM engineering around financial products | Apps: `create_app`, `update_app`, `list_my_apps`, `preview_app`, `publish_app`. GTM: `create_segment`, `list_my_segments`, `create_campaign`, `update_campaign`, `lint_campaign`, `launch_campaign`, `pause_campaign`, `end_campaign`, `list_my_campaigns`, `get_campaign_metrics`. Runtime: `create_api_key`, `list_api_keys`, `rotate_api_key`, `revoke_api_key`, `create_webhook`, `list_webhooks`, `delete_webhook`, `rotate_webhook_secret`, `list_webhook_deliveries`, `create_test_consumer`, `simulate_handoff`, `release_app`, `list_app_releases`, `rollback_app`, `get_app_metrics` |
 | **Innovator** | Create, test, publish, version and upgrade financial products | `create_product`, `update_product`, `test_product`, `publish_product`, `unpublish_product`, `list_my_products`, `create_product_version`, `update_product_version`, `list_product_versions`, `diff_product_versions`, `restore_product_version`, `upgrade_enrollments`, `get_product_distribution_metrics`, `report_handoff_outcome`, `get_product_take_rate`. Product requests: `list_product_requests` (requesters shown only by a pseudonymous id), `respond_to_product_request` (offer one of your published products; audited) |
-| **Admin** | Run Mynt: geographies, product types, the whitelist, and oversight, all from Mynt itself | `define_region`, `define_product_category`, `list_whitelist`, `invite_user`, `revoke_user`, `list_all_campaigns`, `admin_pause_campaign`, `admin_set_product_status`, `define_take_rate`, `list_take_rates`, `audit_log` |
+| **Vendor** | Offer standard services (identity, KYC, account data, bureau, e-sign, e-mandate…) that innovators plug into their products; a peer of innovators, not above or below them | `list_service_types`, `create_vendor_offering`, `update_vendor_offering`, `run_conformance`, `list_my_offerings`, `list_my_subscribers`, `reveal_subscription_secret`, `rotate_subscription_secret`, plus their firm's `get_my_entity` and `register_license`. Innovators get `list_vendor_offerings`, `subscribe_vendor_service`, `list_my_vendor_subscriptions`, `set_subscription_live` and `unsubscribe_vendor_service`. See [Vendors](#vendors-standard-services-per-region) |
+| **Admin** | Run Mynt: geographies, product types, the whitelist, and oversight, all from Mynt itself | `define_region`, `define_product_category`, `list_whitelist`, `invite_user`, `revoke_user`, `list_all_campaigns`, `admin_pause_campaign`, `admin_set_product_status`, `define_take_rate`, `list_take_rates`, `audit_log`; vendors: `define_service_type`, `load_service_types`, `suspend_vendor_offering`, `register_firm` |
 
 Everyone (including guests without a token) gets the catalog tools: `whoami`, `list_products`, `get_product`, `list_categories`, `list_regions`, `list_product_categories`, `list_apps`, plus the resource `mynt://catalog`.
 
@@ -212,6 +214,7 @@ The CLI (`users invite --role admin`) remains as a fallback for creating the fir
 
   Each innovator acts for a **firm** (`create_entity`) and registers the **licences** it holds (`register_license`), which an admin verifies against the regulator's register (`review_license`). A product declares its `action` (`issuance`, `sale` or `repackaging`, with `underlying_product_ids` for the last two). **`publish_product` requires a verified, in-date licence held by the firm that covers that action on that category in that region.**
 - **Developers are the software layer.** They build SDKs, apps and experiences on innovators' products, and never issue, sell, hold funds or collect financial data. Onboarding, KYC and payments hand off to the innovator's own flow (`deep_link` / `initiate_onboarding`).
+- **Vendors offer standard services** that innovators plug into their products instead of each integrating them: identity checks, KYC records, account data, bank statement analytics, bureau reports, documents, e-sign, e-mandates. See [Vendors](#vendors-standard-services-per-region).
 
 **Opening products to developers.** Each product has an **access mode**, set with `set_product_access`:
 
@@ -243,6 +246,34 @@ Each product also has **build terms**:
 **Campaigns.** Promoting a financial product is a regulated act:
 - A campaign over the launcher's own (or their firm's) products, or the open reference catalogue, goes live once its copy passes the lint.
 - A campaign over **another innovator's** products becomes `pending_approval` and lands in that innovator's inbox. It goes live when every product's innovator approves, and goes back to draft on any rejection.
+
+### Vendors: standard services, per region
+
+Vendors are firms (legal entities an admin adds by hand with `register_firm`; there's no self-serve discovery) that offer **standard services** innovators plug into their products, so that no innovator has to integrate identity, KYC, account aggregator data, analytics, bureau, e-sign or e-mandate providers itself. An admin invites a vendor's people with the `vendor` role (`invite_user`) and attaches them to the firm (`add_entity_member`). The vendor registers its licences (`register_license`), and an admin verifies them as for any firm.
+
+**Service types (admins).** Like regulators, service types are defined per region (`define_service_type`, `list_service_types`). Each has a `key`, `region`, `name`, `category` (identity, kyc, account_data, analytics, credit_bureau, documents, esign, mandate, fraud, other), an `input_schema` and `output_schema` (JSON Schema: the one contract every vendor in that region implements), the `consent_purpose` the customer must give, the data dictionary fields its output `fills`, and the licence types, from the region's regulatory model, of which the **subscribing firm** (`innovator_licences`) and the **vendor** (`vendor_licences`) must hold one. Required inputs are data dictionary fields, because Mynt sends them from the customer's vault. Examples ship as JSON in [`schemas/service-types/`](schemas/service-types) (India: PAN verification, CKYC search and download, Account Aggregator data fetch, bank statement analytics, credit bureau report, DigiLocker documents, eSign, e-mandate; US: identity and SSN verification, bank account verification, credit bureau report). `load_service_types` loads them; an example naming a licence type your regulatory model calls something else is skipped with the reason until you pass `licence_map`.
+
+**Offerings (vendors).** `create_vendor_offering` offers a service type in a region from a test (and later live) HTTPS endpoint, with a fixed price per call (for innovators to see: billing is between vendor and innovator, never through Mynt), SLA notes and the firm's licences it relies on. It starts as `draft`. **Mynt tests it itself** (`run_conformance`): signed requests with fixture inputs valid against the input schema, every answer checked against the output schema, a badly signed request and a correctly signed but stale one (over 300 s old) that must both be refused, timeouts and errors recorded, and the vendor's licences checked against the service type. A pass makes it `conformance_passed`; `update_vendor_offering { listed: true }` lists it. Changing an endpoint or licences sends it back to draft. Admins can suspend an offering (`suspend_vendor_offering`), which stops listing and calls. An admin's changes to another firm's offering are audited as admin actions (`admin_update_vendor_offering`, …) naming the firm.
+
+**Subscriptions (innovators).** `list_vendor_offerings` shows listed offerings by region, service type or category, and whether your firm meets the licence prerequisites. `subscribe_vendor_service` checks them, keeps the credentials the vendor issued you (if it needs them) in your firm's **key vault** (one row per key, typed `vendor_test_credential` or `vendor_live_credential`, sealed with `MYNT_VAULT_KEY`, never shown again): the test one goes only to the test endpoint and the live one only to the live endpoint, and adds the vendor's firm to your roster as a party, so the regime check and drift see it. Bind a product's partner handoff to the subscription in its definition (see Product definitions). Sandbox sessions then use the vendor's test endpoint; `set_subscription_live` turns live calls on (with the live credential, if needed). Live calls go only to a listed offering, and both sides' licence prerequisites are re-checked on every call. The subscription's state (active, offering not suspended, both sides' licences in force) is pinned with each product version that uses it: a suspension or a lapsed licence drifts those products, pausing new sales and sending `product.drifted`, until it's restored. `unsubscribe_vendor_service` is refused while a live product version hands off through the subscription; otherwise it deletes the credentials and, if the vendor joined your roster for it, ends that party. Developer apps change nothing.
+
+**Usage.** Mynt counts calls per subscription and day (successes and errors, never customer data): vendors see them in `list_my_subscribers`, innovators in `list_my_vendor_subscriptions`. `ops_status` lists failed conformance runs and subscriptions whose calls mostly fail.
+
+**The wire contract.** Mynt calls the vendor with
+
+```
+POST <base_url>/v1/<service_type_key>
+Content-Type: application/json
+Mynt-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">
+Authorization: Bearer <the subscriber's credential>        (only when the offering requires one)
+
+{ "request_id": "…", "environment": "test" | "live", "input": { …valid against input_schema… },
+  "consent": { "purpose": "<the service type's consent_purpose>", "artefact_ref": "<Mynt's consent evidence id>", "given_at": "<ISO 8601>" } }
+```
+
+and expects `200` with `{ "request_id": "<the same>", "status": "ok" | "error", "output": { …valid against output_schema… }, "error": { "code": "…", "message": "…" } | null }`. The signing secret is per subscription: Mynt generates it, `list_my_subscribers` says whether it's been taken, and `reveal_subscription_secret` shows it to the vendor once. `rotate_subscription_secret` replaces it (shown once; the old one stops verifying at once). Conformance runs use the offering's own secret, shown once by `create_vendor_offering`. Answer `401` to anything whose signature doesn't verify or whose timestamp is more than 300 seconds old, and treat a repeated `request_id` as a replay: answer it once.
+
+**Outbound safety.** HTTPS on port 443 only. The host is resolved and refused if any address is private, loopback, link-local (including cloud metadata addresses), carrier-grade NAT or otherwise reserved, including IPv6 forms that embed an IPv4 address (IPv4-mapped and -compatible, NAT64, 6to4) and site-local, and Mynt connects to the address it checked. Redirects aren't followed, each call has 10 seconds, and responses are capped at 256 KiB. Credentials and customer data never go into logs or responses.
 
 ### Coding-agent builds (developers)
 
@@ -527,7 +558,7 @@ The device routes need a client session that has a `customer_ref`:
   - sensitive fields only from a secure field;
   - every value validated against the data dictionary.
 - **`GET /v1/client/fields`** shows what's held, masked.
-- **`POST /v1/client/prefill`** fetches fields from Account Aggregator, DigiLocker or CKYC, with consent. Sandbox sessions get realistic fixture values. Live connectors return `501` until they're configured.
+- **`POST /v1/client/prefill`** fetches fields from Account Aggregator, DigiLocker or CKYC, with consent. When the product hands off to a vendor's standard service for that source (see [Vendors](#vendors-standard-services-per-region)), Mynt calls the vendor: its test endpoint for sandbox sessions, its live one once the innovator turned the subscription live. The service's own consent purpose must be recorded first (`409 consent_required`), its inputs must be in the customer's vault (`409 data_required`), and the answer is checked against the service's output schema before any field is saved (`502 vendor_error` otherwise; `503 vendor_unavailable` when the offering is suspended). Without a vendor, sandbox sessions get realistic fixture values and live connectors return `501` until they're configured. The app sends the same request either way.
 - **`DELETE /v1/client/fields`** erases everything held for the customer.
 
 A hosted action refuses to start (`data_required`) until the personal data it sends is held for the customer.
@@ -583,7 +614,7 @@ Beyond the checks:
 - Developers: `get_app_metrics(app_id, from?, to?, include_sandbox?)` gives views, clicks and hand-offs (started, completed, failed) per product and per day. It also gives conversion (completed hand-offs per view) and the hand-off completion rate. Only live traffic counts unless you set `include_sandbox`.
 - Innovators: `get_product_distribution_metrics(product_id)` shows how one of their products performs across every app that shows it.
 
-Roles nest: **every admin is also an innovator, every innovator a developer, and every developer a consumer**. Each role gets its own tools plus everything below it. Tools are registered per user, so a client only *sees* the tools its roles allow. `whoami` shows both the granted and the effective roles.
+Roles nest: **every admin is also an innovator, every innovator a developer, and every developer a consumer**. Each role gets its own tools plus everything below it. **Vendors** stand beside innovators: they get the catalog tools, their firm and vendor tools only, and can't publish products. Every admin is also a vendor, and an admin can grant one person both innovator and vendor. Tools are registered per user, so a client only *sees* the tools its roles allow. `whoami` shows both the granted and the effective roles.
 
 ## Product lines, actions and primitives
 
@@ -690,7 +721,9 @@ Every error comes back at once. A valid definition checked against a product (`p
 - It sets the catalogue record from the definition's projection, so existing tools, SDKs and apps keep reading the same fields.
 - On a live product, it goes into the draft version.
 
-**At publish.** The definition is checked again, since parties, licences and records may have changed. Its hash is then pinned as `pins.definition_hash`.
+**Handoffs to a vendor's standard service.** A `handoff_to_party` connection may name `attributes.vendor_subscription_id` (and, for readers, `service_type`): the firm's subscription to a vendor's offering. The party must be that subscription's vendor (subscribing adds it to the roster) and `consent_purpose` the service type's. Both attributes are optional; definitions without them are unchanged. See [Vendors](#vendors-standard-services-per-region).
+
+**At publish.** The definition is checked again, since parties, licences and records may have changed. Its hash is then pinned as `pins.definition_hash`, and handoffs bound to vendor subscriptions as `pins.vendor_bindings`.
 
 **Developer contract.** Publishing a defined product freezes its **developer contract**: exactly what developers build against. It comes from `get_developer_contract`, and it's also returned by `get_product_sdk`. Innovators preview it in `check_product_definition`.
 - **Offers** per customer segment: eligibility, terms, rates, fees and customer-facing limits, with segment overrides applied.

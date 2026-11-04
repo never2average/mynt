@@ -1,0 +1,50 @@
+{
+  "region": "US",
+  "key": "identity_verification",
+  "name": "Identity and SSN verification",
+  "category": "identity",
+  "description": "Checks that a name, date of birth and Social Security number belong together, with the customer's consent (as the Social Security Administration's electronic verification requires).",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name",
+      "date_of_birth",
+      "ssn"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "date_of_birth": {
+        "type": "string",
+        "format": "date"
+      },
+      "ssn": {
+        "type": "string",
+        "pattern": "^[0-9]{3}-?[0-9]{2}-?[0-9]{4}$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "result"
+    ],
+    "properties": {
+      "result": {
+        "enum": [
+          "match",
+          "no_match",
+          "deceased",
+          "unavailable"
+        ]
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "identity_verification",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": []
+}

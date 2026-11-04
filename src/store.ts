@@ -14,11 +14,13 @@ import {
   type RegulatoryModel,
 } from "./regulatory.js";
 
-export const ROLES = ["consumer", "developer", "innovator", "admin"] as const;
+export const ROLES = ["consumer", "developer", "innovator", "vendor", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
-// Roles nest: every admin is an innovator, every innovator a developer, every developer a consumer.
-const IMPLIES: Record<Role, Role[]> = { consumer: [], developer: ["consumer"], innovator: ["developer"], admin: ["innovator"] };
+// Roles nest: every admin is an innovator, every innovator a developer, every developer a consumer. Vendors
+// (firms offering standard services innovators plug in) are a peer of innovators: they get vendor tools only,
+// and an admin is both.
+const IMPLIES: Record<Role, Role[]> = { consumer: [], developer: ["consumer"], innovator: ["developer"], vendor: [], admin: ["innovator", "vendor"] };
 
 // Reference data admins manage: where products may be offered and what kinds of product exist.
 // How a product line is legally brought to market in a region: licences, approvals, filings.
@@ -242,11 +244,19 @@ export interface Pins {
   components: Component[];
   parties: PartyBinding[];
   entity_ids: string[];
-  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string> };
+  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string>; vendors?: Record<string, string> };
   definition_hash?: string; // the live v2 definition (see definition.ts), when the product has one
   contract?: DeveloperContract; // what developers build against, derived from that definition (see contract.ts)
+  vendor_bindings?: VendorBinding[]; // handoffs the live version runs through a vendor subscription (see vendors.ts)
 }
-export type DriftChange = { kind: "entity" | "licence" | "party"; id: string; was: string; now: string };
+export interface VendorBinding {
+  handoff_id: string;
+  party_id: string;
+  subscription_id: string;
+  service_type: string;
+  consent_purpose: string;
+}
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor"; id: string; was: string; now: string };
 export interface ProductRecord {
   product: FinancialProduct;
   owner_id: string | null; // null = bundled catalog product
@@ -968,6 +978,7 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS client_evidence_app_idx ON financial_products.client_evidence (app_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS client_evidence_subject_idx ON financial_products.client_evidence (session_id, product_id, subject, created_at DESC);
   -- Apps' journeys: declarative specs checked against one version of a product's developer contract.
   CREATE TABLE IF NOT EXISTS financial_products.app_journeys (
     app_id uuid NOT NULL REFERENCES financial_products.apps(id),
@@ -1001,6 +1012,92 @@ const TABLES = `
     email text PRIMARY KEY,
     blocked_by uuid REFERENCES financial_products.users(id),
     created_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- Vendors: standard services (identity, KYC, account data, bureau, e-sign, …) admins define per region as
+  -- one input/output contract, vendors' offerings of them (checked by Mynt before listing), and innovators'
+  -- subscriptions. Mynt does no billing: usage is counts per subscription and day, never customer data.
+  CREATE TABLE IF NOT EXISTS financial_products.service_types (
+    region text NOT NULL,
+    key text NOT NULL,
+    name text NOT NULL,
+    category text NOT NULL,
+    description text NOT NULL DEFAULT '',
+    input_schema jsonb NOT NULL,
+    output_schema jsonb NOT NULL,
+    consent_purpose text NOT NULL,
+    fills text[] NOT NULL DEFAULT '{}',
+    innovator_licences text[] NOT NULL DEFAULT '{}',
+    vendor_licences text[] NOT NULL DEFAULT '{}',
+    fixtures jsonb NOT NULL DEFAULT '[]',
+    updated_by uuid REFERENCES financial_products.users(id),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (region, key)
+  );
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_offerings (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    region text NOT NULL,
+    service_type text NOT NULL,
+    name text NOT NULL,
+    test_base_url text NOT NULL,
+    live_base_url text,
+    price jsonb NOT NULL,
+    sla_notes text NOT NULL DEFAULT '',
+    licence_ids uuid[] NOT NULL DEFAULT '{}',
+    requires_credential boolean NOT NULL DEFAULT false,
+    conformance_secret text NOT NULL,
+    status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'conformance_passed', 'listed', 'suspended')),
+    status_note text,
+    created_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (region, service_type) REFERENCES financial_products.service_types(region, key)
+  );
+  CREATE INDEX IF NOT EXISTS vendor_offerings_entity_idx ON financial_products.vendor_offerings (entity_id);
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_conformance_runs (
+    id uuid PRIMARY KEY,
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    passed boolean NOT NULL,
+    cases jsonb NOT NULL,
+    run_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS vendor_conformance_offering_idx ON financial_products.vendor_conformance_runs (offering_id, created_at DESC);
+  -- A firm's key vault: one row per key, each of one type; values sealed, never returned.
+  CREATE TABLE IF NOT EXISTS financial_products.key_vault (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    type text NOT NULL,
+    label text NOT NULL,
+    sealed text NOT NULL,
+    created_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS key_vault_entity_idx ON financial_products.key_vault (entity_id);
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_subscriptions (
+    id uuid PRIMARY KEY,
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    party_id uuid NOT NULL REFERENCES financial_products.entity_parties(id),
+    party_created boolean NOT NULL DEFAULT false,
+    live boolean NOT NULL DEFAULT false,
+    signing_secret text NOT NULL,
+    secret_shown_at timestamptz,
+    test_credential_key_id uuid REFERENCES financial_products.key_vault(id),
+    live_credential_key_id uuid REFERENCES financial_products.key_vault(id),
+    status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended')),
+    created_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    ended_at timestamptz
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS vendor_subscriptions_one_active_idx ON financial_products.vendor_subscriptions (offering_id, entity_id) WHERE status = 'active';
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_usage (
+    subscription_id uuid NOT NULL REFERENCES financial_products.vendor_subscriptions(id),
+    day date NOT NULL,
+    environment text NOT NULL CHECK (environment IN ('test', 'live')),
+    ok integer NOT NULL DEFAULT 0,
+    errors integer NOT NULL DEFAULT 0,
+    PRIMARY KEY (subscription_id, day, environment)
   );
 `;
 
@@ -1824,6 +1921,16 @@ export class Store {
 
   async journeysOf(appId: string): Promise<AppJourney[]> {
     return (await this.all("SELECT * FROM financial_products.app_journeys WHERE app_id = $1 ORDER BY journey_id", [appId])).map(toAppJourney);
+  }
+
+  // The latest consent grant or withdrawal for one purpose in one session (disclosures don't count).
+  async latestConsent(sessionId: string, productId: string, purpose: string): Promise<ClientEvidence | undefined> {
+    const r = await this.one(
+      `SELECT * FROM financial_products.client_evidence WHERE session_id = $1 AND product_id = $2 AND subject = $3 AND type <> 'disclosure_shown'
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [sessionId, productId, purpose],
+    );
+    return r && toClientEvidence(r);
   }
 
   async clientEvidence(appId: string, limit = 200): Promise<ClientEvidence[]> {

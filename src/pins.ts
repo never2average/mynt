@@ -4,6 +4,7 @@ import { partyActive } from "./parties.js";
 import type { productRegime } from "./regime.js";
 import { emitProductEvent } from "./runtime.js";
 import type { DriftChange, Entity, HeldLicense, Party, Pins, ProductRecord, Store } from "./store.js";
+import { vendorStateOf } from "./vendors.js";
 
 // Publishing pins a product's live composition and the state of everything it rests on: the owner, every
 // provider entity, each providing licence, and every party standing behind a component. When any of them
@@ -63,6 +64,8 @@ export async function pinChanges(store: Store, pins: Pins): Promise<DriftChange[
   await check("entity", pins.state.entities, async (id) => entityState(await store.getEntity(id)));
   await check("licence", pins.state.licences, async (id) => licenceState(await store.getHeldLicense(id)));
   await check("party", pins.state.parties, async (id) => partyState(await store.getParty(id)));
+  // Vendor services the live version hands off through (see vendors.ts).
+  await check("vendor", pins.state.vendors ?? {}, (id) => vendorStateOf(store, id));
   return changes;
 }
 

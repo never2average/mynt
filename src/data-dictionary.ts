@@ -31,6 +31,7 @@ export const DATA_DICTIONARY: Record<string, DataField> = {
   employment_type: { label: "Employment type", type: "enum", enum: ["salaried", "self_employed", "business_owner", "student", "retired", "other"], sensitivity: "personal", capture: ["typed"] },
   monthly_income: { label: "Monthly income", type: "number", sensitivity: "personal", capture: ["typed", "account_aggregator"] },
   bank_account_number: { label: "Bank account number", type: "string", pattern: "^[0-9]{9,18}$", sensitivity: "sensitive", capture: ["secure_field", "account_aggregator"] },
+  routing_number: { label: "Routing number (ABA)", type: "string", pattern: "^[0-9]{9}$", sensitivity: "personal", capture: ["typed"], countries: ["us"] },
   ifsc: { label: "IFSC", type: "string", pattern: "^[A-Z]{4}0[A-Z0-9]{6}$", sensitivity: "personal", capture: ["typed", "account_aggregator"], countries: ["in"] },
   bank_statement_6m: { label: "Bank statements (6 months)", type: "file", sensitivity: "sensitive", capture: ["account_aggregator", "document_upload"] },
   gst_number: { label: "GSTIN", type: "string", pattern: "^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$", sensitivity: "personal", capture: ["typed"], countries: ["in"] },

@@ -37,7 +37,8 @@ import {
   type Store,
   type User,
 } from "./store.js";
-import { registerMarketplaceTools } from "./marketplace.js";
+import { registerFirmTools, registerMarketplaceTools } from "./marketplace.js";
+import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { registerTakeRateAdminTools, registerTakeRateTools } from "./take-rates.js";
@@ -72,7 +73,8 @@ const productFields = {
 };
 
 // Tools are registered per user, so each role only sees what it is allowed to call. Roles nest
-// (admin > innovator > developer > consumer). Guests (no token) get the read-only catalog tools.
+// (admin > innovator > developer > consumer); vendors are a peer of innovators with vendor tools only, and
+// admins are both. Guests (no token) get the read-only catalog tools.
 export function createServer(store: Store, user: User | null = null, ctx: AdminContext = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, title: "Mynt: financial products", version: "0.6.0" });
   const roles = effectiveRoles(user?.roles ?? []);
@@ -84,8 +86,10 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerBdAgentTools(server, ctx.bd, ctx.bdRun.id);
     return server;
   }
-  if (user && ctx.bd) registerConnectTools(server, ctx.bd, user);
-  if (user) registerProductRequestTools(server, store, user);
+  // A vendor-only user (no consumer role) gets the public catalogue, its firm and its vendor tools.
+  const vendorOnly = has("vendor") && !has("consumer");
+  if (user && ctx.bd && !vendorOnly) registerConnectTools(server, ctx.bd, user);
+  if (user && !vendorOnly) registerProductRequestTools(server, store, user);
   if (has("consumer")) registerConsumerTools(server, store, user!);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
@@ -105,12 +109,19 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerRuntimeInnovatorTools(server, store, user!);
     registerTakeRateTools(server, store, user!);
     registerDefinitionTools(server, store, user!, { admin: has("admin") });
+    registerVendorInnovatorTools(server, store, user!, { admin: has("admin") });
+  }
+  if (has("vendor") || has("innovator")) registerServiceTypeCatalog(server, store);
+  if (has("vendor")) {
+    if (!has("innovator")) registerFirmTools(server, store, user!);
+    registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
   }
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
     registerTakeRateAdminTools(server, store, user!);
+    registerVendorAdminTools(server, store, user!);
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);
@@ -1048,6 +1059,12 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
         if (record.definition) {
           pins.definition_hash = definitionHash(record.definition as unknown as Definition);
           pins.contract = deriveContract(record.definition as unknown as Definition, live.version);
+          const bindings = await vendorBindingsOf(store, ((record.definition as unknown as Definition).connections ?? []) as never);
+          if (bindings.length) {
+            pins.vendor_bindings = bindings;
+            pins.state.vendors = {};
+            for (const b of bindings) pins.state.vendors[b.subscription_id] = await vendorStateOf(store, b.subscription_id);
+          }
         }
         await store.setPins(id, pins);
       }
