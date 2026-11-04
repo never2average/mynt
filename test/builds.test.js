@@ -161,6 +161,7 @@ async function runBuild(ctx, { dev, startArgs, agent = agentReport, verification
   const { builds, boat, call } = ctx;
   const started = (await call(dev, "start_build", startArgs)).data;
   assert.ok(started.id, JSON.stringify(started));
+  assert.ok(!("source_url" in started) && !("agent_report" in started), "start_build shows the build as get_build does");
   await builds.tick(); // sandbox requested
   const sbx = (await builds.get(started.id)).sandbox_id;
   boat.ready(sbx);
