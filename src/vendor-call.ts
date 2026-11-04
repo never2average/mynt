@@ -19,7 +19,9 @@ export interface VendorCallOptions {
 
 export class OutboundRefused extends Error {}
 
+// Separate lists per family: BlockList also matches IPv4 addresses against IPv4-mapped IPv6 rules.
 const BLOCKED = new BlockList();
+const BLOCKED6 = new BlockList();
 for (const [net, bits] of [
   ["0.0.0.0", 8],
   ["10.0.0.0", 8],
@@ -38,16 +40,19 @@ for (const [net, bits] of [
 ] as const)
   BLOCKED.addSubnet(net, bits, "ipv4");
 for (const [net, bits] of [
-  ["::", 128],
-  ["::1", 128],
+  ["::", 96], // unspecified, loopback and the deprecated IPv4-compatible form
+  ["::ffff:0:0", 96], // IPv4-mapped, in whatever notation
   ["64:ff9b::", 96], // NAT64 reaches IPv4 space
+  ["64:ff9b:1::", 48], // local-use NAT64
+  ["2002::", 16], // 6to4 embeds an IPv4 address
+  ["fec0::", 10], // deprecated site-local
   ["100::", 64],
   ["2001:db8::", 32],
   ["fc00::", 7], // unique local, including fd00:ec2::254
   ["fe80::", 10],
   ["ff00::", 8],
 ] as const)
-  BLOCKED.addSubnet(net, bits, "ipv6");
+  BLOCKED6.addSubnet(net, bits, "ipv6");
 
 const LOOPBACK = new BlockList();
 LOOPBACK.addSubnet("127.0.0.0", 8, "ipv4");
@@ -64,7 +69,7 @@ export const isBlockedAddress = (address: string) => {
   const a = unmap(address);
   if (!isIP(a)) return true;
   if (/^::ffff:/i.test(a)) return true; // a mapped form we couldn't read
-  return BLOCKED.check(a, family(a));
+  return family(a) === "ipv6" ? BLOCKED6.check(a, "ipv6") : BLOCKED.check(a, "ipv4");
 };
 
 // The address a vendor URL may be called at, or why it may not.
@@ -89,12 +94,16 @@ export async function resolveVendorUrl(raw: string, opts: VendorCallOptions = {}
     }
   }
   if (!addresses.length) throw new OutboundRefused(`${host} doesn't resolve`);
+  let testLoopback = true;
   for (const a of addresses) {
     const loop = isLoopback(a.address);
     if (loop && opts.allowInsecureLoopback) continue;
+    testLoopback = false;
     if (isBlockedAddress(a.address)) throw new OutboundRefused(`${host} resolves to a private, loopback, link-local or reserved address`);
     if (insecure) throw new OutboundRefused("HTTPS only");
   }
+  // Vendors serve on 443; another port is a way to reach services that aren't theirs.
+  if (url.port && url.port !== "443" && !testLoopback) throw new OutboundRefused("only port 443");
   return { url, address: addresses[0].address, family: addresses[0].family === 6 ? 6 : 4 };
 }
 

@@ -206,11 +206,15 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     };
 
     // Consent purposes whose latest evidence in this session is a grant.
-    const activeConsents = async (productId: string) => {
-      const latest = new Map<string, string>();
-      for (const e of await store.clientEvidence(app.id, 1000))
-        if (e.session_id === session.id && e.product_id === productId && e.type !== "disclosure_shown" && !latest.has(e.subject)) latest.set(e.subject, e.type);
-      return new Set([...latest].filter(([, t]) => t === "consent_given").map(([p]) => p));
+    // Looked up per purpose in this session, so a busy app's other evidence can't push a grant out of view.
+    const consentFor = async (productId: string, purpose: string) => {
+      const latest = await store.latestConsent(session.id, productId, purpose);
+      return latest?.type === "consent_given" ? latest : null;
+    };
+    const activeConsents = async (record: Contracted) => {
+      const out = new Set<string>();
+      for (const p of record.pins.contract.consent_purposes) if (await consentFor(record.product.id, p)) out.add(p);
+      return out;
     };
     // The dictionary fields a product's client actions need: the only ones a device may store for it.
     const neededFields = (c: DeveloperContract) =>
@@ -235,7 +239,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       const body = parse(FieldsBody, await readJson(req, maxBody));
       const record = await inSession(body.product_id);
       const needed = neededFields(record.pins.contract);
-      const consents = await activeConsents(record.product.id);
+      const consents = await activeConsents(record);
       const problems: string[] = [];
       for (const [field, value] of Object.entries(body.values)) {
         const f = DATA_DICTIONARY[field];
@@ -256,7 +260,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       const customer = requireCustomer();
       const body = parse(PrefillBody, await readJson(req, maxBody));
       const record = await inSession(body.product_id);
-      if (!(await activeConsents(record.product.id)).size) throw new ApiError(409, "consent_required", "Record the customer's consent before fetching their data");
+      if (!(await activeConsents(record)).size) throw new ApiError(409, "consent_required", "Record the customer's consent before fetching their data");
       const needed = neededFields(record.pins.contract);
       const bad = body.fields.filter((f) => !needed.has(f) || !DATA_DICTIONARY[f]?.capture.includes(body.source));
       if (bad.length) throw new ApiError(400, "invalid_fields", `Can't prefill ${bad.join(", ")} from ${body.source} for '${record.product.id}'`);
@@ -271,10 +275,8 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
           fields: body.fields,
           held: async () => Object.fromEntries((await store.vaultFields(app.id, customer, session.sandbox)).map((h) => [h.field, open(h.sealed, session.sandbox)])),
           consent: async (purpose) => {
-            const latest = (await store.clientEvidence(app.id, 1000)).find(
-              (e) => e.session_id === session.id && e.product_id === record.product.id && e.subject === purpose && e.type !== "disclosure_shown",
-            );
-            return latest?.type === "consent_given" ? { id: latest.id, created_at: latest.created_at } : null;
+            const latest = await consentFor(record.product.id, purpose);
+            return latest ? { id: latest.id, created_at: latest.created_at } : null;
           },
           save: (field, value) =>
             store.putVaultField({ app_id: app.id, customer_ref: customer, sandbox: session.sandbox, field, sealed: seal(value, session.sandbox), source: body.source }),
@@ -327,10 +329,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       if (record.drift) throw new ApiError(409, "sales_paused", `New applications to '${record.product.id}' are paused`);
       // The consent the action needs must be recorded in this session, and not withdrawn since.
       if (a.consent_purpose) {
-        const latest = (await store.clientEvidence(app.id, 1000)).find(
-          (e) => e.session_id === session.id && e.product_id === record.product.id && e.subject === a.consent_purpose && e.type !== "disclosure_shown",
-        );
-        if (latest?.type !== "consent_given") throw new ApiError(409, "consent_required", `Record consent '${a.consent_purpose}' (POST /v1/client/evidence) before starting '${a.id}'`);
+        if (!(await consentFor(record.product.id, a.consent_purpose))) throw new ApiError(409, "consent_required", `Record consent '${a.consent_purpose}' (POST /v1/client/evidence) before starting '${a.id}'`);
       }
       // The personal data the action sends must be held for this customer first.
       const required = (a.data_requirements ?? []).filter((r) => r.known && r.sensitivity !== "public" && !r.capture?.includes("derived")).map((r) => r.field);

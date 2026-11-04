@@ -244,7 +244,7 @@ export interface Pins {
   components: Component[];
   parties: PartyBinding[];
   entity_ids: string[];
-  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string> };
+  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string>; vendors?: Record<string, string> };
   definition_hash?: string; // the live v2 definition (see definition.ts), when the product has one
   contract?: DeveloperContract; // what developers build against, derived from that definition (see contract.ts)
   vendor_bindings?: VendorBinding[]; // handoffs the live version runs through a vendor subscription (see vendors.ts)
@@ -256,7 +256,7 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party"; id: string; was: string; now: string };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor"; id: string; was: string; now: string };
 export interface ProductRecord {
   product: FinancialProduct;
   owner_id: string | null; // null = bundled catalog product
@@ -978,6 +978,7 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS client_evidence_app_idx ON financial_products.client_evidence (app_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS client_evidence_subject_idx ON financial_products.client_evidence (session_id, product_id, subject, created_at DESC);
   -- Apps' journeys: declarative specs checked against one version of a product's developer contract.
   CREATE TABLE IF NOT EXISTS financial_products.app_journeys (
     app_id uuid NOT NULL REFERENCES financial_products.apps(id),
@@ -1082,7 +1083,8 @@ const TABLES = `
     live boolean NOT NULL DEFAULT false,
     signing_secret text NOT NULL,
     secret_shown_at timestamptz,
-    credential_key_id uuid REFERENCES financial_products.key_vault(id),
+    test_credential_key_id uuid REFERENCES financial_products.key_vault(id),
+    live_credential_key_id uuid REFERENCES financial_products.key_vault(id),
     status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended')),
     created_by uuid REFERENCES financial_products.users(id),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -1919,6 +1921,16 @@ export class Store {
 
   async journeysOf(appId: string): Promise<AppJourney[]> {
     return (await this.all("SELECT * FROM financial_products.app_journeys WHERE app_id = $1 ORDER BY journey_id", [appId])).map(toAppJourney);
+  }
+
+  // The latest consent grant or withdrawal for one purpose in one session (disclosures don't count).
+  async latestConsent(sessionId: string, productId: string, purpose: string): Promise<ClientEvidence | undefined> {
+    const r = await this.one(
+      `SELECT * FROM financial_products.client_evidence WHERE session_id = $1 AND product_id = $2 AND subject = $3 AND type <> 'disclosure_shown'
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [sessionId, productId, purpose],
+    );
+    return r && toClientEvidence(r);
   }
 
   async clientEvidence(appId: string, limit = 200): Promise<ClientEvidence[]> {

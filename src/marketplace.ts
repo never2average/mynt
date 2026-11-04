@@ -5,6 +5,7 @@ import { lintCampaign } from "./gtm.js";
 import { folder, folderOf, GrcRecordInputSchema, reconcileEntityGrc, validateGrcRecord } from "./entity-grc.js";
 import { EntityFactsSchema, PartyInputSchema, reconcileEntity, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
+import { vendorDriftSweep } from "./vendors.js";
 import { normalizeModel } from "./regulatory.js";
 import { emitProductEvent, emitRequestEvent } from "./runtime.js";
 import { ACCESS_MODES, type AccessRequest, type Store, type User } from "./store.js";
@@ -422,7 +423,8 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
       const held = await store.registerLicense(user.id, { ...l, entity_id, valid_from: l.valid_from ?? null, valid_to: l.valid_to ?? null });
       await audit("register_license", held.id, { region: l.region, regulator: l.regulator_id, license: l.license_id });
       // Re-registering sends a licence back for review, so products resting on it are re-checked.
-      return json({ ...held, drifted_products: await driftSweep(store, entity_id) });
+      const drifted = [...(await driftSweep(store, entity_id)), ...(await vendorDriftSweep(store, { vendor_entity_id: entity_id }))];
+      return json({ ...held, drifted_products: [...new Set(drifted)] });
     },
   );
 }

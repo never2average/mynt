@@ -30,7 +30,7 @@ import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions } from "
 export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "other"] as const;
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 // Types of key a firm's key vault holds.
-export const KEY_TYPES = ["vendor_credential"] as const;
+export const KEY_TYPES = ["vendor_test_credential", "vendor_live_credential"] as const;
 // The prefill source (POST /v1/client/prefill) a category of service answers.
 export const PREFILL_SOURCE: Partial<Record<ServiceCategory, CaptureMethod>> = {
   kyc: "ckyc",
@@ -115,7 +115,8 @@ export interface Subscription {
   party_id: string;
   party_created: boolean;
   live: boolean;
-  credential_key_id: string | null;
+  test_credential_key_id: string | null; // sent to the test endpoint only
+  live_credential_key_id: string | null; // sent to the live endpoint only
   status: "active" | "ended";
   secret_shown: boolean;
   created_at: string;
@@ -161,7 +162,8 @@ const toSubscription = (r: Row): Subscription => ({
   party_id: r.party_id as string,
   party_created: r.party_created as boolean,
   live: r.live as boolean,
-  credential_key_id: (r.credential_key_id as string | null) ?? null,
+  test_credential_key_id: (r.test_credential_key_id as string | null) ?? null,
+  live_credential_key_id: (r.live_credential_key_id as string | null) ?? null,
   status: r.status as Subscription["status"],
   secret_shown: r.secret_shown_at != null,
   created_at: iso(r.created_at)!,
@@ -346,12 +348,40 @@ export async function innovatorLicenceGap(store: Store, entityId: string, t: Ser
   return held.length ? null : `${t.name} in ${t.region} needs your firm to hold a verified licence of one of: ${t.innovator_licences.join(", ")}`;
 }
 // The vendor-side prerequisite, against the licences the offering names.
-async function vendorLicenceGap(store: Store, o: Offering, t: ServiceType): Promise<string | null> {
+export async function vendorLicenceGap(store: Store, o: Offering, t: ServiceType): Promise<string | null> {
   if (!t.vendor_licences.length) return null;
   const named = (await store.licensesOf(o.entity_id)).filter((l) => o.licence_ids.includes(l.id));
   const ok = named.some((l) => l.region === t.region && licenseInForce(l) && t.vendor_licences.includes(l.license_id));
   return ok ? null : `${t.name} in ${t.region} needs the vendor to hold, and name on the offering, a verified licence of one of: ${t.vendor_licences.join(", ")}`;
 }
+// What a product bound to a subscription rests on, pinned at publish and compared by the drift sweep: the
+// subscription still active, the offering not suspended, and both sides' licence prerequisites still met.
+export async function vendorStateOf(store: Store, subscriptionId: string): Promise<string> {
+  const sub = await getSubscription(store.db, subscriptionId);
+  const o = sub && (await getOffering(store.db, sub.offering_id));
+  const t = o && (await serviceType(store.db, o.region, o.service_type));
+  if (!sub || !o || !t) return "missing";
+  return [
+    `subscription:${sub.status}`,
+    `offering:${o.status === "suspended" ? "suspended" : "available"}`,
+    `innovator_licences:${(await innovatorLicenceGap(store, sub.entity_id, t)) ? "gap" : "met"}`,
+    `vendor_licences:${(await vendorLicenceGap(store, o, t)) ? "gap" : "met"}`,
+  ].join(" ");
+}
+
+// Re-checks the products of every firm subscribed to a vendor's offerings (or one offering): a suspension or a
+// lapsed licence drifts them, which pauses new sales and tells their innovators (product.drifted).
+export async function vendorDriftSweep(store: Store, by: { offering_id?: string; vendor_entity_id?: string }): Promise<string[]> {
+  const { rows } = await store.db.query(
+    `SELECT DISTINCT s.entity_id FROM ${T}.vendor_subscriptions s JOIN ${T}.vendor_offerings o ON o.id = s.offering_id
+     WHERE ($1::text IS NULL OR o.id::text = $1) AND ($2::text IS NULL OR o.entity_id::text = $2)`,
+    [by.offering_id ?? null, by.vendor_entity_id ?? null],
+  );
+  const drifted: string[] = [];
+  for (const r of rows) drifted.push(...(await driftSweep(store, r.entity_id as string)));
+  return drifted;
+}
+
 const licenceView = (l: HeldLicense) => ({ id: l.id, regulator_id: l.regulator_id, license_id: l.license_id, registration_number: l.registration_number, status: l.status, in_force: licenseInForce(l) });
 
 // ---- conformance ----
@@ -390,6 +420,23 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
       http_status: r.http_status,
       latency_ms: r.latency_ms,
       problems: refused ? [] : [r.error && r.http_status == null ? r.error : "a request with a bad Mynt-Signature wasn't refused (answer 401)"],
+    });
+  }
+  {
+    // Correctly signed, but ten minutes old: a replay, which must be refused.
+    const body = request(t.fixtures[0] ?? {});
+    const stale = Math.floor(Date.now() / 1000) - 600;
+    const r = await callVendor(
+      { base_url: o.test_base_url, service_type: t.key, body, signing_secret: secret, credential, signature: signBody(secret, JSON.stringify(body), stale) },
+      opts,
+    );
+    const refused = (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
+    cases.push({
+      case: "stale_timestamp_refused",
+      passed: refused,
+      http_status: r.http_status,
+      latency_ms: r.latency_ms,
+      problems: refused ? [] : [r.error && r.http_status == null ? r.error : "a request signed more than 300 s ago wasn't refused (answer 401)"],
     });
   }
   const gap = await vendorLicenceGap(store, o, t);
@@ -448,6 +495,9 @@ export async function checkVendorHandoffs(store: Store, entityId: string | null,
     if (!t) continue;
     if (c.attributes?.service_type && c.attributes.service_type !== t.key) errors.push(`${at}: the subscription provides '${t.key}', not '${String(c.attributes.service_type)}'`);
     if (c.attributes?.consent_purpose !== t.consent_purpose) errors.push(`${at}: consent_purpose must be '${t.consent_purpose}', the purpose ${t.name} needs`);
+    if (o!.status === "suspended") errors.push(`${at}: the offering is suspended`);
+    const gap = (await innovatorLicenceGap(store, sub.entity_id, t)) ?? (await vendorLicenceGap(store, o!, t));
+    if (gap) errors.push(`${at}: ${gap}`);
   }
   return errors;
 }
@@ -492,8 +542,13 @@ export async function vendorPrefill(
     if (PREFILL_SOURCE[t.category] !== a.source || !t.fills.some((f) => a.fields.includes(f))) continue;
     const environment = a.sandbox ? "test" : "live";
     if (!a.sandbox && !sub.live) return { kind: "none" };
-    if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status))
-      return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses isn't available right now` };
+    const unavailable = (why = "isn't available right now"): VendorPrefill => ({ kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses ${why}` });
+    if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status)) return unavailable();
+    // Live calls go only to a listed offering, with both sides' licence prerequisites still met today.
+    if (!a.sandbox) {
+      if (o.status !== "listed") return unavailable();
+      if ((await innovatorLicenceGap(store, sub.entity_id, t)) || (await vendorLicenceGap(store, o, t))) return unavailable("can't be used: a licence it needs isn't in force");
+    }
     const consent = await a.consent(t.consent_purpose);
     if (!consent) return { kind: "error", status: 409, code: "consent_required", message: `Record consent '${t.consent_purpose}' (POST /v1/client/evidence) before fetching this customer's data` };
     const held = await a.held();
@@ -507,7 +562,10 @@ export async function vendorPrefill(
     const base = a.sandbox ? o.test_base_url : o.live_base_url;
     if (!base) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service has no live endpoint` };
     const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
-    const sealedCredential = sub.credential_key_id ? await sealedColumn(store.db, "key_vault", "sealed", sub.credential_key_id) : null;
+    // Sandbox calls carry the test credential and never the live one.
+    const keyId = a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
+    const sealedCredential = keyId ? await sealedColumn(store.db, "key_vault", "sealed", keyId) : null;
+    if (!a.sandbox && o.requires_credential && !sealedCredential) return unavailable("has no live credential set");
     const body = { request_id: randomUUID(), environment, input, consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at } };
     const r = await callVendor({ base_url: base, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null }, opts);
     const problems = r.ok ? responseProblems(r.body, body.request_id, t) : [r.error ?? "failed"];
@@ -620,7 +678,7 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
     "suspend_vendor_offering",
     {
       title: "Suspend a vendor's offering",
-      description: "Admin: stop an offering being listed or called (suspended: true), or lift that (false: it goes back to draft and must pass conformance again).",
+      description: "Admin: stop an offering being listed or called (suspended: true), or lift that (false: it goes back to draft and must pass conformance again). Products bound to it drift, pausing new sales, until it's lifted.",
       inputSchema: { offering_id: z.string(), suspended: z.boolean().default(true), note: z.string().max(500).optional() },
       annotations: { destructiveHint: true },
     },
@@ -630,8 +688,8 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
       const status = suspended ? "suspended" : "draft";
       if (!suspended && o.status !== "suspended") return fail("That offering isn't suspended");
       await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, status_note = $3, updated_at = now() WHERE id = $1`, [o.id, status, note ?? null]);
-      await audit("suspend_vendor_offering", o.id, { suspended, note: note ?? null });
-      return json({ ...o, status, status_note: note ?? null });
+      await audit("suspend_vendor_offering", o.id, { suspended, note: note ?? null, vendor_entity_id: o.entity_id });
+      return json({ ...o, status, status_note: note ?? null, drifted_products: await vendorDriftSweep(store, { offering_id: o.id }) });
     },
   );
 
@@ -657,6 +715,11 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     const o = await getOffering(store.db, id);
     const entity = await entityOf(store, user);
     return o && (o.entity_id === entity || opts.admin) ? o : undefined;
+  };
+  // An admin acting on another firm's offering is recorded as an admin action, naming the firm.
+  const auditOffering = async (action: string, o: Offering, details: Record<string, unknown>) => {
+    const own = o.entity_id === (await entityOf(store, user));
+    await audit(own ? action : `admin_${action}`, o.id, own ? details : { ...details, as_admin: true, vendor_entity_id: o.entity_id });
   };
   const checkUrls = async (urls: (string | undefined)[]) => {
     for (const u of urls.filter((x): x is string => Boolean(x)))
@@ -774,7 +837,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
          WHERE id = $1 RETURNING *`,
         [o.id, next.name, next.test_base_url, next.live_base_url, JSON.stringify(next.price), next.sla_notes, next.licence_ids, next.requires_credential, next.status],
       );
-      await audit("update_vendor_offering", o.id, { status: next.status, reverify });
+      await auditOffering("update_vendor_offering", o, { status: next.status, reverify, fields: Object.keys(a).filter((k) => k !== "offering_id") });
       return json(toOffering(rows[0]));
     },
   );
@@ -793,7 +856,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       if (o.requires_credential && !test_credential) return fail("This offering requires a credential: pass a test_credential");
       const t = (await serviceType(store.db, o.region, o.service_type))!;
       const result = await runConformance(store, o, t, opts, user.id, test_credential ?? null);
-      await audit("run_conformance", o.id, { passed: result.passed });
+      await auditOffering("run_conformance", o, { passed: result.passed });
       return json(result);
     },
   );
@@ -825,7 +888,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Who subscribes to my offerings",
       description:
-        "Vendor: firms subscribed to your offerings, whether they're live, and calls per day (counts only). A new subscription's signing secret is shown here once: verify Mynt-Signature with it.",
+        "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), and calls per day (counts only).",
       inputSchema: { offering_id: z.string().optional(), days: z.number().int().min(1).max(90).default(30) },
     },
     async ({ offering_id, days }) => {
@@ -841,11 +904,6 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       const out = [];
       for (const r of rows) {
         const s = toSubscription(r);
-        let signing_secret: string | undefined;
-        if (s.status === "active" && !s.secret_shown) {
-          signing_secret = open(r.signing_secret as string, false);
-          await store.db.query(`UPDATE ${T}.vendor_subscriptions SET secret_shown_at = now() WHERE id = $1`, [s.id]);
-        }
         out.push({
           subscription_id: s.id,
           offering_id: s.offering_id,
@@ -854,11 +912,57 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
           live: s.live,
           status: s.status,
           created_at: s.created_at,
-          ...(signing_secret ? { signing_secret, note: "Shown once: keep it to verify Mynt-Signature on this subscriber's requests" } : {}),
+          secret_revealed: s.secret_shown,
           usage: usageFor(usage, s.id),
         });
       }
       return json(out);
+    },
+  );
+
+  // A subscription to one of the caller's offerings (admins: any).
+  const subscriberOf = async (id: string) => {
+    const sub = await getSubscription(store.db, id);
+    const o = sub && (await mine(sub.offering_id));
+    return sub && o && sub.status === "active" ? { sub, o } : undefined;
+  };
+
+  server.registerTool(
+    "reveal_subscription_secret",
+    {
+      title: "Take a subscriber's signing secret",
+      description:
+        "Vendor: the secret Mynt signs a subscriber's requests with (verify Mynt-Signature with it). Shown once; if it's lost, rotate_subscription_secret.",
+      inputSchema: { subscription_id: z.string() },
+    },
+    async ({ subscription_id }) => {
+      const found = await subscriberOf(subscription_id);
+      if (!found) return fail(`No active subscription '${subscription_id}' to your offerings`);
+      // One statement, so two callers can't both see it.
+      const { rows } = await store.db.query(
+        `UPDATE ${T}.vendor_subscriptions SET secret_shown_at = now() WHERE id = $1 AND secret_shown_at IS NULL RETURNING signing_secret`,
+        [found.sub.id],
+      );
+      if (!rows[0]) return fail("That secret was already revealed; rotate_subscription_secret for a new one");
+      await auditOffering("reveal_subscription_secret", found.o, { subscription_id: found.sub.id });
+      return json({ subscription_id: found.sub.id, signing_secret: open(rows[0].signing_secret as string, false), note: "Shown once: keep it to verify Mynt-Signature on this subscriber's requests" });
+    },
+  );
+
+  server.registerTool(
+    "rotate_subscription_secret",
+    {
+      title: "Rotate a subscriber's signing secret",
+      description: "Vendor: replace a subscriber's signing secret. Mynt signs with the new one at once and the old one stops verifying. The new one is shown once, here.",
+      inputSchema: { subscription_id: z.string() },
+    },
+    async ({ subscription_id }) => {
+      const found = await subscriberOf(subscription_id);
+      if (!found) return fail(`No active subscription '${subscription_id}' to your offerings`);
+      const secret = newSecret();
+      await store.db.query(`UPDATE ${T}.vendor_subscriptions SET signing_secret = $2, secret_shown_at = now() WHERE id = $1`, [found.sub.id, seal(secret, false)]);
+      await auditOffering("rotate_subscription_secret", found.o, { subscription_id: found.sub.id });
+      return json({ subscription_id: found.sub.id, signing_secret: secret, note: "Shown once. The previous secret no longer verifies." });
     },
   );
 }
@@ -870,10 +974,19 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     const entity = await entityOf(store, user);
     return s && entity && s.entity_id === entity ? s : undefined;
   };
+  // A vendor credential into the firm's key vault (sealed; never returned).
+  const vaultKey = async (entityId: string, type: (typeof KEY_TYPES)[number], label: string, value: string) => {
+    const id = randomUUID();
+    await store.db.query(`INSERT INTO ${T}.key_vault (id, entity_id, type, label, sealed, created_by) VALUES ($1, $2, $3, $4, $5, $6)`, [id, entityId, type, label, seal(value, false), user.id]);
+    return id;
+  };
   const subscriptionView = async (s: Subscription) => {
     const o = (await getOffering(store.db, s.offering_id))!;
     const vendor = await store.getEntity(o.entity_id);
-    const key = s.credential_key_id ? (await store.db.query(`SELECT id, label, created_at FROM ${T}.key_vault WHERE id = $1`, [s.credential_key_id])).rows[0] : null;
+    const keyView = async (id: string | null) => {
+      const k = id ? (await store.db.query(`SELECT id, label, created_at FROM ${T}.key_vault WHERE id = $1`, [id])).rows[0] : null;
+      return k ? { key_id: k.id, label: k.label, set_at: iso(k.created_at) } : null;
+    };
     return {
       subscription_id: s.id,
       offering_id: o.id,
@@ -885,7 +998,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       live: s.live,
       status: s.status,
       offering_status: o.status,
-      credential: key ? { key_id: key.id, label: key.label, set_at: iso(key.created_at) } : null,
+      credentials: { test: await keyView(s.test_credential_key_id), live: await keyView(s.live_credential_key_id) },
       created_at: s.created_at,
       ended_at: s.ended_at,
     };
@@ -944,14 +1057,15 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Subscribe to a vendor's service",
       description:
-        "Innovator: subscribe your firm to a listed offering (in the sandbox first). Checks the licences the service needs your firm to hold, keeps the credential the vendor gave you (if it needs one) in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id.",
+        "Innovator: subscribe your firm to a listed offering (in the sandbox first). Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id.",
       inputSchema: {
         offering_id: z.string(),
-        credential: z.string().min(1).max(2000).optional().describe("The API credential the vendor issued your firm, if the offering requires one"),
+        test_credential: z.string().min(1).max(2000).optional().describe("The test API credential the vendor issued your firm, if the offering requires one; sent only to its test endpoint"),
+        live_credential: z.string().min(1).max(2000).optional().describe("The live credential; sent only to its live endpoint (can also be given to set_subscription_live)"),
         credential_label: z.string().min(1).max(100).optional(),
       },
     },
-    async ({ offering_id, credential, credential_label }) => {
+    async ({ offering_id, test_credential, live_credential, credential_label }) => {
       const entityId = await entityOf(store, user);
       if (!entityId) return fail("You don't belong to an entity yet; create one with create_entity");
       const o = await getOffering(store.db, offering_id);
@@ -959,7 +1073,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       const t = (await serviceType(store.db, o.region, o.service_type))!;
       const gap = await innovatorLicenceGap(store, entityId, t);
       if (gap) return fail(gap);
-      if (o.requires_credential && !credential) return fail(`${o.name} requires a credential the vendor issues you: pass it as credential`);
+      if (o.requires_credential && !test_credential) return fail(`${o.name} requires a credential the vendor issues you: pass its test one as test_credential`);
       const existing = (await store.db.query(`SELECT id FROM ${T}.vendor_subscriptions WHERE offering_id = $1 AND entity_id = $2 AND status = 'active'`, [o.id, entityId])).rows[0];
       if (existing) return fail(`Your firm already subscribes to this offering (${existing.id})`);
       if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep credentials or signing secrets");
@@ -973,24 +1087,16 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
         created = true;
         await audit("add_party", party.id, { entity_id: entityId, kind: "external", via: "subscribe_vendor_service" });
       }
-      let keyId: string | null = null;
-      if (credential) {
-        keyId = randomUUID();
-        await store.db.query(`INSERT INTO ${T}.key_vault (id, entity_id, type, label, sealed, created_by) VALUES ($1, $2, 'vendor_credential', $3, $4, $5)`, [
-          keyId,
-          entityId,
-          credential_label ?? `${o.name} credential`,
-          seal(credential, false),
-          user.id,
-        ]);
-      }
+      const label = credential_label ?? o.name;
+      const testKey = test_credential ? await vaultKey(entityId, "vendor_test_credential", `${label} (test)`, test_credential) : null;
+      const liveKey = live_credential ? await vaultKey(entityId, "vendor_live_credential", `${label} (live)`, live_credential) : null;
       const { rows } = await store.db.query(
-        `INSERT INTO ${T}.vendor_subscriptions (id, offering_id, entity_id, party_id, party_created, signing_secret, credential_key_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [randomUUID(), o.id, entityId, party.id, created, seal(newSecret(), false), keyId, user.id],
+        `INSERT INTO ${T}.vendor_subscriptions (id, offering_id, entity_id, party_id, party_created, signing_secret, test_credential_key_id, live_credential_key_id, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [randomUUID(), o.id, entityId, party.id, created, seal(newSecret(), false), testKey, liveKey, user.id],
       );
       const s = toSubscription(rows[0]);
-      await audit("subscribe_vendor_service", s.id, { offering_id: o.id, credential: Boolean(keyId) });
+      await audit("subscribe_vendor_service", s.id, { offering_id: o.id, test_credential: Boolean(testKey), live_credential: Boolean(liveKey) });
       return json({
         ...(await subscriptionView(s)),
         next: `Bind a partner handoff: handoff_to_party to party ${party.id} with attributes { vendor_subscription_id: '${s.id}', service_type: '${t.key}', consent_purpose: '${t.consent_purpose}' }. Sandbox sessions then call the vendor's test endpoint; set_subscription_live when you're ready for live.`,
@@ -1022,10 +1128,11 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     "set_subscription_live",
     {
       title: "Turn a vendor service live",
-      description: "Innovator: let live sessions call the vendor's live endpoint (live: true), or stop that (false). Sandbox sessions always use its test endpoint.",
-      inputSchema: { subscription_id: z.string(), live: z.boolean() },
+      description:
+        "Innovator: let live sessions call the vendor's live endpoint (live: true), or stop that (false). Sandbox sessions always use its test endpoint. Give the live credential here if the offering needs one and you haven't yet; it replaces any earlier one.",
+      inputSchema: { subscription_id: z.string(), live: z.boolean(), live_credential: z.string().min(1).max(2000).optional() },
     },
-    async ({ subscription_id, live }) => {
+    async ({ subscription_id, live, live_credential }) => {
       const s = await mySubscription(subscription_id);
       if (!s || s.status !== "active") return fail(`No active subscription of your firm '${subscription_id}'`);
       if (live) {
@@ -1034,9 +1141,16 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
         if (!o.live_base_url) return fail("The vendor hasn't given a live endpoint yet");
         const gap = await innovatorLicenceGap(store, s.entity_id, (await serviceType(store.db, o.region, o.service_type))!);
         if (gap) return fail(gap);
+        if (o.requires_credential && !live_credential && !s.live_credential_key_id) return fail(`${o.name} requires a credential: pass the live one the vendor issued you as live_credential`);
+      }
+      if (live_credential) {
+        const old = s.live_credential_key_id;
+        s.live_credential_key_id = await vaultKey(s.entity_id, "vendor_live_credential", `${(await getOffering(store.db, s.offering_id))!.name} (live)`, live_credential);
+        await store.db.query(`UPDATE ${T}.vendor_subscriptions SET live_credential_key_id = $2 WHERE id = $1`, [s.id, s.live_credential_key_id]);
+        if (old) await store.db.query(`DELETE FROM ${T}.key_vault WHERE id = $1`, [old]);
       }
       await store.db.query(`UPDATE ${T}.vendor_subscriptions SET live = $2 WHERE id = $1`, [s.id, live]);
-      await audit("set_subscription_live", s.id, { live });
+      await audit("set_subscription_live", s.id, { live, live_credential_replaced: Boolean(live_credential) });
       return json(await subscriptionView({ ...s, live }));
     },
   );
@@ -1046,7 +1160,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "End a vendor service",
       description:
-        "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credential is deleted from your key vault, and the vendor leaves your roster if it joined for this subscription.",
+        "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, and the vendor leaves your roster if it joined for this subscription.",
       inputSchema: { subscription_id: z.string() },
       annotations: { destructiveHint: true },
     },
@@ -1055,8 +1169,11 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       if (!s || s.status !== "active") return fail(`No active subscription of your firm '${subscription_id}'`);
       const using = (await store.pinnedProducts(s.entity_id)).filter((r) => r.status === "published" && r.pins?.vendor_bindings?.some((b) => b.subscription_id === s.id));
       if (using.length) return fail(`Live products hand off through it: ${using.map((r) => r.product.id).join(", ")}. Publish versions without it first.`);
-      await store.db.query(`UPDATE ${T}.vendor_subscriptions SET status = 'ended', live = false, ended_at = now(), credential_key_id = NULL WHERE id = $1`, [s.id]);
-      if (s.credential_key_id) await store.db.query(`DELETE FROM ${T}.key_vault WHERE id = $1`, [s.credential_key_id]);
+      await store.db.query(
+        `UPDATE ${T}.vendor_subscriptions SET status = 'ended', live = false, ended_at = now(), test_credential_key_id = NULL, live_credential_key_id = NULL WHERE id = $1`,
+        [s.id],
+      );
+      for (const k of [s.test_credential_key_id, s.live_credential_key_id]) if (k) await store.db.query(`DELETE FROM ${T}.key_vault WHERE id = $1`, [k]);
       let partyEnded = false;
       if (s.party_created) {
         const others = (await store.db.query(`SELECT 1 FROM ${T}.vendor_subscriptions WHERE party_id = $1 AND status = 'active'`, [s.party_id])).rows.length;

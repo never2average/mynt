@@ -17,14 +17,16 @@ process.env.MYNT_VAULT_KEY ??= randomBytes(32).toString("base64");
 // Tests reach the vendor they run on 127.0.0.1 over plain HTTP; production never sets this.
 const VENDOR_OPTS = { allowInsecureLoopback: true, timeoutMs: 400 };
 const CREDENTIAL = "vendor-cred-7f3a9c";
+const LIVE_CREDENTIAL = "vendor-live-cred-91b2e4";
 
 // A vendor's service as the wire contract describes it: it checks Mynt-Signature against the secrets it was
 // shown, and answers in the mode the test sets.
 async function vendorServer() {
-  const state = { mode: "ok", secrets: new Set(), seen: [] };
+  const state = { mode: "ok", secrets: new Set(), seen: [], acceptStale: false };
   const verify = (header, raw) => {
     const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header ?? "");
     if (!m) return false;
+    if (!state.acceptStale && Math.abs(Date.now() / 1000 - Number(m[1])) > 300) return false;
     return [...state.secrets].some((s) => {
       const want = createHmac("sha256", s).update(`${m[1]}.${raw}`).digest();
       return timingSafeEqual(want, Buffer.from(m[2], "hex"));
@@ -117,11 +119,19 @@ test("outbound safety: HTTPS only, no private, loopback, link-local or metadata 
     ["https://[::1]/v1", /private/],
     ["https://[fd00:ec2::254]/", /private/],
     ["https://[::ffff:169.254.169.254]/", /private/],
+    ["https://[::ffff:a9fe:a9fe]/", /private/],
+    ["https://[::a9fe:a9fe]/", /private/],
+    ["https://[64:ff9b:1::a9fe:a9fe]/", /private/],
+    ["https://[2002:a9fe:a9fe::1]/", /private/],
+    ["https://[fec0::1]/", /private/],
+    ["https://8.8.8.8:8443/v1", /only port 443/],
+    ["https://8.8.8.8:22/", /only port 443/],
     ["https://user:secret@8.8.8.8/", /credentials/],
     ["ftp://8.8.8.8/", /HTTPS only/],
   ])
     await assert.rejects(resolveVendorUrl(url), why, url);
   assert.equal((await resolveVendorUrl("https://8.8.8.8/v1")).address, "8.8.8.8", "a public address is fine (not called)");
+  assert.equal((await resolveVendorUrl("https://8.8.8.8:443/v1")).address, "8.8.8.8");
   // Even with the test-only loopback allowance, plain HTTP elsewhere and private addresses stay refused.
   await assert.rejects(resolveVendorUrl("http://8.8.8.8/", VENDOR_OPTS), /HTTPS only/);
   await assert.rejects(resolveVendorUrl("https://10.0.0.1/", VENDOR_OPTS), /private/);
@@ -152,7 +162,7 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   await ok(admin, "add_entity_member", { email: "vera@kycworks.example", entity_id: firm.id });
   const vera = await w.connect(veraUser);
   const vendorTools = await tools(vera);
-  for (const t of ["whoami", "list_service_types", "create_vendor_offering", "update_vendor_offering", "run_conformance", "list_my_offerings", "list_my_subscribers", "get_my_entity", "register_license"])
+  for (const t of ["whoami", "list_service_types", "create_vendor_offering", "update_vendor_offering", "run_conformance", "list_my_offerings", "list_my_subscribers", "reveal_subscription_secret", "rotate_subscription_secret", "get_my_entity", "register_license"])
     assert.ok(vendorTools.includes(t), t);
   for (const t of ["create_product", "publish_product", "set_product_definition", "create_app", "create_entity", "add_party", "list_vendor_offerings", "subscribe_vendor_service", "define_service_type", "create_product_request"])
     assert.ok(!vendorTools.includes(t), `vendors don't get ${t}`);
@@ -227,21 +237,37 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   assert.equal(unverified.passed, false);
   assert.ok(unverified.cases.filter((c) => c.case !== "vendor_licences").every((c) => c.passed), JSON.stringify(unverified.cases));
   assert.match(unverified.licence_gap, /rbi_pa/);
+  // A vendor that accepts a correctly signed but stale request (a replay) fails that case.
+  vendor.state.acceptStale = true;
+  const replayable = await ok(vera, "run_conformance", { offering_id: offeringId, test_credential: "test-cred" });
+  assert.equal(replayable.cases.find((c) => c.case === "stale_timestamp_refused").passed, false);
+  assert.match(replayable.cases.find((c) => c.case === "stale_timestamp_refused").problems[0], /more than 300 s ago/);
+  vendor.state.acceptStale = false;
   await ok(admin, "review_license", { license_record_id: paLicence.id, decision: "verified", note: "On the register" });
   const passed = await ok(vera, "run_conformance", { offering_id: offeringId, test_credential: "test-cred" });
   assert.equal(passed.passed, true, JSON.stringify(passed.cases));
   assert.equal(passed.status, "conformance_passed");
-  assert.deepEqual(passed.cases.map((c) => c.case), ["fixture_1", "bad_signature_refused"]);
-  const conformanceCall = vendor.state.seen.at(-2);
+  assert.deepEqual(passed.cases.map((c) => c.case), ["fixture_1", "bad_signature_refused", "stale_timestamp_refused"]);
+  const conformanceCall = vendor.state.seen.at(-3);
   assert.equal(conformanceCall.path, "/v1/ckyc_search_download");
   assert.equal(conformanceCall.signed, true);
   assert.equal(conformanceCall.authorization, "Bearer test-cred");
   assert.deepEqual(conformanceCall.body.input, { pan: "ABCPV1234K" });
   assert.deepEqual(Object.keys(conformanceCall.body).sort(), ["consent", "environment", "input", "request_id"]);
-  assert.equal(vendor.state.seen.at(-1).signed, false, "the bad-signature case really was badly signed");
+  assert.equal(vendor.state.seen.at(-2).signed, false, "the bad-signature case really was badly signed");
+  assert.equal(vendor.state.seen.at(-1).signed, false, "the stale case was refused for its timestamp");
   assert.equal((await ok(vera, "update_vendor_offering", { offering_id: offeringId, listed: true })).status, "listed");
   const opsAfter = JSON.parse((await admin.callTool({ name: "ops_status", arguments: {} })).content[0].text);
-  assert.ok(opsAfter.attention.includes("vendors: 3 conformance run(s) failed in the last 24h"), JSON.stringify(opsAfter.attention));
+  assert.ok(opsAfter.attention.includes("vendors: 4 conformance run(s) failed in the last 24h"), JSON.stringify(opsAfter.attention));
+
+  // An admin changing another firm's offering is audited as an admin action, naming the firm.
+  await ok(admin, "update_vendor_offering", { offering_id: offeringId, sla_notes: "99.95% monthly" });
+  const adminEdit = (await store.db.query("SELECT actor_id, details FROM financial_products.audit_log WHERE action = 'admin_update_vendor_offering'")).rows;
+  assert.equal(adminEdit.length, 1);
+  assert.equal(adminEdit[0].actor_id, w.adminUser.id);
+  assert.equal(adminEdit[0].details.vendor_entity_id, firm.id);
+  assert.deepEqual(adminEdit[0].details.fields, ["sla_notes"]);
+  assert.equal((await store.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'update_vendor_offering'")).rows[0].n, 1, "the vendor's own edit stays a plain one");
 
   // ---- innovators: browse, and subscribe only with the licences the service needs ----
   const offers = await ok(innovator, "list_vendor_offerings", { region: "IN", category: "kyc" });
@@ -257,30 +283,40 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   await store.setUserEntity(ivan.id, ivanFirm.id);
   const ivanClient = await w.connect({ ...ivan, entity_id: ivanFirm.id });
   assert.equal((await ok(ivanClient, "list_vendor_offerings", { region: "IN" }))[0].you_can_subscribe, false);
-  assert.match((await call(ivanClient, "subscribe_vendor_service", { offering_id: offeringId, credential: CREDENTIAL })).data.error, /needs your firm to hold a verified licence of one of: rbi_bank/);
+  assert.match((await call(ivanClient, "subscribe_vendor_service", { offering_id: offeringId, test_credential: CREDENTIAL })).data.error, /needs your firm to hold a verified licence of one of: rbi_bank/);
 
   assert.match((await call(innovator, "subscribe_vendor_service", { offering_id: offeringId })).data.error, /requires a credential/);
-  const sub = await ok(innovator, "subscribe_vendor_service", { offering_id: offeringId, credential: CREDENTIAL, credential_label: "KYC Works API key" });
+  const sub = await ok(innovator, "subscribe_vendor_service", { offering_id: offeringId, test_credential: CREDENTIAL, credential_label: "KYC Works API key" });
   assert.equal(sub.live, false);
-  assert.deepEqual(sub.credential.label, "KYC Works API key");
+  assert.equal(sub.credentials.test.label, "KYC Works API key (test)");
+  assert.equal(sub.credentials.live, null);
   assert.ok(!JSON.stringify(sub).includes(CREDENTIAL), "the credential isn't returned");
-  assert.match((await call(innovator, "subscribe_vendor_service", { offering_id: offeringId, credential: CREDENTIAL })).data.error, /already subscribes/);
+  assert.match((await call(innovator, "subscribe_vendor_service", { offering_id: offeringId, test_credential: CREDENTIAL })).data.error, /already subscribes/);
   const roster = (await ok(innovator, "get_my_entity")).parties;
   const vendorParty = roster.find((p) => p.id === sub.vendor_party_id);
   assert.equal(vendorParty.legal_entity_id, firm.id, "the vendor joined the roster");
   assert.equal(vendorParty.relationship, "vendor_service_agreement");
   const vaulted = (await store.db.query("SELECT type, sealed FROM financial_products.key_vault")).rows;
   assert.equal(vaulted.length, 1);
-  assert.equal(vaulted[0].type, "vendor_credential");
+  assert.equal(vaulted[0].type, "vendor_test_credential");
   assert.ok(vaulted[0].sealed.startsWith("v1:") && !vaulted[0].sealed.includes(CREDENTIAL), "sealed at rest");
 
-  // The vendor sees its new subscriber, and the subscription's signing secret, once.
-  const subscribers = await ok(vera, "list_my_subscribers");
-  assert.equal(subscribers.length, 1);
-  assert.equal(subscribers[0].subscriber, "Ines Bank");
-  assert.match(subscribers[0].signing_secret, /^mvs_/);
-  assert.equal((await ok(vera, "list_my_subscribers"))[0].signing_secret, undefined);
-  vendor.state.secrets = new Set([subscribers[0].signing_secret]);
+  // The vendor sees its new subscriber; listing never reveals the signing secret, revealing does, once, even
+  // when asked twice at the same moment.
+  const listed = await ok(vera, "list_my_subscribers");
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].subscriber, "Ines Bank");
+  assert.equal(listed[0].secret_revealed, false);
+  assert.ok(!JSON.stringify(listed).includes("mvs_"));
+  const [r1, r2] = await Promise.all([1, 2].map(() => call(vera, "reveal_subscription_secret", { subscription_id: sub.subscription_id })));
+  assert.equal([r1, r2].filter((r) => !r.isError).length, 1, "exactly one reveal wins");
+  const signingSecret = (r1.isError ? r2 : r1).data.signing_secret;
+  assert.match(signingSecret, /^mvs_/);
+  assert.match((r1.isError ? r1 : r2).data.error, /already revealed/);
+  assert.equal((await ok(vera, "list_my_subscribers"))[0].secret_revealed, true);
+  assert.equal((await call(innovator, "reveal_subscription_secret", { subscription_id: sub.subscription_id })).isError, true, "the subscriber itself never sees it");
+  const subscribers = [{ signing_secret: signingSecret }];
+  vendor.state.secrets = new Set([signingSecret]);
 
   // ---- the product: a handoff bound to the subscription ----
   const bind = (d, attrs = {}) => {
@@ -354,6 +390,15 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
     assert.equal(wrongPurpose.status, 409);
     assert.match(wrongPurpose.body.message, /Record consent 'kyc_records_fetch'/, "the service type's own purpose is needed");
     await consent(s, "kyc_records_fetch");
+    // A busy app: another session's 1,100 newer evidence rows don't hide this session's grant.
+    const busy = await session("cust_busy");
+    const busyId = (await store.db.query("SELECT id FROM financial_products.client_sessions ORDER BY created_at DESC LIMIT 1")).rows[0].id;
+    assert.ok(busy);
+    await store.db.query(
+      `INSERT INTO financial_products.client_evidence (id, app_id, session_id, product_id, contract_hash, type, subject, content_hash, customer_ref, sandbox)
+       SELECT gen_random_uuid(), $1, $2, 'everyday-rd', NULL, 'consent_given', 'mandate_setup', NULL, NULL, true FROM generate_series(1, 1100)`,
+      [app.id, busyId],
+    );
     const noPan = await prefill(s, "ckyc", ["full_name", "date_of_birth", "address"]);
     assert.equal(noPan.body.error, "data_required");
     assert.match(noPan.body.message, /needs pan/);
@@ -415,10 +460,63 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   const theirs = await ok(vera, "list_my_subscribers");
   assert.deepEqual(theirs[0].usage, mine[0].usage);
 
-  // ---- live, unsubscribing and suspension ----
+  // ---- rotation: the old secret stops verifying, the new one works ----
+  const rotated = await ok(vera, "rotate_subscription_secret", { subscription_id: sub.subscription_id });
+  assert.notEqual(rotated.signing_secret, signingSecret);
+  const sr = await session("cust_rot");
+  await consent(sr, "kyc_records_fetch");
+  await api("POST", "/v1/client/fields", sr, { product_id: "everyday-rd", values: { pan: "ABCPV1234K" }, source: "secure_field" });
+  assert.equal((await prefill(sr, "ckyc", ["full_name"])).body.error, "vendor_error", "the vendor still holds only the old secret");
+  vendor.state.secrets = new Set([rotated.signing_secret]);
+  assert.equal((await prefill(sr, "ckyc", ["full_name"])).status, 201);
+  assert.equal((await call(vera, "reveal_subscription_secret", { subscription_id: sub.subscription_id })).isError, true, "a rotated secret was shown once already");
+
+  // ---- live: its own endpoint and credential, licences re-checked at call time ----
   assert.match((await call(innovator, "set_subscription_live", { subscription_id: sub.subscription_id, live: true })).data.error, /hasn't given a live endpoint/);
+  vendor.state.secrets.add(created.conformance_signing_secret);
+  assert.equal((await ok(vera, "update_vendor_offering", { offering_id: offeringId, live_base_url: `${vendor.url}/live` })).status, "draft", "a new endpoint needs conformance again");
+  assert.equal((await ok(vera, "run_conformance", { offering_id: offeringId, test_credential: "test-cred" })).passed, true);
+  await ok(vera, "update_vendor_offering", { offering_id: offeringId, listed: true });
+  assert.match((await call(innovator, "set_subscription_live", { subscription_id: sub.subscription_id, live: true })).data.error, /live_credential/);
+  const live = await ok(innovator, "set_subscription_live", { subscription_id: sub.subscription_id, live: true, live_credential: LIVE_CREDENTIAL });
+  assert.equal(live.live, true);
+  assert.equal(live.credentials.live.label, "KYC Works CKYC (live)");
+  assert.equal((await ok(dev, "check_experience", { app_id: app.id })).ready, true);
+  await ok(dev, "publish_app", { app_id: app.id });
+  const liveKey = (await ok(dev, "create_api_key", { app_id: app.id, environment: "live", label: "live" })).key;
+  const liveSession = (await api("POST", "/v1/client_sessions", liveKey, { product_ids: ["everyday-rd"], scopes: ["kyc_fetch"], customer_ref: "cust_live" })).body.client_secret;
+  await consent(liveSession, "kyc_records_fetch");
+  await api("POST", "/v1/client/fields", liveSession, { product_id: "everyday-rd", values: { pan: "ABCPV1234K" }, source: "secure_field" });
+  const liveBefore = vendor.state.seen.length;
+  const liveFill = await prefill(liveSession, "ckyc", ["full_name", "date_of_birth"]);
+  assert.equal(liveFill.status, 201, liveFill.text);
+  assert.equal(liveFill.body.sandbox, false);
+  const liveCall = vendor.state.seen.slice(liveBefore);
+  assert.equal(liveCall.length, 1);
+  assert.equal(liveCall[0].path, "/live/v1/ckyc_search_download", "the live endpoint");
+  assert.equal(liveCall[0].authorization, `Bearer ${LIVE_CREDENTIAL}`, "with the live credential");
+  assert.equal(liveCall[0].body.environment, "live");
+  assert.ok(
+    vendor.state.seen.filter((x) => !x.path.startsWith("/live/")).every((x) => x.authorization !== `Bearer ${LIVE_CREDENTIAL}`),
+    "test calls never carry the live credential",
+  );
+  // The vendor's licence is suspended: products bound to it drift (and their innovators hear of it), and live calls stop.
+  const lapsed = await ok(admin, "review_license", { license_record_id: paLicence.id, decision: "suspended", note: "Register shows it suspended" });
+  assert.ok(lapsed.drifted_products.includes("everyday-rd"), JSON.stringify(lapsed));
+  assert.equal((await store.getProduct("everyday-rd")).drift.changes[0].kind, "vendor");
+  assert.match((await store.getProduct("everyday-rd")).drift.changes[0].now, /vendor_licences:gap/);
+  const refusedLive = await prefill(liveSession, "ckyc", ["full_name"]);
+  assert.equal(refusedLive.body.error, "vendor_unavailable");
+  assert.match(refusedLive.body.message, /licence it needs isn't in force/);
+  assert.equal((await store.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'product_drifted' AND target = 'everyday-rd'")).rows[0].n, 1);
+  await ok(admin, "review_license", { license_record_id: paLicence.id, decision: "verified", note: "Restored" });
+  assert.equal((await store.getProduct("everyday-rd")).drift, null, "drift clears once the licence is back");
+
+  // ---- unsubscribing and suspension ----
   assert.match((await call(innovator, "unsubscribe_vendor_service", { subscription_id: sub.subscription_id })).data.error, /Live products hand off through it: everyday-rd/);
-  await ok(admin, "suspend_vendor_offering", { offering_id: offeringId, note: "Under review" });
+  const suspendedNow = await ok(admin, "suspend_vendor_offering", { offering_id: offeringId, note: "Under review" });
+  assert.deepEqual(suspendedNow.drifted_products, ["everyday-rd"], "a suspension drifts the products bound to it");
+  assert.match((await store.getProduct("everyday-rd")).drift.changes[0].now, /offering:suspended/);
   assert.deepEqual(await ok(innovator, "list_vendor_offerings", { region: "IN", category: "kyc" }), [], "a suspended offering isn't listed");
   const s3 = await session("cust_3");
   await consent(s3, "kyc_records_fetch");

@@ -38,7 +38,7 @@ import {
   type User,
 } from "./store.js";
 import { registerFirmTools, registerMarketplaceTools } from "./marketplace.js";
-import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf } from "./vendors.js";
+import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { registerTakeRateAdminTools, registerTakeRateTools } from "./take-rates.js";
@@ -1060,7 +1060,11 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
           pins.definition_hash = definitionHash(record.definition as unknown as Definition);
           pins.contract = deriveContract(record.definition as unknown as Definition, live.version);
           const bindings = await vendorBindingsOf(store, ((record.definition as unknown as Definition).connections ?? []) as never);
-          if (bindings.length) pins.vendor_bindings = bindings;
+          if (bindings.length) {
+            pins.vendor_bindings = bindings;
+            pins.state.vendors = {};
+            for (const b of bindings) pins.state.vendors[b.subscription_id] = await vendorStateOf(store, b.subscription_id);
+          }
         }
         await store.setPins(id, pins);
       }

@@ -31,6 +31,7 @@ import { emitProductEvent } from "./runtime.js";
 import type { HostingService } from "./hosting.js";
 import type { ModuleRegistry } from "./modules.js";
 import { driftSweep } from "./pins.js";
+import { vendorDriftSweep } from "./vendors.js";
 import { reconcileEntityGrc } from "./entity-grc.js";
 import { reconcileEntity } from "./parties.js";
 import { ComponentSchema, PartyBindingSchema, productRegime, validateComposition } from "./regime.js";
@@ -444,7 +445,9 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (!held) return fail(`No registered licence '${license_record_id}'`);
       const reviewed = await store.reviewLicense(held.id, decision, user.id, note ?? null);
       await audit("review_license", held.id, { decision, entity_id: held.entity_id, license: held.license_id });
-      return json({ ...reviewed, drifted_products: await driftSweep(store, held.entity_id) });
+      // A vendor's licence can carry its subscribers' products too.
+      const drifted = [...(await driftSweep(store, held.entity_id)), ...(await vendorDriftSweep(store, { vendor_entity_id: held.entity_id }))];
+      return json({ ...reviewed, drifted_products: [...new Set(drifted)] });
     },
   );
 
