@@ -10,6 +10,10 @@ export interface RepoAccess {
   installUrl(): string;
   // Opened by Mynt, only after a build passes its gates.
   openPullRequest(repo: string, installationId: number, pr: { head: string; title: string; body: string }): Promise<string>;
+  // The commit a branch, tag or SHA points at now (null when it doesn't exist), so Mynt can pin what it checks.
+  resolveRef(repo: string, installationId: number, ref: string): Promise<string | null>;
+  // A branch Mynt creates itself at a commit it checked (e.g. to propose exactly what it scored).
+  createBranch(repo: string, installationId: number, branch: string, sha: string): Promise<void>;
 }
 
 const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -70,16 +74,35 @@ export class GitHubApp implements RepoAccess {
     return `https://github.com/apps/${this.slug}/installations/new`;
   }
 
-  async openPullRequest(repo: string, installationId: number, pr: { head: string; title: string; body: string }) {
+  // Calls as the installation, with a token limited to the one repository.
+  private async asInstallation(repo: string, installationId: number) {
     const { token } = await this.tokenFor(repo, installationId);
-    const call = async (method: string, path: string, body?: unknown) => {
+    return async (method: string, path: string, body?: unknown) => {
       const res = await fetch(`${this.api}${path}`, {
         method,
         headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mynt", "X-GitHub-Api-Version": "2022-11-28" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      return { status: res.status, data: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, data: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Record<string, unknown> };
     };
+  }
+
+  async resolveRef(repo: string, installationId: number, ref: string) {
+    const call = await this.asInstallation(repo, installationId);
+    const r = await call("GET", `/repos/${repo}/commits/${encodeURIComponent(ref)}`);
+    if (r.status === 404 || r.status === 422) return null;
+    if (r.status !== 200) throw new Error(`GitHub couldn't resolve ${ref} (${r.status})`);
+    return r.data.sha as string;
+  }
+
+  async createBranch(repo: string, installationId: number, branch: string, sha: string) {
+    const call = await this.asInstallation(repo, installationId);
+    const r = await call("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha });
+    if (r.status !== 201) throw new Error(`GitHub refused to create branch ${branch} (${r.status})`);
+  }
+
+  async openPullRequest(repo: string, installationId: number, pr: { head: string; title: string; body: string }) {
+    const call = await this.asInstallation(repo, installationId);
     const info = await call("GET", `/repos/${repo}`);
     const base = info.data.default_branch as string;
     if (pr.head === base) throw new Error("Refusing to open a pull request from the default branch");

@@ -9,7 +9,14 @@
 //     metrics. It is not an input to pd, but it is correlated with region and income, as such attributes are
 //     in real books, so a policy that cuts hard on income or region can show adverse impact.
 // The generator is deliberately simple; `assumptions` says what it assumes and is saved on the job.
+//
+// The holdout must stay unknowable to the explorers, who see the job id, these parameters and this (public) code.
+// So each job has a random 32-byte secret, kept only in Mynt's database, and every split's randomness comes from
+// HMAC-SHA256 keyed by it (a counter-mode stream: 256-bit key, nothing to brute-force from the outputs). Within a
+// split, features and outcomes come from separately keyed streams, so the features an algorithm sees say nothing
+// about the draws behind the protected group, the default-probability noise or who defaulted.
 
+import { createHmac, randomBytes } from "node:crypto";
 import type { ProductRecord } from "./store.js";
 
 export const EMPLOYMENT_TYPES = ["salaried", "self_employed", "gig"] as const;
@@ -104,28 +111,46 @@ export function datasetInputs(p: ProductRecord, inputs: Record<string, unknown> 
   return { params, economics, assumptions };
 }
 
-// Mulberry32: a small, well-known seeded generator; the same seed always gives the same applicants.
-function rng(seed: number) {
-  let a = seed >>> 0;
+// A deterministic stream of uniforms in [0, 1) from HMAC-SHA256(key, counter): 4 draws of 53 bits per block.
+function stream(key: Buffer) {
+  let counter = 0;
+  let block: Buffer = Buffer.alloc(0);
+  let at = 32;
   return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    if (at >= 32) {
+      const c = Buffer.alloc(8);
+      c.writeBigUInt64BE(BigInt(counter++));
+      block = createHmac("sha256", key).update(c).digest();
+      at = 0;
+    }
+    const v = block.readBigUInt64BE(at) >> 11n;
+    at += 8;
+    return Number(v) / 2 ** 53;
   };
+}
+
+const subkey = (key: Buffer | string, label: string) => createHmac("sha256", key).update(label).digest();
+
+// A new exploration's secret. Stored with the job, never shown to anyone or written into a sandbox.
+export const newDatasetSecret = () => randomBytes(32).toString("hex");
+
+// The two splits' keys: the dev set explorers get (with outcomes) and the holdout only Mynt sees.
+export function splitKeys(secretHex: string) {
+  const secret = Buffer.from(secretHex, "hex");
+  if (secret.length < 32) throw new Error("A dataset secret is 32 random bytes");
+  return { dev: subkey(secret, "dev").toString("hex"), holdout: subkey(secret, "holdout").toString("hex") };
 }
 
 const round = (x: number, step: number) => Math.round(x / step) * step;
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
-export function generateDataset(params: GeneratorParams, seed: number, prefix: string, n = DATASET_SIZE) {
-  const r = rng(seed);
-  const normal = () => {
-    const u = Math.max(r(), 1e-12);
-    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r());
-  };
+export function generateDataset(params: GeneratorParams, keyHex: string, prefix: string, n = DATASET_SIZE) {
+  const key = Buffer.from(keyHex, "hex");
+  const r = stream(subkey(key, "features"));
+  const o = stream(subkey(key, "outcomes")); // protected group, default-probability noise, defaults
+  const gaussian = (u: () => number) => Math.sqrt(-2 * Math.log(Math.max(u(), 1e-12))) * Math.cos(2 * Math.PI * u());
+  const normal = () => gaussian(r);
   const pick = <T>(xs: readonly T[], weights: number[]) => {
     let x = r() * weights.reduce((s, w) => s + w, 0);
     for (let i = 0; i < xs.length; i++) if ((x -= weights[i]) < 0) return xs[i];
@@ -135,7 +160,7 @@ export function generateDataset(params: GeneratorParams, seed: number, prefix: s
   const rows: { a: Applicant; group: "A" | "B"; logit: number }[] = [];
   for (let i = 0; i < n; i++) {
     const region = pick(REGIONS, [0.3, 0.25, 0.2, 0.25]);
-    const group: "A" | "B" = r() < (region === "east" ? 0.45 : 0.2) ? "B" : "A";
+    const group: "A" | "B" = o() < (region === "east" ? 0.45 : 0.2) ? "B" : "A";
     const employment = pick(EMPLOYMENT_TYPES, [0.6, 0.3, 0.1]);
     const incomeMedian = (mid / 4) * (employment === "salaried" ? 1 : employment === "self_employed" ? 0.9 : 0.6) * (group === "B" ? 0.85 : 1);
     const income = round(incomeMedian * Math.exp(0.5 * normal()), 100);
@@ -153,7 +178,7 @@ export function generateDataset(params: GeneratorParams, seed: number, prefix: s
       (employment === "gig" ? 0.5 : employment === "self_employed" ? 0.25 : 0) +
       0.35 * Math.log(amount / Math.max(income, 1) / 4) +
       0.04 * (month - MONTHS / 2) +
-      0.3 * normal();
+      0.3 * gaussian(o);
     rows.push({
       a: {
         id: `${prefix}-${String(i + 1).padStart(6, "0")}`,
@@ -187,15 +212,9 @@ export function generateDataset(params: GeneratorParams, seed: number, prefix: s
   for (const x of rows) {
     const pd = sigmoid(c + x.logit);
     applicants.push(x.a);
-    truth.push({ id: x.a.id, pd: Math.round(pd * 1e6) / 1e6, defaulted: r() < pd, protected_group: x.group });
+    truth.push({ id: x.a.id, pd: Math.round(pd * 1e6) / 1e6, defaulted: o() < pd, protected_group: x.group });
   }
   return { applicants, truth };
-}
-
-// The two splits of an exploration, from seeds derived from the job id: the dev set explorers get (with
-// outcomes) and the holdout only Mynt sees. Different seeds and id prefixes keep them apart.
-export function seedsFor(jobId: string, hash: (s: string) => string) {
-  return { dev: parseInt(hash(`${jobId}:dev`).slice(0, 8), 16), holdout: parseInt(hash(`${jobId}:holdout`).slice(0, 8), 16) };
 }
 
 export const jsonl = (rows: unknown[]) => rows.map((x) => JSON.stringify(x)).join("\n") + "\n";

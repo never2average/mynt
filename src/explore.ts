@@ -9,7 +9,8 @@ import { agentState, launchAgent, WORKSPACES_ROOT } from "./agent-host.js";
 import type { BoatClient } from "./boat.js";
 import type { Db } from "./db.js";
 import type { DeskConfig, DeskService } from "./desk.js";
-import { DATASET_SIZE, datasetInputs, generateDataset, jsonl, seedsFor, type Economics, type GeneratorParams } from "./explore-data.js";
+import { isQuotaExhausted, isTransient, QUOTA_MESSAGE } from "./builds.js";
+import { DATASET_SIZE, datasetInputs, generateDataset, jsonl, newDatasetSecret, splitKeys, type Economics, type GeneratorParams } from "./explore-data.js";
 import { OBJECTIVES, SCORER_SCRIPT, scoreWithStability, type Objective, type ScoringSpec } from "./explore-score.js";
 import type { RepoAccess } from "./github.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
@@ -29,6 +30,9 @@ import { serialLoop } from "./worker.js";
 //      itself against the hidden truth (explore-score.ts). The leaderboard comes only from that.
 //   4. The firm may adopt a variant: Mynt opens a pull request. The product changes only when the firm merges it and
 //      pins the new version through the normal product update.
+// Explorers hold a token that can write to the whole repository, so Mynt never trusts a branch name: it pins the
+// baseline to a commit when the job starts and each variant to its branch head the moment its explorer finishes,
+// scores exactly those commits, and proposes an adopted variant from a branch it creates at the scored commit.
 
 export interface ExploreConfig {
   capUsd: number; // per exploration, shared by its explorers
@@ -60,6 +64,7 @@ const TABLES = `
     algorithm_id text NOT NULL,
     model_dir text NOT NULL,
     base_ref text,
+    base_sha text,
     objective text NOT NULL,
     constraints jsonb NOT NULL,
     explorers integer NOT NULL,
@@ -84,6 +89,7 @@ const TABLES = `
     process_id text,
     token_hash text,
     started_at timestamptz,
+    token_minted_at timestamptz,
     agent_cost_usd numeric NOT NULL DEFAULT 0,
     summary text,
     score_sandbox_id text,
@@ -98,9 +104,17 @@ const TABLES = `
     proposed_at timestamptz,
     PRIMARY KEY (job_id, k)
   );
+  -- One active exploration per product algorithm, enforced by the database so two starts can't race.
+  CREATE UNIQUE INDEX IF NOT EXISTS explore_jobs_active_idx ON financial_products.explore_jobs (product_id, algorithm_id)
+    WHERE status NOT IN ('finished', 'failed', 'stopped', 'over_budget');
 `;
 
-const DONE = ["finished", "failed", "stopped"];
+const DONE = ["finished", "failed", "stopped", "over_budget"];
+// Where an explorer's git token lives in its sandbox: read by a credential helper, rewritten by Mynt before the
+// token's hour is up, never in the environment, a command line or the repository.
+export const TOKEN_FILE = "/home/user/.mynt-github-token";
+const TOKEN_REFRESH_MS = 40 * 60_000;
+const suffix = () => randomBytes(6).toString("hex");
 const DIR = "/home/user/mynt-explore";
 const JOB = `${DIR}/job`;
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -233,9 +247,11 @@ export class ExploreService {
   ) {
     if (!this.enabled) throw new Error("Algorithm explorations aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    if (!(await this.desk.workspace(user.entity_id))) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    const ws = await this.desk.workspace(user.entity_id);
+    if (!ws) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
     const p = await this.store.getProduct(o.product_id);
-    if (!p || (p.owner_id !== user.id && p.entity_id !== user.entity_id)) throw new Error(`No product of your firm's with id '${o.product_id}'`);
+    // The firm's product (or, for a product with no firm, the caller's own): the workspace and budget are the firm's.
+    if (!p || (p.entity_id ? p.entity_id !== user.entity_id : p.owner_id !== user.id)) throw new Error(`No product of your firm's with id '${o.product_id}'`);
     const algorithms = ((p.definition?.core_algorithms as Row[] | undefined) ?? []) as { _id: string; purpose: string; repository: string; version?: string }[];
     const algorithm = algorithms.find((a) => a._id === o.algorithm_id);
     if (!algorithm) throw new Error(`The product's definition has no core algorithm '${o.algorithm_id}'${algorithms.length ? ` (it has: ${algorithms.map((a) => a._id).join(", ")})` : ""}`);
@@ -251,22 +267,33 @@ export class ExploreService {
     const inputs = (terms?.inputs ?? {}) as Record<string, unknown>;
     const { params, economics, assumptions } = datasetInputs(p, inputs);
     const constraints = this.constraints(p.definition, inputs, economics, params, o.constraints ?? {});
+    if (constraints.apr_cap_pct === null) throw new Error("Set an APR cap first: apr_cap_pct here or on the term sheet, or a cap on the product's lending rate");
+    // The baseline is the pinned version as it is now, as a commit: a tag or branch moved later doesn't change it.
+    const baseRef = algorithm.version ?? "HEAD";
+    const baseSha = await this.repos!.resolveRef(ws.repository, ws.installation_id, baseRef);
+    if (!baseSha) throw new Error(`The pinned version '${baseRef}' isn't in ${ws.repository}`);
     const id = randomUUID();
-    const seeds = seedsFor(id, hash);
-    const dataset = { params, economics, assumptions, seeds, sizes: { dev: DATASET_SIZE, holdout: DATASET_SIZE } };
-    await this.db.query(
-      `INSERT INTO financial_products.explore_jobs (id, entity_id, user_id, product_id, algorithm_id, model_dir, base_ref, objective, constraints, explorers, status, dataset, cap_usd)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued', $11, $12)`,
-      [id, user.entity_id, user.id, p.product.id, algorithm._id, algorithm.repository, algorithm.version ?? null, o.objective ?? "net_margin", JSON.stringify(constraints), explorers, JSON.stringify(dataset), cap],
-    );
+    // The dataset secret seeds both splits; it stays in this record and is never shown or sent to a sandbox.
+    const dataset = { params, economics, assumptions, secret: newDatasetSecret(), sizes: { dev: DATASET_SIZE, holdout: DATASET_SIZE } };
+    try {
+      await this.db.query(
+        `INSERT INTO financial_products.explore_jobs (id, entity_id, user_id, product_id, algorithm_id, model_dir, base_ref, base_sha, objective, constraints, explorers, status, dataset, cap_usd)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', $12, $13)`,
+        [id, user.entity_id, user.id, p.product.id, algorithm._id, algorithm.repository, algorithm.version ?? null, baseSha, o.objective ?? "net_margin", JSON.stringify(constraints), explorers, JSON.stringify(dataset), cap],
+      );
+    } catch (e) {
+      if (/explore_jobs_active_idx|duplicate key/.test((e as Error).message)) throw new Error("An exploration of this algorithm is already running");
+      throw e;
+    }
     const angles = explorationAngles();
-    await this.db.query("INSERT INTO financial_products.explore_variants (job_id, k, angle, branch, status) VALUES ($1, 0, NULL, $2, 'waiting')", [id, algorithm.version ?? null]);
+    await this.db.query("INSERT INTO financial_products.explore_variants (job_id, k, angle, branch, commit_sha, status) VALUES ($1, 0, NULL, $2, $3, 'waiting')", [id, baseRef, baseSha]);
+    // Branch names with a random part: explorers can't aim at each other's branches by guessing them.
     for (let k = 1; k <= explorers; k++) {
       await this.db.query("INSERT INTO financial_products.explore_variants (job_id, k, angle, branch, status) VALUES ($1, $2, $3, $4, 'queued')", [
         id,
         k,
         angles[(k - 1) % angles.length].id,
-        `mynt/explore-${id.slice(0, 8)}-${k}`,
+        `mynt/explore-${id.slice(0, 8)}-${k}-${suffix()}`,
       ]);
     }
     return (await this.get(id))!;
@@ -309,8 +336,8 @@ export class ExploreService {
   }
 
   private split(j: Row, which: "dev" | "holdout") {
-    const d = j.dataset as { params: GeneratorParams; seeds: { dev: number; holdout: number }; sizes: { dev: number; holdout: number } };
-    return generateDataset(d.params, d.seeds[which], which === "dev" ? "d" : "h", d.sizes[which]);
+    const d = j.dataset as { params: GeneratorParams; secret: string; sizes: { dev: number; holdout: number } };
+    return generateDataset(d.params, splitKeys(d.secret)[which], which === "dev" ? "d" : "h", d.sizes[which]);
   }
 
   // ---- reading ----
@@ -398,15 +425,43 @@ export class ExploreService {
     return ["ready", "idle", "running"].includes(s.state);
   }
 
+  // A provider's passing hiccup (a 5xx, a rate limit, a dropped connection) mustn't throw away an exploration that
+  // has already spent money: retry on the next ticks, as builds do, and fail only once it has lasted this long.
+  private transient = new Map<string, number>();
+  static TRANSIENT_GRACE_MS = Number(process.env.MYNT_TRANSIENT_GRACE_MS || 600000);
+
   async tick() {
     if (!this.enabled) return;
     for (const j of await this.all("SELECT * FROM financial_products.explore_jobs WHERE status <> ALL($1) ORDER BY created_at", [DONE])) {
       try {
         await this.advance(j);
+        this.transient.delete(j.id as string);
       } catch (e) {
-        await this.end(j, "failed", { error: (e as Error).message });
+        if (isTransient(e)) {
+          const since = this.transient.get(j.id as string) ?? Date.now();
+          this.transient.set(j.id as string, since);
+          if (Date.now() - since < ExploreService.TRANSIENT_GRACE_MS) continue;
+        }
+        this.transient.delete(j.id as string);
+        const current = await this.one("SELECT status FROM financial_products.explore_jobs WHERE id = $1", [j.id]);
+        if (current && DONE.includes(current.status as string)) continue; // stopped while this tick was in flight
+        await this.end(j, "failed", { error: isQuotaExhausted(e) ? `${QUOTA_MESSAGE} (${(e as Error).message})` : (e as Error).message });
       }
     }
+  }
+
+  private async workspaceOf(j: Row) {
+    const ws = await this.desk.workspace(j.entity_id as string);
+    if (!ws) throw new Error("The firm's workspace repository is no longer connected");
+    return ws;
+  }
+
+  // A fresh push token into an explorer's sandbox, for its credential helper to read.
+  private async writeToken(j: Row, v: Row) {
+    const ws = await this.workspaceOf(j);
+    const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
+    await this.boat!.writeFile(v.sandbox_id as string, TOKEN_FILE, token);
+    await this.updateVariant(j.id as string, Number(v.k), { token_minted_at: new Date().toISOString() });
   }
 
   private async advance(j: Row) {
@@ -416,10 +471,12 @@ export class ExploreService {
     const explorers = vs.filter((v) => Number(v.k) > 0);
 
     if (j.status === "queued") {
-      const ws = (await this.desk.workspace(j.entity_id as string))!;
+      const ws = await this.workspaceOf(j);
+      // Idempotent: a tick that failed halfway doesn't create a second sandbox for an explorer that has one. The
+      // push token comes later, just before launch, as a file (see TOKEN_FILE).
       for (const v of explorers) {
-        const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
-        const sandbox = await this.newSandbox(j, `explorer-${v.k}`, { GITHUB_REPOSITORY: ws.repository, GITHUB_TOKEN: token, MYNT_BRANCH: v.branch as string });
+        if (v.sandbox_id) continue;
+        const sandbox = await this.newSandbox(j, `explorer-${v.k}`, { GITHUB_REPOSITORY: ws.repository, MYNT_BRANCH: v.branch as string, MYNT_GIT_TOKEN_FILE: TOKEN_FILE });
         await this.updateVariant(id, Number(v.k), { status: "provisioning", sandbox_id: sandbox });
       }
       await this.update(id, { status: "exploring", phase_message: `Starting ${explorers.length} explorer(s)` });
@@ -438,13 +495,14 @@ export class ExploreService {
     const agents = explorers.reduce((s, v) => s + Number(v.agent_cost_usd), 0);
     const total = cost + Math.max(agents, this.meter ? await this.meter.spent(`explore:${id}`) : 0);
     if (total !== Number(j.cost_usd)) await this.update(id, { cost_usd: total });
-    if (total > Number(j.cap_usd)) return this.end(j, "stopped", { error: `Stopped at US$${total.toFixed(2)}: over the US$${j.cap_usd} cap`, cost_usd: total });
+    if (total > Number(j.cap_usd)) return this.end(j, "over_budget", { error: `Stopped at US$${total.toFixed(2)}: over the US$${j.cap_usd} cap`, cost_usd: total });
 
     if (j.status === "exploring") {
       for (const v of explorers) {
         const k = Number(v.k);
         if (v.status === "provisioning") {
           if (!(await this.ready(v.sandbox_id as string))) continue;
+          await this.writeToken(j, v);
           const token = `mynt_explore_${randomBytes(24).toString("base64url")}`;
           await this.updateVariant(id, k, { token_hash: hash(token) });
           const pid = await launchAgent(boat, this.desk.config, v.sandbox_id as string, {
@@ -459,11 +517,19 @@ export class ExploreService {
           const agent = await agentState(boat, v.sandbox_id as string, v.process_id as string);
           // A margin past the explorer's own time limit; whatever it pushed by then is still scored.
           const overtime = Date.now() - new Date(v.started_at as string).getTime() > (this.config.maxMinutes + 15) * 60_000;
-          if (agent.running && !overtime) continue;
+          if (agent.running && !overtime) {
+            // Installation tokens last an hour: replace it well before then so late pushes still work.
+            if (Date.now() - new Date(v.token_minted_at as string).getTime() > TOKEN_REFRESH_MS) await this.writeToken(j, v);
+            continue;
+          }
           await boat.stop(v.sandbox_id as string).catch(() => {});
+          // Pin what the explorer pushed now: whatever lands on its branch later isn't what gets scored or adopted.
+          const ws = await this.workspaceOf(j);
+          const head = await this.repos!.resolveRef(ws.repository, ws.installation_id, v.branch as string);
           await this.updateVariant(id, k, {
             status: agent.ok ? "explored" : "failed",
             token_hash: null,
+            commit_sha: head,
             summary: agent.state?.summary?.slice(0, 4000) ?? null,
             error: agent.ok ? null : overtime && agent.running ? "Over the time limit" : `Explorer ${agent.state?.error ?? agent.state?.last_subtype ?? "exited"}`,
           });
@@ -471,8 +537,12 @@ export class ExploreService {
       }
       vs = await this.variants(id);
       if (vs.some((v) => Number(v.k) > 0 && !["explored", "failed"].includes(v.status as string))) return;
-      // Every explorer is done: Mynt scores each pushed branch, and the pinned baseline, each in its own clean sandbox.
-      for (const v of vs) await this.updateVariant(id, Number(v.k), { status: "scoring", score_sandbox_id: await this.newSandbox(j, `score-${v.k}`) });
+      // Every explorer is done: Mynt scores each pushed commit, and the pinned baseline, each in its own clean sandbox.
+      for (const v of vs) {
+        if (v.score_sandbox_id || v.status === "unscorable") continue;
+        if (!v.commit_sha) await this.updateVariant(id, Number(v.k), { status: "unscorable", error: "The explorer's branch wasn't pushed" });
+        else await this.updateVariant(id, Number(v.k), { status: "scoring", score_sandbox_id: await this.newSandbox(j, `score-${v.k}`) });
+      }
       await this.update(id, { status: "scoring", phase_message: "Mynt is scoring every variant on the holdout" });
       return;
     }
@@ -486,15 +556,15 @@ export class ExploreService {
         if (!v.score_process_id) {
           if (!(await this.ready(sandbox))) continue;
           holdout ??= this.split(j, "holdout");
-          const ws = (await this.desk.workspace(j.entity_id as string))!;
-          // Only the holdout's features go in; the truth stays in Mynt.
+          const ws = await this.workspaceOf(j);
+          // Exactly the pinned commit, and only the holdout's features; the truth stays in Mynt.
           const pid = await startRepoRun(boat, this.repos!, sandbox, {
             repository: ws.repository,
             installationId: ws.installation_id,
-            ref: (v.branch as string | null) ?? null,
+            ref: v.commit_sha as string,
             dir: DIR,
             outcome: `${JOB}/outcome.json`,
-            cloneFailure: { outcome: "error", error: k === 0 ? "Couldn't check out the pinned version" : "The explorer's branch wasn't pushed", log: "" },
+            cloneFailure: { outcome: "error", error: `Couldn't check out commit ${String(v.commit_sha).slice(0, 7)}`, log: "" },
             files: { [`${DIR}/run-decide.mjs`]: DECIDE_RUNNER, [`${JOB}/applicants.jsonl`]: jsonl(holdout.applicants) },
             command: `node ${DIR}/run-decide.mjs ${REPO_DIR} ${JOB} '${String(j.model_dir).replace(/[^\w./-]/g, "")}'`,
           });
@@ -504,12 +574,14 @@ export class ExploreService {
         if ((await boat.commandStatus(sandbox, Number(v.score_process_id))).running) continue;
         const o = parse<RunOutcome>(await boat.readFile(sandbox, `${JOB}/outcome.json`)) ?? { outcome: "error" as const, error: "The run produced no outcome", log: "" };
         if (o.outcome !== "ran") {
-          await this.updateVariant(id, k, { status: "unscorable", commit_sha: o.commit ?? null, error: o.error });
+          await this.updateVariant(id, k, { status: "unscorable", error: o.error });
+        } else if (o.commit !== v.commit_sha) {
+          await this.updateVariant(id, k, { status: "unscorable", error: `Ran ${String(o.commit).slice(0, 7)}, not the pinned commit ${String(v.commit_sha).slice(0, 7)}` });
         } else {
           holdout ??= this.split(j, "holdout");
           const decisions = readJsonl(await boat.readFile(sandbox, `${JOB}/decisions.jsonl`));
           const score = scoreWithStability(holdout.applicants, holdout.truth, decisions, this.scoringSpec(j));
-          await this.updateVariant(id, k, { status: "scored", commit_sha: o.commit, score });
+          await this.updateVariant(id, k, { status: "scored", score });
         }
         await boat.stop(sandbox).catch(() => {});
       }
@@ -561,7 +633,7 @@ export class ExploreService {
       product: { id: p.product.id, name: p.product.name, product_line: p.product.product_line, category: p.product.category, region: p.product.region },
       algorithm,
       model_dir: j.model_dir,
-      base_ref: j.base_ref,
+      base_ref: j.base_sha,
       branch: v.branch,
       angle,
       objective: { maximise: j.objective },
@@ -597,7 +669,7 @@ export class ExploreService {
     if (v.pr_url) return { pr_url: v.pr_url, review_case_id: v.review_case_id ?? null, already_proposed: true };
     const entry = ((j.leaderboard as ReturnType<ExploreService["leaderboard"]>) ?? []).find((e) => e.k === k)!;
     const baseline = ((j.leaderboard as ReturnType<ExploreService["leaderboard"]>) ?? []).find((e) => e.k === 0);
-    const ws = (await this.desk.workspace(j.entity_id as string))!;
+    const ws = await this.workspaceOf(j);
     const s = v.score as ReturnType<typeof scoreWithStability>;
     const body = [
       `Explorer ${k} (${v.angle}) on \`${j.model_dir}\` for product \`${j.product_id}\`, algorithm \`${j.algorithm_id}\`.`,
@@ -619,8 +691,11 @@ export class ExploreService {
       "",
       `Merging this doesn't change the product. To use it, merge, then set this algorithm's \`version\` in the product's definition to the merged ref. Opened by Mynt (exploration ${j.id}); the numbers come from Mynt scoring synthetic holdout applicants the explorer never saw.`,
     ].join("\n");
+    // From a branch Mynt creates at the commit it scored: whatever was pushed to the explorer's branch since isn't in it.
+    const head = `mynt/adopt-${String(j.id).slice(0, 8)}-${k}-${suffix()}`;
+    await this.repos!.createBranch(ws.repository, ws.installation_id, head, v.commit_sha as string);
     const pr = await this.repos!.openPullRequest(ws.repository, ws.installation_id, {
-      head: v.branch as string,
+      head,
       title: `Mynt explorer: ${j.algorithm_id} (${v.angle})`,
       body,
     });

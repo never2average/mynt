@@ -10,9 +10,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { workspaceFiles } from "../dist/agent-host.js";
 import { DeskService, deskConfigFromEnv } from "../dist/desk.js";
-import { DATASET_SIZE, datasetInputs, generateDataset, seedsFor } from "../dist/explore-data.js";
+import { DATASET_SIZE, datasetInputs, generateDataset, newDatasetSecret, splitKeys } from "../dist/explore-data.js";
 import { SCORER_SCRIPT, scoreSet, scoreWithStability } from "../dist/explore-score.js";
-import { DECIDE_RUNNER, ExploreService, explorationAngles, exploreConfigFromEnv } from "../dist/explore.js";
+import { DECIDE_RUNNER, ExploreService, TOKEN_FILE, explorationAngles, exploreConfigFromEnv } from "../dist/explore.js";
+import { startRepoRun } from "../dist/repo-run.js";
 import { opsStatus } from "../dist/ops.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
@@ -23,6 +24,7 @@ const JOB = `${DIR}/job`;
 const A = "/home/user/mynt-agent";
 const WS = "/home/user/workspaces/algorithm-explorer";
 const sha = (s) => createHash("sha256").update(s).digest("hex");
+const KEY = "ab".repeat(32);
 const params = { product_line: "credit", segments: ["salaried", "self_employed"], amount_min: 10000, amount_max: 500000, target_pd_pct: 5 };
 const spec = (over = {}) => ({
   objective: { maximise: "net_margin" },
@@ -34,14 +36,16 @@ const spec = (over = {}) => ({
 // ---- the generator ----
 
 test("the generator is deterministic, and the dev and holdout splits never overlap", () => {
-  const a = generateDataset(params, 123, "d", 500);
-  const b = generateDataset(params, 123, "d", 500);
-  assert.deepEqual(a, b, "same seed, same applicants and truth");
-  const seeds = seedsFor("job-1", sha);
-  assert.notEqual(seeds.dev, seeds.holdout);
-  assert.deepEqual(seedsFor("job-1", sha), seeds, "seeds come from the job id");
-  const dev = generateDataset(params, seeds.dev, "d");
-  const holdout = generateDataset(params, seeds.holdout, "h");
+  const a = generateDataset(params, KEY, "d", 500);
+  const b = generateDataset(params, KEY, "d", 500);
+  assert.deepEqual(a, b, "same key, same applicants and truth");
+  const secret = newDatasetSecret();
+  assert.match(secret, /^[0-9a-f]{64}$/, "32 random bytes");
+  const keys = splitKeys(secret);
+  assert.notEqual(keys.dev, keys.holdout);
+  assert.deepEqual(splitKeys(secret), keys, "the splits come from the job's secret, deterministically");
+  const dev = generateDataset(params, keys.dev, "d");
+  const holdout = generateDataset(params, keys.holdout, "h");
   assert.equal(dev.applicants.length, DATASET_SIZE);
   const devIds = new Set(dev.applicants.map((x) => x.id));
   assert.ok(holdout.applicants.every((x) => !devIds.has(x.id)), "no id in both splits");
@@ -64,6 +68,25 @@ test("the generator is deterministic, and the dev and holdout splits never overl
   const q = Math.floor(scored.length / 4);
   const rate = (xs) => xs.filter((x) => x.d).length / xs.length;
   assert.ok(rate(scored.slice(0, q)) > 2 * rate(scored.slice(-q)));
+});
+
+test("the holdout can't be rebuilt from what an explorer gets, and two jobs never share one", () => {
+  const jobId = "6f1c2a8e-0000-4000-8000-000000000001";
+  const secret = newDatasetSecret();
+  const holdout = generateDataset(params, splitKeys(secret).holdout, "h", 300);
+  // What an explorer could try: keys made from the job id (the old derivation), or from its dev files.
+  const dev = generateDataset(params, splitKeys(secret).dev, "d", 300);
+  for (const guess of [sha(`${jobId}:holdout`), sha(jobId), sha(JSON.stringify(dev.truth)), splitKeys(sha(jobId)).holdout]) {
+    const attempt = generateDataset(params, guess, "h", 300);
+    assert.notDeepEqual(attempt.applicants.map((x) => x.monthly_income), holdout.applicants.map((x) => x.monthly_income));
+  }
+  // Two jobs with the same inputs get different holdouts.
+  const other = generateDataset(params, splitKeys(newDatasetSecret()).holdout, "h", 300);
+  assert.notDeepEqual(other.truth.map((t) => t.defaulted), holdout.truth.map((t) => t.defaulted));
+  // Features and outcomes come from separate streams: the same features key with another outcomes stream would be
+  // a different key altogether, so knowing every feature still says nothing about who defaulted.
+  const flips = holdout.truth.filter((t, i) => t.defaulted !== other.truth[i].defaulted).length;
+  assert.ok(flips > 0);
 });
 
 test("generator inputs come from the definition and term sheet, and every default is stated", () => {
@@ -138,8 +161,16 @@ test("each constraint fails on its own", () => {
   const pricey = scoreSet(people, truth.map((t) => ({ ...t, defaulted: false })), all({ apr_pct: 30 }), spec());
   assert.deepEqual(checks(pricey), { apr_cap: 30 });
   const noCap = scoreSet(people, truth.map((t) => ({ ...t, defaulted: false })), all({ apr_pct: 30 }), spec({ constraints: { ...spec().constraints, apr_cap_pct: null } }));
-  assert.equal(noCap.checks.find((c) => c.name === "apr_cap").status, "not_set", "no cap: reported as not set, not as a pass");
-  assert.equal(noCap.eligible, true);
+  assert.equal(noCap.checks.find((c) => c.name === "apr_cap").status, "fail", "no cap: no variant can be eligible");
+  assert.equal(noCap.eligible, false);
+  // Absurd or malformed prices and limits aren't decisions Mynt can use.
+  const clean0 = truth.map((t) => ({ ...t, defaulted: false }));
+  for (const bad of [{ apr_pct: 1e6 }, { apr_pct: -5 }, { apr_pct: Infinity }, { apr_pct: "20" }, { limit: -1 }, { limit: 0 }, { limit: "lots" }]) {
+    const s = scoreSet(people, clean0, all(bad), spec({ constraints: { ...spec().constraints, apr_cap_pct: null } }));
+    assert.equal(s.metrics.missing_decisions, 4, JSON.stringify(bad));
+    assert.equal(s.metrics.interest_revenue, 0, "no revenue from an invalid decision");
+    assert.equal(s.eligible, false);
+  }
 
   const clean = truth.map((t) => ({ ...t, defaulted: false }));
   const oneBDeclined = [{ id: "a1", approve: true }, { id: "a2", approve: true }, { id: "b1", approve: true }, { id: "b2", approve: false, reason_codes: ["X"] }];
@@ -163,7 +194,7 @@ test("stability: the same metrics on three time-like slices", () => {
 
 test("the explorers' scorer script is Mynt's scorer: same numbers on the same files", () => {
   const dir = mkdtempSync(join(tmpdir(), "mynt-score-"));
-  const set = generateDataset(params, 7, "d", 400);
+  const set = generateDataset(params, KEY, "d", 400);
   const decisions = set.applicants.map((a) => ({ id: a.id, approve: (a.bureau_score ?? 0) >= 680, apr_pct: 19, reason_codes: (a.bureau_score ?? 0) >= 680 ? [] : ["LOW_SCORE"] }));
   const devTruth = set.truth.map(({ id, defaulted, protected_group }) => ({ id, defaulted, protected_group }));
   const lines = (xs) => xs.map((x) => JSON.stringify(x)).join("\n") + "\n";
@@ -198,7 +229,7 @@ for line in open(os.environ["MYNT_APPLICANTS"]):
   git("add", "-A");
   git("commit", "-q", "-m", "model");
   const job = mkdtempSync(join(tmpdir(), "mynt-explore-job-"));
-  const set = generateDataset(params, 9, "h", 50);
+  const set = generateDataset(params, "cd".repeat(32), "h", 50);
   writeFileSync(join(job, "applicants.jsonl"), set.applicants.map((x) => JSON.stringify(x)).join("\n"));
   writeFileSync(join(job, "run-decide.mjs"), DECIDE_RUNNER);
   const run = () => {
@@ -262,26 +293,40 @@ function fakeBoat() {
       s.files.set(`${A}/state.json`, JSON.stringify({ done: true, last_subtype: "success", cost_usd: cost, summary }));
     },
     // Mynt's holdout run: decisions from `decide` (a function of the applicant), or a failed clone.
-    finishDecide(id, decide) {
+    finishDecide(id, decide, commit) {
       const s = sandboxes.get(id);
       s.running = false;
       if (!decide) return s.files.set(`${JOB}/outcome.json`, s.files.get(`${DIR}/clone-failed.json`));
       const applicants = s.files.get(`${JOB}/applicants.jsonl`).split("\n").filter(Boolean).map((l) => JSON.parse(l));
       s.files.set(`${JOB}/decisions.jsonl`, applicants.map((a) => JSON.stringify({ id: a.id, ...decide(a) })).join("\n"));
-      s.files.set(`${JOB}/outcome.json`, JSON.stringify({ outcome: "ran", commit: sha(id).slice(0, 40), decisions: applicants.length, log: "" }));
+      s.files.set(`${JOB}/outcome.json`, JSON.stringify({ outcome: "ran", commit, decisions: applicants.length, log: "" }));
     },
   };
 }
 
+const BASE = "b".repeat(40);
 function fakeRepos() {
   const prs = [];
+  const created = [];
+  // What each branch, tag or SHA points at in the firm's repository.
+  const refs = new Map([["v1.0.0", BASE], ["HEAD", "a".repeat(40)]]);
+  let minted = 0;
   return {
     prs,
+    created,
+    refs,
     async installationFor(repo) {
       return repo === "acme/desk" ? 7 : null;
     },
     async tokenFor() {
-      return { token: "ghs_explore", expires_at: new Date(Date.now() + 3600e3).toISOString() };
+      return { token: `ghs_explore_${++minted}`, expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    },
+    async resolveRef(repo, installation, ref) {
+      return refs.get(ref) ?? null;
+    },
+    async createBranch(repo, installation, branch, commit) {
+      created.push({ branch, commit });
+      refs.set(branch, commit);
     },
     installUrl: () => "https://github.com/apps/mynt/installations/new",
     async openPullRequest(repo, installation, pr) {
@@ -377,28 +422,41 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   assert.equal(await desk.monthCommitted(job.entity_id), 20, "explorations share the firm's monthly desk budget");
   assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw" })).data.error, /already running/);
 
-  // Explorer sandboxes: each with the firm's repo, its own branch, and a push token.
+  assert.equal(job.base_sha, BASE, "the pinned version, resolved to a commit at the start");
+
+  // Explorer sandboxes: each with the firm's repo and its own hard-to-guess branch; no token in the environment.
   await explore.tick();
+  await explore.tick(); // a second tick before they're ready creates nothing new
+  assert.equal(boat.sandboxes.size, 3);
   const explorerSbx = [];
+  const branches = {};
   for (const k of [1, 2, 3]) {
     const id = await sandboxOf(db, job.id, k);
     explorerSbx.push(id);
-    assert.equal(boat.sandboxes.get(id).opts.env.MYNT_BRANCH, `mynt/explore-${job.id.slice(0, 8)}-${k}`);
-    assert.equal(boat.sandboxes.get(id).opts.env.GITHUB_REPOSITORY, "acme/desk");
+    const env = boat.sandboxes.get(id).opts.env;
+    branches[k] = env.MYNT_BRANCH;
+    assert.match(env.MYNT_BRANCH, new RegExp(`^mynt/explore-${job.id.slice(0, 8)}-${k}-[0-9a-f]{12}$`));
+    assert.equal(env.GITHUB_REPOSITORY, "acme/desk");
+    assert.ok(!("GITHUB_TOKEN" in env), "the push token isn't in the environment");
+    assert.ok(!boat.sandboxes.get(id).files.has(TOKEN_FILE), "nor minted before the explorer starts");
     boat.ready(id);
   }
   await explore.tick();
+  // Minted just before launch, as a file for the credential helper.
+  assert.match(boat.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE), /^ghs_explore_\d+$/);
   const specs = explorerSbx.map((id) => JSON.parse(boat.sandboxes.get(id).files.get(`${WS}/job/explore.json`)));
   const angles = explorationAngles().map((a) => a.id);
   assert.deepEqual(specs.map((s) => s.angle.id), angles.slice(0, 3), "a different angle each");
   for (const s of specs) {
     assert.equal(s.model_dir, "models/underwriting");
-    assert.equal(s.base_ref, "v1.0.0");
+    assert.equal(s.base_ref, BASE);
     assert.deepEqual(s.objective, { maximise: "net_margin" });
     assert.deepEqual(Object.keys(s.limits), ["max_iterations", "max_minutes", "experiment_timeout_seconds"]);
     assert.equal(s.experiment_log, "models/underwriting/explore-log.tsv");
   }
-  const holdout = generateDataset((await db.query("SELECT dataset FROM financial_products.explore_jobs WHERE id = $1", [job.id])).rows[0].dataset.params, seedsFor(job.id, sha).holdout, "h");
+  const stored = (await db.query("SELECT dataset FROM financial_products.explore_jobs WHERE id = $1", [job.id])).rows[0].dataset;
+  const holdout = generateDataset(stored.params, splitKeys(stored.secret).holdout, "h");
+  assert.ok(!JSON.stringify(job).includes(stored.secret), "the dataset secret is never shown");
   for (const id of explorerSbx) {
     const files = boat.sandboxes.get(id).files;
     assert.ok(files.get(`${WS}/CLAUDE.md`).includes("autoresearch"));
@@ -414,12 +472,22 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
     const everything = [...files.values()].join("\n");
     assert.ok(!/"h-\d{6}"/.test(everything), "no holdout ids in an explorer sandbox");
     assert.ok(!everything.includes(JSON.stringify(holdout.applicants[0])));
+    assert.ok(!everything.includes(stored.secret), "nor the secret that would rebuild it");
   }
+  // Tokens last an hour: Mynt replaces an explorer's well before then.
+  const before = boat.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE);
+  await db.query("UPDATE financial_products.explore_variants SET token_minted_at = now() - interval '41 minutes' WHERE job_id = $1 AND k = 1", [job.id]);
+  await explore.tick();
+  assert.notEqual(boat.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE), before, "a fresh token for late pushes");
   const auth = JSON.parse(boat.sandboxes.get(explorerSbx[0]).files.get(`${A}/auth.json`));
   assert.deepEqual(await explore.agentRun(auth.token), { key: `explore:${job.id}`, capUsd: 20 }, "every explorer spends against the job's one key and cap");
   assert.equal((await explore.get(job.id)).status, "exploring");
 
   // Explorers finish (one of them without pushing anything).
+  const C1 = "1".repeat(40);
+  const C2 = "2".repeat(40);
+  repos.refs.set(branches[1], C1);
+  repos.refs.set(branches[2], C2);
   boat.finishAgent(explorerSbx[0], 1, "Added a bureau-score knockout at 650");
   boat.finishAgent(explorerSbx[1], 1, "Priced riskier grades higher");
   await explore.tick();
@@ -429,19 +497,25 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   assert.equal((await explore.get(job.id)).status, "scoring");
   assert.equal(await explore.agentTokenActive(auth.token), false, "explorer tokens die when they finish");
   for (const id of explorerSbx) assert.ok(boat.sandboxes.get(id).stopped);
+  // A push after the explorer finished (by it, or another explorer with the same repository access) changes nothing.
+  repos.refs.set(branches[1], "f".repeat(40));
+  repos.refs.set("v1.0.0", "e".repeat(40));
+  assert.deepEqual((await variants(explore, job.id)).map((v) => v.commit_sha), [BASE, C1, C2, null]);
 
-  // Mynt's scoring: a clean sandbox per variant (and the baseline), no credentials, features only.
+  // Mynt's scoring: a clean sandbox per pushed variant (and the baseline), no credentials, features only.
   const scoreSbx = {};
-  for (const k of [0, 1, 2, 3]) {
+  assert.equal(await sandboxOf(db, job.id, 3, "score_sandbox_id"), null, "nothing pushed, nothing to run");
+  for (const k of [0, 1, 2]) {
     scoreSbx[k] = await sandboxOf(db, job.id, k, "score_sandbox_id");
     assert.deepEqual(boat.sandboxes.get(scoreSbx[k]).opts.env, {}, "the scorer gets no credentials in its env");
     boat.ready(scoreSbx[k]);
   }
   await explore.tick();
-  assert.match(boat.sandboxes.get(scoreSbx[0]).files.get(`${DIR}/run.sh`), /--branch 'v1\.0\.0'/, "the baseline is the pinned version");
-  for (const k of [1, 2, 3]) {
+  const pinned = { 0: BASE, 1: C1, 2: C2 };
+  for (const k of [0, 1, 2]) {
     const s = boat.sandboxes.get(scoreSbx[k]).files;
-    assert.match(s.get(`${DIR}/run.sh`), new RegExp(`--branch 'mynt/explore-${job.id.slice(0, 8)}-${k}'`));
+    assert.ok(s.get(`${DIR}/run.sh`).includes(`fetch -q --depth 1 origin ${pinned[k]}`), "exactly the commit pinned when the explorer finished");
+    assert.ok(!s.get(`${DIR}/run.sh`).includes("--branch"));
     assert.ok(s.get(`${DIR}/run.sh`).indexOf("rm -f /home/user/.mynt-git-credentials") < s.get(`${DIR}/run.sh`).indexOf("run-decide.mjs"), "the clone token is gone before any algorithm code runs");
     const sent = s.get(`${JOB}/applicants.jsonl`).split("\n").filter(Boolean).map((l) => JSON.parse(l));
     assert.deepEqual(sent, holdout.applicants, "the holdout's features, nothing else");
@@ -450,10 +524,9 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   // Baseline approves everyone at 18%; explorer 1 adds a knockout (better, within every constraint); explorer 2 prices
   // over the APR cap (more margin, but ineligible); explorer 3 never pushed.
   const knockout = (a) => ((a.bureau_score ?? 0) >= 650 ? { approve: true, grade: "A", reason_codes: [] } : { approve: false, reason_codes: ["LOW_BUREAU_SCORE"] });
-  boat.finishDecide(scoreSbx[0], () => ({ approve: true, apr_pct: 18, reason_codes: [] }));
-  boat.finishDecide(scoreSbx[1], knockout);
-  boat.finishDecide(scoreSbx[2], (a) => ({ ...knockout(a), ...((a.bureau_score ?? 0) >= 650 ? { apr_pct: 30 } : {}) }));
-  boat.finishDecide(scoreSbx[3], null);
+  boat.finishDecide(scoreSbx[0], () => ({ approve: true, apr_pct: 18, reason_codes: [] }), BASE);
+  boat.finishDecide(scoreSbx[1], knockout, C1);
+  boat.finishDecide(scoreSbx[2], (a) => ({ ...knockout(a), ...((a.bureau_score ?? 0) >= 650 ? { apr_pct: 30 } : {}) }), C2);
   await explore.tick();
 
   const done = await explore.get(job.id);
@@ -476,7 +549,8 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   assert.ok(typeof first.metrics.expected_loss_rate_pct === "number", "Mynt holds the latent probability, so expected loss is measured on the holdout");
   assert.match(done.phase_message, /^Best: explorer 1/);
   assert.ok(Number(done.cost_usd) >= 3, "the explorers' spend is counted");
-  for (const k of [0, 1, 2, 3]) assert.ok(boat.sandboxes.get(scoreSbx[k]).stopped);
+  for (const k of [0, 1, 2]) assert.ok(boat.sandboxes.get(scoreSbx[k]).stopped);
+  assert.equal(first.commit, C1);
   const got = (await call(client, "get_exploration", { job_id: job.id })).data;
   assert.equal(got.leaderboard[0].k, 1);
   assert.match(got.dataset.holdout, /never given to explorers/);
@@ -487,7 +561,11 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   const adopted = await call(client, "adopt_variant", { job_id: job.id, explorer: 1 });
   assert.equal(adopted.isError, false, JSON.stringify(adopted.data));
   assert.equal(adopted.data.pr_url, "https://github.com/acme/desk/pull/1");
-  assert.equal(repos.prs[0].head, `mynt/explore-${job.id.slice(0, 8)}-1`);
+  // From a branch Mynt made at the scored commit, not the explorer's branch (which has moved since).
+  assert.equal(repos.created.length, 1);
+  assert.equal(repos.created[0].commit, C1);
+  assert.match(repos.created[0].branch, new RegExp(`^mynt/adopt-${job.id.slice(0, 8)}-1-[0-9a-f]{12}$`));
+  assert.equal(repos.prs[0].head, repos.created[0].branch);
   assert.match(repos.prs[0].body, /scored by Mynt/);
   assert.match(repos.prs[0].body, /\| apr_cap \| pass \|/);
   assert.match(repos.prs[0].body, /Added a bureau-score knockout at 650/);
@@ -518,8 +596,9 @@ test("the budget is shared and enforced: over the cap, everything stops", async 
   for (const id of ids) boat.sandboxes.get(id).files.set(`${A}/state.json`, JSON.stringify({ done: false, cost_usd: 2.6 }));
   await explore.tick();
   const stopped = await explore.get(job.id);
-  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.status, "over_budget");
   assert.match(stopped.error, /over the US\$5 cap/);
+  assert.match((await opsStatus(db)).attention.join("\n"), /explorers: 1 failed/, "over-cap stops show up for admins");
   for (const id of ids) assert.ok(boat.sandboxes.get(id).stopped);
   const auth = JSON.parse(boat.sandboxes.get(ids[0]).files.get(`${A}/auth.json`));
   assert.equal(await explore.agentTokenActive(auth.token), false);
@@ -544,9 +623,81 @@ test("explorations are the firm's own, and only innovators get the tools", async
   assert.equal((await explore.get(job.id)).status, "stopped");
 });
 
+test("starting: an APR cap is required, one exploration at a time even when two starts race, and the pinned version must exist", async () => {
+  const { explore, repos, call, ready } = await setup();
+  const { user, client } = await ready();
+  await call(client, "set_product_terms", { product_id: "quick-loan", inputs: { apr_pct: 18 } });
+  assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw" })).data.error, /Set an APR cap/);
+  repos.refs.delete("v1.0.0");
+  assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", apr_cap_pct: 30 })).data.error, /pinned version 'v1.0.0' isn't in acme\/desk/);
+  repos.refs.set("v1.0.0", BASE);
+  const results = await Promise.allSettled([1, 2, 3].map(() => explore.start(user, { product_id: "quick-loan", algorithm_id: "uw", constraints: { apr_cap_pct: 30 } })));
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(results.map((r) => r.reason?.message)));
+  for (const r of results.filter((x) => x.status === "rejected")) assert.match(r.reason.message, /already running/);
+});
+
+test("a passing provider error doesn't fail an exploration; a lasting one does", async () => {
+  const { explore, boat, call, ready } = await setup();
+  const { client } = await ready();
+  const job = (await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", explorers: 1 })).data;
+  await explore.tick();
+  const cost = boat.costDollars;
+  boat.costDollars = async () => {
+    throw new Error("boat: 503 Service Unavailable");
+  };
+  await explore.tick();
+  assert.equal((await explore.get(job.id)).status, "exploring", "ridden out");
+  const grace = ExploreService.TRANSIENT_GRACE_MS;
+  ExploreService.TRANSIENT_GRACE_MS = 0;
+  await explore.tick();
+  ExploreService.TRANSIENT_GRACE_MS = grace;
+  const failed = await explore.get(job.id);
+  assert.equal(failed.status, "failed", "past the grace period it fails");
+  assert.match(failed.error, /503/);
+  boat.costDollars = cost;
+});
+
+test("Mynt's checkout of a pinned commit works on a real repository (a SHA can't be cloned with --branch)", async () => {
+  const origin = mkdtempSync(join(tmpdir(), "mynt-explore-origin-"));
+  const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd }).toString().trim();
+  git(origin, "init", "-q", "-b", "main");
+  git(origin, "config", "uploadpack.allowAnySHA1InWant", "true");
+  writeFileSync(join(origin, "f.txt"), "pinned");
+  git(origin, "add", "-A");
+  git(origin, "commit", "-q", "-m", "pinned");
+  const pinned = git(origin, "rev-parse", "HEAD");
+  writeFileSync(join(origin, "f.txt"), "moved on");
+  git(origin, "commit", "-q", "-am", "later");
+  // Capture the script Mynt writes, then run it against the local repository instead of GitHub.
+  const files = new Map();
+  const boat = { writeFile: async (_s, path, content) => void files.set(path, content), exec: async () => ({ processId: 1 }) };
+  const base = mkdtempSync(join(tmpdir(), "mynt-explore-run-"));
+  await startRepoRun(boat, { tokenFor: async () => ({ token: "t" }) }, "s", {
+    repository: "acme/desk",
+    installationId: 7,
+    ref: pinned,
+    dir: base,
+    outcome: join(base, "outcome.json"),
+    cloneFailure: { outcome: "error" },
+    files: {},
+    command: `git -C /home/user/workspace rev-parse HEAD > ${join(base, "head.txt")}; cat /home/user/workspace/f.txt >> ${join(base, "head.txt")}`,
+  });
+  const repoDir = join(base, "repo");
+  const script = files
+    .get(`${base}/run.sh`)
+    .replaceAll("/home/user/workspace", repoDir)
+    .replaceAll("https://github.com/acme/desk.git", `file://${origin}`)
+    .replaceAll("/home/user/.mynt-git-credentials", join(base, "creds"));
+  writeFileSync(join(base, "run.sh"), script);
+  writeFileSync(join(base, "clone-failed.json"), "{}");
+  const r = spawnSync("bash", [join(base, "run.sh")], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(base, "head.txt"), "utf8"), `${pinned}\npinned`, `checked out the pinned commit: ${readFileSync(join(base, "clone.log"), "utf8")}`);
+});
+
 test("the explorer workspace: its instructions, the angles, and the desk's skills copied verbatim", () => {
   const files = workspaceFiles("algorithm-explorer");
-  for (const rule of [/autoresearch/, /Never use outcome labels or the protected group/, /Change only `model_dir`/, /Do not open a pull request/, /explore-log\.tsv/, /max_iterations/]) assert.match(files["CLAUDE.md"], rule);
+  for (const rule of [/autoresearch/, /Never use outcome labels or the protected group/, /Change only `model_dir`/, /Do not open a pull request/, /explore-log\.tsv/, /max_iterations/, /MYNT_GIT_TOKEN_FILE/, /push\*\* every kept state/]) assert.match(files["CLAUDE.md"], rule);
   const desk = workspaceFiles("product-desk");
   for (const skill of ["model-contract", "financial-modelling"]) assert.equal(files[`.claude/skills/${skill}/SKILL.md`], desk[`.claude/skills/${skill}/SKILL.md`]);
   assert.match(files[".claude/skills/model-contract/SKILL.md"], /MYNT_APPLICANTS/);

@@ -13,14 +13,14 @@ export interface ScoringSpec {
   economics: { default_apr_pct: number; cost_of_funds_pct: number; lgd_pct: number; opex_pct: number; tenor_months: number };
   constraints: {
     max_loss_rate_pct: number; // realised losses as % of the approved amount
-    apr_cap_pct: number | null; // null when neither the job, the term sheet nor the definition sets one
+    apr_cap_pct: number | null; // null fails the check: without a cap, pricing without limit would win
     min_adverse_impact_ratio: number; // approval rate of the protected group / the reference group
   };
 }
 
 export interface Check {
   name: string;
-  status: "pass" | "fail" | "not_set";
+  status: "pass" | "fail";
   value: number | null;
   threshold: number | null;
   detail: string;
@@ -56,7 +56,11 @@ export function scoreSet(applicants: any[], truth: any[], decisions: any[], spec
     const d = byId.get(a.id);
     const group = t && groups[t.protected_group] ? groups[t.protected_group] : null;
     if (group) group.n++;
-    if (!d || typeof d.approve !== "boolean") {
+    // A decision Mynt can't use counts as missing: approve must be a boolean, and an APR or limit, when given,
+    // must be a sane number (an absurd APR would otherwise buy revenue the scorer can't see through).
+    const badApr = d && d.apr_pct !== undefined && d.apr_pct !== null && (typeof d.apr_pct !== "number" || !Number.isFinite(d.apr_pct) || d.apr_pct < 0 || d.apr_pct > 100);
+    const badLimit = d && d.limit !== undefined && d.limit !== null && (typeof d.limit !== "number" || !Number.isFinite(d.limit) || d.limit <= 0);
+    if (!d || typeof d.approve !== "boolean" || (d.approve && (badApr || badLimit))) {
       missing++;
       continue;
     }
@@ -66,7 +70,7 @@ export function scoreSet(applicants: any[], truth: any[], decisions: any[], spec
     }
     approved++;
     if (group) group.approved++;
-    const limit = typeof d.limit === "number" && d.limit > 0 ? d.limit : a.requested_amount;
+    const limit = typeof d.limit === "number" ? d.limit : a.requested_amount;
     const amount = Math.min(limit, a.requested_amount);
     const apr = typeof d.apr_pct === "number" ? d.apr_pct : e.default_apr_pct;
     maxApr = maxApr === null ? apr : Math.max(maxApr, apr);
@@ -108,7 +112,7 @@ export function scoreSet(applicants: any[], truth: any[], decisions: any[], spec
       status: missing === 0 ? "pass" : "fail",
       value: missing,
       threshold: 0,
-      detail: missing === 0 ? "A decision for every applicant" : `${missing} applicant(s) without a valid decision`,
+      detail: missing === 0 ? "A valid decision for every applicant" : `${missing} applicant(s) without a valid decision (approve a boolean; apr_pct 0-100; limit positive)`,
     },
     {
       name: "loss_rate",
@@ -118,7 +122,7 @@ export function scoreSet(applicants: any[], truth: any[], decisions: any[], spec
       detail: `Realised loss rate ${lossRate ?? "n/a"}% against a ceiling of ${c.max_loss_rate_pct}%`,
     },
     c.apr_cap_pct === null
-      ? { name: "apr_cap", status: "not_set", value: maxApr, threshold: null, detail: "No APR cap set by the job, the term sheet or the definition" }
+      ? { name: "apr_cap", status: "fail", value: maxApr, threshold: null, detail: "No APR cap is set, so no variant can be eligible: set apr_cap_pct" }
       : {
           name: "apr_cap",
           status: maxApr === null || maxApr <= c.apr_cap_pct ? "pass" : "fail",

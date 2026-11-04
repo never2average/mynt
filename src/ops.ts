@@ -12,7 +12,7 @@ const RUNS = [
   { name: "builds", table: "build_runs", done: ["succeeded", "blocked", "failed", "stopped", "over_budget"], bad: ["failed", "blocked", "over_budget"] },
   { name: "desk", table: "desk_jobs", done: ["succeeded", "failed", "stopped", "over_budget", "done"], bad: ["failed", "over_budget"] },
   { name: "reviews", table: "review_cases", done: ["ready", "decided", "failed", "stopped", "over_budget"], bad: ["failed", "over_budget"] },
-  { name: "explorers", table: "explore_jobs", done: ["finished", "failed", "stopped"], bad: ["failed"] },
+  { name: "explorers", table: "explore_jobs", done: ["finished", "failed", "stopped", "over_budget"], bad: ["failed", "over_budget"] },
   { name: "connector", table: "bd_runs", done: ["succeeded", "failed", "stopped", "over_budget", "done"], bad: ["failed", "over_budget"] },
 ] as const;
 
