@@ -9,6 +9,7 @@ import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./
 import { egressFor } from "./hosting-tools.js";
 import { ModuleRegistry } from "./modules.js";
 import { driftSweep } from "./pins.js";
+import { recomputeDerived } from "./derived.js";
 import { DeskService, deskConfigFromEnv } from "./desk.js";
 import { ExploreService, exploreConfigFromEnv } from "./explore.js";
 import { ReviewService, reviewConfigFromEnv } from "./review.js";
@@ -145,6 +146,8 @@ if (values.help) {
   // Licences lapse with time: re-check pinned products hourly (changes made through Mynt re-check at once).
   const drift = setInterval(() => driftSweep(store).catch((e) => console.error("drift sweep:", e)), 60 * 60 * 1000);
   drift.unref();
+  // Products without a stored regime summary and take rate yet get one (in the background; see derived.ts).
+  void recomputeDerived(store, { missing_only: true }).then((r) => r.recomputed && console.error(`derived values computed for ${r.recomputed} products`));
   // Vendor-served actions that will never finish (a call cut short, a customer who never came back) end as expired.
   const vendorRuns = setInterval(() => sweepVendorActionRuns(store).catch((e) => console.error("vendor action sweep:", (e as Error).message)), 60 * 1000);
   vendorRuns.unref();

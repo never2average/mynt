@@ -31,6 +31,7 @@ import { emitProductEvent } from "./runtime.js";
 import type { HostingService } from "./hosting.js";
 import type { ModuleRegistry } from "./modules.js";
 import { driftSweep } from "./pins.js";
+import { recomputeDerived, rederiveProduct } from "./derived.js";
 import { vendorDriftSweep } from "./vendors.js";
 import { reconcileEntityGrc } from "./entity-grc.js";
 import { reconcileEntity } from "./parties.js";
@@ -152,6 +153,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
         underlying: product_type.underlying ?? null,
         wrapper: product_type.wrapper ?? null,
       });
+      await recomputeDerived(store, { region: code });
       return json({ region: code, product_type: product_type.id, replaced });
     },
   );
@@ -168,6 +170,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (users.length) return fail(`'${product_type_id}' is supervised by ${users.join(", ")}; remove it from their scope first`);
       if (!(await store.removeRegulatedProductType(code, product_type_id))) return fail(`No regulated product type '${product_type_id}' in ${code}`);
       await audit("remove_regulated_product_type", `${code}/${product_type_id}`);
+      await recomputeDerived(store, { region: code });
       return json({ region: code, removed: product_type_id });
     },
   );
@@ -199,6 +202,8 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       const short = regulator.short_name ?? regulator.name;
       if (!region.regulators.includes(short)) await store.upsertRegion({ code, regulators: [...region.regulators, short] });
       await audit("define_regulator", `${code}/${regulator.id}`, { replaced, license_types: regulator.license_types.map((l) => l._id) });
+      // Coverage, stakeholders and workload follow the model: recompute what's stored on the region's products.
+      await recomputeDerived(store, { region: code });
       return json({ region: code, regulator: regulator.id, replaced, license_types: regulator.license_types.length, warnings });
     },
   );
@@ -219,6 +224,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (!gone) return fail(`No regulator '${regulator_id}' in ${code}`);
       await store.setRegulatoryModel(code, { ...model, regulators: model.regulators.filter((r) => r.id !== regulator_id) });
       await audit("remove_regulator", `${code}/${regulator_id}`);
+      await recomputeDerived(store, { region: code });
       return json({ region: code, removed: regulator_id });
     },
   );
@@ -585,7 +591,24 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (errors.length) return { ...json({ error: "The composition can't be saved", errors }), isError: true };
       await store.setComposition(product_id, components, parties);
       await audit("admin_set_product_composition", product_id, { components: components.length });
+      await rederiveProduct(store, product_id);
       return json(await productRegime(store, { ...record, components, parties }));
+    },
+  );
+
+  server.registerTool(
+    "recompute_product_derived",
+    {
+      title: "Recompute products' stored coverage and take rate",
+      description:
+        "Admin: recompute what Mynt stores on products from its own checks: each component's licence coverage (regulator and licence type), mandated stakeholders required and bound, publish blockers, and the effective take rate with its workload breakdown. One product, or every product when product_id is left out. It's also recomputed on publish, on composition and definition changes, on licence, roster and regulatory-model changes, hourly, and on boot.",
+      inputSchema: { product_id: z.string().optional() },
+    },
+    async ({ product_id }) => {
+      if (product_id && !(await store.getProduct(product_id))) return fail(`No product '${product_id}'`);
+      const result = await recomputeDerived(store, product_id ? { product_ids: [product_id] } : {});
+      await audit("recompute_product_derived", product_id ?? "*", result);
+      return json(product_id ? { ...result, ...(await store.productDerived(product_id)) } : result);
     },
   );
 
@@ -608,6 +631,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       }
       const saved = status === "published" ? await store.publishCurrentVersion(id) : await store.setProductStatus(id, "unpublished");
       await audit("admin_set_product_status", id, { status, reason, owner_id: record.owner_id });
+      await rederiveProduct(store, id);
       if (status === "unpublished") await emitProductEvent(store, id, "product.unpublished");
       return json(saved);
     },

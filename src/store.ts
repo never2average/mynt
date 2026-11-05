@@ -1134,6 +1134,10 @@ const TABLES = `
   ALTER TABLE financial_products.webhooks ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES financial_products.entities(id);
   ALTER TABLE financial_products.webhooks ALTER COLUMN app_id DROP NOT NULL;
   CREATE INDEX IF NOT EXISTS webhooks_entity_idx ON financial_products.webhooks (entity_id) WHERE entity_id IS NOT NULL;
+  -- What Mynt's own code derives for a product (its regime's coverage and its take rate), stored so it's cheap to read.
+  ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS regime_summary jsonb;
+  ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS take_rate jsonb;
+  ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS derived_at timestamptz;
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -2378,6 +2382,44 @@ export class Store {
       ? await this.all("SELECT * FROM financial_products.products WHERE status = 'published' AND pins->'entity_ids' ? $1 ORDER BY id", [entityId])
       : await this.all("SELECT * FROM financial_products.products WHERE status = 'published' AND pins IS NOT NULL ORDER BY id");
     return rows.map(toProductRecord);
+  }
+
+  // Every product (drafts too), for recomputing what's derived from each (see derived.ts).
+  async allProducts(): Promise<ProductRecord[]> {
+    return (await this.all("SELECT * FROM financial_products.products ORDER BY id")).map(toProductRecord);
+  }
+
+  // Products resting on a legal entity: owned by it, pinned to it, or with a component provided by a party it stands behind.
+  async productsRestingOn(entityId: string): Promise<ProductRecord[]> {
+    const rows = await this.all(
+      `SELECT p.* FROM financial_products.products p
+        WHERE p.entity_id = $1 OR p.pins->'entity_ids' ? $1::text
+           OR EXISTS (SELECT 1 FROM financial_products.entity_parties pa
+                       WHERE pa.legal_entity_id = $1
+                         AND p.components @> jsonb_build_array(jsonb_build_object('provider', jsonb_build_object('by', 'party', 'party_id', pa.id::text))))
+        ORDER BY p.id`,
+      [entityId],
+    );
+    return rows.map(toProductRecord);
+  }
+
+  // Ids of products Mynt hasn't derived a regime summary and take rate for yet.
+  async productsNotDerived(): Promise<string[]> {
+    return (await this.all("SELECT id FROM financial_products.products WHERE derived_at IS NULL ORDER BY id")).map((r) => r.id as string);
+  }
+
+  // Doesn't touch updated_at: deriving isn't an edit.
+  async setProductDerived(productId: string, regimeSummary: unknown, takeRate: unknown): Promise<void> {
+    await this.db.query("UPDATE financial_products.products SET regime_summary = $2, take_rate = $3, derived_at = now() WHERE id = $1", [
+      productId,
+      regimeSummary == null ? null : JSON.stringify(regimeSummary),
+      takeRate == null ? null : JSON.stringify(takeRate),
+    ]);
+  }
+
+  async productDerived(productId: string): Promise<{ regime_summary: unknown; take_rate: unknown; derived_at: string | null } | undefined> {
+    const r = await this.one("SELECT regime_summary, take_rate, derived_at FROM financial_products.products WHERE id = $1", [productId]);
+    return r && { regime_summary: r.regime_summary ?? null, take_rate: r.take_rate ?? null, derived_at: iso(r.derived_at) };
   }
 
   async getProduct(id: string): Promise<ProductRecord | undefined> {

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { PRODUCT_LINES } from "./catalog.js";
 import { productRegime } from "./regime.js";
+import { recomputeDerived } from "./derived.js";
 import { normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, TakeRate, User } from "./store.js";
 
@@ -61,6 +62,16 @@ export function applyTakeRate(rate: TakeRate, score: number) {
   return { rate_pct: round(pct), unclamped_pct: round(raw), clamped: pct === raw ? null : pct === rate.max_pct ? ("max" as const) : ("min" as const) };
 }
 
+// What Mynt takes on a product: its line's rate applied to its workload score (get_product_take_rate, and
+// what's stored on the product; see derived.ts).
+export async function productTakeRate(store: Store, record: ProductRecord) {
+  const line = record.product.product_line;
+  const [rate, workload] = await Promise.all([store.takeRate(line), workloadScore(store, record)]);
+  if (!rate) return { line, configured: false as const, message: `No take rate is configured for ${line} yet; an admin sets one with define_take_rate`, workload };
+  const { updated_by: _, ...terms } = rate;
+  return { line, configured: true as const, ...applyTakeRate(rate, workload.score), basis: rate.basis, rate: terms, workload };
+}
+
 const TakeRateSchema = {
   line: z.enum(PRODUCT_LINES),
   base_pct: z.number().min(0).max(100).describe("Percentage taken on every product in the line"),
@@ -84,6 +95,8 @@ export function registerTakeRateAdminTools(server: McpServer, store: Store, user
       if (r.min_pct > r.max_pct) return fail("min_pct can't be above max_pct");
       const saved = await store.upsertTakeRate(r, user.id);
       await store.audit(user.id, "define_take_rate", r.line, r);
+      // Products on the line take the new rate (stored on each; see derived.ts).
+      await recomputeDerived(store, { line: r.line });
       return json(saved);
     },
   );
@@ -119,13 +132,7 @@ export function registerTakeRateTools(server: McpServer, store: Store, user: Use
       const allowed =
         record && (record.owner_id === user.id || (user.entity_id != null && record.entity_id === user.entity_id) || user.roles.includes("admin"));
       if (!record || !allowed) return fail(`No product of yours with id '${product_id}'`);
-      const line = record.product.product_line;
-      const rate = await store.takeRate(line);
-      const workload = await workloadScore(store, record);
-      if (!rate)
-        return json({ product_id, line, configured: false, message: `No take rate is configured for ${line} yet; an admin sets one with define_take_rate`, workload });
-      const { updated_by: _, ...terms } = rate;
-      return json({ product_id, line, configured: true, ...applyTakeRate(rate, workload.score), basis: rate.basis, rate: terms, workload });
+      return json({ product_id, ...(await productTakeRate(store, record)) });
     },
   );
 }

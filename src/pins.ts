@@ -4,6 +4,7 @@ import { partyActive } from "./parties.js";
 import type { productRegime } from "./regime.js";
 import { emitProductEvent } from "./runtime.js";
 import type { DriftChange, Entity, HeldLicense, Party, Pins, ProductRecord, Store } from "./store.js";
+import { recomputeDerived } from "./derived.js";
 import { vendorStateOf } from "./vendors.js";
 
 // Publishing pins a product's live composition and the state of everything it rests on: the owner, every
@@ -92,9 +93,11 @@ export async function checkDrift(store: Store, record: ProductRecord) {
   return null;
 }
 
-// Re-checks every published product resting on this entity (all of them without one).
+// Re-checks every published product resting on this entity (all of them without one), and recomputes the
+// stored regime summary and take rate of every product resting on it (see derived.ts).
 export async function driftSweep(store: Store, entityId?: string) {
   const drifted: string[] = [];
   for (const record of await store.pinnedProducts(entityId)) if (await checkDrift(store, record)) drifted.push(record.product.id);
+  await recomputeDerived(store, entityId ? { entity_id: entityId } : {});
   return drifted;
 }
