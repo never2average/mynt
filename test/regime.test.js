@@ -381,3 +381,131 @@ test("components stored in the old shape move to line primitives, partners on My
   await Store.open(db(ctx.pg), CATALOG);
   assert.equal((await reopened.partiesOf(b.entity.id)).length, 1);
 });
+
+// What Mynt stores on a product: its own regime result, projected (see derived.ts).
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+
+test("the stored regime summary is productRegime's coverage: covered, partner-provided, uncovered, stakeholders bound or not", async () => {
+  const ctx = await setup();
+  const b = await bankWithRoster(ctx);
+  assert.equal((await ctx.call(b.client, "create_product", rd)).isError, false);
+  const comp = composition(b);
+  // The bank provides the deposit (auditor left unbound), the partner the mandate, and a resale the partner isn't licensed for.
+  const set = await ctx.call(b.client, "set_product_composition", {
+    product_id: "everyday-rd",
+    components: [...comp.components, { key: "resale", country: "in", primitive: "account_operations", action: "sale", provider: { by: "party", party_id: b.partner.id } }],
+    parties: [comp.parties[0]],
+  });
+  assert.equal(set.isError, false, JSON.stringify(set.data));
+  // Mynt's own result for the working copy, as its owner sees it.
+  const regime = (await ctx.call(b.client, "get_product_regime", { product_id: "everyday-rd" })).data;
+  assert.ok(regime.regions, JSON.stringify(regime));
+  const stored = await ctx.store.productDerived("everyday-rd");
+  assert.ok(stored.derived_at);
+  const s = stored.regime_summary;
+  assert.equal(s.composition, "working_copy");
+  assert.equal(s.publishable, false);
+  // Component by component, the status, regulator and licence type are Mynt's own.
+  const rows = regime.regions[0].components;
+  const summary = s.regions[0].components;
+  assert.deepEqual(summary.map((c) => [c.key, c.primitive, c.action, c.coverage.status]), rows.map((c) => [c.key, c.primitive, c.action, c.coverage.status]));
+  assert.deepEqual(
+    summary.map((c) => c.coverage.by.map((x) => [x.regulator_id, x.license_id])),
+    rows.map((c) => (c.coverage.status === "covered" ? c.coverage.by.map((x) => [x.regulator_id, x.license_id]) : [])),
+  );
+  assert.deepEqual(s.regions[0].regulators, [{ regulator_id: "rbi", name: "Reserve Bank of India" }]);
+  const [deposit, mandate, resale] = summary;
+  assert.deepEqual(deposit.coverage.by, [{ regulator_id: "rbi", name: "Reserve Bank of India", license_id: "rbi_bank", licence: "Bank" }]);
+  assert.equal(deposit.provided_by, "self");
+  assert.deepEqual(
+    { required: deposit.stakeholders.required, filled: deposit.stakeholders.filled, bound: deposit.stakeholders.bound, unbound: deposit.stakeholders.unbound },
+    { required: 2, filled: ["rbi_bank_compliance_officer", "rbi_bank_statutory_auditor"], bound: 1, unbound: 1 },
+  );
+  assert.equal(mandate.provided_by, "partner");
+  assert.equal(mandate.coverage.by[0].license_id, "rbi_pa");
+  assert.equal(mandate.stakeholders.enforced, false);
+  assert.equal(mandate.stakeholders.bound, null);
+  assert.equal(resale.coverage.status, "uncovered");
+  assert.equal(resale.coverage.reason, rows[2].coverage.reason);
+  // The publish blockers are blockingComponents', without who the parties are.
+  assert.deepEqual(s.publish_blockers.map((x) => x.key), ["deposit", "resale"]);
+  assert.match(s.publish_blockers[0].reason, /bind a party to 'deposit'/);
+  assert.equal(deposit.blocking, s.publish_blockers[0].reason);
+  // No registration numbers, licence records or party ids.
+  const text = JSON.stringify(s);
+  assert.doesNotMatch(text, /rbi_bank-1|rbi_pa-1/);
+  assert.doesNotMatch(text, UUID_RE);
+
+  // Bound and published: the live composition, every stakeholder bound, nothing blocking.
+  await ctx.call(b.client, "set_product_composition", { product_id: "everyday-rd", ...comp });
+  await ctx.call(b.client, "test_product", { id: "everyday-rd" });
+  assert.equal((await ctx.call(b.client, "publish_product", { id: "everyday-rd" })).isError, false);
+  const live = (await ctx.store.productDerived("everyday-rd")).regime_summary;
+  assert.equal(live.composition, "live");
+  assert.equal(live.publishable, true);
+  assert.deepEqual(live.publish_blockers, []);
+  assert.equal(live.regions[0].components[0].stakeholders.bound, 2);
+});
+
+test("a licence suspension recomputes the stored coverage of the products resting on it", async () => {
+  const ctx = await setup();
+  const b = await bankWithRoster(ctx);
+  assert.equal((await publishRd(ctx, b)).isError, false);
+  const before = await ctx.store.productDerived("everyday-rd");
+  assert.equal(before.regime_summary.regions[0].components[0].coverage.status, "covered");
+  await ctx.call(ctx.admin, "review_license", { license_record_id: b.held.id, decision: "suspended", note: "regulator order" });
+  const after = await ctx.store.productDerived("everyday-rd");
+  assert.ok(after.derived_at >= before.derived_at);
+  const deposit = after.regime_summary.regions[0].components[0];
+  assert.equal(deposit.coverage.status, "uncovered");
+  assert.match(deposit.coverage.reason, /The pinned licence isn't verified and in force/);
+  assert.deepEqual(after.regime_summary.publish_blockers.map((x) => x.key), ["deposit"]);
+  const guest = await ctx.connect(null);
+  const regime = (await ctx.call(guest, "get_product_regime", { product_id: "everyday-rd", live: true })).data;
+  assert.equal(regime.regions[0].components[0].coverage.status, "uncovered");
+  await ctx.call(ctx.admin, "review_license", { license_record_id: b.held.id, decision: "verified", note: "order lifted" });
+  assert.equal((await ctx.store.productDerived("everyday-rd")).regime_summary.regions[0].components[0].coverage.status, "covered");
+});
+
+test("reference products are stored as reference; admins recompute every product, and products without one get it on boot", async () => {
+  const { call, admin, store, pg } = await setup();
+  const id = CATALOG.find((p) => p.region === "IN" && p.category === "deposits").id;
+  await call(admin, "admin_set_product_composition", { product_id: id, components: [{ key: "deposit", country: "in", primitive: "account_operations", action: "issuance" }] });
+  const stored = await store.productDerived(id);
+  assert.equal(stored.regime_summary.regions[0].components[0].coverage.status, "reference");
+  assert.equal(stored.regime_summary.regions[0].components[0].provided_by, null);
+  assert.equal(stored.regime_summary.publishable, true);
+  assert.equal(stored.take_rate.configured, false);
+  assert.equal(stored.take_rate.rate_pct, null);
+  assert.match(stored.take_rate.reason, /No take rate is configured/);
+
+  // The admin tool: one product, or all of them.
+  const one = await call(admin, "recompute_product_derived", { product_id: id });
+  assert.equal(one.data.recomputed, 1);
+  assert.equal(one.data.regime_summary.regions[0].components[0].coverage.status, "reference");
+  const all = await call(admin, "recompute_product_derived");
+  assert.equal(all.data.recomputed, CATALOG.length);
+  assert.deepEqual(all.data.failed, []);
+  assert.equal((await store.productsNotDerived()).length, 0);
+
+  // Boot: only the products without one.
+  await pg.query("UPDATE financial_products.products SET derived_at = NULL, regime_summary = NULL, take_rate = NULL WHERE id = $1", [id]);
+  const { recomputeDerived } = await import("../dist/derived.js");
+  assert.equal((await recomputeDerived(store, { missing_only: true })).recomputed, 1);
+  assert.equal((await store.productDerived(id)).regime_summary.regions[0].components[0].coverage.status, "reference");
+});
+
+test("a regime Mynt can't compute is stored as a note, never thrown", async () => {
+  const { store } = await setup();
+  const { deriveProduct } = await import("../dist/derived.js");
+  const id = CATALOG[0].id;
+  const record = await store.getProduct(id);
+  const broken = new Proxy(store, {
+    get: (t, k) => (k === "regulatedProductTypes" ? async () => { throw new Error("model unavailable"); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]),
+  });
+  const result = await deriveProduct(broken, { ...record, components: [{ key: "deposit", country: "in", primitive: "account_operations", action: "issuance" }] });
+  assert.equal(result.ok, false);
+  const stored = await store.productDerived(id);
+  assert.match(stored.regime_summary.error, /couldn't compute the regime: model unavailable/);
+  assert.ok(stored.derived_at);
+});

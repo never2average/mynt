@@ -279,6 +279,11 @@ test("take rates scale with a product's compliance and servicing workload, withi
   assert.equal(got.rate_pct, 2); // 1 + 0.25 × 4
   assert.equal(got.clamped, null);
   assert.equal(got.basis, "revenue");
+  // Defining the rate stored it on the product: exactly what get_product_take_rate says, obligation points included.
+  const { product_id: _, ...exact } = got;
+  const stored = await store.productDerived("green-fd");
+  assert.deepEqual(stored.take_rate, exact);
+  assert.equal(stored.take_rate.workload.components[0].grc_points, 0.5);
 
   // The cap and the floor hold.
   await call(admin, "define_take_rate", { ...rate, max_pct: 1.5 });

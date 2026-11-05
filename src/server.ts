@@ -22,6 +22,7 @@ import { checkDefinition, definitionHash, type Definition } from "./definition.j
 import { registerDefinitionTools } from "./definition-tools.js";
 import { buildPins } from "./pins.js";
 import { blockingComponents, ComponentSchema, partnerGaps, PartyBindingSchema, productRegime, validateComposition } from "./regime.js";
+import { rederiveProduct } from "./derived.js";
 import { accessStatus, BuildTermsSchema, coveringLicenses, EXPERIENCE_ACTIONS, lintExperience, productEntity } from "./access.js";
 import { runProductTests } from "./product-tests.js";
 import { COURT_LEVELS, findLicenses, LEGISLATIVE_KINDS, normalizeModel, PRODUCT_ACTIONS, summarizeModel, type Regulator } from "./regulatory.js";
@@ -963,6 +964,7 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
       if (errors.length) return { ...json({ error: "The composition can't be saved", errors }), isError: true };
       await store.setComposition(product_id, components, parties);
       await store.audit(user.id, "set_product_composition", product_id, { components: components.length, parties: parties.length });
+      await rederiveProduct(store, product_id);
       return json(await productRegime(store, { ...record, components, parties }));
     },
   );
@@ -1077,6 +1079,8 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
         await store.setPins(id, pins);
       }
       else await store.setPins(id, null);
+      // Its coverage and take rate as published (never stops the publish; a failure is stored as a note).
+      await rederiveProduct(store, id);
       await emitProductEvent(store, id, "product.version_published", { version: live.version });
       return json({
         ...live,
@@ -1098,6 +1102,7 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
       if (!record) return fail(`No product of yours with id '${id}'`);
       if (record.status !== "published") return fail("Product is not published");
       const unpublished = await store.setProductStatus(id, "unpublished");
+      await rederiveProduct(store, id);
       await emitProductEvent(store, id, "product.unpublished");
       return json(unpublished);
     },

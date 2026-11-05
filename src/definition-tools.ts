@@ -6,6 +6,7 @@ import { deriveContract } from "./contract.js";
 import { vendorServedActions } from "./vendors.js";
 import { checkDefinition, DEFINITION_SCHEMA_PATH, projectCatalogue, toV1Composition, type Definition } from "./definition.js";
 import { blockingComponents, productRegime } from "./regime.js";
+import { rederiveProduct } from "./derived.js";
 import { normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, User } from "./store.js";
 
@@ -101,6 +102,7 @@ export function registerDefinitionTools(server: McpServer, store: Store, user: U
         target = "product";
       }
       await store.audit(user.id, "set_product_definition", product_id, { components: v1.components.length, connections: def.connections?.length ?? 0, target });
+      await rederiveProduct(store, product_id);
       return json({ product_id, saved: true, catalogue_record: catalogue, applied_to: target, warnings: check.warnings, next: "test_product, then publish_product" });
     },
   );
