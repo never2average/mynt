@@ -174,8 +174,16 @@ test("the reference catalogue's seed definitions check, publish, and give each p
   // Only admins test and publish the reference catalogue: an innovator can't touch it.
   const { user: innovatorUser } = await store.createUser("Ines", ["innovator"]);
   const innovator = await w.connect(innovatorUser);
-  for (const tool of ["test_product", "publish_product"])
+  for (const tool of ["test_product", "publish_product", "unpublish_product"])
     assert.match((await call(innovator, tool, { id: "savings-account" })).data.error, /No product of yours/, tool);
+
+  // An admin can take a reference product out of the catalogue too (US-only launch), and back in.
+  const off = await call(admin, "unpublish_product", { id: "savings-account" });
+  assert.equal(off.isError, false, JSON.stringify(off.data));
+  assert.equal(off.data.status, "unpublished");
+  const readyAfter = (await ok(developer, "list_products", { developer_ready: true, limit: 100 })).products.map((p) => p.id);
+  assert.ok(!readyAfter.includes("savings-account"), readyAfter.join(", "));
+  assert.equal((await call(admin, "publish_product", { id: "savings-account" })).isError, false, "republished");
 });
 
 test("the catalogue cites the licensing regulator, in a documented order, never the first id alphabetically", async () => {

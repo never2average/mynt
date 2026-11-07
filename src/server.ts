@@ -1099,12 +1099,14 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     "unpublish_product",
     {
       title: "Unpublish a financial product",
-      description: "Innovator: remove one of your products from the catalog. Existing enrollments are kept; no new ones can be made.",
+      description:
+        "Innovator: remove one of your products from the catalog (admins: also Mynt's reference products). Existing enrollments are kept; no new ones can be made.",
       inputSchema: { id: z.string() },
       annotations: { destructiveHint: true },
     },
     async ({ id }) => {
-      const record = await ownProduct(id);
+      // The same rule as publishing: the owner, or an admin for a reference product with no owner.
+      const record = await publishableProduct(id);
       if (!record) return fail(`No product of yours with id '${id}'`);
       if (record.status !== "published") return fail("Product is not published");
       const unpublished = await store.setProductStatus(id, "unpublished");
