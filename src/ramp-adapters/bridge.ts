@@ -57,7 +57,7 @@ export const bridgeStatus = (state: unknown): RampTransferStatus | null => (type
 type BridgeTransfer = {
   id?: unknown;
   state?: unknown;
-  receipt?: { destination_tx_hash?: unknown; source_tx_hash?: unknown; final_amount?: unknown; final_amount_currency?: unknown; subtotal_amount?: unknown } | null;
+  receipt?: { destination_tx_hash?: unknown; source_tx_hash?: unknown; initial_amount?: unknown; final_amount?: unknown; final_amount_currency?: unknown; subtotal_amount?: unknown } | null;
   source_deposit_instructions?: Record<string, unknown> | null;
 };
 const str = (v: unknown) => (typeof v === "string" && v ? v : null);
@@ -87,12 +87,15 @@ function updateOf(t: BridgeTransfer, direction: RampDirection): RampTransferUpda
 }
 
 const AMOUNT_TEXT = /^[0-9]{1,12}(\.[0-9]{1,8})?$/;
-function receiptAmounts(t: BridgeTransfer, direction: RampDirection): { total_usd: string | null; settlement_amount: string | null } {
+const usd = (v: string | null) => (v && AMOUNT_TEXT.test(v) ? (Math.round(Number(v) * 100) / 100).toFixed(2) : null);
+// What Bridge's receipt says actually moved, never assumed. total_usd means what it means in the leg's quote: in,
+// the dollars added to the customer's balance (final_amount, the USDC delivered); out, what the customer is charged
+// (initial_amount, the USDC sent: amount plus fees). paid_out_usd is what reached the customer's bank (out only).
+function receiptAmounts(t: BridgeTransfer, direction: RampDirection): { total_usd: string | null; settlement_amount: string | null; paid_out_usd?: string | null } {
   const final = str(t.receipt?.final_amount);
-  if (!final || !AMOUNT_TEXT.test(final)) return { total_usd: null, settlement_amount: null };
-  const fixed = (Math.round(Number(final) * 100) / 100).toFixed(2);
-  // In, the destination is USDC the customer's dollar balance is credited with; out, it's the dollars paid.
-  return direction === "in" ? { total_usd: fixed, settlement_amount: final } : { total_usd: fixed, settlement_amount: null };
+  const initial = str(t.receipt?.initial_amount);
+  if (direction === "in") return { total_usd: usd(final), settlement_amount: final && AMOUNT_TEXT.test(final) ? final : null };
+  return { total_usd: usd(initial), settlement_amount: initial && AMOUNT_TEXT.test(initial) ? initial : null, paid_out_usd: usd(final) };
 }
 
 // Bridge's documented hosts and key prefix (apidocs.bridge.xyz: sandbox keys start sk-test).
@@ -239,6 +242,15 @@ export const bridgeAdapter: RampAdapter = {
     const name = str(c.full_name) ?? ([str(c.first_name), str(c.last_name)].filter(Boolean).join(" ") || null);
     const dob = str(c.birth_date);
     return { full_name: name, date_of_birth: dob && /^\d{4}-\d{2}-\d{2}/.test(dob) ? dob.slice(0, 10) : null };
+  },
+
+  // GET /v0/customers/{customerID}/external_accounts/{externalAccountID}: the payout account is this customer's.
+  async payoutAccountOf(ctx, customerId, accountId) {
+    const r = await ctx.http("GET", `/v0/customers/${encodeURIComponent(customerId)}/external_accounts/${encodeURIComponent(accountId)}`);
+    if (r.status === 404) return false;
+    if (r.status === null || r.status < 200 || r.status >= 300) return partnerError(r);
+    const a = (r.body ?? {}) as { id?: unknown; customer_id?: unknown; active?: unknown };
+    return a.id === accountId && (a.customer_id === undefined || a.customer_id === customerId) && a.active !== false;
   },
 
   environmentProblems(e) {

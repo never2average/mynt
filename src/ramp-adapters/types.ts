@@ -74,6 +74,7 @@ export interface RampTransferUpdate {
   // customer (in: added to the balance; out: paid to the bank), settlement_amount partner-side. Never assumed 1:1.
   total_usd?: string | null;
   settlement_amount?: string | null;
+  paid_out_usd?: string | null; // out: what reached the customer's bank, as the partner reports it
   partner_side?: Record<string, unknown>; // e.g. where the USDC leg is to be sent; kept by the adapter only
 }
 
@@ -106,6 +107,8 @@ export interface RampAdapter {
   cancel?(ctx: RampAdapterContext, partner_transfer_id: string): Promise<RampError | null>;
   // The identity the partner holds for one of its customers.
   customerIdentity(ctx: RampAdapterContext, partner_customer_id: string): Promise<RampPartnerIdentity | RampError>;
+  // Whether a payout bank account at the partner belongs to that partner customer (and is usable).
+  payoutAccountOf(ctx: RampAdapterContext, partner_customer_id: string, partner_payout_account_id: string): Promise<boolean | RampError>;
   // Whether each environment points at the partner's matching environment (sandbox URL and key for test, and the
   // other way round), as far as the partner documents it.
   environmentProblems(e: { test_base_url: string; live_base_url: string | null; test_credential?: string; live_credential?: string }): string[];

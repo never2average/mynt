@@ -1198,13 +1198,19 @@ const TABLES = `
     session_id uuid NOT NULL,
     product_id text NOT NULL,
     consent_purpose text NOT NULL,
-    status text NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'linked', 'refused')),
+    status text NOT NULL DEFAULT 'requested',
     refusal text,
     created_at timestamptz NOT NULL DEFAULT now(),
     decided_at timestamptz
   );
   ALTER TABLE financial_products.ramp_partner_links ADD COLUMN IF NOT EXISTS link_request_id uuid;
   ALTER TABLE financial_products.ramp_partner_links ADD COLUMN IF NOT EXISTS identity_verified_at timestamptz;
+  ALTER TABLE financial_products.ramp_link_requests DROP CONSTRAINT IF EXISTS ramp_link_requests_status_check;
+  ALTER TABLE financial_products.ramp_link_requests ADD CONSTRAINT ramp_link_requests_status_check CHECK (status IN ('requested', 'linked', 'refused', 'expired'));
+  CREATE INDEX IF NOT EXISTS ramp_link_requests_session_idx ON financial_products.ramp_link_requests (session_id, created_at);
+  CREATE INDEX IF NOT EXISTS ramp_link_requests_customer_idx ON financial_products.ramp_link_requests (app_id, customer_ref, created_at);
+  -- One partner customer is linked, verified, to one Mynt customer at most.
+  CREATE UNIQUE INDEX IF NOT EXISTS ramp_partner_links_one_customer_idx ON financial_products.ramp_partner_links (entity_id, environment, partner_customer_id) WHERE identity_verified_at IS NOT NULL;
   CREATE INDEX IF NOT EXISTS ramp_adapter_transfers_open_idx ON financial_products.ramp_adapter_transfers (updated_at) WHERE status = 'submitted';
   -- Evidence of a vendor-served action's end (status only, never the result).
   ALTER TABLE financial_products.client_evidence DROP CONSTRAINT IF EXISTS client_evidence_type_check;

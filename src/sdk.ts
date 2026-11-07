@@ -288,7 +288,7 @@ export function openApiDocument(name: string, version: string, baseUrl: string, 
                   schema: {
                     type: "object",
                     required: ["link_reference", "status"],
-                    properties: { link_reference: { type: "string" }, status: { type: "string", enum: ["requested"] }, consent_purpose: { type: "string" }, sandbox: { type: "boolean" } },
+                    properties: { link_reference: { type: "string" }, status: { type: "string", enum: ["requested"] }, consent_purpose: { type: "string" }, expires_at: { type: "string" }, sandbox: { type: "boolean" } },
                   },
                 },
               },

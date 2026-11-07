@@ -1252,7 +1252,9 @@ export async function lateVendorSettlement(store: Store, at: { subscription_id: 
   const run = rows[0] as (RunRow & { status: string }) | undefined;
   if (!run) return false;
   const sealed = seal(JSON.stringify(output), run.sandbox, true);
-  await store.db.query(`UPDATE ${T}.vendor_action_runs SET late_result_sealed = $2 WHERE id = $1`, [run.id, sealed]);
+  // Once per run: a retried webhook or a later poll finds it recorded and tells no one twice.
+  const { rows: first } = await store.db.query(`UPDATE ${T}.vendor_action_runs SET late_result_sealed = $2 WHERE id = $1 AND late_result_sealed IS NULL RETURNING id`, [run.id, sealed]);
+  if (!first.length) return true;
   await emitFirmEvent(
     store,
     run.entity_id,

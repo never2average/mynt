@@ -226,17 +226,21 @@ export async function serveRampAdapter(
 }
 
 // A transfer update as the service type's output: dollars for the customer, the rest partner-side.
-const outputOf = (u: RampTransferUpdate, direction: RampDirection, extra: { pay_to_void?: boolean } = {}) => ({
+// pay_to_status: active while the customer may pay into the account; void once the partner confirmed it voided the
+// transfer; unknown when Mynt ended it without that confirmation (late money is still recorded).
+type PayToStatus = "active" | "void" | "unknown";
+const outputOf = (u: RampTransferUpdate, direction: RampDirection, extra: { pay_to_status?: PayToStatus } = {}) => ({
   transfer_status: u.status,
   estimated_arrival: u.estimated_arrival,
   total_usd: u.total_usd ?? null,
+  ...(direction === "out" ? { paid_out_usd: u.paid_out_usd ?? null } : {}),
   ...(direction === "in"
     ? {
         pay_to_bank_name: u.pay_to?.bank_name ?? null,
         pay_to_account_number: u.pay_to?.account_number ?? null,
         pay_to_routing_number: u.pay_to?.routing_number ?? null,
         pay_to_reference: u.pay_to?.reference ?? null,
-        pay_to_void: extra.pay_to_void ?? null,
+        pay_to_status: extra.pay_to_status ?? (u.pay_to && Object.values(u.pay_to).some(Boolean) ? (u.status === "submitted" ? "active" : null) : null),
       }
     : {}),
   settlement_ref: u.settlement_ref,
@@ -281,26 +285,41 @@ async function applyUpdate(store: Store, offeringId: string, environment: "test"
   switch (r.status) {
     case "submitted": {
       if (u.status === "submitted") return "open";
-      if (!(await setRow(store, r, u.status, "submitted"))) return "ignored";
+      // End the run first, and only then move the row: if ending it throws, the row is still submitted, so the
+      // partner's retry (or the poller) ends it again; the 24-hour sweep never touches a submitted row.
       const before = await runStatus(store, r);
       if (before === "calling" || before === "pending") await callbackRun(store, r, output);
       // Settled, but the run ended without completing (its consent withdrawn, or swept): the money still moved.
       if (u.status === "settled" && (await runStatus(store, r)) !== "completed") {
-        await setRow(store, r, "settled_late", "settled");
         await lateVendorSettlement(store, at, output);
+        await setRow(store, r, "settled_late", "submitted");
         return "late";
       }
-      return "finished";
+      return (await setRow(store, r, u.status, "submitted")) ? "finished" : "ignored";
     }
     case "expired":
     case "closed":
       if (u.status === "settled") {
-        if (!(await setRow(store, r, "settled_late", r.status))) return "ignored";
         await lateVendorSettlement(store, at, output);
-        return "late";
+        return (await setRow(store, r, "settled_late", r.status)) ? "late" : "ignored";
       }
       return "ignored";
-    case "settled":
+    case "settled": {
+      if (u.status === "returned") {
+        if (!(await setRow(store, r, "reversed", r.status))) return "ignored";
+        await reverseVendorRun(store, at, output);
+        return "reversed";
+      }
+      if (u.status !== "settled") return "ignored";
+      // The row says settled but the run didn't complete (an earlier attempt stopped part-way): finish it now, or,
+      // if the run already ended another way, record the money as a late settlement. Both are idempotent.
+      const rs = await runStatus(store, r);
+      if (rs === "calling" || rs === "pending") await callbackRun(store, r, output);
+      const now = await runStatus(store, r);
+      if (now === "completed" || now === "reversed") return rs === now ? "ignored" : "finished";
+      await lateVendorSettlement(store, at, output);
+      return (await setRow(store, r, "settled_late", "settled")) ? "late" : "ignored";
+    }
     case "settled_late":
       if (u.status === "returned") {
         if (!(await setRow(store, r, "reversed", r.status))) return "ignored";
@@ -371,8 +390,8 @@ const HARD_STOP_BUSINESS_DAYS = 30;
 // Reads back adapter transfers (a missed or delayed webhook): open ones every `olderThanSeconds`, ended ones (for a
 // reversal or a late settlement) every `finalOlderThanSeconds` for 45 days. Each row is claimed with SKIP LOCKED and
 // its updated_at bumped first, so overlapping ticks never take the same row and a failing partner is backed off.
-// An open transfer past its window is voided at the partner (when it can be) and its run ends as failed, telling
-// the customer the payment instructions are void.
+// An open transfer past its window is voided at the partner (when it can be) and its run ends as failed:
+// pay_to_status is void when the partner confirmed the void, unknown otherwise (late money is still recorded).
 export async function pollRampAdapterTransfers(
   store: Store,
   opts: VendorCallOptions = {},
@@ -423,7 +442,7 @@ export async function pollRampAdapterTransfers(
     // The partner wouldn't void it (its money may be moving): keep waiting, up to the hard stop.
     if (!voided && !hardStop && !("error" in c) && c.adapter.cancel) continue;
     if (!(await setRow(store, r, "expired", "submitted"))) continue;
-    await callbackRun(store, r, outputOf({ partner_transfer_id: r.partner_transfer_id, status: "failed", estimated_arrival: null, settlement_ref: r.partner_transfer_id, settlement_tx: null }, r.direction, { pay_to_void: true }));
+    await callbackRun(store, r, outputOf({ partner_transfer_id: r.partner_transfer_id, status: "failed", estimated_arrival: null, settlement_ref: r.partner_transfer_id, settlement_tx: null }, r.direction, { pay_to_status: voided ? "void" : "unknown" }));
     n++;
   }
   return n;
@@ -431,14 +450,35 @@ export async function pollRampAdapterTransfers(
 
 // ---- linking a customer to the ramp partner, started by the customer's own session ----
 
-const normName = (s: string | null | undefined) =>
+// A name compared across scripts: Unicode-decomposed (NFKD), marks removed, letters only (any script), case-folded,
+// spaces collapsed. Empty when nothing of it is a letter.
+export const normName = (s: string | null | undefined) =>
   (s ?? "")
     .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z ]+/g, " ")
+    .replace(/\p{M}+/gu, "")
+    .toLocaleLowerCase("und")
+    .replace(/[^\p{L}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+// Why the partner's identity isn't the customer's, or null when it is. Names must both be there and match; in
+// live, dates of birth must too (in test, they're compared when both have one).
+export function identityProblem(held: { full_name?: string; date_of_birth?: string }, partner: { full_name: string | null; date_of_birth: string | null }, environment: "test" | "live"): string | null {
+  const a = normName(held.full_name);
+  const b = normName(partner.full_name);
+  if (!a || !b) return "The customer's name, or the partner's, has no letters to compare";
+  if (a !== b) return "The partner's customer isn't the customer who asked: their names don't match";
+  const ha = held.date_of_birth?.slice(0, 10) || null;
+  const pb = partner.date_of_birth || null;
+  if (environment === "live" && (!ha || !pb)) return "In live, both the customer and the partner must have a date of birth to compare";
+  if (ha && pb && ha !== pb) return "The partner's customer isn't the customer who asked: their dates of birth don't match";
+  return null;
+}
+
+// How many link requests a session, and a customer, may make; and how long a request waits for the ramp firm.
+const LINKS_PER_SESSION_HOUR = 5;
+const LINKS_PER_CUSTOMER_DAY = 10;
+const linkExpiryHours = () => Number(process.env.RAMP_LINK_EXPIRY_HOURS) || 7 * 24;
 
 // POST /v1/client/ramp_links (runtime API): a customer, in their own session, with the ramp's consent given there,
 // asks to be linked to the ramp partner. The ramp firm is told only the request's id (ramp_link.requested); it
@@ -446,7 +486,7 @@ const normName = (s: string | null | undefined) =>
 export async function requestRampLink(
   store: Store,
   a: { app_id: string; customer_ref: string; sandbox: boolean; session_id: string; product_id: string; vendor_subscription_ids: string[]; consented: (purpose: string) => Promise<boolean> },
-): Promise<{ error: { status: number; code: string; message: string } } | { link_reference: string; status: "requested"; consent_purpose: string }> {
+): Promise<{ error: { status: number; code: string; message: string } } | { link_reference: string; status: "requested"; consent_purpose: string; expires_at: string }> {
   const bad = (status: number, code: string, message: string) => ({ error: { status, code, message } });
   const ramp = await myntRampEntity(store);
   if (!ramp) return bad(409, "ramp_not_available", "This product's ramp isn't available");
@@ -463,13 +503,21 @@ export async function requestRampLink(
   let purpose: string | undefined;
   for (const p of [...new Set(purposes)].sort()) if (await a.consented(p)) purpose = p;
   if (!purpose) return bad(409, "consent_required", `Record consent '${[...new Set(purposes)].sort().join("' or '")}' (POST /v1/client/evidence) first`);
+  const { rows: counts } = await store.db.query(
+    `SELECT count(*) FILTER (WHERE session_id = $1 AND created_at > now() - interval '1 hour')::int AS session,
+            count(*) FILTER (WHERE app_id = $2 AND customer_ref = $3 AND sandbox = $4 AND created_at > now() - interval '1 day')::int AS customer
+     FROM ${T}.ramp_link_requests WHERE (session_id = $1 OR (app_id = $2 AND customer_ref = $3)) AND created_at > now() - interval '1 day'`,
+    [a.session_id, a.app_id, a.customer_ref, a.sandbox],
+  );
+  if (Number(counts[0]?.session ?? 0) >= LINKS_PER_SESSION_HOUR || Number(counts[0]?.customer ?? 0) >= LINKS_PER_CUSTOMER_DAY)
+    return bad(429, "rate_limited", "Too many link requests for this customer; try again later");
   const id = randomUUID();
   await store.db.query(
     `INSERT INTO ${T}.ramp_link_requests (id, entity_id, app_id, customer_ref, sandbox, session_id, product_id, consent_purpose) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [id, ramp, a.app_id, a.customer_ref, a.sandbox, a.session_id, a.product_id, purpose],
   );
   await emitFirmEvent(store, ramp, "ramp_link.requested", { link_reference: id, environment: a.sandbox ? "test" : "live", product_id: a.product_id }, a.sandbox);
-  return { link_reference: id, status: "requested", consent_purpose: purpose };
+  return { link_reference: id, status: "requested", consent_purpose: purpose, expires_at: new Date(Date.now() + linkExpiryHours() * 3600_000).toISOString() };
 }
 
 // ---- tools: the ramp firm (or an admin) plugs its partner in ----
@@ -582,13 +630,18 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
       const firm = await rampFirm();
       if (typeof firm !== "string") return fail(firm.error);
       const { rows } = await store.db.query(`SELECT * FROM ${T}.ramp_link_requests WHERE id = $1 AND entity_id = $2`, [link_reference, firm]);
-      const req = rows[0] as { id: string; app_id: string; customer_ref: string; sandbox: boolean; status: string } | undefined;
+      const req = rows[0] as { id: string; app_id: string; customer_ref: string; sandbox: boolean; status: string; created_at: string | Date } | undefined;
       if (!req) return fail(`No link request '${link_reference}' for the Mynt Ramp`);
       if (req.status !== "requested") return fail(`This link request is already ${req.status}`);
+      if (Date.now() - new Date(req.created_at).getTime() > linkExpiryHours() * 3600_000) {
+        await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'expired', decided_at = now() WHERE id = $1 AND status = 'requested'`, [req.id]);
+        return fail("This link request has expired; the customer asks again from their app", { refusal: "expired" });
+      }
       const environment = req.sandbox ? "test" : "live";
       // Any of the ramp firm's adapter offerings reaches the partner for this environment.
       const { rows: offs } = await store.db.query(`SELECT id FROM ${T}.vendor_offerings WHERE entity_id = $1 AND adapter IS NOT NULL AND status <> 'suspended' ORDER BY created_at`, [firm]);
       let identity: { full_name: string | null; date_of_birth: string | null } | null = null;
+      let payoutOk: boolean | null = partner_payout_account_id ? false : null;
       for (const { id } of offs) {
         const o = await getOffering(store.db, id as string);
         const row = o && (await adapterRow(store, o.id));
@@ -598,6 +651,12 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
         const got = await c.adapter.customerIdentity(c.ctx, partner_customer_id);
         if (isRampError(got)) return fail(`The ramp partner couldn't confirm that customer (${got.error.code})`);
         identity = got;
+        // The payout account must be this partner customer's own.
+        if (partner_payout_account_id) {
+          const owns = await c.adapter.payoutAccountOf(c.ctx, partner_customer_id, partner_payout_account_id);
+          if (isRampError(owns)) return fail(`The ramp partner couldn't confirm that payout account (${owns.error.code})`);
+          payoutOk = owns;
+        }
         break;
       }
       if (!identity) return fail(`No adapter offering of the Mynt Ramp reaches the partner's ${environment} environment`);
@@ -605,23 +664,36 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
         (await store.vaultFields(req.app_id, req.customer_ref, req.sandbox)).filter((h) => h.field === "full_name" || h.field === "date_of_birth").map((h) => [h.field, open(h.sealed, req.sandbox)]),
       );
       const refuse = async (why: string, message: string) => {
-        await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'refused', refusal = $2, decided_at = now() WHERE id = $1`, [req.id, why]);
+        await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'refused', refusal = $2, decided_at = now() WHERE id = $1 AND status = 'requested'`, [req.id, why]);
         await audit("link_ramp_partner_customer", req.id, { environment, linked: false, refusal: why });
         return fail(message, { refusal: why });
       };
-      if (!held.full_name || !identity.full_name || normName(held.full_name) !== normName(identity.full_name))
-        return refuse("identity_mismatch", "The partner's customer isn't the customer who asked: their names don't match");
-      if (held.date_of_birth && identity.date_of_birth && held.date_of_birth.slice(0, 10) !== identity.date_of_birth)
-        return refuse("identity_mismatch", "The partner's customer isn't the customer who asked: their dates of birth don't match");
+      const mismatch = identityProblem(held, identity, environment);
+      if (mismatch) return refuse("identity_mismatch", mismatch);
+      if (payoutOk === false) return refuse("payout_account_mismatch", "That payout account isn't the partner customer's own");
       const key = rampCustomerKey(req.app_id, req.customer_ref);
-      await store.db.query(
-        `INSERT INTO ${T}.ramp_partner_links (entity_id, environment, customer_key, partner_customer_id, partner_payout_account_id, link_request_id, identity_verified_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
-         ON CONFLICT (entity_id, environment, customer_key) DO UPDATE SET partner_customer_id = EXCLUDED.partner_customer_id,
-           partner_payout_account_id = EXCLUDED.partner_payout_account_id, link_request_id = EXCLUDED.link_request_id, identity_verified_at = now(), updated_at = now()`,
-        [firm, environment, key, partner_customer_id, partner_payout_account_id ?? null, req.id],
+      // One partner customer is one Mynt customer.
+      const { rows: taken } = await store.db.query(
+        `SELECT 1 FROM ${T}.ramp_partner_links WHERE entity_id = $1 AND environment = $2 AND partner_customer_id = $3 AND customer_key <> $4 AND identity_verified_at IS NOT NULL`,
+        [firm, environment, partner_customer_id, key],
       );
-      await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'linked', decided_at = now() WHERE id = $1`, [req.id]);
+      if (taken.length) return refuse("partner_customer_already_linked", "That partner customer is already linked to another customer");
+      // Claim the request: of two completions at once, exactly one goes through.
+      const { rows: claimed } = await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'linked', decided_at = now() WHERE id = $1 AND status = 'requested' RETURNING id`, [req.id]);
+      if (!claimed.length) return fail("This link request was decided by another call just now");
+      try {
+        await store.db.query(
+          `INSERT INTO ${T}.ramp_partner_links (entity_id, environment, customer_key, partner_customer_id, partner_payout_account_id, link_request_id, identity_verified_at)
+           VALUES ($1, $2, $3, $4, $5, $6, now())
+           ON CONFLICT (entity_id, environment, customer_key) DO UPDATE SET partner_customer_id = EXCLUDED.partner_customer_id,
+             partner_payout_account_id = EXCLUDED.partner_payout_account_id, link_request_id = EXCLUDED.link_request_id, identity_verified_at = now(), updated_at = now()`,
+          [firm, environment, key, partner_customer_id, partner_payout_account_id ?? null, req.id],
+        );
+      } catch {
+        // The unique index caught a race on the same partner customer.
+        await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'refused', refusal = 'partner_customer_already_linked' WHERE id = $1`, [req.id]);
+        return fail("That partner customer is already linked to another customer", { refusal: "partner_customer_already_linked" });
+      }
       await audit("link_ramp_partner_customer", req.id, { environment, linked: true, payout_account: !!partner_payout_account_id });
       return json({ link_reference: req.id, environment, linked: true, identity: "verified", payout_account: !!partner_payout_account_id });
     },

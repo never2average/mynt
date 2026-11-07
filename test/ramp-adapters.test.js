@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpHttpServer } from "../dist/http.js";
 import { sweepVendorActionRuns } from "../dist/vendors.js";
-import { pendingDeadline, pollRampAdapterTransfers } from "../dist/ramp-adapters/index.js";
+import { identityProblem, normName, pendingDeadline, pollRampAdapterTransfers } from "../dist/ramp-adapters/index.js";
 import { bridgeAdapter, bridgeStatus } from "../dist/ramp-adapters/bridge.js";
 import { createServer } from "../dist/server.js";
 import { generateSdk } from "../dist/sdk.js";
@@ -40,6 +40,7 @@ async function fakeBridge() {
     transfers: new Map(),
     byIdempotency: new Map(),
     n: 0,
+    accounts: { cust_bridge_1: ["ea_bridge_1"], cust_other: ["ea_other"] },
     customers: { cust_bridge_1: { id: "cust_bridge_1", first_name: "Avery", last_name: "Stone" }, cust_other: { id: "cust_other", first_name: "Blake", last_name: "Doe" } },
   };
   const url = await listen(async (req, res) => {
@@ -81,6 +82,9 @@ async function fakeBridge() {
       state.byIdempotency.set(key, id);
       return reply(201, t);
     }
+    const acct = /^\/v0\/customers\/([a-z0-9_]+)\/external_accounts\/([a-z0-9_]+)$/.exec(req.url);
+    if (req.method === "GET" && acct)
+      return (state.accounts[acct[1]] ?? []).includes(acct[2]) ? reply(200, { id: acct[2], customer_id: acct[1], active: true, last_4: "6789" }) : reply(404, { code: "resource_not_found", message: "no" });
     const cust = /^\/v0\/customers\/([a-z0-9_]+)$/.exec(req.url);
     if (req.method === "GET" && cust) return state.customers[cust[1]] ? reply(200, state.customers[cust[1]]) : reply(404, { code: "resource_not_found", message: "no" });
     const one = /^\/v0\/transfers\/([a-z0-9_]+)$/.exec(req.url);
@@ -114,6 +118,20 @@ test("Bridge's sandbox and production stay apart, and pending windows count busi
   // Friday + 1 business day is Monday; + 7 is the Tuesday after next.
   assert.equal(pendingDeadline(new Date("2026-11-06T12:00:00Z"), 1).toISOString().slice(0, 10), "2026-11-09");
   assert.equal(pendingDeadline(new Date("2026-11-06T12:00:00Z"), 7).toISOString().slice(0, 10), "2026-11-17");
+});
+
+test("a link's identity check: names in any script, never empty, and dates of birth in live", () => {
+  assert.equal(normName("  José  NÚÑEZ "), "jose nunez");
+  assert.equal(normName("王小明"), "王小明");
+  assert.equal(normName("!!! 123"), "");
+  assert.equal(identityProblem({ full_name: "José Núñez" }, { full_name: "jose nunez", date_of_birth: null }, "test"), null);
+  assert.match(identityProblem({ full_name: "王小明" }, { full_name: "李四", date_of_birth: null }, "test"), /names don't match/, "non-Latin names are compared, not stripped to nothing");
+  assert.match(identityProblem({ full_name: "王小明" }, { full_name: "", date_of_birth: null }, "test"), /no letters/);
+  assert.match(identityProblem({ full_name: "123" }, { full_name: "456", date_of_birth: null }, "test"), /no letters/, "two empty names never match");
+  assert.equal(identityProblem({ full_name: "王小明" }, { full_name: "王小明", date_of_birth: null }, "test"), null);
+  assert.match(identityProblem({ full_name: "Avery Stone" }, { full_name: "Avery Stone", date_of_birth: null }, "live"), /date of birth/, "live needs both dates of birth");
+  assert.match(identityProblem({ full_name: "Avery Stone", date_of_birth: "1990-01-02" }, { full_name: "Avery Stone", date_of_birth: "1990-01-03" }, "live"), /dates of birth don't match/);
+  assert.equal(identityProblem({ full_name: "Avery Stone", date_of_birth: "1990-01-02" }, { full_name: "Avery Stone", date_of_birth: "1990-01-02" }, "live"), null);
 });
 
 test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, accept, webhooks and status, dollars only", async () => {
@@ -314,19 +332,41 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.equal(wrong.data.refusal, "identity_mismatch");
   assert.equal((await call(partner, "link_ramp_partner_customer", { link_reference: firstAsk, partner_customer_id: "cust_bridge_1" })).isError, true);
   assert.equal((await start("onramp_transfer", { quote: q1.body.reference })).status, 502, "no transfer on an unverified link");
+  // A payout account that isn't that partner customer's own is refused.
+  const notTheirs = await call(partner, "link_ramp_partner_customer", { link_reference: await ask(), partner_customer_id: "cust_bridge_1", partner_payout_account_id: "ea_other" });
+  assert.equal(notTheirs.data.refusal, "payout_account_mismatch", JSON.stringify(notTheirs.data));
   const linked = await ok(partner, "link_ramp_partner_customer", { link_reference: await ask(), partner_customer_id: "cust_bridge_1", partner_payout_account_id: "ea_bridge_1" });
   assert.equal(linked.identity, "verified");
   assert.ok(!JSON.stringify(linked).includes("cust_b1"), "the ramp firm never sees the customer reference");
   const links = (await store.db.query("SELECT customer_key, identity_verified_at FROM financial_products.ramp_partner_links")).rows;
   assert.ok(links.length === 1 && !links[0].customer_key.includes("cust_b1") && links[0].identity_verified_at, "filed under a pseudonymous key, verified");
+  // Two completions of one request at once: exactly one goes through.
+  const race = await ask();
+  const both = await Promise.all([0, 1].map(() => call(partner, "link_ramp_partner_customer", { link_reference: race, partner_customer_id: "cust_bridge_1", partner_payout_account_id: "ea_bridge_1" })));
+  assert.deepEqual(both.map((r) => r.isError).sort(), [false, true]);
+  // A request the ramp firm leaves too long expires.
+  const stale = await ask();
+  await store.db.query("UPDATE financial_products.ramp_link_requests SET created_at = now() - interval '8 days' WHERE id = $1", [stale]);
+  assert.equal((await call(partner, "link_ramp_partner_customer", { link_reference: stale, partner_customer_id: "cust_bridge_1" })).data.refusal, "expired");
+  // Five requests an hour per session (the stale one, moved back 8 days, no longer counts).
+  await ask();
+  const limited = await api("POST", "/v1/client/ramp_links", device, { product_id: P });
+  assert.equal(limited.status, 429, limited.text);
+  // One partner customer is one Mynt customer: another customer can't be linked to cust_bridge_1.
+  const os = otherSess.body.client_secret;
+  assert.equal((await api("POST", "/v1/client/evidence", os, { product_id: P, type: "consent_given", subject: "fiat_onramp" })).status, 201);
+  assert.equal((await api("POST", "/v1/client/fields", os, { product_id: P, values: { full_name: NAME } })).status, 201);
+  const otherAsk = await api("POST", "/v1/client/ramp_links", os, { product_id: P });
+  assert.equal(otherAsk.status, 201, otherAsk.text);
+  assert.equal((await call(partner, "link_ramp_partner_customer", { link_reference: otherAsk.body.link_reference, partner_customer_id: "cust_bridge_1" })).data.refusal, "partner_customer_already_linked");
 
   // ---- add dollars: the customer pushes $100 to the deposit account; the USDC goes to the ramp's address ----
   const t1 = await start("onramp_transfer", { quote: q1.body.reference });
   assert.equal(t1.status, 201, t1.text);
   assert.equal(t1.body.status, "pending");
   assert.deepEqual(
-    [t1.body.transfer_status, t1.body.pay_to_bank_name, t1.body.pay_to_account_number, t1.body.pay_to_routing_number, t1.body.pay_to_reference],
-    ["submitted", "Lead Bank", "215268129123", "101019644", "BRGDEPOSIT7Q2"],
+    [t1.body.transfer_status, t1.body.pay_to_bank_name, t1.body.pay_to_account_number, t1.body.pay_to_routing_number, t1.body.pay_to_reference, t1.body.pay_to_status],
+    ["submitted", "Lead Bank", "215268129123", "101019644", "BRGDEPOSIT7Q2", "active"],
   );
   const post1 = bridge.state.calls.filter((c) => c.method === "POST" && c.path === "/v0/transfers");
   assert.equal(post1.length, 1);
@@ -436,11 +476,12 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   await pollRampAdapterTransfers(store, VENDOR_OPTS, { olderThanSeconds: 0, now: days(12) });
   assert.ok(bridge.state.calls.some((c) => c.method === "DELETE" && c.path === "/v0/transfers/tr_5"));
   const void5 = await run(t5.body.reference);
-  assert.deepEqual([void5.body.status, void5.body.transfer_status, void5.body.pay_to_void], ["failed", "failed", true]);
+  assert.deepEqual([void5.body.status, void5.body.transfer_status, void5.body.pay_to_status], ["failed", "failed", "void"], "void only because Bridge confirmed it");
   // tr_4 had its money arrive (funds_received): Bridge won't cancel it, so it keeps waiting, up to the hard stop.
   assert.equal((await run(t4.body.reference)).body.status, "pending");
   await pollRampAdapterTransfers(store, VENDOR_OPTS, { olderThanSeconds: 0, now: days(60) });
-  assert.equal((await run(t4.body.reference)).body.status, "failed");
+  const stop4 = await run(t4.body.reference);
+  assert.deepEqual([stop4.body.status, stop4.body.pay_to_status], ["failed", "unknown"], "Bridge never confirmed a void: unknown, not void");
   // Then the money lands anyway: recorded, and the innovator is told to handle it; never dropped.
   const tr4 = bridge.state.transfers.get("tr_4");
   tr4.state = "payment_processed";
@@ -450,6 +491,36 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.ok(late.late_result_sealed, "the late result is kept, sealed");
   assert.equal((await store.db.query("SELECT status FROM financial_products.ramp_adapter_transfers WHERE partner_transfer_id = 'tr_4'")).rows[0].status, "settled_late");
   assert.equal((await run(t4.body.reference)).body.status, "failed", "the device's answer doesn't change");
+
+  // ---- cash-out amounts: total_usd is what the customer is charged, paid_out_usd what reached their bank ----
+  const q6 = await start("offramp_quote", { params: { direction: "out", amount_usd: "250.00" } });
+  const t6 = await start("offramp_transfer", { quote: q6.body.reference });
+  const tr6 = bridge.state.transfers.get(`tr_${bridge.state.n}`);
+  Object.assign(tr6, { state: "payment_processed", receipt: { ...tr6.receipt, initial_amount: "251.25", final_amount: "249.90" } });
+  assert.equal((await hook(offerings.offramp_transfer, tr6)).status, 200);
+  const done6 = await run(t6.body.reference);
+  assert.deepEqual([done6.body.status, done6.body.total_usd, done6.body.paid_out_usd], ["completed", "251.25", "249.90"]);
+
+  // ---- a row left settled while its run never ended (an attempt stopped part-way) is finished, not ignored ----
+  const q7 = await start("onramp_quote", { params: { direction: "in", amount_usd: "43.00" } });
+  const t7 = await start("onramp_transfer", { quote: q7.body.reference });
+  const tr7 = bridge.state.transfers.get(`tr_${bridge.state.n}`);
+  await store.db.query("UPDATE financial_products.ramp_adapter_transfers SET status = 'settled' WHERE partner_transfer_id = $1", [tr7.id]);
+  tr7.state = "payment_processed";
+  assert.equal((await hook(offerings.onramp_transfer, tr7)).status, 200);
+  assert.equal((await run(t7.body.reference)).body.status, "completed");
+  // ... and one whose run already ended another way becomes a late settlement, once.
+  const q8 = await start("onramp_quote", { params: { direction: "in", amount_usd: "44.00" } });
+  const t8 = await start("onramp_transfer", { quote: q8.body.reference });
+  const tr8 = bridge.state.transfers.get(`tr_${bridge.state.n}`);
+  await store.db.query("UPDATE financial_products.ramp_adapter_transfers SET status = 'settled' WHERE partner_transfer_id = $1", [tr8.id]);
+  await store.db.query("UPDATE financial_products.vendor_action_runs SET status = 'expired' WHERE id = $1", [t8.body.reference]);
+  tr8.state = "payment_processed";
+  const lateBefore = (await queued()).filter((t) => t === "vendor_action.late_settlement").length;
+  assert.equal((await hook(offerings.onramp_transfer, tr8)).status, 200);
+  assert.equal((await hook(offerings.onramp_transfer, tr8)).status, 200);
+  assert.equal((await queued()).filter((t) => t === "vendor_action.late_settlement").length, lateBefore + 1, "told once");
+  assert.ok((await store.db.query("SELECT late_result_sealed FROM financial_products.vendor_action_runs WHERE id = $1", [t8.body.reference])).rows[0].late_result_sealed);
 
   // ---- dollars only, and the credential nowhere ----
   // The SDK a developer generates for this product: its actions, types and docs carry no crypto concept.
