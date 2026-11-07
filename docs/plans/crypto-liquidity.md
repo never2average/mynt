@@ -3,10 +3,14 @@
 **Status:** decided: the Mynt Ramp, operated by a licensed partner (model R1). The ramp's platform side is built (section 3.2); the partner and the rest are not.
 **Reads with:** [`docs/architecture.md`](../architecture.md).
 **Scope:** the United States only. Other countries are out of scope for this plan.
+**Scope (decided 2026-11-07): USDC only, for now.** Every digital-asset product on Mynt is USDC-based: no other tokens, no crypto trading, no tokenised funds, no third-party bridges. The ramp converts US dollars to and from USDC only, and Circle's CCTP (USDC-only on Solana) covers every cross-chain need (section 3.3). Items below that need anything else are kept, marked "out of scope while Mynt is USDC-only".
+**Scope (decided 2026-11-07): developers' customers never see or touch crypto.** No wallets, tokens, chain addresses or "USDC" in any app screen, device SDK result or customer-facing copy: customers see US dollars only. USDC is at most an invisible back-end settlement rail, held by a licensed custodial partner (the Mynt Ramp partner, model R1). Route D (the customer's own wallet signs) is rejected.
 
 ## 1. What we want
 
 Developers on Mynt should be able to build apps where a customer can buy, sell, hold, send and borrow against digital assets (crypto, stablecoins and tokenised real-world assets) at **real market prices with real depth**, not a simulated order book. Innovators should be able to compose products that use that liquidity: a stablecoin remittance, a tokenised T-bill savings pot, a loan secured by crypto.
+
+While Mynt is USDC-only (see Scope), what's in scope is dollar products that settle over USDC behind the scenes, through the licensed ramp partner; the customer sees dollars. Crypto buying and holding, tokenised funds and crypto-backed loans are out of scope while Mynt is USDC-only.
 
 ## 2. The constraints this plan keeps
 
@@ -24,11 +28,11 @@ These come from how Mynt is already built and from `AGENTS.md`. The plan is shap
 | Route | How it works | Fits Mynt? |
 |---|---|---|
 | **A. A licensed exchange or broker as the provider** | The innovator *is* (or partners with) a registered virtual-asset service provider. Its product's `exchange` component hands the customer to that provider's hosted flow. | **Yes, works today** with hand-offs. Weak developer experience: no quotes or status inside the app. |
-| **B. Liquidity as a vendor standard service** | Admins define US service types (quote, execute, on-ramp, off-ramp, custody balance, address screening, Travel Rule). Licensed liquidity providers implement them; innovators subscribe and bind handoffs to them; Mynt calls them signed and tested. | **Yes, the main route.** Reuses the vendor rails (`src/vendors.ts`) and their safety, adds what trading needs. |
+| **B. Liquidity as a vendor standard service** | Admins define US service types (quote, execute, on-ramp, off-ramp, custody balance, address screening, Travel Rule). Licensed liquidity providers implement them; innovators subscribe and bind handoffs to them; Mynt calls them signed and tested. | **Yes, the main route** for the ramp and its USD↔USDC conversion. Reuses the vendor rails (`src/vendors.ts`) and their safety. General liquidity providers and trading (quote, execute on other assets) are out of scope while Mynt is USDC-only. |
 | **C. Mynt routes orders on-chain itself** (DEX aggregation, its own wallets) | Mynt signs transactions or holds hot wallets. | **No.** Mynt would be the executing and custodial party, which breaks constraint 1 and would itself need licences. |
-| **D. Non-custodial: the customer's own wallet signs** | The provider builds an unsigned transaction or a swap quote; the customer's wallet signs on the device. | **Later, as a variant of B.** Needs wallet-signing support in the device SDKs and a regulatory view per region on unhosted wallets. |
+| **D. Non-custodial: the customer's own wallet signs** | The provider builds an unsigned transaction or a swap quote; the customer's wallet signs on the device. | **Rejected (2026-11-07).** Customers never see or touch crypto, so there is no customer wallet to sign with. |
 
-**Recommendation:** ship **B**, keep **A** working as the fallback, and treat **D** as a later phase. Real depth comes from whichever licensed providers pass conformance: exchanges' brokerage or OTC desks, prime brokers, and regulated stablecoin issuers' mint and redeem. **Fiat in and out goes through one dedicated Mynt Ramp** (section 3.1), so every product and every liquidity provider shares the same on- and off-ramp.
+**Recommendation:** ship **B**, keep **A** working as the fallback. **D** is rejected. Real depth comes from whichever licensed providers pass conformance: exchanges' brokerage or OTC desks, prime brokers, and regulated stablecoin issuers' mint and redeem. **Fiat in and out goes through one dedicated Mynt Ramp** (section 3.1), so every product and every liquidity provider shares the same on- and off-ramp.
 
 ### 3.1 The Mynt Ramp: one on- and off-ramp for all liquidity
 
@@ -75,12 +79,23 @@ R1 can move to R2 later without changing the API developers and providers use: o
 | The US regulatory model as data (FinCEN, NYDFS, California DFPI, OCC, with OFAC, Regulation E and IRS obligations), and a script that applies it to a server | `schemas/regulatory/us.json`, `scripts/apply-regulatory-model.mjs` | `test/us-regulatory-model.test.js` |
 | A US USDC account template (ramp funds a USDC purchase held in custody; cash-out back through the ramp) that a licensed firm publishes on that model | `schemas/examples/us/usdc-account.v2.json` | `test/us-regulatory-model.test.js` |
 | Research: US ramp partners, shortlist Zero Hash, Bridge, BVNK | `docs/research/us-ramp-partners.md` | |
+| Coverage per state: state regulators and their licences scoped to a state, products listing the states they're offered in, publishing blocked per component × state, drift naming the state (section 4.2) | `src/regulatory.ts`, `src/regime.ts`, `src/derived.ts`, `src/pins.ts`, `schemas/regulatory/us.json` | `test/state-coverage.test.js` |
 
 **Not built yet:**
 - **The partner's live endpoint.** The partner either implements Mynt's vendor wire contract (`docs/reference.md`) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner. Sandbox already works without it.
 - **Journeys.** A journey step that shows a quote with its expiry before accept.
 - **The stablecoin leg** with liquidity providers, and the price and liquidity services behind the exchange component (routes A and B).
 - **Ops views:** expired quotes, stuck transfers and returned bank transfers in `ops_status`.
+
+### 3.3 Chains (decided 2026-11-07)
+
+- **USDC only, for now** (see Scope). The ramp converts US dollars to and from USDC; no other token, no crypto trading, no tokenised funds.
+- **Solana is the primary chain** for Mynt's digital-asset products. **Base is not used.**
+- **Cross-chain moves are USDC through Circle's CCTP V2 only**: native burn-and-mint between Solana (CCTP domain 5) and EVM chains, with no wrapped tokens and no bridge pools ([supported chains and domains](https://developers.circle.com/cctp/expanded-assets/concepts/supported-chains-and-domains), [Solana programs](https://developers.circle.com/cctp/references/solana-programs)). CCTP on Solana carries USDC only (its non-USDC "expanded assets" are EVM-only), which is enough while Mynt is USDC-only. Other assets would cross only by their issuer's native Solana issuance; third-party bridges are avoided, and one is used only if a product needs it, with that decision recorded here.
+- **Contract templates are Anchor (Rust) programs.**
+- **Mynt never holds keys or signs.** The licensed firm signs through its custody or key-management vendor. Route D (the customer's wallet signs) is rejected.
+- **Customers never see or touch crypto.** USDC on Solana (and CCTP across chains) is at most an invisible back-end settlement rail held by the licensed custodial ramp partner (model R1). No wallets, tokens, chain addresses or "USDC" appear in any app screen, device SDK result or customer-facing copy; customers see US dollars. The US USDC account template (`schemas/examples/us/usdc-account.v2.json`) still names USDC in its customer-facing descriptions and must be reworded to dollars before it is offered.
+- **Partners must support USDC on Solana:** the ramp partner and the address-screening and Travel Rule vendors, to be confirmed per partner.
 
 ## 4. How it fits the existing model
 
@@ -92,10 +107,10 @@ Each row below uses only links whose ends the schema allows today (`x-from` and 
 
 | Product | Components | Links |
 |---|---|---|
-| Buy and hold crypto | `exchange:sale` (broker executes) + `custody_settlement:servicing` (custodian holds) | exchange `settles_into` custody |
+| Buy and hold crypto (*Out of scope while Mynt is USDC-only.*) | `exchange:sale` (broker executes) + `custody_settlement:servicing` (custodian holds) | exchange `settles_into` custody |
 | Stablecoin cross-border transfer | `exchange:sale` (fiat → stablecoin) + `payments:sale` (send) | exchange `converts_into` payments. `converts_into` requires a `cash` underlying today, so this depends on how stablecoins are classified (section 4.2). The far-end off-ramp is the receiving provider's own product |
-| Tokenised T-bill savings pot | `payments:sale` (on-ramp funding) + `wealth:purchase` (tokenised fund unit) + `custody_settlement:servicing` | payments `funds` wealth; custody `services` wealth |
-| Crypto-backed loan | `credit:issuance` + `custody_settlement:servicing` (collateral held) + `payments:sale` (repayments) | custody `secures` credit; credit `repays_from` payments |
+| Tokenised T-bill savings pot (*Out of scope while Mynt is USDC-only.*) | `payments:sale` (on-ramp funding) + `wealth:purchase` (tokenised fund unit) + `custody_settlement:servicing` | payments `funds` wealth; custody `services` wealth |
+| Crypto-backed loan (*Out of scope while Mynt is USDC-only.*) | `credit:issuance` + `custody_settlement:servicing` (collateral held) + `payments:sale` (repayments) | custody `secures` credit; credit `repays_from` payments |
 
 The regime check then does what it does for any product: it finds the regulated product types in the perimeter, the licences that may provide each part, and blocks publishing if the provider doesn't hold one.
 
@@ -110,12 +125,24 @@ The regime check then does what it does for any product: it finds the regulated 
 | Vendor categories are data services only | `SERVICE_CATEGORIES` in `src/vendors.ts` | Add `liquidity` (quote, execute), `ramp` (on/off), `custody` (balance, withdrawal), `chain_compliance` (address screening, Travel Rule) |
 | ~~The vendor contract is a single request and answer, with no notion of a firm price~~ (done: params and quotes) | `src/vendor-call.ts`, the wire contract in `docs/reference.md` | A two-step **quote → accept** pattern: a quote carries a price, size, expiry (seconds) and quote id; accept is idempotent on the quote id and refused after expiry. Built on the existing async callback for settlement status |
 | Price changes between showing and accepting | Developer contract, journeys | A `quote` step type in journeys and a device-visible `client_result` for quotes (price, size, expiry, fees: never the provider's internal data) |
-| No wallet address or chain data field | `src/data-dictionary.ts` | Add `wallet_address`, `chain_network`, `destination_tag`, with validation per network and sensitivity `personal` |
+| No wallet address or chain data field | `src/data-dictionary.ts` | Add `wallet_address`, `chain_network`, `destination_tag`, with validation per network. Since customers never touch crypto, these are not customer fields: only firm- or partner-side, if ever needed |
+| Wallet address validation doesn't cover Solana | `src/data-dictionary.ts` (planned fields above) | If `wallet_address` / `chain_network` are added, validate Solana addresses (base58 public keys) as well as EVM ones, since Solana is the primary chain (section 3.3) |
 | No Travel Rule data for transfers | Data dictionary, service types | Originator and beneficiary fields, sent only to a `chain_compliance` service with consent |
-| Coverage is checked per country, so one licence anywhere in the US counts as covering every customer. US money transmission and virtual-currency business are licensed **state by state** | `productRegime` in `src/regime.ts` (groups components by country), regions | Let a regulator and its licences be scoped to a state (`us-ny`, `us-ca`, … as entities' incorporation codes already are), and check coverage per state the product is offered in. A product then lists its states, and publishing is blocked for any state with no covering licence. This is the largest change in the plan |
+| ~~Coverage is checked per country, so one licence anywhere in the US counts as covering every customer~~ (done). US money transmission and virtual-currency business are licensed **state by state** | `productRegime` in `src/regime.ts`, `src/regulatory.ts`, `src/derived.ts`, `src/pins.ts`, `schemas/regulatory/us.json` | Built as described under "Coverage per state" below |
 | Lifecycle events for on-chain settlement | Schema `lifecycle_event` | Reuse ACTUS `STD` (settlement) and `AD` (monitoring); add confirmation depth as a term, not an event code |
 | Take rate basis for trading | `src/take-rates.ts` | Confirm a `volume` basis covers notional traded; no new mechanism expected |
 | Sandbox liquidity | Vendor test endpoints | Providers' test endpoints (testnet or paper trading) are the sandbox; conformance fixtures include a quote that expires and an accept after expiry that must be refused |
+
+#### Coverage per state (built)
+
+- **Jurisdiction codes** are ISO 3166-2, lowercase like entities' incorporation codes: `us-ny`, `us-ca`. A country code alone (`us`) means the whole country.
+- **Regulators**: a state regulator carries `jurisdiction` (NYDFS `us-ny`, DFPI `us-ca`); a federal one (FinCEN, OCC) has none and is country-wide.
+- **Licence types** may declare `covers`: a list of codes, or `["us"]` for the whole country, e.g. a federal charter taken to pre-empt state licensing for what it grants. Without it a licence covers its regulator's jurisdiction (its state, or the whole country). `coverage_note` records the basis and what is still to verify. A type issued separately in many states sets `issued_per_jurisdiction: true` with `covers` listing those states; each held licence then records the `jurisdiction` it was issued for (`register_license … jurisdiction: "us-tx"`, a new nullable column on held licences), so a firm can hold one per state.
+- **Products** list where they're offered: `offered_in` on the v2 definition (copied onto each component of that country) or on a component in `compose_product`, e.g. `["us-ny", "us-ca"]`, or `["us"]` for the whole country (which needs a licence covering all of it). Without `offered_in`, a component is checked for its country as a whole, exactly as before, so regions without states are unchanged.
+- **The regime** checks each component in each offered state: covered when the provider (the owner, or a partner on the roster) holds a verified, in-force licence that grants it and covers that state. Each component gets a row per state; `blockingComponents` lists component × state with a reason such as "In us-ca: Your entity's licences granting this cover nydfs_bitlicense (us-ny), not us-ca; needs one covering us-ca: ca_dfpi_dfal". Mandated stakeholders are checked per covering licence, as before.
+- **Stored `regime_summary`** gains `jurisdictions` per region (each offered state, covered or not) and per component (coverage and blocker per state). Panes that read it as-is keep working; the fields are additive.
+- **Drift**: every licence that covers a state is pinned at publish, with the states it covers. When one lapses or is suspended, the drift change names those states, and new sales pause **for the whole product**, with a drift note saying why: Mynt's runtime can't reliably tell a customer's state when a sale starts (a session may carry no customer, and the vault no address). Pausing one state would need the customer's state at sale time.
+- **The US model** (`schemas/regulatory/us.json`) scopes NYDFS and DFPI to their states. The FinCEN registration and the two OCC charters cover `us`; each says in its `coverage_note` that this is an assumption to verify. The FinCEN one matters most: in law it doesn't replace state money transmitter licences, so it should be narrowed once state money transmitter licence types are modelled. To add a state, add its regulator with `jurisdiction: "us-xx"`, its licence types and the law they cite, from the state's own sources.
 
 ### 4.3 The quote → accept flow
 
@@ -167,7 +194,7 @@ Each phase ends with something that runs and is checked by tests, and changes no
 - Shortlist US liquidity, ramp and custody providers that already hold the federal registration and the state licences (or a trust charter) for the launch states, and are willing to implement Mynt's vendor contract. Partnering with licensed providers is what makes a multi-state launch possible without holding every licence yourselves.
 
 **Phase 1: model it.**
-- Add the `digital_assets` underlying, and state-scoped regulators and coverage per state (section 4.2).
+- Done: the `digital_assets` underlying, and state-scoped regulators and coverage per state (section 4.2).
 - The US regulated product types and licence types (federal and the launch states), entered by an admin and reviewed by the governance desk.
 - A seed definition (like `schemas/examples/seed/`) for one product, "buy and hold crypto", checked with `check_product_definition`.
 - Tests: `test/regulatory.test.js`, `test/regime.test.js`, `test/definition.test.js` with a US digital-asset slice (federal plus two states) in a test regulatory model, including a product blocked in a state with no covering licence.
@@ -177,7 +204,7 @@ Each phase ends with something that runs and is checked by tests, and changes no
 - Choose R1 or R2 (section 3.1) and, for R1, the ramp partner.
 - Done: the designated ramp firm, the on-ramp and off-ramp service types, the sandbox ramp, and quote → accept client actions in every product that composes the ramp.
 - Done: tests for an on-ramp, an off-ramp, an expired quote and a returned bank transfer. Still to do: a sanctions hit, once address screening exists.
-- New service categories and example service types as JSON in `schemas/service-types/us/` (`crypto_quote`, `crypto_execute`, `fiat_onramp`, `fiat_offramp`, `custody_balance`, `address_screening`, `travel_rule`).
+- New service categories and example service types as JSON in `schemas/service-types/us/` (`fiat_onramp`, `fiat_offramp`, `custody_balance`, `address_screening`, `travel_rule`; `crypto_quote` and `crypto_execute` for trading are out of scope while Mynt is USDC-only).
 - The quote → accept pattern in `src/vendor-call.ts` and `src/vendors.ts`: quote expiry, idempotent accept, settlement by callback, conformance cases for each.
 - New data dictionary fields; `client_result` for quotes.
 - Tests: `test/vendors.test.js`, `test/vendor-actions.test.js`, with a fake provider covering expiry, replay, a schema-breaking answer and a withdrawn consent.
@@ -193,9 +220,9 @@ Each phase ends with something that runs and is checked by tests, and changes no
 - Ops: `ops_status` shows failed quotes, expired accepts and stuck settlements per subscription.
 
 **Phase 5: later.**
-- Non-custodial signing on the device (route D), if the regulatory research supports it.
-- Crypto-collateralised credit, with price feeds as an `information` service and margin calls as lifecycle events.
-- Tokenised real-world assets as `wealth` products.
+- ~~Non-custodial signing on the device (route D)~~: rejected, customers never touch crypto.
+- Crypto-collateralised credit, with price feeds as an `information` service and margin calls as lifecycle events. *Out of scope while Mynt is USDC-only.*
+- Tokenised real-world assets as `wealth` products. *Out of scope while Mynt is USDC-only.*
 
 ## 7. Risks
 
@@ -205,7 +232,7 @@ Each phase ends with something that runs and is checked by tests, and changes no
 | One ramp is a single point of failure | The ramp partner's licences are pinned, so a lapse pauses sales instead of failing mid-transfer; R1 can add a second partner behind the same API |
 | A provider's licence lapses or it's suspended mid-trade | Already handled: vendor bindings are pinned, so products drift and new sales pause; open actions finish or expire |
 | Stale prices | Quotes expire in seconds; accept after expiry is refused by the provider and checked in conformance |
-| A state with no covering licence | Coverage per state blocks publishing there; drift pauses sales in that state when a state licence lapses |
+| A state with no covering licence | Coverage per state blocks publishing for that state; when a state licence lapses, drift names the state and pauses new sales of the whole product (the runtime can't tell a customer's state) |
 | Misleading promotion | Crypto promotion rules entered as banned claims and required disclosures, enforced by `lint_campaign` and `check_experience` |
 | Sanctions and illicit-finance exposure | Address screening and Travel Rule as required services in the regime for transfer products |
 | Regulatory change | Regulation is data; a change is a model update that recomputes every product's regime and drifts those it affects |

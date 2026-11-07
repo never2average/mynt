@@ -25,10 +25,21 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
   const entityIds = new Set<string>(record.entity_id ? [record.entity_id] : []);
   const licenceIds = new Set<string>();
   const partyIds = new Set<string>(record.parties.map((b) => b.party_id));
+  // The jurisdictions each pinned licence covers this product in, so a drift says which states it touches.
+  const licenceJurisdictions: Record<string, string[]> = {};
   for (const c of rows) {
     if (c.provider_entity_id) entityIds.add(c.provider_entity_id);
     if (c.provider?.by === "party") partyIds.add(c.provider.party_id);
-    if (c.coverage.status === "covered") licenceIds.add(c.coverage.by[0].licence_id);
+    if (c.jurisdictions) {
+      for (const j of c.jurisdictions) {
+        if (j.coverage.status === "covered") {
+          const id = j.coverage.by[0].licence_id;
+          licenceIds.add(id);
+          licenceJurisdictions[id] = [...new Set([...(licenceJurisdictions[id] ?? []), j.jurisdiction])];
+        }
+        for (const f of j.stakeholders?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
+      }
+    } else if (c.coverage.status === "covered") licenceIds.add(c.coverage.by[0].licence_id);
     for (const f of c.stakeholders?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
   }
   const parties = new Map<string, Party>();
@@ -39,18 +50,28 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
       if (p.legal_entity_id) entityIds.add(p.legal_entity_id);
     }
   }
-  // Self-provided components without a named licence are pinned to the one that covers them.
+  // Self-provided components without a named licence are pinned to the one that covers them; one offered in
+  // several jurisdictions only when a single licence covers all of them (else each state's licence is pinned
+  // in the state above, and drift catches any of them changing).
   const components = record.components.map((c) => {
     const row = rows.find((r) => r.key === c.key);
-    return c.provider?.by === "self" && !c.provider.licence_id && row?.coverage.status === "covered"
-      ? { ...c, provider: { by: "self" as const, licence_id: row.coverage.by[0].licence_id } }
-      : c;
+    if (c.provider?.by !== "self" || c.provider.licence_id || row?.coverage.status !== "covered") return c;
+    const used = row.jurisdictions ? [...new Set(row.jurisdictions.map((j) => (j.coverage.status === "covered" ? j.coverage.by[0].licence_id : "")))] : [row.coverage.by[0].licence_id];
+    return used.length === 1 && used[0] ? { ...c, provider: { by: "self" as const, licence_id: used[0] } } : c;
   });
   const state: Pins["state"] = { entities: {}, licences: {}, parties: {} };
   for (const id of entityIds) state.entities[id] = entityState(await store.getEntity(id));
   for (const id of licenceIds) state.licences[id] = licenceState(await store.getHeldLicense(id));
   for (const [id, p] of parties) state.parties[id] = partyState(p);
-  return { version, pinned_at: new Date().toISOString(), components, parties: record.parties, entity_ids: [...entityIds], state };
+  return {
+    version,
+    pinned_at: new Date().toISOString(),
+    components,
+    parties: record.parties,
+    entity_ids: [...entityIds],
+    state,
+    ...(Object.keys(licenceJurisdictions).length ? { licence_jurisdictions: licenceJurisdictions } : {}),
+  };
 }
 
 // What changed in a product's pinned state, if anything.
@@ -64,6 +85,8 @@ export async function pinChanges(store: Store, pins: Pins): Promise<DriftChange[
   };
   await check("entity", pins.state.entities, async (id) => entityState(await store.getEntity(id)));
   await check("licence", pins.state.licences, async (id) => licenceState(await store.getHeldLicense(id)));
+  // A licence pinned for named jurisdictions (a state licence) says which ones lose coverage.
+  for (const c of changes) if (c.kind === "licence" && pins.licence_jurisdictions?.[c.id]) c.jurisdictions = pins.licence_jurisdictions[c.id];
   await check("party", pins.state.parties, async (id) => partyState(await store.getParty(id)));
   // Vendor services the live version hands off through (see vendors.ts).
   await check("vendor", pins.state.vendors ?? {}, (id) => vendorStateOf(store, id));
@@ -77,7 +100,16 @@ export async function checkDrift(store: Store, record: ProductRecord) {
   const key = (c: DriftChange[]) => JSON.stringify(c.map((x) => [x.kind, x.id, x.now]));
   if (changes.length) {
     if (record.drift && key(record.drift.changes) === key(changes)) return record.drift;
-    const drift = { detected_at: record.drift?.detected_at ?? new Date().toISOString(), changes };
+    // Mynt's runtime doesn't reliably know a customer's state (a session may carry no customer, and the vault
+    // no address), so a state losing coverage pauses the whole product, and the drift note says which states.
+    const states = [...new Set(changes.flatMap((c) => c.jurisdictions ?? []))];
+    const drift = {
+      detected_at: record.drift?.detected_at ?? new Date().toISOString(),
+      changes,
+      ...(states.length
+        ? { note: `Coverage changed in ${states.join(", ")}. New sales pause for the whole product, not only there: Mynt can't tell which state a customer is in when a sale starts` }
+        : {}),
+    };
     await store.setDrift(record.product.id, drift);
     if (!record.drift) {
       await store.audit(null, "product_drifted", record.product.id, { changes });

@@ -249,6 +249,7 @@ export interface Pins {
   definition_hash?: string; // the live v2 definition (see definition.ts), when the product has one
   contract?: DeveloperContract; // what developers build against, derived from that definition (see contract.ts)
   vendor_bindings?: VendorBinding[]; // handoffs the live version runs through a vendor subscription (see vendors.ts)
+  licence_jurisdictions?: Record<string, string[]>; // pinned licence id -> the jurisdictions it covers this product in (see regime.ts)
 }
 export interface VendorBinding {
   handoff_id: string;
@@ -257,7 +258,7 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor"; id: string; was: string; now: string };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor"; id: string; was: string; now: string; jurisdictions?: string[] };
 export interface ProductRecord {
   product: FinancialProduct;
   owner_id: string | null; // null = bundled catalog product
@@ -270,7 +271,7 @@ export interface ProductRecord {
   components: Component[]; // the regulated primitives the product is made of (see regime.ts)
   parties: PartyBinding[]; // parties from the owner's roster, bound to components
   pins: Pins | null; // the live version's composition and the state of everything it rests on (see pins.ts)
-  drift: { detected_at: string; changes: DriftChange[] } | null; // pinned state that changed: new sales pause
+  drift: { detected_at: string; changes: DriftChange[]; note?: string } | null; // pinned state that changed: new sales pause
   definition: Record<string, unknown> | null; // the v2 product definition (working copy; see definition.ts)
   access_mode: AccessMode;
   build_terms: BuildTerms;
@@ -350,6 +351,7 @@ export interface HeldLicense {
   region: string;
   regulator_id: string;
   license_id: string;
+  jurisdiction: string | null; // ISO 3166-2 code it was issued for, when its type is issued per jurisdiction
   registration_number: string;
   valid_from: string | null;
   valid_to: string | null;
@@ -805,6 +807,13 @@ const TABLES = `
     reviewed_at timestamptz,
     UNIQUE (entity_id, region, regulator_id, license_id)
   );
+  -- A licence type issued per jurisdiction (e.g. a money transmitter licence in several US states) is held once
+  -- per jurisdiction: the held licence records the ISO 3166-2 code it was issued for (null: not issued per
+  -- jurisdiction), and the uniqueness above widens to include it.
+  ALTER TABLE financial_products.held_licenses ADD COLUMN IF NOT EXISTS jurisdiction text;
+  CREATE UNIQUE INDEX IF NOT EXISTS held_licenses_per_jurisdiction
+    ON financial_products.held_licenses (entity_id, region, regulator_id, license_id, (COALESCE(jurisdiction, '')));
+  ALTER TABLE financial_products.held_licenses DROP CONSTRAINT IF EXISTS held_licenses_entity_id_region_regulator_id_license_id_key;
   -- Products: who issues or distributes them, what they build on, and how developers may use them.
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES financial_products.entities(id);
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'issuance';
@@ -1345,6 +1354,7 @@ const toHeldLicense = (r: Row): HeldLicense => ({
   region: r.region as string,
   regulator_id: r.regulator_id as string,
   license_id: r.license_id as string,
+  jurisdiction: (r.jurisdiction as string | null) ?? null,
   registration_number: r.registration_number as string,
   valid_from: (r.valid_from as string | null) ?? null,
   valid_to: (r.valid_to as string | null) ?? null,
@@ -2872,18 +2882,18 @@ export class Store {
 
   async registerLicense(
     submittedBy: string,
-    l: Pick<HeldLicense, "entity_id" | "region" | "regulator_id" | "license_id" | "registration_number" | "valid_from" | "valid_to">,
+    l: Pick<HeldLicense, "entity_id" | "region" | "regulator_id" | "license_id" | "registration_number" | "valid_from" | "valid_to"> & { jurisdiction?: string | null },
   ): Promise<HeldLicense> {
-    // Re-registering resubmits for review.
+    // Re-registering (the same licence type, for the same jurisdiction) resubmits for review.
     const r = await this.one(
       `INSERT INTO financial_products.held_licenses
-         (id, entity_id, region, regulator_id, license_id, registration_number, valid_from, valid_to, status, submitted_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
-       ON CONFLICT (entity_id, region, regulator_id, license_id) DO UPDATE SET
+         (id, entity_id, region, regulator_id, license_id, registration_number, valid_from, valid_to, status, submitted_by, jurisdiction)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
+       ON CONFLICT (entity_id, region, regulator_id, license_id, (COALESCE(jurisdiction, ''))) DO UPDATE SET
          registration_number = EXCLUDED.registration_number, valid_from = EXCLUDED.valid_from, valid_to = EXCLUDED.valid_to,
          status = 'pending', submitted_by = EXCLUDED.submitted_by, reviewed_by = NULL, review_note = NULL, reviewed_at = NULL
        RETURNING *`,
-      [randomUUID(), l.entity_id, l.region, l.regulator_id, l.license_id, l.registration_number, l.valid_from, l.valid_to, submittedBy],
+      [randomUUID(), l.entity_id, l.region, l.regulator_id, l.license_id, l.registration_number, l.valid_from, l.valid_to, submittedBy, l.jurisdiction ?? null],
     );
     return toHeldLicense(r!);
   }
