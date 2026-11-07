@@ -1,0 +1,117 @@
+{
+  "_id": "dollar-account",
+  "product_name": "Dollar Account",
+  "product_type": "digital_asset_custody",
+  "descriptions": {
+    "summary": "Hold US dollars in an account you fund from your bank account and withdraw back to it, with the balance held for you by a licensed partner.",
+    "key_features": [
+      "Add dollars from your own bank account, and withdraw them back whenever you like",
+      "See your balance in US dollars, always",
+      "Your balance is held for you by a licensed partner, in your name",
+      "A fee of 0.5% per transfer in or out, at least $0.50, shown before you confirm",
+      "Your balance is not a bank deposit and isn't FDIC-insured"
+    ],
+    "long": "A US dollar account built on the money transmission product (builds_on: money-transmission), so it never declares transmission itself: dollars come in and go out through that product, and this one adds the balance the customer holds between transfers. Because it is built on money transmission, it can only be offered, and only publishes, in the states where the money transmission product is covered, and it pauses its sales when that product does. Customers only ever see US dollars. This template names no firm: its owner names who holds the balance (a licensed partner on its roster, or itself under its own licences) and sets offered_in to states the money transmission product covers. Assumptions: USD only, individuals only; how the balance is classified in each state is for the provider's licences to cover and is not settled here."
+  },
+  "owner_entity_id": null,
+  "version": 1,
+  "access_mode": "open",
+  "offered_in": ["us-ny", "us-ca"],
+  "builds_on": [
+    {
+      "product_id": "money-transmission",
+      "funds": ["dollar_balance"],
+      "settles_from": ["dollar_balance"],
+      "note": "Moves the customer's dollars into the balance from their bank account, and back out to it"
+    }
+  ],
+  "plane": { "role": "standalone", "sellable": true },
+  "context": {
+    "currencies": ["USD"],
+    "calendar": "us_federal_reserve",
+    "business_day_convention": "following",
+    "day_count": "actual_365_fixed",
+    "time_zone": "America/New_York"
+  },
+  "components": [
+    {
+      "key": "dollar_balance",
+      "country": "us",
+      "primitive": "custody_settlement",
+      "action": "servicing",
+      "underlying": "digital_assets",
+      "block": "custodial_holding",
+      "terms": {
+        "shown_to_customers_as": "usd_balance",
+        "segregation": "customer_omnibus_with_individual_records",
+        "rehypothecation": false,
+        "back_end_asset": "USDC",
+        "back_end_network": "solana",
+        "back_end_shown_to_customers": false
+      },
+      "schedules": [{ "purpose": "statement", "anchor": "calendar_month_end", "cycle": "P1M" }],
+      "election": "required"
+    }
+  ],
+  "customer_segments": [
+    {
+      "_id": "us_individual",
+      "name": "US individuals (18+)",
+      "customer_kind": "individual",
+      "qualification": { "min_age": 18, "resident": true },
+      "identity": {
+        "verification_tiers": [
+          { "tier": "full_kyc", "methods": ["document_verification", "ssn_verification", "bank_account_verification"], "validity": "P2Y", "on_expiry": "refresh_kyc" }
+        ],
+        "min_tier_by_event": { "onboarding": "full_kyc", "funding": "full_kyc", "withdrawal": "full_kyc" }
+      },
+      "channels": ["app", "web", "partner_embedded"]
+    }
+  ],
+  "core_algorithms": [
+    {
+      "_id": "onboarding_eligibility",
+      "algorithm_name": "Onboarding eligibility",
+      "description": "Knocks out applicants who can't hold the account: under 18, not US residents, not in a state the account is offered in, or not verified to full KYC.",
+      "purpose": "eligibility",
+      "repository": "models/dollar-account-onboarding-eligibility",
+      "version": "1.0.0"
+    }
+  ],
+  "risk_models": [],
+  "partner_handoffs": [],
+  "terms": [
+    { "_id": "max_balance", "label": "Largest balance you can hold", "type": "money", "currency": "USD", "default": 50000, "range": { "min": 1000, "max": 250000 }, "set_by": ["template", "operations"], "negotiable": "fixed", "post_issue": { "rule": "operations_dated_change" } }
+  ],
+  "rates": [],
+  "fees": [],
+  "limits": [
+    { "_id": "balance_cap", "kind": "constraint", "constraint_type": "MAX_BALANCE", "max": { "$term": "max_balance" }, "scope": "customer" }
+  ],
+  "servicing_policies": [
+    { "_id": "statement", "kind": "statement", "config": { "cycle": "P1M", "channels": ["email", "app"] } },
+    { "_id": "service_level", "kind": "service_level", "config": { "error_resolution_business_days": 10, "complaint_acknowledgement_days": 2 } }
+  ],
+  "lifecycle_events": [
+    { "_id": "account_opened", "sequence": 1, "trigger": "customer", "primitives": ["contract_formation"], "edition": "latest" },
+    { "_id": "balance_credited", "sequence": 2, "trigger": "linked", "primitives": ["quantity_change"] },
+    { "_id": "balance_debited", "sequence": 3, "trigger": "linked", "primitives": ["quantity_change"] },
+    { "_id": "account_closed", "sequence": 4, "trigger": "customer", "primitives": ["contract_formation"] }
+  ],
+  "connections": [
+    { "_id": "persona_us_individual", "type": "segment_maps_to_persona", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "register_persona", "regulator_id": "fincen", "id": "fincen_individual_customer" }, "attributes": { "fit": "subset" } },
+    { "_id": "use_onboarding_eligibility", "type": "segment_uses_algorithm", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "core_algorithm", "id": "onboarding_eligibility" }, "attributes": { "stage": "application", "order": 1, "required": true } },
+    { "_id": "t_max_balance", "type": "applies_to", "from": { "kind": "term", "id": "max_balance" }, "to": { "kind": "component", "id": "dollar_balance" }, "attributes": { "mode": "default" } },
+    { "_id": "l_balance_cap", "type": "applies_to", "from": { "kind": "limit", "id": "balance_cap" }, "to": { "kind": "component", "id": "dollar_balance" }, "attributes": { "mode": "default" } },
+    { "_id": "s_statement", "type": "applies_to", "from": { "kind": "servicing_policy", "id": "statement" }, "to": { "kind": "component", "id": "dollar_balance" }, "attributes": { "mode": "default" } },
+    { "_id": "s_service_level", "type": "applies_to", "from": { "kind": "servicing_policy", "id": "service_level" }, "to": { "kind": "product", "id": "self" }, "attributes": { "mode": "default" } },
+    { "_id": "ev_account_opened", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "account_opened" }, "to": { "kind": "component", "id": "dollar_balance" } },
+    { "_id": "ev_balance_credited", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "balance_credited" }, "to": { "kind": "component", "id": "dollar_balance" } },
+    { "_id": "ev_balance_debited", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "balance_debited" }, "to": { "kind": "component", "id": "dollar_balance" } },
+    { "_id": "ev_account_closed", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "account_closed" }, "to": { "kind": "component", "id": "dollar_balance" } },
+    { "_id": "ob_reg_e", "type": "satisfies_obligation", "from": { "kind": "servicing_policy", "id": "service_level" }, "to": { "kind": "register_item", "regulator_id": "fincen", "license_type_id": "fincen_msb", "section": "obligations", "id": "cfpb_reg_e_errors" }, "attributes": { "how": "Balance errors investigated within 10 business days" } }
+  ],
+  "versioning": { "change_class": "initial", "summary": "First US dollar account template, built on money transmission", "edition_policy": { "origination": "latest", "mid_term_change": "stored" } },
+  "governance": { "state": "draft", "review": { "cadence": "P1Y" } },
+  "projection": { "lead_component": "dollar_balance", "risk_level": "low", "liquidity": "high", "typical_horizon": "short", "return_type": "fixed_interest" }
+}

@@ -106,10 +106,15 @@ const LicenseType = z.object({
   scope: z.string().default(""),
   covers: z
     .array(Jurisdiction)
-    .min(1)
     .optional()
     .describe(
-      "Where a held licence of this type lets its holder provide what it grants: ISO 3166-2 codes ('us-ny'), or the country code for the whole country ('us', e.g. a federal charter that pre-empts state licensing for the activities it grants). Omit for the regulator's jurisdiction (its state, or the whole country)",
+      "Where a held licence of this type lets its holder provide what it grants: ISO 3166-2 codes ('us-ny'), or the country code for the whole country ('us', e.g. a federal charter that pre-empts state licensing for the activities it grants). Omit for the regulator's jurisdiction (its state, or the whole country). An empty list covers nowhere by itself: a registration other licences require (see requires) that licenses nothing on its own, e.g. a federal money services business registration where each state licenses money transmission",
+    ),
+  requires: z
+    .array(z.union([Id, z.array(Id).min(1)]))
+    .optional()
+    .describe(
+      "Licence types (their _ids, in this region) the holder must also hold, verified and in force, for a held licence of this type to count: e.g. a state money transmitter licence requires the federal money services business registration. Each entry is one _id, or a list of _ids any one of which will do (the same registration modelled under different ids). The regime checks it wherever this licence would cover a component, and pins the prerequisite at publish with it",
     ),
   issued_per_jurisdiction: z
     .boolean()
@@ -406,6 +411,14 @@ export function validateRegulator(
     }
     if (l.issued_per_jurisdiction && !(l.covers ?? []).some((c) => SUBDIVISION.test(c)))
       errors.push(`licence '${l._id}' is issued per jurisdiction, so covers must list the jurisdictions it's issued for`);
+    // Prerequisites: never itself; another regulator's licence type is a link outside this one.
+    const defined = (id: string) => r.license_types.some((x) => x._id === id) || ctx.otherRegulators.some((o) => o.id !== r.id && o.license_types.some((x) => x._id === id));
+    for (const entry of l.requires ?? []) {
+      const ids = typeof entry === "string" ? [entry] : entry;
+      if (ids.includes(l._id)) errors.push(`licence '${l._id}' can't require itself`);
+      else if (!ids.some(defined))
+        warnings.push(`licence '${l._id}' requires ${ids.map((id) => `'${id}'`).join(" or ")}, which no regulator in ${ctx.region ?? "this region"} defines yet: until one does, no licence of this type counts`);
+    }
   }
   const catalogue = new Map(ctx.productTypes.map((p) => [p.id, p]));
   const productIds = r.scope.product_types.map((p) => p.id);
@@ -507,14 +520,15 @@ export function validateRegulator(
 }
 
 // Where a held licence covers: the jurisdiction it was issued for when its type is issued per jurisdiction,
-// else its type's covers, else its regulator's jurisdiction, else the whole country ('*').
+// else its type's covers (an empty list: nowhere by itself), else its regulator's jurisdiction, else the
+// whole country ('*').
 export function licenceJurisdictions(
   r: Pick<Regulator, "jurisdiction"> | undefined,
   l: Pick<License, "covers" | "issued_per_jurisdiction"> | undefined,
   held: { jurisdiction?: string | null },
 ): string[] {
   if (l?.issued_per_jurisdiction) return held.jurisdiction ? [held.jurisdiction] : [];
-  if (l?.covers?.length) return l.covers.map((c) => (SUBDIVISION.test(c) ? c : "*"));
+  if (l?.covers) return l.covers.map((c) => (SUBDIVISION.test(c) ? c : "*"));
   return r?.jurisdiction ? [r.jurisdiction] : ["*"];
 }
 // Whether those cover one jurisdiction: a state, or the whole country when it's the country code.

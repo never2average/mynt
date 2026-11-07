@@ -245,7 +245,8 @@ export interface Pins {
   components: Component[];
   parties: PartyBinding[];
   entity_ids: string[];
-  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string>; vendors?: Record<string, string> };
+  // products: the products it is built on (underlying_product_ids), so it drifts when one is unpublished or drifts
+  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string>; vendors?: Record<string, string>; products?: Record<string, string> };
   definition_hash?: string; // the live v2 definition (see definition.ts), when the product has one
   contract?: DeveloperContract; // what developers build against, derived from that definition (see contract.ts)
   vendor_bindings?: VendorBinding[]; // handoffs the live version runs through a vendor subscription (see vendors.ts)
@@ -258,7 +259,7 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor"; id: string; was: string; now: string; jurisdictions?: string[] };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product"; id: string; was: string; now: string; jurisdictions?: string[] };
 export interface ProductRecord {
   product: FinancialProduct;
   owner_id: string | null; // null = bundled catalog product
@@ -2388,6 +2389,11 @@ export class Store {
     ]);
   }
 
+  // The products this one is built on (a v2 definition's builds_on; see regime.ts).
+  async setUnderlyingProducts(productId: string, ids: string[]): Promise<void> {
+    await this.db.query("UPDATE financial_products.products SET underlying_product_ids = $2, updated_at = now() WHERE id = $1", [productId, ids]);
+  }
+
   // Pinning a new live version clears any drift recorded against the previous one.
   async setPins(productId: string, pins: Pins | null): Promise<void> {
     await this.db.query("UPDATE financial_products.products SET pins = $2, drift = NULL WHERE id = $1", [productId, pins && JSON.stringify(pins)]);
@@ -2402,6 +2408,12 @@ export class Store {
     const rows = entityId
       ? await this.all("SELECT * FROM financial_products.products WHERE status = 'published' AND pins->'entity_ids' ? $1 ORDER BY id", [entityId])
       : await this.all("SELECT * FROM financial_products.products WHERE status = 'published' AND pins IS NOT NULL ORDER BY id");
+    return rows.map(toProductRecord);
+  }
+
+  // Published products whose live version is built on this one (see pins.ts).
+  async productsBuiltOn(productId: string): Promise<ProductRecord[]> {
+    const rows = await this.all("SELECT * FROM financial_products.products WHERE status = 'published' AND pins->'state'->'products' ? $1 ORDER BY id", [productId]);
     return rows.map(toProductRecord);
   }
 

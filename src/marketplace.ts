@@ -428,7 +428,7 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
       if (type.issued_per_jurisdiction) {
         if (!l.jurisdiction) return fail(`'${l.license_id}' is issued per jurisdiction: name the one it was issued for (one of ${(type.covers ?? []).join(", ")})`);
         if (!(type.covers ?? []).includes(l.jurisdiction)) return fail(`'${l.license_id}' isn't issued for '${l.jurisdiction}'; it covers ${(type.covers ?? []).join(", ")}`);
-      } else if (l.jurisdiction) return fail(`'${l.license_id}' isn't issued per jurisdiction, so it takes no jurisdiction: it covers ${licenceJurisdictions(regulator, type, {}).map((j) => (j === "*" ? "the whole country" : j)).join(", ")}`);
+      } else if (l.jurisdiction) return fail(`'${l.license_id}' isn't issued per jurisdiction, so it takes no jurisdiction: it covers ${licenceJurisdictions(regulator, type, {}).map((j) => (j === "*" ? "the whole country" : j)).join(", ") || "nowhere by itself (other licences require it)"}`);
       const held = await store.registerLicense(user.id, { ...l, entity_id, jurisdiction: l.jurisdiction ?? null, valid_from: l.valid_from ?? null, valid_to: l.valid_to ?? null });
       await audit("register_license", held.id, { region: l.region, regulator: l.regulator_id, license: l.license_id, ...(l.jurisdiction ? { jurisdiction: l.jurisdiction } : {}) });
       // Re-registering sends a licence back for review, so products resting on it are re-checked.

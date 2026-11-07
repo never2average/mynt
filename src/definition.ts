@@ -49,6 +49,7 @@ export interface Definition {
   version: number;
   access_mode?: "open" | "approval" | "private";
   offered_in?: string[];
+  builds_on?: { product_id: string; funds?: string[]; settles_from?: string[]; note?: string }[];
   components?: (Node & { key: string; country: string; primitive: Component["primitive"]; action: Component["action"]; underlying?: Component["underlying"]; wrapper?: Component["wrapper"] })[];
   connections?: Connection[];
   projection?: { lead_component?: string; risk_level?: string; liquidity?: string; typical_horizon?: string; return_type?: string };
@@ -258,11 +259,35 @@ export async function checkDefinition(store: Store, record: ProductRecord | null
       priced.add(k);
     }
   }
+  // Products it's built on: real, not itself, linked to real components, and not re-declared here.
+  for (const b of def.builds_on ?? []) {
+    const at = `builds_on '${b.product_id}'`;
+    if (b.product_id === def._id) {
+      errors.push(`${at}: a product can't be built on itself`);
+      continue;
+    }
+    const base = await store.getProduct(b.product_id);
+    if (!base) {
+      errors.push(`${at}: no product '${b.product_id}'`);
+      continue;
+    }
+    if (base.status !== "published") warnings.push(`${at} isn't published yet: publishing this product needs it live`);
+    for (const key of [...(b.funds ?? []), ...(b.settles_from ?? [])]) if (!comp.has(key)) errors.push(`${at}: no component '${key}'`);
+    const baseComponents = base.status === "published" && base.pins ? base.pins.components : base.components;
+    if (!baseComponents.length) warnings.push(`${at} has no composition, so there's no coverage to inherit from it`);
+    for (const c of components(def))
+      if (baseComponents.some((x) => x.country === c.country && x.primitive === c.primitive && x.action === c.action && (x.underlying ?? null) === (c.underlying ?? null)))
+        warnings.push(`component '${c.key}' re-declares ${c.primitive}:${c.action}, which '${b.product_id}' already provides; build on it instead`);
+  }
   const lead = def.projection?.lead_component;
   if (lead && !comp.has(lead)) errors.push(`projection.lead_component '${lead}' isn't a component`);
   if (def.descriptions.key_features.length < 2) warnings.push("the catalogue's tests want at least 2 key features");
   return { errors, warnings };
 }
+
+// The products a definition is built on: its builds_on when it declares one, else what the product records.
+export const underlyingOf = (def: Definition, record: Pick<ProductRecord, "underlying_product_ids">) =>
+  def.builds_on ? def.builds_on.map((b) => b.product_id) : record.underlying_product_ids;
 
 // The v1 composition the regime, pins and drift checks read.
 export function toV1Composition(def: Definition): { components: Component[]; parties: PartyBinding[] } {

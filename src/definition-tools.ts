@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { FinancialProduct } from "./catalog.js";
 import { deriveContract } from "./contract.js";
 import { vendorServedActions } from "./vendors.js";
-import { checkDefinition, DEFINITION_SCHEMA_PATH, projectCatalogue, toV1Composition, type Definition } from "./definition.js";
+import { checkDefinition, DEFINITION_SCHEMA_PATH, projectCatalogue, toV1Composition, underlyingOf, type Definition } from "./definition.js";
 import { blockingComponents, productRegime } from "./regime.js";
 import { rederiveProduct } from "./derived.js";
 import { normalizeModel } from "./regulatory.js";
@@ -16,7 +16,7 @@ const fail = (error: string, extra: Record<string, unknown> = {}) => ({ ...json(
 // The regulator short name the catalogue cites: whoever's licence covers the lead component, else whoever
 // supervises it, else what the product cited before.
 async function leadRegulator(store: Store, record: ProductRecord, def: Definition, v1: ReturnType<typeof toV1Composition>, regime?: Awaited<ReturnType<typeof productRegime>>) {
-  regime ??= await productRegime(store, { ...record, components: v1.components, parties: v1.parties });
+  regime ??= await productRegime(store, { ...record, components: v1.components, parties: v1.parties, underlying_product_ids: underlyingOf(def, record) });
   const lead = def.projection?.lead_component ?? def.components?.[0]?.key;
   const row = regime.regions.flatMap((r) => r.components).find((c) => c.key === lead);
   const regulatorId = row?.coverage.status === "covered" ? row.coverage.by[0].regulator_id : row?.supervised_by[0]?.regulator_id;
@@ -62,7 +62,7 @@ export function registerDefinitionTools(server: McpServer, store: Store, user: U
       // A valid definition can still be refused at publish by its regime (an uncovered component, a
       // mandated stakeholder missing or not bound to the component it serves): say so now.
       const v1 = toV1Composition(def);
-      const regime = await productRegime(store, { ...record, components: v1.components, parties: v1.parties });
+      const regime = await productRegime(store, { ...record, components: v1.components, parties: v1.parties, underlying_product_ids: underlyingOf(def, record) });
       return json({
         valid: true,
         ...check,
@@ -91,6 +91,8 @@ export function registerDefinitionTools(server: McpServer, store: Store, user: U
       const catalogue: FinancialProduct = projectCatalogue(def, await leadRegulator(store, record, def, v1));
       await store.setDefinition(product_id, def as unknown as Record<string, unknown>);
       await store.setComposition(product_id, v1.components, v1.parties);
+      // builds_on is the definition's own record of the products it rests on.
+      if (def.builds_on) await store.setUnderlyingProducts(product_id, underlyingOf(def, record));
       let target: "product" | "draft_version";
       if (record.status === "published") {
         const draft = await store.draftVersion(product_id);
