@@ -1,0 +1,133 @@
+{
+  "region": "US",
+  "key": "ramp_quote",
+  "name": "Mynt Ramp quote",
+  "category": "ramp",
+  "description": "A firm price to move a customer's dollars into a stablecoin (on-ramp) or a stablecoin back into dollars (off-ramp), through the Mynt Ramp. The price holds until expires_at. The customer accepts it with ramp_transfer; the stablecoin settles with the product's liquidity provider, never the customer's own wallet.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name",
+      "bank_account_number",
+      "routing_number"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "bank_account_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9,18}$"
+      },
+      "routing_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9}$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "params_schema": {
+    "type": "object",
+    "required": [
+      "direction",
+      "asset",
+      "network",
+      "fiat_amount"
+    ],
+    "properties": {
+      "direction": {
+        "enum": [
+          "on",
+          "off"
+        ]
+      },
+      "asset": {
+        "enum": [
+          "USDC"
+        ]
+      },
+      "network": {
+        "enum": [
+          "ethereum",
+          "base",
+          "solana"
+        ]
+      },
+      "fiat_amount": {
+        "type": "string",
+        "pattern": "^[0-9]{1,9}(\\.[0-9]{1,2})?$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "params_fixture": {
+    "direction": "on",
+    "asset": "USDC",
+    "network": "base",
+    "fiat_amount": "100.00"
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "quote_id",
+      "expires_at",
+      "direction",
+      "fiat_amount",
+      "fiat_currency",
+      "asset",
+      "asset_amount",
+      "fee"
+    ],
+    "properties": {
+      "quote_id": {
+        "type": "string"
+      },
+      "expires_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "direction": {
+        "enum": [
+          "on",
+          "off"
+        ]
+      },
+      "fiat_amount": {
+        "type": "string"
+      },
+      "fiat_currency": {
+        "enum": [
+          "USD"
+        ]
+      },
+      "asset": {
+        "type": "string"
+      },
+      "asset_amount": {
+        "type": "string"
+      },
+      "fee": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "quote": true,
+  "consent_purpose": "fiat_ramp_transfer",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": [
+    "fincen_msb"
+  ],
+  "client_result": {
+    "fields": [
+      "direction",
+      "fiat_amount",
+      "fiat_currency",
+      "asset",
+      "asset_amount",
+      "fee"
+    ],
+    "redirect": false
+  }
+}

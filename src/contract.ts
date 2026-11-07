@@ -33,11 +33,13 @@ export interface ContractAction {
   data_requirements?: { field: string; known: boolean; sensitivity?: Sensitivity; capture?: CaptureMethod[] }[];
   // Served by a vendor's standard service Mynt calls for the product: the device gets back only this outcome
   // (a status, a reference, the listed fields, and a redirect_url to the provider's page when `redirect`).
-  served_by?: { kind: "vendor_service"; service_type: string | null; client_result: { statuses: string[]; fields: string[]; redirect: boolean } };
+  // A service that takes params (params_schema) is started with them. A quote (quote: true) answers with expires_at;
+  // the action whose accepts_quote_from names it is started with the quote's reference as `quote`.
+  served_by?: { kind: "vendor_service"; service_type: string | null; client_result: { statuses: string[]; fields: string[]; redirect: boolean }; params_schema?: Record<string, unknown>; quote?: true; accepts_quote_from?: string };
 }
 
 // Per handoff id, the vendor service that serves it (see vendorServedActions in vendors.ts).
-export type ServedActions = Record<string, { service_type: string; client_result: { statuses: string[]; fields: string[]; redirect: boolean } }>;
+export type ServedActions = Record<string, { service_type: string; client_result: { statuses: string[]; fields: string[]; redirect: boolean }; params_schema?: Record<string, unknown>; quote?: true; accepts_quote_from?: string }>;
 
 export interface DeveloperContract {
   product_id: string;

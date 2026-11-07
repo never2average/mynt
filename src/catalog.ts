@@ -20,7 +20,7 @@ export const PRODUCT_LINES = [
 export type ProductLine = (typeof PRODUCT_LINES)[number];
 
 // What a regulated primitive is made of. Commodities are an underlying, not a line.
-export const UNDERLYINGS = ["cash", "securities", "commodities", "real_assets", "receivables", "risk", "data"] as const;
+export const UNDERLYINGS = ["cash", "securities", "commodities", "real_assets", "receivables", "risk", "data", "digital_assets"] as const;
 export type Underlying = (typeof UNDERLYINGS)[number];
 
 // A statutory or tax structure around a primitive: retirement is wealth plus a wrapper, not a line.

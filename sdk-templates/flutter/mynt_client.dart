@@ -82,10 +82,15 @@ class MyntClient {
 
   Future<Map<String, dynamic>> withdrawConsent(String productId, String purpose) => _evidence(productId, 'consent_withdrawn', purpose, null);
 
-  /// Starts a provider-hosted action; send the customer to redirect_url.
-  Future<Map<String, dynamic>> startAction(String productId, String action) {
+  /// Starts a provider-hosted action; send the customer to redirect_url. Pass params to an action that takes them
+  /// (a Mynt Ramp quote's amount and asset), and quote (the quote's reference) to one that accepts a quote.
+  Future<Map<String, dynamic>> startAction(String productId, String action, {Map<String, Object?>? params, String? quote}) {
     if (!(MyntContract.clientActions[productId] ?? const []).contains(action)) throw ArgumentError("$action isn't a client action of $productId");
-    return _request('POST', '/client/actions/$action', {'product_id': productId});
+    return _request('POST', '/client/actions/$action', {
+      'product_id': productId,
+      if (params != null) 'params': params,
+      if (quote != null) 'quote': quote,
+    });
   }
 
   /// Stores customer data the product's actions need. Sensitive fields must come from a secure input.

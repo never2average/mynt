@@ -728,7 +728,8 @@
       "real_assets",
       "receivables",
       "risk",
-      "data"
+      "data",
+      "digital_assets"
      ]
     },
     "wrapper": {
@@ -3654,7 +3655,7 @@
    }
   },
   "conn_funds": {
-   "description": "Money moves from one component into another on a schedule: a mandate or sweep funds a deposit, a SIP funds a fund holding, a debit funds a premium.",
+   "description": "Money moves from one component into another on a schedule or on the customer's request: a mandate or sweep funds a deposit, a SIP funds a fund holding, a debit funds a premium, an on-ramp funds a digital-asset purchase.",
    "x-composition": true,
    "x-from": [
     "payments:sale|issuance|servicing",
@@ -3664,7 +3665,8 @@
     "account_operations:issuance",
     "wealth:purchase|issuance",
     "insurance:sale|issuance",
-    "custody_settlement:issuance"
+    "custody_settlement:issuance",
+    "exchange:sale|purchase"
    ],
    "x-cardinality": "a funded component may have several funders; each (from, to) pair once",
    "x-event-ordering": "The debit on 'from' and the credit on 'to' are one atomic event (CDM BusinessEvent). On 'to' it is a drawing (ACTUS PD, sequence 4), so on a shared date it posts before interest (IP 8 / IPCI 9) and maturity (MD 19). A failed debit raises failure_handling.event on 'from' and nothing on 'to'.",

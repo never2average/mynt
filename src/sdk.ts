@@ -404,7 +404,19 @@ export function openApiDocument(name: string, version: string, baseUrl: string, 
           },
           required: ["products", "expires_at"],
         },
-        ClientActionRequest: { type: "object", properties: { product_id: { type: "string", enum: productIds } }, required: ["product_id"] },
+        ClientActionRequest: {
+          type: "object",
+          properties: {
+            product_id: { type: "string", enum: productIds },
+            params: {
+              type: "object",
+              description: "For an action whose served_by has a params_schema (e.g. a Mynt Ramp quote): what the customer chose, such as the amount. Never customer data",
+              additionalProperties: { type: ["string", "number", "boolean", "null"] },
+            },
+            quote: { type: "string", description: "For an action whose served_by has accepts_quote_from: the reference of the quote being accepted" },
+          },
+          required: ["product_id"],
+        },
         ClientActionResult: {
           type: "object",
           description:
@@ -416,6 +428,7 @@ export function openApiDocument(name: string, version: string, baseUrl: string, 
             reference: { type: "string" },
             status: { type: "string", enum: ["verified", "not_verified", "completed", "failed", "pending"] },
             sandbox: { type: "boolean" },
+            expires_at: { type: "string", format: "date-time", description: "For a quote: until when it can be accepted" },
           },
           required: ["action"],
         },
@@ -600,9 +613,20 @@ export function createMyntBrowserClient(options: MyntBrowserOptions) {
     async withdrawConsent(productId: ProductId, purpose: string) {
       return evidence({ product_id: productId, type: "consent_withdrawn", subject: purpose });
     },
-    /** Starts a provider-hosted action; send the customer to redirect_url. */
-    async startAction<P extends ProductId>(productId: P, action: (typeof CLIENT_ACTIONS)[P][number]) {
-      const { data, error, response } = await client.POST("/client/actions/{action}", { params: { path: { action } }, body: { product_id: productId } });
+    /**
+     * Starts a provider-hosted action; send the customer to redirect_url. An action served by a vendor answers with
+     * its outcome instead. Pass params to one that takes them (a Mynt Ramp quote's amount and asset), and quote
+     * (the quote's reference) to one that accepts a quote.
+     */
+    async startAction<P extends ProductId>(
+      productId: P,
+      action: (typeof CLIENT_ACTIONS)[P][number],
+      options: { params?: Record<string, string | number | boolean | null>; quote?: string } = {},
+    ) {
+      const { data, error, response } = await client.POST("/client/actions/{action}", {
+        params: { path: { action } },
+        body: { product_id: productId, ...(options.params ? { params: options.params } : {}), ...(options.quote ? { quote: options.quote } : {}) },
+      });
       if (!data) throw fail(response, error);
       return data;
     },

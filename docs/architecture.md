@@ -169,6 +169,7 @@ sequenceDiagram
 
 - **Evidence** (documents shown, consents given and withdrawn) is stored against the contract version (`client_evidence`).
 - **The vault** keeps each customer's fields per app, sealed. Fields are accepted only if an action needs them, after consent, sensitive ones only from a secure input, and every value is validated against the data dictionary (`src/data-dictionary.ts`). `DELETE /v1/client/fields` erases everything, including vendor results still queued.
+- **Params and quotes:** a vendor-served action may take `params` from the device (an amount, an asset; never customer data) and may be a quote, which another action accepts once, before it expires, by Mynt's reference. Mynt keeps the vendor's quote id.
 - **Vendor calls** (`src/vendor-call.ts`) go out HTTPS-only to a checked public address, with no redirects, 10 s, 256 KiB, HMAC-signed and replay-protected. Results are sealed, sent in full only to the innovator, and expire if never finished (`sweepVendorActionRuns`, every minute).
 - **Webhooks** to apps and firms are signed (`Mynt-Signature`), queued in `webhook_deliveries` and retried with backoff by `startWebhookWorker`.
 
@@ -248,7 +249,7 @@ Two secrets protect stored data: `MYNT_VAULT_KEY` seals the customer vault, firm
 | Vendor result → device | Everything except a status, a reference and what `client_result` allows |
 | Anything → Mynt's logs and outputs | Secret values and customer data (scrubbed by `src/boxes.ts`) |
 
-Mynt itself **never holds customer funds or assets**. Money moves in the licensed providers' own flows (innovators' hosted flows, vendors' services); Mynt records consent, evidence and outcomes.
+Mynt itself **never holds customer funds or assets**. Money moves in the licensed providers' own flows (innovators' hosted flows, vendors' services); Mynt records consent, evidence and outcomes. That includes the **Mynt Ramp**, the one on- and off-ramp for digital-asset liquidity: it is a `ramp` vendor service offered only by the firm designated with `set_mynt_ramp`, today a licensed ramp partner that holds funds in transit under its own licences ([plan](plans/crypto-liquidity.md)).
 
 ## 11. Deployment
 

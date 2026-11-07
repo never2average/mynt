@@ -71,10 +71,16 @@ class MyntClient(private val clientSecret: String, private val baseUrl: String =
 
     fun withdrawConsent(productId: String, purpose: String): JSONObject = evidence(productId, "consent_withdrawn", purpose, null)
 
-    /** Starts a provider-hosted action; send the customer to redirect_url. */
-    fun startAction(productId: String, action: String): JSONObject {
+    /**
+     * Starts a provider-hosted action; send the customer to redirect_url. Pass params to an action that takes them
+     * (a Mynt Ramp quote's amount and asset), and quote (the quote's reference) to one that accepts a quote.
+     */
+    fun startAction(productId: String, action: String, params: Map<String, Any?>? = null, quote: String? = null): JSONObject {
         require(MyntContract.CLIENT_ACTIONS[productId]?.contains(action) == true) { action + " isn't a client action of " + productId }
-        return request("POST", "/client/actions/" + action, JSONObject().put("product_id", productId))
+        val body = JSONObject().put("product_id", productId)
+        if (params != null) body.put("params", JSONObject(params))
+        if (quote != null) body.put("quote", quote)
+        return request("POST", "/client/actions/" + action, body)
     }
 
     /** Stores customer data the product's actions need. Sensitive fields must come from a secure input. */

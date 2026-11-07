@@ -118,7 +118,15 @@ const ClientSessionBody = z
     ttl_seconds: z.number().int().min(60).max(3600).default(1800),
   })
   .strict();
-const ClientActionBody = z.object({ product_id: z.string().min(1).max(100) }).strict();
+// params: what the device sends a vendor-served action that takes them (an amount, an asset), checked against the
+// service type's params_schema; quote: the reference of a quote this action accepts.
+const ClientActionBody = z
+  .object({
+    product_id: z.string().min(1).max(100),
+    params: z.record(z.string().max(64), z.union([z.string().max(200), z.number(), z.boolean(), z.null()])).optional(),
+    quote: z.string().min(1).max(100).optional(),
+  })
+  .strict();
 const EvidenceBody = z
   .object({
     product_id: z.string().min(1).max(100),
@@ -336,13 +344,16 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       if (!a || !session.scopes.includes(a.id)) throw new ApiError(403, "action_not_in_scope", `'${action[1]}' isn't a client action this session may start`);
       if (a.flow !== "hosted") throw new ApiError(400, "not_startable", `'${a.id}' isn't a hosted flow; read it from /v1/client/offers`);
       if (record.drift) throw new ApiError(409, "sales_paused", `New applications to '${record.product.id}' are paused`);
+      // Only actions served by a vendor take params or a quote; a hand-off to the innovator's page takes neither.
+      const vendorServed = !!record.pins.vendor_bindings?.some((b) => b.handoff_id === a.id);
+      if (!vendorServed && (body.params !== undefined || body.quote !== undefined)) throw new ApiError(400, "params_not_accepted", `'${a.id}' takes no params or quote`);
       // The consent the action needs must be recorded in this session, and not withdrawn since.
       if (a.consent_purpose) {
         if (!(await consentFor(record.product.id, a.consent_purpose))) throw new ApiError(409, "consent_required", `Record consent '${a.consent_purpose}' (POST /v1/client/evidence) before starting '${a.id}'`);
       }
       // Served by the product's bound vendor: Mynt calls it with the service type's declared inputs from the
       // vault; the device gets only the outcome the service type allows.
-      if (record.pins.vendor_bindings?.some((b) => b.handoff_id === a.id)) {
+      if (vendorServed) {
         const customer = requireCustomer();
         const served = await vendorAction(
           store,
@@ -358,6 +369,8 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
               const latest = await consentFor(record.product.id, purpose);
               return latest ? { id: latest.id, created_at: latest.created_at } : null;
             },
+            params: body.params,
+            quote: body.quote,
           },
           opts.vendors,
         );

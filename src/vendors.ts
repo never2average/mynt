@@ -29,7 +29,9 @@ import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions } from "
 // bound handoff (the vendor's result goes to the innovator; the device gets only the outcome the service type's
 // client_result allows). Billing is between vendor and innovator: Mynt only counts calls.
 
-export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "other"] as const;
+// `ramp` is the Mynt Ramp's own category: fiat in and out of digital-asset liquidity, offered only by the one firm
+// an admin designates as operating the Mynt Ramp (set_mynt_ramp), so every product shares the same ramp.
+export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"] as const;
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 // Types of key a firm's key vault holds.
 export const KEY_TYPES = ["vendor_test_credential", "vendor_live_credential"] as const;
@@ -99,6 +101,10 @@ export interface ServiceType {
   vendor_licences: string[];
   fixtures: Record<string, unknown>[];
   client_result: ClientResult | null; // null: the device gets the status and a reference only
+  params_schema: Record<string, unknown> | null; // what the device sends with each call (never customer data)
+  params_fixture: Record<string, unknown> | null; // params for conformance
+  quote: boolean; // a price quote: output carries quote_id and expires_at
+  accepts: string | null; // the quote service type this one executes
   updated_at: string;
 }
 export type OfferingStatus = "draft" | "conformance_passed" | "listed" | "suspended";
@@ -148,6 +154,10 @@ const toType = (r: Row): ServiceType => ({
   vendor_licences: r.vendor_licences as string[],
   fixtures: r.fixtures as Record<string, unknown>[],
   client_result: (r.client_result as ClientResult | null) ?? null,
+  params_schema: (r.params_schema as Record<string, unknown> | null) ?? null,
+  params_fixture: (r.params_fixture as Record<string, unknown> | null) ?? null,
+  quote: (r.quote as boolean | null) ?? false,
+  accepts: (r.accepts as string | null) ?? null,
   updated_at: iso(r.updated_at)!,
 });
 const toOffering = (r: Row): Offering => ({
@@ -264,6 +274,21 @@ export const ServiceTypeSchema = z
       .strict()
       .optional()
       .describe("What a device that starts an action served by this service is told. The full output goes to the innovator; by default the device gets only a status and a reference"),
+    params_schema: z
+      .record(z.string(), z.unknown())
+      .nullable()
+      .optional()
+      .describe(
+        "JSON Schema of `params`: what the device sends with each call (an amount, a currency, an asset), never customer data, which comes from the vault. An object of plain scalar properties with additionalProperties false",
+      ),
+    params_fixture: z.record(z.string(), z.unknown()).nullable().optional().describe("params for Mynt's conformance test; needed when params_schema has required properties"),
+    quote: z
+      .boolean()
+      .default(false)
+      .describe("true for a price quote: its output must require quote_id (string) and expires_at (date-time, at most an hour ahead). The device is shown expires_at and accepts the quote through the service type whose `accepts` names this one"),
+    accepts: Key.nullable().optional().describe(
+      "The key of the quote service type (same region) this service executes. The device sends the quote's reference; Mynt sends the vendor its quote_id, once, only while it hasn't expired, and only to the vendor that quoted",
+    ),
   })
   .strict();
 export type ServiceTypeInput = z.infer<typeof ServiceTypeSchema>;
@@ -321,6 +346,34 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
       else if (t.fills.includes(f)) errors.push(`client_result.fields: '${f}' fills the customer's vault; it goes to the innovator, never the device`);
     }
   }
+  if (t.params_schema) {
+    const ps = t.params_schema;
+    if (ps.type !== "object") errors.push("params_schema must be a JSON Schema of type object");
+    if (ps.additionalProperties !== false) errors.push("params_schema must set additionalProperties: false, so a device can't send anything it doesn't declare");
+    try {
+      validator(ps);
+    } catch (e) {
+      errors.push(`params_schema isn't a valid JSON Schema: ${(e as Error).message}`);
+    }
+    for (const [name, prop] of Object.entries((ps.properties ?? {}) as Record<string, unknown>)) {
+      if (!scalarSchema(prop)) errors.push(`params_schema: '${name}' must be a plain string, number, boolean or enum property`);
+      if (DATA_DICTIONARY[name] && DATA_DICTIONARY[name].sensitivity !== "public") errors.push(`params_schema: '${name}' is customer data; it comes from the vault as an input, never from the device as a param`);
+    }
+    const needed = Array.isArray(ps.required) ? (ps.required as string[]) : [];
+    if (needed.length && !t.params_fixture) errors.push("params_fixture: needed for Mynt's conformance test, because params_schema has required properties");
+  } else if (t.params_fixture) errors.push("params_fixture: there is no params_schema");
+  const outRequired = Array.isArray(t.output_schema.required) ? (t.output_schema.required as string[]) : [];
+  if (t.quote) {
+    for (const f of ["quote_id", "expires_at"]) if (!(f in outputProps) || !outRequired.includes(f)) errors.push(`quote: output_schema must require '${f}'`);
+    if (t.client_result?.fields.includes("quote_id")) errors.push("client_result.fields: 'quote_id' stays between Mynt and the vendor; the device accepts a quote by Mynt's reference");
+    if (t.accepts) errors.push("A service type is a quote or accepts one, not both");
+  }
+  if (t.accepts) {
+    const q = t.accepts === t.key ? undefined : await serviceType(store.db, t.region, t.accepts);
+    if (!q) errors.push(`accepts: no service type '${t.accepts}' in ${t.region} (define the quote service type first)`);
+    else if (!q.quote) errors.push(`accepts: '${t.accepts}' isn't a quote service type (quote: true)`);
+    else if (q.category !== t.category) errors.push(`accepts: '${t.accepts}' is ${q.category}; a quote and the service accepting it share a category`);
+  }
   for (const [side, list] of [
     ["innovator_licences", t.innovator_licences],
     ["vendor_licences", t.vendor_licences],
@@ -343,17 +396,23 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
       const p = schemaProblems(t.input_schema, f);
       if (p.length) errors.push(`fixture ${i + 1} doesn't match input_schema: ${p.join("; ")}`);
     });
+  if (!errors.length && t.params_schema && t.params_fixture) {
+    const p = schemaProblems(t.params_schema, t.params_fixture);
+    if (p.length) errors.push(`params_fixture doesn't match params_schema: ${p.join("; ")}`);
+  }
   return { errors, fixtures };
 }
 
 export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtures: Record<string, unknown>[], by: string | null): Promise<ServiceType> {
   const { rows } = await store.db.query(
-    `INSERT INTO ${T}.service_types (region, key, name, category, description, input_schema, output_schema, consent_purpose, fills, innovator_licences, vendor_licences, fixtures, updated_by, client_result, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+    `INSERT INTO ${T}.service_types (region, key, name, category, description, input_schema, output_schema, consent_purpose, fills, innovator_licences, vendor_licences, fixtures, updated_by, client_result,
+       params_schema, params_fixture, quote, accepts, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
      ON CONFLICT (region, key) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
        input_schema = EXCLUDED.input_schema, output_schema = EXCLUDED.output_schema, consent_purpose = EXCLUDED.consent_purpose, fills = EXCLUDED.fills,
        innovator_licences = EXCLUDED.innovator_licences, vendor_licences = EXCLUDED.vendor_licences, fixtures = EXCLUDED.fixtures,
-       updated_by = EXCLUDED.updated_by, client_result = EXCLUDED.client_result, updated_at = now()
+       updated_by = EXCLUDED.updated_by, client_result = EXCLUDED.client_result, params_schema = EXCLUDED.params_schema, params_fixture = EXCLUDED.params_fixture,
+       quote = EXCLUDED.quote, accepts = EXCLUDED.accepts, updated_at = now()
      RETURNING *`,
     [
       t.region,
@@ -370,6 +429,10 @@ export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtu
       JSON.stringify(fixtures),
       by,
       t.client_result ? JSON.stringify(t.client_result) : null,
+      t.params_schema ? JSON.stringify(t.params_schema) : null,
+      t.params_fixture ? JSON.stringify(t.params_fixture) : null,
+      t.quote,
+      t.accepts ?? null,
     ],
   );
   return toType(rows[0]);
@@ -446,6 +509,8 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
     request_id: randomUUID(),
     environment: "test",
     input,
+    ...(t.params_schema ? { params: t.params_fixture ?? {} } : {}),
+    ...(t.accepts ? { quote: { quote_id: "mynt_conformance" } } : {}),
     consent: { purpose: t.consent_purpose, artefact_ref: "mynt_conformance", given_at: new Date().toISOString() },
   });
   for (const [i, input] of t.fixtures.entries()) {
@@ -517,8 +582,23 @@ function responseProblems(body: unknown, requestId: string, t: ServiceType, allo
   if (allowPending && b.status === "pending") {
     if (b.redirect_url != null && typeof b.redirect_url !== "string") problems.push("redirect_url must be a string");
   } else if (b.status !== "ok") problems.push(`status is ${JSON.stringify(b.status)}, not "ok"`);
-  else problems.push(...schemaProblems(t.output_schema, b.output).map((p) => `output ${p}`));
+  else {
+    const p = schemaProblems(t.output_schema, b.output).map((x) => `output ${x}`);
+    if (!p.length && t.quote) p.push(...quoteProblems(b.output as Record<string, unknown>));
+    problems.push(...p);
+  }
   return problems;
+}
+
+// A quote must be acceptable for a short, real window: expires_at in the future, at most an hour ahead.
+export const QUOTE_MAX_SECONDS = 3600;
+function quoteProblems(output: Record<string, unknown>): string[] {
+  const at = Date.parse(String(output.expires_at));
+  if (typeof output.quote_id !== "string" || !output.quote_id || output.quote_id.length > 200) return ["output quote_id must be a non-empty string of at most 200 characters"];
+  if (Number.isNaN(at)) return ["output expires_at isn't a date-time"];
+  if (at <= Date.now()) return ["output expires_at is already past"];
+  if (at > Date.now() + QUOTE_MAX_SECONDS * 1000) return [`output expires_at is more than ${QUOTE_MAX_SECONDS} s ahead`];
+  return [];
 }
 
 // A provider's hosted page a device may be sent to: https (plain http only to loopback in tests), no credentials.
@@ -590,9 +670,10 @@ export async function vendorBindingsOf(store: Store, connections: Conn[]): Promi
 
 // What the developer contract says of each vendor-served action: the service type, and what a device is told
 // of its outcome. No subscription, vendor, endpoint or secret.
-export type VendorServedActions = Record<string, { service_type: string; client_result: { statuses: ClientStatus[]; fields: string[]; redirect: boolean } }>;
+export type VendorServedActions = Record<string, { service_type: string; client_result: { statuses: ClientStatus[]; fields: string[]; redirect: boolean }; params_schema?: Record<string, unknown>; quote?: true; accepts_quote_from?: string }>;
 export async function vendorServedActions(store: Store, connections: Conn[]): Promise<VendorServedActions> {
   const out: VendorServedActions = {};
+  const accepting: Record<string, string> = {}; // handoff id → the quote service type it accepts
   for (const c of connections.filter((x) => x.type === "handoff_to_party" && x.attributes?.vendor_subscription_id && x.from.id)) {
     const sub = await getSubscription(store.db, c.attributes!.vendor_subscription_id as string);
     const o = sub && (await getOffering(store.db, sub.offering_id));
@@ -600,9 +681,37 @@ export async function vendorServedActions(store: Store, connections: Conn[]): Pr
     if (!t) continue;
     const cr = t.client_result;
     const statuses = new Set<ClientStatus>(["completed", "failed", "pending", ...Object.values(cr?.status?.map ?? {})]);
-    out[c.from.id!] = { service_type: t.key, client_result: { statuses: CLIENT_STATUSES.filter((s) => statuses.has(s)), fields: cr?.fields ?? [], redirect: cr?.redirect ?? false } };
+    out[c.from.id!] = {
+      service_type: t.key,
+      client_result: { statuses: CLIENT_STATUSES.filter((s) => statuses.has(s)), fields: cr?.fields ?? [], redirect: cr?.redirect ?? false },
+      // Only present when set, so contracts of services without them are unchanged.
+      ...(t.params_schema ? { params_schema: t.params_schema } : {}),
+      ...(t.quote ? { quote: true as const } : {}),
+    };
+    if (t.accepts) accepting[c.from.id!] = t.accepts;
+  }
+  // An accepting action names the product's action whose quotes it accepts.
+  for (const [id, quoteKey] of Object.entries(accepting)) {
+    const from = Object.entries(out).find(([, v]) => v.quote && v.service_type === quoteKey)?.[0];
+    if (from) out[id].accepts_quote_from = from;
   }
   return out;
+}
+
+// ---- the Mynt Ramp ----
+
+// The one firm that operates the Mynt Ramp: in R1 the licensed ramp partner (it holds the funds in transit under
+// its own licences); later, if Mynt is licensed itself, Mynt's own firm. Only that firm may offer `ramp` services,
+// and calls go only to its offerings, so every product's fiat in and out runs through the same ramp.
+export const MYNT_RAMP_SETTING = "mynt_ramp";
+export async function myntRampEntity(store: Store): Promise<string | null> {
+  return (await store.getSetting<{ entity_id: string }>(MYNT_RAMP_SETTING))?.entity_id ?? null;
+}
+async function rampRefusal(store: Store, t: ServiceType, entityId: string): Promise<string | null> {
+  if (t.category !== "ramp") return null;
+  const ramp = await myntRampEntity(store);
+  if (!ramp) return "No firm operates the Mynt Ramp yet: an admin designates it with set_mynt_ramp";
+  return ramp === entityId ? null : "Ramp services are offered only by the firm that operates the Mynt Ramp: all fiat in and out goes through the one Mynt Ramp";
 }
 
 // ---- runtime: calls through a product's bound vendor ----
@@ -634,12 +743,16 @@ async function callBoundVendor(
     held: () => Promise<Record<string, string>>; // the customer's vault, opened
     consent: (purpose: string) => Promise<{ id: string; created_at: string } | null>; // the active grant in this session
     allowPending?: boolean;
+    params?: Record<string, unknown>; // checked against the service type's params_schema by the caller
+    quote_id?: string; // the vendor's own quote id, for a service that accepts a quote
   },
   opts: VendorCallOptions,
 ): Promise<VendorAnswer> {
   const environment = a.sandbox ? "test" : "live";
   const unavailable = (why = "isn't available right now"): VendorAnswer => ({ kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses ${why}` });
   if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status)) return unavailable();
+  // A ramp offering whose firm no longer operates the Mynt Ramp isn't called, in sandbox or live.
+  if (await rampRefusal(store, t, o.entity_id)) return unavailable("isn't the Mynt Ramp");
   // Live calls go only to a listed offering, with both sides' licence prerequisites still met today.
   if (!a.sandbox) {
     if (o.status !== "listed") return unavailable();
@@ -662,7 +775,14 @@ async function callBoundVendor(
   const keyId = a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
   const sealedCredential = keyId ? await sealedColumn(store.db, "key_vault", "sealed", keyId) : null;
   if (!a.sandbox && o.requires_credential && !sealedCredential) return unavailable("has no live credential set");
-  const body = { request_id: a.request_id, environment, input, consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at } };
+  const body = {
+    request_id: a.request_id,
+    environment,
+    input,
+    ...(t.params_schema ? { params: a.params ?? {} } : {}),
+    ...(a.quote_id ? { quote: { quote_id: a.quote_id } } : {}),
+    consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at },
+  };
   const r = await callVendor({ base_url: base, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null }, opts);
   const problems = r.ok ? responseProblems(r.body, body.request_id, t, a.allowPending) : [r.error ?? "failed"];
   await recordUsage(store.db, sub.id, environment, !problems.length);
@@ -726,8 +846,11 @@ const deviceStatus = (t: ServiceType, output: Record<string, unknown>): ClientSt
   const s = t.client_result?.status;
   return (s && s.map[String(output[s.from])]) || "completed";
 };
-const deviceFields = (t: ServiceType, output: Record<string, unknown>) =>
-  Object.fromEntries((t.client_result?.fields ?? []).filter((f) => f in output && !RESERVED.includes(f)).map((f) => [f, output[f]]));
+const deviceFields = (t: ServiceType, output: Record<string, unknown>) => ({
+  ...Object.fromEntries((t.client_result?.fields ?? []).filter((f) => f in output && !RESERVED.includes(f) && f !== "quote_id").map((f) => [f, output[f]])),
+  // A quote's device is always told when it stops being acceptable.
+  ...(t.quote ? { expires_at: output.expires_at } : {}),
+});
 
 type RunStatus = "calling" | "pending" | "completed" | "failed" | "withdrawn" | "expired";
 const OPEN: RunStatus[] = ["calling", "pending"];
@@ -786,6 +909,8 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType | null, end: 
   );
   if (!rows[0]) return null;
   const done = rows[0] as RunRow;
+  if (status === "completed" && output && t?.quote)
+    await store.db.query(`UPDATE ${T}.vendor_action_runs SET quote_id = $2, quote_expires_at = $3 WHERE id = $1`, [run.id, String(output.quote_id), new Date(String(output.expires_at)).toISOString()]);
   if (status === "completed" && output && t && run.customer_ref)
     for (const f of t.fills) {
       const v = output[f];
@@ -858,6 +983,8 @@ export async function vendorAction(
     customer_ref: string;
     held: () => Promise<Record<string, string>>;
     consent: (purpose: string) => Promise<{ id: string; created_at: string } | null>;
+    params?: Record<string, unknown>; // what the device sent, for a service with a params_schema
+    quote?: string; // the reference of the quote run this action accepts
   },
   opts: VendorCallOptions = {},
 ): Promise<VendorAction> {
@@ -867,9 +994,50 @@ export async function vendorAction(
   if (!bound) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The service behind '${a.action}' isn't available right now` };
   const { sub, t } = bound;
   if (!a.sandbox && !sub.live) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses isn't turned on for live use yet` };
+  const bad = (status: number, code: string, message: string): VendorAction => ({ kind: "error", status, code, message });
+  if (a.params !== undefined && !t.params_schema) return bad(400, "params_not_accepted", `'${a.action}' takes no params`);
+  if (t.params_schema) {
+    const problems = schemaProblems(t.params_schema, a.params ?? {});
+    if (problems.length) return bad(400, "invalid_params", `params for '${a.action}' don't match what it takes: ${problems.join("; ")}`);
+  }
+  if (a.quote !== undefined && !t.accepts) return bad(400, "quote_not_accepted", `'${a.action}' doesn't accept a quote`);
+  if (t.accepts && !a.quote) return bad(400, "quote_required", `'${a.action}' accepts a quote: send the quote's reference as quote`);
+  const runId = randomUUID();
+  // Claim the quote for this run: the same app, customer, product and environment, from the same vendor, completed,
+  // unexpired and not accepted before. Claiming is one UPDATE, so two accepts of one quote can't both go through.
+  let quoteId: string | undefined;
+  if (t.accepts) {
+    const { rows: claimed } = await store.db.query(
+      `UPDATE ${T}.vendor_action_runs q SET accepted_by = $2
+       FROM ${T}.vendor_subscriptions s, ${T}.vendor_offerings o
+       WHERE q.id::text = $1 AND q.app_id = $3 AND q.customer_ref = $4 AND q.sandbox = $5 AND q.product_id = $6 AND q.service_type = $7
+         AND q.status = 'completed' AND q.quote_id IS NOT NULL AND q.accepted_by IS NULL AND q.quote_expires_at > now()
+         AND s.id = q.subscription_id AND o.id = s.offering_id AND o.entity_id = $8
+       RETURNING q.quote_id`,
+      [a.quote, runId, a.app_id, a.customer_ref, a.sandbox, a.record.product.id, t.accepts, bound.o.entity_id],
+    );
+    if (!claimed[0]) {
+      const { rows: seen } = uuidLike(a.quote!)
+        ? await store.db.query(`SELECT accepted_by, quote_expires_at FROM ${T}.vendor_action_runs WHERE id = $1 AND app_id = $2 AND customer_ref = $3 AND sandbox = $4 AND service_type = $5`, [
+            a.quote,
+            a.app_id,
+            a.customer_ref,
+            a.sandbox,
+            t.accepts,
+          ])
+        : { rows: [] };
+      const q = seen[0] as { accepted_by: string | null; quote_expires_at: Date | string | null } | undefined;
+      if (!q || !q.quote_expires_at) return bad(404, "quote_not_found", "No quote with that reference for this customer");
+      if (q.accepted_by) return bad(409, "quote_used", "This quote was already accepted");
+      return bad(409, "quote_expired", "This quote has expired; get a new one");
+    }
+    quoteId = claimed[0].quote_id as string;
+  }
+  const releaseQuote = () =>
+    t.accepts ? store.db.query(`UPDATE ${T}.vendor_action_runs SET accepted_by = NULL WHERE id::text = $1 AND accepted_by = $2`, [a.quote, runId]) : Promise.resolve();
   // The run exists before the call, so a vendor that calls back before answering still finds it.
   const run: RunRow = {
-    id: randomUUID(),
+    id: runId,
     request_id: randomUUID(),
     subscription_id: sub.id,
     entity_id: sub.entity_id,
@@ -889,11 +1057,20 @@ export async function vendorAction(
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
     [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
   );
-  // Nothing is kept of a call that was refused, failed, answered badly or threw.
-  const discard = () => store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
+  // Nothing is kept of a call that was refused, failed, answered badly or threw, and its quote can be accepted again
+  // (vendors treat a repeated quote_id as the same order, so a retry can't execute twice).
+  const discard = async () => {
+    await store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
+    await releaseQuote();
+  };
   let answer: VendorAnswer;
   try {
-    answer = await callBoundVendor(store, bound, { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true }, opts);
+    answer = await callBoundVendor(
+      store,
+      bound,
+      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId },
+      opts,
+    );
   } catch (e) {
     await discard();
     throw e;
@@ -1032,6 +1209,34 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
 
   server.registerTool(
+    "set_mynt_ramp",
+    {
+      title: "Designate the Mynt Ramp",
+      description:
+        "Admin: name the firm that operates the Mynt Ramp, the one on- and off-ramp every product's fiat in and out goes through (category `ramp` service types). Today that's the licensed ramp partner, which holds funds in transit under its own licences. Only that firm may offer or list ramp services, and Mynt calls only its offerings. Omit entity_id to see the current one.",
+      inputSchema: { entity_id: z.string().uuid().optional().describe("The ramp operator's firm (register_firm)") },
+    },
+    async ({ entity_id }) => {
+      const current = await myntRampEntity(store);
+      if (!entity_id) return json({ entity_id: current, name: current ? ((await store.getEntity(current))?.name ?? null) : null });
+      const entity = await store.getEntity(entity_id);
+      if (!entity) return fail(`No firm '${entity_id}'; register it with register_firm`);
+      await store.setSetting(MYNT_RAMP_SETTING, { entity_id }, user.id);
+      await audit("set_mynt_ramp", entity_id, { was: current });
+      const { rows } = await store.db.query(
+        `SELECT o.id FROM ${T}.vendor_offerings o JOIN ${T}.service_types t ON t.region = o.region AND t.key = o.service_type
+         WHERE t.category = 'ramp' AND o.entity_id <> $1 AND o.status <> 'suspended'`,
+        [entity_id],
+      );
+      return json({
+        entity_id,
+        name: entity.name,
+        ...(rows.length ? { note: `${rows.length} ramp offering(s) by another firm are no longer called; suspend them with suspend_vendor_offering` } : {}),
+      });
+    },
+  );
+
+  server.registerTool(
     "define_service_type",
     {
       title: "Define a standard service",
@@ -1053,7 +1258,7 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
     {
       title: "Load the example standard services",
       description:
-        "Admin: load the example service types shipped with Mynt (IN: PAN verification, CKYC, account aggregator data, bank statement analytics, credit bureau, DigiLocker, e-sign, e-mandate; US: identity, bank account verification, credit bureau). Each is checked like define_service_type; one whose licence types your regulatory model names differently is skipped with the reason, unless licence_map renames them.",
+        "Admin: load the example service types shipped with Mynt (IN: PAN verification, CKYC, account aggregator data, bank statement analytics, credit bureau, DigiLocker, e-sign, e-mandate; US: identity, bank account verification, credit bureau, and the Mynt Ramp's quote and transfer). Each is checked like define_service_type; one whose licence types your regulatory model names differently is skipped with the reason, unless licence_map renames them.",
       inputSchema: {
         region: z.string().regex(/^[A-Z]{2}$/).optional(),
         licence_map: z.record(z.string(), z.string()).default({}).describe("Example licence type id → the id in your regulatory model"),
@@ -1062,7 +1267,9 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
     async ({ region, licence_map }) => {
       const loaded: string[] = [];
       const skipped: { file: string; errors: string[] }[] = [];
-      for (const { file, data } of exampleServiceTypes(region)) {
+      // Quote service types first, so a service type that accepts one finds it.
+      const examples = exampleServiceTypes(region).sort((x, y) => Number(!(x.data as { quote?: boolean }).quote) - Number(!(y.data as { quote?: boolean }).quote));
+      for (const { file, data } of examples) {
         const parsed = ServiceTypeSchema.safeParse(data);
         if (!parsed.success) {
           skipped.push({ file, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) });
@@ -1158,6 +1365,8 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       if (!entityId) return fail("You don't belong to a firm yet; an admin adds you to one");
       const t = await serviceType(store.db, o.region, o.service_type);
       if (!t) return fail(`No service type '${o.service_type}' in ${o.region}; see list_service_types`);
+      const ramp = await rampRefusal(store, t, entityId);
+      if (ramp) return fail(ramp);
       const bad = (await checkUrls([o.test_base_url, o.live_base_url])) ?? (await checkLicences(entityId, o.region, o.licence_ids));
       if (bad) return fail(bad);
       if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep signing secrets");
@@ -1236,7 +1445,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
         if (a.listed) {
           if (next.status !== "conformance_passed" && next.status !== "listed") return fail("Run run_conformance until it passes before listing");
           const t = (await serviceType(store.db, o.region, o.service_type))!;
-          const gap = await vendorLicenceGap(store, next, t);
+          const gap = (await rampRefusal(store, t, o.entity_id)) ?? (await vendorLicenceGap(store, next, t));
           if (gap) return fail(gap);
           next.status = "listed";
         } else if (next.status === "listed") next.status = "conformance_passed";

@@ -1101,6 +1101,12 @@ const TABLES = `
     PRIMARY KEY (subscription_id, day, environment)
   );
   ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS client_result jsonb;
+  -- What a device sends with each call, and quotes: a quote service's answer carries a price that expires, and
+  -- the service that accepts it is sent the quote's id once.
+  ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS params_schema jsonb;
+  ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS params_fixture jsonb;
+  ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS quote boolean NOT NULL DEFAULT false;
+  ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS accepts text;
   -- Client actions served by a product's bound vendor service: one row per call, the full result sealed (the
   -- device only ever gets client_outcome, which the service type's client_result allows).
   CREATE TABLE IF NOT EXISTS financial_products.vendor_action_runs (
@@ -1126,6 +1132,11 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS vendor_action_runs_session_idx ON financial_products.vendor_action_runs (session_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS vendor_action_runs_customer_idx ON financial_products.vendor_action_runs (app_id, customer_ref, sandbox);
   CREATE INDEX IF NOT EXISTS vendor_action_runs_open_idx ON financial_products.vendor_action_runs (created_at) WHERE status IN ('calling', 'pending');
+  -- A completed quote: the vendor's quote id (never shown to the device), until when it may be accepted, and the
+  -- run that accepted it (one at most).
+  ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS quote_id text;
+  ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS quote_expires_at timestamptz;
+  ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS accepted_by uuid;
   -- Evidence of a vendor-served action's end (status only, never the result).
   ALTER TABLE financial_products.client_evidence DROP CONSTRAINT IF EXISTS client_evidence_type_check;
   ALTER TABLE financial_products.client_evidence ADD CONSTRAINT client_evidence_type_check

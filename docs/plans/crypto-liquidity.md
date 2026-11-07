@@ -1,6 +1,6 @@
 # Plan: connecting Mynt to crypto liquidity
 
-**Status:** draft for discussion. Nothing here is built yet.
+**Status:** decided: the Mynt Ramp, operated by a licensed partner (model R1). The ramp's platform side is built (section 3.2); the partner and the rest are not.
 **Reads with:** [`docs/architecture.md`](../architecture.md).
 **Scope:** the United States only. Other countries are out of scope for this plan.
 
@@ -35,7 +35,7 @@ These come from how Mynt is already built and from `AGENTS.md`. The plan is shap
 Every dollar that enters or leaves digital-asset liquidity on Mynt goes through one ramp that Mynt owns as a platform service:
 
 - **For customers:** one way to fund and cash out in every app (bank transfer, card, wire in; bank transfer out), with one verification and one set of limits, wherever the app is.
-- **For developers:** two actions in every SDK, `deposit` and `withdraw`, served by Mynt. No ramp integration, ever.
+- **For developers:** two SDK calls on every product that uses the ramp: get a quote, then accept it. No ramp integration, ever.
 - **For liquidity providers:** they settle with the ramp in stablecoins and never touch a customer's bank account. A new provider plugs into one counterparty instead of every app.
 - **For Mynt:** one place to price fiat conversion (a ramp fee on top of the take rate), and one place to apply sanctions screening, the Travel Rule and transaction limits.
 
@@ -56,10 +56,27 @@ Every dollar that enters or leaves digital-asset liquidity on Mynt goes through 
 R1 can move to R2 later without changing the API developers and providers use: only who stands behind the ramp changes.
 
 **How it fits the code:**
-- Mynt registers its own firm (`register_firm`) and offers `fiat_onramp` and `fiat_offramp` as vendor offerings backed by the ramp partner. Every product firm subscribes to them like any vendor service. That firm is a different legal entity from Mynt, so the rule that a firm can't be on its own roster (`src/parties.ts:126`) doesn't get in the way.
-- Every digital-asset product composes the ramp: a `payments:sale` component provided by Mynt's firm. Cash-out already fits (the exchange component `settles_into` the ramp). Funding in doesn't yet: `funds` can't end on an `exchange` component today, so the schema needs that end added (section 4.2). The regime check then requires the ramp's licences like any other component's, and a lapse pauses every product that uses it.
-- `deposit` and `withdraw` become client actions served by the ramp, with the quote → accept flow in section 4.3 for the fiat price.
+- An admin registers the ramp partner's firm (`register_firm`) and designates it with `set_mynt_ramp`. Only that firm may offer `ramp` service types, so there is exactly one ramp. Every product firm subscribes to it like any vendor service, and the partner joins its roster as a party, so the regime check and drift see the partner's licences. Moving to R2 later is re-designating Mynt's own firm.
+- Every digital-asset product composes the ramp: a `payments:sale` component provided by the ramp partner. Cash-out fits as the exchange component `settles_into` the ramp, and funding in as the ramp `funds` the exchange component (the schema now allows `exchange:sale|purchase` as a `funds` target).
+- On- and off-ramp are one quote (`ramp_quote`, with `direction` on or off) and its acceptance (`ramp_transfer`), using the quote → accept flow in section 4.3.
 - The ramp's stablecoin settlement with providers is a ledger between firms, reported to each firm by webhook. Customers' balances stay with the provider that holds them.
+
+### 3.2 What's built
+
+| Part | Where | Tests |
+|---|---|---|
+| The `ramp` service category, the `set_mynt_ramp` admin tool, and the rule that only the designated firm may offer, list or be called for ramp services | `src/vendors.ts` | `test/ramp.test.js` |
+| Params: what a device sends with a vendor-served action (amount, asset, direction), declared per service type, scalar only, never customer data | `src/vendors.ts`, `src/runtime-api.ts` | `test/ramp.test.js` |
+| Quotes: a quote service's id and expiry kept by Mynt, never shown to the device; accepted once, atomically, only unexpired, only by the same customer and only at the vendor that quoted; released if the call fails | `src/vendors.ts`, `src/store.ts` | `test/ramp.test.js` |
+| What the developer contract says (`params_schema`, `quote`, `accepts_quote_from`), and `startAction(…, params, quote)` in every SDK | `src/vendors.ts`, `src/contract.ts`, `src/sdk.ts`, `sdk-templates/` | `test/client-sdks.test.js`; CI compiles Kotlin, Swift and Flutter |
+| US service types `ramp_quote` and `ramp_transfer` | `schemas/service-types/us/` | `test/ramp.test.js` |
+| The `digital_assets` underlying, and `funds` into an exchange component | schema, `src/catalog.ts` | None of its own yet; the existing definition tests still pass |
+
+**Not built yet:**
+- **The partner's side.** The partner either implements Mynt's vendor wire contract (`docs/reference.md`) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner.
+- **Journeys.** A journey step that shows a quote with its expiry before accept.
+- **The stablecoin leg** with liquidity providers, and the price and liquidity services behind the exchange component (routes A and B).
+- **Ops views:** expired quotes, stuck transfers and returned bank transfers in `ops_status`.
 
 ## 4. How it fits the existing model
 
@@ -82,12 +99,12 @@ The regime check then does what it does for any product: it finds the regulated 
 
 | Gap | Where | Change |
 |---|---|---|
-| No `digital_assets` underlying, so a crypto exchange component can't be told apart from FX or bullion | `UNDERLYINGS` in `src/catalog.ts`, the schema's `underlying` enum | Add `digital_assets` (and decide whether stablecoins are `cash` with a `wrapper`, or their own underlying) |
+| ~~No `digital_assets` underlying~~ (done), so a crypto exchange component couldn't be told apart from FX or bullion | `UNDERLYINGS` in `src/catalog.ts`, the schema's `underlying` enum | Add `digital_assets` (and decide whether stablecoins are `cash` with a `wrapper`, or their own underlying) |
 | A stablecoin is neither clearly `cash` nor a new underlying, and `converts_into` accepts only `cash` | Schema `conn_converts_into`, `src/definition.ts` | Decide the classification; if stablecoins get their own underlying, widen `converts_into` to accept it |
 | Nothing settles out of an exchange into another exchange component, and `discovers_price_for` can't target one, so a crypto venue or a two-leg swap can't be composed | Schema `x-from` / `x-to` | Extend the allowed ends only if a first product needs it |
-| A payment can't fund an exchange component, so the Mynt Ramp can't be composed as the way money comes in | Schema `conn_funds` `x-to` | Add `exchange:sale|purchase` as an allowed end of `funds` |
+| ~~A payment can't fund an exchange component~~ (done) | Schema `conn_funds` `x-to` | `exchange:sale\|purchase` is now an allowed end of `funds` |
 | Vendor categories are data services only | `SERVICE_CATEGORIES` in `src/vendors.ts` | Add `liquidity` (quote, execute), `ramp` (on/off), `custody` (balance, withdrawal), `chain_compliance` (address screening, Travel Rule) |
-| The vendor contract is a single request and answer, with no notion of a firm price | `src/vendor-call.ts`, the wire contract in `docs/reference.md` | A two-step **quote → accept** pattern: a quote carries a price, size, expiry (seconds) and quote id; accept is idempotent on the quote id and refused after expiry. Built on the existing async callback for settlement status |
+| ~~The vendor contract is a single request and answer, with no notion of a firm price~~ (done: params and quotes) | `src/vendor-call.ts`, the wire contract in `docs/reference.md` | A two-step **quote → accept** pattern: a quote carries a price, size, expiry (seconds) and quote id; accept is idempotent on the quote id and refused after expiry. Built on the existing async callback for settlement status |
 | Price changes between showing and accepting | Developer contract, journeys | A `quote` step type in journeys and a device-visible `client_result` for quotes (price, size, expiry, fees: never the provider's internal data) |
 | No wallet address or chain data field | `src/data-dictionary.ts` | Add `wallet_address`, `chain_network`, `destination_tag`, with validation per network and sensitivity `personal` |
 | No Travel Rule data for transfers | Data dictionary, service types | Originator and beneficiary fields, sent only to a `chain_compliance` service with consent |
@@ -191,8 +208,7 @@ Each phase ends with something that runs and is checked by tests, and changes no
 
 ## 8. Questions for the operator
 
-1. Mynt Ramp: start with a licensed partner operating it (R1), or have Mynt become the money transmitter itself (R2)?
-2. Which states first? A few large ones, or everywhere a partner is already licensed?
-3. Which first product: buy and hold, stablecoin remittance, or a tokenised T-bill pot?
-4. Will you hold US licences yourselves, or will innovators bring theirs?
-5. Are there liquidity or ramp providers you already talk to who could implement the vendor contract?
+1. Which states first? A few large ones, or everywhere a partner is already licensed?
+2. Which first product: buy and hold, stablecoin remittance, or a tokenised T-bill pot?
+3. Will you hold US licences yourselves, or will innovators bring theirs?
+4. Are there liquidity or ramp providers you already talk to who could implement the vendor contract?

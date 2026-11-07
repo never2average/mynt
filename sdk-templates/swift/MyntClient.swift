@@ -106,10 +106,14 @@ public final class MyntClient {
         try await evidence(productId, "consent_withdrawn", purpose, nil)
     }
 
-    /// Starts a provider-hosted action; send the customer to redirect_url.
-    public func startAction(_ productId: String, action: String) async throws -> JSON {
+    /// Starts a provider-hosted action; send the customer to redirect_url. Pass params to an action that takes them
+    /// (a Mynt Ramp quote's amount and asset), and quote (the quote's reference) to one that accepts a quote.
+    public func startAction(_ productId: String, action: String, params: JSON? = nil, quote: String? = nil) async throws -> JSON {
         guard MyntContract.clientActions[productId]?.contains(action) == true else { throw MyntError(status: 0, code: "unknown_action", message: action + " isn't a client action of " + productId) }
-        return try await request("POST", "/client/actions/" + action, ["product_id": productId])
+        var body: JSON = ["product_id": productId]
+        if let params = params { body["params"] = params }
+        if let quote = quote { body["quote"] = quote }
+        return try await request("POST", "/client/actions/" + action, body)
     }
 
     /// Stores customer data the product's actions need. Sensitive fields must come from a secure input.
