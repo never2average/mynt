@@ -143,6 +143,44 @@
    },
    "description": "Where the product is offered, for countries that license state by state: ISO 3166-2 codes, lowercase like entities' incorporation (e.g. 'us-ny', 'us-ca'), or a country code ('us') for the whole country. Each component is checked for coverage in each code within its country, and publishing is blocked for any with no covering licence. Omit to check each component's country as a whole, as before."
   },
+  "builds_on": {
+   "type": "array",
+   "minItems": 1,
+   "uniqueItems": true,
+   "description": "Published products this one is built on (a base product), so it doesn't re-declare what they provide: a dollar account built on the money transmission product moves money in and out through it. Saving the definition sets the product's underlying_product_ids from this list. The base's per-state coverage bounds this product's: in each jurisdiction this one is offered in, every base must be published, not drifted, and covered there, or publishing is blocked there; the live version pins each base and drifts when one is unpublished, offered elsewhere or drifts itself.",
+   "items": {
+    "type": "object",
+    "required": [
+     "product_id"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "product_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "The base product's id"
+     },
+     "funds": {
+      "type": "array",
+      "items": {
+       "$ref": "#/$defs/key"
+      },
+      "description": "Components of this product the base moves money into (like a funds link from the base)"
+     },
+     "settles_from": {
+      "type": "array",
+      "items": {
+       "$ref": "#/$defs/key"
+      },
+      "description": "Components of this product whose proceeds settle back out through the base (like a settles_into link to the base)"
+     },
+     "note": {
+      "type": "string",
+      "description": "What the base does for this product, in a sentence"
+     }
+    }
+   }
+  },
   "plane": {
    "$ref": "#/$defs/plane"
   },

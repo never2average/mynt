@@ -11,7 +11,8 @@ import { CATALOG } from "./helpers.js";
 
 // Coverage per state: US money transmission and virtual-currency business are licensed state by state, so a
 // product lists the states it's offered in and each component is checked in each, on the US model as data
-// (schemas/regulatory/us.json: NYDFS scoped to us-ny, DFPI to us-ca, FinCEN and the OCC country-wide).
+// (schemas/regulatory/us.json: NYDFS scoped to us-ny, DFPI to us-ca, the OCC country-wide, and the FinCEN
+// registration covering no state by itself).
 
 const MODEL = JSON.parse(readFileSync(new URL("../schemas/regulatory/us.json", import.meta.url), "utf8"));
 
@@ -168,11 +169,19 @@ test("a product offered in New York and California with only a New York licence 
 test("a country-wide federal licence that grants the type covers every state; the whole country needs one", async () => {
   const ctx = await setup();
   const f = await ctx.firm("Fed");
+  // The FinCEN registration used to stand in here; it now covers no state by itself (see
+  // money-transmission.test.js), so a national trust bank charter, which covers 'us', holds custody instead.
   const msb = await f.hold("fincen", "fincen_msb");
+  const trust = await f.hold("occ", "occ_national_trust_bank");
   assert.equal((await f.call("create_product", product("fed-wallet"))).isError, false);
-  const regime = await compose(f, "fed-wallet", [buy(["us-ny", "us-ca", "us-tx"])], bindAll(msb));
+  const hold = (offered_in) => ({ key: "buy", country: "us", primitive: "custody_settlement", action: "servicing", underlying: "digital_assets", provider: { by: "self" }, offered_in });
+  const regime = await compose(f, "fed-wallet", [hold(["us-ny", "us-ca", "us-tx"])], bindAll(trust));
   assert.deepEqual(regime.regions[0].jurisdictions.map((j) => j.covered), [true, true, true]);
-  for (const j of regime.regions[0].components[0].jurisdictions) assert.equal(j.coverage.by[0].license_id, "fincen_msb");
+  for (const j of regime.regions[0].components[0].jurisdictions) assert.equal(j.coverage.by[0].license_id, "occ_national_trust_bank");
+  // The FinCEN registration alone covers the exchange nowhere, and says why.
+  const exchange = await compose(f, "fed-wallet", [buy(["us-tx"])], bindAll(msb));
+  assert.equal(exchange.regions[0].components[0].jurisdictions[0].coverage.status, "uncovered");
+  assert.match(exchange.regions[0].components[0].coverage.reason, /fincen_msb covers nowhere by itself/);
 
   // offered_in: ['us'] is the whole country: a New York licence alone doesn't cover it.
   const g = await ctx.firm("Gotham");

@@ -22,6 +22,15 @@ import type { HeldLicense, Party, ProductRecord, ReferenceData, Store } from "./
 // the whole country), and coverage is checked in each: a held licence counts there when it covers it (a state
 // licence its state, a country-wide or pre-empting licence everywhere; see licenceJurisdictions). Without
 // offered_in a component is checked for the country as before: any licence held in the region counts.
+//
+// A licence type may require others (requires: a state money transmitter licence counts only alongside the
+// FinCEN registration), and a licence type may cover nowhere by itself (covers: [], that registration).
+//
+// A product may be built on others (underlying_product_ids; a v2 definition's builds_on): a dollar account
+// on the money transmission product, so it never re-declares transmission. It inherits their coverage: in
+// each jurisdiction it's offered in, every product it's built on must be published, not drifted, and
+// covered there (its live regime), or the composed product is blocked there too. Its pins record them (see
+// pins.ts), so it drifts when one of them does.
 
 const Key = z.string().regex(/^[a-z][a-z0-9_]*$/, "Use a lowercase key like 'loan' or 'collect'");
 
@@ -66,8 +75,10 @@ export const compositionOf = (record: ProductRecord, live = false) =>
   live && record.pins ? { components: record.pins.components, parties: record.pins.parties } : { components: record.components, parties: record.parties };
 
 type Stakeholders = LicenceReconciliation & { enforced: boolean; unbound: string[] };
-type JurisdictionRow = { jurisdiction: string; coverage: Coverage; stakeholders: Stakeholders | null };
-type Covering = { entity_id: string; licence_id: string; regulator_id: string; license_id: string; registration_number: string };
+type JurisdictionRow = { jurisdiction: string; coverage: Coverage; stakeholders: Stakeholders | null; prerequisites?: Stakeholders[] };
+// requires: the held licences the covering one counts only with (its type's prerequisites, e.g. the FinCEN
+// registration behind a state money transmitter licence); pinned with it at publish.
+type Covering = { entity_id: string; licence_id: string; regulator_id: string; license_id: string; registration_number: string; requires?: string[] };
 type Coverage =
   | { status: "covered"; by: Covering[] }
   | { status: "uncovered"; reason: string }
@@ -131,8 +142,9 @@ export async function validateComposition(store: Store, product: ProductRecord, 
 }
 
 // The regime of a product's composition (its working copy, or the pinned live one), per jurisdiction.
-export async function productRegime(store: Store, product: ProductRecord, opts: { live?: boolean } = {}) {
+export async function productRegime(store: Store, product: ProductRecord, opts: { live?: boolean; seen?: string[] } = {}) {
   const { components, parties } = compositionOf(product, opts.live);
+  const bases = await basesOf(store, product, opts.seen ?? []);
   const ref = await store.referenceData(true);
   const types = await store.regulatedProductTypes();
   const mappings = await store.productMappings();
@@ -201,53 +213,78 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
       const pinnedLicence = c.provider?.by === "self" ? c.provider.licence_id : undefined;
       const who = c.provider?.by === "self" ? "Your entity" : "The partner";
       const granting = held.filter((h) => h.region === region && licenseInForce(h) && grants.has(`${h.regulator_id}/${h.license_id}`) && (!pinnedLicence || h.id === pinnedLicence));
+      // A held licence counts only with its type's prerequisites held by the same provider, verified and in force.
+      const typeOf = (h: HeldLicense) => regulators.get(h.regulator_id)?.license_types.find((x) => x._id === h.license_id);
+      const prerequisites = (h: HeldLicense) => {
+        // Each entry is one licence type, or several any one of which will do.
+        const required = (typeOf(h)?.requires ?? []).map((e) => (typeof e === "string" ? [e] : e));
+        const met = required.map((ids) => held.find((p) => p.region === region && ids.includes(p.license_id) && licenseInForce(p)));
+        return { missing: required.filter((_, i) => !met[i]).map((ids) => ids.join(" or ")), held: met.filter((p): p is HeldLicense => Boolean(p)) };
+      };
+      // Licences whose type covers nowhere by itself (a registration others require) never cover a component.
+      const nowhere = granting.filter((h) => !typeOf(h)?.issued_per_jurisdiction && whereHeld(h).length === 0);
+      const counting = granting.filter((h) => !nowhere.includes(h));
 
       // Covered in one jurisdiction (null: the country as a whole, any licence in the region counting).
       const coverIn = (j: string | null): Coverage => {
         if (pre) return pre;
-        const by = granting
-          .filter((h) => j === null || coversJurisdiction(whereHeld(h), j))
-          .map((h) => ({ entity_id: providerEntity!, licence_id: h.id, regulator_id: h.regulator_id, license_id: h.license_id, registration_number: h.registration_number }));
+        const there = counting.filter((h) => j === null || coversJurisdiction(whereHeld(h), j));
+        const by = there
+          .filter((h) => prerequisites(h).missing.length === 0)
+          .map((h) => {
+            const requires = prerequisites(h).held.map((p) => p.id);
+            return { entity_id: providerEntity!, licence_id: h.id, regulator_id: h.regulator_id, license_id: h.license_id, registration_number: h.registration_number, ...(requires.length ? { requires } : {}) };
+          });
         if (by.length) return { status: "covered", by };
-        if (pinnedLicence) return { status: "uncovered", reason: `Licence '${pinnedLicence}' isn't verified and in force, or doesn't grant this${j ? ` in ${label(j)}` : ""}` };
+        const notes = nowhere.length ? `; ${nowhere.map((h) => h.license_id).join(", ")} ${nowhere.length > 1 ? "cover" : "covers"} nowhere by itself: other licences require it` : "";
+        const lacking = there.map((h) => `${h.license_id} (${whereHeld(h).map(label).join(", ") || "no jurisdiction recorded"}) counts only alongside ${prerequisites(h).missing.join(", ")}, verified and in force, which ${who.toLowerCase()} doesn't hold`);
+        if (lacking.length) return { status: "uncovered", reason: `${who}'s ${lacking.join("; ")}${notes}` };
+        if (pinnedLicence) return { status: "uncovered", reason: `Licence '${pinnedLicence}' isn't verified and in force, or doesn't grant this${j ? ` in ${label(j)}` : ""}${notes}` };
         if (!licences.length) return { status: "uncovered", reason: "No licence in the regulatory model grants this yet" };
-        if (j === null) return { status: "uncovered", reason: `${who} holds no verified licence granting this; needs one of: ${licences.map((l) => l.license_id).join(", ")}` };
+        if (j === null) return { status: "uncovered", reason: `${who} holds no verified licence granting this; needs one of: ${licences.filter((l) => typeJurisdictions(l.regulator_id, l.license_id).length).map((l) => l.license_id).join(", ")}${notes}` };
         const could = licences.filter((l) => coversJurisdiction(typeJurisdictions(l.regulator_id, l.license_id), j)).map((l) => l.license_id);
-        const elsewhere = granting.map((h) => `${h.license_id} (${whereHeld(h).map(label).join(", ") || "no jurisdiction recorded"})`);
+        const elsewhere = counting.map((h) => `${h.license_id} (${whereHeld(h).map(label).join(", ") || "no jurisdiction recorded"})`);
         return {
           status: "uncovered",
           reason:
             (elsewhere.length ? `${who}'s licences granting this cover ${elsewhere.join("; ")}, not ${label(j)}` : `${who} holds no verified licence granting this in ${label(j)}`) +
-            (could.length ? `; needs one covering ${label(j)}: ${could.join(", ")}` : `; no licence in the regulatory model covers ${label(j)} for this yet`),
+            (could.length ? `; needs one covering ${label(j)}: ${could.join(", ")}` : `; no licence in the regulatory model covers ${label(j)} for this yet`) +
+            notes,
         };
       };
-      // The covering licence's mandated stakeholders on the provider's roster; the owner's must also be bound here.
-      const stakeholdersFor = (coverage: Coverage): Stakeholders | null => {
-        if (coverage.status !== "covered") return null;
-        const licence = held.find((h) => h.id === coverage.by[0].licence_id)!;
+      // A held licence's mandated stakeholders on the provider's roster; the owner's must also be bound here.
+      const reconcile = (licenceId: string): Stakeholders => {
+        const licence = held.find((h) => h.id === licenceId)!;
         const r = reconcileLicence(ref, licence, roster);
         const enforced = c.provider?.by === "self";
         const bound = new Set(parties.filter((b) => b.for === c.key).map((b) => b.party_id));
         const unbound = enforced ? r.filled.map((f) => f.party_ids.find((id) => bound.has(id)) ?? f.party_ids[0]).filter((id) => !bound.has(id)) : [];
         return { ...r, enforced, unbound };
       };
+      // The covering licence's, and its prerequisites' (the FinCEN registration's AML officer behind a state licence).
+      const stakeholdersFor = (coverage: Coverage): Stakeholders | null => (coverage.status === "covered" ? reconcile(coverage.by[0].licence_id) : null);
+      const prerequisitesFor = (coverage: Coverage): Stakeholders[] => (coverage.status === "covered" ? (coverage.by[0].requires ?? []).map(reconcile) : []);
 
       let coverage: Coverage;
       let stakeholders: Stakeholders | null;
+      let prerequisiteStakeholders: Stakeholders[];
       let jurisdictions: JurisdictionRow[] | undefined;
       const offered = c.offered_in?.length ? [...new Set(c.offered_in)] : null;
       if (!offered) {
         coverage = coverIn(null);
         stakeholders = stakeholdersFor(coverage);
+        prerequisiteStakeholders = prerequisitesFor(coverage);
       } else {
         jurisdictions = offered.map((j) => {
           const cov = coverIn(j);
-          return { jurisdiction: j, coverage: cov, stakeholders: stakeholdersFor(cov) };
+          const prerequisites = prerequisitesFor(cov);
+          return { jurisdiction: j, coverage: cov, stakeholders: stakeholdersFor(cov), ...(prerequisites.length ? { prerequisites } : {}) };
         });
         const gaps = jurisdictions.filter((x) => x.coverage.status !== "covered");
         const covering = new Map(jurisdictions.flatMap((x) => (x.coverage.status === "covered" ? x.coverage.by : [])).map((b) => [b.licence_id, b]));
         coverage = pre ?? (gaps.length ? { status: "uncovered", reason: gaps.map((x) => `in ${label(x.jurisdiction)}: ${(x.coverage as { reason: string }).reason}`).join("; ") } : { status: "covered", by: [...covering.values()] });
         stakeholders = jurisdictions.find((x) => x.stakeholders)?.stakeholders ?? null;
+        prerequisiteStakeholders = jurisdictions.find((x) => x.prerequisites)?.prerequisites ?? [];
       }
       rows.push({
         ...c,
@@ -259,61 +296,156 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
         law,
         coverage,
         stakeholders,
+        ...(prerequisiteStakeholders.length ? { prerequisites: prerequisiteStakeholders } : {}),
         ...(jurisdictions ? { jurisdictions } : {}),
         parties: parties.filter((b) => b.for === c.key).map((b) => b.party_id),
       });
     }
     // Per jurisdiction offered (when any component lists them): covered when nothing blocks there.
     const offeredIn = [...new Set(rows.flatMap((x) => x.jurisdictions?.map((j) => j.jurisdiction) ?? []))];
-    const gaps = rows.flatMap((x) => rowBlockers(x));
+    // The products it's built on, checked wherever it's offered (the country as a whole without offered_in).
+    const foundations = bases.map((b) => foundationIn(b, region, offeredIn));
+    const gaps = [...rows.flatMap((x) => rowBlockers(x)), ...foundations.flatMap((f) => f.blockers)];
     out.push({
       region,
       components: rows,
       regulators: [...new Set(rows.flatMap((x) => x.supervised_by.map((s) => s.regulator_id)))],
       covered: gaps.length === 0,
       ...(offeredIn.length ? { jurisdictions: offeredIn.map((j) => ({ jurisdiction: j, covered: !gaps.some((b) => b.jurisdiction === j || b.jurisdiction === undefined) })) } : {}),
+      ...(foundations.length ? { foundations } : {}),
     });
   }
-  return { product_id: product.product.id, composed: components.length > 0, live: Boolean(opts.live && product.pins), regions: out };
+  return { product_id: product.product.id, composed: components.length > 0, live: Boolean(opts.live && product.pins), built_on: bases.map((b) => b.product_id), regions: out };
+}
+
+// A product another is built on, as the composed product's regime needs it: per region, whether it's covered,
+// in which jurisdictions, and why not.
+type Base = {
+  product_id: string;
+  name?: string;
+  problem?: string;
+  published?: boolean;
+  drifted?: boolean;
+  lead?: { primitive: string; action: string };
+  regions?: { region: string; covered: boolean; jurisdictions?: { jurisdiction: string; covered: boolean }[]; blockers: { jurisdiction?: string; reason: string }[] }[];
+};
+
+async function basesOf(store: Store, product: ProductRecord, seen: string[]): Promise<Base[]> {
+  const path = [...seen, product.product.id];
+  const out: Base[] = [];
+  for (const id of [...new Set(product.underlying_product_ids ?? [])]) {
+    if (path.includes(id)) {
+      out.push({ product_id: id, problem: "is built on this one in turn (a cycle)" });
+      continue;
+    }
+    const base = await store.getProduct(id);
+    if (!base) {
+      out.push({ product_id: id, problem: "doesn't exist" });
+      continue;
+    }
+    const live = base.status === "published" && Boolean(base.pins);
+    const composition = compositionOf(base, live);
+    // Nothing to inherit from a product with no composition (e.g. a fund a distributor sells).
+    if (!composition.components.length) continue;
+    const regime = await productRegime(store, base, { live, seen: path });
+    out.push({
+      product_id: id,
+      name: base.product.name,
+      published: base.status === "published",
+      drifted: Boolean(base.drift),
+      lead: { primitive: composition.components[0].primitive, action: composition.components[0].action },
+      regions: regime.regions.map((r) => ({
+        region: r.region,
+        covered: r.covered,
+        ...(r.jurisdictions ? { jurisdictions: r.jurisdictions } : {}),
+        blockers: blockingComponents(regime, r.region).map((b) => ({ ...(b.jurisdiction ? { jurisdiction: b.jurisdiction } : {}), reason: b.reason })),
+      })),
+    });
+  }
+  return out;
+}
+
+// Whether a base covers the composed product in one region: in each jurisdiction it's offered in, or the
+// country as a whole when it lists none.
+function foundationIn(b: Base, region: string, offeredIn: string[]) {
+  const country = region.toLowerCase();
+  const label = (j: string) => (j === country ? `the whole of ${region}` : j);
+  const name = `Built on '${b.product_id}'`;
+  const gapIn = (j: string | null): string | null => {
+    if (b.problem) return `${name}, which ${b.problem}`;
+    if (!b.published) return `${name}, which isn't published`;
+    if (b.drifted) return `${name}, whose sales are paused: something it rests on changed (drift)`;
+    const r = b.regions?.find((x) => x.region === region);
+    if (!r) return `${name}, which isn't offered in ${region}`;
+    const why = (where: string | null) =>
+      r.blockers
+        .filter((x) => where === null || x.jurisdiction === where || x.jurisdiction === undefined)
+        .map((x) => x.reason)
+        .join("; ");
+    if (j === null || !r.jurisdictions) return r.covered ? null : `${name}, which isn't covered in ${j === null ? region : label(j)}: ${why(null)}`;
+    const row = r.jurisdictions.find((x) => x.jurisdiction === j) ?? r.jurisdictions.find((x) => x.jurisdiction === country);
+    if (!row) return `${name}, which isn't offered in ${label(j)} (it's offered in ${r.jurisdictions.map((x) => label(x.jurisdiction)).join(", ")})`;
+    return row.covered ? null : `${name}, which isn't covered in ${label(row.jurisdiction)}: ${why(row.jurisdiction)}`;
+  };
+  const where = (offeredIn.length ? offeredIn : [null]).map((j) => ({ jurisdiction: j, reason: gapIn(j) }));
+  return {
+    product_id: b.product_id,
+    name: b.name ?? null,
+    primitive: b.lead?.primitive ?? null,
+    action: b.lead?.action ?? null,
+    covered: where.every((w) => !w.reason),
+    ...(offeredIn.length ? { jurisdictions: where.map((w) => ({ jurisdiction: w.jurisdiction!, covered: !w.reason, ...(w.reason ? { reason: w.reason } : {}) })) } : {}),
+    blockers: where
+      .filter((w) => w.reason)
+      .map((w) => (w.jurisdiction ? { jurisdiction: w.jurisdiction, reason: `In ${w.jurisdiction.includes("-") ? w.jurisdiction : `the whole of ${region}`}: ${w.reason}` } : { reason: w.reason! })),
+  };
 }
 // Why a component stops publishing, if it does.
-function blockingReason(c: { key: string; coverage: Coverage; stakeholders: Stakeholders | null }): string | null {
+function blockingReason(c: { key: string; coverage: Coverage; stakeholders: Stakeholders | null; prerequisites?: Stakeholders[] }): string | null {
   if (c.coverage.status === "uncovered" || c.coverage.status === "unmodelled" || c.coverage.status === "unassigned") return c.coverage.reason;
-  const s = c.stakeholders;
-  if (!s?.enforced) return null;
-  if (!s.known) return `${s.license_id} isn't in the regulatory model any more, so its mandated stakeholders can't be checked`;
-  const gaps = [
-    ...s.missing.map((m) => `no ${m.kind} party fills ${m.stakeholder}`),
-    ...s.unqualified.map((u) => `party ${u.party_id} doesn't meet ${u.stakeholder}'s criteria (${u.failed.join(", ")})`),
-    ...s.unbound.map((id) => `bind party ${id} to '${c.key}'`),
-  ];
-  return gaps.length ? `${s.license_id}: ${gaps.join("; ")}` : null;
+  // The covering licence's mandated stakeholders, then its prerequisites' (e.g. the FinCEN registration's).
+  const reasons = [c.stakeholders, ...(c.prerequisites ?? [])].flatMap((s) => {
+    if (!s?.enforced) return [];
+    if (!s.known) return [`${s.license_id} isn't in the regulatory model any more, so its mandated stakeholders can't be checked`];
+    const gaps = [
+      ...s.missing.map((m) => `no ${m.kind} party fills ${m.stakeholder}`),
+      ...s.unqualified.map((u) => `party ${u.party_id} doesn't meet ${u.stakeholder}'s criteria (${u.failed.join(", ")})`),
+      ...s.unbound.map((id) => `bind party ${id} to '${c.key}'`),
+    ];
+    return gaps.length ? [`${s.license_id}: ${gaps.join("; ")}`] : [];
+  });
+  return reasons.length ? reasons.join("; ") : null;
 }
 
 // What blocks one component: once, or once per jurisdiction it's offered in.
-function rowBlockers(c: { key: string; coverage: Coverage; stakeholders: Stakeholders | null; jurisdictions?: JurisdictionRow[] }): { jurisdiction?: string; reason: string }[] {
+function rowBlockers(c: { key: string; coverage: Coverage; stakeholders: Stakeholders | null; prerequisites?: Stakeholders[]; jurisdictions?: JurisdictionRow[] }): { jurisdiction?: string; reason: string }[] {
   if (!c.jurisdictions) {
     const reason = blockingReason(c);
     return reason ? [{ reason }] : [];
   }
   return c.jurisdictions.flatMap((j) => {
-    const reason = blockingReason({ key: c.key, coverage: j.coverage, stakeholders: j.stakeholders });
+    const reason = blockingReason({ key: c.key, coverage: j.coverage, stakeholders: j.stakeholders, prerequisites: j.prerequisites });
     return reason ? [{ jurisdiction: j.jurisdiction, reason: `In ${j.jurisdiction.includes("-") ? j.jurisdiction : `the whole of ${j.jurisdiction.toUpperCase()}`}: ${reason}` }] : [];
   });
 }
 
 // Components that stop publishing: not covered, not modelled, no provider, or the providing licence's
 // mandated stakeholders not filled on the roster and bound. A component offered in several jurisdictions
-// is listed once per jurisdiction it's blocked in (component × state).
-export function blockingComponents(regime: Awaited<ReturnType<typeof productRegime>>, region: string) {
+// is listed once per jurisdiction it's blocked in (component × state). A product it's built on that doesn't
+// cover it somewhere is listed as 'builds_on:<product id>', once per jurisdiction too.
+export function blockingComponents(regime: Awaited<ReturnType<typeof productRegime>>, region: string): Blocker[] {
   return regime.regions
     .filter((r) => region === "global" || r.region === region)
-    .flatMap((r) =>
-      r.components.flatMap((c) =>
+    .flatMap((r) => [
+      ...r.components.flatMap((c) =>
         rowBlockers(c).map((b) => ({ region: r.region, ...(b.jurisdiction ? { jurisdiction: b.jurisdiction } : {}), key: c.key, primitive: c.primitive, action: c.action, reason: b.reason })),
       ),
-    );
+      ...(r.foundations ?? []).flatMap((f) =>
+        f.blockers.map((b) => ({ region: r.region, ...(b.jurisdiction ? { jurisdiction: b.jurisdiction } : {}), key: `builds_on:${f.product_id}`, primitive: f.primitive ?? "", action: f.action ?? "", reason: b.reason })),
+      ),
+    ]);
 }
+export type Blocker = { region: string; jurisdiction?: string; key: string; primitive: string; action: string; reason: string };
 
 // Partner-provided components whose providing licence has stakeholder gaps on the partner's roster (advisory).
 export function partnerGaps(regime: Awaited<ReturnType<typeof productRegime>>) {

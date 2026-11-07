@@ -1,6 +1,6 @@
 {
   "region": "US",
-  "description": "The US slice of Mynt's regulatory model for digital-asset on-ramps, off-ramps and buy-and-hold stablecoin products. Researched 2026-11-07 from primary-domain sources (see each instrument's url); the full text of the pages could not be opened from the research session, so check each against its source before relying on it. Coverage is checked per state for a product that lists the states it's offered in (offered_in, ISO 3166-2 codes like 'us-ny'): a state regulator carries its jurisdiction, and its licences cover only that state; a federal licence covers every state only when its covers says 'us', and each such claim says in its coverage_note what is assumed and still to verify. To add a state: add its regulator with jurisdiction 'us-xx' (and short_name in region_definition), its licence types (they cover 'us-xx' by default), and the legislation they cite, each from the state's own sources; or, for one licence type issued in many states, set covers to those states and issued_per_jurisdiction to true, so a firm registers one held licence per state (see docs/plans/crypto-liquidity.md). OFAC, CFPB and IRS obligations are kept on the FinCEN registration's register, the licence every ramp and exchange holds.",
+  "description": "The US slice of Mynt's regulatory model for money transmission, digital-asset on-ramps and off-ramps and buy-and-hold stablecoin products. Researched 2026-11-07 from primary-domain sources (see each instrument's url); the full text of the pages could not be opened from the research session, so check each against its source before relying on it. Coverage is checked per state for a product that lists the states it's offered in (offered_in, ISO 3166-2 codes like 'us-ny'): a state regulator carries its jurisdiction, and its licences cover only that state; a federal licence covers every state only when its covers says 'us', and each such claim says in its coverage_note what is assumed and still to verify. Money transmission is licensed by each state: the FinCEN money services business registration covers no state by itself (covers: []) and is a prerequisite (requires) of each state's money transmitter licence, which counts only alongside it. To add a state's money transmitter licence: add (or reuse) its regulator with jurisdiction 'us-xx' and short_name in region_definition; add a licence type '<regulator>_money_transmitter' granting us_money_transmission (sale, servicing) with requires set to the FinCEN registration, its application procedure (most states license through NMLS), and one obligation citing the state's money transmission act, added to legislation with its url; record in coverage_note what is assumed (exemptions such as agent of the payee, and whether virtual-currency transmission needs a separate licence there). Take every fact from the state's own sources; never invent licence numbers, bond or net-worth amounts. OFAC, CFPB and IRS obligations are kept on the FinCEN registration's register, the registration every ramp and exchange holds.",
   "region_definition": {
     "name": "United States",
     "regulators": [
@@ -54,6 +54,17 @@
         "servicing"
       ],
       "description": "Accepting US dollars or convertible virtual currency from a customer and transmitting it, including turning dollars into a stablecoin and back for the customer."
+    },
+    {
+      "id": "us_money_transmission",
+      "name": "Money transmission (US dollars)",
+      "type_id": "money_transmission",
+      "actions": [
+        "sale",
+        "servicing"
+      ],
+      "underlying": "cash",
+      "description": "Receiving US dollars from a customer and transmitting them to another person or place, or holding them in transit for the customer (e.g. by bank transfer in and out), as each state's money transmission law defines it."
     },
     {
       "id": "us_cvc_exchange",
@@ -269,6 +280,24 @@
       "effective_from": "2026-07-01",
       "url": "https://dfpi.ca.gov/regulated-industries/digital-financial-assets/",
       "summary": "From 2026-07-01, digital financial asset business activity with California residents needs a DFPI licence (or an application filed by that date)."
+    },
+    {
+      "id": "ny_banking_law_13b",
+      "title": "New York Banking Law, Article 13-B (transmitters of money)",
+      "kind": "act",
+      "citation": "N.Y. Banking Law §§ 640-652-b",
+      "issued_by": "ny_legislature",
+      "url": "https://www.nysenate.gov/legislation/laws/BNK/A13-B",
+      "summary": "No one may engage in the business of selling or issuing payment instruments, or of receiving money for transmission or transmitting money, in New York without a licence from the Superintendent of Financial Services (§ 641). Section numbers to verify against the source."
+    },
+    {
+      "id": "ca_money_transmission_act",
+      "title": "California Money Transmission Act",
+      "kind": "act",
+      "citation": "California Financial Code Division 1.2 (§ 2000 and following)",
+      "issued_by": "ca_legislature",
+      "url": "https://leginfo.legislature.ca.gov/faces/codes_displayexpandedbranch.xhtml?tocCode=FIN&division=1.2.",
+      "summary": "No one may engage in the business of money transmission in California without a licence from the DFPI (§ 2030), unless exempt. Section numbers and exemptions to verify against the source."
     }
   ],
   "regulators": [
@@ -278,6 +307,9 @@
       "short_name": "FinCEN",
       "scope": {
         "product_types": [
+          {
+            "id": "us_money_transmission"
+          },
           {
             "id": "us_cvc_money_transmission"
           },
@@ -301,11 +333,9 @@
         {
           "_id": "fincen_msb",
           "name": "Money services business registration (money transmitter)",
-          "scope": "A registration with FinCEN, not a licence; state money transmitter licences are separate. Covers money transmission of US dollars and convertible virtual currency, and buying and selling convertible virtual currency (FIN-2019-G001).",
-          "covers": [
-            "us"
-          ],
-          "coverage_note": "Assumption to verify: Mynt counts this federal registration as covering every state, so a registered firm's products are not blocked state by state. In law it is a registration, not a licence, and does not replace state money transmitter licences (see scope); narrow this when state money transmitter licence types are modelled.",
+          "scope": "A registration with FinCEN, not a licence: it covers no state by itself. Money transmission (of US dollars or convertible virtual currency) needs a licence in each state, and each state's money transmitter licence counts only alongside this registration (FIN-2019-G001 for convertible virtual currency).",
+          "covers": [],
+          "coverage_note": "Covers nowhere by itself (covers: []): in law this is a federal registration, not a licence, and doesn't replace state money transmitter licences. State money transmitter licence types require it (requires). Production's model may hold the same registration as fincen_money_services_business or fincen_msb_registration; the state licences accept any of the three ids. Assumption to verify: that every licensed money transmitter Mynt relies on must register (some exemptions, e.g. for banks, are not modelled).",
           "application_procedure": [
             "File FinCEN Form 107 through BSA E-Filing within 180 days of the day after the business is established",
             "Put the written AML program in place and designate the compliance officer"
@@ -556,6 +586,7 @@
               "inspection_history": []
             },
             "allowed_product_types": [
+              "us_money_transmission",
               "us_cvc_money_transmission",
               "us_cvc_exchange"
             ],
@@ -593,6 +624,9 @@
       "scope": {
         "product_types": [
           {
+            "id": "us_money_transmission"
+          },
+          {
             "id": "us_cvc_money_transmission"
           },
           {
@@ -618,6 +652,68 @@
         ]
       },
       "license_types": [
+        {
+          "_id": "nydfs_money_transmitter",
+          "name": "Money transmitter licence (New York Banking Law Article 13-B)",
+          "scope": "Receiving money for transmission, transmitting it, or selling or issuing payment instruments, in New York or for New York residents. Virtual currency business activity needs a BitLicense separately (23 NYCRR Part 200).",
+          "covers": [
+            "us-ny"
+          ],
+          "requires": [
+            [
+              "fincen_msb",
+              "fincen_money_services_business",
+              "fincen_msb_registration"
+            ]
+          ],
+          "coverage_note": "Counts only alongside the FinCEN money services business registration (requires). Assumptions to verify: that US-dollar transmission which the licensee settles on its own back end in USDC needs no BitLicense for the customer-facing activity (Mynt models it as us_money_transmission only; the licensee's own licences cover its back end); and that no exemption applies (agent of the payee and other exemptions are not modelled).",
+          "application_procedure": [
+            "Apply to the New York Department of Financial Services through NMLS (to verify on DFS's site)",
+            "Meet the surety bond and net-worth requirements DFS sets for the applicant (amounts not modelled here)"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "nydfs_mtl_licence",
+                  "title": "Hold a New York money transmitter licence",
+                  "description": "Money transmission in New York, or for New York residents, needs a licence from the Superintendent of Financial Services; licences held in other states don't count.",
+                  "recurrence": "one_time",
+                  "criticality": "high",
+                  "legal_ref": "ny_banking_law_13b"
+                }
+              ],
+              "reporting_disclosure_filings": [],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              {
+                "id": "us_money_transmission",
+                "actions": [
+                  "sale",
+                  "servicing"
+                ]
+              }
+            ],
+            "allowed_customer_segments": [
+              "nydfs_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [],
+              "external": []
+            }
+          }
+        },
         {
           "_id": "nydfs_bitlicense",
           "name": "Virtual currency licence (BitLicense, 23 NYCRR Part 200)",
@@ -1076,6 +1172,9 @@
       "scope": {
         "product_types": [
           {
+            "id": "us_money_transmission"
+          },
+          {
             "id": "us_cvc_money_transmission"
           },
           {
@@ -1101,6 +1200,68 @@
         ]
       },
       "license_types": [
+        {
+          "_id": "ca_dfpi_money_transmitter",
+          "name": "Money transmission licence (California Money Transmission Act)",
+          "scope": "The business of money transmission in California or with California residents. Digital financial asset business activity needs a DFAL licence separately (Financial Code Division 1.25).",
+          "covers": [
+            "us-ca"
+          ],
+          "requires": [
+            [
+              "fincen_msb",
+              "fincen_money_services_business",
+              "fincen_msb_registration"
+            ]
+          ],
+          "coverage_note": "Counts only alongside the FinCEN money services business registration (requires). Assumptions to verify: that the Act's exemptions (including acting as agent of the payee) don't apply to the licensee's product; and that US-dollar transmission settled on the licensee's back end in USDC needs no DFAL licence for the customer-facing activity (Mynt models it as us_money_transmission only).",
+          "application_procedure": [
+            "Apply to the California DFPI through NMLS",
+            "Meet the surety bond and net-worth requirements the DFPI sets for the applicant (amounts not modelled here)"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "ca_dfpi_mtl_licence",
+                  "title": "Hold a California money transmission licence",
+                  "description": "Money transmission in California needs a DFPI licence unless exempt; licences held in other states don't count.",
+                  "recurrence": "one_time",
+                  "criticality": "high",
+                  "legal_ref": "ca_money_transmission_act"
+                }
+              ],
+              "reporting_disclosure_filings": [],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              {
+                "id": "us_money_transmission",
+                "actions": [
+                  "sale",
+                  "servicing"
+                ]
+              }
+            ],
+            "allowed_customer_segments": [
+              "ca_dfpi_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [],
+              "external": []
+            }
+          }
+        },
         {
           "_id": "ca_dfpi_dfal",
           "name": "Digital Financial Assets Law licence",

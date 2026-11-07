@@ -99,8 +99,9 @@ test("the US regulatory model applies, and the Mynt Ramp's service types load ag
 });
 
 // The USDC account template (schemas/examples/us/usdc-account.v2.json) checks against the US model as it is,
-// and a firm holding a FinCEN registration and a national trust bank charter can take it, name itself as the
-// provider of each part, and publish it, with the regime Mynt computes from the US model.
+// and a firm holding a FinCEN registration, state licences in New York and California and a national trust
+// bank charter can take it, name itself as the provider of each part, and publish it, with the regime Mynt
+// computes from the US model. (A FinCEN registration alone once covered every state; it covers none now.)
 test("the US USDC account template checks, and a licensed firm publishes it on the US model", async () => {
   const pg = new PGlite();
   const store = await Store.open({ query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() }, CATALOG);
@@ -167,24 +168,38 @@ test("the US USDC account template checks, and a licensed firm publishes it on t
   };
   const created = await firm("create_product", product);
   assert.equal(created.isError, false, JSON.stringify(created.data));
-  const own = (d, licences) => {
+  // Each part is provided by the firm; `licences` pins one where a single licence covers it, null leaves the
+  // regime to find the covering licence in each state. `people` are bound to the parts they stand behind.
+  const own = (d, licences, people = []) => {
     d.owner_entity_id = entity.id;
     for (const [component, l] of Object.entries(licences))
-      d.connections.push({ _id: `p_${component}`, type: "component_provided_by", from: { kind: "component", id: component }, to: { kind: "owner", licence_id: l.id }, attributes: { business_role: "issuer" } });
+      d.connections.push({ _id: `p_${component}`, type: "component_provided_by", from: { kind: "component", id: component }, to: { kind: "owner", ...(l ? { licence_id: l.id } : {}) }, attributes: { business_role: "issuer" } });
     d.connections.push({ _id: "owner_role", type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "owner" }, attributes: { role: "product_owner", bound_component: "usdc_exchange" } });
-    for (const component of ["ramp", "usdc_exchange"])
-      d.connections.push({ _id: `aml_officer_${component}`, type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "party", id: officer.data.id }, attributes: { role: "compliance_officer", bound_component: component } });
+    for (const [i, [party, components]] of [[officer.data.id, ["ramp", "usdc_exchange"]], ...people].entries())
+      for (const component of components)
+        d.connections.push({ _id: `person_${i}_${component}`, type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "party", id: party }, attributes: { role: "compliance_officer", bound_component: component } });
     return d;
   };
 
-  // With only a FinCEN registration, custody isn't covered: a money services business isn't a custodian.
-  const partial = own(structuredClone(template), { ramp: msb, usdc_exchange: msb, usdc_custody: msb });
+  // With only a FinCEN registration nothing is covered: the registration covers no state by itself, and a
+  // money services business isn't a custodian either.
+  const partial = own(structuredClone(template), { ramp: null, usdc_exchange: null, usdc_custody: null });
   const refused = await firm("check_product_definition", { product_id: "usdc-account", definition: partial });
-  assert.ok(JSON.stringify(refused.data).match(/usdc_custody/), JSON.stringify(refused.data));
+  assert.deepEqual([...new Set(refused.data.publish_blockers.map((b) => b.key))].sort(), ["ramp", "usdc_custody", "usdc_exchange"], JSON.stringify(refused.data));
+  assert.match(JSON.stringify(refused.data.publish_blockers), /fincen_msb covers nowhere by itself/);
 
-  // With a national trust bank charter for custody, it publishes.
+  // State licences for the ramp (money transmission) and the exchange (virtual currency) in New York and
+  // California, and a national trust bank charter for custody: it publishes.
+  for (const [regulator, id] of [["nydfs", "nydfs_money_transmitter"], ["ca_dfpi", "ca_dfpi_money_transmitter"], ["ca_dfpi", "ca_dfpi_dfal"]]) await licence(regulator, id);
+  const bit = await licence("nydfs", "nydfs_bitlicense");
+  const people = [];
+  for (const s of MODEL.regulators.find((r) => r.id === "nydfs").license_types.find((l) => l._id === "nydfs_bitlicense").grc.mandatory_stakeholders.internal) {
+    const p = await firm("add_party", { kind: "internal", person: { name: s.name }, fills: [{ licence_id: bit.id, stakeholder: s.id }] });
+    assert.equal(p.isError, false, JSON.stringify(p.data));
+    people.push([p.data.id, ["ramp", "usdc_exchange", "usdc_custody"]]);
+  }
   const trust = await licence("occ", "occ_national_trust_bank");
-  const def = own(structuredClone(template), { ramp: msb, usdc_exchange: msb, usdc_custody: trust });
+  const def = own(structuredClone(template), { ramp: null, usdc_exchange: null, usdc_custody: trust }, people);
   const ready = await firm("check_product_definition", { product_id: "usdc-account", definition: def });
   assert.equal(ready.data.valid, true, JSON.stringify(ready.data));
   assert.deepEqual(ready.data.publish_blockers, [], JSON.stringify(ready.data.publish_blockers));
