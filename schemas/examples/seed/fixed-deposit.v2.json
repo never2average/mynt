@@ -1311,7 +1311,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_kyc_cdd"
       },
@@ -1329,7 +1329,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_kyc_cdd"
       },
@@ -1347,7 +1347,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_deposit_interest"
       },
@@ -1365,7 +1365,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_term_deposit_terms"
       },
@@ -1383,7 +1383,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_term_deposit_terms"
       },
@@ -1401,7 +1401,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_term_deposit_terms"
       },
@@ -1419,7 +1419,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_grievance_redressal"
       },

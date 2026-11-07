@@ -1,0 +1,149 @@
+{
+  "_id": "money-transmission",
+  "product_name": "Money transmission (Mynt Ramp)",
+  "product_type": "money_transmission",
+  "descriptions": {
+    "summary": "Move US dollars in from your bank account and back out to it, by bank transfer or wire, held for you in transit by a licensed money transmitter.",
+    "key_features": [
+      "Add dollars from your own bank account by bank transfer (ACH) or wire",
+      "Send dollars back to your bank account whenever you like",
+      "Your money is held in transit by a licensed money transmitter, under its state licences",
+      "See the fee before you confirm: 0.5% per transfer, at least $0.50",
+      "Money held in transit is not a bank deposit and isn't FDIC-insured"
+    ],
+    "long": "Mynt's foundational US product: money transmission, operated by the licensed partner behind the Mynt Ramp (model R1). Dollars come in from the customer's own bank account by ACH or wire and go back out the same way; between the two the licensed partner holds them in transit under its FinCEN registration and its money transmitter licence in each state it serves. Customers only ever see US dollars. Other dollar products (a dollar account, payouts) are built on this one (builds_on) instead of declaring transmission again, and can only be offered in the states this one covers. This template names no firm: the partner's firm owns it, names itself as the provider of the transmission component, and sets offered_in to the states it is licensed in. Assumptions: USD only, individuals only; the fee mirrors the Mynt Ramp sandbox's (0.5%, at least $0.50); limits are placeholders the owner sets; exemptions (such as acting as agent of the payee) are not relied on."
+  },
+  "owner_entity_id": null,
+  "version": 1,
+  "access_mode": "open",
+  "offered_in": ["us-ny", "us-ca"],
+  "plane": { "role": "standalone", "sellable": true },
+  "context": {
+    "currencies": ["USD"],
+    "calendar": "us_federal_reserve",
+    "business_day_convention": "following",
+    "day_count": "actual_365_fixed",
+    "time_zone": "America/New_York"
+  },
+  "components": [
+    {
+      "key": "transmission",
+      "country": "us",
+      "primitive": "payments",
+      "action": "sale",
+      "underlying": "cash",
+      "block": "transfer",
+      "terms": {
+        "rails": ["ach", "wire"],
+        "source": "customer_own_bank_account",
+        "directions": ["in", "out"],
+        "funds_held_by": "licensed_partner",
+        "back_end_settlement_asset": "USDC",
+        "back_end_settlement_network": "solana",
+        "back_end_cross_chain": "cctp_v2",
+        "back_end_settlement_shown_to_customers": false
+      },
+      "schedules": [
+        { "purpose": "settlement", "anchor": "transfer_in_confirmed", "day_basis": "business", "business_day_convention": "following", "time_zone": "America/New_York" },
+        { "purpose": "payout", "anchor": "transfer_out_confirmed", "day_basis": "business", "business_day_convention": "following", "time_zone": "America/New_York" }
+      ],
+      "election": "required"
+    }
+  ],
+  "customer_segments": [
+    {
+      "_id": "us_individual",
+      "name": "US individuals (18+)",
+      "customer_kind": "individual",
+      "qualification": { "min_age": 18, "resident": true },
+      "identity": {
+        "verification_tiers": [
+          { "tier": "full_kyc", "methods": ["document_verification", "ssn_verification", "bank_account_verification"], "validity": "P2Y", "on_expiry": "refresh_kyc" }
+        ],
+        "min_tier_by_event": { "onboarding": "full_kyc", "funding": "full_kyc", "withdrawal": "full_kyc" }
+      },
+      "channels": ["app", "web", "partner_embedded"]
+    }
+  ],
+  "core_algorithms": [
+    {
+      "_id": "onboarding_eligibility",
+      "algorithm_name": "Onboarding eligibility",
+      "description": "Knocks out applicants who can't use the product: under 18, not US residents, not in a state the product is offered in, or not verified to full KYC.",
+      "purpose": "eligibility",
+      "repository": "models/money-transmission-onboarding-eligibility",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "sanctions_screening",
+      "algorithm_name": "Sanctions screening",
+      "description": "Screens the customer at onboarding and every transfer against OFAC's lists; a match holds the transfer for review.",
+      "purpose": "fraud_screening",
+      "repository": "models/money-transmission-sanctions-screening",
+      "version": "1.0.0"
+    }
+  ],
+  "risk_models": [],
+  "partner_handoffs": [],
+  "terms": [
+    { "_id": "transfer_fee_pct", "label": "Transfer fee", "type": "percent", "default": 0.5, "range": { "min": 0, "max": 3 }, "set_by": ["template", "operations"], "negotiable": "fixed", "post_issue": { "rule": "operations_dated_change" }, "effective_dated": true },
+    { "_id": "transfer_fee_min", "label": "Minimum transfer fee", "type": "money", "currency": "USD", "default": 0.5, "range": { "min": 0, "max": 10 }, "set_by": ["template", "operations"], "negotiable": "fixed", "post_issue": { "rule": "operations_dated_change" }, "effective_dated": true },
+    { "_id": "min_transfer", "label": "Smallest transfer", "type": "money", "currency": "USD", "default": 1, "range": { "min": 1, "max": 100 }, "set_by": ["template", "operations"], "negotiable": "fixed", "post_issue": { "rule": "operations_dated_change" } },
+    { "_id": "daily_in_limit", "label": "Most a customer can add in a day", "type": "money", "currency": "USD", "default": 10000, "range": { "min": 100, "max": 50000 }, "set_by": ["template", "operations"], "negotiable": "fixed", "post_issue": { "rule": "operations_dated_change" } }
+  ],
+  "rates": [],
+  "fees": [
+    { "_id": "transfer_fee", "type": "TRANSACTION", "method": "rate_based", "rate": { "$term": "transfer_fee_pct" }, "rate_base": "transaction", "min": { "$term": "transfer_fee_min" }, "payer": "customer" }
+  ],
+  "limits": [
+    { "_id": "min_transfer_size", "kind": "constraint", "constraint_type": "MIN_TRANSACTION", "min": { "$term": "min_transfer" }, "scope": "customer" },
+    { "_id": "daily_in", "kind": "control", "event_stream": "funding", "rule_type": "velocity", "window": { "type": "day", "time_zone": "America/New_York" }, "limit_amount": { "$term": "daily_in_limit" }, "scope": "customer", "outcome": "decline", "purpose": "fraud", "state": "active" },
+    { "_id": "sanctions_block", "kind": "control", "event_stream": "transfer_out", "rule_type": "block_list", "conditions": [{ "attr": "counterparty.sanctions_match", "op": "eq", "value": true }], "scope": "customer", "outcome": "hold", "purpose": "compliance", "state": "active" }
+  ],
+  "servicing_policies": [
+    { "_id": "statement", "kind": "statement", "config": { "cycle": "P1M", "channels": ["email", "app"] } },
+    { "_id": "service_level", "kind": "service_level", "config": { "error_resolution_business_days": 10, "complaint_acknowledgement_days": 2 } }
+  ],
+  "lifecycle_events": [
+    { "_id": "customer_enrolled", "sequence": 1, "trigger": "customer", "primitives": ["contract_formation"], "edition": "latest" },
+    { "_id": "transfer_in_confirmed", "sequence": 2, "trigger": "customer", "primitives": ["execution"] },
+    { "_id": "funds_received", "sequence": 3, "trigger": "partner", "primitives": ["transfer"] },
+    { "_id": "transfer_out_confirmed", "sequence": 4, "trigger": "customer", "primitives": ["execution"] },
+    { "_id": "payout_sent", "sequence": 5, "trigger": "partner", "primitives": ["transfer"] },
+    { "_id": "bank_transfer_returned", "sequence": 6, "trigger": "partner", "primitives": ["transfer"] },
+    { "_id": "customer_left", "sequence": 7, "trigger": "customer", "primitives": ["contract_formation"] }
+  ],
+  "connections": [
+    { "_id": "persona_us_individual", "type": "segment_maps_to_persona", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "register_persona", "regulator_id": "fincen", "id": "fincen_individual_customer" }, "attributes": { "fit": "subset" } },
+    { "_id": "use_onboarding_eligibility", "type": "segment_uses_algorithm", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "core_algorithm", "id": "onboarding_eligibility" }, "attributes": { "stage": "application", "order": 1, "required": true } },
+    { "_id": "use_sanctions_screening", "type": "segment_uses_algorithm", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "core_algorithm", "id": "sanctions_screening" }, "attributes": { "stage": "application", "order": 2, "required": true } },
+    { "_id": "use_sanctions_per_transfer", "type": "segment_uses_algorithm", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "core_algorithm", "id": "sanctions_screening" }, "attributes": { "stage": "per_transaction", "order": 1, "required": true } },
+    { "_id": "t_transfer_fee_pct", "type": "applies_to", "from": { "kind": "term", "id": "transfer_fee_pct" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "t_transfer_fee_min", "type": "applies_to", "from": { "kind": "term", "id": "transfer_fee_min" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "t_min_transfer", "type": "applies_to", "from": { "kind": "term", "id": "min_transfer" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "t_daily_in_limit", "type": "applies_to", "from": { "kind": "term", "id": "daily_in_limit" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "f_transfer_fee", "type": "applies_to", "from": { "kind": "fee", "id": "transfer_fee" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "l_min_transfer_size", "type": "applies_to", "from": { "kind": "limit", "id": "min_transfer_size" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "l_daily_in", "type": "applies_to", "from": { "kind": "limit", "id": "daily_in" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "l_sanctions_block", "type": "applies_to", "from": { "kind": "limit", "id": "sanctions_block" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "s_statement", "type": "applies_to", "from": { "kind": "servicing_policy", "id": "statement" }, "to": { "kind": "component", "id": "transmission" }, "attributes": { "mode": "default" } },
+    { "_id": "s_service_level", "type": "applies_to", "from": { "kind": "servicing_policy", "id": "service_level" }, "to": { "kind": "product", "id": "self" }, "attributes": { "mode": "default" } },
+    { "_id": "ev_customer_enrolled", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "customer_enrolled" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "ev_transfer_in_confirmed", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "transfer_in_confirmed" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "ev_funds_received", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "funds_received" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "ev_transfer_out_confirmed", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "transfer_out_confirmed" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "ev_payout_sent", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "payout_sent" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "ev_bank_transfer_returned", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "bank_transfer_returned" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "ev_customer_left", "type": "occurs_on", "from": { "kind": "lifecycle_event", "id": "customer_left" }, "to": { "kind": "component", "id": "transmission" } },
+    { "_id": "fee_on_transfer_in", "type": "raises_fee", "from": { "kind": "lifecycle_event", "id": "transfer_in_confirmed" }, "to": { "kind": "fee", "id": "transfer_fee" } },
+    { "_id": "fee_on_transfer_out", "type": "raises_fee", "from": { "kind": "lifecycle_event", "id": "transfer_out_confirmed" }, "to": { "kind": "fee", "id": "transfer_fee" } },
+    { "_id": "ob_kyc_aml", "type": "satisfies_obligation", "from": { "kind": "customer_segment", "id": "us_individual" }, "to": { "kind": "register_item", "regulator_id": "fincen", "license_type_id": "fincen_msb", "section": "obligations", "id": "fincen_aml_program" }, "attributes": { "how": "Full KYC before the first transfer; refreshed every two years" } },
+    { "_id": "ob_sanctions", "type": "satisfies_obligation", "from": { "kind": "core_algorithm", "id": "sanctions_screening" }, "to": { "kind": "register_item", "regulator_id": "fincen", "license_type_id": "fincen_msb", "section": "obligations", "id": "ofac_sanctions_program" }, "attributes": { "how": "Every customer and transfer screened against OFAC's lists" } },
+    { "_id": "ob_blocked", "type": "satisfies_obligation", "from": { "kind": "limit", "id": "sanctions_block" }, "to": { "kind": "register_item", "regulator_id": "fincen", "license_type_id": "fincen_msb", "section": "obligations", "id": "ofac_blocked_property" }, "attributes": { "how": "A sanctions match holds the transfer for blocking and reporting" } },
+    { "_id": "ob_reg_e", "type": "satisfies_obligation", "from": { "kind": "servicing_policy", "id": "service_level" }, "to": { "kind": "register_item", "regulator_id": "fincen", "license_type_id": "fincen_msb", "section": "obligations", "id": "cfpb_reg_e_errors" }, "attributes": { "how": "Bank transfer errors investigated within 10 business days" } },
+    { "_id": "ob_travel_rule", "type": "satisfies_obligation", "from": { "kind": "component", "id": "transmission" }, "to": { "kind": "register_item", "regulator_id": "fincen", "license_type_id": "fincen_msb", "section": "obligations", "id": "fincen_travel_rule" }, "attributes": { "how": "Transfers of $3,000 or more carry the sender's details to the next institution" } }
+  ],
+  "versioning": { "change_class": "initial", "summary": "First US money transmission template, the base the other dollar products build on", "edition_policy": { "origination": "latest", "mid_term_change": "stored" } },
+  "governance": { "state": "draft", "review": { "cadence": "P1Y" } },
+  "projection": { "lead_component": "transmission", "risk_level": "not_applicable", "liquidity": "high", "typical_horizon": "short", "return_type": "fixed_interest" }
+}

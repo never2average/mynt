@@ -30,17 +30,28 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
   for (const c of rows) {
     if (c.provider_entity_id) entityIds.add(c.provider_entity_id);
     if (c.provider?.by === "party") partyIds.add(c.provider.party_id);
+    // The covering licence and the prerequisites it counts only with (a state licence's FinCEN registration).
     if (c.jurisdictions) {
       for (const j of c.jurisdictions) {
         if (j.coverage.status === "covered") {
-          const id = j.coverage.by[0].licence_id;
-          licenceIds.add(id);
-          licenceJurisdictions[id] = [...new Set([...(licenceJurisdictions[id] ?? []), j.jurisdiction])];
+          for (const id of [j.coverage.by[0].licence_id, ...(j.coverage.by[0].requires ?? [])]) {
+            licenceIds.add(id);
+            licenceJurisdictions[id] = [...new Set([...(licenceJurisdictions[id] ?? []), j.jurisdiction])];
+          }
         }
-        for (const f of j.stakeholders?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
+        for (const s of [j.stakeholders, ...(j.prerequisites ?? [])]) for (const f of s?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
       }
-    } else if (c.coverage.status === "covered") licenceIds.add(c.coverage.by[0].licence_id);
-    for (const f of c.stakeholders?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
+    } else if (c.coverage.status === "covered") for (const id of [c.coverage.by[0].licence_id, ...(c.coverage.by[0].requires ?? [])]) licenceIds.add(id);
+    for (const s of [c.stakeholders, ...(c.prerequisites ?? [])]) for (const f of s?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
+  }
+  // The products it's built on: their state, and the entities they rest on (so a sweep for the partner's
+  // entity re-checks this product too).
+  const products: Record<string, string> = {};
+  for (const id of record.underlying_product_ids ?? []) {
+    const base = await store.getProduct(id);
+    if (!base?.pins) continue;
+    for (const e of base.pins.entity_ids) entityIds.add(e);
+    products[id] = (await baseState(store, base)).state;
   }
   const parties = new Map<string, Party>();
   for (const id of partyIds) {
@@ -63,6 +74,7 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
   for (const id of entityIds) state.entities[id] = entityState(await store.getEntity(id));
   for (const id of licenceIds) state.licences[id] = licenceState(await store.getHeldLicense(id));
   for (const [id, p] of parties) state.parties[id] = partyState(p);
+  if (Object.keys(products).length) state.products = products;
   return {
     version,
     pinned_at: new Date().toISOString(),
@@ -75,7 +87,7 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
 }
 
 // What changed in a product's pinned state, if anything.
-export async function pinChanges(store: Store, pins: Pins): Promise<DriftChange[]> {
+export async function pinChanges(store: Store, pins: Pins, depth = 0): Promise<DriftChange[]> {
   const changes: DriftChange[] = [];
   const check = async (kind: DriftChange["kind"], pinned: Record<string, string>, now: (id: string) => Promise<string>) => {
     for (const [id, was] of Object.entries(pinned)) {
@@ -90,7 +102,35 @@ export async function pinChanges(store: Store, pins: Pins): Promise<DriftChange[
   await check("party", pins.state.parties, async (id) => partyState(await store.getParty(id)));
   // Vendor services the live version hands off through (see vendors.ts).
   await check("vendor", pins.state.vendors ?? {}, (id) => vendorStateOf(store, id));
+  // Products it's built on: unpublished, offered somewhere else, or drifted themselves (checked afresh, so the
+  // order products are swept in doesn't matter). Their drift's states are this product's too.
+  const offered = new Set(pins.components.flatMap((c) => c.offered_in ?? []));
+  for (const [id, was] of Object.entries(pins.state.products ?? {})) {
+    const base = await store.getProduct(id);
+    const now = base ? await baseState(store, base, depth) : { state: "missing", jurisdictions: [] };
+    if (now.state === was) continue;
+    const jurisdictions = offered.size ? now.jurisdictions.filter((j) => offered.has(j)) : now.jurisdictions;
+    changes.push({ kind: "product", id, was, now: now.state, ...(jurisdictions.length ? { jurisdictions } : {}) });
+  }
   return changes;
+}
+
+// A product another is built on, as that one pins it: whether it's live, where it's offered, and whether it
+// has drifted (with the states its drift touches).
+async function baseState(store: Store, base: ProductRecord, depth = 0): Promise<{ state: string; jurisdictions: string[] }> {
+  const changes = base.status === "published" && base.pins && depth < 5 ? await pinChanges(store, base.pins, depth + 1) : [];
+  const offered = [...new Set((base.pins?.components ?? base.components).flatMap((c) => c.offered_in ?? []))].sort();
+  return {
+    state: hash({ published: base.status === "published", offered, drifted: changes.length > 0 }),
+    jurisdictions: [...new Set(changes.flatMap((c) => c.jurisdictions ?? []))],
+  };
+}
+
+// Re-checks the published products built on this one, after it's unpublished or a new version goes live.
+export async function driftDependents(store: Store, productId: string) {
+  const drifted: string[] = [];
+  for (const record of await store.productsBuiltOn(productId)) if (await checkDrift(store, record)) drifted.push(record.product.id);
+  return drifted;
 }
 
 // Re-checks one product: records drift (pausing new sales) or clears it once the pinned state is back.

@@ -52,6 +52,17 @@ export async function regimeSummary(store: Store, record: ProductRecord, regime?
         region: r.region,
         covered: r.covered,
         ...(r.jurisdictions ? { jurisdictions: r.jurisdictions } : {}),
+        // The products it's built on, and where each covers it.
+        ...(r.foundations
+          ? {
+              built_on: r.foundations.map((f) => ({
+                product_id: f.product_id,
+                name: f.name,
+                covered: f.covered,
+                ...(f.jurisdictions ? { jurisdictions: f.jurisdictions.map((j) => ({ jurisdiction: j.jurisdiction, covered: j.covered, ...(j.reason ? { reason: redact(j.reason) } : {}) })) } : {}),
+              })),
+            }
+          : {}),
         regulators: r.regulators.map(regulator),
         components: r.components.map((c) => {
           const cov = c.coverage;

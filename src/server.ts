@@ -20,7 +20,7 @@ import { registerExploreTools } from "./explore.js";
 import { deriveContract } from "./contract.js";
 import { checkDefinition, definitionHash, type Definition } from "./definition.js";
 import { registerDefinitionTools } from "./definition-tools.js";
-import { buildPins } from "./pins.js";
+import { buildPins, driftDependents } from "./pins.js";
 import { blockingComponents, ComponentSchema, partnerGaps, PartyBindingSchema, productRegime, validateComposition } from "./regime.js";
 import { rederiveProduct } from "./derived.js";
 import { accessStatus, BuildTermsSchema, coveringLicenses, EXPERIENCE_ACTIONS, lintExperience, productEntity } from "./access.js";
@@ -1085,9 +1085,12 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
       // Its coverage and take rate as published (never stops the publish; a failure is stored as a note).
       await rederiveProduct(store, id);
       await emitProductEvent(store, id, "product.version_published", { version: live.version });
+      // Products built on this one drift if the new version is offered somewhere else.
+      const drifted = await driftDependents(store, id);
       return json({
         ...live,
         licensed_under: held.map((h) => ({ regulator: h.regulator_id, license: h.license_id, registration_number: h.registration_number })),
+        ...(drifted.length ? { drifted_products: drifted } : {}),
       });
     },
   );
@@ -1107,7 +1110,9 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
       const unpublished = await store.setProductStatus(id, "unpublished");
       await rederiveProduct(store, id);
       await emitProductEvent(store, id, "product.unpublished");
-      return json(unpublished);
+      // Products built on this one pause their sales (drift).
+      const drifted = await driftDependents(store, id);
+      return json(drifted.length ? { ...unpublished, drifted_products: drifted } : unpublished);
     },
   );
 

@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { FinancialProduct } from "./catalog.js";
 import { deriveContract } from "./contract.js";
 import { vendorServedActions } from "./vendors.js";
-import { checkDefinition, DEFINITION_SCHEMA_PATH, projectCatalogue, toV1Composition, type Definition } from "./definition.js";
+import { checkDefinition, DEFINITION_SCHEMA_PATH, projectCatalogue, toV1Composition, underlyingOf, type Definition } from "./definition.js";
 import { blockingComponents, productRegime } from "./regime.js";
 import { rederiveProduct } from "./derived.js";
 import { normalizeModel } from "./regulatory.js";
@@ -13,16 +13,47 @@ import type { ProductRecord, Store, User } from "./store.js";
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string, extra: Record<string, unknown> = {}) => ({ ...json({ error, ...extra }), isError: true });
 
-// The regulator short name the catalogue cites: whoever's licence covers the lead component, else whoever
-// supervises it, else what the product cited before.
+// The regulator short name the catalogue cites, from the lead component (projection.lead_component, else the first
+// component), in this order:
+//   1. the regulator of the held licence that covers it (a firm's product);
+//   2. else a licensing regulator, one whose licence types grant the component's regulated product type and action:
+//      first one whose licence type the definition's own register items cite (e.g. obligations it satisfies on
+//      rbi_universal_bank), else the one with the most licence types granting it;
+//   3. else a regulator that supervises it;
+//   4. else what the product cited before.
+// Ties go to the regulator listed first in the region's regulators (define_region), then by id. Never simply the
+// first id alphabetically: a broad perimeter can include regulators (an IFSC banking unit, an exchange listing)
+// that aren't the product's own.
 async function leadRegulator(store: Store, record: ProductRecord, def: Definition, v1: ReturnType<typeof toV1Composition>, regime?: Awaited<ReturnType<typeof productRegime>>) {
-  regime ??= await productRegime(store, { ...record, components: v1.components, parties: v1.parties });
+  regime ??= await productRegime(store, { ...record, components: v1.components, parties: v1.parties, underlying_product_ids: underlyingOf(def, record) });
   const lead = def.projection?.lead_component ?? def.components?.[0]?.key;
   const row = regime.regions.flatMap((r) => r.components).find((c) => c.key === lead);
-  const regulatorId = row?.coverage.status === "covered" ? row.coverage.by[0].regulator_id : row?.supervised_by[0]?.regulator_id;
-  if (!row || !regulatorId) return record.product.regulator;
+  if (!row) return record.product.regulator;
   const ref = await store.referenceData(true);
-  const reg = normalizeModel(ref.regions.find((r) => r.code === row.region)?.regulatory).regulators.find((r) => r.id === regulatorId);
+  const region = ref.regions.find((r) => r.code === row.region);
+  const regulators = normalizeModel(region?.regulatory).regulators;
+  const byId = new Map(regulators.map((r) => [r.id, r]));
+  const listed = (id: string) => {
+    const r = byId.get(id);
+    const i = (region?.regulators ?? []).findIndex((n) => n === r?.short_name || n === r?.name);
+    return i < 0 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  const rank = (ids: string[], score: (id: string) => number = () => 0) =>
+    [...new Set(ids)].sort((a, b) => score(b) - score(a) || listed(a) - listed(b) || a.localeCompare(b))[0];
+
+  let regulatorId: string | undefined;
+  if (row.coverage.status === "covered") regulatorId = row.coverage.by[0].regulator_id;
+  if (!regulatorId && row.licences.length) {
+    const granting = new Set(row.licences.map((l) => `${l.regulator_id}/${l.license_id}`));
+    const cited = (def.connections ?? [])
+      .map((c) => (c as { to?: { kind?: string; regulator_id?: string; license_type_id?: string } }).to)
+      .filter((t) => t?.kind === "register_item" && granting.has(`${t.regulator_id}/${t.license_type_id}`))
+      .map((t) => t!.regulator_id!);
+    const grants = (id: string) => row.licences.filter((l) => l.regulator_id === id).length;
+    regulatorId = cited.length ? rank(cited, (id) => cited.filter((x) => x === id).length) : rank(row.licences.map((l) => l.regulator_id), grants);
+  }
+  regulatorId ??= rank(row.supervised_by.map((s) => s.regulator_id));
+  const reg = regulatorId ? byId.get(regulatorId) : undefined;
   return reg?.short_name ?? reg?.name ?? record.product.regulator;
 }
 
@@ -62,7 +93,7 @@ export function registerDefinitionTools(server: McpServer, store: Store, user: U
       // A valid definition can still be refused at publish by its regime (an uncovered component, a
       // mandated stakeholder missing or not bound to the component it serves): say so now.
       const v1 = toV1Composition(def);
-      const regime = await productRegime(store, { ...record, components: v1.components, parties: v1.parties });
+      const regime = await productRegime(store, { ...record, components: v1.components, parties: v1.parties, underlying_product_ids: underlyingOf(def, record) });
       return json({
         valid: true,
         ...check,
@@ -91,6 +122,8 @@ export function registerDefinitionTools(server: McpServer, store: Store, user: U
       const catalogue: FinancialProduct = projectCatalogue(def, await leadRegulator(store, record, def, v1));
       await store.setDefinition(product_id, def as unknown as Record<string, unknown>);
       await store.setComposition(product_id, v1.components, v1.parties);
+      // builds_on is the definition's own record of the products it rests on.
+      if (def.builds_on) await store.setUnderlyingProducts(product_id, underlyingOf(def, record));
       let target: "product" | "draft_version";
       if (record.status === "published") {
         const draft = await store.draftVersion(product_id);

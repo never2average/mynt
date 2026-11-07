@@ -1,6 +1,6 @@
 {
-  "_id": "dollar-account",
-  "product_name": "Dollar Account",
+  "_id": "dollar-holding-account",
+  "product_name": "Dollar Holding Account",
   "product_type": "virtual_currency",
   "descriptions": {
     "summary": "Add US dollars from your bank account, keep a dollar balance, and cash it back out to your bank account, with the fee and amount shown before you accept.",
@@ -11,7 +11,7 @@
       "A fee of 0.5% per transfer, at least $0.50",
       "Your dollar balance isn't a bank deposit and isn't FDIC-insured"
     ],
-    "long": "A dollar account for US individuals. Customers add dollars from their own bank account by ACH, keep a dollar balance, and cash out to their bank account; every transfer is a firm quote in dollars (amount, fee, total) that the customer sees and accepts before it expires. Customers only ever see US dollars. For the firm (never shown to customers): the dollars move through the Mynt Ramp, run by a licensed ramp partner that holds funds in transit and transmits money under its own licences; underneath, the balance settles as USDC on Solana, bought by the product's licensed exchange and held by its custodian, with Circle's CCTP V2 for any cross-chain need (components settlement_exchange and settlement_custody). This template names no firm: the owner adds who provides each part (the ramp partner for the ramp, a licensed exchange and a custodian) and binds the ramp handoffs to its Mynt Ramp subscriptions. Assumptions: USD only, ACH only, individuals only; the fee mirrors the Mynt Ramp sandbox's (0.5%, at least $0.50); limits are placeholders the owner sets. Regulation: FinCEN money services business registration for the ramp and exchange, OFAC sanctions screening, Regulation E error resolution on the ACH leg, Form 1099-DA reporting of sales; state licences (New York BitLicense, California DFAL and others) apply per state."
+    "long": "A dollar holding account for US individuals, composed directly of a ramp, an exchange and custody (the dollar-account template instead builds on the money-transmission product). Customers add dollars from their own bank account by ACH, keep a dollar balance, and cash out to their bank account; every transfer is a firm quote in dollars (amount, fee, total) that the customer sees and accepts before it expires. Customers only ever see US dollars. For the firm (never shown to customers): the dollars move through the Mynt Ramp, run by a licensed ramp partner that holds funds in transit and transmits money under its own licences; underneath, the balance settles as USDC on Solana, bought by the product's licensed exchange and held by its custodian, with Circle's CCTP V2 for any cross-chain need (components settlement_exchange and settlement_custody). This template names no firm: the owner adds who provides each part (the ramp partner for the ramp, a licensed exchange and a custodian) and binds the ramp handoffs to its Mynt Ramp subscriptions. Assumptions: USD only, ACH only, individuals only; the fee mirrors the Mynt Ramp sandbox's (0.5%, at least $0.50); limits are placeholders the owner sets. Regulation: FinCEN money services business registration for the ramp and exchange, OFAC sanctions screening, Regulation E error resolution on the ACH leg, Form 1099-DA reporting of sales; state licences (New York BitLicense, California DFAL and others) apply per state."
   },
   "owner_entity_id": null,
   "version": 1,
