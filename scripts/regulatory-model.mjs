@@ -61,7 +61,9 @@ export async function applyRegulatoryModel({ call, listTools, model, dryRun = fa
     for (const item of model[s.key] ?? []) {
       const input = s.input(item, region);
       if (!validate(input)) problems.push(`${s.key} '${s.id(item)}': ${ajv.errorsText(validate.errors)}`);
-      plan.push({ tool: s.tool, id: s.id(item), change: existing[s.key].has(s.id(item)) ? "replace" : "add" });
+      const there = existing[s.key].has(s.id(item));
+      // A category already on the server is kept as it is: other products may rely on its product lines.
+      plan.push({ tool: s.tool, id: s.id(item), change: there ? (s.key === "product_categories" ? "keep" : "replace") : "add" });
     }
   }
   if (model.service_types) plan.push({ tool: "load_service_types", id: region, change: "load" });
@@ -76,8 +78,20 @@ export async function applyRegulatoryModel({ call, listTools, model, dryRun = fa
     say(`${tool} ${id}: done${r.data?.warnings?.length ? `; warnings: ${r.data.warnings.join("; ")}` : ""}`);
     return r.data;
   };
-  if (model.region_definition) await step("define_region", region, { code: region, ...model.region_definition });
-  for (const s of STEPS) for (const item of model[s.key] ?? []) await step(s.tool, s.id(item), s.input(item, region));
+  if (model.region_definition) {
+    // The region's regulator short names are merged with any already listed, never replaced.
+    const current = listOf(await call("list_regions", { include_inactive: true })).find((r) => r.code === region);
+    const regulators = [...new Set([...(current?.regulators ?? []), ...(model.region_definition.regulators ?? [])])];
+    await step("define_region", region, { code: region, ...model.region_definition, regulators });
+  }
+  for (const s of STEPS)
+    for (const item of model[s.key] ?? []) {
+      if (s.key === "product_categories" && existing.product_categories.has(item.id)) {
+        say(`${s.tool} ${item.id}: already there, kept`);
+        continue;
+      }
+      await step(s.tool, s.id(item), s.input(item, region));
+    }
   let services = null;
   if (model.service_types) {
     services = await step("load_service_types", region, { region, licence_map: model.service_types.licence_map ?? {} });
