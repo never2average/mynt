@@ -93,10 +93,31 @@ const RepoItem = z.object({
   summary: z.string().default(""),
 });
 
+// Jurisdictions below a country: ISO 3166-2 subdivision codes, lowercase like entities' incorporation
+// (e.g. 'us-ny', 'us-ca'). A country code alone ('us') means the whole country.
+export const SUBDIVISION = /^[a-z]{2}-[a-z0-9]{1,3}$/;
+export const JURISDICTION = /^[a-z]{2}(-[a-z0-9]{1,3})?$/;
+const Subdivision = z.string().regex(SUBDIVISION, "An ISO 3166-2 code, lowercase, e.g. 'us-ny'");
+const Jurisdiction = z.string().regex(JURISDICTION, "An ISO 3166-2 code, lowercase, e.g. 'us-ny', or the country code for the whole country, e.g. 'us'");
+
 const LicenseType = z.object({
   _id: Id,
   name: z.string().min(1),
   scope: z.string().default(""),
+  covers: z
+    .array(Jurisdiction)
+    .min(1)
+    .optional()
+    .describe(
+      "Where a held licence of this type lets its holder provide what it grants: ISO 3166-2 codes ('us-ny'), or the country code for the whole country ('us', e.g. a federal charter that pre-empts state licensing for the activities it grants). Omit for the regulator's jurisdiction (its state, or the whole country)",
+    ),
+  issued_per_jurisdiction: z
+    .boolean()
+    .optional()
+    .describe(
+      "True when one licence type is issued separately for each jurisdiction in covers (e.g. a money transmitter licence held in several states): each held licence then records the jurisdiction it was issued for, and covers only that one",
+    ),
+  coverage_note: z.string().optional().describe("The basis for covers, e.g. a pre-emption claim, and anything about it still to verify"),
   application_procedure: z.array(z.string().min(1)).default([]).describe("How to obtain the licence, in order"),
   grc: z.object({
     // Obligations, filings and risks are data; controls and inspection events are templates.
@@ -143,6 +164,9 @@ export const RegulatorSchema = z.object({
   id: Id,
   name: z.string().min(1),
   short_name: z.string().optional().describe("How products cite it, e.g. RBI"),
+  jurisdiction: Subdivision.optional().describe(
+    "A sub-national regulator's jurisdiction, as an ISO 3166-2 code in the region's country (e.g. 'us-ny' for a New York regulator). Omit for a national regulator: its licences cover the whole country",
+  ),
   scope: z
     .object({
       product_types: z
@@ -367,10 +391,22 @@ const subset = (inner: readonly string[], outer: readonly string[]) => inner.fil
 
 export function validateRegulator(
   r: RegulatorInput,
-  ctx: { legalIds: string[]; productTypes: RegulatedProductType[]; otherRegulators: Regulator[] },
+  ctx: { legalIds: string[]; productTypes: RegulatedProductType[]; otherRegulators: Regulator[]; region?: string },
 ): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
+  // Jurisdictions sit in the region's country; a state regulator's licences cover only its state.
+  const country = ctx.region?.toLowerCase();
+  const inCountry = (code: string) => !country || code === country || code.startsWith(`${country}-`);
+  if (r.jurisdiction && !inCountry(r.jurisdiction)) errors.push(`jurisdiction '${r.jurisdiction}' isn't in ${ctx.region}`);
+  for (const l of r.license_types) {
+    for (const code of l.covers ?? []) {
+      if (!inCountry(code)) errors.push(`licence '${l._id}' covers '${code}', which isn't in ${ctx.region}`);
+      else if (r.jurisdiction && code !== r.jurisdiction) errors.push(`licence '${l._id}' covers '${code}', beyond its regulator's jurisdiction (${r.jurisdiction})`);
+    }
+    if (l.issued_per_jurisdiction && !(l.covers ?? []).some((c) => SUBDIVISION.test(c)))
+      errors.push(`licence '${l._id}' is issued per jurisdiction, so covers must list the jurisdictions it's issued for`);
+  }
   const catalogue = new Map(ctx.productTypes.map((p) => [p.id, p]));
   const productIds = r.scope.product_types.map((p) => p.id);
   const personaIds = r.scope.customer_personas.map((p) => p.id);
@@ -469,6 +505,20 @@ export function validateRegulator(
   }
   return { errors, warnings };
 }
+
+// Where a held licence covers: the jurisdiction it was issued for when its type is issued per jurisdiction,
+// else its type's covers, else its regulator's jurisdiction, else the whole country ('*').
+export function licenceJurisdictions(
+  r: Pick<Regulator, "jurisdiction"> | undefined,
+  l: Pick<License, "covers" | "issued_per_jurisdiction"> | undefined,
+  held: { jurisdiction?: string | null },
+): string[] {
+  if (l?.issued_per_jurisdiction) return held.jurisdiction ? [held.jurisdiction] : [];
+  if (l?.covers?.length) return l.covers.map((c) => (SUBDIVISION.test(c) ? c : "*"));
+  return r?.jurisdiction ? [r.jurisdiction] : ["*"];
+}
+// Whether those cover one jurisdiction: a state, or the whole country when it's the country code.
+export const coversJurisdiction = (where: string[], jurisdiction: string) => where.includes("*") || (SUBDIVISION.test(jurisdiction) && where.includes(jurisdiction));
 
 // What a licence permits, product by product: the product type with the actions the licence grants.
 export function licenseProducts(r: Regulator, l: License) {

@@ -16,6 +16,10 @@
   "owner_entity_id": null,
   "version": 1,
   "access_mode": "open",
+  "offered_in": [
+    "us-ny",
+    "us-ca"
+  ],
   "plane": {
     "role": "standalone",
     "sellable": true

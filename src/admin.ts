@@ -192,6 +192,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
         legalIds: legalIds(model),
         productTypes: catalogue,
         otherRegulators: model.regulators,
+        region: code,
       });
       if (errors.length) return { ...json({ error: "The regulator has broken links", errors, warnings }), isError: true };
       const replaced = model.regulators.some((r) => r.id === regulator.id);

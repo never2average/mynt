@@ -48,6 +48,7 @@ export interface Definition {
   owner_entity_id: string | null;
   version: number;
   access_mode?: "open" | "approval" | "private";
+  offered_in?: string[];
   components?: (Node & { key: string; country: string; primitive: Component["primitive"]; action: Component["action"]; underlying?: Component["underlying"]; wrapper?: Component["wrapper"] })[];
   connections?: Connection[];
   projection?: { lead_component?: string; risk_level?: string; liquidity?: string; typical_horizon?: string; return_type?: string };
@@ -138,6 +139,8 @@ export async function checkDefinition(store: Store, record: ProductRecord | null
     store.referenceData(true),
   ]);
   const regions = [...new Set(components(def).map((c) => c.country.toUpperCase()))];
+  for (const j of def.offered_in ?? [])
+    if (!components(def).some((c) => j === c.country || j.startsWith(`${c.country}-`))) errors.push(`offered_in: '${j}' isn't in any component's country`);
   const models = regions.map((r) => normalizeModel(ref.regions.find((x) => x.code === r)?.regulatory));
 
   const comp = nodes.get("component")!;
@@ -268,6 +271,7 @@ export function toV1Composition(def: Definition): { components: Component[]; par
     const p = provided.find((x) => x.from.id === c.key)?.to;
     const provider: Component["provider"] =
       p?.kind === "owner" ? { by: "self", ...(p.licence_id ? { licence_id: p.licence_id } : {}) } : p?.kind === "party" ? { by: "party", party_id: p.id! } : undefined;
+    const offered = (def.offered_in ?? []).filter((j) => j === c.country || j.startsWith(`${c.country}-`));
     return {
       key: c.key,
       country: c.country,
@@ -276,6 +280,7 @@ export function toV1Composition(def: Definition): { components: Component[]; par
       ...(c.underlying ? { underlying: c.underlying } : {}),
       ...(c.wrapper ? { wrapper: c.wrapper } : {}),
       ...(provider ? { provider } : {}),
+      ...(offered.length ? { offered_in: offered } : {}),
     };
   });
   const seen = new Set<string>();
