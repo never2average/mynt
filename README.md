@@ -149,7 +149,7 @@ Mynt's platform, published as an MCP server. It covers eleven lines, grouped by 
 | **Vendors** | A place to offer standard services (identity, KYC, account data, bureau, e-sign, e-mandate) that innovators plug into their products, tested by Mynt before they're listed |
 | **Admins** | The regulatory model (regulators, licences, law, GRC), the governance desk that reviews firms, licences and products, and `ops_status` for what needs attention |
 
-**Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](#install--build) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md)
+**Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](#install--build) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md) · **Architecture:** [`docs/architecture.md`](docs/architecture.md)
 
 The rest of this README is the technical reference.
 
