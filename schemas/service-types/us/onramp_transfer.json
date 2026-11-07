@@ -3,7 +3,7 @@
   "key": "onramp_transfer",
   "name": "Mynt Ramp: add dollars",
   "category": "ramp",
-  "description": "Accepts an onramp_quote: the customer's dollars come in from their bank account. When the partner can't pull the payment, it answers with the US bank account the customer pays into (pay_to_bank_name, pay_to_account_number, pay_to_routing_number) and the reference to put on the payment (pay_to_reference). It answers pending (submitted) and finishes by callback: settled, failed, or returned when the bank transfer bounces. settlement_ref and settlement_tx are the partner's own records and go only to the innovator.",
+  "description": "Accepts an onramp_quote: the customer's dollars come in from their bank account. When the partner can't pull the payment, it answers with the US bank account the customer pays into (pay_to_bank_name, pay_to_account_number, pay_to_routing_number) and the reference to put on the payment (pay_to_reference). If the payment never arrives in time, the transfer fails and pay_to_void is true: the customer must not pay into that account any more. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the bank transfer bounces. settlement_ref and settlement_tx are the partner's own records and go only to the innovator. total_usd, when the partner reports it, is the dollar amount it actually moved (in: added to the balance; out: paid to the bank).",
   "input_schema": {
     "type": "object",
     "required": [
@@ -46,6 +46,12 @@
           "null"
         ]
       },
+      "total_usd": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "pay_to_bank_name": {
         "type": [
           "string",
@@ -67,6 +73,12 @@
       "pay_to_reference": {
         "type": [
           "string",
+          "null"
+        ]
+      },
+      "pay_to_void": {
+        "type": [
+          "boolean",
           "null"
         ]
       },
@@ -105,10 +117,12 @@
     "fields": [
       "transfer_status",
       "estimated_arrival",
+      "total_usd",
       "pay_to_bank_name",
       "pay_to_account_number",
       "pay_to_routing_number",
-      "pay_to_reference"
+      "pay_to_reference",
+      "pay_to_void"
     ],
     "redirect": false
   }

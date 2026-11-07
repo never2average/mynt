@@ -70,7 +70,17 @@ export interface RampTransferUpdate {
   pay_to?: { bank_name: string | null; account_number: string | null; routing_number: string | null; reference: string | null } | null;
   settlement_ref: string | null; // partner-side
   settlement_tx: string | null; // partner-side: an on-chain transaction, never shown to a device
+  // What the partner reports it actually moved, when it does (its own fees included): total_usd in dollars for the
+  // customer (in: added to the balance; out: paid to the bank), settlement_amount partner-side. Never assumed 1:1.
+  total_usd?: string | null;
+  settlement_amount?: string | null;
   partner_side?: Record<string, unknown>; // e.g. where the USDC leg is to be sent; kept by the adapter only
+}
+
+// Who the partner verified the customer to be, to match against what the customer gave Mynt before a link counts.
+export interface RampPartnerIdentity {
+  full_name: string | null;
+  date_of_birth: string | null; // YYYY-MM-DD
 }
 
 export interface RampWebhookEvent {
@@ -92,6 +102,15 @@ export interface RampAdapter {
   price(ctx: RampAdapterContext, direction: RampDirection, amount_usd: string): RampPrice | RampError;
   transfer(ctx: RampAdapterContext, req: RampTransferRequest): Promise<RampTransferUpdate | RampError>;
   status(ctx: RampAdapterContext, partner_transfer_id: string, direction: RampDirection): Promise<RampTransferUpdate | RampError>;
+  // Voids a transfer that never got its money (when its window passes), if the partner can. null: voided.
+  cancel?(ctx: RampAdapterContext, partner_transfer_id: string): Promise<RampError | null>;
+  // The identity the partner holds for one of its customers.
+  customerIdentity(ctx: RampAdapterContext, partner_customer_id: string): Promise<RampPartnerIdentity | RampError>;
+  // Whether each environment points at the partner's matching environment (sandbox URL and key for test, and the
+  // other way round), as far as the partner documents it.
+  environmentProblems(e: { test_base_url: string; live_base_url: string | null; test_credential?: string; live_credential?: string }): string[];
+  // Whether this adapter can cash out yet (the stablecoin leg into the partner exists). Refused otherwise.
+  offrampReady(ctx: RampAdapterContext): boolean;
   // A partner webhook: verified with the partner's own scheme, then normalised. null: not an event Mynt needs.
   webhook(ctx: Omit<RampAdapterContext, "http">, raw: string, headers: Record<string, string | undefined>): RampWebhookEvent | null | RampError;
 }

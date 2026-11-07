@@ -14,17 +14,20 @@ import {
 // endpoints:
 //   POST /v0/transfers              (Api-Key, Idempotency-Key)  a transfer, fiat ↔ USDC on Solana
 //   GET  /v0/transfers/{id}                                      its state
+//   DELETE /v0/transfers/{id}                                    void one still awaiting_funds
 //   GET  /v0/customers?limit=1                                   the conformance probe (read-only)
+//   GET  /v0/customers/{id}                                      the identity a link is checked against
 //   webhooks, X-Webhook-Signature: t=<ms>,v0=<base64>            RSA over SHA-256(`${t}.${body}`)
 //
 // Bridge has no quote that locks a price, so Mynt issues the quote: the fee is the Mynt Ramp's (developer_fee on
 // the transfer), the amount out follows from it, and Mynt sets the validity. In: the customer pushes dollars by ACH
 // to the deposit account Bridge returns, with its deposit message; Bridge sends the USDC to the ramp's settlement
-// address on Solana. Out: USDC from that address, dollars by ACH to the customer's payout account at Bridge.
+// address on Solana. Out: USDC from that address, dollars by ACH to the customer's payout account at Bridge; it's
+// refused (always in live) until the USDC leg from the settlement address into Bridge exists.
 //
 // What Mynt doesn't do here, and refuses clearly instead: onboarding the customer at Bridge (KYC, terms of
-// service, and the postal address Bridge's external accounts need). The ramp firm links the customer's Bridge
-// customer id and payout account id with link_ramp_partner_customer.
+// service, and the postal address Bridge's external accounts need). The customer asks to be linked from their own
+// session; the ramp firm completes it with link_ramp_partner_customer, which Mynt checks against Bridge's identity.
 
 const AMOUNT = /^[0-9]{1,9}(\.[0-9]{1,2})?$/;
 const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -54,7 +57,7 @@ export const bridgeStatus = (state: unknown): RampTransferStatus | null => (type
 type BridgeTransfer = {
   id?: unknown;
   state?: unknown;
-  receipt?: { destination_tx_hash?: unknown; source_tx_hash?: unknown } | null;
+  receipt?: { destination_tx_hash?: unknown; source_tx_hash?: unknown; final_amount?: unknown; final_amount_currency?: unknown; subtotal_amount?: unknown } | null;
   source_deposit_instructions?: Record<string, unknown> | null;
 };
 const str = (v: unknown) => (typeof v === "string" && v ? v : null);
@@ -74,11 +77,34 @@ function updateOf(t: BridgeTransfer, direction: RampDirection): RampTransferUpda
         : null,
     settlement_ref: id,
     settlement_tx: str(direction === "in" ? t.receipt?.destination_tx_hash : t.receipt?.source_tx_hash),
+    // Bridge's receipt: final_amount is what reached the destination after every fee (USDC in, dollars out). It's
+    // only reported, never assumed; until Bridge reports it, it stays null.
+    ...receiptAmounts(t, direction),
     // Off-ramp: where the USDC leg goes (the stablecoin leg with the product's provider isn't built yet).
     partner_side:
       direction === "out" && d ? { deposit_rail: str(d.payment_rail), deposit_to: str(d.to_address), deposit_amount: str(d.amount), deposit_currency: str(d.currency) } : {},
   };
 }
+
+const AMOUNT_TEXT = /^[0-9]{1,12}(\.[0-9]{1,8})?$/;
+function receiptAmounts(t: BridgeTransfer, direction: RampDirection): { total_usd: string | null; settlement_amount: string | null } {
+  const final = str(t.receipt?.final_amount);
+  if (!final || !AMOUNT_TEXT.test(final)) return { total_usd: null, settlement_amount: null };
+  const fixed = (Math.round(Number(final) * 100) / 100).toFixed(2);
+  // In, the destination is USDC the customer's dollar balance is credited with; out, it's the dollars paid.
+  return direction === "in" ? { total_usd: fixed, settlement_amount: final } : { total_usd: fixed, settlement_amount: null };
+}
+
+// Bridge's documented hosts and key prefix (apidocs.bridge.xyz: sandbox keys start sk-test).
+const SANDBOX_HOST = "api.sandbox.bridge.xyz";
+const LIVE_HOST = "api.bridge.xyz";
+const hostOf = (u: string | null) => {
+  try {
+    return u ? new URL(u).hostname.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+};
 
 // Bridge's error codes are short identifiers; anything else becomes a generic code. Its messages aren't relayed.
 const partnerError = (r: { status: number | null; body: unknown; error: string | null }): RampError => {
@@ -103,6 +129,10 @@ export const bridgeAdapter: RampAdapter = {
     settlement_address: { required: true, description: "The ramp's own Solana address that receives (in) and sends (out) the USDC. Partner-side only; never shown to a device" },
     fee_percent: { required: false, description: "The Mynt Ramp's fee, in percent of the amount (default 0.5), charged as Bridge's developer_fee" },
     fee_min_usd: { required: false, description: "The smallest fee in US dollars (default 0.50)" },
+    min_usd: { required: false, description: "The smallest transfer in US dollars (default 1.00)" },
+    max_usd: { required: false, description: "The largest transfer in US dollars (default 10000.00)" },
+    pending_business_days: { required: false, description: "How many business days an add-dollars transfer waits for the customer's payment before it's voided (default 7, from 1 to 30)" },
+    test_offramp: { required: false, description: "\"true\" lets cash-out run in the test environment only (against a fake or the sandbox). Live cash-out stays refused until the USDC leg into Bridge exists" },
     quote_seconds: { required: false, description: "How long a Mynt quote can be accepted, in seconds (default 60, at most 900): Bridge has no quote that locks a price" },
     test_webhook_public_key: { required: false, description: "The PEM public key of the Bridge sandbox webhook endpoint (public, not a secret)" },
     live_webhook_public_key: { required: false, description: "The PEM public key of the Bridge production webhook endpoint (public, not a secret)" },
@@ -115,6 +145,12 @@ export const bridgeAdapter: RampAdapter = {
     if (!(pct >= 0 && pct <= 5)) p.push("config.fee_percent: a number from 0 to 5");
     const min = configNumber(config, "fee_min_usd", 0.5);
     if (!(min >= 0 && min <= 100)) p.push("config.fee_min_usd: a number from 0 to 100");
+    const lo = configNumber(config, "min_usd", 1);
+    const hi = configNumber(config, "max_usd", 10000);
+    if (!(lo >= 1 && hi >= lo && hi <= 1_000_000)) p.push("config.min_usd and max_usd: dollars, at least 1.00, min_usd no more than max_usd, max_usd at most 1000000");
+    const days = configNumber(config, "pending_business_days", 7);
+    if (!(Number.isInteger(days) && days >= 1 && days <= 30)) p.push("config.pending_business_days: a whole number from 1 to 30");
+    if (config.test_offramp !== undefined && !["true", "false"].includes(config.test_offramp)) p.push('config.test_offramp: "true" or "false"');
     const secs = configNumber(config, "quote_seconds", 60);
     if (!(Number.isInteger(secs) && secs >= 10 && secs <= 900)) p.push("config.quote_seconds: a whole number from 10 to 900");
     for (const k of ["test_webhook_public_key", "live_webhook_public_key"])
@@ -136,7 +172,10 @@ export const bridgeAdapter: RampAdapter = {
   price(ctx, direction, amount_usd) {
     if (!AMOUNT.test(amount_usd)) return rampError("invalid_amount", "The amount must be US dollars, like 100.00");
     const amount = cents(amount_usd);
-    if (amount < 100) return rampError("amount_too_small", "The smallest amount is $1.00");
+    const lo = Math.round(configNumber(ctx.config, "min_usd", 1) * 100);
+    const hi = Math.round(configNumber(ctx.config, "max_usd", 10000) * 100);
+    if (amount < lo) return rampError("amount_too_small", `The smallest amount is $${dollars(lo)}`);
+    if (amount > hi) return rampError("amount_too_large", `The largest amount is $${dollars(hi)}`);
     const fee = Math.max(Math.round(configNumber(ctx.config, "fee_min_usd", 0.5) * 100), Math.round((amount * configNumber(ctx.config, "fee_percent", 0.5)) / 100));
     if (direction === "in" && amount <= fee) return rampError("amount_too_small", "The amount doesn't cover the fee");
     const total = direction === "in" ? amount - fee : amount + fee;
@@ -184,6 +223,34 @@ export const bridgeAdapter: RampAdapter = {
     if (r.status === null || r.status < 200 || r.status >= 300) return partnerError(r);
     return updateOf(r.body as BridgeTransfer, direction);
   },
+
+  // DELETE /v0/transfers/{id}: Bridge cancels a transfer only while it's awaiting_funds (transfer-states docs).
+  async cancel(ctx, id) {
+    const r = await ctx.http("DELETE", `/v0/transfers/${encodeURIComponent(id)}`);
+    return r.status !== null && r.status >= 200 && r.status < 300 ? null : partnerError(r);
+  },
+
+  // GET /v0/customers/{id}. The name and birth date fields (first_name, last_name, birth_date) are as Bridge's
+  // customer object is documented; checked against the sandbox before live use.
+  async customerIdentity(ctx, id) {
+    const r = await ctx.http("GET", `/v0/customers/${encodeURIComponent(id)}`);
+    if (r.status === null || r.status < 200 || r.status >= 300) return partnerError(r);
+    const c = (r.body ?? {}) as { first_name?: unknown; last_name?: unknown; full_name?: unknown; birth_date?: unknown };
+    const name = str(c.full_name) ?? ([str(c.first_name), str(c.last_name)].filter(Boolean).join(" ") || null);
+    const dob = str(c.birth_date);
+    return { full_name: name, date_of_birth: dob && /^\d{4}-\d{2}-\d{2}/.test(dob) ? dob.slice(0, 10) : null };
+  },
+
+  environmentProblems(e) {
+    const p: string[] = [];
+    if (hostOf(e.test_base_url) === LIVE_HOST) p.push(`test_base_url: ${LIVE_HOST} is Bridge's production API; the test environment uses https://${SANDBOX_HOST}`);
+    if (hostOf(e.live_base_url) === SANDBOX_HOST) p.push(`live_base_url: ${SANDBOX_HOST} is Bridge's sandbox; the live environment uses https://${LIVE_HOST}`);
+    if (e.test_credential && !e.test_credential.startsWith("sk-test")) p.push("test_credential: Bridge sandbox keys start with sk-test; this looks like a production key");
+    if (e.live_credential && e.live_credential.startsWith("sk-test")) p.push("live_credential: this is a Bridge sandbox key (sk-test…); the live environment needs a production key");
+    return p;
+  },
+
+  offrampReady: (ctx) => ctx.environment === "test" && ctx.config.test_offramp === "true",
 
   webhook(ctx, raw, headers) {
     const key = ctx.config[`${ctx.environment}_webhook_public_key`];

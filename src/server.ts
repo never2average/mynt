@@ -117,7 +117,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("vendor")) {
     if (!has("innovator")) registerFirmTools(server, store, user!);
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
-    registerRampAdapterTools(server, store, user!, { admin: has("admin") });
+    registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("admin")) {
@@ -125,7 +125,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
     registerTakeRateAdminTools(server, store, user!);
     registerVendorAdminTools(server, store, user!);
-    if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true });
+    if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);

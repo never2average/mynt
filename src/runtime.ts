@@ -24,6 +24,7 @@ export const WEBHOOK_EVENTS = [
   "request.decided",
   "handoff.completed",
   "handoff.failed",
+  "handoff.reversed",
 ] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
@@ -76,7 +77,10 @@ export async function emitEvent(store: Store, appIds: string[], type: WebhookEve
 
 // Events a firm (an innovator) gets at its own webhooks, about what Mynt did for it: a client action its
 // product's bound vendor service answered, with the full result (sealed while queued, opened only to send).
-export const FIRM_WEBHOOK_EVENTS = ["vendor_action.completed", "vendor_action.failed"] as const;
+// vendor_action.reversed: a completed ramp transfer the partner later reversed; vendor_action.late_settlement: one
+// it settled after Mynt had ended the run (to handle by hand); ramp_link.requested: to the Mynt Ramp firm, a
+// customer asked to be linked to the ramp partner (link_ramp_partner_customer).
+export const FIRM_WEBHOOK_EVENTS = ["vendor_action.completed", "vendor_action.failed", "vendor_action.reversed", "vendor_action.late_settlement", "ramp_link.requested"] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 
 // Queues `type` for every webhook of the firm subscribed to it. `sealedResult` (sealed with the sandbox or live
@@ -431,7 +435,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     {
       title: "Register a webhook",
       description:
-        "Developer: receive events about one of your apps' products at an https URL: product.version_published, product.unpublished, product.suspended, product.drifted, product.drift_cleared, access.approved, access.revoked, request.decided, handoff.completed, handoff.failed. Each POST carries a Mynt-Signature header (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
+        "Developer: receive events about one of your apps' products at an https URL: product.version_published, product.unpublished, product.suspended, product.drifted, product.drift_cleared, access.approved, access.revoked, request.decided, handoff.completed, handoff.failed, handoff.reversed (a completed Mynt Ramp transfer the bank later sent back). Each POST carries a Mynt-Signature header (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
       inputSchema: { app_id: z.string(), url: z.string(), events: z.array(z.enum(WEBHOOK_EVENTS)).min(1) },
     },
     async ({ app_id, url, events }) => {

@@ -1176,6 +1176,35 @@ const TABLES = `
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (offering_id, environment, partner_transfer_id)
   );
+  -- A completed ramp transfer the partner later reversed; and a result that came after the run ended (kept sealed).
+  ALTER TABLE financial_products.vendor_action_runs DROP CONSTRAINT IF EXISTS vendor_action_runs_status_check;
+  ALTER TABLE financial_products.vendor_action_runs ADD CONSTRAINT vendor_action_runs_status_check
+    CHECK (status IN ('calling', 'pending', 'completed', 'failed', 'withdrawn', 'expired', 'reversed'));
+  ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS late_result_sealed text;
+  -- Partner webhook events already applied, so a redelivery is a no-op.
+  CREATE TABLE IF NOT EXISTS financial_products.ramp_adapter_events (
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    event_id text NOT NULL,
+    received_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (offering_id, event_id)
+  );
+  -- A customer's request, from their own session, to be linked to the ramp partner. The ramp firm sees only the id.
+  CREATE TABLE IF NOT EXISTS financial_products.ramp_link_requests (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    app_id uuid NOT NULL,
+    customer_ref text NOT NULL,
+    sandbox boolean NOT NULL,
+    session_id uuid NOT NULL,
+    product_id text NOT NULL,
+    consent_purpose text NOT NULL,
+    status text NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'linked', 'refused')),
+    refusal text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    decided_at timestamptz
+  );
+  ALTER TABLE financial_products.ramp_partner_links ADD COLUMN IF NOT EXISTS link_request_id uuid;
+  ALTER TABLE financial_products.ramp_partner_links ADD COLUMN IF NOT EXISTS identity_verified_at timestamptz;
   CREATE INDEX IF NOT EXISTS ramp_adapter_transfers_open_idx ON financial_products.ramp_adapter_transfers (updated_at) WHERE status = 'submitted';
   -- Evidence of a vendor-served action's end (status only, never the result).
   ALTER TABLE financial_products.client_evidence DROP CONSTRAINT IF EXISTS client_evidence_type_check;

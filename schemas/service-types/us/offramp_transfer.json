@@ -3,7 +3,7 @@
   "key": "offramp_transfer",
   "name": "Mynt Ramp: cash out dollars",
   "category": "ramp",
-  "description": "Accepts an offramp_quote: pays the dollars to the customer's bank account. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the receiving bank sends the payment back. settlement_ref and settlement_tx are the partner's own records and go only to the innovator.",
+  "description": "Accepts an offramp_quote: pays the dollars to the customer's bank account. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the receiving bank sends the payment back. settlement_ref and settlement_tx are the partner's own records and go only to the innovator. total_usd, when the partner reports it, is the dollar amount it actually moved (in: added to the balance; out: paid to the bank).",
   "input_schema": {
     "type": "object",
     "required": [
@@ -46,6 +46,12 @@
           "null"
         ]
       },
+      "total_usd": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "settlement_ref": {
         "type": [
           "string",
@@ -80,7 +86,8 @@
     },
     "fields": [
       "transfer_status",
-      "estimated_arrival"
+      "estimated_arrival",
+      "total_usd"
     ],
     "redirect": false
   }

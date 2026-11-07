@@ -1205,6 +1205,77 @@ export async function vendorCallback(
   return { status: 200, body: { request_id: run.request_id, status: now[0]?.status } };
 }
 
+// After a ramp transfer completed, the partner reports it reversed (the bank sent the payment back, or it was
+// refunded): the one change allowed after a run ended. The run becomes `reversed`; the device is told it failed
+// (with the new transfer_status, and reversed: true); the innovator gets vendor_action.reversed with the sealed
+// details, and the app a data-free handoff.reversed.
+export async function reverseVendorRun(store: Store, at: { subscription_id: string; request_id: string }, output: Record<string, unknown>): Promise<boolean> {
+  const { rows: found } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [at.request_id, at.subscription_id]);
+  const run = found[0] as RunRow | undefined;
+  if (!run) return false;
+  const sealed = seal(JSON.stringify(output), run.sandbox, true);
+  const shown = { status: "failed", ...(typeof output.transfer_status === "string" ? { transfer_status: output.transfer_status } : {}), reversed: true };
+  const { rows } = await store.db.query(
+    `UPDATE ${T}.vendor_action_runs SET status = 'reversed', client_outcome = client_outcome || $2::jsonb, late_result_sealed = $3 WHERE id = $1 AND status = 'completed' RETURNING id`,
+    [run.id, JSON.stringify(shown), sealed],
+  );
+  const wasCompleted = rows.length > 0;
+  await emitFirmEvent(
+    store,
+    run.entity_id,
+    "vendor_action.reversed",
+    {
+      reference: run.id,
+      request_id: run.request_id,
+      product_id: run.product_id,
+      action: run.action,
+      service_type: run.service_type,
+      subscription_id: run.subscription_id,
+      app_id: run.app_id,
+      customer_ref: run.customer_ref,
+      sandbox: run.sandbox,
+      // false: the run had already ended another way (a late settlement), so the customer was never told it completed
+      run_was_completed: wasCompleted,
+    },
+    run.sandbox,
+    sealed,
+  );
+  if (wasCompleted) await emitEvent(store, [run.app_id], "handoff.reversed", { product_id: run.product_id, reference: run.id, action: run.action, status: "failed", sandbox: run.sandbox }, run.sandbox);
+  return true;
+}
+
+// The partner settled a ramp transfer after Mynt had already ended its run (its window passed, or the customer's
+// consent was withdrawn): the money moved, so it's never dropped. The result is kept sealed on the run and the
+// innovator gets vendor_action.late_settlement to handle it by hand; the device's answer doesn't change.
+export async function lateVendorSettlement(store: Store, at: { subscription_id: string; request_id: string }, output: Record<string, unknown>): Promise<boolean> {
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [at.request_id, at.subscription_id]);
+  const run = rows[0] as (RunRow & { status: string }) | undefined;
+  if (!run) return false;
+  const sealed = seal(JSON.stringify(output), run.sandbox, true);
+  await store.db.query(`UPDATE ${T}.vendor_action_runs SET late_result_sealed = $2 WHERE id = $1`, [run.id, sealed]);
+  await emitFirmEvent(
+    store,
+    run.entity_id,
+    "vendor_action.late_settlement",
+    {
+      reference: run.id,
+      request_id: run.request_id,
+      product_id: run.product_id,
+      action: run.action,
+      service_type: run.service_type,
+      subscription_id: run.subscription_id,
+      app_id: run.app_id,
+      customer_ref: run.customer_ref,
+      sandbox: run.sandbox,
+      run_status: run.status,
+      needs: "manual_handling",
+    },
+    run.sandbox,
+    sealed,
+  );
+  return true;
+}
+
 // Ends runs that will never finish: a call still "calling" after `callingMinutes` (the process died mid-call) and
 // a "pending" one older than `pendingHours` (VENDOR_PENDING_EXPIRY_HOURS, default 24). Each ends as expired, and
 // the innovator and the app are told (without data).
@@ -1213,7 +1284,11 @@ export async function sweepVendorActionRuns(store: Store, o: { callingMinutes?: 
   const pendingHours = o.pendingHours ?? (Number(process.env.VENDOR_PENDING_EXPIRY_HOURS) || 24);
   const { rows } = await store.db.query(
     `SELECT * FROM ${T}.vendor_action_runs
-     WHERE (status = 'calling' AND created_at < $1::timestamptz - make_interval(mins => $2)) OR (status = 'pending' AND created_at < $1::timestamptz - make_interval(hours => $3))
+     WHERE (status = 'calling' AND created_at < $1::timestamptz - make_interval(mins => $2))
+        OR (status = 'pending' AND created_at < $1::timestamptz - make_interval(hours => $3)
+            -- A ramp transfer an adapter started has its own, longer window (bank transfers take business days): the
+            -- adapter's poller ends it, voiding it at the partner first (src/ramp-adapters/).
+            AND NOT EXISTS (SELECT 1 FROM ${T}.ramp_adapter_transfers t WHERE t.request_id = vendor_action_runs.request_id AND t.subscription_id = vendor_action_runs.subscription_id AND t.status = 'submitted'))
      ORDER BY created_at LIMIT 500`,
     [now.toISOString(), o.callingMinutes ?? 5, pendingHours],
   );
