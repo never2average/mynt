@@ -6,7 +6,7 @@ import { folder, folderOf, GrcRecordInputSchema, reconcileEntityGrc, validateGrc
 import { EntityFactsSchema, PartyInputSchema, reconcileEntity, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
 import { vendorDriftSweep } from "./vendors.js";
-import { normalizeModel } from "./regulatory.js";
+import { licenceJurisdictions, normalizeModel, SUBDIVISION } from "./regulatory.js";
 import { emitProductEvent, emitRequestEvent } from "./runtime.js";
 import { ACCESS_MODES, type AccessRequest, type Store, type User } from "./store.js";
 
@@ -403,11 +403,16 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
     {
       title: "Register a licence your firm holds",
       description:
-        "Record a licence your firm holds (a licence type from the regulatory model, see find_licenses) with its registration number and validity. An admin verifies it before it counts.",
+        "Record a licence your firm holds (a licence type from the regulatory model, see find_licenses) with its registration number and validity. A licence type issued per jurisdiction (e.g. a money transmitter licence in each US state) is registered once per jurisdiction, naming it. An admin verifies it before it counts.",
       inputSchema: {
         region: z.string(),
         regulator_id: z.string(),
         license_id: z.string(),
+        jurisdiction: z
+          .string()
+          .regex(SUBDIVISION, "An ISO 3166-2 code, lowercase, e.g. 'us-ny'")
+          .optional()
+          .describe("The jurisdiction it was issued for (ISO 3166-2, e.g. 'us-ny'); required when its licence type is issued per jurisdiction, and only then"),
         registration_number: z.string().min(1),
         valid_from: z.string().optional().describe("YYYY-MM-DD"),
         valid_to: z.string().optional().describe("YYYY-MM-DD"),
@@ -418,10 +423,14 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
       if (!entity_id) return fail(noFirm);
       const region = (await store.referenceData(true)).regions.find((r) => r.code === l.region);
       const regulator = normalizeModel(region?.regulatory).regulators.find((r) => r.id === l.regulator_id);
-      if (!regulator?.license_types.some((t) => t._id === l.license_id))
-        return fail(`No licence type '${l.license_id}' under '${l.regulator_id}' in ${l.region}; see get_regulator`);
-      const held = await store.registerLicense(user.id, { ...l, entity_id, valid_from: l.valid_from ?? null, valid_to: l.valid_to ?? null });
-      await audit("register_license", held.id, { region: l.region, regulator: l.regulator_id, license: l.license_id });
+      const type = regulator?.license_types.find((t) => t._id === l.license_id);
+      if (!type) return fail(`No licence type '${l.license_id}' under '${l.regulator_id}' in ${l.region}; see get_regulator`);
+      if (type.issued_per_jurisdiction) {
+        if (!l.jurisdiction) return fail(`'${l.license_id}' is issued per jurisdiction: name the one it was issued for (one of ${(type.covers ?? []).join(", ")})`);
+        if (!(type.covers ?? []).includes(l.jurisdiction)) return fail(`'${l.license_id}' isn't issued for '${l.jurisdiction}'; it covers ${(type.covers ?? []).join(", ")}`);
+      } else if (l.jurisdiction) return fail(`'${l.license_id}' isn't issued per jurisdiction, so it takes no jurisdiction: it covers ${licenceJurisdictions(regulator, type, {}).map((j) => (j === "*" ? "the whole country" : j)).join(", ")}`);
+      const held = await store.registerLicense(user.id, { ...l, entity_id, jurisdiction: l.jurisdiction ?? null, valid_from: l.valid_from ?? null, valid_to: l.valid_to ?? null });
+      await audit("register_license", held.id, { region: l.region, regulator: l.regulator_id, license: l.license_id, ...(l.jurisdiction ? { jurisdiction: l.jurisdiction } : {}) });
       // Re-registering sends a licence back for review, so products resting on it are re-checked.
       const drifted = [...(await driftSweep(store, entity_id)), ...(await vendorDriftSweep(store, { vendor_entity_id: entity_id }))];
       return json({ ...held, drifted_products: [...new Set(drifted)] });

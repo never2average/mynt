@@ -22,6 +22,8 @@ const redact = (reason: string) =>
 
 // The regime, as stored: per region and component, its coverage and by which regulator and licence type,
 // who supervises it, the mandated stakeholders required against those filled and bound, and the publish blockers.
+// A component offered in named jurisdictions (US states) also has a row per jurisdiction, and the region says
+// which of them are covered.
 export async function regimeSummary(store: Store, record: ProductRecord, regime?: Regime) {
   const live = record.status === "published" && Boolean(record.pins);
   regime ??= await productRegime(store, record, { live });
@@ -35,9 +37,21 @@ export async function regimeSummary(store: Store, record: ProductRecord, regime?
     regions: regime.regions.map((r) => {
       const model = normalizeModel(ref.regions.find((x) => x.code === r.region)?.regulatory);
       const regulator = (id: string) => ({ regulator_id: id, name: model.regulators.find((x) => x.id === id)?.name ?? id });
+      const coverageOf = (cov: (typeof r.components)[number]["coverage"], c: (typeof r.components)[number]) =>
+        cov.status === "covered"
+          ? {
+              status: cov.status,
+              by: cov.by.map((b) => ({
+                ...regulator(b.regulator_id),
+                license_id: b.license_id,
+                licence: c.licences.find((l) => l.regulator_id === b.regulator_id && l.license_id === b.license_id)?.name ?? b.license_id,
+              })),
+            }
+          : { status: cov.status, reason: redact(cov.reason), by: [] };
       return {
         region: r.region,
         covered: r.covered,
+        ...(r.jurisdictions ? { jurisdictions: r.jurisdictions } : {}),
         regulators: r.regulators.map(regulator),
         components: r.components.map((c) => {
           const cov = c.coverage;
@@ -50,17 +64,15 @@ export async function regimeSummary(store: Store, record: ProductRecord, regime?
             ...(c.underlying ? { underlying: c.underlying } : {}),
             ...(c.wrapper ? { wrapper: c.wrapper } : {}),
             provided_by: c.provider?.by === "self" ? ("self" as const) : c.provider?.by === "party" ? ("partner" as const) : null,
-            coverage:
-              cov.status === "covered"
-                ? {
-                    status: cov.status,
-                    by: cov.by.map((b) => ({
-                      ...regulator(b.regulator_id),
-                      license_id: b.license_id,
-                      licence: c.licences.find((l) => l.regulator_id === b.regulator_id && l.license_id === b.license_id)?.name ?? b.license_id,
-                    })),
-                  }
-                : { status: cov.status, reason: redact(cov.reason), by: [] },
+            coverage: coverageOf(cov, c),
+            ...(c.jurisdictions
+              ? {
+                  jurisdictions: c.jurisdictions.map((j) => {
+                    const b = blockers.find((x) => x.region === r.region && x.key === c.key && x.jurisdiction === j.jurisdiction);
+                    return { jurisdiction: j.jurisdiction, coverage: coverageOf(j.coverage, c), blocking: b ? redact(b.reason) : null };
+                  }),
+                }
+              : {}),
             supervised_by: c.supervised_by,
             licences_granting: c.licences,
             stakeholders: s
