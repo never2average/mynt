@@ -694,6 +694,14 @@ const TABLES = `
     CHECK (underlying IN (${sqlList(UNDERLYINGS)}));
   ALTER TABLE financial_products.regulated_product_types ADD COLUMN IF NOT EXISTS wrapper text
     CHECK (wrapper IN (${sqlList(WRAPPERS)}));
+  -- ADD COLUMN IF NOT EXISTS leaves an existing column's check as it was created, so a value added to the list
+  -- later (digital_assets) would be refused on an older database. Re-create each list check on every start.
+  ALTER TABLE financial_products.regulated_product_types DROP CONSTRAINT IF EXISTS regulated_product_types_underlying_check;
+  ALTER TABLE financial_products.regulated_product_types ADD CONSTRAINT regulated_product_types_underlying_check
+    CHECK (underlying IN (${sqlList(UNDERLYINGS)}));
+  ALTER TABLE financial_products.regulated_product_types DROP CONSTRAINT IF EXISTS regulated_product_types_wrapper_check;
+  ALTER TABLE financial_products.regulated_product_types ADD CONSTRAINT regulated_product_types_wrapper_check
+    CHECK (wrapper IN (${sqlList(WRAPPERS)}));
   -- ---- Runtime layer: per-app API keys, hand-offs, analytics events, webhooks, app releases ----
   CREATE TABLE IF NOT EXISTS financial_products.api_keys (
     id uuid PRIMARY KEY,
@@ -908,8 +916,12 @@ const TABLES = `
     updated_by uuid REFERENCES financial_products.users(id),
     updated_at timestamptz NOT NULL DEFAULT now()
   );
+  ALTER TABLE financial_products.take_rates DROP CONSTRAINT IF EXISTS take_rates_line_check;
+  ALTER TABLE financial_products.take_rates ADD CONSTRAINT take_rates_line_check CHECK (line IN (${sqlList(PRODUCT_LINES)}));
   -- Legal entities as typed facts, and the parties on each firm's roster.
   ALTER TABLE financial_products.entities ADD COLUMN IF NOT EXISTS legal_form text CHECK (legal_form IN (${sqlList(LEGAL_FORMS)}));
+  ALTER TABLE financial_products.entities DROP CONSTRAINT IF EXISTS entities_legal_form_check;
+  ALTER TABLE financial_products.entities ADD CONSTRAINT entities_legal_form_check CHECK (legal_form IN (${sqlList(LEGAL_FORMS)}));
   ALTER TABLE financial_products.entities ADD COLUMN IF NOT EXISTS incorporation jsonb;
   ALTER TABLE financial_products.entities ADD COLUMN IF NOT EXISTS identifiers jsonb NOT NULL DEFAULT '[]';
   ALTER TABLE financial_products.entities ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active'
