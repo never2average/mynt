@@ -1,0 +1,1300 @@
+{
+  "region": "US",
+  "description": "The US slice of Mynt's regulatory model for digital-asset on-ramps, off-ramps and buy-and-hold stablecoin products. Researched 2026-11-07 from primary-domain sources (see each instrument's url); the full text of the pages could not be opened from the research session, so check each against its source before relying on it. Coverage is per country today: one licence anywhere in the US counts for every customer, although US money transmission is licensed state by state (see docs/plans/crypto-liquidity.md). OFAC, CFPB and IRS obligations are kept on the FinCEN registration's register, the licence every ramp and exchange holds.",
+  "region_definition": {
+    "name": "United States",
+    "regulators": [
+      "FinCEN",
+      "NYDFS",
+      "DFPI",
+      "OCC"
+    ]
+  },
+  "product_categories": [
+    {
+      "id": "money_transmission",
+      "name": "Money transmission",
+      "product_lines": [
+        "payments"
+      ],
+      "description": "Moving money or value for others, including convertible virtual currency: on-ramps and off-ramps."
+    },
+    {
+      "id": "virtual_currency",
+      "name": "Virtual currency",
+      "product_lines": [
+        "exchange"
+      ],
+      "description": "Buying and selling convertible virtual currency, including stablecoins, for customers."
+    },
+    {
+      "id": "digital_asset_custody",
+      "name": "Digital asset custody",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "description": "Holding digital assets for customers."
+    },
+    {
+      "id": "payment_stablecoins",
+      "name": "Payment stablecoins",
+      "product_lines": [
+        "payments"
+      ],
+      "description": "Issuing and redeeming payment stablecoins."
+    }
+  ],
+  "regulated_product_types": [
+    {
+      "id": "us_cvc_money_transmission",
+      "name": "Money transmission, including convertible virtual currency (on-ramp and off-ramp)",
+      "type_id": "money_transmission",
+      "actions": [
+        "sale",
+        "servicing"
+      ],
+      "description": "Accepting US dollars or convertible virtual currency from a customer and transmitting it, including turning dollars into a stablecoin and back for the customer."
+    },
+    {
+      "id": "us_cvc_exchange",
+      "name": "Convertible virtual currency exchange",
+      "type_id": "virtual_currency",
+      "actions": [
+        "sale",
+        "purchase",
+        "secondary_sale"
+      ],
+      "underlying": "digital_assets",
+      "description": "Buying and selling convertible virtual currency, including stablecoins, as a customer business."
+    },
+    {
+      "id": "us_digital_asset_custody",
+      "name": "Digital asset custody",
+      "type_id": "digital_asset_custody",
+      "actions": [
+        "issuance",
+        "servicing"
+      ],
+      "underlying": "digital_assets",
+      "description": "Holding digital assets for customers."
+    },
+    {
+      "id": "us_payment_stablecoin",
+      "name": "Payment stablecoin",
+      "type_id": "payment_stablecoins",
+      "actions": [
+        "issuance"
+      ],
+      "description": "A digital asset used for payment or settlement that the issuer must redeem for a fixed amount of money (GENIUS Act)."
+    }
+  ],
+  "legislation": [
+    {
+      "id": "us_bsa_msb_definitions",
+      "title": "Bank Secrecy Act definitions: money transmitter",
+      "kind": "regulation",
+      "citation": "31 CFR 1010.100(ff)(5)",
+      "issued_by": "fincen",
+      "url": "https://www.law.cornell.edu/cfr/text/31/1010.100",
+      "summary": "A money transmitter accepts currency, funds or value that substitutes for currency from one person and transmits it to another location or person by any means, unless an exemption in (ff)(5)(ii) applies."
+    },
+    {
+      "id": "us_msb_registration",
+      "title": "Registration of money services businesses",
+      "kind": "regulation",
+      "citation": "31 CFR 1022.380",
+      "issued_by": "fincen",
+      "url": "https://www.ecfr.gov/current/title-31/subtitle-B/chapter-X/part-1022/subpart-C/section-1022.380",
+      "summary": "Register with FinCEN (Form 107) within 180 days of being established, renew every two years, re-register on certain changes, and keep an agent list."
+    },
+    {
+      "id": "us_msb_aml_program",
+      "title": "Anti-money laundering programs for money services businesses",
+      "kind": "regulation",
+      "citation": "31 CFR 1022.210",
+      "issued_by": "fincen",
+      "effective_from": "2002-07-24",
+      "url": "https://www.ecfr.gov/current/title-31/subtitle-B/chapter-X/part-1022/subpart-B/section-1022.210",
+      "summary": "A written, risk-based AML program with internal controls, a compliance officer, training and independent review."
+    },
+    {
+      "id": "us_msb_sar",
+      "title": "Reports by money services businesses of suspicious transactions",
+      "kind": "regulation",
+      "citation": "31 CFR 1022.320",
+      "issued_by": "fincen",
+      "url": "https://www.ecfr.gov/current/title-31/subtitle-B/chapter-X/part-1022/subpart-C/section-1022.320",
+      "summary": "Report suspicious transactions of $2,000 or more within 30 calendar days of initial detection; keep records five years."
+    },
+    {
+      "id": "us_ctr",
+      "title": "Currency transaction reports",
+      "kind": "regulation",
+      "citation": "31 CFR 1010.311; 1010.306(a)",
+      "issued_by": "fincen",
+      "url": "https://www.ecfr.gov/current/title-31/subtitle-B/chapter-X/part-1010/subpart-C/section-1010.311",
+      "summary": "Report each transaction in currency of more than $10,000, aggregating one person's transactions in a business day, within 15 days."
+    },
+    {
+      "id": "us_funds_transfer_rules",
+      "title": "Funds transfer recordkeeping and the Travel Rule",
+      "kind": "regulation",
+      "citation": "31 CFR 1010.410(e), (f)",
+      "issued_by": "fincen",
+      "url": "https://www.law.cornell.edu/cfr/text/31/1010.410",
+      "summary": "For transmittals of funds of $3,000 or more, keep the required records and pass the required information to the next institution."
+    },
+    {
+      "id": "us_bsa_retention",
+      "title": "Retention of Bank Secrecy Act records",
+      "kind": "regulation",
+      "citation": "31 CFR 1010.430(d)",
+      "issued_by": "fincen",
+      "url": "https://www.ecfr.gov/current/title-31/subtitle-B/chapter-X/part-1010/subpart-D/section-1010.430",
+      "summary": "Keep required records for five years, accessible within a reasonable time."
+    },
+    {
+      "id": "us_fincen_cvc_guidance",
+      "title": "Application of FinCEN's regulations to certain business models involving convertible virtual currencies",
+      "kind": "guideline",
+      "citation": "FIN-2019-G001",
+      "issued_by": "fincen",
+      "effective_from": "2019-05-09",
+      "url": "https://www.fincen.gov/system/files/2019-05/FinCEN%20Guidance%20CVC%20FINAL%20508.pdf",
+      "summary": "An exchanger or administrator that accepts and transmits convertible virtual currency, or buys or sells it for any reason, is a money transmitter unless an exemption applies."
+    },
+    {
+      "id": "us_ofac_vc_guidance",
+      "title": "Sanctions compliance guidance for the virtual currency industry",
+      "kind": "guideline",
+      "issued_by": "ofac",
+      "effective_from": "2021-10-15",
+      "url": "https://ofac.treasury.gov/media/913571/download?inline=",
+      "summary": "Sanctions obligations apply equally to virtual currency and fiat transactions; OFAC recommends a risk-based sanctions compliance program."
+    },
+    {
+      "id": "us_ofac_reporting",
+      "title": "Reporting, procedures and penalties regulations",
+      "kind": "regulation",
+      "citation": "31 CFR part 501 (501.603, 501.604)",
+      "issued_by": "ofac",
+      "url": "https://www.ecfr.gov/current/title-31/subtitle-B/chapter-V/part-501/subpart-C",
+      "summary": "Report blocked property within 10 business days and annually as of June 30 by September 30; report rejected transactions within 10 business days."
+    },
+    {
+      "id": "us_reg_e_error_resolution",
+      "title": "Regulation E: procedures for resolving errors",
+      "kind": "regulation",
+      "citation": "12 CFR 1005.11",
+      "issued_by": "cfpb",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.11",
+      "summary": "Investigate a consumer's notice of an electronic fund transfer error within 10 business days (up to 45 days with provisional credit) and correct it within one business day."
+    },
+    {
+      "id": "us_irs_broker_digital_assets",
+      "title": "Gross proceeds and basis reporting by brokers of digital assets",
+      "kind": "regulation",
+      "citation": "T.D. 10000",
+      "issued_by": "irs",
+      "effective_from": "2025-01-01",
+      "url": "https://www.federalregister.gov/documents/2024/07/09/2024-14004/gross-proceeds-and-basis-reporting-by-brokers-and-determination-of-amount-realized-and-basis-for",
+      "summary": "Brokers report gross proceeds on Form 1099-DA for sales from 2025 and basis for covered assets from 2026, with an optional aggregate method for qualifying stablecoins."
+    },
+    {
+      "id": "us_genius_act",
+      "title": "Guiding and Establishing National Innovation for U.S. Stablecoins Act (GENIUS Act)",
+      "kind": "act",
+      "citation": "Pub. L. 119-27, 139 Stat. 419",
+      "issued_by": "congress",
+      "effective_from": "2027-01-18",
+      "url": "https://www.congress.gov/119/plaws/publ27/PLAW-119publ27.pdf",
+      "summary": "Only a permitted payment stablecoin issuer may issue a payment stablecoin in the US; 1:1 reserves, monthly reserve reports and published redemption policies. From 2028-07-18 a digital asset service provider may not offer or sell to US persons a payment stablecoin not issued by a permitted issuer. Effective the earlier of 2027-01-18 or 120 days after final rules."
+    },
+    {
+      "id": "us_occ_genius_rule",
+      "title": "OCC rule implementing the GENIUS Act (12 CFR part 15)",
+      "kind": "regulation",
+      "citation": "OCC Bulletin 2026-50",
+      "issued_by": "occ",
+      "parent_id": "us_genius_act",
+      "effective_from": "2027-01-18",
+      "url": "https://www.occ.gov/news-issuances/bulletins/2026/bulletin-2026-50.html",
+      "summary": "Licensing, reserves, redemption and supervision for OCC-supervised permitted payment stablecoin issuers."
+    },
+    {
+      "id": "us_treasury_genius_s3_proposal",
+      "title": "GENIUS Act regulations on payment stablecoin issuance, offer and sale (proposed)",
+      "kind": "regulation",
+      "citation": "91 FR 53368",
+      "issued_by": "treasury",
+      "parent_id": "us_genius_act",
+      "status": "draft",
+      "url": "https://www.federalregister.gov/documents/2026/08/18/2026-16796/genius-act-regulations-on-payment-stablecoin-issuance-offer-and-sale",
+      "summary": "Proposed rule under section 3; comments closed 2026-10-19."
+    },
+    {
+      "id": "ny_23_nycrr_200",
+      "title": "Virtual currencies (BitLicense)",
+      "kind": "regulation",
+      "citation": "23 NYCRR Part 200",
+      "issued_by": "nydfs",
+      "effective_from": "2015-06-24",
+      "url": "https://www.law.cornell.edu/regulations/new-york/title-23/chapter-I/part-200",
+      "summary": "No one may engage in virtual currency business activity involving New York or a New York resident without a licence: capital, custody, books and records, financial reports, AML, cybersecurity, consumer disclosures and complaints."
+    },
+    {
+      "id": "ny_23_nycrr_500",
+      "title": "Cybersecurity requirements for financial services companies",
+      "kind": "regulation",
+      "citation": "23 NYCRR Part 500",
+      "issued_by": "nydfs",
+      "url": "https://www.dfs.ny.gov/system/files/documents/2023/10/rf_fs_2amend23NYCRR500_text_20231101.pdf",
+      "summary": "Annual certification of compliance by April 15, and notice of a cybersecurity incident within 72 hours."
+    },
+    {
+      "id": "ny_stablecoin_guidance",
+      "title": "Guidance on the issuance of U.S. dollar-backed stablecoins",
+      "kind": "guideline",
+      "issued_by": "nydfs",
+      "effective_from": "2022-06-08",
+      "url": "https://www.dfs.ny.gov/industry_guidance/industry_letters/il20220608_issuance_stablecoins",
+      "summary": "Reserves at least equal to outstanding coins at the end of every business day, redemption at par within two business days, segregated reserves of short Treasuries, repos or deposits, and monthly CPA examinations."
+    },
+    {
+      "id": "ca_dfal",
+      "title": "Digital Financial Assets Law",
+      "kind": "act",
+      "citation": "California Financial Code Division 1.25 (as amended by AB 1934)",
+      "issued_by": "ca_legislature",
+      "effective_from": "2026-07-01",
+      "url": "https://dfpi.ca.gov/regulated-industries/digital-financial-assets/",
+      "summary": "From 2026-07-01, digital financial asset business activity with California residents needs a DFPI licence (or an application filed by that date)."
+    }
+  ],
+  "regulators": [
+    {
+      "id": "fincen",
+      "name": "Financial Crimes Enforcement Network",
+      "short_name": "FinCEN",
+      "scope": {
+        "product_types": [
+          {
+            "id": "us_cvc_money_transmission"
+          },
+          {
+            "id": "us_cvc_exchange"
+          }
+        ],
+        "customer_personas": [
+          {
+            "id": "fincen_individual_customer",
+            "name": "Individual customer",
+            "description": "A natural person who is a customer of the licensee.",
+            "qualification": {},
+            "action": [
+              "onboarding"
+            ]
+          }
+        ]
+      },
+      "license_types": [
+        {
+          "_id": "fincen_msb",
+          "name": "Money services business registration (money transmitter)",
+          "scope": "A registration with FinCEN, not a licence; state money transmitter licences are separate. Covers money transmission of US dollars and convertible virtual currency, and buying and selling convertible virtual currency (FIN-2019-G001).",
+          "application_procedure": [
+            "File FinCEN Form 107 through BSA E-Filing within 180 days of the day after the business is established",
+            "Put the written AML program in place and designate the compliance officer"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "fincen_msb_register",
+                  "title": "Register as a money services business",
+                  "description": "File FinCEN Form 107 through BSA E-Filing within 180 days of the day after the business is established.",
+                  "recurrence": "one_time",
+                  "criticality": "high",
+                  "legal_ref": "us_msb_registration"
+                },
+                {
+                  "id": "fincen_msb_renew",
+                  "title": "Renew the registration",
+                  "description": "Renew every two years, by the last day of the calendar year before each new two-year period.",
+                  "recurrence": "biennial",
+                  "criticality": "high",
+                  "legal_ref": "us_msb_registration",
+                  "frequency_note": "By December 31 before each two-year registration period"
+                },
+                {
+                  "id": "fincen_msb_reregister",
+                  "title": "Re-register on certain changes",
+                  "description": "Re-register within 180 days of a change in ownership or control that needs re-licensing under state law, a transfer of more than 10% of voting power or equity, or an increase of more than 50% in the number of agents.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "us_msb_registration"
+                },
+                {
+                  "id": "fincen_msb_agent_list",
+                  "title": "Keep the agent list",
+                  "description": "Keep a list of agents at the US location on the registration form, updated each January 1 for the previous 12 months, and produce it on request.",
+                  "recurrence": "annual",
+                  "criticality": "medium",
+                  "legal_ref": "us_msb_registration"
+                },
+                {
+                  "id": "fincen_aml_program",
+                  "title": "Anti-money laundering program",
+                  "description": "A written, risk-based program with internal controls, a designated compliance officer, training (including spotting suspicious transactions) and an independent review not done by the compliance officer.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "us_msb_aml_program",
+                  "owner": "fincen_aml_compliance_officer"
+                },
+                {
+                  "id": "fincen_sar",
+                  "title": "Report suspicious transactions",
+                  "description": "Report transactions of $2,000 or more that the business knows, suspects or has reason to suspect involve illicit activity, within 30 calendar days of first detection; keep a copy and the supporting documents for five years; keep the report confidential.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "us_msb_sar",
+                  "owner": "fincen_aml_compliance_officer"
+                },
+                {
+                  "id": "fincen_ctr",
+                  "title": "Report currency transactions over $10,000",
+                  "description": "Report each transaction in currency of more than $10,000, aggregating one person's transactions in a business day, within 15 days.",
+                  "recurrence": "event_driven",
+                  "criticality": "medium",
+                  "legal_ref": "us_ctr"
+                },
+                {
+                  "id": "fincen_funds_transfer_records",
+                  "title": "Funds transfer records",
+                  "description": "For transmittals of $3,000 or more, keep the transmitter's name and address, the amount, the execution date and the recipient's institution.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "us_funds_transfer_rules"
+                },
+                {
+                  "id": "fincen_travel_rule",
+                  "title": "Travel Rule",
+                  "description": "For transmittals of $3,000 or more, pass the required information to the next institution. FinCEN's 2019 guidance says convertible virtual currency transactions can be transmittals of funds under this rule.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "us_funds_transfer_rules"
+                },
+                {
+                  "id": "fincen_record_retention",
+                  "title": "Keep records for five years",
+                  "description": "Keep the records the Bank Secrecy Act requires for five years, accessible within a reasonable time.",
+                  "recurrence": "continuous",
+                  "criticality": "medium",
+                  "legal_ref": "us_bsa_retention"
+                },
+                {
+                  "id": "ofac_sanctions_program",
+                  "title": "Sanctions compliance",
+                  "description": "A risk-based sanctions compliance program, including screening customers and wallet addresses against OFAC's lists. Every US person must comply with sanctions; OFAC recommends the program rather than mandating it by regulation.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "us_ofac_vc_guidance",
+                  "owner": "fincen_aml_compliance_officer"
+                },
+                {
+                  "id": "ofac_blocked_property",
+                  "title": "Block and report blocked property",
+                  "description": "Block property, including virtual currency, of sanctioned persons and report it within 10 business days; report blocked property held as of June 30 by September 30 each year.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "us_ofac_reporting"
+                },
+                {
+                  "id": "ofac_rejected_transactions",
+                  "title": "Report rejected transactions",
+                  "description": "Report transactions rejected (not blocked) for sanctions reasons within 10 business days.",
+                  "recurrence": "event_driven",
+                  "criticality": "medium",
+                  "legal_ref": "us_ofac_reporting"
+                },
+                {
+                  "id": "cfpb_reg_e_errors",
+                  "title": "Resolve electronic fund transfer errors",
+                  "description": "For a consumer's bank transfers (e.g. ACH debits): accept an error notice within 60 days of the statement, investigate within 10 business days (up to 45 days with provisional credit within 10 business days), report within 3 business days and correct within 1 business day.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "us_reg_e_error_resolution"
+                },
+                {
+                  "id": "irs_1099_da",
+                  "title": "Report digital asset sales to the IRS",
+                  "description": "Report customers' gross proceeds on Form 1099-DA for sales from 2025, and basis for covered assets from 2026; qualifying stablecoins may use the optional aggregate method (no report unless a customer's yearly gross proceeds exceed $10,000).",
+                  "recurrence": "annual",
+                  "criticality": "medium",
+                  "legal_ref": "us_irs_broker_digital_assets",
+                  "frequency_note": "Furnish to customers by February 15; file with the IRS by February 28"
+                }
+              ],
+              "reporting_disclosure_filings": [
+                {
+                  "id": "fincen_form_107",
+                  "name": "Registration of a money services business",
+                  "category": "filing",
+                  "description": "Initial registration, renewal and re-registration.",
+                  "frequency": "biennial",
+                  "due": "Within 180 days of being established; renewal by December 31 before each two-year period; within 180 days of a triggering change",
+                  "form": "FinCEN Form 107",
+                  "legal_ref": "us_msb_registration",
+                  "obligation_ref": "fincen_msb_register",
+                  "channels": [
+                    "BSA E-Filing"
+                  ],
+                  "recipient": "FinCEN"
+                },
+                {
+                  "id": "fincen_sar_filing",
+                  "name": "Suspicious activity report",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "event_driven",
+                  "due": "Within 30 calendar days of initial detection",
+                  "form": "FinCEN SAR",
+                  "legal_ref": "us_msb_sar",
+                  "obligation_ref": "fincen_sar",
+                  "channels": [
+                    "BSA E-Filing"
+                  ],
+                  "recipient": "FinCEN"
+                },
+                {
+                  "id": "fincen_ctr_filing",
+                  "name": "Currency transaction report",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "event_driven",
+                  "due": "Within 15 days of the transaction",
+                  "form": "FinCEN CTR",
+                  "legal_ref": "us_ctr",
+                  "obligation_ref": "fincen_ctr",
+                  "channels": [
+                    "BSA E-Filing"
+                  ],
+                  "recipient": "FinCEN"
+                },
+                {
+                  "id": "ofac_blocked_initial",
+                  "name": "Initial report of blocked property",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "event_driven",
+                  "due": "Within 10 business days of blocking",
+                  "form": "Report of Blocked Property",
+                  "legal_ref": "us_ofac_reporting",
+                  "obligation_ref": "ofac_blocked_property",
+                  "channels": [
+                    "OFAC Reporting System"
+                  ],
+                  "recipient": "OFAC"
+                },
+                {
+                  "id": "ofac_blocked_annual",
+                  "name": "Annual report of blocked property",
+                  "category": "reporting",
+                  "description": "Property held as of June 30.",
+                  "frequency": "annual",
+                  "due": "By September 30",
+                  "form": "Annual Report of Blocked Property",
+                  "legal_ref": "us_ofac_reporting",
+                  "obligation_ref": "ofac_blocked_property",
+                  "channels": [
+                    "OFAC Reporting System"
+                  ],
+                  "recipient": "OFAC"
+                },
+                {
+                  "id": "ofac_rejected",
+                  "name": "Report of rejected transaction",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "event_driven",
+                  "due": "Within 10 business days",
+                  "form": "Report of Rejected Transaction",
+                  "legal_ref": "us_ofac_reporting",
+                  "obligation_ref": "ofac_rejected_transactions",
+                  "channels": [
+                    "OFAC Reporting System"
+                  ],
+                  "recipient": "OFAC"
+                },
+                {
+                  "id": "irs_form_1099_da",
+                  "name": "Form 1099-DA",
+                  "category": "reporting",
+                  "description": "Digital asset proceeds from broker transactions.",
+                  "frequency": "annual",
+                  "due": "Furnish to customers by February 15; file with the IRS by February 28",
+                  "form": "Form 1099-DA",
+                  "legal_ref": "us_irs_broker_digital_assets",
+                  "obligation_ref": "irs_1099_da",
+                  "recipient": "IRS"
+                }
+              ],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              "us_cvc_money_transmission",
+              "us_cvc_exchange"
+            ],
+            "allowed_customer_segments": [
+              "fincen_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [
+                {
+                  "id": "fincen_aml_compliance_officer",
+                  "name": "AML compliance officer",
+                  "description": "The person designated to ensure day-to-day compliance with the AML program (31 CFR 1022.210(d)(2)).",
+                  "qualification": {},
+                  "action": [
+                    "aml_compliance"
+                  ],
+                  "obligations": [
+                    "fincen_aml_program",
+                    "fincen_sar",
+                    "ofac_sanctions_program"
+                  ]
+                }
+              ],
+              "external": []
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "nydfs",
+      "name": "New York State Department of Financial Services",
+      "short_name": "NYDFS",
+      "scope": {
+        "product_types": [
+          {
+            "id": "us_cvc_money_transmission"
+          },
+          {
+            "id": "us_cvc_exchange"
+          },
+          {
+            "id": "us_digital_asset_custody"
+          },
+          {
+            "id": "us_payment_stablecoin"
+          }
+        ],
+        "customer_personas": [
+          {
+            "id": "nydfs_individual_customer",
+            "name": "Individual customer",
+            "description": "A natural person who is a customer of the licensee.",
+            "qualification": {},
+            "action": [
+              "onboarding"
+            ]
+          }
+        ]
+      },
+      "license_types": [
+        {
+          "_id": "nydfs_bitlicense",
+          "name": "Virtual currency licence (BitLicense, 23 NYCRR Part 200)",
+          "scope": "Virtual currency business activity involving New York or a New York resident: transmitting, holding for others, buying and selling, and exchange services. No fiduciary powers.",
+          "application_procedure": [
+            "Apply to DFS for a licence under 23 NYCRR Part 200"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "nydfs_capital",
+                  "title": "Capital",
+                  "description": "Keep capital in the amount and form the Superintendent sets from the licensee's risks.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.8"
+                },
+                {
+                  "id": "nydfs_custody",
+                  "title": "Custody and protection of customer assets",
+                  "description": "Keep a surety bond or a US dollar trust account with a qualified custodian; hold the same type and amount of virtual currency owed to customers; never pledge or lend customer assets.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.9"
+                },
+                {
+                  "id": "nydfs_books_records",
+                  "title": "Books and records",
+                  "description": "Keep records in their original or native format for at least seven years, with immediate access for DFS.",
+                  "recurrence": "continuous",
+                  "criticality": "medium",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.12"
+                },
+                {
+                  "id": "nydfs_financial_reports",
+                  "title": "Financial reports",
+                  "description": "Quarterly financial statements within 45 days of each quarter end, and audited annual statements with a CPA's opinion on internal controls.",
+                  "recurrence": "quarterly",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.14; also annual"
+                },
+                {
+                  "id": "nydfs_aml",
+                  "title": "Anti-money laundering program",
+                  "description": "An initial risk assessment reassessed annually, internal controls, independent testing at least annually reported to DFS, a compliance officer, training, transaction monitoring and risk-based OFAC compliance.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "owner": "nydfs_compliance_officer",
+                  "frequency_note": "23 NYCRR 200.15"
+                },
+                {
+                  "id": "nydfs_cybersecurity",
+                  "title": "Cybersecurity program",
+                  "description": "A written cybersecurity policy reviewed and approved by the board at least annually; the CISO reports to the board annually, and the report goes to DFS.",
+                  "recurrence": "annual",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "owner": "nydfs_ciso",
+                  "frequency_note": "23 NYCRR 200.16"
+                },
+                {
+                  "id": "nydfs_part500_certification",
+                  "title": "Annual cybersecurity certification",
+                  "description": "A certificate of compliance, or an acknowledgement of noncompliance, for the prior year, signed by the CEO and the CISO.",
+                  "recurrence": "annual",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "owner": "nydfs_ciso",
+                  "frequency_note": "By April 15"
+                },
+                {
+                  "id": "nydfs_cyber_incident",
+                  "title": "Cybersecurity incident notice",
+                  "description": "Notify DFS within 72 hours of determining that a cybersecurity incident occurred.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "owner": "nydfs_ciso"
+                },
+                {
+                  "id": "nydfs_consumer_disclosures",
+                  "title": "Consumer disclosures",
+                  "description": "Before the first transaction, disclose the material risks in writing (not government-backed, no FDIC or SIPC protection, irreversible, volatile), the account terms and each transaction's terms (amount, fees, rate); get the customer's acknowledgement; give receipts; keep a written anti-fraud policy.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.19"
+                },
+                {
+                  "id": "nydfs_complaints",
+                  "title": "Complaints",
+                  "description": "Written policies to resolve complaints fairly and in time; post complaint contacts and DFS's details; tell DFS of policy changes within 7 days.",
+                  "recurrence": "continuous",
+                  "criticality": "medium",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.20"
+                }
+              ],
+              "reporting_disclosure_filings": [
+                {
+                  "id": "nydfs_quarterly_financials",
+                  "name": "Quarterly financial statements",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "quarterly",
+                  "due": "Within 45 days of quarter end",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "obligation_ref": "nydfs_financial_reports",
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_annual_audited",
+                  "name": "Audited annual financial statements",
+                  "category": "reporting",
+                  "description": "With a CPA opinion on internal controls, management's statements and an officer's certification.",
+                  "frequency": "annual",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "obligation_ref": "nydfs_financial_reports",
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_aml_testing_report",
+                  "name": "Independent AML testing report",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "annual",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "obligation_ref": "nydfs_aml",
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_part500_cert",
+                  "name": "Part 500 certification of compliance",
+                  "category": "filing",
+                  "description": "",
+                  "frequency": "annual",
+                  "due": "By April 15",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "obligation_ref": "nydfs_part500_certification",
+                  "channels": [
+                    "DFS Portal"
+                  ],
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_cyber_notice",
+                  "name": "Cybersecurity incident notice",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "event_driven",
+                  "due": "Within 72 hours of determining an incident occurred",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "obligation_ref": "nydfs_cyber_incident",
+                  "channels": [
+                    "DFS Portal"
+                  ],
+                  "recipient": "NYDFS"
+                }
+              ],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              "us_cvc_money_transmission",
+              "us_cvc_exchange",
+              {
+                "id": "us_digital_asset_custody",
+                "actions": [
+                  "servicing"
+                ]
+              }
+            ],
+            "allowed_customer_segments": [
+              "nydfs_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [
+                {
+                  "id": "nydfs_compliance_officer",
+                  "name": "Compliance officer (BitLicense)",
+                  "description": "Responsible for the AML program and compliance with Part 200.",
+                  "qualification": {},
+                  "action": [
+                    "aml_compliance"
+                  ],
+                  "obligations": [
+                    "nydfs_aml"
+                  ]
+                },
+                {
+                  "id": "nydfs_ciso",
+                  "name": "Chief information security officer",
+                  "description": "Oversees the cybersecurity program and signs the Part 500 certification.",
+                  "qualification": {},
+                  "action": [
+                    "cybersecurity"
+                  ],
+                  "obligations": [
+                    "nydfs_cybersecurity",
+                    "nydfs_part500_certification",
+                    "nydfs_cyber_incident"
+                  ]
+                }
+              ],
+              "external": []
+            }
+          }
+        },
+        {
+          "_id": "nydfs_trust_charter",
+          "name": "Limited purpose trust company (New York Banking Law)",
+          "scope": "An alternative to the BitLicense with fiduciary powers; DFS applies analogous requirements. May issue stablecoins under DFS supervision.",
+          "application_procedure": [
+            "Apply to DFS for a limited purpose trust charter under the Banking Law"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "nydfs_capital",
+                  "title": "Capital",
+                  "description": "Keep capital in the amount and form the Superintendent sets from the licensee's risks.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.8"
+                },
+                {
+                  "id": "nydfs_custody",
+                  "title": "Custody and protection of customer assets",
+                  "description": "Keep a surety bond or a US dollar trust account with a qualified custodian; hold the same type and amount of virtual currency owed to customers; never pledge or lend customer assets.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.9"
+                },
+                {
+                  "id": "nydfs_books_records",
+                  "title": "Books and records",
+                  "description": "Keep records in their original or native format for at least seven years, with immediate access for DFS.",
+                  "recurrence": "continuous",
+                  "criticality": "medium",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.12"
+                },
+                {
+                  "id": "nydfs_financial_reports",
+                  "title": "Financial reports",
+                  "description": "Quarterly financial statements within 45 days of each quarter end, and audited annual statements with a CPA's opinion on internal controls.",
+                  "recurrence": "quarterly",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.14; also annual"
+                },
+                {
+                  "id": "nydfs_aml",
+                  "title": "Anti-money laundering program",
+                  "description": "An initial risk assessment reassessed annually, internal controls, independent testing at least annually reported to DFS, a compliance officer, training, transaction monitoring and risk-based OFAC compliance.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "owner": "nydfs_compliance_officer",
+                  "frequency_note": "23 NYCRR 200.15"
+                },
+                {
+                  "id": "nydfs_cybersecurity",
+                  "title": "Cybersecurity program",
+                  "description": "A written cybersecurity policy reviewed and approved by the board at least annually; the CISO reports to the board annually, and the report goes to DFS.",
+                  "recurrence": "annual",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "owner": "nydfs_ciso",
+                  "frequency_note": "23 NYCRR 200.16"
+                },
+                {
+                  "id": "nydfs_part500_certification",
+                  "title": "Annual cybersecurity certification",
+                  "description": "A certificate of compliance, or an acknowledgement of noncompliance, for the prior year, signed by the CEO and the CISO.",
+                  "recurrence": "annual",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "owner": "nydfs_ciso",
+                  "frequency_note": "By April 15"
+                },
+                {
+                  "id": "nydfs_cyber_incident",
+                  "title": "Cybersecurity incident notice",
+                  "description": "Notify DFS within 72 hours of determining that a cybersecurity incident occurred.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "owner": "nydfs_ciso"
+                },
+                {
+                  "id": "nydfs_consumer_disclosures",
+                  "title": "Consumer disclosures",
+                  "description": "Before the first transaction, disclose the material risks in writing (not government-backed, no FDIC or SIPC protection, irreversible, volatile), the account terms and each transaction's terms (amount, fees, rate); get the customer's acknowledgement; give receipts; keep a written anti-fraud policy.",
+                  "recurrence": "event_driven",
+                  "criticality": "high",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.19"
+                },
+                {
+                  "id": "nydfs_complaints",
+                  "title": "Complaints",
+                  "description": "Written policies to resolve complaints fairly and in time; post complaint contacts and DFS's details; tell DFS of policy changes within 7 days.",
+                  "recurrence": "continuous",
+                  "criticality": "medium",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "frequency_note": "23 NYCRR 200.20"
+                }
+              ],
+              "reporting_disclosure_filings": [
+                {
+                  "id": "nydfs_quarterly_financials",
+                  "name": "Quarterly financial statements",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "quarterly",
+                  "due": "Within 45 days of quarter end",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "obligation_ref": "nydfs_financial_reports",
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_annual_audited",
+                  "name": "Audited annual financial statements",
+                  "category": "reporting",
+                  "description": "With a CPA opinion on internal controls, management's statements and an officer's certification.",
+                  "frequency": "annual",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "obligation_ref": "nydfs_financial_reports",
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_aml_testing_report",
+                  "name": "Independent AML testing report",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "annual",
+                  "legal_ref": "ny_23_nycrr_200",
+                  "obligation_ref": "nydfs_aml",
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_part500_cert",
+                  "name": "Part 500 certification of compliance",
+                  "category": "filing",
+                  "description": "",
+                  "frequency": "annual",
+                  "due": "By April 15",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "obligation_ref": "nydfs_part500_certification",
+                  "channels": [
+                    "DFS Portal"
+                  ],
+                  "recipient": "NYDFS"
+                },
+                {
+                  "id": "nydfs_cyber_notice",
+                  "name": "Cybersecurity incident notice",
+                  "category": "reporting",
+                  "description": "",
+                  "frequency": "event_driven",
+                  "due": "Within 72 hours of determining an incident occurred",
+                  "legal_ref": "ny_23_nycrr_500",
+                  "obligation_ref": "nydfs_cyber_incident",
+                  "channels": [
+                    "DFS Portal"
+                  ],
+                  "recipient": "NYDFS"
+                }
+              ],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              "us_cvc_money_transmission",
+              "us_cvc_exchange",
+              "us_digital_asset_custody",
+              "us_payment_stablecoin"
+            ],
+            "allowed_customer_segments": [
+              "nydfs_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [
+                {
+                  "id": "nydfs_compliance_officer",
+                  "name": "Compliance officer (BitLicense)",
+                  "description": "Responsible for the AML program and compliance with Part 200.",
+                  "qualification": {},
+                  "action": [
+                    "aml_compliance"
+                  ],
+                  "obligations": [
+                    "nydfs_aml"
+                  ]
+                },
+                {
+                  "id": "nydfs_ciso",
+                  "name": "Chief information security officer",
+                  "description": "Oversees the cybersecurity program and signs the Part 500 certification.",
+                  "qualification": {},
+                  "action": [
+                    "cybersecurity"
+                  ],
+                  "obligations": [
+                    "nydfs_cybersecurity",
+                    "nydfs_part500_certification",
+                    "nydfs_cyber_incident"
+                  ]
+                }
+              ],
+              "external": []
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_dfpi",
+      "name": "California Department of Financial Protection and Innovation",
+      "short_name": "DFPI",
+      "scope": {
+        "product_types": [
+          {
+            "id": "us_cvc_money_transmission"
+          },
+          {
+            "id": "us_cvc_exchange"
+          },
+          {
+            "id": "us_digital_asset_custody",
+            "actions": [
+              "servicing"
+            ]
+          }
+        ],
+        "customer_personas": [
+          {
+            "id": "ca_dfpi_individual_customer",
+            "name": "Individual customer",
+            "description": "A natural person who is a customer of the licensee.",
+            "qualification": {},
+            "action": [
+              "onboarding"
+            ]
+          }
+        ]
+      },
+      "license_types": [
+        {
+          "_id": "ca_dfpi_dfal",
+          "name": "Digital Financial Assets Law licence",
+          "scope": "Digital financial asset business activity with California residents, from 2026-07-01.",
+          "application_procedure": [
+            "Apply to the DFPI through NMLS"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "ca_dfpi_dfal_licence",
+                  "title": "Hold a DFAL licence for California residents",
+                  "description": "From 2026-07-01, digital financial asset business activity with California residents needs a DFPI licence, or an application filed through NMLS by that date. Licences held in other states don't count.",
+                  "recurrence": "one_time",
+                  "criticality": "high",
+                  "legal_ref": "ca_dfal",
+                  "effective_date": "2026-07-01"
+                }
+              ],
+              "reporting_disclosure_filings": [],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              "us_cvc_money_transmission",
+              "us_cvc_exchange",
+              "us_digital_asset_custody"
+            ],
+            "allowed_customer_segments": [
+              "ca_dfpi_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [],
+              "external": []
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "occ",
+      "name": "Office of the Comptroller of the Currency",
+      "short_name": "OCC",
+      "scope": {
+        "product_types": [
+          {
+            "id": "us_digital_asset_custody"
+          },
+          {
+            "id": "us_payment_stablecoin"
+          }
+        ],
+        "customer_personas": [
+          {
+            "id": "occ_individual_customer",
+            "name": "Individual customer",
+            "description": "A natural person who is a customer of the licensee.",
+            "qualification": {},
+            "action": [
+              "onboarding"
+            ]
+          }
+        ]
+      },
+      "license_types": [
+        {
+          "_id": "occ_national_trust_bank",
+          "name": "National trust bank charter",
+          "scope": "Custody of digital assets in a fiduciary capacity. Takes no deposits.",
+          "application_procedure": [
+            "Apply to the OCC for a national trust bank charter"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [],
+              "reporting_disclosure_filings": [],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              {
+                "id": "us_digital_asset_custody",
+                "actions": [
+                  "servicing"
+                ]
+              }
+            ],
+            "allowed_customer_segments": [
+              "occ_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [],
+              "external": []
+            }
+          }
+        },
+        {
+          "_id": "occ_federal_ppsi",
+          "name": "Federal qualified payment stablecoin issuer",
+          "scope": "Issuing and redeeming payment stablecoins, managing reserves, and custody, under the GENIUS Act and the OCC's rule (effective 2027-01-18).",
+          "application_procedure": [
+            "Apply to the OCC for approval as a federal qualified payment stablecoin issuer"
+          ],
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "occ_ppsi_reserves",
+                  "title": "Reserves of at least 1:1",
+                  "description": "Keep identifiable reserves of at least one to one in US currency or similarly liquid assets; no rehypothecation except short-term Treasuries for repurchase agreements.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "us_genius_act",
+                  "effective_date": "2027-01-18"
+                },
+                {
+                  "id": "occ_ppsi_monthly_report",
+                  "title": "Monthly reserve report",
+                  "description": "Publish the reserve composition monthly, examined by a registered public accounting firm and certified by the CEO and CFO.",
+                  "recurrence": "monthly",
+                  "criticality": "high",
+                  "legal_ref": "us_genius_act",
+                  "effective_date": "2027-01-18"
+                },
+                {
+                  "id": "occ_ppsi_redemption",
+                  "title": "Redemption policy",
+                  "description": "Publish the redemption policy and fees, with clear and conspicuous procedures for timely redemption.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "us_genius_act",
+                  "effective_date": "2027-01-18"
+                },
+                {
+                  "id": "occ_ppsi_lawful_orders",
+                  "title": "Lawful orders",
+                  "description": "Be technically able to block, freeze and reject transactions and to comply with lawful orders.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "us_genius_act",
+                  "effective_date": "2027-01-18"
+                },
+                {
+                  "id": "occ_ppsi_no_yield",
+                  "title": "No interest or yield to holders",
+                  "description": "Pay no interest or yield to holders of the payment stablecoin.",
+                  "recurrence": "continuous",
+                  "criticality": "high",
+                  "legal_ref": "us_genius_act",
+                  "effective_date": "2027-01-18"
+                }
+              ],
+              "reporting_disclosure_filings": [],
+              "risks": [],
+              "controls": [],
+              "inspection_events": []
+            },
+            "repositories": {
+              "regulatory_communications": [],
+              "enforcement_actions": [],
+              "press_releases": [],
+              "policies": [],
+              "risk_models": [],
+              "inspection_history": []
+            },
+            "allowed_product_types": [
+              "us_payment_stablecoin",
+              {
+                "id": "us_digital_asset_custody",
+                "actions": [
+                  "servicing"
+                ]
+              }
+            ],
+            "allowed_customer_segments": [
+              "occ_individual_customer"
+            ],
+            "mandatory_stakeholders": {
+              "internal": [],
+              "external": []
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "service_types": {
+    "licence_map": {}
+  }
+}

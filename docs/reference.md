@@ -642,6 +642,29 @@ With `--dry-run`, the script only reads: it makes no change to the server's prod
 
 Variants (a template plus a patch) can't be saved yet. Save the resolved product as `plane.role: "standalone"`.
 
+#### Set up a region's regulatory model: the United States
+
+A region's regulatory model can be kept as data and applied in one step. [`schemas/regulatory/us.json`](../schemas/regulatory/us.json) is the US slice for on-ramps, off-ramps and buy-and-hold stablecoin products, each instrument with its source:
+- **FinCEN:** money services business registration (`fincen_msb`), with its AML, suspicious-activity, currency-transaction, funds-transfer and Travel Rule obligations, plus the OFAC, Regulation E and Form 1099-DA obligations every ramp carries;
+- **NYDFS:** the BitLicense and the limited purpose trust charter;
+- **California DFPI:** the Digital Financial Assets Law licence;
+- **OCC:** the national trust bank charter and the GENIUS Act's federal payment stablecoin issuer.
+
+It also defines the product categories and regulated product types they cover. Applying it loads the US service types too, including the Mynt Ramp's four. Coverage is still checked per country, not per state.
+
+```sh
+node scripts/apply-regulatory-model.mjs --url <the server's MCP URL> --login --dry-run   # check only: prints what would be added or replaced
+node scripts/apply-regulatory-model.mjs --url <the server's MCP URL> --login             # apply
+```
+
+It checks every item against the server's own tool schemas first and changes nothing if any is wrong. Categories already on the server are kept, and the region's regulator names are merged, not replaced. Defining a regulator again replaces it with the file's version, so keep the model in the file rather than editing it by hand on the server. Sign-in works as for the seed definitions above. [`test/us-regulatory-model.test.js`](../test/us-regulatory-model.test.js) runs exactly what the script does.
+
+**A US product to start from.** [`schemas/examples/us/usdc-account.v2.json`](../schemas/examples/us/usdc-account.v2.json) is a firm-less template for a USDC account: a ramp (`payments:sale`) funds a USDC purchase (`exchange:sale`), which settles into custody (`custody_settlement:servicing`); cashing out settles back through the ramp. It has customer segments, KYC, sanctions screening and quoting algorithms, fees, limits, statements, lifecycle events (on-ramp and off-ramp acceptance become the customer actions in its developer contract) and the FinCEN register obligations each part satisfies. A firm takes it as is and adds:
+- `owner_entity_id`;
+- a `component_provided_by` for each component. A FinCEN registration covers the ramp and the exchange; custody needs a custodian's licence, such as an OCC national trust bank charter or a NYDFS trust charter;
+- its AML compliance officer bound to the ramp and the exchange;
+- its ramp handoffs bound to its Mynt Ramp subscriptions.
+
 Stores created under the original four lines (credit, wealth, insurance and the old cash-and-markets line) are moved onto these lines once, when Mynt starts. Old cash-and-markets products go by category: deposits to account_operations, bonds and money-market instruments to credit, derivatives to derivatives, and funds to wealth. REIT and InvIT units go to securitization. Published products stay published, and their test reports are re-run so they match the migrated data.
 
 `list_products` filters by `product_line`, `category`, `region` (`IN`, `US`, `global`), `risk_level` or free text, and `list_categories` returns counts for each.

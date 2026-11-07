@@ -1,0 +1,1103 @@
+{
+  "_id": "usdc-account",
+  "product_name": "USDC Account",
+  "product_type": "virtual_currency",
+  "descriptions": {
+    "summary": "Buy USDC with US dollars from your bank account, hold it, and cash it back out to your bank account, at a price shown before you accept.",
+    "key_features": [
+      "Buy USDC with dollars from your bank account; see the price, fee and USDC amount before you accept",
+      "Hold USDC with a regulated custodian; it's in your name, not in your own wallet",
+      "Cash out to your bank account at a price shown before you accept",
+      "A fee of 0.5% per transfer, at least $0.50",
+      "USDC is not a bank deposit: it isn't FDIC-insured, and its value can move away from $1"
+    ],
+    "long": "A buy-and-hold USDC product for US individuals. Dollars come in through the Mynt Ramp (on-ramp) from the customer's own bank account by ACH and become USDC, bought by the product's licensed exchange and held for the customer by its custodian; cashing out runs the other way (off-ramp). Every buy and sell is a firm quote the customer sees and accepts before it expires. This template names no firm: the owner adds who provides each part (the ramp partner for the ramp, a licensed exchange and a custodian) and binds the ramp handoffs to its Mynt Ramp subscriptions. Assumptions: USD only, ACH only, individuals only; the fee mirrors the Mynt Ramp sandbox's (0.5%, at least $0.50); limits are placeholders the owner sets. Regulation: FinCEN money services business registration for the ramp and exchange, OFAC sanctions screening, Regulation E error resolution on the ACH leg, Form 1099-DA reporting of sales; state licences (New York BitLicense, California DFAL and others) apply per state and aren't yet checked per state by Mynt."
+  },
+  "owner_entity_id": null,
+  "version": 1,
+  "access_mode": "open",
+  "plane": {
+    "role": "standalone",
+    "sellable": true
+  },
+  "context": {
+    "currencies": [
+      "USD"
+    ],
+    "calendar": "us_federal_reserve",
+    "business_day_convention": "following",
+    "day_count": "actual_365_fixed",
+    "time_zone": "America/New_York"
+  },
+  "components": [
+    {
+      "key": "ramp",
+      "country": "us",
+      "primitive": "payments",
+      "action": "sale",
+      "underlying": "cash",
+      "block": "fiat_ramp",
+      "terms": {
+        "rails": [
+          "ach"
+        ],
+        "source": "customer_own_bank_account",
+        "directions": [
+          "onramp",
+          "offramp"
+        ],
+        "quote_validity": {
+          "$term": "quote_validity"
+        }
+      },
+      "schedules": [
+        {
+          "purpose": "settlement",
+          "anchor": "transfer_accepted",
+          "day_basis": "business",
+          "business_day_convention": "following",
+          "time_zone": "America/New_York"
+        },
+        {
+          "purpose": "payout",
+          "anchor": "cash_out_accepted",
+          "day_basis": "business",
+          "business_day_convention": "following",
+          "time_zone": "America/New_York"
+        }
+      ],
+      "election": "required"
+    },
+    {
+      "key": "usdc_exchange",
+      "country": "us",
+      "primitive": "exchange",
+      "action": "sale",
+      "underlying": "digital_assets",
+      "block": "stablecoin_purchase",
+      "terms": {
+        "asset": "USDC",
+        "networks": [
+          "ethereum",
+          "base",
+          "solana"
+        ],
+        "price_source": "firm_quote",
+        "quote_validity": {
+          "$term": "quote_validity"
+        }
+      },
+      "schedules": [
+        {
+          "purpose": "dealing",
+          "anchor": "quote_accepted"
+        },
+        {
+          "purpose": "settlement",
+          "anchor": "funds_received",
+          "day_basis": "calendar"
+        }
+      ],
+      "election": "required"
+    },
+    {
+      "key": "usdc_custody",
+      "country": "us",
+      "primitive": "custody_settlement",
+      "action": "servicing",
+      "underlying": "digital_assets",
+      "block": "custodial_holding",
+      "terms": {
+        "asset": "USDC",
+        "segregation": "customer_omnibus_with_individual_records",
+        "rehypothecation": false
+      },
+      "schedules": [
+        {
+          "purpose": "statement",
+          "anchor": "calendar_month_end",
+          "cycle": "P1M"
+        }
+      ],
+      "election": "required"
+    }
+  ],
+  "customer_segments": [
+    {
+      "_id": "us_individual",
+      "name": "US individuals (18+)",
+      "customer_kind": "individual",
+      "qualification": {
+        "min_age": 18,
+        "resident": true
+      },
+      "identity": {
+        "verification_tiers": [
+          {
+            "tier": "full_kyc",
+            "methods": [
+              "document_verification",
+              "ssn_verification",
+              "bank_account_verification"
+            ],
+            "validity": "P2Y",
+            "on_expiry": "refresh_kyc"
+          }
+        ],
+        "min_tier_by_event": {
+          "onboarding": "full_kyc",
+          "funding": "full_kyc",
+          "withdrawal": "full_kyc"
+        }
+      },
+      "channels": [
+        "app",
+        "web",
+        "partner_embedded"
+      ]
+    }
+  ],
+  "core_algorithms": [
+    {
+      "_id": "onboarding_eligibility",
+      "algorithm_name": "Onboarding eligibility",
+      "description": "Knocks out applicants who can't hold the product: under 18, not US residents, or not verified to full KYC.",
+      "purpose": "eligibility",
+      "repository": "models/usdc-onboarding-eligibility",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "sanctions_screening",
+      "algorithm_name": "Sanctions screening",
+      "description": "Screens the customer at onboarding and every transfer against OFAC's lists; a match blocks the transfer for review.",
+      "purpose": "fraud_screening",
+      "repository": "models/usdc-sanctions-screening",
+      "version": "1.0.0"
+    },
+    {
+      "_id": "ramp_quoting",
+      "algorithm_name": "Ramp quoting",
+      "description": "Turns the ramp partner's quote into the customer's price: USDC per dollar, the fee (0.5%, at least $0.50), and the expiry; never longer than quote_validity.",
+      "purpose": "fx_quoting",
+      "repository": "models/usdc-ramp-quoting",
+      "version": "1.0.0"
+    }
+  ],
+  "risk_models": [],
+  "partner_handoffs": [],
+  "terms": [
+    {
+      "_id": "ramp_fee_pct",
+      "label": "Ramp fee",
+      "type": "percent",
+      "default": 0.5,
+      "range": {
+        "min": 0,
+        "max": 3
+      },
+      "set_by": [
+        "template",
+        "operations"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change"
+      },
+      "effective_dated": true
+    },
+    {
+      "_id": "ramp_fee_min",
+      "label": "Minimum ramp fee",
+      "type": "money",
+      "currency": "USD",
+      "default": 0.5,
+      "range": {
+        "min": 0,
+        "max": 10
+      },
+      "set_by": [
+        "template",
+        "operations"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change"
+      },
+      "effective_dated": true
+    },
+    {
+      "_id": "quote_validity",
+      "label": "How long a quote can be accepted",
+      "type": "duration",
+      "default": "PT60S",
+      "set_by": [
+        "template"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change"
+      }
+    },
+    {
+      "_id": "min_transfer",
+      "label": "Smallest transfer",
+      "type": "money",
+      "currency": "USD",
+      "default": 1,
+      "range": {
+        "min": 1,
+        "max": 100
+      },
+      "set_by": [
+        "template",
+        "operations"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change"
+      }
+    },
+    {
+      "_id": "daily_onramp_limit",
+      "label": "Most a customer can buy in a day",
+      "type": "money",
+      "currency": "USD",
+      "default": 10000,
+      "range": {
+        "min": 100,
+        "max": 50000
+      },
+      "set_by": [
+        "template",
+        "operations"
+      ],
+      "negotiable": "fixed",
+      "post_issue": {
+        "rule": "operations_dated_change"
+      }
+    }
+  ],
+  "rates": [],
+  "fees": [
+    {
+      "_id": "ramp_fee",
+      "type": "TRANSACTION",
+      "method": "rate_based",
+      "rate": {
+        "$term": "ramp_fee_pct"
+      },
+      "rate_base": "transaction",
+      "min": {
+        "$term": "ramp_fee_min"
+      },
+      "payer": "customer"
+    }
+  ],
+  "limits": [
+    {
+      "_id": "min_transfer_size",
+      "kind": "constraint",
+      "constraint_type": "MIN_TRANSACTION",
+      "min": {
+        "$term": "min_transfer"
+      },
+      "scope": "customer"
+    },
+    {
+      "_id": "daily_onramp",
+      "kind": "control",
+      "event_stream": "funding",
+      "rule_type": "velocity",
+      "window": {
+        "type": "day",
+        "time_zone": "America/New_York"
+      },
+      "limit_amount": {
+        "$term": "daily_onramp_limit"
+      },
+      "scope": "customer",
+      "outcome": "decline",
+      "purpose": "fraud",
+      "state": "active"
+    },
+    {
+      "_id": "sanctions_block",
+      "kind": "control",
+      "event_stream": "transfer_out",
+      "rule_type": "block_list",
+      "conditions": [
+        {
+          "attr": "counterparty.sanctions_match",
+          "op": "eq",
+          "value": true
+        }
+      ],
+      "scope": "customer",
+      "outcome": "hold",
+      "purpose": "compliance",
+      "state": "active"
+    }
+  ],
+  "servicing_policies": [
+    {
+      "_id": "statement",
+      "kind": "statement",
+      "config": {
+        "cycle": "P1M",
+        "channels": [
+          "email",
+          "app"
+        ],
+        "annual_tax_form": "1099-DA"
+      }
+    },
+    {
+      "_id": "service_level",
+      "kind": "service_level",
+      "config": {
+        "error_resolution_business_days": 10,
+        "complaint_acknowledgement_days": 2
+      }
+    }
+  ],
+  "lifecycle_events": [
+    {
+      "_id": "account_opened",
+      "sequence": 1,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation"
+      ],
+      "edition": "latest"
+    },
+    {
+      "_id": "onramp_accepted",
+      "sequence": 2,
+      "trigger": "customer",
+      "primitives": [
+        "execution"
+      ]
+    },
+    {
+      "_id": "funds_received",
+      "sequence": 3,
+      "trigger": "partner",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "usdc_bought",
+      "sequence": 4,
+      "actus": "STD",
+      "trigger": "linked",
+      "primitives": [
+        "execution",
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "usdc_credited",
+      "sequence": 5,
+      "trigger": "linked",
+      "primitives": [
+        "quantity_change",
+        "transfer"
+      ]
+    },
+    {
+      "_id": "offramp_accepted",
+      "sequence": 6,
+      "trigger": "customer",
+      "primitives": [
+        "execution"
+      ]
+    },
+    {
+      "_id": "usdc_sold",
+      "sequence": 7,
+      "actus": "STD",
+      "trigger": "linked",
+      "primitives": [
+        "execution",
+        "quantity_change"
+      ]
+    },
+    {
+      "_id": "payout_sent",
+      "sequence": 8,
+      "trigger": "partner",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "bank_transfer_returned",
+      "sequence": 9,
+      "trigger": "partner",
+      "primitives": [
+        "transfer"
+      ]
+    },
+    {
+      "_id": "account_closed",
+      "sequence": 10,
+      "trigger": "customer",
+      "primitives": [
+        "contract_formation"
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "_id": "quote_within_an_hour",
+      "expr": "quote_validity <= PT1H",
+      "message": "A quote can't be acceptable for more than an hour (the Mynt Ramp refuses longer ones)",
+      "applies_at": [
+        "design",
+        "publish"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "_id": "ramp_funds_purchase",
+      "type": "funds",
+      "from": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_exchange"
+      },
+      "attributes": {
+        "amount_rule": "derived_from_source",
+        "schedule_purpose": "settlement",
+        "failure_handling": {
+          "retries": 0,
+          "on_exhaustion": "raise_event",
+          "event": "bank_transfer_returned"
+        }
+      }
+    },
+    {
+      "_id": "purchase_settles_into_custody",
+      "type": "settles_into",
+      "from": {
+        "kind": "component",
+        "id": "usdc_exchange"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_custody"
+      },
+      "attributes": {
+        "settlement_cycle": "P0D",
+        "day_basis": "calendar",
+        "amount_rule": "derived_from_source"
+      }
+    },
+    {
+      "_id": "sale_settles_into_ramp",
+      "type": "settles_into",
+      "from": {
+        "kind": "component",
+        "id": "usdc_exchange"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "settlement_cycle": "P1D",
+        "day_basis": "business",
+        "amount_rule": "derived_from_source"
+      }
+    },
+    {
+      "_id": "custody_needs_exchange",
+      "type": "requires",
+      "from": {
+        "kind": "component",
+        "id": "usdc_custody"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_exchange"
+      },
+      "attributes": {
+        "scope": "same_customer",
+        "stage": "lifetime",
+        "on_break": "notify"
+      }
+    },
+    {
+      "_id": "persona_us_individual",
+      "type": "segment_maps_to_persona",
+      "from": {
+        "kind": "customer_segment",
+        "id": "us_individual"
+      },
+      "to": {
+        "kind": "register_persona",
+        "regulator_id": "fincen",
+        "id": "fincen_individual_customer"
+      },
+      "attributes": {
+        "fit": "subset"
+      }
+    },
+    {
+      "_id": "use_onboarding_eligibility",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "us_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "onboarding_eligibility"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_sanctions_screening",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "us_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "sanctions_screening"
+      },
+      "attributes": {
+        "stage": "application",
+        "order": 2,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_ramp_quoting",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "us_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "ramp_quoting"
+      },
+      "attributes": {
+        "stage": "per_transaction",
+        "order": 1,
+        "required": true
+      }
+    },
+    {
+      "_id": "use_sanctions_per_transfer",
+      "type": "segment_uses_algorithm",
+      "from": {
+        "kind": "customer_segment",
+        "id": "us_individual"
+      },
+      "to": {
+        "kind": "core_algorithm",
+        "id": "sanctions_screening"
+      },
+      "attributes": {
+        "stage": "per_transaction",
+        "order": 2,
+        "required": true
+      }
+    },
+    {
+      "_id": "t_ramp_fee_pct",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "ramp_fee_pct"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_ramp_fee_min",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "ramp_fee_min"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_quote_validity",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "quote_validity"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_min_transfer",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "min_transfer"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "t_daily_onramp_limit",
+      "type": "applies_to",
+      "from": {
+        "kind": "term",
+        "id": "daily_onramp_limit"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "f_ramp_fee",
+      "type": "applies_to",
+      "from": {
+        "kind": "fee",
+        "id": "ramp_fee"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_min_transfer_size",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "min_transfer_size"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_daily_onramp",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "daily_onramp"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "l_sanctions_block",
+      "type": "applies_to",
+      "from": {
+        "kind": "limit",
+        "id": "sanctions_block"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_statement",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "statement"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_custody"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "s_service_level",
+      "type": "applies_to",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "product",
+        "id": "self"
+      },
+      "attributes": {
+        "mode": "default"
+      }
+    },
+    {
+      "_id": "ev_account_opened",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "account_opened"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_custody"
+      }
+    },
+    {
+      "_id": "ev_onramp_accepted",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "onramp_accepted"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      }
+    },
+    {
+      "_id": "ev_funds_received",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "funds_received"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      }
+    },
+    {
+      "_id": "ev_usdc_bought",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "usdc_bought"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_exchange"
+      }
+    },
+    {
+      "_id": "ev_usdc_credited",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "usdc_credited"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_custody"
+      }
+    },
+    {
+      "_id": "ev_offramp_accepted",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "offramp_accepted"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      }
+    },
+    {
+      "_id": "ev_usdc_sold",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "usdc_sold"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_exchange"
+      }
+    },
+    {
+      "_id": "ev_payout_sent",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "payout_sent"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      }
+    },
+    {
+      "_id": "ev_bank_transfer_returned",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "bank_transfer_returned"
+      },
+      "to": {
+        "kind": "component",
+        "id": "ramp"
+      }
+    },
+    {
+      "_id": "ev_account_closed",
+      "type": "occurs_on",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "account_closed"
+      },
+      "to": {
+        "kind": "component",
+        "id": "usdc_custody"
+      }
+    },
+    {
+      "_id": "cx_funds_received_usdc_bought",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "funds_received"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "usdc_bought"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_usdc_bought_usdc_credited",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "usdc_bought"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "usdc_credited"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "cx_usdc_sold_payout_sent",
+      "type": "cascades_to",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "usdc_sold"
+      },
+      "to": {
+        "kind": "lifecycle_event",
+        "id": "payout_sent"
+      },
+      "attributes": {
+        "atomic": true
+      }
+    },
+    {
+      "_id": "fee_on_onramp",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "onramp_accepted"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "ramp_fee"
+      }
+    },
+    {
+      "_id": "fee_on_offramp",
+      "type": "raises_fee",
+      "from": {
+        "kind": "lifecycle_event",
+        "id": "offramp_accepted"
+      },
+      "to": {
+        "kind": "fee",
+        "id": "ramp_fee"
+      }
+    },
+    {
+      "_id": "ob_kyc_aml",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "customer_segment",
+        "id": "us_individual"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "fincen",
+        "license_type_id": "fincen_msb",
+        "section": "obligations",
+        "id": "fincen_aml_program"
+      },
+      "attributes": {
+        "how": "Full KYC before the account opens and before any transfer; refreshed every two years"
+      }
+    },
+    {
+      "_id": "ob_sanctions",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "core_algorithm",
+        "id": "sanctions_screening"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "fincen",
+        "license_type_id": "fincen_msb",
+        "section": "obligations",
+        "id": "ofac_sanctions_program"
+      },
+      "attributes": {
+        "how": "Every customer and transfer screened against OFAC's lists"
+      }
+    },
+    {
+      "_id": "ob_blocked",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "limit",
+        "id": "sanctions_block"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "fincen",
+        "license_type_id": "fincen_msb",
+        "section": "obligations",
+        "id": "ofac_blocked_property"
+      },
+      "attributes": {
+        "how": "A sanctions match holds the transfer for blocking and reporting"
+      }
+    },
+    {
+      "_id": "ob_reg_e",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "service_level"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "fincen",
+        "license_type_id": "fincen_msb",
+        "section": "obligations",
+        "id": "cfpb_reg_e_errors"
+      },
+      "attributes": {
+        "how": "ACH errors investigated within 10 business days"
+      }
+    },
+    {
+      "_id": "ob_1099_da",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "servicing_policy",
+        "id": "statement"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "fincen",
+        "license_type_id": "fincen_msb",
+        "section": "obligations",
+        "id": "irs_1099_da"
+      },
+      "attributes": {
+        "how": "Sales reported on Form 1099-DA each year"
+      }
+    },
+    {
+      "_id": "ob_travel_rule",
+      "type": "satisfies_obligation",
+      "from": {
+        "kind": "component",
+        "id": "ramp"
+      },
+      "to": {
+        "kind": "register_item",
+        "regulator_id": "fincen",
+        "license_type_id": "fincen_msb",
+        "section": "obligations",
+        "id": "fincen_travel_rule"
+      },
+      "attributes": {
+        "how": "Transfers of $3,000 or more carry the transmitter's details to the next institution"
+      }
+    }
+  ],
+  "versioning": {
+    "change_class": "initial",
+    "summary": "First US USDC account template",
+    "edition_policy": {
+      "origination": "latest",
+      "mid_term_change": "stored"
+    }
+  },
+  "governance": {
+    "state": "draft",
+    "review": {
+      "cadence": "P1Y"
+    }
+  },
+  "projection": {
+    "lead_component": "usdc_exchange",
+    "risk_level": "moderate",
+    "liquidity": "high",
+    "typical_horizon": "short",
+    "return_type": "market_linked"
+  }
+}
