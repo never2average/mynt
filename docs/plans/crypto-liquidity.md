@@ -2,6 +2,7 @@
 
 **Status:** draft for discussion. Nothing here is built yet.
 **Reads with:** [`docs/architecture.md`](../architecture.md).
+**Scope:** the United States only. Other countries are out of scope for this plan.
 
 ## 1. What we want
 
@@ -23,11 +24,11 @@ These come from how Mynt is already built and from `AGENTS.md`. The plan is shap
 | Route | How it works | Fits Mynt? |
 |---|---|---|
 | **A. A licensed exchange or broker as the provider** | The innovator *is* (or partners with) a registered virtual-asset service provider. Its product's `exchange` component hands the customer to that provider's hosted flow. | **Yes, works today** with hand-offs. Weak developer experience: no quotes or status inside the app. |
-| **B. Liquidity as a vendor standard service** | Admins define service types per region (quote, execute, on-ramp, off-ramp, custody balance, address screening, Travel Rule). Licensed liquidity providers implement them; innovators subscribe and bind handoffs to them; Mynt calls them signed and tested. | **Yes, the main route.** Reuses the vendor rails (`src/vendors.ts`) and their safety, adds what trading needs. |
+| **B. Liquidity as a vendor standard service** | Admins define US service types (quote, execute, on-ramp, off-ramp, custody balance, address screening, Travel Rule). Licensed liquidity providers implement them; innovators subscribe and bind handoffs to them; Mynt calls them signed and tested. | **Yes, the main route.** Reuses the vendor rails (`src/vendors.ts`) and their safety, adds what trading needs. |
 | **C. Mynt routes orders on-chain itself** (DEX aggregation, its own wallets) | Mynt signs transactions or holds hot wallets. | **No.** Mynt would be the executing and custodial party, which breaks constraint 1 and would itself need licences. |
 | **D. Non-custodial: the customer's own wallet signs** | The provider builds an unsigned transaction or a swap quote; the customer's wallet signs on the device. | **Later, as a variant of B.** Needs wallet-signing support in the device SDKs and a regulatory view per region on unhosted wallets. |
 
-**Recommendation:** ship **B**, keep **A** working as the fallback, and treat **D** as a later phase. Real depth then comes from whichever licensed providers pass conformance in each region: exchanges' brokerage or OTC desks, prime brokers, regulated stablecoin issuers' mint and redeem, and on- and off-ramp providers. Mynt can list several per region and an innovator chooses, so Mynt never becomes a single point of liquidity.
+**Recommendation:** ship **B**, keep **A** working as the fallback, and treat **D** as a later phase. Real depth then comes from whichever licensed providers pass conformance: exchanges' brokerage or OTC desks, prime brokers, regulated stablecoin issuers' mint and redeem, and on- and off-ramp providers. Mynt can list several and an innovator chooses, so Mynt never becomes a single point of liquidity.
 
 ## 4. How it fits the existing model
 
@@ -58,6 +59,7 @@ The regime check then does what it does for any product: it finds the regulated 
 | Price changes between showing and accepting | Developer contract, journeys | A `quote` step type in journeys and a device-visible `client_result` for quotes (price, size, expiry, fees: never the provider's internal data) |
 | No wallet address or chain data field | `src/data-dictionary.ts` | Add `wallet_address`, `chain_network`, `destination_tag`, with validation per network and sensitivity `personal` |
 | No Travel Rule data for transfers | Data dictionary, service types | Originator and beneficiary fields, sent only to a `chain_compliance` service with consent |
+| Coverage is checked per country, so one licence anywhere in the US counts as covering every customer. US money transmission and virtual-currency business are licensed **state by state** | `productRegime` in `src/regime.ts` (groups components by country), regions | Let a regulator and its licences be scoped to a state (`us-ny`, `us-ca`, … as entities' incorporation codes already are), and check coverage per state the product is offered in. A product then lists its states, and publishing is blocked for any state with no covering licence. This is the largest change in the plan |
 | Lifecycle events for on-chain settlement | Schema `lifecycle_event` | Reuse ACTUS `STD` (settlement) and `AD` (monitoring); add confirmation depth as a term, not an event code |
 | Take rate basis for trading | `src/take-rates.ts` | Confirm a `volume` basis covers notional traded; no new mechanism expected |
 | Sandbox liquidity | Vendor test endpoints | Providers' test endpoints (testnet or paper trading) are the sandbox; conformance fixtures include a quote that expires and an accept after expiry that must be refused |
@@ -90,32 +92,36 @@ Customer money and assets move only in the provider's accounts. Mynt holds the e
 
 None of this goes in as code. Each item becomes data through `define_regulator` and the governance desk's review, with sources, the way [`docs/research/licence-gaps.md`](../research/licence-gaps.md) records them. These are **starting points to research**, not verified facts; each must be confirmed against the regulator's own text, and statuses may have changed.
 
-| Region | What to research and model |
+| Layer | What to research and model |
 |---|---|
-| India | Registration of virtual digital asset service providers as reporting entities with FIU-IND under the Prevention of Money Laundering Act (Ministry of Finance notification, March 2023); the tax treatment of VDA transfers (Income-tax Act s. 115BBH and TDS under s. 194S) as disclosures; RBI's position on banks serving VDA businesses; any newer VDA legislation |
-| European Union | MiCA, Regulation (EU) 2023/1114: crypto-asset service provider authorisation, e-money and asset-referenced tokens, and the end of national transitional periods; the Transfer of Funds Regulation (EU) 2023/1113 (Travel Rule) |
-| United States | FinCEN money services business registration; state money transmitter licences and New York's BitLicense (23 NYCRR Part 200); federal payment-stablecoin legislation and its implementing rules; SEC and CFTC positions on which tokens are securities or commodities |
-| Others as needed | Singapore (Payment Services Act, digital payment token services), UAE (VARA), UK (FCA cryptoasset registration and promotion rules) |
+| Federal anti-money-laundering | FinCEN money services business registration; Bank Secrecy Act programme, suspicious activity and currency transaction reporting; the funds Travel Rule (31 CFR 1010.410(f)); FinCEN's guidance on convertible virtual currency |
+| Sanctions | OFAC screening of customers and wallet addresses, as an obligation served by an `address_screening` service |
+| Federal market regulators | Which tokens the SEC treats as securities and which the CFTC treats as commodities, and what that means for who may offer `exchange:sale` on each (broker-dealer, alternative trading system, futures commission merchant, or neither) |
+| Stablecoins | The federal payment-stablecoin law (the GENIUS Act, 2025) and its implementing rules: who may issue, reserve and redemption requirements, and what that means for a product that holds or sends them |
+| States | Money transmitter licences in each state, the states that have adopted the Money Transmission Modernization Act, and New York's BitLicense (23 NYCRR Part 200) and limited-purpose trust charter. Each state regulator becomes a regulator in the model, scoped to its state (section 4.2) |
+| Consumer protection | The CFPB Remittance Transfer Rule (Regulation E, subpart B) for consumer cross-border transfers, including stablecoin remittances; state unfair and deceptive practice rules for promotion |
+| Tax | IRS broker reporting of digital-asset sales on Form 1099-DA, as a provider obligation and a customer disclosure |
 
-For each: the regulator, the licence types and what they grant on which regulated product types, mandatory stakeholders, obligations and filings (suspicious transaction reporting, Travel Rule, proof of reserves where required), and required disclosures and banned claims for campaigns (crypto promotion rules are strict in several regions; `lint_campaign` should get them as data).
+For each: the regulator, the licence types and what they grant on which regulated product types, mandatory stakeholders, obligations and filings (suspicious transaction reporting, Travel Rule, proof of reserves where required), and required disclosures and banned claims for campaigns (crypto promotion rules are strict; `lint_campaign` should get them as data).
 
 ## 6. Phases
 
 Each phase ends with something that runs and is checked by tests, and changes nothing live without an explicit yes.
 
 **Phase 0: research and decisions (no code).**
-- Confirm the regions to start with and the first two or three products.
-- Research the regulatory items in section 5 for those regions, with sources, into `docs/research/`.
-- Shortlist licensed liquidity, ramp and custody providers per region willing to implement Mynt's vendor contract.
+- Confirm the first two or three products and the states to launch in.
+- Research the regulatory items in section 5, with sources, into `docs/research/`.
+- Shortlist US liquidity, ramp and custody providers that already hold the federal registration and the state licences (or a trust charter) for the launch states, and are willing to implement Mynt's vendor contract. Partnering with licensed providers is what makes a multi-state launch possible without holding every licence yourselves.
 
 **Phase 1: model it.**
-- Add the `digital_assets` underlying; the regulated product types and licence types for the first region, entered by an admin and reviewed by the governance desk.
+- Add the `digital_assets` underlying, and state-scoped regulators and coverage per state (section 4.2).
+- The US regulated product types and licence types (federal and the launch states), entered by an admin and reviewed by the governance desk.
 - A seed definition (like `schemas/examples/seed/`) for one product, "buy and hold crypto", checked with `check_product_definition`.
-- Tests: `test/regulatory.test.js`, `test/regime.test.js`, `test/definition.test.js` with a digital-asset slice in a test regulatory model.
+- Tests: `test/regulatory.test.js`, `test/regime.test.js`, `test/definition.test.js` with a US digital-asset slice (federal plus two states) in a test regulatory model, including a product blocked in a state with no covering licence.
 - Route A works at the end of this phase: a licensed provider's hosted flow behind a hand-off.
 
 **Phase 2: liquidity as a vendor service.**
-- New service categories and example service types as JSON in `schemas/service-types/` (`crypto_quote`, `crypto_execute`, `fiat_onramp`, `fiat_offramp`, `custody_balance`, `address_screening`, `travel_rule`).
+- New service categories and example service types as JSON in `schemas/service-types/us/` (`crypto_quote`, `crypto_execute`, `fiat_onramp`, `fiat_offramp`, `custody_balance`, `address_screening`, `travel_rule`).
 - The quote → accept pattern in `src/vendor-call.ts` and `src/vendors.ts`: quote expiry, idempotent accept, settlement by callback, conformance cases for each.
 - New data dictionary fields; `client_result` for quotes.
 - Tests: `test/vendors.test.js`, `test/vendor-actions.test.js`, with a fake provider covering expiry, replay, a schema-breaking answer and a withdrawn consent.
@@ -142,13 +148,14 @@ Each phase ends with something that runs and is checked by tests, and changes no
 | Mynt drifting into custody or execution | Route C is out of scope; reviews of every phase check that no key, balance or order book sits in Mynt |
 | A provider's licence lapses or it's suspended mid-trade | Already handled: vendor bindings are pinned, so products drift and new sales pause; open actions finish or expire |
 | Stale prices | Quotes expire in seconds; accept after expiry is refused by the provider and checked in conformance |
-| Misleading promotion | Region-specific crypto promotion rules entered as banned claims and required disclosures, enforced by `lint_campaign` and `check_experience` |
+| A state with no covering licence | Coverage per state blocks publishing there; drift pauses sales in that state when a state licence lapses |
+| Misleading promotion | Crypto promotion rules entered as banned claims and required disclosures, enforced by `lint_campaign` and `check_experience` |
 | Sanctions and illicit-finance exposure | Address screening and Travel Rule as required services in the regime for transfer products |
 | Regulatory change | Regulation is data; a change is a model update that recomputes every product's regime and drifts those it affects |
 
 ## 8. Questions for the operator
 
-1. Which region first: India, the EU, the US, or another?
+1. Which states first? A few large ones, or everywhere a partner is already licensed?
 2. Which first product: buy and hold, stablecoin remittance, or a tokenised T-bill pot?
-3. Do you already have, or plan to get, a licence in that region yourselves, or will innovators bring theirs?
+3. Will you hold US licences yourselves, or will innovators bring theirs?
 4. Are there liquidity or ramp providers you already talk to who could implement the vendor contract?
