@@ -35,7 +35,11 @@
 	handle /.well-known/oauth-* {
 		reverse_proxy 127.0.0.1:@PORT@
 	}
+	# Everything else (/, /llms.txt, /llms-full.txt, /.well-known/llms.txt and real 404s) is Mynt's to answer.
 	handle {
-		respond "Mynt MCP server. Connect an MCP client to https://@DOMAIN@/mcp" 200
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy 127.0.0.1:@PORT@
 	}
 }
