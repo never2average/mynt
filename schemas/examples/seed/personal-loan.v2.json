@@ -2230,7 +2230,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_kyc_cdd"
       },
@@ -2248,7 +2248,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_kyc_cdd"
       },
@@ -2266,7 +2266,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_aml_monitoring"
       },
@@ -2284,7 +2284,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_kfs_apr"
       },
@@ -2302,7 +2302,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_penal_charges"
       },
@@ -2320,7 +2320,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_digital_lending"
       },
@@ -2338,7 +2338,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_digital_lending"
       },
@@ -2356,7 +2356,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_fair_recovery"
       },
@@ -2374,7 +2374,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_credit_info_reporting"
       },
@@ -2392,7 +2392,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_asset_classification"
       },
@@ -2410,7 +2410,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_asset_classification"
       },
@@ -2428,7 +2428,7 @@
       "to": {
         "kind": "register_item",
         "regulator_id": "rbi",
-        "license_type_id": "rbi_bank",
+        "license_type_id": "rbi_universal_bank",
         "section": "obligations",
         "id": "rbi_grievance_redressal"
       },

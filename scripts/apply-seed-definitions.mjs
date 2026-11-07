@@ -19,6 +19,7 @@ import { basename } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { login } from "./mynt-login.mjs";
+import { applySeedDefinitions, checkSeedDefinitions } from "./seed-definitions.mjs";
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -83,60 +84,17 @@ async function call(name, input) {
   return { isError: Boolean(res.isError), data };
 }
 
-const stable = (v) =>
-  Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v;
-const same = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
-
 let exitCode = 0;
 try {
-  // 1. Check every definition; change nothing unless all of them pass.
-  const defs = files.map((f) => ({ file: f, def: JSON.parse(readFileSync(f, "utf8")) }));
-  let refused = false;
-  for (const { file, def } of defs) {
-    const r = await call("check_product_definition", { product_id: def._id, definition: def });
-    const blockers = r.data.publish_blockers ?? [];
-    if (r.isError || !r.data.valid || blockers.length) {
-      refused = true;
-      shout(`${def._id}: NOT READY (${basename(file)})`);
-      if (r.data.error) shout(`  ${r.data.error}`);
-      for (const e of r.data.errors ?? []) shout(`  error: ${e}`);
-      for (const b of blockers) shout(`  publish blocker: ${b.key} (${b.primitive} ${b.action}, ${b.region}): ${b.reason}`);
-    } else {
-      const warnings = r.data.warnings ?? [];
-      say(`${def._id}: valid, no publish blockers; catalogue cites ${r.data.catalogue_record?.regulator} in ${r.data.catalogue_record?.region}${warnings.length ? `; warnings: ${warnings.join("; ")}` : ""}`);
-    }
-  }
-  if (refused) {
+  // 1. Check every definition; change nothing unless all of them pass. 2. Save, test and publish each.
+  const defs = files.map((f) => ({ file: basename(f), def: JSON.parse(readFileSync(f, "utf8")) }));
+  const { ready } = await checkSeedDefinitions({ call, defs, say, shout });
+  if (!ready) {
     shout("Stopped: nothing was changed. Fix the definitions or the regulatory model, then run again.");
     exitCode = 1;
   } else if (dryRun) {
     say(`Dry run: ${defs.length} definition(s) checked, nothing changed.`);
-  } else {
-    // 2. Save, test and publish each.
-    for (const { def } of defs) {
-      const current = await call("get_product_definition", { product_id: def._id });
-      if (!current.isError && current.data.live_definition_hash && same(current.data.definition, def)) {
-        say(`${def._id}: unchanged (live definition already matches), skipped`);
-        continue;
-      }
-      const step = async (name, input) => {
-        const r = await call(name, input);
-        if (r.isError) throw new Error(`${def._id}: ${name} failed: ${JSON.stringify(r.data)}`);
-        return r.data;
-      };
-      await step("set_product_definition", { product_id: def._id, definition: def, changelog: "v2 definition for Mynt's reference catalogue" });
-      const tested = await step("test_product", { id: def._id });
-      if (!tested.passed) throw new Error(`${def._id}: test_product failed: ${JSON.stringify(tested.checks.filter((c) => c.status === "fail"))}`);
-      const live = await step("publish_product", { id: def._id });
-      const contract = await call("get_developer_contract", { product_id: def._id });
-      const c = contract.data;
-      say(
-        contract.isError
-          ? `${def._id}: published version ${live.version ?? "?"}, but its contract couldn't be read: ${c.error}`
-          : `${def._id}: published version ${c.version}; contract ${c.contract_hash} with ${c.offers.length} offer(s), ${c.actions.length} action(s)`,
-      );
-    }
-  }
+  } else await applySeedDefinitions({ call, defs, say });
 } catch (e) {
   shout(e instanceof Error ? e.message : e);
   exitCode = 1;

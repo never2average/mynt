@@ -7,13 +7,16 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { CATALOG } from "./helpers.js";
-import { regulatoryModel } from "./seed-regulatory-model.js";
+import { applyRegulatoryModel } from "../scripts/regulatory-model.mjs";
+import { checkSeedDefinitions } from "../scripts/seed-definitions.mjs";
+import { ADDITIONS, productionLikeModel, toolsOf } from "./seed-regulatory-model.js";
 
 // Mynt's reference catalogue gets v2 definitions: the seed records (published, no firm) were published
-// without one, so they had no developer contract. This test builds, through admin tools only, exactly the
-// regulatory model these definitions point at (docs/reference.md lists it as the production prerequisites), then
-// checks, saves, tests and publishes each schemas/examples/seed/*.v2.json the way
-// scripts/apply-seed-definitions.mjs does, and reads the developer contract each one now has.
+// without one, so they had no developer contract. This test builds, through admin tools only, a slice of India's
+// model shaped like production's (test/seed-regulatory-model.js), shows the definitions are refused on it, applies
+// schemas/regulatory/in.additions.json in merge mode (only additions), then checks, saves, tests and publishes each
+// schemas/examples/seed/*.v2.json the way scripts/apply-seed-definitions.mjs does, and reads the developer
+// contract each one now has.
 
 const SEED_DIR = new URL("../schemas/examples/seed/", import.meta.url);
 const SEEDS = readdirSync(SEED_DIR)
@@ -63,7 +66,50 @@ test("the reference catalogue's seed definitions check, publish, and give each p
   for (const d of SEEDS) assert.ok(!before.includes(d._id), `${d._id} isn't developer-ready yet`);
   for (const d of SEEDS) assert.equal((await store.getProduct(d._id)).owner_id, null, `${d._id} is a Mynt reference product`);
 
-  await regulatoryModel(w);
+  await productionLikeModel(w);
+  const tools = toolsOf(admin);
+  const defs = SEEDS.map((def) => ({ file: `${def._id}.v2.json`, def }));
+
+  // On production's model as it is, every definition is refused: it cites personas and obligations it lacks.
+  const refused = await checkSeedDefinitions({ call: tools.call, defs });
+  assert.equal(refused.ready, false);
+  assert.ok(refused.results.every((r) => !r.ready));
+  const rbiBefore = (await call(admin, "get_regulator", { region: "IN", regulator_id: "rbi" })).data;
+
+  // The additions file only adds: three personas and thirteen obligations on rbi_universal_bank.
+  const dry = await applyRegulatoryModel({ ...tools, model: ADDITIONS, dryRun: true });
+  assert.deepEqual(dry.problems, []);
+  assert.deepEqual(dry.removals, []);
+  assert.deepEqual(dry.plan.map((p) => [p.tool, p.id, p.change]), [["define_regulator", "rbi", "update"]]);
+  assert.equal(dry.plan[0].added.length, 16, dry.plan[0].added.join("\n"));
+  assert.deepEqual(dry.plan[0].updated, []);
+  assert.ok(
+    dry.plan[0].added.every((a) => /^scope › persona rbi_(resident_individual|senior_citizen|retail_borrower)$|^licence rbi_universal_bank › grc › registers › obligation rbi_/.test(a)),
+    dry.plan[0].added.join("\n"),
+  );
+  assert.deepEqual((await call(admin, "get_regulator", { region: "IN", regulator_id: "rbi" })).data, rbiBefore, "a dry run writes nothing");
+  const applied = await applyRegulatoryModel({ ...tools, model: ADDITIONS });
+  assert.equal(applied.applied, true, JSON.stringify(applied.problems));
+
+  // Everything production had is still there, unchanged; the additions sit beside it.
+  const rbi = (await call(admin, "get_regulator", { region: "IN", regulator_id: "rbi" })).data;
+  const bank = rbi.license_types.find((l) => l._id === "rbi_universal_bank");
+  const bankBefore = rbiBefore.license_types.find((l) => l._id === "rbi_universal_bank");
+  assert.deepEqual(bank.grc.registers.obligations.slice(0, 3), bankBefore.grc.registers.obligations);
+  assert.equal(bank.grc.registers.obligations.length, 3 + 13);
+  for (const k of ["reporting_disclosure_filings", "risks"]) assert.deepEqual(bank.grc.registers[k], bankBefore.grc.registers[k], k);
+  for (const k of ["repositories", "allowed_product_types", "allowed_customer_segments", "mandatory_stakeholders"]) assert.deepEqual(bank.grc[k], bankBefore.grc[k], k);
+  assert.deepEqual(rbi.scope.product_types, rbiBefore.scope.product_types);
+  assert.deepEqual(rbi.scope.customer_personas.slice(0, 2), rbiBefore.scope.customer_personas);
+  assert.equal(rbi.scope.customer_personas.length, 5);
+  const again = await applyRegulatoryModel({ ...tools, model: ADDITIONS, dryRun: true });
+  assert.deepEqual(again.plan.map((p) => p.change), ["keep"], "applied twice, nothing more to do");
+
+  // Every definition is now ready, and the catalogue cites RBI, the regulator whose licence the definition's
+  // register items cite, not IFSCA or BSE, though their ids sort first and they have more licence types granting it.
+  const readyNow = await checkSeedDefinitions({ call: tools.call, defs });
+  assert.equal(readyNow.ready, true, JSON.stringify(readyNow.results.filter((r) => !r.ready).map((r) => r.data)));
+  assert.deepEqual(readyNow.results.map((r) => r.regulator), ["RBI", "RBI", "RBI", "RBI"]);
 
   for (const def of SEEDS) {
     // What scripts/apply-seed-definitions.mjs does: check, refuse on errors or blockers, save, publish.
@@ -130,4 +176,35 @@ test("the reference catalogue's seed definitions check, publish, and give each p
   const innovator = await w.connect(innovatorUser);
   for (const tool of ["test_product", "publish_product"])
     assert.match((await call(innovator, tool, { id: "savings-account" })).data.error, /No product of yours/, tool);
+});
+
+test("the catalogue cites the licensing regulator, in a documented order, never the first id alphabetically", async () => {
+  const w = await world();
+  const { ok, admin } = w;
+  await productionLikeModel(w);
+  assert.equal((await applyRegulatoryModel({ ...toolsOf(admin), model: ADDITIONS })).applied, true);
+  const savings = SEEDS.find((d) => d._id === "savings-account");
+  const cites = async (def) => (await ok(admin, "check_product_definition", { product_id: def._id, definition: def })).catalogue_record.regulator;
+
+  // Its register items cite rbi_universal_bank, which grants its lead component: RBI.
+  assert.equal(await cites(savings), "RBI");
+
+  // Without register items, the licensing regulator with the most licence types granting it: IFSCA's two here
+  // against RBI's one. Deterministic, and documented in leadRegulator.
+  const bare = structuredClone(savings);
+  bare.connections = bare.connections.filter((c) => c.to?.kind !== "register_item");
+  assert.equal(await cites(bare), "IFSCA");
+
+  // A tie goes to the regulator listed first in the region (define_region): RBI before IFSCA.
+  await ok(admin, "define_regulator", {
+    region: "IN",
+    regulator: {
+      id: "ifsca",
+      name: "International Financial Services Centres Authority",
+      short_name: "IFSCA",
+      scope: { product_types: [{ id: "in_savings_deposit" }] },
+      license_types: [{ _id: "ifsca_ifsc_banking_unit", name: "IFSC banking unit", grc: { allowed_product_types: ["in_savings_deposit"] } }],
+    },
+  });
+  assert.equal(await cites(bare), "RBI");
 });

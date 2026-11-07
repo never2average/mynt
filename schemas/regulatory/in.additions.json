@@ -1,0 +1,182 @@
+{
+  "region": "IN",
+  "description": "Additions to the RBI regulator in Mynt's production regulatory model, applied in merge mode (scripts/apply-regulatory-model.mjs merges each regulator into the server's version by id and never drops anything), so it only adds: three customer personas and thirteen obligations on the universal bank licence (rbi_universal_bank), the ones Mynt's reference definitions in schemas/examples/seed/ cite. It assumes the server already has the RBI regulator and that licence, as production does; on a server without them the run is refused. The content is taken from the RBI slice the seed definitions were written against (test/seed-regulatory-model.js), in the register's own schema. Every item is tagged or described as unverified: none has been checked line by line against the current RBI directions (production's own universal bank obligations cite the 2025 KYC directions, these the 2016 master directions), and none carries a legal_ref yet.",
+  "regulators": [
+    {
+      "id": "rbi",
+      "scope": {
+        "customer_personas": [
+          {
+            "id": "rbi_resident_individual",
+            "name": "Resident individual",
+            "description": "Unverified: kept for Mynt's reference definitions (schemas/examples/seed/). It describes the same people as rbi_retail_individual_resident; check against the RBI's KYC and deposit directions before relying on it.",
+            "qualification": {
+              "min_age": 18,
+              "resident": true
+            },
+            "action": [
+              "onboarding",
+              "deposit_custody"
+            ]
+          },
+          {
+            "id": "rbi_senior_citizen",
+            "name": "Resident senior citizen",
+            "description": "Unverified: kept for Mynt's reference definitions (schemas/examples/seed/). Overlaps rbi_senior_citizen_depositor; the age threshold (60) is the one banks commonly use for senior-citizen deposit rates, to verify.",
+            "qualification": {
+              "min_age": 60,
+              "resident": true
+            },
+            "action": [
+              "onboarding",
+              "deposit_custody"
+            ]
+          },
+          {
+            "id": "rbi_retail_borrower",
+            "name": "Retail (individual) borrower",
+            "description": "Unverified: kept for Mynt's reference definitions (schemas/examples/seed/). An individual borrowing in a personal capacity.",
+            "qualification": {
+              "min_age": 18,
+              "resident": true
+            },
+            "action": [
+              "onboarding",
+              "credit"
+            ]
+          }
+        ]
+      },
+      "license_types": [
+        {
+          "_id": "rbi_universal_bank",
+          "grc": {
+            "registers": {
+              "obligations": [
+                {
+                  "id": "rbi_kyc_cdd",
+                  "title": "Customer due diligence and periodic KYC updation",
+                  "description": "Master Direction - Know Your Customer (2016): identify and verify customers before account-based relationships, screen against sanctions lists, update KYC periodically by risk category.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ],
+                  "owner": "ucb_sh_principal_officer"
+                },
+                {
+                  "id": "rbi_aml_monitoring",
+                  "title": "Transaction monitoring and suspicious transaction reporting",
+                  "description": "Prevention of Money-laundering Act, 2002 and its rules: monitor transactions and report suspicious ones to FIU-IND.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ],
+                  "owner": "ucb_sh_principal_officer"
+                },
+                {
+                  "id": "rbi_deposit_interest",
+                  "title": "Interest on deposits",
+                  "description": "Master Direction - Interest Rate on Deposits (2016): savings interest on the daily balance at quarterly or shorter rests; term deposit rates fixed for the tenor; premature withdrawal at the rate for the period run less a disclosed penalty.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_term_deposit_terms",
+                  "title": "Term deposit terms",
+                  "description": "Tenor 7 days to 10 years; premature withdrawal available on individuals' deposits up to ₹1 crore; penalty disclosed upfront; unclaimed matured deposits earn the lower of the savings and contracted rate.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_min_balance_charges",
+                  "title": "Minimum-balance charges",
+                  "description": "Notify the customer of a shortfall, allow one month to restore it, keep charges proportionate to the shortfall, never let them make the balance negative.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_unclaimed_deposits",
+                  "title": "Inoperative accounts and unclaimed deposits",
+                  "description": "Treat accounts without customer-induced transactions for two years as inoperative, reactivate free, transfer balances unclaimed for ten years to the Depositor Education and Awareness Fund (Banking Regulation Act, section 26A).",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_grievance_redressal",
+                  "title": "Grievance redressal",
+                  "description": "Board-approved grievance policy; customers may escalate to the RBI Integrated Ombudsman Scheme (2021) if not resolved within 30 days.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_kfs_apr",
+                  "title": "Key Facts Statement with APR",
+                  "description": "Retail and MSME loans: a Key Facts Statement with the annual percentage rate and every charge before the contract is executed.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_penal_charges",
+                  "title": "Penal charges in loan accounts",
+                  "description": "Charge defaults as penal charges, not penal interest; never capitalise them; keep them reasonable and disclosed in the KFS.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_digital_lending",
+                  "title": "Digital lending",
+                  "description": "Disburse to and collect from the borrower's own bank account directly; offer a cooling-off period to exit without penalty.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_fair_recovery",
+                  "title": "Fair practices in recovery",
+                  "description": "Fair Practices Code: no harassment; recovery contact only between 08:00 and 19:00.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_credit_info_reporting",
+                  "title": "Credit information reporting",
+                  "description": "Credit Information Companies (Regulation) Act, 2005: membership of every credit information company and regular reporting of borrower data.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                },
+                {
+                  "id": "rbi_asset_classification",
+                  "title": "Early stress and asset classification",
+                  "description": "Classify overdue loans as SMA-0, SMA-1 and SMA-2 and as non-performing after 90 days overdue.",
+                  "criticality": "high",
+                  "tags": [
+                    "unverified"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
