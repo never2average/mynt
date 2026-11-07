@@ -6,6 +6,7 @@ import type { ClerkAuth } from "./auth.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
 import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
+import { llmsFullCache, llmsTxt } from "./llms-txt.js";
 import type { Store, User } from "./store.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -66,19 +67,44 @@ async function authenticate(
   return { user };
 }
 
-async function handle(
-  store: Store,
-  clerk: ClerkAuth | null,
-  meta: (() => Promise<unknown>) | null,
-  ctx: AdminContext,
-  runtime: ReturnType<typeof createRuntimeApi>,
-  req: IncomingMessage,
-  res: ServerResponse,
-) {
+const TEXT_CACHE = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300" };
+
+const sendText = (req: IncomingMessage, res: ServerResponse, status: number, body: string, headers: Record<string, string> = {}) => {
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", ...headers });
+  res.end(req.method === "HEAD" ? undefined : body);
+};
+
+// The origin people and agents should use: the configured public URL, else the Host the request came to.
+function publicBase(clerk: ClerkAuth | null, runtimeOptions: RuntimeApiOptions, req: IncomingMessage): string {
+  const configured = runtimeOptions.publicUrl ?? process.env.PUBLIC_URL ?? (clerk ? clerk.resource.replace(/\/mcp$/, "") : undefined);
+  return (configured ?? `http://${req.headers.host ?? "localhost"}`).replace(/\/+$/, "");
+}
+
+interface Handlers {
+  meta: (() => Promise<unknown>) | null;
+  runtime: ReturnType<typeof createRuntimeApi>;
+  llmsFull: (base: string) => Promise<string>;
+  runtimeOptions: RuntimeApiOptions;
+}
+
+async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, h: Handlers, req: IncomingMessage, res: ServerResponse) {
+  const { meta, runtime } = h;
   const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname === "/healthz") {
     await store.ping();
     return void res.writeHead(200).end("ok");
+  }
+  // For AI assistants (https://llmstxt.org): markdown served as plain text, no sign-in, no customer data.
+  const readOnly = req.method === "GET" || req.method === "HEAD";
+  if (readOnly && (url.pathname === "/llms.txt" || url.pathname === "/.well-known/llms.txt")) {
+    return sendText(req, res, 200, llmsTxt(publicBase(clerk, h.runtimeOptions, req)), TEXT_CACHE);
+  }
+  if (readOnly && url.pathname === "/llms-full.txt") {
+    return sendText(req, res, 200, await h.llmsFull(publicBase(clerk, h.runtimeOptions, req)), TEXT_CACHE);
+  }
+  if (readOnly && url.pathname === "/") {
+    const base = publicBase(clerk, h.runtimeOptions, req);
+    return sendText(req, res, 200, `Mynt MCP server. Connect an MCP client to ${base}/mcp. AI assistants: start at ${base}/llms.txt.\n`, TEXT_CACHE);
   }
   if (clerk && req.method === "GET" && url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
     return sendJson(res, 200, clerk.protectedResourceMetadata(), { "Cache-Control": "public, max-age=3600" });
@@ -115,7 +141,10 @@ async function handle(
     if (req.method !== "POST") return void res.writeHead(405, { Allow: "POST" }).end();
     return serveMcp(createServer(store, null, { ...ctx, bdRun: { id: run.id as string } }), req, res);
   }
-  if (url.pathname !== "/mcp") return void res.writeHead(404).end();
+  if (url.pathname !== "/mcp") {
+    const base = publicBase(clerk, h.runtimeOptions, req);
+    return sendText(req, res, 404, `Not found. Mynt's MCP endpoint is ${base}/mcp; start at ${base}/llms.txt.\n`);
+  }
   if (req.method !== "POST") return void res.writeHead(405, { Allow: "POST" }).end();
 
   const authed = await authenticate(store, clerk, req, res);
@@ -148,8 +177,9 @@ export function createMcpHttpServer(
 ): Server {
   const meta = clerk ? authServerMetadata(clerk.issuer) : null;
   const runtime = createRuntimeApi(store, { hosting: ctx.hosting ?? null, ...runtimeOptions });
+  const handlers: Handlers = { meta, runtime, llmsFull: llmsFullCache(store, ctx), runtimeOptions };
   return createHttpServer((req, res) =>
-    handle(store, clerk, meta, ctx, runtime, req, res).catch((err) => {
+    handle(store, clerk, ctx, handlers, req, res).catch((err) => {
       console.error(err);
       if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Internal server error" }));

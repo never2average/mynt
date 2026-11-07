@@ -10,6 +10,6 @@
 		reverse_proxy mcp:3000
 	}
 	handle {
-		respond "Mynt MCP server. Connect an MCP client to https://{$MCP_DOMAIN}/mcp" 200
+		reverse_proxy mcp:3000
 	}
 }

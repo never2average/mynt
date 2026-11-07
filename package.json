@@ -4,6 +4,11 @@
   "description": "Mynt: MCP server for financial products across credit, payments, accounts, custody, wealth, insurance, trade, exchange, derivatives and information, with consumer, developer, innovator, vendor and admin roles",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/never2average/mynt#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/never2average/mynt.git"
+  },
   "bin": {
     "mynt": "dist/index.js"
   },

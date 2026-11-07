@@ -122,6 +122,8 @@ Behind it is a whole coding team. An **architect** plans. **Server**, **web** an
 
 Mynt is an [MCP](https://modelcontextprotocol.io) server; clients show it as `mynt`. Any MCP client can use it, so you're never tied to one tool. Claude Code is the reference client. `examples/mynt-chat` is a sample of your own: a mobile-friendly chat for customers, and a developer console for builds, sandboxes and hosting.
 
+**For AI assistants:** every Mynt server answers `GET /llms.txt` (also at `/.well-known/llms.txt`) with a short guide in the [llms.txt](https://llmstxt.org) format: what Mynt is, its MCP endpoint, how to sign in, the roles and the first tools each one should call. `GET /llms-full.txt` lists every tool each role gets, with its inputs, generated from the server's live tool registry, plus the runtime API and the vendor contract.
+
 ## Ground rules Mynt enforces for you
 
 - **Secrets by name only.** Keys live in the server's environment, are never printed, and never enter a sandbox, a hosted app or a pull request.
