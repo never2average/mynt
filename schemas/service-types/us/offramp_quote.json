@@ -1,0 +1,122 @@
+{
+  "region": "US",
+  "key": "offramp_quote",
+  "name": "Mynt Ramp: off-ramp quote",
+  "category": "ramp",
+  "description": "A firm price to turn a customer's stablecoin back into US dollars through the Mynt Ramp: fiat_amount dollars to the customer's bank account, for asset_amount of the stablecoin including the fee. The price holds until expires_at; the customer accepts it with offramp_transfer.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name",
+      "bank_account_number",
+      "routing_number"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "bank_account_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9,18}$"
+      },
+      "routing_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9}$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "params_schema": {
+    "type": "object",
+    "required": [
+      "asset",
+      "network",
+      "fiat_amount"
+    ],
+    "properties": {
+      "asset": {
+        "enum": [
+          "USDC"
+        ]
+      },
+      "network": {
+        "enum": [
+          "ethereum",
+          "base",
+          "solana"
+        ]
+      },
+      "fiat_amount": {
+        "type": "string",
+        "pattern": "^[0-9]{1,9}(\\.[0-9]{1,2})?$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "params_fixture": {
+    "asset": "USDC",
+    "network": "base",
+    "fiat_amount": "100.00"
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "quote_id",
+      "expires_at",
+      "fiat_amount",
+      "fiat_currency",
+      "asset",
+      "network",
+      "asset_amount",
+      "fee"
+    ],
+    "properties": {
+      "quote_id": {
+        "type": "string"
+      },
+      "expires_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "fiat_amount": {
+        "type": "string"
+      },
+      "fiat_currency": {
+        "enum": [
+          "USD"
+        ]
+      },
+      "asset": {
+        "type": "string"
+      },
+      "network": {
+        "type": "string"
+      },
+      "asset_amount": {
+        "type": "string"
+      },
+      "fee": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "quote": true,
+  "consent_purpose": "fiat_offramp",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": [
+    "fincen_msb"
+  ],
+  "client_result": {
+    "fields": [
+      "fiat_amount",
+      "fiat_currency",
+      "asset",
+      "network",
+      "asset_amount",
+      "fee"
+    ],
+    "redirect": false
+  }
+}

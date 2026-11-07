@@ -1228,9 +1228,12 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
          WHERE t.category = 'ramp' AND o.entity_id <> $1 AND o.status <> 'suspended'`,
         [entity_id],
       );
+      const publicUrl = process.env.PUBLIC_URL?.replace(/\/+$/, "");
       return json({
         entity_id,
         name: entity.name,
+        // Until the partner's live endpoint exists, its offerings' test_base_url can be Mynt's own sandbox ramp.
+        ...(publicUrl ? { sandbox_test_base_url: `${publicUrl}/ramp-sandbox` } : {}),
         ...(rows.length ? { note: `${rows.length} ramp offering(s) by another firm are no longer called; suspend them with suspend_vendor_offering` } : {}),
       });
     },
@@ -1258,7 +1261,7 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
     {
       title: "Load the example standard services",
       description:
-        "Admin: load the example service types shipped with Mynt (IN: PAN verification, CKYC, account aggregator data, bank statement analytics, credit bureau, DigiLocker, e-sign, e-mandate; US: identity, bank account verification, credit bureau, and the Mynt Ramp's quote and transfer). Each is checked like define_service_type; one whose licence types your regulatory model names differently is skipped with the reason, unless licence_map renames them.",
+        "Admin: load the example service types shipped with Mynt (IN: PAN verification, CKYC, account aggregator data, bank statement analytics, credit bureau, DigiLocker, e-sign, e-mandate; US: identity, bank account verification, credit bureau, and the Mynt Ramp's on-ramp and off-ramp quotes and transfers). Each is checked like define_service_type; one whose licence types your regulatory model names differently is skipped with the reason, unless licence_map renames them.",
       inputSchema: {
         region: z.string().regex(/^[A-Z]{2}$/).optional(),
         licence_map: z.record(z.string(), z.string()).default({}).describe("Example licence type id → the id in your regulatory model"),

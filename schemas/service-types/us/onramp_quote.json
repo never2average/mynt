@@ -1,9 +1,9 @@
 {
   "region": "US",
-  "key": "ramp_quote",
-  "name": "Mynt Ramp quote",
+  "key": "onramp_quote",
+  "name": "Mynt Ramp: on-ramp quote",
   "category": "ramp",
-  "description": "A firm price to move a customer's dollars into a stablecoin (on-ramp) or a stablecoin back into dollars (off-ramp), through the Mynt Ramp. The price holds until expires_at. The customer accepts it with ramp_transfer; the stablecoin settles with the product's liquidity provider, never the customer's own wallet.",
+  "description": "A firm price to turn a customer's US dollars into a stablecoin through the Mynt Ramp: fiat_amount dollars in, asset_amount out after the fee. The price holds until expires_at; the customer accepts it with onramp_transfer. The stablecoin settles with the product's liquidity provider for the customer, never into the customer's own wallet.",
   "input_schema": {
     "type": "object",
     "required": [
@@ -29,18 +29,11 @@
   "params_schema": {
     "type": "object",
     "required": [
-      "direction",
       "asset",
       "network",
       "fiat_amount"
     ],
     "properties": {
-      "direction": {
-        "enum": [
-          "on",
-          "off"
-        ]
-      },
       "asset": {
         "enum": [
           "USDC"
@@ -61,7 +54,6 @@
     "additionalProperties": false
   },
   "params_fixture": {
-    "direction": "on",
     "asset": "USDC",
     "network": "base",
     "fiat_amount": "100.00"
@@ -71,10 +63,10 @@
     "required": [
       "quote_id",
       "expires_at",
-      "direction",
       "fiat_amount",
       "fiat_currency",
       "asset",
+      "network",
       "asset_amount",
       "fee"
     ],
@@ -85,12 +77,6 @@
       "expires_at": {
         "type": "string",
         "format": "date-time"
-      },
-      "direction": {
-        "enum": [
-          "on",
-          "off"
-        ]
       },
       "fiat_amount": {
         "type": "string"
@@ -103,6 +89,9 @@
       "asset": {
         "type": "string"
       },
+      "network": {
+        "type": "string"
+      },
       "asset_amount": {
         "type": "string"
       },
@@ -113,7 +102,7 @@
     "additionalProperties": false
   },
   "quote": true,
-  "consent_purpose": "fiat_ramp_transfer",
+  "consent_purpose": "fiat_onramp",
   "fills": [],
   "innovator_licences": [],
   "vendor_licences": [
@@ -121,10 +110,10 @@
   ],
   "client_result": {
     "fields": [
-      "direction",
       "fiat_amount",
       "fiat_currency",
       "asset",
+      "network",
       "asset_amount",
       "fee"
     ],

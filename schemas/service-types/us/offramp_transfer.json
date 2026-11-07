@@ -1,9 +1,9 @@
 {
   "region": "US",
-  "key": "ramp_transfer",
-  "name": "Mynt Ramp transfer",
+  "key": "offramp_transfer",
+  "name": "Mynt Ramp: off-ramp transfer",
   "category": "ramp",
-  "description": "Accepts a ramp_quote: pulls the customer's dollars and settles the stablecoin with the product's liquidity provider (on-ramp), or takes the stablecoin and pays the customer's bank account (off-ramp). Bank transfers settle later, so it usually answers pending and finishes by callback; a returned bank transfer ends it as returned.",
+  "description": "Accepts an offramp_quote: takes the stablecoin from the product's liquidity provider and pays the dollars to the customer's bank account. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the receiving bank sends the payment back.",
   "input_schema": {
     "type": "object",
     "required": [
@@ -49,8 +49,8 @@
     },
     "additionalProperties": false
   },
-  "accepts": "ramp_quote",
-  "consent_purpose": "fiat_ramp_transfer",
+  "accepts": "offramp_quote",
+  "consent_purpose": "fiat_offramp",
   "fills": [],
   "innovator_licences": [],
   "vendor_licences": [

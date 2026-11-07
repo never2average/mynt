@@ -58,7 +58,7 @@ R1 can move to R2 later without changing the API developers and providers use: o
 **How it fits the code:**
 - An admin registers the ramp partner's firm (`register_firm`) and designates it with `set_mynt_ramp`. Only that firm may offer `ramp` service types, so there is exactly one ramp. Every product firm subscribes to it like any vendor service, and the partner joins its roster as a party, so the regime check and drift see the partner's licences. Moving to R2 later is re-designating Mynt's own firm.
 - Every digital-asset product composes the ramp: a `payments:sale` component provided by the ramp partner. Cash-out fits as the exchange component `settles_into` the ramp, and funding in as the ramp `funds` the exchange component (the schema now allows `exchange:sale|purchase` as a `funds` target).
-- On- and off-ramp are one quote (`ramp_quote`, with `direction` on or off) and its acceptance (`ramp_transfer`), using the quote → accept flow in section 4.3.
+- On-ramp and off-ramp are separate pairs, each a quote and its acceptance, with its own consent: `onramp_quote` → `onramp_transfer` (`fiat_onramp`) and `offramp_quote` → `offramp_transfer` (`fiat_offramp`), using the quote → accept flow in section 4.3.
 - The ramp's stablecoin settlement with providers is a ledger between firms, reported to each firm by webhook. Customers' balances stay with the provider that holds them.
 
 ### 3.2 What's built
@@ -69,11 +69,12 @@ R1 can move to R2 later without changing the API developers and providers use: o
 | Params: what a device sends with a vendor-served action (amount, asset, direction), declared per service type, scalar only, never customer data | `src/vendors.ts`, `src/runtime-api.ts` | `test/ramp.test.js` |
 | Quotes: a quote service's id and expiry kept by Mynt, never shown to the device; accepted once, atomically, only unexpired, only by the same customer and only at the vendor that quoted; released if the call fails | `src/vendors.ts`, `src/store.ts` | `test/ramp.test.js` |
 | What the developer contract says (`params_schema`, `quote`, `accepts_quote_from`), and `startAction(…, params, quote)` in every SDK | `src/vendors.ts`, `src/contract.ts`, `src/sdk.ts`, `sdk-templates/` | `test/client-sdks.test.js`; CI compiles Kotlin, Swift and Flutter |
-| US service types `ramp_quote` and `ramp_transfer` | `schemas/service-types/us/` | `test/ramp.test.js` |
+| US on-ramp and off-ramp service types: `onramp_quote`, `onramp_transfer`, `offramp_quote`, `offramp_transfer` | `schemas/service-types/us/` | `test/ramp.test.js` |
+| The Mynt Ramp sandbox: a test ramp Mynt serves itself at `/ramp-sandbox`, so both ramps work end to end in sandbox before the partner's live endpoint exists (prices, fees, delayed settlement, returned and failed transfers) | `src/ramp-sandbox.ts`, `src/http.ts` | `test/ramp.test.js` |
 | The `digital_assets` underlying, and `funds` into an exchange component | schema, `src/catalog.ts` | None of its own yet; the existing definition tests still pass |
 
 **Not built yet:**
-- **The partner's side.** The partner either implements Mynt's vendor wire contract (`docs/reference.md`) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner.
+- **The partner's live endpoint.** The partner either implements Mynt's vendor wire contract (`docs/reference.md`) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner. Sandbox already works without it.
 - **Journeys.** A journey step that shows a quote with its expiry before accept.
 - **The stablecoin leg** with liquidity providers, and the price and liquidity services behind the exchange component (routes A and B).
 - **Ops views:** expired quotes, stuck transfers and returned bank transfers in `ops_status`.
@@ -171,8 +172,8 @@ Each phase ends with something that runs and is checked by tests, and changes no
 
 **Phase 2: the Mynt Ramp, then liquidity as a vendor service.**
 - Choose R1 or R2 (section 3.1) and, for R1, the ramp partner.
-- Mynt's own firm, the `fiat_onramp` and `fiat_offramp` service types, and Mynt's offering of them; `deposit` and `withdraw` client actions in every product that composes the ramp.
-- Tests: a fake ramp partner covering a deposit, a withdrawal, an expired quote, a returned bank transfer and a sanctions hit.
+- Done: the designated ramp firm, the on-ramp and off-ramp service types, the sandbox ramp, and quote → accept client actions in every product that composes the ramp.
+- Done: tests for an on-ramp, an off-ramp, an expired quote and a returned bank transfer. Still to do: a sanctions hit, once address screening exists.
 - New service categories and example service types as JSON in `schemas/service-types/us/` (`crypto_quote`, `crypto_execute`, `fiat_onramp`, `fiat_offramp`, `custody_balance`, `address_screening`, `travel_rule`).
 - The quote → accept pattern in `src/vendor-call.ts` and `src/vendors.ts`: quote expiry, idempotent accept, settlement by callback, conformance cases for each.
 - New data dictionary fields; `client_result` for quotes.

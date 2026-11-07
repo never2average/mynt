@@ -360,14 +360,33 @@ test("the Mynt Ramp: one designated ramp, quotes with params, accepted once whil
   assert.equal(audit.length, 2, "every designation is audited");
 });
 
-test("the shipped US ramp service types load once their licence type is mapped", async () => {
+test("the Mynt Ramp sandbox: on-ramp and off-ramp end to end, on the shipped US service types", async () => {
+  process.env.RAMP_SANDBOX_SETTLE_MS = "50";
   const ctx = await setup();
   const { store, call } = ctx;
+  const connect = async (user) => {
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    await createServer(store, user, { vendors: VENDOR_OPTS }).connect(s);
+    const client = new Client({ name: "ramp-sandbox", version: "0" });
+    await client.connect(c);
+    return client;
+  };
+  const ok = async (client, name, args = {}) => {
+    const r = await call(client, name, args);
+    assert.equal(r.isError, false, `${name}: ${JSON.stringify(r.data)}`);
+    return r.data;
+  };
   const { user: adminUser } = await store.createUser("Root", ["admin"]);
-  const [c, s] = InMemoryTransport.createLinkedPair();
-  await createServer(store, adminUser).connect(s);
-  const admin = new Client({ name: "ramp-us", version: "0" });
-  await admin.connect(c);
+  const admin = await connect(adminUser);
+  const innovator = await connect(ctx.user);
+
+  // Mynt's own server: the runtime API, and the sandbox ramp at /ramp-sandbox.
+  const srv = createMcpHttpServer(store, null, { vendors: VENDOR_OPTS }, { publicUrl: "https://mynt.test", vendors: VENDOR_OPTS }).listen(0, "127.0.0.1");
+  await new Promise((r) => srv.once("listening", r));
+  servers.push({ close: () => (srv.closeAllConnections(), srv.close()) });
+  const base = `http://127.0.0.1:${srv.address().port}`;
+
+  // ---- the US model knows the ramp's licence type, so the shipped types load ----
   const grc = {
     registers: { obligations: [], reporting_disclosure_filings: [], risks: [], controls: [], inspection_events: [] },
     repositories: { regulatory_communications: [], enforcement_actions: [], press_releases: [], policies: [], risk_models: [], inspection_history: [] },
@@ -375,17 +394,138 @@ test("the shipped US ramp service types load once their licence type is mapped",
     allowed_customer_segments: [],
     mandatory_stakeholders: { internal: [], external: [] },
   };
-  const reg = await call(admin, "define_regulator", {
+  await ok(admin, "define_regulator", {
     region: "US",
     regulator: { id: "fincen", name: "Financial Crimes Enforcement Network", short_name: "FinCEN", scope: { product_types: [], customer_personas: [] }, license_types: [{ _id: "fincen_msb", name: "Money services business", grc }] },
   });
-  assert.equal(reg.isError, false, JSON.stringify(reg.data));
-  const loaded = await call(admin, "load_service_types", { region: "US" });
-  assert.equal(loaded.isError, false, JSON.stringify(loaded.data));
-  assert.ok(loaded.data.loaded.includes("US/ramp_quote") && loaded.data.loaded.includes("US/ramp_transfer"), JSON.stringify(loaded.data));
-  const types = Object.fromEntries((await call(admin, "list_service_types", { region: "US" })).data.map((t) => [t.key, t]));
-  assert.equal(types.ramp_quote.category, "ramp");
-  assert.equal(types.ramp_quote.quote, true);
-  assert.equal(types.ramp_transfer.accepts, "ramp_quote");
-  assert.deepEqual(types.ramp_transfer.vendor_licences, ["fincen_msb"]);
+  const KEYS = ["onramp_quote", "onramp_transfer", "offramp_quote", "offramp_transfer"];
+  const loaded = await ok(admin, "load_service_types", { region: "US" });
+  for (const k of KEYS) assert.ok(loaded.loaded.includes(`US/${k}`), JSON.stringify(loaded));
+  const types = Object.fromEntries((await ok(admin, "list_service_types", { region: "US" })).map((t) => [t.key, t]));
+  assert.equal(types.onramp_transfer.accepts, "onramp_quote");
+  assert.equal(types.offramp_transfer.accepts, "offramp_quote");
+  assert.notEqual(types.onramp_quote.consent_purpose, types.offramp_quote.consent_purpose, "on and off are separate consents");
+
+  // ---- the ramp partner's firm, designated, with its test endpoint on Mynt's sandbox ----
+  await ok(admin, "invite_user", { email: "ops@rampco.example", roles: ["vendor"] });
+  const firm = await ok(admin, "register_firm", { name: "RampCo", legal_form: "company_private", incorporation: { country: "us" }, regions: ["US"] });
+  const vu = await store.upsertClerkUser("clerk_rampco", "ops@rampco.example", "RampCo ops", (await store.getInvite("ops@rampco.example")).roles);
+  await ok(admin, "add_entity_member", { email: "ops@rampco.example", entity_id: firm.id });
+  const rampco = await connect(vu);
+  const lic = await ok(rampco, "register_license", { region: "US", regulator_id: "fincen", license_id: "fincen_msb", registration_number: "MSB-1" });
+  await ok(admin, "review_license", { license_record_id: lic.id, decision: "verified", note: "ok" });
+  await ok(admin, "set_mynt_ramp", { entity_id: firm.id });
+  const offerings = {};
+  for (const key of KEYS) {
+    const o = await ok(rampco, "create_vendor_offering", {
+      region: "US",
+      service_type: key,
+      name: `Mynt Ramp ${key}`,
+      price: { amount: 0, currency: "USD" },
+      test_base_url: `${base}/ramp-sandbox`,
+      licence_ids: [lic.id],
+    });
+    const run = await ok(rampco, "run_conformance", { offering_id: o.id });
+    assert.equal(run.passed, true, `${key}: ${JSON.stringify(run.cases)}`);
+    await ok(rampco, "update_vendor_offering", { offering_id: o.id, listed: true });
+    offerings[key] = o.id;
+  }
+
+  // The sandbox answers only what Mynt signed for a ramp offering pointed at it.
+  const raw = JSON.stringify({ request_id: randomUUID(), environment: "test", input: {}, params: { asset: "USDC", network: "base", fiat_amount: "10.00" } });
+  const unsigned = await fetch(`${base}/ramp-sandbox/v1/onramp_quote`, { method: "POST", body: raw });
+  assert.equal(unsigned.status, 401);
+  const forged = await fetch(`${base}/ramp-sandbox/v1/onramp_quote`, { method: "POST", headers: { "Mynt-Signature": signBody("not-a-ramp-secret", raw) }, body: raw });
+  assert.equal(forged.status, 401);
+  assert.equal((await fetch(`${base}/ramp-sandbox/v1/wire_money`, { method: "POST", body: "{}" })).status, 404);
+
+  // ---- a product with both ramps ----
+  const subs = {};
+  for (const key of KEYS) subs[key] = await ok(innovator, "subscribe_vendor_service", { offering_id: offerings[key] });
+  const SENDS = ["full_name", "bank_account_number", "routing_number"];
+  await publishDefined(ctx, (d) => {
+    d.descriptions.documents = { kfs: "https://bank.example.com/rd/kfs.pdf" };
+    for (const key of KEYS) {
+      d.partner_handoffs.push({ _id: key, name: key, trigger: "account_opened", sends: { type: "object", required: SENDS }, returns: { type: "object", required: ["status"] } });
+      d.connections.push(
+        {
+          _id: `h_${key}`,
+          type: "handoff_to_party",
+          from: { kind: "partner_handoff", id: key },
+          to: { kind: "party", id: subs[key].vendor_party_id },
+          attributes: { sla: "PT1M", consent_purpose: types[key].consent_purpose, channel: "api", vendor_subscription_id: subs[key].subscription_id, service_type: key },
+        },
+        { _id: `s_${key}`, type: "handoff_serves_component", from: { kind: "partner_handoff", id: key }, to: { kind: "component", id: "deposit" } },
+      );
+    }
+    return d;
+  });
+  const contract = (await store.getProduct("everyday-rd")).pins.contract;
+  assert.equal(contract.actions.find((a) => a.id === "onramp_transfer").served_by.accepts_quote_from, "onramp_quote");
+  assert.equal(contract.actions.find((a) => a.id === "offramp_transfer").served_by.accepts_quote_from, "offramp_quote");
+
+  await ok(ctx.client, "set_product_access", { id: "everyday-rd", access_mode: "open", build_terms: { permitted_actions: ["display", "deep_link"], handoff_url: "https://bank.example.com/start" } });
+  const { user: devUser } = await store.createUser("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = await ok(dev, "create_app", { name: "Dollars", description: "In and out of USDC", audience: "Savers", product_ids: ["everyday-rd"] });
+  const key = (await ok(dev, "create_api_key", { app_id: app.id, environment: "sandbox", label: "test" })).key;
+  const api = async (method, path, secret, body) => {
+    const res = await fetch(`${base}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${secret}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: JSON.parse(text), text };
+  };
+  const sess = await api("POST", "/v1/client_sessions", key, { product_ids: ["everyday-rd"], scopes: KEYS, customer_ref: "cust_us_1" });
+  assert.equal(sess.status, 201, sess.text);
+  const device = sess.body.client_secret;
+  const P = "everyday-rd";
+  for (const purpose of ["fiat_onramp", "fiat_offramp"]) assert.equal((await api("POST", "/v1/client/evidence", device, { product_id: P, type: "consent_given", subject: purpose })).status, 201);
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: NAME, routing_number: "021000021" } })).status, 201);
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { bank_account_number: "000123456789" }, source: "secure_field" })).status, 201);
+  const start = (action, extra) => api("POST", `/v1/client/actions/${action}`, device, { product_id: P, ...extra });
+  const settled = async (reference) => {
+    for (let i = 0; i < 100; i++) {
+      const r = await api("GET", `/v1/client/action_runs/${reference}`, device);
+      if (r.body.status !== "pending") return r.body;
+      await new Promise((ok) => setTimeout(ok, 20));
+    }
+    throw new Error("never settled");
+  };
+  const params = (fiat_amount) => ({ params: { asset: "USDC", network: "base", fiat_amount } });
+
+  // ---- on-ramp: $100 in, 99.50 USDC out after a $0.50 fee ----
+  const onQuote = await start("onramp_quote", params("100.00"));
+  assert.equal(onQuote.status, 201, onQuote.text);
+  assert.deepEqual(
+    { fiat: onQuote.body.fiat_amount, usdc: onQuote.body.asset_amount, fee: onQuote.body.fee, currency: onQuote.body.fiat_currency },
+    { fiat: "100.00", usdc: "99.50", fee: "0.50", currency: "USD" },
+  );
+  assert.ok(!onQuote.text.includes("sbq."), "the device never sees the ramp's quote id");
+  const onTransfer = await start("onramp_transfer", { quote: onQuote.body.reference });
+  assert.equal(onTransfer.status, 201, onTransfer.text);
+  assert.equal(onTransfer.body.status, "pending");
+  const onDone = await settled(onTransfer.body.reference);
+  assert.equal(onDone.status, "completed");
+  assert.equal(onDone.transfer_status, "settled");
+
+  // ---- off-ramp: $250 to the bank account, for 251.25 USDC including a $1.25 fee ----
+  const offQuote = await start("offramp_quote", params("250.00"));
+  assert.equal(offQuote.body.asset_amount, "251.25");
+  assert.equal(offQuote.body.fee, "1.25");
+  // An off-ramp quote can't be accepted as an on-ramp, or the other way round.
+  assert.equal((await start("onramp_transfer", { quote: offQuote.body.reference })).body.error, "quote_not_found");
+  const offDone = await settled((await start("offramp_transfer", { quote: offQuote.body.reference })).body.reference);
+  assert.equal(offDone.transfer_status, "settled");
+
+  // ---- a bounced bank transfer and a failed one ----
+  const bounced = await settled((await start("onramp_transfer", { quote: (await start("onramp_quote", params("20.13"))).body.reference })).body.reference);
+  assert.deepEqual([bounced.status, bounced.transfer_status], ["failed", "returned"]);
+  const failed = await settled((await start("offramp_transfer", { quote: (await start("offramp_quote", params("40.66"))).body.reference })).body.reference);
+  assert.deepEqual([failed.status, failed.transfer_status], ["failed", "failed"]);
+
+  // ---- too small to cover the fee ----
+  assert.equal((await start("onramp_quote", params("0.50"))).body.error, "vendor_error");
 });
