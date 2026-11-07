@@ -1,17 +1,17 @@
 {
-  "_id": "usdc-account",
-  "product_name": "USDC Account",
+  "_id": "dollar-holding-account",
+  "product_name": "Dollar Holding Account",
   "product_type": "virtual_currency",
   "descriptions": {
-    "summary": "Buy USDC with US dollars from your bank account, hold it, and cash it back out to your bank account, at a price shown before you accept.",
+    "summary": "Add US dollars from your bank account, keep a dollar balance, and cash it back out to your bank account, with the fee and amount shown before you accept.",
     "key_features": [
-      "Buy USDC with dollars from your bank account; see the price, fee and USDC amount before you accept",
-      "Hold USDC with a regulated custodian; it's in your name, not in your own wallet",
-      "Cash out to your bank account at a price shown before you accept",
+      "Add dollars from your bank account; see the fee and the amount added before you accept",
+      "Keep a dollar balance, held for you by a regulated custodian",
+      "Cash out to your bank account, with the fee and the amount shown before you accept",
       "A fee of 0.5% per transfer, at least $0.50",
-      "USDC is not a bank deposit: it isn't FDIC-insured, and its value can move away from $1"
+      "Your dollar balance isn't a bank deposit and isn't FDIC-insured"
     ],
-    "long": "A buy-and-hold USDC product for US individuals. Dollars come in through the Mynt Ramp (on-ramp) from the customer's own bank account by ACH and become USDC, bought by the product's licensed exchange and held for the customer by its custodian; cashing out runs the other way (off-ramp). Every buy and sell is a firm quote the customer sees and accepts before it expires. This template names no firm: the owner adds who provides each part (the ramp partner for the ramp, a licensed exchange and a custodian) and binds the ramp handoffs to its Mynt Ramp subscriptions. Assumptions: USD only, ACH only, individuals only; the fee mirrors the Mynt Ramp sandbox's (0.5%, at least $0.50); limits are placeholders the owner sets. Regulation: FinCEN money services business registration for the ramp and exchange, OFAC sanctions screening, Regulation E error resolution on the ACH leg, Form 1099-DA reporting of sales; state licences (New York BitLicense, California DFAL and others) apply per state and aren't yet checked per state by Mynt."
+    "long": "A dollar holding account for US individuals, composed directly of a ramp, an exchange and custody (the dollar-account template instead builds on the money-transmission product). Customers add dollars from their own bank account by ACH, keep a dollar balance, and cash out to their bank account; every transfer is a firm quote in dollars (amount, fee, total) that the customer sees and accepts before it expires. Customers only ever see US dollars. For the firm (never shown to customers): the dollars move through the Mynt Ramp, run by a licensed ramp partner that holds funds in transit and transmits money under its own licences; underneath, the balance settles as USDC on Solana, bought by the product's licensed exchange and held by its custodian, with Circle's CCTP V2 for any cross-chain need (components settlement_exchange and settlement_custody). This template names no firm: the owner adds who provides each part (the ramp partner for the ramp, a licensed exchange and a custodian) and binds the ramp handoffs to its Mynt Ramp subscriptions. Assumptions: USD only, ACH only, individuals only; the fee mirrors the Mynt Ramp sandbox's (0.5%, at least $0.50); limits are placeholders the owner sets. Regulation: FinCEN money services business registration for the ramp and exchange, OFAC sanctions screening, Regulation E error resolution on the ACH leg, Form 1099-DA reporting of sales; state licences (New York BitLicense, California DFAL and others) apply per state."
   },
   "owner_entity_id": null,
   "version": 1,
@@ -73,7 +73,7 @@
       "election": "required"
     },
     {
-      "key": "usdc_exchange",
+      "key": "settlement_exchange",
       "country": "us",
       "primitive": "exchange",
       "action": "sale",
@@ -82,14 +82,13 @@
       "terms": {
         "asset": "USDC",
         "networks": [
-          "ethereum",
-          "base",
           "solana"
         ],
         "price_source": "firm_quote",
         "quote_validity": {
           "$term": "quote_validity"
-        }
+        },
+        "cross_chain": "circle_cctp_v2"
       },
       "schedules": [
         {
@@ -105,7 +104,7 @@
       "election": "required"
     },
     {
-      "key": "usdc_custody",
+      "key": "settlement_custody",
       "country": "us",
       "primitive": "custody_settlement",
       "action": "servicing",
@@ -167,7 +166,7 @@
       "algorithm_name": "Onboarding eligibility",
       "description": "Knocks out applicants who can't hold the product: under 18, not US residents, or not verified to full KYC.",
       "purpose": "eligibility",
-      "repository": "models/usdc-onboarding-eligibility",
+      "repository": "models/dollar-account-onboarding-eligibility",
       "version": "1.0.0"
     },
     {
@@ -175,15 +174,15 @@
       "algorithm_name": "Sanctions screening",
       "description": "Screens the customer at onboarding and every transfer against OFAC's lists; a match blocks the transfer for review.",
       "purpose": "fraud_screening",
-      "repository": "models/usdc-sanctions-screening",
+      "repository": "models/dollar-account-sanctions-screening",
       "version": "1.0.0"
     },
     {
       "_id": "ramp_quoting",
       "algorithm_name": "Ramp quoting",
-      "description": "Turns the ramp partner's quote into the customer's price: USDC per dollar, the fee (0.5%, at least $0.50), and the expiry; never longer than quote_validity.",
+      "description": "Turns the ramp partner's price into the customer's dollar quote: the amount, the fee (0.5%, at least $0.50), the total and the expiry, never longer than quote_validity. The USDC settlement amount stays with the firm.",
       "purpose": "fx_quoting",
-      "repository": "models/usdc-ramp-quoting",
+      "repository": "models/dollar-account-ramp-quoting",
       "version": "1.0.0"
     }
   ],
@@ -391,7 +390,7 @@
       ]
     },
     {
-      "_id": "usdc_bought",
+      "_id": "settlement_bought",
       "sequence": 4,
       "actus": "STD",
       "trigger": "linked",
@@ -401,7 +400,7 @@
       ]
     },
     {
-      "_id": "usdc_credited",
+      "_id": "balance_credited",
       "sequence": 5,
       "trigger": "linked",
       "primitives": [
@@ -418,7 +417,7 @@
       ]
     },
     {
-      "_id": "usdc_sold",
+      "_id": "settlement_sold",
       "sequence": 7,
       "actus": "STD",
       "trigger": "linked",
@@ -473,7 +472,7 @@
       },
       "to": {
         "kind": "component",
-        "id": "usdc_exchange"
+        "id": "settlement_exchange"
       },
       "attributes": {
         "amount_rule": "derived_from_source",
@@ -490,11 +489,11 @@
       "type": "settles_into",
       "from": {
         "kind": "component",
-        "id": "usdc_exchange"
+        "id": "settlement_exchange"
       },
       "to": {
         "kind": "component",
-        "id": "usdc_custody"
+        "id": "settlement_custody"
       },
       "attributes": {
         "settlement_cycle": "P0D",
@@ -507,7 +506,7 @@
       "type": "settles_into",
       "from": {
         "kind": "component",
-        "id": "usdc_exchange"
+        "id": "settlement_exchange"
       },
       "to": {
         "kind": "component",
@@ -524,11 +523,11 @@
       "type": "requires",
       "from": {
         "kind": "component",
-        "id": "usdc_custody"
+        "id": "settlement_custody"
       },
       "to": {
         "kind": "component",
-        "id": "usdc_exchange"
+        "id": "settlement_exchange"
       },
       "attributes": {
         "scope": "same_customer",
@@ -764,7 +763,7 @@
       },
       "to": {
         "kind": "component",
-        "id": "usdc_custody"
+        "id": "settlement_custody"
       },
       "attributes": {
         "mode": "default"
@@ -794,7 +793,7 @@
       },
       "to": {
         "kind": "component",
-        "id": "usdc_custody"
+        "id": "settlement_custody"
       }
     },
     {
@@ -822,27 +821,27 @@
       }
     },
     {
-      "_id": "ev_usdc_bought",
+      "_id": "ev_settlement_bought",
       "type": "occurs_on",
       "from": {
         "kind": "lifecycle_event",
-        "id": "usdc_bought"
+        "id": "settlement_bought"
       },
       "to": {
         "kind": "component",
-        "id": "usdc_exchange"
+        "id": "settlement_exchange"
       }
     },
     {
-      "_id": "ev_usdc_credited",
+      "_id": "ev_balance_credited",
       "type": "occurs_on",
       "from": {
         "kind": "lifecycle_event",
-        "id": "usdc_credited"
+        "id": "balance_credited"
       },
       "to": {
         "kind": "component",
-        "id": "usdc_custody"
+        "id": "settlement_custody"
       }
     },
     {
@@ -858,15 +857,15 @@
       }
     },
     {
-      "_id": "ev_usdc_sold",
+      "_id": "ev_settlement_sold",
       "type": "occurs_on",
       "from": {
         "kind": "lifecycle_event",
-        "id": "usdc_sold"
+        "id": "settlement_sold"
       },
       "to": {
         "kind": "component",
-        "id": "usdc_exchange"
+        "id": "settlement_exchange"
       }
     },
     {
@@ -902,7 +901,7 @@
       },
       "to": {
         "kind": "component",
-        "id": "usdc_custody"
+        "id": "settlement_custody"
       }
     },
     {
@@ -914,7 +913,7 @@
       },
       "to": {
         "kind": "lifecycle_event",
-        "id": "usdc_bought"
+        "id": "settlement_bought"
       },
       "attributes": {
         "atomic": true
@@ -925,11 +924,11 @@
       "type": "cascades_to",
       "from": {
         "kind": "lifecycle_event",
-        "id": "usdc_bought"
+        "id": "settlement_bought"
       },
       "to": {
         "kind": "lifecycle_event",
-        "id": "usdc_credited"
+        "id": "balance_credited"
       },
       "attributes": {
         "atomic": true
@@ -940,7 +939,7 @@
       "type": "cascades_to",
       "from": {
         "kind": "lifecycle_event",
-        "id": "usdc_sold"
+        "id": "settlement_sold"
       },
       "to": {
         "kind": "lifecycle_event",
@@ -1098,7 +1097,7 @@
     }
   },
   "projection": {
-    "lead_component": "usdc_exchange",
+    "lead_component": "settlement_exchange",
     "risk_level": "moderate",
     "liquidity": "high",
     "typical_horizon": "short",

@@ -130,6 +130,7 @@ Mynt is an [MCP](https://modelcontextprotocol.io) server; clients show it as `my
 - **Products follow their contracts.** Only the actions a product lists, where they may run; every required document shown word for word; consent before the action that needs it.
 - **Agents never grade their own work.** Verification runs in a clean sandbox, and only its result decides whether a build ships.
 - **No open proxy to Mynt.** On Mynt's hosting, anything an app sends to Mynt's server-side routes carries its key, so apps forward only client-session routes.
+- **Dollars only for customers.** A developer's customers see and send US dollars: amounts, fees, totals, statuses, arrival times and references. Wallets, tokens, chain names, addresses and stablecoin symbols never reach an app; the USDC on Solana underneath is the licensed ramp partner's settlement rail, and Mynt refuses any service type that would show a device otherwise.
 - **Nothing is guessed.** A cost that can't be measured is never shown as $0. Freestyle machine time counts the larger of Freestyle's own figure and wall-clock time.
 
 ## A compliance loop that gets better with every product

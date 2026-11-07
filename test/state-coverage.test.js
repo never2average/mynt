@@ -259,23 +259,23 @@ test("a licence type issued per jurisdiction is held once per state, and covers 
   assert.match(regime.regions[0].components[0].jurisdictions[2].coverage.reason, /not us-ga; no licence in the regulatory model covers us-ga for this yet|needs one covering us-ga/);
 });
 
-test("the USDC template lists its states, and a v2 product is checked in each", async () => {
+test("the dollar holding account template (USDC underneath) lists its states, and a v2 product is checked in each", async () => {
   const ctx = await setup();
   const template = JSON.parse(readFileSync(new URL("../schemas/examples/us/usdc-account.v2.json", import.meta.url), "utf8"));
   assert.deepEqual(template.offered_in, ["us-ny", "us-ca"]);
   const f = await ctx.firm("Ivy");
   const ny = await f.hold("nydfs", "nydfs_bitlicense");
-  const p = { ...product("usdc-account"), name: template.product_name, description: template.descriptions.summary, key_features: template.descriptions.key_features.slice(0, 3) };
+  const p = { ...product("dollar-holding-account"), name: template.product_name, description: template.descriptions.summary, key_features: template.descriptions.key_features.slice(0, 3) };
   assert.equal((await f.call("create_product", p)).isError, false);
   const def = structuredClone(template);
   def.owner_entity_id = f.entity.id;
   for (const c of def.components)
     def.connections.push({ _id: `p_${c.key}`, type: "component_provided_by", from: { kind: "component", id: c.key }, to: { kind: "owner" }, attributes: { business_role: "issuer" } });
-  def.connections.push({ _id: "owner_role", type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "owner" }, attributes: { role: "product_owner", bound_component: "usdc_exchange" } });
+  def.connections.push({ _id: "owner_role", type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "owner" }, attributes: { role: "product_owner", bound_component: "settlement_exchange" } });
   for (const c of def.components)
     for (const [i, id] of ny.people.entries())
       def.connections.push({ _id: `ny_${i}_${c.key}`, type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "party", id }, attributes: { role: "compliance_officer", bound_component: c.key } });
-  const checked = (await f.call("check_product_definition", { product_id: "usdc-account", definition: def })).data;
+  const checked = (await f.call("check_product_definition", { product_id: "dollar-holding-account", definition: def })).data;
   assert.equal(checked.valid, true, JSON.stringify(checked.errors));
   // Every component is blocked in California and nowhere else.
   assert.ok(checked.publish_blockers.length > 0);
@@ -283,7 +283,7 @@ test("the USDC template lists its states, and a v2 product is checked in each", 
   assert.deepEqual(checked.publish_blockers.map((b) => b.key).sort(), def.components.map((c) => c.key).sort());
 
   // A state outside the product's countries is refused.
-  const bad = (await f.call("check_product_definition", { product_id: "usdc-account", definition: { ...def, offered_in: ["us-ny", "in-mh"] } })).data;
+  const bad = (await f.call("check_product_definition", { product_id: "dollar-holding-account", definition: { ...def, offered_in: ["us-ny", "in-mh"] } })).data;
   assert.equal(bad.valid, false);
   assert.match(JSON.stringify(bad.errors), /offered_in: 'in-mh' isn't in any component's country/);
 });

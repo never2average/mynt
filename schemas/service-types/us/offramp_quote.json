@@ -1,9 +1,9 @@
 {
   "region": "US",
   "key": "offramp_quote",
-  "name": "Mynt Ramp: off-ramp quote",
+  "name": "Mynt Ramp: cash out dollars quote",
   "category": "ramp",
-  "description": "A firm price to turn a customer's stablecoin back into US dollars through the Mynt Ramp: fiat_amount dollars to the customer's bank account, for asset_amount of the stablecoin including the fee. The price holds until expires_at; the customer accepts it with offramp_transfer.",
+  "description": "A firm price for a customer cashing out US dollars to their bank account through the Mynt Ramp: amount_usd to the bank, fee_usd, and total_usd taken from their dollar balance (amount plus fee). The price holds until expires_at; the customer accepts it with offramp_transfer. The device sees dollars only. Underneath, the licensed ramp partner receives USDC on Solana from the product's provider: settlement_asset, settlement_network and settlement_amount are partner-side and go only to the innovator, never to the device.",
   "input_schema": {
     "type": "object",
     "required": [
@@ -29,24 +29,16 @@
   "params_schema": {
     "type": "object",
     "required": [
-      "asset",
-      "network",
-      "fiat_amount"
+      "direction",
+      "amount_usd"
     ],
     "properties": {
-      "asset": {
+      "direction": {
         "enum": [
-          "USDC"
+          "out"
         ]
       },
-      "network": {
-        "enum": [
-          "ethereum",
-          "base",
-          "solana"
-        ]
-      },
-      "fiat_amount": {
+      "amount_usd": {
         "type": "string",
         "pattern": "^[0-9]{1,9}(\\.[0-9]{1,2})?$"
       }
@@ -54,21 +46,22 @@
     "additionalProperties": false
   },
   "params_fixture": {
-    "asset": "USDC",
-    "network": "base",
-    "fiat_amount": "100.00"
+    "direction": "out",
+    "amount_usd": "100.00"
   },
   "output_schema": {
     "type": "object",
     "required": [
       "quote_id",
       "expires_at",
-      "fiat_amount",
-      "fiat_currency",
-      "asset",
-      "network",
-      "asset_amount",
-      "fee"
+      "direction",
+      "amount_usd",
+      "fee_usd",
+      "total_usd",
+      "currency",
+      "settlement_asset",
+      "settlement_network",
+      "settlement_amount"
     ],
     "properties": {
       "quote_id": {
@@ -78,24 +71,42 @@
         "type": "string",
         "format": "date-time"
       },
-      "fiat_amount": {
+      "direction": {
+        "enum": [
+          "out"
+        ]
+      },
+      "amount_usd": {
         "type": "string"
       },
-      "fiat_currency": {
+      "fee_usd": {
+        "type": "string"
+      },
+      "total_usd": {
+        "type": "string"
+      },
+      "currency": {
         "enum": [
           "USD"
         ]
       },
-      "asset": {
-        "type": "string"
+      "estimated_arrival": {
+        "type": [
+          "string",
+          "null"
+        ]
       },
-      "network": {
-        "type": "string"
+      "settlement_asset": {
+        "enum": [
+          "USDC"
+        ]
       },
-      "asset_amount": {
-        "type": "string"
+      "settlement_network": {
+        "enum": [
+          "solana"
+        ]
       },
-      "fee": {
+      "settlement_amount": {
         "type": "string"
       }
     },
@@ -110,12 +121,12 @@
   ],
   "client_result": {
     "fields": [
-      "fiat_amount",
-      "fiat_currency",
-      "asset",
-      "network",
-      "asset_amount",
-      "fee"
+      "direction",
+      "amount_usd",
+      "fee_usd",
+      "total_usd",
+      "currency",
+      "estimated_arrival"
     ],
     "redirect": false
   }

@@ -23,6 +23,7 @@ export const WEBHOOK_EVENTS = [
   "request.decided",
   "handoff.completed",
   "handoff.failed",
+  "handoff.reversed",
 ] as const;
 
 export interface SdkProduct {
@@ -268,6 +269,32 @@ export function openApiDocument(name: string, version: string, baseUrl: string, 
           security: [{ clientSession: [] }],
           requestBody: { required: true, content: { "application/json": { schema: ref("EvidenceRequest") } } },
           responses: { "201": { description: "Recorded", content: { "application/json": { schema: ref("EvidenceResult") } } }, ...errors },
+        },
+      },
+      "/client/ramp_links": {
+        post: {
+          operationId: "requestRampLink",
+          summary: "Ask to be linked to the Mynt Ramp's partner (after the ramp's consent), so the customer can move dollars",
+          security: [{ clientSession: [] }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { type: "object", required: ["product_id"], properties: { product_id: { type: "string" } }, additionalProperties: false } } },
+          },
+          responses: {
+            "201": {
+              description: "Requested",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["link_reference", "status"],
+                    properties: { link_reference: { type: "string" }, status: { type: "string", enum: ["requested"] }, consent_purpose: { type: "string" }, expires_at: { type: "string" }, sandbox: { type: "boolean" } },
+                  },
+                },
+              },
+            },
+            ...errors,
+          },
         },
       },
     },

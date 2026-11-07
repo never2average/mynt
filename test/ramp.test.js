@@ -11,8 +11,9 @@ import { definitionFor, publishDefined, setup } from "./v2-helpers.js";
 
 // The Mynt Ramp: one on- and off-ramp for all digital-asset liquidity, offered only by the firm an admin
 // designates (today the licensed ramp partner, which holds funds in transit). A device asks for a quote with
-// params (direction, asset, amount), sees the price and when it expires, and accepts it by Mynt's reference.
-// Mynt sends the vendor its own quote id once, only while unexpired, and only to the vendor that quoted.
+// params (direction and a dollar amount), sees the price in dollars and when it expires, and accepts it by Mynt's
+// reference. Mynt sends the vendor its own quote id once, only while unexpired, and only to the vendor that quoted.
+// Customers see US dollars only: the settlement asset is the partner's, and never reaches a device.
 
 process.env.MYNT_VAULT_KEY ??= randomBytes(32).toString("base64");
 const VENDOR_OPTS = { allowInsecureLoopback: true, timeoutMs: 1000 };
@@ -54,7 +55,7 @@ async function rampPartner() {
       return reply(200, {
         request_id: body.request_id,
         status: "ok",
-        output: { quote_id, expires_at, direction: p.direction, fiat_amount: p.fiat_amount, fiat_currency: "INR", asset: p.asset, asset_amount: "99.50", fee: "0.50" },
+        output: { quote_id, expires_at, direction: p.direction, fiat_amount: p.fiat_amount, fiat_currency: "USD", receive_amount: "99.50", fee: "0.50", settlement_asset: "USDC", settlement_network: "solana" },
       });
     }
     if (req.url.endsWith("/v1/ramp_transfer")) {
@@ -67,7 +68,8 @@ async function rampPartner() {
   return { state, url };
 }
 
-// Service types shaped like the shipped US ramp_quote and ramp_transfer, in this test's region.
+// Service types shaped like the shipped US ramp quote and transfer, in this test's region: dollars for the device,
+// the settlement asset partner-side.
 const RAMP_INPUT = { type: "object", required: ["full_name"], properties: { full_name: { type: "string" } }, additionalProperties: false };
 const QUOTE = {
   region: "IN",
@@ -77,30 +79,31 @@ const QUOTE = {
   input_schema: RAMP_INPUT,
   params_schema: {
     type: "object",
-    required: ["direction", "asset", "fiat_amount"],
-    properties: { direction: { enum: ["on", "off"] }, asset: { enum: ["USDC"] }, fiat_amount: { type: "string", pattern: "^[0-9]{1,9}(\\.[0-9]{1,2})?$" } },
+    required: ["direction", "fiat_amount"],
+    properties: { direction: { enum: ["on", "off"] }, fiat_amount: { type: "string", pattern: "^[0-9]{1,9}(\\.[0-9]{1,2})?$" } },
     additionalProperties: false,
   },
-  params_fixture: { direction: "on", asset: "USDC", fiat_amount: "100.00" },
+  params_fixture: { direction: "on", fiat_amount: "100.00" },
   output_schema: {
     type: "object",
-    required: ["quote_id", "expires_at", "direction", "fiat_amount", "fiat_currency", "asset", "asset_amount", "fee"],
+    required: ["quote_id", "expires_at", "direction", "fiat_amount", "fiat_currency", "receive_amount", "fee", "settlement_asset", "settlement_network"],
     properties: {
       quote_id: { type: "string" },
       expires_at: { type: "string" },
       direction: { enum: ["on", "off"] },
       fiat_amount: { type: "string" },
-      fiat_currency: { type: "string" },
-      asset: { type: "string" },
-      asset_amount: { type: "string" },
+      fiat_currency: { enum: ["USD"] },
+      receive_amount: { type: "string" },
       fee: { type: "string" },
+      settlement_asset: { enum: ["USDC"] },
+      settlement_network: { enum: ["solana"] },
     },
     additionalProperties: false,
   },
   quote: true,
   consent_purpose: "fiat_ramp_transfer",
   vendor_licences: ["rbi_pa"],
-  client_result: { fields: ["direction", "fiat_amount", "fiat_currency", "asset", "asset_amount", "fee"], redirect: false },
+  client_result: { fields: ["direction", "fiat_amount", "fiat_currency", "receive_amount", "fee"], redirect: false },
 };
 const TRANSFER = {
   region: "IN",
@@ -162,6 +165,33 @@ test("the Mynt Ramp: one designated ramp, quotes with params, accepted once whil
   assert.match(errs, /must require 'expires_at'/);
   assert.match(errs, /'quote_id' stays between Mynt and the vendor/);
   assert.match(await errorsOf(admin, "define_service_type", { service_type: TRANSFER }), /accepts: no service type 'ramp_quote'/);
+
+  // ---- dollars only: a service type that would show a device, or take from it, a crypto concept is refused ----
+  const leaky = (fields, props, extra = {}) => ({
+    ...QUOTE,
+    output_schema: { ...QUOTE.output_schema, properties: { ...QUOTE.output_schema.properties, ...props } },
+    client_result: { fields, redirect: false },
+    ...extra,
+  });
+  errs = await errorsOf(admin, "define_service_type", {
+    service_type: leaky(["chain", "wallet_address", "asset", "settlement_network"], { chain: { type: "string" }, wallet_address: { type: "string" }, asset: { const: "USDC" } }),
+  });
+  for (const f of ["chain", "wallet_address", "asset", "settlement_network"]) assert.match(errs, new RegExp(`client_result.fields: '${f}' names a crypto concept`));
+  assert.match(errs, /US dollars only/);
+  errs = await errorsOf(admin, "define_service_type", { service_type: leaky(["unit"], { unit: { enum: ["USD", "USDC"] } }) });
+  assert.match(errs, /'unit' can take the value "USDC", a crypto asset or network/);
+  errs = await errorsOf(admin, "define_service_type", { service_type: leaky(["fiat_currency"], { fiat_currency: { type: "string" } }) });
+  assert.match(errs, /'fiat_currency' must be US dollars only/);
+  errs = await errorsOf(admin, "define_service_type", {
+    service_type: {
+      ...QUOTE,
+      params_schema: { ...QUOTE.params_schema, properties: { ...QUOTE.params_schema.properties, network: { enum: ["solana"] } } },
+    },
+  });
+  assert.match(errs, /params_schema: 'network' names a crypto concept/);
+  errs = await errorsOf(admin, "define_service_type", { service_type: { ...QUOTE, params_schema: { ...QUOTE.params_schema, properties: { ...QUOTE.params_schema.properties, rail: { enum: ["ethereum", "ach"] } } } } });
+  assert.match(errs, /'rail' can take the value "ethereum"/);
+  assert.match(await errorsOf(admin, "define_service_type", { service_type: { ...QUOTE, name: "USDC on-ramp quote" } }), /name: 'USDC on-ramp quote' names a crypto concept/);
   await ok(admin, "define_service_type", { service_type: QUOTE });
   await ok(admin, "define_service_type", { service_type: TRANSFER });
   assert.match(await errorsOf(admin, "define_service_type", { service_type: { ...TRANSFER, key: "ramp_again", accepts: "ramp_transfer" } }), /isn't a quote service type/);
@@ -269,7 +299,7 @@ test("the Mynt Ramp: one designated ramp, quotes with params, accepted once whil
     return secret;
   };
   const start = (secret, action, extra = {}) => api("POST", `/v1/client/actions/${action}`, secret, { product_id: "everyday-rd", ...extra });
-  const PARAMS = { direction: "on", asset: "USDC", fiat_amount: "100.00" };
+  const PARAMS = { direction: "on", fiat_amount: "100.00" };
   const dev1 = await session("cust_1");
 
   // Params are checked before the ramp is called.
@@ -287,7 +317,8 @@ test("the Mynt Ramp: one designated ramp, quotes with params, accepted once whil
   assert.equal(quote.status, 201, quote.text);
   assert.equal(quote.body.status, "completed");
   assert.equal(quote.body.fiat_amount, "100.00");
-  assert.equal(quote.body.asset_amount, "99.50");
+  assert.equal(quote.body.receive_amount, "99.50");
+  assert.doesNotMatch(quote.text, /usdc|solana|settlement|asset|network/i, "dollars only: the settlement asset stays partner-side");
   assert.ok(Date.parse(quote.body.expires_at) > Date.now());
   const issued = `q_${partner.state.n}`; // the partner's own id for this quote
   assert.ok(!quote.text.includes(issued), "the vendor's quote id stays with Mynt");
@@ -432,7 +463,7 @@ test("the Mynt Ramp sandbox: on-ramp and off-ramp end to end, on the shipped US 
   }
 
   // The sandbox answers only what Mynt signed for a ramp offering pointed at it.
-  const raw = JSON.stringify({ request_id: randomUUID(), environment: "test", input: {}, params: { asset: "USDC", network: "base", fiat_amount: "10.00" } });
+  const raw = JSON.stringify({ request_id: randomUUID(), environment: "test", input: {}, params: { direction: "in", amount_usd: "10.00" } });
   const unsigned = await fetch(`${base}/ramp-sandbox/v1/onramp_quote`, { method: "POST", body: raw });
   assert.equal(unsigned.status, 401);
   const forged = await fetch(`${base}/ramp-sandbox/v1/onramp_quote`, { method: "POST", headers: { "Mynt-Signature": signBody("not-a-ramp-secret", raw) }, body: raw });
@@ -463,6 +494,10 @@ test("the Mynt Ramp sandbox: on-ramp and off-ramp end to end, on the shipped US 
   const contract = (await store.getProduct("everyday-rd")).pins.contract;
   assert.equal(contract.actions.find((a) => a.id === "onramp_transfer").served_by.accepts_quote_from, "onramp_quote");
   assert.equal(contract.actions.find((a) => a.id === "offramp_transfer").served_by.accepts_quote_from, "offramp_quote");
+  // Dollars only: what the contract tells developers a device sends and sees names no crypto concept.
+  const deviceSide = JSON.stringify(contract.actions.filter((a) => a.served_by).map((a) => [a.served_by.client_result, a.served_by.params_schema ?? null]));
+  assert.doesNotMatch(deviceSide, /usdc|solana|ethereum|wallet|chain|network|asset|token|address|tx_|_tx|hash/i, deviceSide);
+  assert.deepEqual(contract.actions.find((a) => a.id === "onramp_quote").served_by.client_result.fields, ["direction", "amount_usd", "fee_usd", "total_usd", "currency", "estimated_arrival"]);
 
   await ok(ctx.client, "set_product_access", { id: "everyday-rd", access_mode: "open", build_terms: { permitted_actions: ["display", "deep_link"], handoff_url: "https://bank.example.com/start" } });
   const { user: devUser } = await store.createUser("Dev", ["developer"]);
@@ -485,24 +520,33 @@ test("the Mynt Ramp sandbox: on-ramp and off-ramp end to end, on the shipped US 
   for (const purpose of ["fiat_onramp", "fiat_offramp"]) assert.equal((await api("POST", "/v1/client/evidence", device, { product_id: P, type: "consent_given", subject: purpose })).status, 201);
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: NAME, routing_number: "021000021" } })).status, 201);
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { bank_account_number: "000123456789" }, source: "secure_field" })).status, 201);
-  const start = (action, extra) => api("POST", `/v1/client/actions/${action}`, device, { product_id: P, ...extra });
+  const start = (action, extra) => deviceApi("POST", `/v1/client/actions/${action}`, device, { product_id: P, ...extra });
   const settled = async (reference) => {
     for (let i = 0; i < 100; i++) {
-      const r = await api("GET", `/v1/client/action_runs/${reference}`, device);
+      const r = await deviceApi("GET", `/v1/client/action_runs/${reference}`, device);
       if (r.body.status !== "pending") return r.body;
       await new Promise((ok) => setTimeout(ok, 20));
     }
     throw new Error("never settled");
   };
-  const params = (fiat_amount) => ({ params: { asset: "USDC", network: "base", fiat_amount } });
+  const params = (amount_usd, direction = "in") => ({ params: { direction, amount_usd } });
+  // Every device response, checked for crypto concepts at the end.
+  const seenByDevice = [];
+  const apiSeen = api;
+  const deviceApi = async (...a) => {
+    const r = await apiSeen(...a);
+    seenByDevice.push(r.text);
+    return r;
+  };
 
-  // ---- on-ramp: $100 in, 99.50 USDC out after a $0.50 fee ----
+  // ---- add dollars: $100 from the bank, $99.50 added after a $0.50 fee ----
   const onQuote = await start("onramp_quote", params("100.00"));
   assert.equal(onQuote.status, 201, onQuote.text);
   assert.deepEqual(
-    { fiat: onQuote.body.fiat_amount, usdc: onQuote.body.asset_amount, fee: onQuote.body.fee, currency: onQuote.body.fiat_currency },
-    { fiat: "100.00", usdc: "99.50", fee: "0.50", currency: "USD" },
+    { direction: onQuote.body.direction, amount: onQuote.body.amount_usd, fee: onQuote.body.fee_usd, total: onQuote.body.total_usd, currency: onQuote.body.currency },
+    { direction: "in", amount: "100.00", fee: "0.50", total: "99.50", currency: "USD" },
   );
+  assert.equal((await start("onramp_quote", params("100.00", "out"))).body.error, "invalid_params", "an on-ramp quote is direction in");
   assert.ok(!onQuote.text.includes("sbq."), "the device never sees the ramp's quote id");
   const onTransfer = await start("onramp_transfer", { quote: onQuote.body.reference });
   assert.equal(onTransfer.status, 201, onTransfer.text);
@@ -511,10 +555,10 @@ test("the Mynt Ramp sandbox: on-ramp and off-ramp end to end, on the shipped US 
   assert.equal(onDone.status, "completed");
   assert.equal(onDone.transfer_status, "settled");
 
-  // ---- off-ramp: $250 to the bank account, for 251.25 USDC including a $1.25 fee ----
-  const offQuote = await start("offramp_quote", params("250.00"));
-  assert.equal(offQuote.body.asset_amount, "251.25");
-  assert.equal(offQuote.body.fee, "1.25");
+  // ---- cash out: $250 to the bank account, $251.25 from the balance including a $1.25 fee ----
+  const offQuote = await start("offramp_quote", params("250.00", "out"));
+  assert.equal(offQuote.body.total_usd, "251.25");
+  assert.equal(offQuote.body.fee_usd, "1.25");
   // An off-ramp quote can't be accepted as an on-ramp, or the other way round.
   assert.equal((await start("onramp_transfer", { quote: offQuote.body.reference })).body.error, "quote_not_found");
   const offDone = await settled((await start("offramp_transfer", { quote: offQuote.body.reference })).body.reference);
@@ -523,9 +567,13 @@ test("the Mynt Ramp sandbox: on-ramp and off-ramp end to end, on the shipped US 
   // ---- a bounced bank transfer and a failed one ----
   const bounced = await settled((await start("onramp_transfer", { quote: (await start("onramp_quote", params("20.13"))).body.reference })).body.reference);
   assert.deepEqual([bounced.status, bounced.transfer_status], ["failed", "returned"]);
-  const failed = await settled((await start("offramp_transfer", { quote: (await start("offramp_quote", params("40.66"))).body.reference })).body.reference);
+  const failed = await settled((await start("offramp_transfer", { quote: (await start("offramp_quote", params("40.66", "out"))).body.reference })).body.reference);
   assert.deepEqual([failed.status, failed.transfer_status], ["failed", "failed"]);
 
   // ---- too small to cover the fee ----
   assert.equal((await start("onramp_quote", params("0.50"))).body.error, "vendor_error");
+
+  // ---- dollars only: nothing a device was sent names a crypto asset, network, wallet or transaction ----
+  assert.ok(seenByDevice.length > 10);
+  for (const text of seenByDevice) assert.doesNotMatch(text, /usdc|solana|ethereum|wallet|chain|network|asset|token|address|settlement|_tx|0x[0-9a-f]{8}/i, text);
 });

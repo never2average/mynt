@@ -7,6 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { licenseInForce } from "./access.js";
 import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
+import { cryptoName, cryptoPropertyProblem, cryptoText, cryptoValue, DOLLARS_ONLY_RULE } from "./dollars-only.js";
 import { EntityFactsSchema, partyActive, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
 import { normalizeModel } from "./regulatory.js";
@@ -14,7 +15,8 @@ import { checkWebhookUrl, emitFirmEvent, emitEvent, FIRM_WEBHOOK_EVENTS } from "
 import type { Db } from "./db.js";
 import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
 import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
-import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions } from "./vendor-call.js";
+import { rampCustomerKey, serveRampAdapter } from "./ramp-adapters/index.js";
+import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
 
 // Vendors: firms that offer standard services (identity, KYC, account data, bureau reports, e-sign,
 // e-mandates…) which innovators plug into their products instead of each integrating them.
@@ -34,7 +36,7 @@ import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions } from "
 export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"] as const;
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 // Types of key a firm's key vault holds.
-export const KEY_TYPES = ["vendor_test_credential", "vendor_live_credential"] as const;
+export const KEY_TYPES = ["vendor_test_credential", "vendor_live_credential", "ramp_partner_test_credential", "ramp_partner_live_credential"] as const;
 // The prefill source (POST /v1/client/prefill) a category of service answers.
 export const PREFILL_SOURCE: Partial<Record<ServiceCategory, CaptureMethod>> = {
   kyc: "ckyc",
@@ -120,6 +122,7 @@ export interface Offering {
   sla_notes: string;
   licence_ids: string[];
   requires_credential: boolean;
+  adapter: string | null; // a ramp offering Mynt answers through an adapter in front of the partner's API (src/ramp-adapters/)
   status: OfferingStatus;
   status_note: string | null;
   created_at: string;
@@ -172,6 +175,7 @@ const toOffering = (r: Row): Offering => ({
   sla_notes: r.sla_notes as string,
   licence_ids: (r.licence_ids as string[]) ?? [],
   requires_credential: r.requires_credential as boolean,
+  adapter: (r.adapter as string | null) ?? null,
   status: r.status as OfferingStatus,
   status_note: (r.status_note as string | null) ?? null,
   created_at: iso(r.created_at)!,
@@ -219,6 +223,22 @@ export async function getSubscription(db: Db, id: string): Promise<Subscription 
 async function sealedColumn(db: Db, table: string, column: string, id: string): Promise<string | null> {
   const { rows } = await db.query(`SELECT ${column} AS v FROM ${T}.${table} WHERE id = $1`, [id]);
   return (rows[0]?.v as string | undefined) ?? null;
+}
+
+// One signed call to an offering: over HTTPS to the vendor's endpoint, or, for a ramp offering run through an
+// adapter, answered in-process by the adapter in front of the partner's API (the same signed body, the same checks).
+async function callOffering(
+  store: Store,
+  o: Offering,
+  req: { environment: "test" | "live"; service_type: string; body: unknown; signing_secret: string; credential?: string | null; signature?: string; customer_key?: string | null },
+  opts: VendorCallOptions,
+): Promise<VendorResult> {
+  if (o.adapter) {
+    const payload = JSON.stringify(req.body);
+    return serveRampAdapter(store, o, req.service_type, payload, req.signature ?? signBody(req.signing_secret, payload), req.environment, req.customer_key ?? null, opts);
+  }
+  const base = req.environment === "test" ? o.test_base_url : o.live_base_url!;
+  return callVendor({ base_url: base, service_type: req.service_type, body: req.body, signing_secret: req.signing_secret, credential: req.credential, signature: req.signature }, opts);
 }
 
 // Calls counted per subscription, day and environment; no customer data.
@@ -344,8 +364,14 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
       else if (!scalarSchema(outputProps[f])) errors.push(`client_result.fields: '${f}' must be a plain string, number, boolean or enum property; objects and arrays never go to the device`);
       else if (DATA_DICTIONARY[f] && DATA_DICTIONARY[f].sensitivity !== "public") errors.push(`client_result.fields: '${f}' is customer data (${DATA_DICTIONARY[f].sensitivity}); it goes to the innovator, never the device`);
       else if (t.fills.includes(f)) errors.push(`client_result.fields: '${f}' fills the customer's vault; it goes to the innovator, never the device`);
+      else {
+        const crypto = cryptoPropertyProblem(f, outputProps[f], { usdOnly: t.category === "ramp" });
+        if (crypto) errors.push(`client_result.fields: ${crypto}. ${DOLLARS_ONLY_RULE}`);
+      }
     }
   }
+  // The name reaches devices in error messages ("The <name> service this product uses isn't available").
+  if (cryptoText(t.name)) errors.push(`name: '${t.name}' names a crypto concept, and devices can be shown it. ${DOLLARS_ONLY_RULE}`);
   if (t.params_schema) {
     const ps = t.params_schema;
     if (ps.type !== "object") errors.push("params_schema must be a JSON Schema of type object");
@@ -358,6 +384,8 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
     for (const [name, prop] of Object.entries((ps.properties ?? {}) as Record<string, unknown>)) {
       if (!scalarSchema(prop)) errors.push(`params_schema: '${name}' must be a plain string, number, boolean or enum property`);
       if (DATA_DICTIONARY[name] && DATA_DICTIONARY[name].sensitivity !== "public") errors.push(`params_schema: '${name}' is customer data; it comes from the vault as an input, never from the device as a param`);
+      const crypto = cryptoPropertyProblem(name, prop, { usdOnly: t.category === "ramp" });
+      if (crypto) errors.push(`params_schema: ${crypto}; a device sends only dollar amounts and plain choices. ${DOLLARS_ONLY_RULE}`);
     }
     const needed = Array.isArray(ps.required) ? (ps.required as string[]) : [];
     if (needed.length && !t.params_fixture) errors.push("params_fixture: needed for Mynt's conformance test, because params_schema has required properties");
@@ -515,7 +543,7 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
   });
   for (const [i, input] of t.fixtures.entries()) {
     const body = request(input);
-    const r = await callVendor({ base_url: o.test_base_url, service_type: t.key, body, signing_secret: secret, credential }, opts);
+    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential }, opts);
     const problems: string[] = [];
     if (!r.ok) problems.push(r.error ?? "failed");
     else problems.push(...responseProblems(r.body, body.request_id, t));
@@ -523,10 +551,7 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
   }
   {
     const body = request(t.fixtures[0] ?? {});
-    const r = await callVendor(
-      { base_url: o.test_base_url, service_type: t.key, body, signing_secret: secret, credential, signature: signBody(newSecret(), JSON.stringify(body)) },
-      opts,
-    );
+    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature: signBody(newSecret(), JSON.stringify(body)) }, opts);
     const refused = (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
     cases.push({
       case: "bad_signature_refused",
@@ -540,10 +565,7 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
     // Correctly signed, but ten minutes old: a replay, which must be refused.
     const body = request(t.fixtures[0] ?? {});
     const stale = Math.floor(Date.now() / 1000) - 600;
-    const r = await callVendor(
-      { base_url: o.test_base_url, service_type: t.key, body, signing_secret: secret, credential, signature: signBody(secret, JSON.stringify(body), stale) },
-      opts,
-    );
+    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature: signBody(secret, JSON.stringify(body), stale) }, opts);
     const refused = (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
     cases.push({
       case: "stale_timestamp_refused",
@@ -646,6 +668,9 @@ export async function checkVendorHandoffs(store: Store, entityId: string | null,
     if (o!.status === "suspended") errors.push(`${at}: the offering is suspended`);
     const gap = (await innovatorLicenceGap(store, sub.entity_id, t)) ?? (await vendorLicenceGap(store, o!, t));
     if (gap) errors.push(`${at}: ${gap}`);
+    // A service type stored before the dollars-only rule can't be bound until an admin reloads it.
+    const leak = deviceLeaks(t);
+    if (leak.length) errors.push(`${at}: ${t.key} would show devices ${leak.join(", ")}; an admin redefines it (load_service_types). ${DOLLARS_ONLY_RULE}`);
     const h = handoffs.find((x) => x._id === c.from.id);
     if (h) {
       const sends = ((h.sends as { required?: unknown } | undefined)?.required as unknown[] | undefined) ?? [];
@@ -654,6 +679,17 @@ export async function checkVendorHandoffs(store: Store, entityId: string | null,
     }
   }
   return errors;
+}
+
+// What of a service type a device would be shown or send that breaks the dollars-only rule.
+export function deviceLeaks(t: ServiceType): string[] {
+  const out = (t.output_schema.properties ?? {}) as Record<string, unknown>;
+  const params = (t.params_schema?.properties ?? {}) as Record<string, unknown>;
+  const usdOnly = t.category === "ramp";
+  return [
+    ...(t.client_result?.fields ?? []).filter((f) => cryptoPropertyProblem(f, out[f], { usdOnly })).map((f) => `client_result field '${f}'`),
+    ...Object.entries(params).filter(([n, p]) => cryptoPropertyProblem(n, p, { usdOnly })).map(([n]) => `param '${n}'`),
+  ];
 }
 
 // The bindings a live version runs through vendors, pinned at publish.
@@ -683,7 +719,8 @@ export async function vendorServedActions(store: Store, connections: Conn[]): Pr
     const statuses = new Set<ClientStatus>(["completed", "failed", "pending", ...Object.values(cr?.status?.map ?? {})]);
     out[c.from.id!] = {
       service_type: t.key,
-      client_result: { statuses: CLIENT_STATUSES.filter((s) => statuses.has(s)), fields: cr?.fields ?? [], redirect: cr?.redirect ?? false },
+      // Never a field that names a crypto concept, even on a service type stored before the dollars-only rule.
+      client_result: { statuses: CLIENT_STATUSES.filter((s) => statuses.has(s)), fields: (cr?.fields ?? []).filter((f) => !cryptoName(f)), redirect: cr?.redirect ?? false },
       // Only present when set, so contracts of services without them are unchanged.
       ...(t.params_schema ? { params_schema: t.params_schema } : {}),
       ...(t.quote ? { quote: true as const } : {}),
@@ -745,6 +782,7 @@ async function callBoundVendor(
     allowPending?: boolean;
     params?: Record<string, unknown>; // checked against the service type's params_schema by the caller
     quote_id?: string; // the vendor's own quote id, for a service that accepts a quote
+    customer_key?: string; // Mynt's pseudonymous key for the customer, for a ramp adapter (never sent over the wire)
   },
   opts: VendorCallOptions,
 ): Promise<VendorAnswer> {
@@ -783,7 +821,12 @@ async function callBoundVendor(
     ...(a.quote_id ? { quote: { quote_id: a.quote_id } } : {}),
     consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at },
   };
-  const r = await callVendor({ base_url: base, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null }, opts);
+  const r = await callOffering(
+    store,
+    o,
+    { environment, service_type: t.key, body, signing_secret: secret, credential: sealedCredential ? open(sealedCredential, false) : null, customer_key: a.customer_key ?? null },
+    opts,
+  );
   const problems = r.ok ? responseProblems(r.body, body.request_id, t, a.allowPending) : [r.error ?? "failed"];
   await recordUsage(store.db, sub.id, environment, !problems.length);
   if (problems.length) return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later` };
@@ -846,8 +889,14 @@ const deviceStatus = (t: ServiceType, output: Record<string, unknown>): ClientSt
   const s = t.client_result?.status;
   return (s && s.map[String(output[s.from])]) || "completed";
 };
+// Dollars only: a field naming a crypto concept, or a value that is one (a token symbol, a chain name, an address
+// or a transaction hash), is never sent to a device, whatever the service type says.
 const deviceFields = (t: ServiceType, output: Record<string, unknown>) => ({
-  ...Object.fromEntries((t.client_result?.fields ?? []).filter((f) => f in output && !RESERVED.includes(f) && f !== "quote_id").map((f) => [f, output[f]])),
+  ...Object.fromEntries(
+    (t.client_result?.fields ?? [])
+      .filter((f) => f in output && !RESERVED.includes(f) && f !== "quote_id" && !cryptoName(f) && !cryptoValue(output[f]))
+      .map((f) => [f, output[f]]),
+  ),
   // A quote's device is always told when it stops being acceptable.
   ...(t.quote ? { expires_at: output.expires_at } : {}),
 });
@@ -1068,7 +1117,7 @@ export async function vendorAction(
     answer = await callBoundVendor(
       store,
       bound,
-      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId },
+      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref) },
       opts,
     );
   } catch (e) {
@@ -1156,6 +1205,79 @@ export async function vendorCallback(
   return { status: 200, body: { request_id: run.request_id, status: now[0]?.status } };
 }
 
+// After a ramp transfer completed, the partner reports it reversed (the bank sent the payment back, or it was
+// refunded): the one change allowed after a run ended. The run becomes `reversed`; the device is told it failed
+// (with the new transfer_status, and reversed: true); the innovator gets vendor_action.reversed with the sealed
+// details, and the app a data-free handoff.reversed.
+export async function reverseVendorRun(store: Store, at: { subscription_id: string; request_id: string }, output: Record<string, unknown>): Promise<boolean> {
+  const { rows: found } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [at.request_id, at.subscription_id]);
+  const run = found[0] as RunRow | undefined;
+  if (!run) return false;
+  const sealed = seal(JSON.stringify(output), run.sandbox, true);
+  const shown = { status: "failed", ...(typeof output.transfer_status === "string" ? { transfer_status: output.transfer_status } : {}), reversed: true };
+  const { rows } = await store.db.query(
+    `UPDATE ${T}.vendor_action_runs SET status = 'reversed', client_outcome = client_outcome || $2::jsonb, late_result_sealed = $3 WHERE id = $1 AND status = 'completed' RETURNING id`,
+    [run.id, JSON.stringify(shown), sealed],
+  );
+  const wasCompleted = rows.length > 0;
+  await emitFirmEvent(
+    store,
+    run.entity_id,
+    "vendor_action.reversed",
+    {
+      reference: run.id,
+      request_id: run.request_id,
+      product_id: run.product_id,
+      action: run.action,
+      service_type: run.service_type,
+      subscription_id: run.subscription_id,
+      app_id: run.app_id,
+      customer_ref: run.customer_ref,
+      sandbox: run.sandbox,
+      // false: the run had already ended another way (a late settlement), so the customer was never told it completed
+      run_was_completed: wasCompleted,
+    },
+    run.sandbox,
+    sealed,
+  );
+  if (wasCompleted) await emitEvent(store, [run.app_id], "handoff.reversed", { product_id: run.product_id, reference: run.id, action: run.action, status: "failed", sandbox: run.sandbox }, run.sandbox);
+  return true;
+}
+
+// The partner settled a ramp transfer after Mynt had already ended its run (its window passed, or the customer's
+// consent was withdrawn): the money moved, so it's never dropped. The result is kept sealed on the run and the
+// innovator gets vendor_action.late_settlement to handle it by hand; the device's answer doesn't change.
+export async function lateVendorSettlement(store: Store, at: { subscription_id: string; request_id: string }, output: Record<string, unknown>): Promise<boolean> {
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [at.request_id, at.subscription_id]);
+  const run = rows[0] as (RunRow & { status: string }) | undefined;
+  if (!run) return false;
+  const sealed = seal(JSON.stringify(output), run.sandbox, true);
+  // Once per run: a retried webhook or a later poll finds it recorded and tells no one twice.
+  const { rows: first } = await store.db.query(`UPDATE ${T}.vendor_action_runs SET late_result_sealed = $2 WHERE id = $1 AND late_result_sealed IS NULL RETURNING id`, [run.id, sealed]);
+  if (!first.length) return true;
+  await emitFirmEvent(
+    store,
+    run.entity_id,
+    "vendor_action.late_settlement",
+    {
+      reference: run.id,
+      request_id: run.request_id,
+      product_id: run.product_id,
+      action: run.action,
+      service_type: run.service_type,
+      subscription_id: run.subscription_id,
+      app_id: run.app_id,
+      customer_ref: run.customer_ref,
+      sandbox: run.sandbox,
+      run_status: run.status,
+      needs: "manual_handling",
+    },
+    run.sandbox,
+    sealed,
+  );
+  return true;
+}
+
 // Ends runs that will never finish: a call still "calling" after `callingMinutes` (the process died mid-call) and
 // a "pending" one older than `pendingHours` (VENDOR_PENDING_EXPIRY_HOURS, default 24). Each ends as expired, and
 // the innovator and the app are told (without data).
@@ -1164,7 +1286,11 @@ export async function sweepVendorActionRuns(store: Store, o: { callingMinutes?: 
   const pendingHours = o.pendingHours ?? (Number(process.env.VENDOR_PENDING_EXPIRY_HOURS) || 24);
   const { rows } = await store.db.query(
     `SELECT * FROM ${T}.vendor_action_runs
-     WHERE (status = 'calling' AND created_at < $1::timestamptz - make_interval(mins => $2)) OR (status = 'pending' AND created_at < $1::timestamptz - make_interval(hours => $3))
+     WHERE (status = 'calling' AND created_at < $1::timestamptz - make_interval(mins => $2))
+        OR (status = 'pending' AND created_at < $1::timestamptz - make_interval(hours => $3)
+            -- A ramp transfer an adapter started has its own, longer window (bank transfers take business days): the
+            -- adapter's poller ends it, voiding it at the partner first (src/ramp-adapters/).
+            AND NOT EXISTS (SELECT 1 FROM ${T}.ramp_adapter_transfers t WHERE t.request_id = vendor_action_runs.request_id AND t.subscription_id = vendor_action_runs.subscription_id AND t.status = 'submitted'))
      ORDER BY created_at LIMIT 500`,
     [now.toISOString(), o.callingMinutes ?? 5, pendingHours],
   );

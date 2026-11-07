@@ -10,6 +10,7 @@ import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { masked, open, sandboxPrefill, seal, validateValue, vaultAvailable } from "./vault.js";
 import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import type { VendorCallOptions } from "./vendor-call.js";
+import { requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
 
 // The runtime REST API under /v1, for developers' shipped apps. Authenticated with a per-app key
@@ -416,6 +417,28 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       const outcome = await vendorActionRun(store, run[1], { app_id: app.id, customer_ref: session.customer_ref, sandbox: session.sandbox });
       if (!outcome) throw new ApiError(404, "not_found", "No such action for this customer");
       return send(res, 200, outcome, cors);
+    }
+    // A customer asks, from their own session and with the ramp's consent given here, to be linked to the Mynt
+    // Ramp's partner. The ramp firm completes it (link_ramp_partner_customer) only if the partner's identity for
+    // them matches theirs; it never sees the customer reference.
+    if (path === "/v1/client/ramp_links") {
+      allow("POST");
+      const body = parse(z.object({ product_id: z.string().min(1).max(100) }).strict(), await readJson(req, maxBody));
+      const record = await inSession(body.product_id);
+      const customer = requireCustomer();
+      const bindings = record.pins.vendor_bindings ?? [];
+      if (!bindings.some((b) => session.scopes.includes(b.handoff_id))) throw new ApiError(403, "action_not_in_scope", "This session may start none of the product's ramp actions");
+      const r = await requestRampLink(store, {
+        app_id: app.id,
+        customer_ref: customer,
+        sandbox: session.sandbox,
+        session_id: session.id,
+        product_id: record.product.id,
+        vendor_subscription_ids: bindings.filter((b) => session.scopes.includes(b.handoff_id)).map((b) => b.subscription_id),
+        consented: async (purpose) => !!(await consentFor(record.product.id, purpose)),
+      });
+      if ("error" in r) throw new ApiError(r.error.status, r.error.code, r.error.message);
+      return send(res, 201, { ...r, sandbox: session.sandbox }, cors);
     }
     const journey = path.match(/^\/v1\/client\/journeys\/([a-z][a-z0-9_]*)$/);
     if (journey) {

@@ -11,7 +11,8 @@ import { vendorCallback } from "./vendors.js";
 // (docs/reference.md): signed requests only (a subscription's secret, or an offering's conformance secret), test
 // environment only, and it never moves money.
 //
-// Prices: 1 USDC per US dollar, and a fee of 0.5% (at least $0.50). Transfers answer pending and settle by Mynt's
+// Prices: in US dollars only (the device never sees the USDC leg, which the sandbox settles 1:1), and a fee of 0.5%
+// (at least $0.50). Transfers answer pending and settle by Mynt's
 // own signed callback after RAMP_SANDBOX_SETTLE_MS (default 3000). Amounts ending in .13 come back returned (a
 // bank transfer that bounced) and .66 failed, so apps can test both.
 
@@ -47,6 +48,7 @@ function verified(header: string | undefined, raw: string, candidates: Signer[])
   return candidates.find((c) => timingSafeEqual(createHmac("sha256", c.secret).update(`${m[1]}.${raw}`).digest(), got)) ?? null;
 }
 
+const settleMs = () => Number(process.env.RAMP_SANDBOX_SETTLE_MS ?? 3000);
 const cents = (amount: string) => Math.round(Number(amount) * 100);
 const dollars = (c: number) => (c / 100).toFixed(2);
 const feeCents = (fiat: number) => Math.max(50, Math.round(fiat * 0.005));
@@ -81,25 +83,29 @@ export async function rampSandbox(store: Store, req: IncomingMessage, res: Serve
 
   if (key.endsWith("_quote")) {
     const p = body.params ?? {};
-    const fiat = cents(String(p.fiat_amount));
+    const fiat = cents(String(p.amount_usd));
     if (!Number.isFinite(fiat) || fiat < 100) return error("amount_too_small", "The smallest amount is $1.00");
     const fee = feeCents(fiat);
     const on = key === "onramp_quote";
     if (on && fiat <= fee) return error("amount_too_small", "The amount doesn't cover the fee");
+    // On-ramp: the customer's bank sends amount_usd and their balance gets it less the fee. Off-ramp: their bank
+    // receives amount_usd and their balance gives it plus the fee. The USDC leg is the partner's, 1:1.
+    const total = on ? fiat - fee : fiat + fee;
     return reply(200, {
       request_id: body.request_id,
       status: "ok",
       output: {
         quote_id: quoteId(key, dollars(fiat)),
         expires_at: new Date(Date.now() + QUOTE_SECONDS * 1000).toISOString(),
-        fiat_amount: dollars(fiat),
-        fiat_currency: "USD",
-        asset: String(p.asset),
-        network: String(p.network),
-        // On-ramp: the customer pays the dollars and gets USDC less the fee. Off-ramp: they receive the dollars and sell
-        // that much USDC plus the fee.
-        asset_amount: dollars(on ? fiat - fee : fiat + fee),
-        fee: dollars(fee),
+        direction: on ? "in" : "out",
+        amount_usd: dollars(fiat),
+        fee_usd: dollars(fee),
+        total_usd: dollars(total),
+        currency: "USD",
+        estimated_arrival: new Date(Date.now() + settleMs()).toISOString(),
+        settlement_asset: "USDC",
+        settlement_network: "solana",
+        settlement_amount: dollars(total),
       },
     });
   }
@@ -111,7 +117,6 @@ export async function rampSandbox(store: Store, req: IncomingMessage, res: Serve
   const fiat = fiatOfQuote(qid);
   if (!fiat || !qid.startsWith(`sbq.${key.replace("_transfer", "_quote")}.`)) return error("unknown_quote", "That quote wasn't issued by the sandbox for this service");
   const outcome = fiat.endsWith(".13") ? "returned" : fiat.endsWith(".66") ? "failed" : "settled";
-  const settleMs = Number(process.env.RAMP_SANDBOX_SETTLE_MS ?? 3000);
   const requestId = body.request_id!;
   const subscriptionId = signer.subscription_id!;
   const secret = signer.secret;
@@ -120,9 +125,9 @@ export async function rampSandbox(store: Store, req: IncomingMessage, res: Serve
     const cb = JSON.stringify({
       request_id: requestId,
       status: "ok",
-      output: { transfer_status: outcome, settlement_ref: outcome === "settled" ? `sbx_${randomBytes(6).toString("hex")}` : null },
+      output: { transfer_status: outcome, estimated_arrival: null, settlement_ref: outcome === "settled" ? `sbx_${randomBytes(6).toString("hex")}` : null, settlement_tx: null },
     });
     vendorCallback(store, subscriptionId, cb, signBody(secret, cb)).catch((e) => console.error("ramp sandbox settlement:", (e as Error).message));
-  }, settleMs).unref();
+  }, settleMs()).unref();
   return reply(200, { request_id: body.request_id, status: "ok", output: { transfer_status: "submitted", settlement_ref: null } });
 }

@@ -1,9 +1,9 @@
 {
   "region": "US",
   "key": "onramp_transfer",
-  "name": "Mynt Ramp: on-ramp transfer",
+  "name": "Mynt Ramp: add dollars",
   "category": "ramp",
-  "description": "Accepts an onramp_quote: pulls the dollars from the customer's bank account and settles the stablecoin with the product's liquidity provider. Bank transfers settle later, so it answers pending (submitted) and finishes by callback: settled, failed, or returned when the bank transfer bounces.",
+  "description": "Accepts an onramp_quote: the customer's dollars come in from their bank account. When the partner can't pull the payment, it answers with the US bank account the customer pays into (pay_to_bank_name, pay_to_account_number, pay_to_routing_number) and the reference to put on the payment (pay_to_reference). pay_to_status is active while the account can be paid into. If the payment never arrives in time, the transfer fails and pay_to_status is void once the partner confirmed it voided the payment, or unknown when it couldn't confirm; either way the customer must not pay into that account any more. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the bank transfer bounces. settlement_ref and settlement_tx are the partner's own records and go only to the innovator. total_usd, when the partner reports it, is what was added to the customer's balance, as in the quote.",
   "input_schema": {
     "type": "object",
     "required": [
@@ -40,7 +40,61 @@
           "returned"
         ]
       },
+      "estimated_arrival": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "total_usd": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pay_to_bank_name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pay_to_account_number": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pay_to_routing_number": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pay_to_reference": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pay_to_status": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "enum": [
+          "active",
+          "void",
+          "unknown",
+          null
+        ]
+      },
       "settlement_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "settlement_tx": {
         "type": [
           "string",
           "null"
@@ -67,7 +121,14 @@
       }
     },
     "fields": [
-      "transfer_status"
+      "transfer_status",
+      "estimated_arrival",
+      "total_usd",
+      "pay_to_bank_name",
+      "pay_to_account_number",
+      "pay_to_routing_number",
+      "pay_to_reference",
+      "pay_to_status"
     ],
     "redirect": false
   }
