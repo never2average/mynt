@@ -1,0 +1,74 @@
+{
+  "region": "US",
+  "key": "onramp_transfer",
+  "name": "Mynt Ramp: on-ramp transfer",
+  "category": "ramp",
+  "description": "Accepts an onramp_quote: pulls the dollars from the customer's bank account and settles the stablecoin with the product's liquidity provider. Bank transfers settle later, so it answers pending (submitted) and finishes by callback: settled, failed, or returned when the bank transfer bounces.",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "full_name",
+      "bank_account_number",
+      "routing_number"
+    ],
+    "properties": {
+      "full_name": {
+        "type": "string"
+      },
+      "bank_account_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9,18}$"
+      },
+      "routing_number": {
+        "type": "string",
+        "pattern": "^[0-9]{9}$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "transfer_status"
+    ],
+    "properties": {
+      "transfer_status": {
+        "enum": [
+          "submitted",
+          "settled",
+          "failed",
+          "returned"
+        ]
+      },
+      "settlement_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "additionalProperties": false
+  },
+  "accepts": "onramp_quote",
+  "consent_purpose": "fiat_onramp",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": [
+    "fincen_msb"
+  ],
+  "client_result": {
+    "status": {
+      "from": "transfer_status",
+      "map": {
+        "submitted": "pending",
+        "settled": "completed",
+        "failed": "failed",
+        "returned": "failed"
+      }
+    },
+    "fields": [
+      "transfer_status"
+    ],
+    "redirect": false
+  }
+}

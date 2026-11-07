@@ -41,7 +41,7 @@ export async function backupStatus(file = process.env.MYNT_BACKUP_STATUS_FILE ||
     const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
     return {
       section: { status: missing ? "no status file" : "status file unreadable" },
-      attention: [missing ? "backups: no backup has run on this server (no status file); see Backups in the README" : "backups: the status file can't be read"],
+      attention: [missing ? "backups: no backup has run on this server (no status file); see Backups in docs/reference.md" : "backups: the status file can't be read"],
     };
   }
   const age = s.last_success_at ? (now - Date.parse(s.last_success_at)) / 3_600_000 : null;

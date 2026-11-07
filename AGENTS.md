@@ -10,7 +10,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 
 1. If `AGENTS.local.md` exists next to this file, read it. It holds this machine's and this operator's own rules (git-ignored, never committed) and wins over this file where they differ.
 2. `npm ci && npm run build`. The build must be clean before anything else.
-3. Read the part of `README.md` for the job: the top explains the product, `## Reference` the tools, the runtime API, hosting and deployment.
+3. Read what the job needs: `README.md` explains the product, `docs/reference.md` the tools, the runtime API, hosting and deployment, and `docs/architecture.md` how the parts fit together.
 4. Then do what was asked, using the map below.
 
 ## Where each job lives

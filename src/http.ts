@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
 import type { ClerkAuth } from "./auth.js";
+import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
 import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
 import type { Store, User } from "./store.js";
@@ -87,6 +88,8 @@ async function handle(
   }
   // The runtime API for developers' apps authenticates with app keys, not Clerk.
   if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return runtime(req, res, url);
+  // The Mynt Ramp's sandbox endpoint: answers only requests Mynt signed for a ramp offering pointed at it.
+  if (url.pathname.startsWith(`${RAMP_SANDBOX_PATH}/`)) return rampSandbox(store, req, res, url);
   // Build agents reach Anthropic through Mynt with a per-build token (see agent-proxy.ts).
   if (ctx.builds && url.pathname.startsWith("/agent/")) {
     const builds = ctx.builds;

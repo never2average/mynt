@@ -49,7 +49,7 @@ export const RegulatedProductTypeSchema = z.object({
   description: z.string().default(""),
   type_id: z.string().describe("The Mynt product category this maps to (see list_product_categories)"),
   actions: actions(ProductAction).describe("Every action that can be taken on this product type"),
-  underlying: z.enum(UNDERLYINGS).optional().describe("What it is made of: cash, securities, commodities, real_assets, receivables, risk or data"),
+  underlying: z.enum(UNDERLYINGS).optional().describe("What it is made of: cash, securities, commodities, real_assets, receivables, risk, data or digital_assets"),
   wrapper: z.enum(WRAPPERS).optional().describe("A statutory or tax structure around it: statutory_pension, tax_advantaged or government_scheme"),
 });
 

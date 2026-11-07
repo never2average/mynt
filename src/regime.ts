@@ -36,7 +36,7 @@ export const ComponentSchema = z.object({
     .describe(
       "What is done with it in this product: issuance, sale, purchase, secondary_sale, repackaging, advice, servicing, underwriting or assessment (an independent rating, valuation, index, actuarial certification, audit or accreditation)",
     ),
-  underlying: z.enum(UNDERLYINGS).optional().describe("What it is made of, when the line alone doesn't say: cash, securities, commodities, real_assets, receivables, risk or data"),
+  underlying: z.enum(UNDERLYINGS).optional().describe("What it is made of, when the line alone doesn't say: cash, securities, commodities, real_assets, receivables, risk, data or digital_assets"),
   wrapper: z.enum(WRAPPERS).optional().describe("A statutory or tax structure around it: statutory_pension, tax_advantaged or government_scheme"),
   provider: ProviderSchema.optional().describe("Who provides it. Required on a firm's product; Mynt reference products (no firm) leave it out"),
 });

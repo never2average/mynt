@@ -11,7 +11,7 @@ import { regulatoryModel } from "./seed-regulatory-model.js";
 
 // Mynt's reference catalogue gets v2 definitions: the seed records (published, no firm) were published
 // without one, so they had no developer contract. This test builds, through admin tools only, exactly the
-// regulatory model these definitions point at (the README lists it as the production prerequisites), then
+// regulatory model these definitions point at (docs/reference.md lists it as the production prerequisites), then
 // checks, saves, tests and publishes each schemas/examples/seed/*.v2.json the way
 // scripts/apply-seed-definitions.mjs does, and reads the developer contract each one now has.
 
