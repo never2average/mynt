@@ -1,9 +1,9 @@
 # Mynt architecture
 
-This is how Mynt is put together: the parts, how they talk, what they store, and where the trust boundaries are. The README explains what the product does and lists every tool. This file explains how it works inside, so you can find where a change belongs.
+This is how Mynt is put together: the parts, how they talk, what they store, and where the trust boundaries are. The README explains what the product does, and the reference lists every tool. This file explains how it works inside, so you can find where a change belongs.
 
-- **Product view:** [`README.md`](../README.md), top half.
-- **Tool and API reference:** [`README.md` § Reference](../README.md#reference).
+- **Product view:** [`README.md`](../README.md).
+- **Tool and API reference:** [`docs/reference.md`](reference.md).
 - **Rules for changing it:** [`AGENTS.md`](../AGENTS.md).
 
 ## 1. The system in one picture
@@ -254,7 +254,7 @@ Mynt itself **never holds customer funds or assets**. Money moves in the license
 
 - **Image:** the root `Dockerfile` builds the server; `npm run build` compiles `src/` to `dist/`.
 - **One host:** `deploy/docker-compose.yml` runs the server behind Caddy (automatic HTTPS), joined to a self-hosted Supabase Postgres (`deploy/supabase.override.yml`). `deploy/setup-vm.sh` and `deploy/host/install-host.sh` set a host up; `deploy/host/backup.sh`, `restore.sh` and their systemd timers handle backups and their verification.
-- **Configuration** is environment variables only, listed in `mynt --help` (`src/index.ts`) and the README. Each feature turns on when its keys are present and stays off otherwise.
+- **Configuration** is environment variables only, listed in `mynt --help` (`src/index.ts`) and [`docs/reference.md`](reference.md). Each feature turns on when its keys are present and stays off otherwise.
 - **CI** builds, runs `npm test`, compiles every generated SDK language, and scaffolds, builds and runs the starter app hardened.
 
 ## 12. Where to make a change

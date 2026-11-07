@@ -180,7 +180,7 @@ install -d -m 755 /var/lib/mynt
 if [ ! -e "$ENV_DIR/backup.env" ]; then
   install -m 600 /dev/null "$ENV_DIR/backup.env"
   cat >"$ENV_DIR/backup.env" <<'EOF'
-# Off-site backup copies: see "Backups" in Mynt's README. KEY=value lines; this file is root-only.
+# Off-site backup copies: see "Backups" in Mynt's docs/reference.md. KEY=value lines; this file is root-only.
 # BACKUP_AGE_RECIPIENT=age1...
 # BACKUP_REMOTE=myntbackup:<bucket>/mynt
 # RCLONE_CONFIG_MYNTBACKUP_TYPE=s3

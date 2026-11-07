@@ -92,7 +92,7 @@ test("ops_status: backups (last run, off-site copy, restore test) and what to do
   assert.equal(ok.section.last_success_at, healthy.last_success_at);
   assert.deepEqual(ok.section.last_verify, { at: healthy.verify.at, ok: true, tables: { financial_products: 41, auth: 17 }, error: null });
 
-  assert.deepEqual(await lines(undefined), ["backups: no backup has run on this server (no status file); see Backups in the README"]);
+  assert.deepEqual(await lines(undefined), ["backups: no backup has run on this server (no status file); see Backups in docs/reference.md"]);
   assert.deepEqual(await lines("{not json"), ["backups: the status file can't be read"]);
   assert.deepEqual(await lines({ ...healthy, at: ago(30), last_success_at: ago(30) }), ["backups: the last successful backup was 30h ago"]);
   assert.deepEqual(await lines({ ...healthy, last_success_at: ago(25) }), [], "a day plus some slack is still fresh");
