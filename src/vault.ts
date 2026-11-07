@@ -25,6 +25,12 @@ function durableSandboxKey(): Buffer | null {
   return live ? Buffer.from(hkdfSync("sha256", live, Buffer.alloc(0), "mynt-sandbox-durable-v1", 32)) : null;
 }
 
+// A key for one purpose (e.g. signing the Mynt Ramp's own quotes), derived from MYNT_VAULT_KEY under its own label.
+export function derivedKey(label: string): Buffer | null {
+  const live = keyFor(false);
+  return live ? Buffer.from(hkdfSync("sha256", live, Buffer.alloc(0), `mynt-derived-v1:${label}`, 32)) : null;
+}
+
 // `durable` matters for sandbox only: sealed with the derived key (marked v1s) when MYNT_VAULT_KEY is set.
 export function seal(value: string, sandbox: boolean, durable = false): string {
   const derived = sandbox && durable ? durableSandboxKey() : null;

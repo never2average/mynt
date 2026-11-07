@@ -1,9 +1,9 @@
 {
   "region": "US",
   "key": "offramp_transfer",
-  "name": "Mynt Ramp: off-ramp transfer",
+  "name": "Mynt Ramp: cash out dollars",
   "category": "ramp",
-  "description": "Accepts an offramp_quote: takes the stablecoin from the product's liquidity provider and pays the dollars to the customer's bank account. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the receiving bank sends the payment back.",
+  "description": "Accepts an offramp_quote: pays the dollars to the customer's bank account. It answers pending (submitted) and finishes by callback: settled, failed, or returned when the receiving bank sends the payment back. settlement_ref and settlement_tx are the partner's own records and go only to the innovator.",
   "input_schema": {
     "type": "object",
     "required": [
@@ -40,7 +40,19 @@
           "returned"
         ]
       },
+      "estimated_arrival": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "settlement_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "settlement_tx": {
         "type": [
           "string",
           "null"
@@ -67,7 +79,8 @@
       }
     },
     "fields": [
-      "transfer_status"
+      "transfer_status",
+      "estimated_arrival"
     ],
     "redirect": false
   }

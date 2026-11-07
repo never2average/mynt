@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
 import type { ClerkAuth } from "./auth.js";
+import { RAMP_ADAPTER_WEBHOOK_PATH, rampAdapterWebhook } from "./ramp-adapters/index.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
 import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
@@ -112,6 +113,8 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   if (meta && req.method === "GET" && url.pathname.startsWith("/.well-known/oauth-authorization-server")) {
     return sendJson(res, 200, await meta(), { "Cache-Control": "public, max-age=3600" });
   }
+  // A ramp partner's webhooks, for an offering Mynt runs through an adapter: verified with the partner's own scheme.
+  if (url.pathname.startsWith(RAMP_ADAPTER_WEBHOOK_PATH)) return rampAdapterWebhook(store, req, res, url);
   // The runtime API for developers' apps authenticates with app keys, not Clerk.
   if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return runtime(req, res, url);
   // The Mynt Ramp's sandbox endpoint: answers only requests Mynt signed for a ramp offering pointed at it.

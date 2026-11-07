@@ -138,6 +138,18 @@ export async function callVendor(
 // (so DNS can't be switched under us), no redirects, a time limit and a size cap. Used for vendors' services
 // and for webhooks (anyPort, anyBody).
 export async function safePost(endpoint: string, payload: string, extraHeaders: Record<string, string>, opts: VendorCallOptions = {}): Promise<VendorResult> {
+  return safeRequest("POST", endpoint, payload, extraHeaders, opts);
+}
+
+// The same rules for any method: a partner API behind a ramp adapter is read with GET and written with POST.
+// A null payload sends no body.
+export async function safeRequest(
+  method: "GET" | "POST" | "DELETE",
+  endpoint: string,
+  payload: string | null,
+  extraHeaders: Record<string, string>,
+  opts: VendorCallOptions = {},
+): Promise<VendorResult> {
   const started = Date.now();
   const done = (r: Omit<VendorResult, "latency_ms">): VendorResult => ({ ...r, latency_ms: Date.now() - started });
   let target: Awaited<ReturnType<typeof resolveVendorUrl>>;
@@ -146,7 +158,7 @@ export async function safePost(endpoint: string, payload: string, extraHeaders: 
   } catch (e) {
     return done({ ok: false, http_status: null, body: null, error: `refused: ${(e as Error).message}` });
   }
-  const headers: Record<string, string> = { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(payload)), ...extraHeaders };
+  const headers: Record<string, string> = payload === null ? { ...extraHeaders } : { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(payload)), ...extraHeaders };
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const maxBytes = opts.maxResponseBytes ?? 256 * 1024;
   const { url, address, family: fam } = target;
@@ -161,7 +173,7 @@ export async function safePost(endpoint: string, payload: string, extraHeaders: 
     };
     const r = client.request(
       {
-        method: "POST",
+        method,
         protocol: url.protocol,
         hostname: url.hostname.replace(/^\[|\]$/g, ""),
         port: url.port || undefined,
@@ -207,6 +219,6 @@ export async function safePost(endpoint: string, payload: string, extraHeaders: 
       r.destroy();
     }, timeoutMs);
     r.on("error", () => finish({ ok: false, http_status: null, body: null, error: "connection error" }));
-    r.end(payload);
+    r.end(payload ?? undefined);
   });
 }

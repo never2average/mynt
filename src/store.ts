@@ -1137,6 +1137,37 @@ const TABLES = `
   ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS quote_id text;
   ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS quote_expires_at timestamptz;
   ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS accepted_by uuid;
+  -- A ramp offering Mynt answers through an adapter in front of the partner's own API (src/ramp-adapters/): the
+  -- adapter, its non-secret settings, and the partner's credentials as keys in the ramp firm's key vault.
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter text;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_config jsonb;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_test_key_id uuid REFERENCES financial_products.key_vault(id);
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_live_key_id uuid REFERENCES financial_products.key_vault(id);
+  -- The partner's own ids for a customer (by Mynt's pseudonymous key for app and customer), linked by the ramp firm.
+  CREATE TABLE IF NOT EXISTS financial_products.ramp_partner_links (
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    environment text NOT NULL CHECK (environment IN ('test', 'live')),
+    customer_key text NOT NULL,
+    partner_customer_id text NOT NULL,
+    partner_payout_account_id text,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (entity_id, environment, customer_key)
+  );
+  -- Transfers an adapter started at the partner, so its webhooks and status reads find Mynt's run.
+  CREATE TABLE IF NOT EXISTS financial_products.ramp_adapter_transfers (
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    environment text NOT NULL CHECK (environment IN ('test', 'live')),
+    partner_transfer_id text NOT NULL,
+    subscription_id uuid NOT NULL REFERENCES financial_products.vendor_subscriptions(id),
+    request_id uuid NOT NULL,
+    direction text NOT NULL CHECK (direction IN ('in', 'out')),
+    status text NOT NULL,
+    partner_side jsonb NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (offering_id, environment, partner_transfer_id)
+  );
+  CREATE INDEX IF NOT EXISTS ramp_adapter_transfers_open_idx ON financial_products.ramp_adapter_transfers (updated_at) WHERE status = 'submitted';
   -- Evidence of a vendor-served action's end (status only, never the result).
   ALTER TABLE financial_products.client_evidence DROP CONSTRAINT IF EXISTS client_evidence_type_check;
   ALTER TABLE financial_products.client_evidence ADD CONSTRAINT client_evidence_type_check

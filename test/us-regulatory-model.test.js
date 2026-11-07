@@ -98,10 +98,10 @@ test("the US regulatory model applies, and the Mynt Ramp's service types load ag
   assert.deepEqual([...regionAgain.regulators].sort(), [...region.regulators].sort(), "the region's regulators are merged, not duplicated");
 });
 
-// The USDC account template (schemas/examples/us/usdc-account.v2.json) checks against the US model as it is,
+// The dollar account template (schemas/examples/us/usdc-account.v2.json; USDC on Solana underneath, dollars for customers) checks against the US model as it is,
 // and a firm holding a FinCEN registration and a national trust bank charter can take it, name itself as the
 // provider of each part, and publish it, with the regime Mynt computes from the US model.
-test("the US USDC account template checks, and a licensed firm publishes it on the US model", async () => {
+test("the US dollar account template checks, and a licensed firm publishes it on the US model", async () => {
   const pg = new PGlite();
   const store = await Store.open({ query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() }, CATALOG);
   const connect = async (u) => {
@@ -152,7 +152,7 @@ test("the US USDC account template checks, and a licensed firm publishes it on t
   assert.equal(officer.isError, false, JSON.stringify(officer.data));
 
   const product = {
-    id: "usdc-account",
+    id: "dollar-account",
     name: template.product_name,
     product_line: "exchange",
     category: "virtual_currency",
@@ -171,36 +171,42 @@ test("the US USDC account template checks, and a licensed firm publishes it on t
     d.owner_entity_id = entity.id;
     for (const [component, l] of Object.entries(licences))
       d.connections.push({ _id: `p_${component}`, type: "component_provided_by", from: { kind: "component", id: component }, to: { kind: "owner", licence_id: l.id }, attributes: { business_role: "issuer" } });
-    d.connections.push({ _id: "owner_role", type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "owner" }, attributes: { role: "product_owner", bound_component: "usdc_exchange" } });
-    for (const component of ["ramp", "usdc_exchange"])
+    d.connections.push({ _id: "owner_role", type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "owner" }, attributes: { role: "product_owner", bound_component: "settlement_exchange" } });
+    for (const component of ["ramp", "settlement_exchange"])
       d.connections.push({ _id: `aml_officer_${component}`, type: "party_plays_role", from: { kind: "product", id: "self" }, to: { kind: "party", id: officer.data.id }, attributes: { role: "compliance_officer", bound_component: component } });
     return d;
   };
 
   // With only a FinCEN registration, custody isn't covered: a money services business isn't a custodian.
-  const partial = own(structuredClone(template), { ramp: msb, usdc_exchange: msb, usdc_custody: msb });
-  const refused = await firm("check_product_definition", { product_id: "usdc-account", definition: partial });
-  assert.ok(JSON.stringify(refused.data).match(/usdc_custody/), JSON.stringify(refused.data));
+  const partial = own(structuredClone(template), { ramp: msb, settlement_exchange: msb, settlement_custody: msb });
+  const refused = await firm("check_product_definition", { product_id: "dollar-account", definition: partial });
+  assert.ok(JSON.stringify(refused.data).match(/settlement_custody/), JSON.stringify(refused.data));
 
   // With a national trust bank charter for custody, it publishes.
   const trust = await licence("occ", "occ_national_trust_bank");
-  const def = own(structuredClone(template), { ramp: msb, usdc_exchange: msb, usdc_custody: trust });
-  const ready = await firm("check_product_definition", { product_id: "usdc-account", definition: def });
+  const def = own(structuredClone(template), { ramp: msb, settlement_exchange: msb, settlement_custody: trust });
+  const ready = await firm("check_product_definition", { product_id: "dollar-account", definition: def });
   assert.equal(ready.data.valid, true, JSON.stringify(ready.data));
   assert.deepEqual(ready.data.publish_blockers, [], JSON.stringify(ready.data.publish_blockers));
-  assert.equal((await firm("set_product_definition", { product_id: "usdc-account", definition: def })).isError, false);
-  const tested = await firm("test_product", { id: "usdc-account" });
+  assert.equal((await firm("set_product_definition", { product_id: "dollar-account", definition: def })).isError, false);
+  const tested = await firm("test_product", { id: "dollar-account" });
   assert.equal(tested.data.passed, true, JSON.stringify(tested.data.checks?.filter((c) => c.status === "fail")));
-  const published = await firm("publish_product", { id: "usdc-account" });
+  const published = await firm("publish_product", { id: "dollar-account" });
   assert.equal(published.isError, false, JSON.stringify(published.data));
 
   // Its regime names FinCEN for the ramp and the exchange, and the OCC for custody.
-  const regime = (await firm("get_product_regime", { product_id: "usdc-account" })).data;
+  const regime = (await firm("get_product_regime", { product_id: "dollar-account" })).data;
   const comps = Object.fromEntries(regime.regions.find((r) => r.region === "US").components.map((c) => [c.key, c]));
   assert.ok(JSON.stringify(comps.ramp.supervised_by).includes("fincen"));
-  assert.ok(JSON.stringify(comps.usdc_exchange.supervised_by).includes("fincen"));
-  assert.ok(JSON.stringify(comps.usdc_custody.supervised_by).includes("occ"));
-  const contract = (await firm("get_developer_contract", { product_id: "usdc-account" })).data;
+  assert.ok(JSON.stringify(comps.settlement_exchange.supervised_by).includes("fincen"));
+  assert.ok(JSON.stringify(comps.settlement_custody.supervised_by).includes("occ"));
+  const contract = (await firm("get_developer_contract", { product_id: "dollar-account" })).data;
   assert.ok(contract.actions.some((a) => a.id === "onramp_accepted"), "customer-triggered events become actions developers can call");
   assert.ok(contract.actions.some((a) => a.id === "offramp_accepted"));
+  // Dollars only: what customers and developers' apps see (the name, the customer copy, the whole contract) names
+  // no crypto asset, network or wallet; USDC on Solana stays in the components, for the regulatory model.
+  const customerFacing = JSON.stringify({ name: template.product_name, summary: template.descriptions.summary, features: template.descriptions.key_features, contract });
+  assert.doesNotMatch(customerFacing, /usdc|solana|ethereum|stablecoin|crypto|wallet|token|blockchain|chain/i, customerFacing);
+  assert.equal(template.components.find((c) => c.key === "settlement_exchange").underlying, "digital_assets", "the regulatory model still sees digital assets");
+  assert.equal(template.components.find((c) => c.key === "settlement_exchange").terms.asset, "USDC");
 });

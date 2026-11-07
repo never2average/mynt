@@ -18,6 +18,7 @@ import { connectPostgres } from "./db.js";
 import { createMcpHttpServer } from "./http.js";
 import { GitHubApp } from "./github.js";
 import { startWebhookWorker } from "./runtime.js";
+import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
 import { createServer } from "./server.js";
 import { ROLES, Store, type Role } from "./store.js";
@@ -149,7 +150,11 @@ if (values.help) {
   // Products without a stored regime summary and take rate yet get one (in the background; see derived.ts).
   void recomputeDerived(store, { missing_only: true }).then((r) => r.recomputed && console.error(`derived values computed for ${r.recomputed} products`));
   // Vendor-served actions that will never finish (a call cut short, a customer who never came back) end as expired.
-  const vendorRuns = setInterval(() => sweepVendorActionRuns(store).catch((e) => console.error("vendor action sweep:", (e as Error).message)), 60 * 1000);
+  // Ramp transfers run through an adapter whose webhook hasn't come are read back from the partner.
+  const vendorRuns = setInterval(() => {
+    sweepVendorActionRuns(store).catch((e) => console.error("vendor action sweep:", (e as Error).message));
+    pollRampAdapterTransfers(store).catch((e) => console.error("ramp adapter poll:", (e as Error).message));
+  }, 60 * 1000);
   vendorRuns.unref();
   process.on("SIGTERM", () => {
     clearInterval(drift);

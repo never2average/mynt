@@ -1,0 +1,356 @@
+import { after, test } from "node:test";
+import assert from "node:assert/strict";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import http from "node:http";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createMcpHttpServer } from "../dist/http.js";
+import { pollRampAdapterTransfers } from "../dist/ramp-adapters/index.js";
+import { bridgeStatus } from "../dist/ramp-adapters/bridge.js";
+import { createServer } from "../dist/server.js";
+import { generateSdk } from "../dist/sdk.js";
+import { publishDefined, setup } from "./v2-helpers.js";
+
+// The Mynt Ramp through an adapter: the licensed partner keeps its own API (here a local fake of Bridge's, with
+// only the documented endpoints), and Mynt answers its own wire contract in front of it. The adapter must pass
+// Mynt's ramp conformance, quotes are Mynt's (Bridge has none that lock a price), and the device sees dollars only.
+// No real network calls: the fake runs on 127.0.0.1.
+
+process.env.MYNT_VAULT_KEY ??= randomBytes(32).toString("base64");
+process.env.PUBLIC_URL ??= "https://mynt.test";
+const VENDOR_OPTS = { allowInsecureLoopback: true, timeoutMs: 2000 };
+const API_KEY = `sk-test-${randomBytes(12).toString("hex")}`;
+const SETTLEMENT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const NAME = "Avery Stone";
+
+const servers = [];
+after(() => servers.forEach((s) => s.close()));
+const listen = async (handler) => {
+  const server = http.createServer(handler).listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  servers.push({ close: () => (server.closeAllConnections(), server.close()) });
+  return `http://127.0.0.1:${server.address().port}`;
+};
+
+// A fake of Bridge's API: Api-Key auth, Idempotency-Key on POST, transfers and their states.
+async function fakeBridge() {
+  const state = { calls: [], transfers: new Map(), byIdempotency: new Map(), n: 0 };
+  const url = await listen(async (req, res) => {
+    let raw = "";
+    for await (const c of req) raw += c;
+    const reply = (code, body) => {
+      res.writeHead(code, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    const call = { method: req.method, path: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null };
+    state.calls.push(call);
+    if (req.headers["api-key"] !== API_KEY) return reply(401, { code: "unauthorized", message: "bad key" });
+    if (req.method === "GET" && req.url === "/v0/customers?limit=1") return reply(200, { count: 0, data: [] });
+    if (req.method === "POST" && req.url === "/v0/transfers") {
+      const key = req.headers["idempotency-key"];
+      if (!key) return reply(400, { code: "invalid_parameters", message: "Idempotency-Key required" });
+      if (state.byIdempotency.has(key)) return reply(201, state.transfers.get(state.byIdempotency.get(key)));
+      const b = call.body;
+      if (!b.on_behalf_of || !b.source || !b.destination) return reply(400, { code: "invalid_parameters", message: "missing" });
+      const id = `tr_${++state.n}`;
+      const on = b.source.payment_rail === "ach_push";
+      const t = {
+        id,
+        state: "awaiting_funds",
+        amount: b.amount,
+        currency: "usd",
+        on_behalf_of: b.on_behalf_of,
+        developer_fee: b.developer_fee,
+        source: b.source,
+        destination: b.destination,
+        source_deposit_instructions: on
+          ? { payment_rail: "ach_push", amount: b.amount, currency: "usd", deposit_message: "BRGDEPOSIT7Q2", bank_name: "Lead Bank", bank_routing_number: "101019644", bank_account_number: "215268129123" }
+          : { payment_rail: "solana", amount: b.amount, currency: "usdc", to_address: "9wFFyRfZBsuAha4YcuxcXLKwMxJR43S7fPfQLusDBzvT" },
+        receipt: { initial_amount: b.amount, developer_fee: b.developer_fee, exchange_fee: "0.0", final_amount: b.amount },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      state.transfers.set(id, t);
+      state.byIdempotency.set(key, id);
+      return reply(201, t);
+    }
+    const one = /^\/v0\/transfers\/([a-z0-9_]+)$/.exec(req.url);
+    if (req.method === "GET" && one) return state.transfers.has(one[1]) ? reply(200, state.transfers.get(one[1])) : reply(404, { code: "resource_not_found", message: "no" });
+    reply(404, { code: "not_found", message: "no route" });
+  });
+  return { state, url };
+}
+
+test("Bridge's transfer states map to Mynt's", () => {
+  for (const s of ["awaiting_funds", "funds_received", "payment_submitted", "in_review"]) assert.equal(bridgeStatus(s), "submitted");
+  assert.equal(bridgeStatus("payment_processed"), "settled");
+  for (const s of ["returned", "refunded", "refund_in_flight"]) assert.equal(bridgeStatus(s), "returned");
+  for (const s of ["undeliverable", "canceled", "refund_failed"]) assert.equal(bridgeStatus(s), "failed");
+  assert.equal(bridgeStatus("something_new"), null);
+});
+
+test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, accept, webhooks and status, dollars only", async () => {
+  // Nothing written to the console during the run may carry the partner's credential.
+  const logged = [];
+  const orig = { log: console.log, error: console.error, warn: console.warn };
+  for (const k of Object.keys(orig))
+    console[k] = (...a) => {
+      logged.push(a.map(String).join(" "));
+      orig[k](...a);
+    };
+  after(() => Object.assign(console, orig));
+
+  const ctx = await setup();
+  const { store, call } = ctx;
+  const connect = async (user) => {
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    await createServer(store, user, { vendors: VENDOR_OPTS }).connect(s);
+    const client = new Client({ name: "ramp-adapter", version: "0" });
+    await client.connect(c);
+    return client;
+  };
+  const toolTexts = [];
+  const ok = async (client, name, args = {}) => {
+    const r = await call(client, name, args);
+    toolTexts.push(JSON.stringify(r.data));
+    assert.equal(r.isError, false, `${name}: ${JSON.stringify(r.data)}`);
+    return r.data;
+  };
+  const { user: adminUser } = await store.createUser("Root", ["admin"]);
+  const admin = await connect(adminUser);
+  const innovator = await connect(ctx.user);
+  const bridge = await fakeBridge();
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const PEM = publicKey.export({ type: "spki", format: "pem" });
+
+  const srv = createMcpHttpServer(store, null, { vendors: VENDOR_OPTS }, { publicUrl: "https://mynt.test", vendors: VENDOR_OPTS }).listen(0, "127.0.0.1");
+  await new Promise((r) => srv.once("listening", r));
+  servers.push({ close: () => (srv.closeAllConnections(), srv.close()) });
+  const base = `http://127.0.0.1:${srv.address().port}`;
+
+  const grc = {
+    registers: { obligations: [], reporting_disclosure_filings: [], risks: [], controls: [], inspection_events: [] },
+    repositories: { regulatory_communications: [], enforcement_actions: [], press_releases: [], policies: [], risk_models: [], inspection_history: [] },
+    allowed_product_types: [],
+    allowed_customer_segments: [],
+    mandatory_stakeholders: { internal: [], external: [] },
+  };
+  await ok(admin, "define_regulator", {
+    region: "US",
+    regulator: { id: "fincen", name: "Financial Crimes Enforcement Network", short_name: "FinCEN", scope: { product_types: [], customer_personas: [] }, license_types: [{ _id: "fincen_msb", name: "Money services business", grc }] },
+  });
+  const KEYS = ["onramp_quote", "onramp_transfer", "offramp_quote", "offramp_transfer"];
+  await ok(admin, "load_service_types", { region: "US" });
+
+  // ---- the ramp partner's firm, designated; its offerings answered through the Bridge adapter ----
+  await ok(admin, "invite_user", { email: "ops@bridge.example", roles: ["vendor"] });
+  const firm = await ok(admin, "register_firm", { name: "Bridge", legal_form: "company_private", incorporation: { country: "us" }, regions: ["US"] });
+  const vu = await store.upsertClerkUser("clerk_bridge", "ops@bridge.example", "Bridge ops", (await store.getInvite("ops@bridge.example")).roles);
+  await ok(admin, "add_entity_member", { email: "ops@bridge.example", entity_id: firm.id });
+  const partner = await connect(vu);
+  const lic = await ok(partner, "register_license", { region: "US", regulator_id: "fincen", license_id: "fincen_msb", registration_number: "MSB-2" });
+  await ok(admin, "review_license", { license_record_id: lic.id, decision: "verified", note: "ok" });
+  await ok(admin, "set_mynt_ramp", { entity_id: firm.id });
+  const offerings = {};
+  for (const key of KEYS) {
+    const o = await ok(partner, "create_vendor_offering", { region: "US", service_type: key, name: `Mynt Ramp ${key}`, price: { amount: 0, currency: "USD" }, test_base_url: bridge.url, licence_ids: [lic.id] });
+    offerings[key] = o.id;
+  }
+
+  // Settings are checked; the credential is sealed and never shown again.
+  const bad = await call(partner, "set_ramp_adapter", { offering_id: offerings.onramp_quote, adapter: "bridge", config: { settlement_address: "0xnot-solana", colour: "red" }, test_credential: API_KEY });
+  assert.equal(bad.isError, true);
+  assert.match(JSON.stringify(bad.data), /settlement_address: a Solana address/);
+  assert.match(JSON.stringify(bad.data), /'colour' isn't a setting/);
+  const config = { settlement_address: SETTLEMENT, quote_seconds: "120", test_webhook_public_key: PEM };
+  for (const key of KEYS) {
+    const set = await ok(partner, "set_ramp_adapter", { offering_id: offerings[key], adapter: "bridge", config, test_credential: API_KEY });
+    assert.equal(set.status, "draft");
+    assert.ok(set.credentials.test.key_id);
+    assert.match(set.webhook_urls.test, new RegExp(`/v1/ramp-adapters/${offerings[key]}/webhook/test$`));
+  }
+
+  // ---- Mynt's own conformance, against the adapter in front of the fake ----
+  for (const key of KEYS) {
+    const run = await ok(partner, "run_conformance", { offering_id: offerings[key] });
+    assert.equal(run.passed, true, `${key}: ${JSON.stringify(run.cases)}`);
+    assert.deepEqual(run.cases.map((c) => c.case), ["fixture_1", "bad_signature_refused", "stale_timestamp_refused"]);
+    await ok(partner, "update_vendor_offering", { offering_id: offerings[key], listed: true });
+  }
+  assert.ok(bridge.state.calls.some((c) => c.path === "/v0/customers?limit=1" && c.headers["api-key"] === API_KEY), "conformance probes the partner with the credential");
+  assert.ok(!bridge.state.calls.some((c) => c.method === "POST"), "conformance moves no money");
+
+  // A wrong credential fails conformance (the partner refuses it), and the offering goes back to draft.
+  const spare = await ok(partner, "create_vendor_offering", { region: "US", service_type: "onramp_quote", name: "spare", price: { amount: 0, currency: "USD" }, test_base_url: bridge.url, licence_ids: [lic.id] });
+  await ok(partner, "set_ramp_adapter", { offering_id: spare.id, adapter: "bridge", config, test_credential: "sk-test-wrong" });
+  const refused = await ok(partner, "run_conformance", { offering_id: spare.id });
+  assert.equal(refused.passed, false);
+  assert.match(JSON.stringify(refused.cases[0].problems), /error/);
+
+  // ---- a product with both ramps, a developer's app and a customer's device ----
+  const subs = {};
+  for (const key of KEYS) subs[key] = await ok(innovator, "subscribe_vendor_service", { offering_id: offerings[key] });
+  const types = Object.fromEntries((await ok(admin, "list_service_types", { region: "US" })).map((t) => [t.key, t]));
+  const SENDS = ["full_name", "bank_account_number", "routing_number"];
+  await publishDefined(ctx, (d) => {
+    d.descriptions.documents = { kfs: "https://bank.example.com/rd/kfs.pdf" };
+    for (const key of KEYS) {
+      d.partner_handoffs.push({ _id: key, name: key, trigger: "account_opened", sends: { type: "object", required: SENDS }, returns: { type: "object", required: ["status"] } });
+      d.connections.push(
+        {
+          _id: `h_${key}`,
+          type: "handoff_to_party",
+          from: { kind: "partner_handoff", id: key },
+          to: { kind: "party", id: subs[key].vendor_party_id },
+          attributes: { sla: "PT1M", consent_purpose: types[key].consent_purpose, channel: "api", vendor_subscription_id: subs[key].subscription_id, service_type: key },
+        },
+        { _id: `s_${key}`, type: "handoff_serves_component", from: { kind: "partner_handoff", id: key }, to: { kind: "component", id: "deposit" } },
+      );
+    }
+    return d;
+  });
+  const contract = (await store.getProduct("everyday-rd")).pins.contract;
+  assert.doesNotMatch(JSON.stringify(contract), new RegExp(`${API_KEY}|${SETTLEMENT}|bridge`, "i"), "the contract names neither the partner, its key nor the settlement address");
+  await ok(ctx.client, "set_product_access", { id: "everyday-rd", access_mode: "open", build_terms: { permitted_actions: ["display", "deep_link"], handoff_url: "https://bank.example.com/start" } });
+  const { user: devUser } = await store.createUser("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = await ok(dev, "create_app", { name: "Dollars", description: "Add and cash out dollars", audience: "Savers", product_ids: ["everyday-rd"] });
+  const appKey = (await ok(dev, "create_api_key", { app_id: app.id, environment: "sandbox", label: "test" })).key;
+  const seenByDevice = [];
+  const api = async (method, path, secret, body) => {
+    const res = await fetch(`${base}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${secret}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    seenByDevice.push(text);
+    return { status: res.status, body: JSON.parse(text), text };
+  };
+  const sess = await api("POST", "/v1/client_sessions", appKey, { product_ids: ["everyday-rd"], scopes: KEYS, customer_ref: "cust_b1" });
+  assert.equal(sess.status, 201, sess.text);
+  const device = sess.body.client_secret;
+  const P = "everyday-rd";
+  for (const purpose of ["fiat_onramp", "fiat_offramp"]) assert.equal((await api("POST", "/v1/client/evidence", device, { product_id: P, type: "consent_given", subject: purpose })).status, 201);
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: NAME, routing_number: "021000021" } })).status, 201);
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { bank_account_number: "000123456789" }, source: "secure_field" })).status, 201);
+  const start = (action, extra) => api("POST", `/v1/client/actions/${action}`, device, { product_id: P, ...extra });
+  const run = (reference) => api("GET", `/v1/client/action_runs/${reference}`, device);
+
+  // ---- a quote is Mynt's: dollars, a fee, a total and a validity Mynt sets ----
+  const q1 = await start("onramp_quote", { params: { direction: "in", amount_usd: "100.00" } });
+  assert.equal(q1.status, 201, q1.text);
+  assert.deepEqual(
+    { amount: q1.body.amount_usd, fee: q1.body.fee_usd, total: q1.body.total_usd, currency: q1.body.currency },
+    { amount: "100.00", fee: "0.50", total: "99.50", currency: "USD" },
+  );
+  const validity = Date.parse(q1.body.expires_at) - Date.now();
+  assert.ok(validity > 100_000 && validity <= 120_000, `quote_seconds sets the validity (${validity} ms)`);
+  assert.ok(!q1.text.includes("maq."), "the device never sees the quote id");
+
+  // Before the ramp firm links the customer to the partner, a transfer can't start; the quote stays usable.
+  const early = await start("onramp_transfer", { quote: q1.body.reference });
+  assert.equal(early.status, 502, early.text);
+  assert.equal(early.body.error, "vendor_error");
+  assert.ok(!bridge.state.calls.some((c) => c.method === "POST"));
+  await ok(partner, "link_ramp_partner_customer", { app_id: app.id, customer_ref: "cust_b1", environment: "test", partner_customer_id: "cust_bridge_1", partner_payout_account_id: "ea_bridge_1" });
+  const links = (await store.db.query("SELECT customer_key FROM financial_products.ramp_partner_links")).rows;
+  assert.ok(links.length === 1 && !links[0].customer_key.includes("cust_b1"), "filed under a pseudonymous key");
+
+  // ---- add dollars: the customer pushes $100 to the deposit account; the USDC goes to the ramp's address ----
+  const t1 = await start("onramp_transfer", { quote: q1.body.reference });
+  assert.equal(t1.status, 201, t1.text);
+  assert.equal(t1.body.status, "pending");
+  assert.deepEqual(
+    [t1.body.transfer_status, t1.body.pay_to_bank_name, t1.body.pay_to_account_number, t1.body.pay_to_routing_number, t1.body.pay_to_reference],
+    ["submitted", "Lead Bank", "215268129123", "101019644", "BRGDEPOSIT7Q2"],
+  );
+  const post1 = bridge.state.calls.filter((c) => c.method === "POST" && c.path === "/v0/transfers");
+  assert.equal(post1.length, 1);
+  assert.deepEqual(post1[0].body, {
+    on_behalf_of: "cust_bridge_1",
+    amount: "100.00",
+    developer_fee: "0.50",
+    source: { payment_rail: "ach_push", currency: "usd" },
+    destination: { payment_rail: "solana", currency: "usdc", to_address: SETTLEMENT },
+  });
+  assert.match(post1[0].headers["idempotency-key"], /^[0-9a-f]{48}$/);
+  assert.equal(post1[0].headers.authorization, undefined, "the credential goes only as Api-Key");
+  assert.equal((await start("onramp_transfer", { quote: q1.body.reference })).body.error, "quote_used");
+
+  // Bridge's webhook: signed with its key, it settles the run; a forged or stale one is refused.
+  const hook = (offering, transfer, { key = privateKey, t = Date.now() } = {}) => {
+    const raw = JSON.stringify({ api_version: "v0", event_id: `wh_${randomBytes(4).toString("hex")}`, event_category: "transfer", event_type: "transfer.updated.status_transitioned", event_object: transfer });
+    const digest = createHash("sha256").update(`${t}.${raw}`).digest();
+    const sig = sign("sha256", digest, key).toString("base64");
+    return fetch(`${base}/v1/ramp-adapters/${offering}/webhook/test`, { method: "POST", headers: { "Content-Type": "application/json", "X-Webhook-Signature": `t=${t},v0=${sig}` }, body: raw });
+  };
+  const tr1 = bridge.state.transfers.get("tr_1");
+  Object.assign(tr1, { state: "payment_processed", receipt: { ...tr1.receipt, destination_tx_hash: "5VERYLongSolanaSignature1111111111111111111111111111111111111111" } });
+  const { privateKey: other } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  assert.equal((await hook(offerings.onramp_transfer, tr1, { key: other })).status, 400, "a forged webhook is refused");
+  assert.equal((await hook(offerings.onramp_transfer, tr1, { t: Date.now() - 11 * 60 * 1000 })).status, 400, "a stale webhook is refused");
+  assert.equal((await run(t1.body.reference)).body.status, "pending");
+  const delivered = await hook(offerings.onramp_transfer, tr1);
+  assert.equal(delivered.status, 200, await delivered.text());
+  const done1 = await run(t1.body.reference);
+  assert.deepEqual([done1.body.status, done1.body.transfer_status], ["completed", "settled"]);
+  assert.equal((await hook(offerings.onramp_transfer, tr1)).status, 200, "a repeated event is harmless");
+
+  // The innovator gets the full result, partner-side fields included (sealed), the device never does.
+  const sealed = (await store.db.query("SELECT result_sealed FROM financial_products.vendor_action_runs WHERE id = $1", [t1.body.reference])).rows[0].result_sealed;
+  assert.ok(sealed && !sealed.includes("5VERYLong"), "the full result is sealed");
+
+  // ---- cash out: $250 to the payout account; $251.25 of USDC leaves the ramp's address ----
+  const q2 = await start("offramp_quote", { params: { direction: "out", amount_usd: "250.00" } });
+  assert.deepEqual([q2.body.amount_usd, q2.body.fee_usd, q2.body.total_usd], ["250.00", "1.25", "251.25"]);
+  const t2 = await start("offramp_transfer", { quote: q2.body.reference });
+  assert.equal(t2.status, 201, t2.text);
+  assert.equal(t2.body.transfer_status, "submitted");
+  const post2 = bridge.state.calls.filter((c) => c.method === "POST" && c.path === "/v0/transfers").at(-1);
+  assert.deepEqual(post2.body, {
+    on_behalf_of: "cust_bridge_1",
+    amount: "251.25",
+    developer_fee: "1.25",
+    source: { payment_rail: "solana", currency: "usdc", from_address: SETTLEMENT },
+    destination: { payment_rail: "ach", currency: "usd", external_account_id: "ea_bridge_1" },
+  });
+  // Where the USDC goes is kept partner-side by the adapter.
+  const kept = (await store.db.query("SELECT partner_side FROM financial_products.ramp_adapter_transfers WHERE partner_transfer_id = 'tr_2'")).rows[0].partner_side;
+  assert.equal(kept.deposit_to, "9wFFyRfZBsuAha4YcuxcXLKwMxJR43S7fPfQLusDBzvT");
+  // No webhook comes: Mynt reads the state back. The bank sent the payment back.
+  bridge.state.transfers.get("tr_2").state = "returned";
+  assert.equal(await pollRampAdapterTransfers(store, VENDOR_OPTS, { olderThanSeconds: 0 }), 1);
+  const done2 = await run(t2.body.reference);
+  assert.deepEqual([done2.body.status, done2.body.transfer_status], ["failed", "returned"]);
+
+  // ---- a transfer Bridge can't deliver fails ----
+  const q3 = await start("onramp_quote", { params: { direction: "in", amount_usd: "40.00" } });
+  const t3 = await start("onramp_transfer", { quote: q3.body.reference });
+  const tr3 = bridge.state.transfers.get("tr_3");
+  tr3.state = "undeliverable";
+  assert.equal((await hook(offerings.onramp_transfer, tr3)).status, 200);
+  const done3 = await run(t3.body.reference);
+  assert.deepEqual([done3.body.status, done3.body.transfer_status], ["failed", "failed"]);
+  // Still open while Bridge says so.
+  const q4 = await start("onramp_quote", { params: { direction: "in", amount_usd: "41.00" } });
+  const t4 = await start("onramp_transfer", { quote: q4.body.reference });
+  bridge.state.transfers.get("tr_4").state = "funds_received";
+  assert.equal(await pollRampAdapterTransfers(store, VENDOR_OPTS, { olderThanSeconds: 0 }), 0);
+  assert.equal((await run(t4.body.reference)).body.status, "pending");
+
+  // ---- dollars only, and the credential nowhere ----
+  // The SDK a developer generates for this product: its actions, types and docs carry no crypto concept.
+  const sdk = await generateSdk({ name: "dollars", version: "1.0.0", languages: ["typescript"], baseUrl: "https://mynt.test/v1", products: [{ record: await store.getProduct("everyday-rd"), issuer: null }] });
+  const sdkText = sdk.map((f) => f.content).join("\n");
+  assert.ok(sdkText.includes("onramp_quote") && sdkText.includes("offramp_transfer"), "the SDK knows the ramp actions");
+  assert.doesNotMatch(sdkText, /usdc|solana|ethereum|wallet|settlement_(asset|network|tx|amount)|blockchain|stablecoin/i);
+  for (const text of seenByDevice) assert.doesNotMatch(text, /usdc|solana|wallet|chain|network|asset|token|address|settlement|_tx|5VERYLong|9wFFy|7xKXt/i, text);
+  const audit = JSON.stringify((await store.db.query("SELECT details FROM financial_products.audit_log")).rows);
+  const vault = JSON.stringify((await store.db.query("SELECT * FROM financial_products.key_vault")).rows);
+  const offeringsRows = JSON.stringify((await store.db.query("SELECT * FROM financial_products.vendor_offerings")).rows);
+  toolTexts.push(JSON.stringify(await ok(partner, "list_my_offerings")));
+  toolTexts.push(JSON.stringify(await ok(innovator, "list_vendor_offerings", { region: "US" })));
+  for (const [where, text] of Object.entries({ responses: seenByDevice.join("\n"), tools: toolTexts.join("\n"), audit, vault, offerings: offeringsRows, console: logged.join("\n") }))
+    assert.ok(!text.includes(API_KEY), `the partner's credential appears in ${where}`);
+});
