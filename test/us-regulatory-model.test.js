@@ -89,11 +89,11 @@ test("the US regulatory model applies, and the Mynt Ramp's service types load ag
   // The Mynt Ramp's four service types load, since their licence type now exists.
   for (const k of ["onramp_quote", "onramp_transfer", "offramp_quote", "offramp_transfer"]) assert.ok(done.services.loaded.includes(`US/${k}`), k);
 
-  // ---- running it again is safe: categories are kept, the rest is replaced with the file's version ----
+  // ---- running it again is safe: the file is merged into what is there, so nothing changes and nothing is sent ----
   const again = await applyRegulatoryModel({ call, listTools, model: MODEL });
   assert.equal(again.applied, true);
-  assert.ok(again.plan.filter((p) => p.tool === "define_product_category").every((p) => p.change === "keep"));
-  assert.ok(again.plan.filter((p) => p.tool === "define_regulator").every((p) => p.change === "replace"));
+  assert.ok(again.plan.every((p) => p.change === "keep"), JSON.stringify(again.plan.filter((p) => p.change !== "keep")));
+  assert.deepEqual(again.removals, []);
   const regionAgain = (await call("list_regions", {})).data.find((r) => r.code === "US");
   assert.deepEqual([...regionAgain.regulators].sort(), [...region.regulators].sort(), "the region's regulators are merged, not duplicated");
 });
