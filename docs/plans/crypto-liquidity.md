@@ -71,7 +71,10 @@ R1 can move to R2 later without changing the API developers and providers use: o
 | What the developer contract says (`params_schema`, `quote`, `accepts_quote_from`), and `startAction(…, params, quote)` in every SDK | `src/vendors.ts`, `src/contract.ts`, `src/sdk.ts`, `sdk-templates/` | `test/client-sdks.test.js`; CI compiles Kotlin, Swift and Flutter |
 | US on-ramp and off-ramp service types: `onramp_quote`, `onramp_transfer`, `offramp_quote`, `offramp_transfer` | `schemas/service-types/us/` | `test/ramp.test.js` |
 | The Mynt Ramp sandbox: a test ramp Mynt serves itself at `/ramp-sandbox`, so both ramps work end to end in sandbox before the partner's live endpoint exists (prices, fees, delayed settlement, returned and failed transfers) | `src/ramp-sandbox.ts`, `src/http.ts` | `test/ramp.test.js` |
-| The `digital_assets` underlying, and `funds` into an exchange component | schema, `src/catalog.ts` | None of its own yet; the existing definition tests still pass |
+| The `digital_assets` underlying, and `funds` into an exchange component | schema, `src/catalog.ts` | `test/us-regulatory-model.test.js` (the USDC template uses both) |
+| The US regulatory model as data (FinCEN, NYDFS, California DFPI, OCC, with OFAC, Regulation E and IRS obligations), and a script that applies it to a server | `schemas/regulatory/us.json`, `scripts/apply-regulatory-model.mjs` | `test/us-regulatory-model.test.js` |
+| A US USDC account template (ramp funds a USDC purchase held in custody; cash-out back through the ramp) that a licensed firm publishes on that model | `schemas/examples/us/usdc-account.v2.json` | `test/us-regulatory-model.test.js` |
+| Research: US ramp partners, shortlist Zero Hash, Bridge, BVNK | `docs/research/us-ramp-partners.md` | |
 
 **Not built yet:**
 - **The partner's live endpoint.** The partner either implements Mynt's vendor wire contract (`docs/reference.md`) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner. Sandbox already works without it.
