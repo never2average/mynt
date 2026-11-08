@@ -121,7 +121,7 @@ PY
 # rust-toolchain.toml, no build script or source code, nothing executable.
 skeleton() {
   python3 - "$1" "$2" <<'PY'
-import os, shutil, sys, tomllib
+import os, re, shutil, sys, tomllib
 ws, out = sys.argv[1], sys.argv[2]
 def stub(rel):
     p = os.path.normpath(os.path.join(out, rel))
@@ -142,11 +142,29 @@ for d, dirs, files in os.walk(ws):
     m = tomllib.load(open(src, "rb"))
     if "package" not in m:
         continue
-    stub(os.path.join(rel, (m.get("lib") or {}).get("path") or "src/lib.rs"))
-    for kind in ("bin", "example", "test", "bench"):
+    package = m["package"].get("name", "")
+    lib = m.get("lib")
+    bins = m.get("bin") or []
+    has = lambda f: os.path.isfile(os.path.join(d, f))
+    # The library: where [lib] says, or src/lib.rs when the crate has one (or nothing else that cargo would find).
+    if lib is not None or has("src/lib.rs") or not (bins or has("src/main.rs")):
+        stub(os.path.join(rel, (lib or {}).get("path") or "src/lib.rs"))
+    # The implied binary: src/main.rs.
+    if has("src/main.rs"):
+        stub(os.path.join(rel, "src/main.rs"))
+    # Named targets: their path, or the place cargo looks for one declared without a path.
+    DEFAULT = {"bin": "src/bin/{}.rs", "example": "examples/{}.rs", "test": "tests/{}.rs", "bench": "benches/{}.rs"}
+    for kind, default in DEFAULT.items():
         for t in m.get(kind) or []:
             if t.get("path"):
                 stub(os.path.join(rel, t["path"]))
+                continue
+            name = str(t.get("name", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                sys.exit(f"a [[{kind}]] target named {name!r} needs a plain name")
+            stub(os.path.join(rel, default.format(name)))
+            if kind == "bin" and name == package:
+                stub(os.path.join(rel, "src/main.rs"))
     build = (m.get("package") or {}).get("build")
     if isinstance(build, str):
         stub(os.path.join(rel, build))
@@ -159,7 +177,7 @@ PY
 if [ "$MODE" = build ]; then
   rm -rf "$OUT"; mkdir -p "$OUT"; echo "[]" > "$OUT/programs.json"; : > "$OUT/checks.jsonl"
   command -v docker >/dev/null || { check "$OUT/checks.jsonl" solana_build fail "docker isn't available for the verifiable build"; exit 0; }
-  BUILD_FAIL=""; BUILT=0
+  BUILD_FAIL=""; BUILT=0; NO_LOCK=""
   # Both cargos fetch: the host toolchain's (it resolves Cargo.lock) and the SBF platform tools' (the one cargo
   # build-sbf compiles with, which keeps its own crate cache), so the offline build finds every crate.
   FETCH='set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; for pc in /root/.cache/solana/*/platform-tools/rust/bin/cargo; do if [ -x "$pc" ]; then "$pc" fetch --manifest-path "$m"; fi; done; done'
@@ -178,6 +196,7 @@ if [ "$MODE" = build ]; then
     #    sources: no .cargo/ config, no build script, no rust-toolchain.toml, nothing of the source that could run.
     #    The compiler and every wrapper are pinned by environment, which outranks any config.
     skel=$(mktemp -d)
+    committed=0; [ -f "$dir/Cargo.lock" ] && [ ! -L "$dir/Cargo.lock" ] && committed=1
     if ! skeleton "$dir" "$skel" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $(tail -c 400 "$log.build.log") "; rm -rf "$skel"; continue; fi
     fcid=$(docker create "${"${"}COMMON[@]}" -e RUSTC=rustc -e CARGO_BUILD_RUSTC=rustc -e RUSTC_WRAPPER= -e CARGO_BUILD_RUSTC_WRAPPER= \
       -e RUSTC_WORKSPACE_WRAPPER= -e CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
@@ -209,6 +228,14 @@ if [ "$MODE" = build ]; then
       [ -n "$bcid" ] && docker rm -f "$bcid" >/dev/null 2>&1; continue
     fi
     cid="$bcid"
+    # The Cargo.lock the build actually used (read back from the stopped build container), hashed and kept with
+    # each program, so anyone can rebuild exactly these bytes.
+    lock="$OUT/$(echo "$label" | tr '/.' '__').Cargo.lock"; rm -f "$lock"
+    lock_sha=""
+    if docker cp -L "$cid:/workdir/Cargo.lock" "$lock" >> "$log.build.log" 2>&1 && [ -f "$lock" ] && [ ! -L "$lock" ]; then
+      lock_sha=$(sha256sum "$lock" | cut -d' ' -f1)
+    fi
+    [ "$committed" = 1 ] || NO_LOCK+="$label "
     for p in "${"${"}PROGS[@]}"; do
       name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
       # -L: a link in the container is resolved there, to the container's own file, never copied out as a link
@@ -218,12 +245,13 @@ if [ "$MODE" = build ]; then
       if [ -L "$OUT/$name.so" ] || [ ! -f "$OUT/$name.so" ] || [ "$(head -c 4 "$OUT/$name.so" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
         BUILD_FAIL+="$label: $name.so isn't a program (not a regular ELF file) "; rm -f "$OUT/$name.so"; continue
       fi
-      python3 - "$OUT" "$name" "$label" "$declared" <<'PY'
+      python3 - "$OUT" "$name" "$label" "$declared" "$lock_sha" "$committed" <<'PY'
 import hashlib, json, os, sys
-out, name, ws, declared = sys.argv[1:5]
+out, name, ws, declared, lock_sha, committed = sys.argv[1:7]
 data = open(os.path.join(out, name + ".so"), "rb").read()
 progs = json.load(open(os.path.join(out, "programs.json")))
-progs.append({"workspace": ws, "name": name, "size": len(data), "sha256": hashlib.sha256(data.rstrip(b"\0")).hexdigest(), "declared_id": declared or None})
+progs.append({"workspace": ws, "name": name, "size": len(data), "sha256": hashlib.sha256(data.rstrip(b"\0")).hexdigest(), "declared_id": declared or None,
+              "cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1"})
 json.dump(progs, open(os.path.join(out, "programs.json"), "w"), indent=2)
 PY
       BUILT=$((BUILT + 1))
@@ -232,7 +260,10 @@ PY
   done
   if [ -n "$BUILD_FAIL" ]; then check "$OUT/checks.jsonl" solana_build fail "$BUILD_FAIL"
   elif [ "$BUILT" = 0 ]; then check "$OUT/checks.jsonl" solana_build fail "an Anchor workspace built no program"
-  else check "$OUT/checks.jsonl" solana_build pass "$BUILT program(s) built verifiably in ${T.anchorImage.split("@")[0]} (Anchor ${T.anchor.version})"; fi
+  else
+    WARN=""; [ -z "$NO_LOCK" ] || WARN="; warning: no Cargo.lock committed in $NO_LOCK- the build resolved one (its hash is recorded), but commit it so the dependencies can't change between builds"
+    check "$OUT/checks.jsonl" solana_build pass "$BUILT program(s) built verifiably in ${T.anchorImage.split("@")[0]} (Anchor ${T.anchor.version})$WARN"
+  fi
   chmod a-w "$OUT"/*.so 2>/dev/null
   exit 0
 fi
