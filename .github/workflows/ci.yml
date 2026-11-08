@@ -65,6 +65,12 @@ jobs:
           programs = json.load(open(f"{tmp}/out/programs.json"))
           assert [p["name"] for p in programs] == ["ci_ledger"], programs
           assert programs[0]["declared_id"] == "HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw", programs
+          # The Cargo.lock the build used is hashed with the program; the template commits none, so a warning, not a failure.
+          import hashlib, re
+          assert re.fullmatch(r"[0-9a-f]{64}", programs[0]["cargo_lock_sha256"] or ""), programs
+          assert programs[0]["cargo_lock_committed"] is False, programs
+          assert hashlib.sha256(open(f"{tmp}/out/solana.Cargo.lock", "rb").read()).hexdigest() == programs[0]["cargo_lock_sha256"]
+          assert "warning: no Cargo.lock committed" in checks["solana_build"]["detail"], checks["solana_build"]
           PY
       - name: A build script that rewrites the program on the host can't change what Mynt captures, and is caught
         run: |

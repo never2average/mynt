@@ -1204,3 +1204,104 @@ test("the fetch container gets a skeleton only: manifests, the lock and empty st
   symlinkSync("/etc/hostname", join(ws, "programs/q/Cargo.toml"));
   assert.notEqual(spawnSync("python3", ["-c", py, ws, mkdtempSync(join(tmpdir(), "mynt-skel-out-"))]).status, 0);
 });
+
+// ---- skeleton targets and the Cargo.lock a build used ----
+
+test("the skeleton stubs where cargo looks for named targets declared without a path, and an implied src/main.rs", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, relative } = await import("node:path");
+  const fn = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("skeleton() {"));
+  const py = fn.slice(fn.indexOf("<<'PY'\n") + 7, fn.indexOf("\nPY\n"));
+  const ws = mkdtempSync(join(tmpdir(), "mynt-skel-ws-"));
+  const put = (path, text) => {
+    mkdirSync(join(ws, path, ".."), { recursive: true });
+    writeFileSync(join(ws, path), text);
+  };
+  put("Cargo.toml", '[workspace]\nmembers = ["programs/*", "tools/*"]\n');
+  // A program crate with named targets declared without paths.
+  put(
+    "programs/p/Cargo.toml",
+    '[package]\nname = "p"\nversion = "0.1.0"\n\n[lib]\ncrate-type = ["cdylib", "lib"]\n\n[[bin]]\nname = "admin-cli"\n\n[[bin]]\nname = "p"\n\n[[example]]\nname = "demo"\n\n[[test]]\nname = "flow"\n\n[[bench]]\nname = "speed"\n',
+  );
+  put("programs/p/src/lib.rs", "pub fn real() {}\n");
+  // A binary-only crate: just src/main.rs, no [lib] and no [[bin]].
+  put("tools/cli/Cargo.toml", '[package]\nname = "cli"\nversion = "0.1.0"\n');
+  put("tools/cli/src/main.rs", "fn main() { real_code() }\n");
+  const out = mkdtempSync(join(tmpdir(), "mynt-skel-out-"));
+  const r = spawnSync("python3", ["-c", py, ws, out]);
+  assert.equal(r.status, 0, r.stderr.toString());
+  const files = [];
+  const walk = (d) => readdirSync(d).forEach((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : files.push(relative(out, join(d, f)))));
+  walk(out);
+  assert.deepEqual(files.sort(), [
+    "Cargo.toml",
+    "programs/p/Cargo.toml",
+    "programs/p/benches/speed.rs",
+    "programs/p/examples/demo.rs",
+    "programs/p/src/bin/admin-cli.rs",
+    "programs/p/src/bin/p.rs",
+    "programs/p/src/lib.rs",
+    "programs/p/src/main.rs",
+    "programs/p/tests/flow.rs",
+    "tools/cli/Cargo.toml",
+    "tools/cli/src/main.rs",
+  ]);
+  for (const f of files.filter((f) => f.endsWith(".rs"))) assert.equal(readFileSync(join(out, f), "utf8"), "", `${f} is an empty stub`);
+  // A target whose name would be a path is refused.
+  put("tools/cli/Cargo.toml", '[package]\nname = "cli"\nversion = "0.1.0"\n\n[[bin]]\nname = "../../evil"\n');
+  const bad = spawnSync("python3", ["-c", py, ws, mkdtempSync(join(tmpdir(), "mynt-skel-out-"))]);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr.toString(), /needs a plain name/);
+});
+
+test("the Cargo.lock each build compiled with is hashed, kept with its program, and shown on the program and its versions", async () => {
+  const w = await world();
+  const LOCK = "c".repeat(64);
+  const code = w.program(2000);
+  const boat = {
+    async readFile(_id, path) {
+      if (path.endsWith("/solana/programs.json"))
+        return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null, cargo_lock_sha256: LOCK, cargo_lock_committed: false }]);
+      if (path.endsWith("/solana/checks.jsonl")) return JSON.stringify({ name: "solana_build", status: "pass", detail: "built; warning: no Cargo.lock committed in solana - …" });
+      return null;
+    },
+    async exec(_id, command) {
+      const m = command.match(/tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
+      return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
+    },
+  };
+  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  builds.solana = w.solana;
+  const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
+  const id = await w.build();
+  await builds.collectPrograms(await builds.get(id), "vm-verify");
+  assert.equal((await w.solana.artifacts(id))[0].cargo_lock_sha256, LOCK);
+  // The missing lock is a warning, not a failure.
+  assert.equal((await builds.get(id)).solana_check.status, "pass");
+  assert.match((await builds.get(id)).solana_check.detail, /no Cargo\.lock committed/);
+  await w.db.query("UPDATE financial_products.solana_program_artifacts SET declared_id = $2 WHERE build_id = $1", [id, program_id]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: id });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.equal(p.cargo_lock_sha256, LOCK);
+  assert.equal(p.versions[0].cargo_lock_sha256, LOCK);
+  assert.equal((await deliveries(w, "program.deployed"))[0].payload.data.cargo_lock_sha256, LOCK);
+  // Anything but a sha256 isn't kept.
+  const other = await w.build();
+  await w.solana.recordArtifacts(other, [{ name: "x", declared_id: null, sha256: executableHash(code), size: code.length, program: code, idl: null, cargo_lock_sha256: "not a hash; rm -rf /" }]);
+  assert.equal((await w.solana.artifacts(other))[0].cargo_lock_sha256, null);
+});
+
+test("the build records the Cargo.lock it used and warns, without failing, when none was committed", () => {
+  const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  // The lock is read back from the stopped build container (the one the build used), as a regular file.
+  const start = build.indexOf('docker start -a "$bcid"');
+  const readLock = build.indexOf('docker cp -L "$cid:/workdir/Cargo.lock" "$lock"');
+  assert.ok(start > 0 && readLock > start, "after the build");
+  assert.match(build, /\[ -f "\$lock" \] && \[ ! -L "\$lock" \]/);
+  assert.match(build, /"cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1"/);
+  assert.match(build, /check "\$OUT\/checks\.jsonl" solana_build pass "[^"]*\$WARN"/, "the warning rides on a pass");
+  assert.match(build, /warning: no Cargo\.lock committed in \$NO_LOCK/);
+});

@@ -210,7 +210,7 @@ export interface BuildSolanaHooks {
   programsForApp(appId: string): Promise<{ name: string; cluster: string; program_id: string; status: string }[]>;
   recordArtifacts(
     buildId: string,
-    artifacts: { name: string; declared_id: string | null; sha256: string; size: number; program: Uint8Array; idl: unknown; reported_sha256?: string }[],
+    artifacts: { name: string; declared_id: string | null; sha256: string; size: number; program: Uint8Array; idl: unknown; reported_sha256?: string; cargo_lock_sha256?: string | null }[],
   ): Promise<string[]>;
   artifacts(buildId: string): Promise<{ name: string; sha256: string }[]>;
   recordIdl(buildId: string, name: string, idl: unknown): Promise<void>;
@@ -848,7 +848,7 @@ export class BuildService {
     const record = async (c: Check) => this.update(b.id, { solana_check: { name: "solana_build", status: c.status, detail: (c.detail ?? "").slice(0, 1500) } });
     await record(row ?? { name: "solana_build", status: "fail", detail: "Mynt's Solana build didn't finish" });
     if (!this.solana) return;
-    const listed = parseJson<{ name: string; size: number; sha256: string; declared_id: string | null }[]>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
+    const listed = parseJson<{ name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null }[]>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
     if (!listed?.length) return;
     const artifacts = [];
     const refused: string[] = [];
@@ -873,13 +873,22 @@ export class BuildService {
         continue;
       }
       // The IDL comes later, from the test run; it only names events, it's never deployed.
-      artifacts.push({ name: p.name, declared_id: p.declared_id ?? null, sha256: p.sha256, reported_sha256: p.sha256, size: p.size, program: new Uint8Array(program), idl: null });
+      artifacts.push({
+        name: p.name,
+        declared_id: p.declared_id ?? null,
+        sha256: p.sha256,
+        reported_sha256: p.sha256,
+        cargo_lock_sha256: p.cargo_lock_sha256 ?? null,
+        size: p.size,
+        program: new Uint8Array(program),
+        idl: null,
+      });
     }
     const kept = await this.solana.recordArtifacts(b.id, artifacts);
     if (refused.length) await record({ name: "solana_build", status: "fail", detail: `not a regular ELF program file of the size its build reported: ${refused.join(", ")}` });
     else if (kept.length < listed.length) await record({ name: "solana_build", status: "fail", detail: "a program Mynt read back didn't match the hash its build reported" });
     await this.event(b.id, "verifying", `Mynt built ${kept.length} Solana program(s) for deploys: ${kept.join(", ") || "none matched their hash"}`, {
-      programs: listed.map((p) => ({ name: p.name, sha256: p.sha256, declared_id: p.declared_id })),
+      programs: listed.map((p) => ({ name: p.name, sha256: p.sha256, declared_id: p.declared_id, cargo_lock_sha256: p.cargo_lock_sha256 ?? null })),
     });
   }
 
