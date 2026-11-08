@@ -76,7 +76,13 @@ export class Keypair {
     if (secret.length !== 64) throw new Error("A Solana keypair is 64 bytes");
     const seed = secret.subarray(0, 32);
     const pub = secret.subarray(32);
-    const key = createPrivateKey({ key: { kty: "OKP", crv: "Ed25519", d: b64url(seed), x: b64url(pub) }, format: "jwk" });
+    // Node 24 checks the halves itself; older versions don't, so both paths end in the same refusal.
+    let key: KeyObject;
+    try {
+      key = createPrivateKey({ key: { kty: "OKP", crv: "Ed25519", d: b64url(seed), x: b64url(pub) }, format: "jwk" });
+    } catch {
+      throw new Error("The keypair's public half doesn't match its secret");
+    }
     // A keypair whose halves don't belong together signs for a different address than it claims.
     const derived = Buffer.from((key.export({ format: "jwk" }) as { x: string }).x, "base64url");
     if (!derived.equals(Buffer.from(pub))) throw new Error("The keypair's public half doesn't match its secret");
