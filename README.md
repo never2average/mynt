@@ -113,8 +113,11 @@ my-app/
 ├── api/                  server: sessions, contracts, webhooks, server-side actions
 ├── web/                  web app: the journey runner, secure inputs, hosted flows
 ├── mobile/               Expo app (or Kotlin / Swift / Flutter), same journeys on a client session
+├── solana/               optional: an Anchor program (smart contract) and its tests
 └── packages/mynt-sdk/    the generated SDK
 ```
+
+**Solana programs.** When an app needs a program on Solana, the agents write it next to the app and Mynt takes it from there: it rebuilds the program itself with Anchor's verifiable build in a clean sandbox, tests it on a local validator, deploys exactly those bytes, upgrades it from later verified builds, and sends the program's events to the firm's webhooks. Mynt signs on devnet; mainnet stays off until an admin configures its signer (a key in Mynt's vault, a key-custody service, or a multisig). Customers never see any of it: they see dollars. See [Solana programs](docs/reference.md#solana-programs-developers).
 
 Behind it is a whole coding team. An **architect** plans. **Server**, **web** and **mobile engineers** build their parts. A read-only **compliance reviewer** checks every product's contract and build terms. **QA** runs every journey against the sandbox. A **release engineer** ships the Compose project.
 

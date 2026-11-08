@@ -49,6 +49,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
+import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerOpsTools } from "./ops.js";
 import { registerModuleTools } from "./modules.js";
 
@@ -120,6 +121,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
+  if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
@@ -127,6 +129,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerVendorAdminTools(server, store, user!);
     if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
+    if (ctx.solana) registerSolanaAdminTools(server, store, user!, ctx.solana);
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);
     registerOpsTools(server, store.db);

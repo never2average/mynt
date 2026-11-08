@@ -180,6 +180,12 @@ else
   check sbom fail "$(tail -c 800 "$V/sbom.log" 2>/dev/null || echo "could not generate an SBOM")"
 fi
 
+# --- Solana programs: Mynt's own verifiable build of every Anchor workspace, and its tests on a local validator
+# (solana-verify.sh, from src/solana/toolchain.ts). Its artifacts are what Mynt deploys, never the agent's.
+if [ -f "$V/solana-verify.sh" ]; then
+  bash "$V/solana-verify.sh" "$APP" "$V/solana" "$CHECKS" "$V/solana-toolchain.sh"
+fi
+
 # --- required disclosures ---
 python3 - "$V/disclosures.json" "$APP" "$CHECKS" <<'PY'
 import json, os, re, sys

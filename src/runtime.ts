@@ -80,7 +80,18 @@ export async function emitEvent(store: Store, appIds: string[], type: WebhookEve
 // vendor_action.reversed: a completed ramp transfer the partner later reversed; vendor_action.late_settlement: one
 // it settled after Mynt had ended the run (to handle by hand); ramp_link.requested: to the Mynt Ramp firm, a
 // customer asked to be linked to the ramp partner (link_ramp_partner_customer).
-export const FIRM_WEBHOOK_EVENTS = ["vendor_action.completed", "vendor_action.failed", "vendor_action.reversed", "vendor_action.late_settlement", "ramp_link.requested"] as const;
+// program.deployed, program.upgraded, program.event: the firm's Solana programs (src/solana/), deployed or upgraded by
+// Mynt, and each Anchor event they emit. Developer-side data only; customers never see it.
+export const FIRM_WEBHOOK_EVENTS = [
+  "vendor_action.completed",
+  "vendor_action.failed",
+  "vendor_action.reversed",
+  "vendor_action.late_settlement",
+  "ramp_link.requested",
+  "program.deployed",
+  "program.upgraded",
+  "program.event",
+] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 
 // Queues `type` for every webhook of the firm subscribed to it. `sealedResult` (sealed with the sandbox or live

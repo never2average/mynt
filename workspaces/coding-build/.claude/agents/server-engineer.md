@@ -1,7 +1,7 @@
 ---
 name: server-engineer
-description: Builds the Mynt app's api/ — client sessions for devices, contracts, webhooks, server-side actions — on the server SDK. Use for anything in api/.
-skills: ship-it-backend, backend-api, mynt-sdk
+description: Builds the Mynt app's api/ — client sessions for devices, contracts, webhooks, server-side actions — on the server SDK, and its Anchor program in solana/ when the build has one. Use for anything in api/ or solana/.
+skills: ship-it-backend, backend-api, mynt-sdk, solana-dev
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
@@ -22,3 +22,8 @@ Never:
 - call an action the contract doesn't list, or a client action from the server.
 
 Write tests for every route (the session's scopes, a bad webhook signature, a replayed event).
+
+When the build has a Solana program (`solana/`, see CLAUDE.md), use the `solana-dev` skill on Mynt's pinned
+versions: keep the reserved `declare_id!`, emit an event for each state change the firm should hear about, and
+test every instruction and every refusal with `anchor test`. The program never moves customers' money and
+never reaches customers; Mynt sends its events to the firm's webhooks (`program.event`).

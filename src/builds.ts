@@ -14,6 +14,7 @@ import type { RepoAccess } from "./github.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
+import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } from "./solana/toolchain.js";
 import type { Store, User } from "./store.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
@@ -121,6 +122,7 @@ export interface Build {
   // A sandbox reopened on the build's branch after the build ended, for the developer to keep working in.
   box_sandbox_id: string | null;
   box_until: string | null;
+  solana: boolean; // the sandbox gets the Solana toolchain, and the app may hold Anchor programs
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -166,6 +168,7 @@ const TABLES = `
   -- The auditor's own token: a separate meter key, budget and model; cleared when the build ends.
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_token_hash text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_started_at timestamptz;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana boolean NOT NULL DEFAULT false;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -196,7 +199,20 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   box_sandbox_id: (r.box_sandbox_id as string | null) ?? null,
   box_until: iso(r.box_until),
   audit_started_at: iso(r.audit_started_at),
+  solana: !!r.solana,
 });
+
+// What builds need of Mynt's Solana programs (src/solana/): the addresses reserved for an app, so the agent
+// declares them, and a place for the programs Mynt itself built while verifying.
+export interface BuildSolanaHooks {
+  programsForApp(appId: string): Promise<{ name: string; cluster: string; program_id: string; status: string }[]>;
+  recordArtifacts(
+    buildId: string,
+    artifacts: { name: string; declared_id: string | null; sha256: string; size: number; program: Uint8Array; idl: unknown; reported_sha256?: string }[],
+  ): Promise<string[]>;
+}
+// The largest program Mynt reads back from its verify sandbox.
+const MAX_PROGRAM_BYTES = 4 * 1024 * 1024;
 
 // Files the agent reads and writes inside the sandbox. boat.dev's file API only accepts paths under
 // the sandbox user's home (/home/user) or /tmp.
@@ -209,9 +225,11 @@ type AuditRun = { result: string | null; exit_code: number | null; error: string
 
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 const OUT = "/home/user/mynt-out";
+const SOLANA_INSTALLER = "/home/user/mynt-solana-toolchain.sh";
 
 export class BuildService {
   private timer: NodeJS.Timeout | null = null;
+  solana: BuildSolanaHooks | null = null;
 
   private constructor(
     private readonly db: Db,
@@ -272,6 +290,13 @@ export class BuildService {
 
   private agentState(sandbox: string, processId: string) {
     return agentState(this.boat!, sandbox, processId);
+  }
+
+  // The pinned Solana toolchain, installed in the background (a few minutes, about 2 GB); the agents wait for
+  // ~/.mynt-solana/env before they use it.
+  private async installSolana(sandbox: string) {
+    await this.boat!.writeFile(sandbox, SOLANA_INSTALLER, SOLANA_TOOLCHAIN_SCRIPT);
+    await this.boat!.exec(sandbox, `bash ${SOLANA_INSTALLER} > /home/user/.mynt-solana-install.log 2>&1`, { detached: true });
   }
 
   // ---- persistence ----
@@ -354,7 +379,7 @@ export class BuildService {
 
   // ---- lifecycle ----
 
-  async start(developer: User, opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number }) {
+  async start(developer: User, opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number; solana?: boolean }) {
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
     const spent = await this.monthSpend(developer.id);
     // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
@@ -368,10 +393,12 @@ export class BuildService {
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
     const id = randomUUID();
+    // The Solana toolchain when asked for, or when the app has programs reserved.
+    const solana = opts.solana ?? (!!opts.app_id && !!this.solana && (await this.solana.programsForApp(opts.app_id)).length > 0);
     await this.db.query(
-      `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd)
-       VALUES ($1, $2, $3, $4, $5, 'queued', $6)`,
-      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap],
+      `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd, solana)
+       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)`,
+      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana],
     );
     await this.event(id, "queued", `Build queued with a US$${cap} cap`);
     return (await this.get(id))!;
@@ -503,6 +530,7 @@ export class BuildService {
     );
     if (r.exitCode !== 0) throw new Error(`Couldn't check out ${build.branch}: ${boxOutput(r.stderr).slice(-300)}`);
     for (const [path, content] of Object.entries(workspaceFiles("coding-build"))) await this.boat!.writeFile(id, `${workspaceCwd("coding-build")}/${path}`, content);
+    if (build.solana) await this.installSolana(id);
     return true;
   }
 
@@ -598,6 +626,7 @@ export class BuildService {
       if (!["ready", "idle", "running"].includes(s.state)) return;
       const jobFiles: Record<string, string> = { "job/build.json": JSON.stringify(await this.spec(b), null, 2) };
       for (const file of await this.sdkFiles(b)) jobFiles[`job/sdk/${file.path}`] = file.content;
+      if (b.solana) await this.installSolana(b.sandbox_id!);
       const processId = await this.startAgent(b, b.sandbox_id!, {
         prompt: "Carry out the build in job/build.json, start to finish, following CLAUDE.md and its skills.",
         budgetUsd: b.cap_usd - b.cost_usd,
@@ -686,6 +715,8 @@ export class BuildService {
       if (state === "error" || state === "cancelled") throw new Error(`Verification sandbox ${state}`);
       if (!["ready", "idle", "running"].includes(state)) return;
       await boat.writeFile(vid, `${VERIFY_DIR}/verify.sh`, VERIFY_SCRIPT);
+      await boat.writeFile(vid, `${VERIFY_DIR}/solana-toolchain.sh`, SOLANA_TOOLCHAIN_SCRIPT);
+      await boat.writeFile(vid, `${VERIFY_DIR}/solana-verify.sh`, SOLANA_VERIFY_SCRIPT);
       await boat.writeFile(vid, `${VERIFY_DIR}/disclosures.json`, JSON.stringify(await this.requiredDisclosures(b)));
       const run = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh '${b.source_url}' ${b.source_sha256}`, { detached: true });
       await this.update(b.id, { verify_step: "checks", verify_process_id: run.processId ?? null });
@@ -695,6 +726,8 @@ export class BuildService {
 
     if (b.verify_step === "checks") {
       if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
+      // The Solana programs Mynt built, read back now, before an auditor runs in this sandbox.
+      await this.collectPrograms(b, vid);
       const { audit } = this.config;
       if (audit.mode === "none") {
         // No agent audit: the source can't change after Mynt's checks, so decide on their report alone.
@@ -755,6 +788,33 @@ export class BuildService {
         audit,
       });
     }
+  }
+
+  // Every program Mynt's verification built (programs.json, written by solana-verify.sh), read back in chunks and
+  // handed to the program registry, which hashes the bytes itself.
+  private async collectPrograms(b: Build, vid: string) {
+    if (!this.solana) return;
+    const listed = parseJson<{ name: string; size: number; sha256: string; declared_id: string | null }[]>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
+    if (!listed?.length) return;
+    const artifacts = [];
+    for (const p of listed) {
+      if (!/^[a-z0-9_]+$/.test(p.name) || !(p.size > 0 && p.size <= MAX_PROGRAM_BYTES)) continue;
+      const chunks: Buffer[] = [];
+      const path = `${VERIFY_DIR}/solana/${p.name}.so`;
+      for (let offset = 0; offset < p.size; offset += 192 * 1024) {
+        const r = await this.boat!.exec(vid, `tail -c +${offset + 1} ${path} | head -c ${192 * 1024} | base64 -w0`, { timeoutSeconds: 60 });
+        if (r.exitCode !== 0) throw new Error(`Couldn't read the program ${p.name} Mynt built`);
+        chunks.push(Buffer.from(r.stdout.trim(), "base64"));
+      }
+      const program = Buffer.concat(chunks);
+      if (program.length !== p.size) throw new Error(`The program ${p.name} read back at ${program.length} bytes, not ${p.size}`);
+      const idl = parseJson<unknown>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/${p.name}.idl.json`));
+      artifacts.push({ name: p.name, declared_id: p.declared_id ?? null, sha256: p.sha256, reported_sha256: p.sha256, size: p.size, program: new Uint8Array(program), idl });
+    }
+    const kept = await this.solana.recordArtifacts(b.id, artifacts);
+    await this.event(b.id, "verifying", `Mynt built ${kept.length} Solana program(s) for deploys: ${kept.join(", ") || "none matched their hash"}`, {
+      programs: listed.map((p) => ({ name: p.name, sha256: p.sha256, declared_id: p.declared_id })),
+    });
   }
 
   // Ship only what Mynt itself verified: the source unchanged through the audit, no critical or high
@@ -842,6 +902,14 @@ export class BuildService {
       app: app ?? null,
       products,
       mynt_api: this.config.publicUrl ? `${this.config.publicUrl}/v1` : null,
+      ...(b.solana
+        ? {
+            solana: {
+              programs: app && this.solana ? await this.solana.programsForApp(app.id) : [],
+              toolchain: { agave: SOLANA_TOOLCHAIN.agave.version, anchor: SOLANA_TOOLCHAIN.anchor.version, rust: SOLANA_TOOLCHAIN.rust.version, env: "~/.mynt-solana/env" },
+            },
+          }
+        : {}),
     };
   }
 
@@ -936,6 +1004,7 @@ export function developerBuild(b: Build) {
     cap_usd: b.cap_usd,
     error: b.error,
     sandbox_open_until: b.box_sandbox_id && b.box_until ? b.box_until : null,
+    solana: b.solana,
     created_at: b.created_at,
     updated_at: b.updated_at,
     finished_at: b.finished_at,
@@ -983,16 +1052,20 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
         app_id: z.string().optional().describe("The experience to build (its products, terms and screens are given to the agent)"),
         repository: z.string().optional().describe("A connected repository (owner/name) to push to"),
         cap_usd: z.number().positive().optional().describe("Spend cap for this build, up to the platform maximum"),
+        solana: z
+          .boolean()
+          .optional()
+          .describe("Give the agents the Solana toolchain (Agave, Anchor, Rust) to build an Anchor program beside the app; on by default when the app has programs reserved"),
       },
     },
-    async ({ goal, app_id, repository, cap_usd }) => {
+    async ({ goal, app_id, repository, cap_usd, solana }) => {
       if (!builds.enabled) return fail("Coding-agent builds aren't enabled on this Mynt yet");
       if (app_id) {
         const app = await store.getApp(app_id);
         if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
       }
       try {
-        const b = await builds.start(user, { goal, app_id, repository, cap_usd });
+        const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana });
         await store.audit(user.id, "start_build", b.id, { app_id, repository, cap_usd: b.cap_usd });
         return json({ ...developerBuild(b), track_with: "get_build" });
       } catch (e) {
