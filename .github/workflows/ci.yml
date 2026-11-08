@@ -75,6 +75,7 @@ jobs:
               println!("cargo:rerun-if-changed=build.rs");
               if Path::new("/.dockerenv").exists() { return; }
               let Ok(dir) = env::var("MYNT_CI_ATTACK_DIR") else { return };
+              fs::write(Path::new(&dir).join("host-ran"), b"").unwrap();
               for e in fs::read_dir(&dir).unwrap().flatten() {
                   let p = e.path();
                   if p.extension().map_or(false, |x| x == "so") {
@@ -86,14 +87,17 @@ jobs:
           RS
           export MYNT_CI_ATTACK_DIR="$RUNNER_TEMP/out2"
           bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app" "$RUNNER_TEMP/out2"
-          # What Mynt reads back right after the build is the honest program: the same bytes as the clean build.
+          # Up to the point Mynt reads the program back, the build script never ran on the host, and what's there
+          # is the program the container built.
           grep -q '"status": "pass"' "$RUNNER_TEMP/out2/checks.jsonl"
+          [ ! -e "$RUNNER_TEMP/out2/host-ran" ] || { echo "the build ran developer code on the host"; exit 1; }
+          [ "$(head -c 4 "$RUNNER_TEMP/out2/ci_ledger.so" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ]
           (cd "$RUNNER_TEMP/out2" && sha256sum ci_ledger.so) | tee "$RUNNER_TEMP/captured.sha"
-          [ "$(cut -d' ' -f1 "$RUNNER_TEMP/captured.sha")" = "$(cut -d' ' -f1 "$RUNNER_TEMP/built.sha")" ]
           # The host-side run (IDL and tests) executes the build script, which rewrites the copy: Mynt's re-hash
           # after the tests must see it.
           : > "$RUNNER_TEMP/checks2.jsonl"
           bash "$RUNNER_TEMP/mynt/solana-verify.sh" test "$RUNNER_TEMP/app" "$RUNNER_TEMP/out2" "$RUNNER_TEMP/checks2.jsonl" "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+          [ -e "$RUNNER_TEMP/out2/host-ran" ] || { echo "the attack never ran: this check proves nothing"; exit 1; }
           if (cd "$RUNNER_TEMP/out2" && sha256sum -c "$RUNNER_TEMP/captured.sha"); then echo "the host-side rewrite went unnoticed"; exit 1; fi
           echo "caught: the program changed after Mynt captured it"
       - name: Logs
