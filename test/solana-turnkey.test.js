@@ -85,7 +85,7 @@ test("turnkey: an activity waiting for approvals is polled until it completes, o
     const sig = await clientFor(tk).signSolanaMessage(tk.address, m.bytes);
     assert.ok(verifyEd25519(tk.address, m.bytes, sig));
     assert.deepEqual(tk.requests.map((r) => r.path), ["/public/v1/submit/sign_transaction", "/public/v1/query/get_activity", "/public/v1/query/get_activity"]);
-    await assert.rejects(clientFor(tk, { approvalTimeoutMs: 0, pollMs: 5 }).signSolanaMessage(tk.address, m.bytes), /still ACTIVITY_STATUS_CONSENSUS_NEEDED .*nothing was signed/);
+    await assert.rejects(clientFor(tk, { approvalTimeoutMs: 0, pollMs: 5 }).signSolanaMessage(tk.address, m.bytes), /still ACTIVITY_STATUS_CONSENSUS_NEEDED .*Mynt sent nothing/);
     tk.mode = "reject";
     await assert.rejects(clientFor(tk).signSolanaMessage(tk.address, m.bytes), /Turnkey refused to sign \(ACTIVITY_STATUS_REJECTED: policy denied\)/);
   } finally {
@@ -156,6 +156,28 @@ test("turnkey: configuration is by name, checked, and the private key never show
       assert.ok(!err.message.includes(s) && !String(err.stack).includes(s), "the API private key is in an error");
       assert.ok(!inspect(client, { showHidden: true, depth: 5 }).includes(s));
     }
+  } finally {
+    await tk.close();
+  }
+});
+
+test("turnkey: the approval wait is TURNKEY_APPROVAL_TIMEOUT_SECONDS, 60 s by default and at most 30 minutes", async () => {
+  const { approvalTimeoutSeconds } = await import("../dist/solana/custody/turnkey.js");
+  assert.equal(approvalTimeoutSeconds(undefined), 60);
+  assert.equal(approvalTimeoutSeconds(""), 60);
+  assert.equal(approvalTimeoutSeconds("abc"), 60);
+  assert.equal(approvalTimeoutSeconds("0"), 60);
+  assert.equal(approvalTimeoutSeconds("600"), 600);
+  assert.equal(approvalTimeoutSeconds("90.7"), 90);
+  assert.equal(approvalTimeoutSeconds("86400"), 1800);
+  // The client waits that long, then names the setting.
+  const tk = await fakeTurnkey();
+  try {
+    tk.mode = "consensus";
+    const key = { TURNKEY_ORGANIZATION_ID: tk.organizationId, TURNKEY_API_PUBLIC_KEY: tk.apiKey.publicKey, TURNKEY_API_PRIVATE_KEY: tk.apiKey.privateKey };
+    assert.ok(turnkeyFromEnv({ ...key, TURNKEY_APPROVAL_TIMEOUT_SECONDS: "1200" }));
+    const quick = clientFor(tk, { approvalTimeoutMs: approvalTimeoutSeconds("1") * 1000, pollMs: 2000 });
+    await assert.rejects(quick.signSolanaMessage(tk.address, message(tk.address).bytes), /after 1 s .*TURNKEY_APPROVAL_TIMEOUT_SECONDS/);
   } finally {
     await tk.close();
   }

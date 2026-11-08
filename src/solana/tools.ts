@@ -191,7 +191,12 @@ export function registerSolanaAdminTools(server: McpServer, store: Store, user: 
         });
         return {
           ...r,
-          ...(r.mainnet.authority && (r.mainnet.backend === "mainnet-vault" || r.mainnet.backend === "custody-service")
+          ...(r.mainnet.backend === "custody-service" && r.mainnet.deploy_payer
+            ? {
+                funding: `Fund the deploy payer ${r.mainnet.deploy_payer} with SOL before the first mainnet deploy: about 0.021 SOL per KB of program (its program data reserves twice its size for upgrades, and the upload buffer holds a copy until the deploy), plus fees. The custody address ${r.mainnet.authority ?? "(not set yet)"} needs none: it only signs.`,
+              }
+            : {}),
+          ...(r.mainnet.authority && r.mainnet.backend === "mainnet-vault"
             ? { funding: `Fund ${r.mainnet.authority} with SOL before the first mainnet deploy: about 0.021 SOL per KB of program (its program data reserves twice its size for upgrades, and the upload buffer holds a copy until the deploy), plus fees.` }
             : {}),
         };

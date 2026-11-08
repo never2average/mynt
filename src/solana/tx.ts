@@ -162,6 +162,15 @@ export const loader = {
       data: Uint8Array.from(u32(3)),
     };
   },
+  // SetAuthority (tag 4) on a buffer: signed by its current authority; the new one needn't sign, and a buffer's
+  // authority can't be removed, only replaced.
+  setBufferAuthority(buffer: string, current: string, next: string): Instruction {
+    return {
+      programId: UPGRADEABLE_LOADER,
+      keys: [meta(buffer, false, true), meta(current, true, false), meta(next, false, false)],
+      data: Uint8Array.from(u32(4)),
+    };
+  },
   close(account: string, recipient: string, authority: string): Instruction {
     return { programId: UPGRADEABLE_LOADER, keys: [meta(account, false, true), meta(recipient, false, true), meta(authority, true, false)], data: Uint8Array.from(u32(5)) };
   },

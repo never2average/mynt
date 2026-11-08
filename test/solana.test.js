@@ -81,6 +81,7 @@ class FakeCluster {
     this.slot = 100;
     this.calls = [];
     this.simulateFails = false;
+    this.expire = 0;
   }
   fund(address, lamports) {
     const a = this.accounts.get(address) ?? { lamports: 0, owner: SYSTEM_PROGRAM, data: Buffer.alloc(0) };
@@ -144,6 +145,7 @@ class FakeCluster {
           assert.equal(findProgramAddress([base58Decode(program)], UPGRADEABLE_LOADER)[0], programData);
           const maxLen = Number(ix.data.readBigUInt64LE(4));
           const buf = this.accounts.get(bufAddr);
+          assert.equal(base58Encode(buf.data.subarray(5, 37)), authority, "the loader deploys only a buffer whose authority is the upgrade authority");
           const code = buf.data.subarray(37);
           assert.ok(code.length <= maxLen);
           const data = Buffer.alloc(45 + maxLen);
@@ -166,14 +168,25 @@ class FakeCluster {
           const pd = this.accounts.get(programData);
           assert.ok(signed.has(authority));
           assert.equal(base58Encode(pd.data.subarray(13, 45)), authority, "only the upgrade authority upgrades");
+          assert.equal(base58Encode(this.accounts.get(bufAddr).data.subarray(5, 37)), authority, "the buffer's authority must be the upgrade authority");
           const code = this.accounts.get(bufAddr).data.subarray(37);
           assert.ok(code.length <= pd.data.length - 45);
           pd.data.fill(0, 45);
           code.copy(pd.data, 45);
           this.accounts.get(spill).lamports += this.accounts.get(bufAddr).lamports;
           this.accounts.delete(bufAddr);
+        } else if (tag === 4) {
+          // SetAuthority on a buffer: signed by its current authority; a buffer always keeps one.
+          const [bufAddr, current, next] = ix.accounts;
+          const buf = this.accounts.get(bufAddr);
+          assert.ok(buf && buf.data.readUInt32LE(0) === 1, "set-authority here is only ever on a buffer");
+          assert.ok(signed.has(current) && base58Encode(buf.data.subarray(5, 37)) === current, "only the buffer's authority hands it over");
+          assert.ok(next, "a buffer's authority can't be removed");
+          Buffer.from(base58Decode(next)).copy(buf.data, 5);
         } else if (tag === 5) {
-          const [bufAddr, recipient] = ix.accounts;
+          const [bufAddr, recipient, authority] = ix.accounts;
+          const buf = this.accounts.get(bufAddr);
+          if (buf) assert.ok(signed.has(authority) && base58Encode(buf.data.subarray(5, 37)) === authority, "only the buffer's authority closes it");
           this.accounts.get(recipient).lamports += this.accounts.get(bufAddr)?.lamports ?? 0;
           this.accounts.delete(bufAddr);
         } else throw new Error(`loader instruction ${tag}`);
@@ -200,6 +213,13 @@ class FakeCluster {
         return this.genesis;
       case "getLatestBlockhash":
         return { value: { blockhash: base58Encode(randomBytes(32)), lastValidBlockHeight: 1000 } };
+      case "isBlockhashValid":
+        // A blockhash that expired while someone was approving: the next `expire` checks say so.
+        if (this.expire > 0) {
+          this.expire--;
+          return { value: false };
+        }
+        return { value: true };
       case "getMinimumBalanceForRentExemption":
         return this.rent(params[0]);
       case "getBalance":
@@ -1184,10 +1204,17 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.equal(ready.mainnet.ready, true, JSON.stringify(ready.mainnet.missing));
     assert.equal(ready.mainnet.authority, tk.address);
     assert.equal(ready.mainnet.custody_provider, "turnkey");
-    assert.match(ready.funding, new RegExp(`Fund ${tk.address}`));
+    // Mynt's deploy payer pays; the custody address only signs, so it needs (and is given) no SOL.
+    const payer = ready.mainnet.deploy_payer;
+    assert.match(payer, /^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+    assert.notEqual(payer, tk.address);
+    assert.match(ready.funding, new RegExp(`Fund the deploy payer ${payer} .*The custody address ${tk.address} needs none`));
 
     const chain = w.clusters.mainnet;
-    chain.fund(tk.address, 10_000_000_000);
+    chain.fund(payer, 10_000_000_000);
+    const custodySigned = () => chain.sent.filter((t) => t.signers.includes(tk.address));
+    const bufferKeys = async () => (await w.db.query("SELECT public_key FROM financial_products.solana_keys WHERE role = 'buffer-authority'")).rows;
+    const blockhashesBefore = chain.calls.filter((c) => c === "getLatestBlockhash").length;
     await w.ok(w.dev, "deploy_program", { program_id, build_id: b1 });
     await w.solana.settled(program_id);
     let p = await w.ok(w.dev, "get_program", { program_id });
@@ -1195,13 +1222,28 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.equal(p.signer_backend, "custody-service");
     assert.equal(p.upgrade_authority, tk.address);
     assert.equal(base58Encode(chain.accounts.get(p.programdata_address).data.subarray(13, 45)), tk.address, "Turnkey's account is the upgrade authority on chain");
-    // Every transaction the authority signed went through Turnkey (the fake cluster checked each signature).
-    const byAuthority = chain.sent.filter((t) => t.signers.includes(tk.address)).length;
-    assert.ok(byAuthority > Math.ceil(code1.length / WRITE_CHUNK));
-    assert.equal(tk.signed, byAuthority);
+    // Turnkey signed exactly one transaction: the buffer's handover and the Deploy, paid for by the deploy payer.
+    assert.equal(tk.signed, 1);
+    assert.equal(custodySigned().length, 1);
+    const [final] = custodySigned();
+    assert.equal(final.signers[0], payer, "the deploy payer is the final transaction's fee payer");
+    assert.deepEqual(final.ixs.filter((i) => i.program === UPGRADEABLE_LOADER).map((i) => i.data.readUInt32LE(0)), [4, 2], "SetAuthority on the buffer, then Deploy");
+    // The buffer was written by a temporary key, never the custody key, each batch on a fresh blockhash.
+    const writes = chain.sent.filter((t) => t.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 1));
+    assert.equal(writes.length, Math.ceil(code1.length / WRITE_CHUNK));
+    const temp = writes[0].signers[0];
+    assert.ok(writes.every((t) => t.signers.length === 1 && t.signers[0] === temp) && ![payer, tk.address].includes(temp));
+    assert.ok(chain.calls.filter((c) => c === "getLatestBlockhash").length - blockhashesBefore >= Math.ceil(writes.length / 16) + 2);
+    // The temporary key's lamports went back to the deploy payer and the key is gone; the custody address holds nothing.
+    assert.equal(chain.accounts.get(temp)?.lamports ?? 0, 0);
+    assert.deepEqual(await bufferKeys(), []);
+    assert.equal(chain.accounts.get(tk.address)?.lamports ?? 0, 0, "the custody address never paid for anything");
     assert.equal(tk.refusedStamps, 0);
 
-    // An upgrade signs the same way.
+    // An upgrade: one Turnkey activity again, waiting for a person's approval, and signed again on a fresh
+    // blockhash when the first one expired during the approval.
+    tk.mode = "consensus";
+    chain.expire = 1;
     const b2 = await w.build();
     const code2 = w.program(2600, 2);
     await record(b2, code2);
@@ -1210,6 +1252,15 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     p = await w.ok(w.dev, "get_program", { program_id });
     assert.equal(p.status, "deployed", p.error);
     assert.equal(p.version, 2);
+    assert.equal(tk.signed, 3, "the upgrade's transaction was signed twice: once on the expired blockhash, once on a fresh one");
+    assert.equal(custodySigned().length, 2, "only one of them was sent");
+    const upgrade = custodySigned()[1];
+    assert.equal(upgrade.signers[0], payer);
+    assert.deepEqual(upgrade.ixs.map((i) => i.data.readUInt32LE(0)), [4, 3], "SetAuthority on the buffer, then Upgrade");
+    assert.equal(upgrade.ixs[1].accounts[3], payer, "the buffer's rent comes back to the deploy payer as the spill");
+    assert.ok(tk.requests.some((r) => r.path === "/public/v1/query/get_activity"), "the approval was waited for");
+    assert.deepEqual(await bufferKeys(), []);
+    tk.mode = "sign";
 
     // Recovery of an interrupted upgrade compares the chain's authority with the custody address; it signs nothing.
     const row = await w.solana.get(program_id);
@@ -1222,18 +1273,42 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.equal(p.verifiable_hash, executableHash(code2), "adopted from the chain under the custody address");
     assert.equal(tk.signed, signedBefore, "recovery asked Turnkey for nothing");
 
-    // A signature that doesn't verify is refused before anything is sent.
+    // A signature that doesn't verify is refused before anything is sent; the buffer, still the temporary key's,
+    // is closed and its rent goes back to the deploy payer.
     tk.mode = "bad-signature";
     const b3 = await w.build();
     await record(b3, w.program(2600, 3));
-    const sentBefore = chain.sent.length;
+    const custodySentBefore = custodySigned().length;
     const versionBefore = p.version;
+    const payerBefore = chain.accounts.get(payer).lamports;
     await w.ok(w.dev, "upgrade_program", { program_id, build_id: b3 });
     await w.solana.settled(program_id);
     p = await w.ok(w.dev, "get_program", { program_id });
     assert.equal(p.version, versionBefore);
     assert.match(p.error, /doesn't verify for .* it wasn't used/);
-    assert.equal(chain.sent.length, sentBefore, "nothing signed badly reached the cluster");
+    assert.equal(custodySigned().length, custodySentBefore, "nothing signed badly reached the cluster");
+    const closes = chain.sent.slice(-2);
+    assert.equal(closes[0].ixs[0].data.readUInt32LE(0), 5, "the buffer was closed by its own key");
+    assert.deepEqual(await bufferKeys(), []);
+    assert.ok(payerBefore - chain.accounts.get(payer).lamports < 100_000, "all but the fees came back to the deploy payer");
+    tk.mode = "sign";
+
+    // A Turnkey approval that never comes: Mynt gives up, sends nothing, and the buffer is cleaned up the same way.
+    const slow = await world({ mainnetUrl: "https://rpc.example.com", custody: new TurnkeyClient({ ...opts, apiPrivateKey: tk.apiKey.privateKey, approvalTimeoutMs: 0, pollMs: 1 }) });
+    await slow.ok(slow.admin, "configure_solana_signer", { backend: "custody-service", custody_address: tk.address, enabled: true });
+    slow.clusters.mainnet.fund((await slow.ok(slow.admin, "configure_solana_signer", {})).mainnet.deploy_payer, 10_000_000_000);
+    const { program_id: slowId } = await slow.ok(slow.dev, "reserve_program_id", { name: "mynt_program", cluster: "mainnet" });
+    const bs = await slow.build();
+    const cs = slow.program(1500, 5);
+    await slow.solana.recordArtifacts(bs, [{ name: "mynt_program", declared_id: slowId, sha256: executableHash(cs), size: cs.length, program: cs, idl: null }]);
+    tk.mode = "consensus";
+    await slow.ok(slow.dev, "deploy_program", { program_id: slowId, build_id: bs });
+    await slow.solana.settled(slowId);
+    const sp = await slow.ok(slow.dev, "get_program", { program_id: slowId });
+    assert.equal(sp.status, "failed");
+    assert.match(sp.error, /still ACTIVITY_STATUS_CONSENSUS_NEEDED .*Mynt sent nothing/);
+    assert.ok(!slow.clusters.mainnet.sent.some((t) => t.signers.includes(tk.address)));
+    assert.equal((await slow.db.query("SELECT 1 FROM financial_products.solana_keys WHERE role = 'buffer-authority'")).rows.length, 0);
     tk.mode = "sign";
 
     // The custody key never pays for or signs a developer's call: on mainnet, calls need per-developer vault keys
@@ -1246,7 +1321,7 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     const dn = await readyToDeploy(w);
     await w.ok(w.dev, "deploy_program", { program_id: dn.program_id, build_id: dn.build_id });
     await w.solana.settled(dn.program_id);
-    for (const accounts of [[{ pubkey: tk.address, signer: true }], [{ pubkey: tk.address, writable: true }]]) {
+    for (const accounts of [[{ pubkey: tk.address, signer: true }], [{ pubkey: tk.address, writable: true }], [{ pubkey: payer, writable: true }]]) {
       r = await w.call(w.dev, "call_program", { program_id: dn.program_id, instruction: { method: "record", accounts } });
       assert.match(r.data.error, /deploy authority/);
     }
@@ -1262,7 +1337,7 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     // The API private key never appears in a response, a log or a program's error.
     const hex = tk.apiKey.privateKey;
     const forms = [hex, hex.toUpperCase(), Buffer.from(hex, "hex").toString("base64"), Buffer.from(hex, "hex").toString("base64url")];
-    const seen = [...w.responses, ...broken.responses, ...logged].join("\n");
+    const seen = [...w.responses, ...broken.responses, ...slow.responses, ...logged].join("\n");
     for (const s of forms) assert.ok(!seen.includes(s), "the Turnkey API private key leaked");
     assert.ok(!/x-stamp/i.test(seen), "a stamp leaked");
   } finally {

@@ -11,7 +11,8 @@ import { shortVec } from "../tx.js";
 //
 // Mynt sends the whole unsigned transaction (ACTIVITY_TYPE_SIGN_TRANSACTION_V2, TRANSACTION_TYPE_SOLANA)
 // rather than a raw payload, so a Turnkey policy can read it (solana.tx.program_keys, transfers, ...) and
-// refuse anything that isn't a deploy, an upgrade or a buffer write. A raw payload Turnkey can't parse.
+// refuse anything but the one transaction Mynt asks it to sign per deploy: the buffer's handover and the
+// Deploy or Upgrade (src/solana/service.ts, custodyDeploy). A raw payload Turnkey can't parse.
 //
 // Requests carry Turnkey's documented API-key stamp: the X-Stamp header is base64url(JSON {publicKey, scheme:
 // SIGNATURE_SCHEME_TK_API_P256, signature}), the signature ECDSA P-256 over SHA-256, DER then hex encoded, over
@@ -101,7 +102,7 @@ export class TurnkeyClient implements CustodyServiceClient {
     while (WAITING.has(activity.status)) {
       if (Date.now() > deadline)
         throw new CustodyError(
-          `Turnkey activity ${activity.id} is still ${activity.status} (waiting for approvals), so nothing was signed. Approve it in Turnkey and retry, or adjust the signing policy.`,
+          `Turnkey activity ${activity.id} is still ${activity.status} after ${Math.round(this.#approvalTimeoutMs / 1000)} s (waiting for approvals), so Mynt sent nothing. Approving it now is harmless (the transaction also needs Mynt's own signatures and its blockhash expires); start the deploy again and approve the new activity, or raise TURNKEY_APPROVAL_TIMEOUT_SECONDS.`,
         );
       await new Promise((r) => setTimeout(r, this.#pollMs));
       activity = await this.#post("/public/v1/query/get_activity", { organizationId: this.#organizationId, activityId: activity.id });
@@ -195,6 +196,16 @@ function signatureFrom(wire: Uint8Array, message: Uint8Array, slot: number): Uin
   return Uint8Array.from(wire.subarray(o + 64 * slot, o + 64 * (slot + 1)));
 }
 
+// How long Mynt waits for a person to approve the deploy's one activity: TURNKEY_APPROVAL_TIMEOUT_SECONDS,
+// default 60, at most 30 minutes.
+export const APPROVAL_TIMEOUT_DEFAULT_S = 60;
+export const APPROVAL_TIMEOUT_MAX_S = 30 * 60;
+export function approvalTimeoutSeconds(raw: string | undefined): number {
+  const n = Number((raw ?? "").trim());
+  if (!raw?.trim() || !Number.isFinite(n) || n < 1) return APPROVAL_TIMEOUT_DEFAULT_S;
+  return Math.min(Math.floor(n), APPROVAL_TIMEOUT_MAX_S);
+}
+
 // Turnkey from the server's environment, by name. None of the three set: no Turnkey. Some set: a client that
 // refuses and says which are missing.
 export function turnkeyFromEnv(env: NodeJS.ProcessEnv = process.env): TurnkeyClient | null {
@@ -204,6 +215,7 @@ export function turnkeyFromEnv(env: NodeJS.ProcessEnv = process.env): TurnkeyCli
     organizationId: env.TURNKEY_ORGANIZATION_ID ?? "",
     apiPublicKey: env.TURNKEY_API_PUBLIC_KEY ?? "",
     apiPrivateKey: env.TURNKEY_API_PRIVATE_KEY ?? "",
+    approvalTimeoutMs: approvalTimeoutSeconds(env.TURNKEY_APPROVAL_TIMEOUT_SECONDS) * 1000,
     ...(missing.length ? { problem: `${missing.join(" and ")} ${missing.length > 1 ? "aren't" : "isn't"} set on the server` } : {}),
   });
 }

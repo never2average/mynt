@@ -208,6 +208,12 @@ const toProgram = (r: Row): ProgramRecord => ({
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const FEE_MARGIN = 20_000_000; // 0.02 SOL for the transactions' fees
+const SIGNATURE_FEE = 5_000; // lamports per signature, Solana's base fee
+// Custody deploys: Mynt's deploy payer (SOL only, no program) and each deploy's temporary buffer key.
+const DEPLOY_PAYER = "deploy-payer";
+const BUFFER_KEY = "buffer-authority";
+const CUSTODY_ATTEMPTS = 3; // fresh blockhashes for the custody-signed transaction before giving up
+type Signs = { address: string; sign(m: Uint8Array): Promise<Uint8Array> };
 const AIRDROP_MAX = 2 * LAMPORTS_PER_SOL;
 const CALL_FEE_RESERVE = 5_000_000; // what a developer's fee payer keeps for calls' fees
 const DEVNET_CALLER_FLOAT = 50_000_000; // devnet only: enough for a call to pay an account's rent
@@ -314,6 +320,8 @@ export class SolanaService {
       const existing = await this.keyRow("mainnet", "authority", "");
       generated = existing ? null : (await this.createKey("mainnet", "authority", "")).address;
     }
+    // Custody deploys are paid for by a Mynt-held deploy payer: made now, so the operator sees what to fund.
+    if (next.backend === "custody-service" && vaultAvailable(false)) await this.deployPayer("mainnet");
     await this.db.query(
       `INSERT INTO ${T}.solana_settings (key, value, updated_by) VALUES ('mainnet', $1, $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
@@ -379,6 +387,7 @@ export class SolanaService {
     if (s.backend === "custody-service") {
       if (!this.custody) reasons.push("no custody provider is connected to this Mynt (for Turnkey: set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PUBLIC_KEY and TURNKEY_API_PRIVATE_KEY on the server)");
       else if (this.custody.problem) reasons.push(`the ${this.custody.provider} custody provider isn't usable: ${this.custody.problem}`);
+      if (!vaultAvailable(false)) reasons.push("MYNT_VAULT_KEY isn't set on the server (custody deploys seal their deploy payer and buffer keys with it)");
       if (!s.custody) reasons.push("no custody address is configured");
       else if (this.custody && s.custody.provider !== this.custody.provider)
         reasons.push(`the custody provider configured is '${s.custody.provider}', but this Mynt is connected to ${this.custody.provider}`);
@@ -443,6 +452,8 @@ export class SolanaService {
                 ? (m.settings.multisig?.vault ?? null)
                 : null,
         custody_provider: m.settings.custody?.provider ?? null,
+        // custody-service: the Mynt-held key that pays each deploy's fees and rent (SOL only; it controls no program).
+        deploy_payer: m.settings.backend === "custody-service" ? ((await this.keyRow("mainnet", DEPLOY_PAYER, ""))?.public_key ?? null) : null,
         multisig: m.settings.multisig?.address ?? null,
         rpc_configured: !!this.config.rpcUrls.mainnet,
         vault_signer_allowed: this.config.mainnetVaultAllowed,
@@ -629,25 +640,38 @@ export class SolanaService {
       action = "upgrade";
       maxDataLen = chain.capacity;
     }
+    // A custody service signs only the final Deploy or Upgrade (one approval per deploy); see custodyDeploy.
+    const custody = signer.backend === "custody-service";
     if (action === "deploy") {
       maxDataLen = len * 2; // room to grow, as the Solana CLI leaves
       const programRent = await rent(PROGRAM_ACCOUNT_SIZE);
-      const need = (await rent(BUFFER_HEADER + len)) + programRent + (await rent(PROGRAMDATA_HEADER + maxDataLen)) + FEE_MARGIN;
-      await this.fund(rpc, p.cluster, signer.address, need);
+      const programDataRent = await rent(PROGRAMDATA_HEADER + maxDataLen);
       const programKey = await this.vaultKey(p.cluster, "program", p.id);
       if (!programKey) throw new SolanaError("The program's reserved keypair is missing");
       // The address is public once reserved: anyone may have sent it lamports. Then it can't be created, but, as
       // the Solana CLI does, it can be topped up, sized and handed to the loader, signed by its own keypair.
-      const existing = await this.accountInfo(rpc, p.program_id);
-      let open: Instruction[];
-      if (!existing) open = [system.createAccount(signer.address, p.program_id, programRent, PROGRAM_ACCOUNT_SIZE, UPGRADEABLE_LOADER)];
-      else if (existing.owner === SYSTEM_PROGRAM && !existing.space)
-        open = [
-          ...(existing.lamports < programRent ? [system.transfer(signer.address, p.program_id, programRent - existing.lamports)] : []),
-          system.allocate(p.program_id, PROGRAM_ACCOUNT_SIZE),
-          system.assign(p.program_id, UPGRADEABLE_LOADER),
-        ];
-      else throw new SolanaError(`An account owned by ${existing.owner} already exists at ${p.program_id}`);
+      const opening = async (funder: string): Promise<Instruction[]> => {
+        const existing = await this.accountInfo(rpc, p.program_id);
+        if (!existing) return [system.createAccount(funder, p.program_id, programRent, PROGRAM_ACCOUNT_SIZE, UPGRADEABLE_LOADER)];
+        if (existing.owner === SYSTEM_PROGRAM && !existing.space)
+          return [
+            ...(existing.lamports < programRent ? [system.transfer(funder, p.program_id, programRent - existing.lamports)] : []),
+            system.allocate(p.program_id, PROGRAM_ACCOUNT_SIZE),
+            system.assign(p.program_id, UPGRADEABLE_LOADER),
+          ];
+        throw new SolanaError(`An account owned by ${existing.owner} already exists at ${p.program_id}`);
+      };
+      if (custody) {
+        tx = await this.custodyDeploy(rpc, p, signer, artifact.program, programRent + programDataRent + FEE_MARGIN, async (payer, buffer) => ({
+          before: await opening(payer),
+          last: loader.deployWithMaxDataLen({ payer, programData: p.programdata_address!, program: p.program_id, buffer, authority: signer.address, maxDataLen: maxDataLen! }),
+          extra: [programKey],
+        }));
+        await this.finish(userId, p, buildId, artifact.sha256, tx, signer, action, maxDataLen);
+        return;
+      }
+      await this.fund(rpc, p.cluster, signer.address, (await rent(BUFFER_HEADER + len)) + programRent + programDataRent + FEE_MARGIN);
+      const open = await opening(signer.address);
       const buffer = await this.writeBuffer(rpc, signer, artifact.program, () => this.heartbeat(p.id));
       try {
         tx = await this.send(rpc, signer, [
@@ -661,6 +685,16 @@ export class SolanaService {
     } else {
       const capacity = chain?.capacity ?? p.max_data_len ?? 0;
       if (len > capacity) throw new SolanaError(`The new program (${len} bytes) is larger than the ${capacity} bytes reserved at first deploy; deploy it as a new program`);
+      if (custody) {
+        // The buffer's rent comes back to Mynt's deploy payer as the upgrade's spill.
+        tx = await this.custodyDeploy(rpc, p, signer, artifact.program, FEE_MARGIN, async (payer, buffer) => ({
+          before: [],
+          last: loader.upgrade({ programData: p.programdata_address!, program: p.program_id, buffer, spill: payer, authority: signer.address }),
+          extra: [],
+        }));
+        await this.finish(userId, p, buildId, artifact.sha256, tx, signer, action, maxDataLen);
+        return;
+      }
       await this.fund(rpc, p.cluster, signer.address, (await rent(BUFFER_HEADER + len)) + FEE_MARGIN);
       const buffer = await this.writeBuffer(rpc, signer, artifact.program, () => this.heartbeat(p.id));
       try {
@@ -790,8 +824,98 @@ export class SolanaService {
       );
   }
 
-  // The program bytes into a fresh buffer account, a Write per chunk, confirmed in batches.
-  private async writeBuffer(rpc: SolanaRpc, signer: SolanaSigner, program: Uint8Array, alive: () => Promise<void> = async () => undefined) {
+  // A deploy or upgrade whose authority is a custody service (Turnkey). The service signs one transaction, the
+  // final Deploy or Upgrade, so a person can approve each deploy once in its consensus:
+  //   1. Mynt's deploy payer (a Mynt-held key that holds SOL only and controls no program) funds a fresh
+  //      buffer key, sealed in the vault for this deploy, with just the buffer's rent and its fees.
+  //   2. The buffer key creates the buffer and writes the program into it, signed locally, batch by batch.
+  //   3. One transaction, signed by the custody service: hand the buffer to the custody address (SetAuthority,
+  //      signed by the buffer key; the loader requires the buffer's authority to be the upgrade authority) and
+  //      Deploy or Upgrade (signed by the custody address). The deploy payer pays its fees and rent; the custody
+  //      address pays nothing, so it needs no SOL. The handover is in the same transaction, so if that one fails
+  //      the buffer is still the buffer key's, and closed.
+  //   4. Whatever is left with the buffer key goes back to the deploy payer and the key is deleted.
+  private async custodyDeploy(
+    rpc: SolanaRpc,
+    p: ProgramRecord,
+    custody: SolanaSigner,
+    program: Uint8Array,
+    payerNeed: number,
+    final: (payer: string, buffer: string) => Promise<{ before: Instruction[]; last: Instruction; extra: Keypair[] }>,
+  ): Promise<string> {
+    const payer = await this.deployPayer(p.cluster);
+    const asSigner = (k: Keypair) => ({ address: k.address, sign: async (m: Uint8Array) => k.sign(m) });
+    await this.sweepBufferKey(rpc, p, payer.address); // left by an interrupted deploy
+    const bufferRent = await rpc.call<number>("getMinimumBalanceForRentExemption", [BUFFER_HEADER + program.length]);
+    // Its transactions: create the buffer (two signatures), the writes, a close if it fails, the sweep.
+    const bufferNeed = bufferRent + SIGNATURE_FEE * (Math.ceil(program.length / WRITE_CHUNK) + 4);
+    await this.fund(rpc, p.cluster, payer.address, payerNeed + bufferNeed + SIGNATURE_FEE);
+    const temp = await this.createKey(p.cluster, BUFFER_KEY, p.id);
+    try {
+      await this.send(rpc, asSigner(payer), [system.transfer(payer.address, temp.address, bufferNeed)]);
+      const buffer = await this.writeBuffer(rpc, asSigner(temp), program, () => this.heartbeat(p.id));
+      try {
+        const { before, last, extra } = await final(payer.address, buffer);
+        return await this.sendCustodySigned(rpc, payer, custody, [...before, loader.setBufferAuthority(buffer, temp.address, custody.address), last], [temp, ...extra]);
+      } catch (e) {
+        await this.closeBuffer(rpc, asSigner(temp), buffer);
+        throw e;
+      }
+    } finally {
+      await this.sweepBufferKey(rpc, p, payer.address);
+    }
+  }
+
+  // The deploy payer for custody deploys: Mynt-held, sealed in the vault; the operator funds it.
+  private async deployPayer(cluster: Cluster) {
+    if (!vaultAvailable(false)) throw new SignerNotConfigured("Custody deploys need MYNT_VAULT_KEY set on the server, to hold the deploy payer and buffer keys");
+    return (await this.vaultKey(cluster, DEPLOY_PAYER, "")) ?? (await this.createKey(cluster, DEPLOY_PAYER, ""));
+  }
+
+  // A deploy's buffer key: its lamports back to the deploy payer, then gone from the vault. Kept if they
+  // couldn't be moved, so the next deploy of the program tries again.
+  private async sweepBufferKey(rpc: SolanaRpc, p: ProgramRecord, to: string) {
+    const key = await this.vaultKey(p.cluster, BUFFER_KEY, p.id);
+    if (!key) return;
+    try {
+      const { value } = await rpc.call<{ value: number }>("getBalance", [key.address, { commitment: "confirmed" }]);
+      // All of it, less the fee: an account left with fewer lamports than rent would be refused.
+      if (value > SIGNATURE_FEE) await this.send(rpc, { address: key.address, sign: async (m) => key.sign(m) }, [system.transfer(key.address, to, value - SIGNATURE_FEE)]);
+    } catch {
+      return;
+    }
+    await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role = $2 AND scope = $3`, [p.cluster, BUFFER_KEY, p.id]);
+  }
+
+  // The one transaction the custody service signs, paid for by the deploy payer. Its signature is checked by
+  // the signer (the custody address's, over exactly this message). An approval can take longer than a
+  // blockhash lasts (about a minute): then the transaction is built again on a fresh one and signed again.
+  private async sendCustodySigned(rpc: SolanaRpc, payer: Keypair, custody: SolanaSigner, ixs: Instruction[], extra: Keypair[]) {
+    for (let attempt = 0; attempt < CUSTODY_ATTEMPTS; attempt++) {
+      const { blockhash } = await this.blockhash(rpc);
+      const message = compileMessage(payer.address, ixs, blockhash);
+      const sigs = new Map<string, Uint8Array>([[custody.address, await custody.sign(message.bytes)]]);
+      for (const s of message.signers) {
+        if (sigs.has(s)) continue;
+        const kp = [payer, ...extra].find((k) => k.address === s);
+        if (!kp) throw new SolanaError(`No signature available for ${s}`);
+        sigs.set(s, kp.sign(message.bytes));
+      }
+      const fresh = await rpc.call<{ value: boolean }>("isBlockhashValid", [blockhash, { commitment: "confirmed" }]);
+      if (!fresh.value) continue;
+      const wire = serializeTransaction(message, sigs);
+      const signature = (await rpc.call<string>("sendTransaction", [Buffer.from(wire).toString("base64"), { encoding: "base64", preflightCommitment: "confirmed" }])) || signatureOf(wire);
+      await this.confirm(rpc, [signature]);
+      return signature;
+    }
+    throw new SolanaError(
+      `The custody service's approval took longer than a blockhash lasts, ${CUSTODY_ATTEMPTS} times; nothing was sent. Approve sooner, or raise TURNKEY_APPROVAL_TIMEOUT_SECONDS, and start the deploy again`,
+    );
+  }
+
+  // The program bytes into a fresh buffer account, a Write per chunk, confirmed in batches, each batch on a
+  // fresh blockhash.
+  private async writeBuffer(rpc: SolanaRpc, signer: Signs, program: Uint8Array, alive: () => Promise<void> = async () => undefined) {
     const buffer = Keypair.generate();
     const size = BUFFER_HEADER + program.length;
     const lamports = await rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
@@ -814,7 +938,7 @@ export class SolanaService {
   }
 
   // Best effort: a buffer left behind holds rent; closing it returns that to the signer.
-  private async closeBuffer(rpc: SolanaRpc, signer: SolanaSigner, buffer: string) {
+  private async closeBuffer(rpc: SolanaRpc, signer: Signs, buffer: string) {
     await this.send(rpc, signer, [loader.close(buffer, signer.address, signer.address)]).catch(() => undefined);
   }
 
@@ -874,8 +998,10 @@ export class SolanaService {
     else throw new SolanaError("Give method (an Anchor instruction) or data_base64");
     const authorities = new Set<string>();
     for (const c of CLUSTERS) {
-      const k = await this.keyRow(c, "authority", "");
-      if (k) authorities.add(k.public_key);
+      for (const role of ["authority", DEPLOY_PAYER]) {
+        const k = await this.keyRow(c, role, "");
+        if (k) authorities.add(k.public_key);
+      }
     }
     const s = await this.mainnetSettings();
     if (s.custody) authorities.add(s.custody.address);
