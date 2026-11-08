@@ -1,0 +1,36 @@
+{
+  "$comment": "The reference flow for a sponsored US product (scripts/sponsored-product.mjs, test/sponsored-product-e2e.test.js): an unlicensed builder's dollar-transfer product, composed on money transmission, sponsored by a licence provider. The licence provider here is a PLACEHOLDER: not a real firm, with fake licence numbers. For staging and tests only. To go live, copy this file, set placeholder to false, and replace licence_provider with the real partner's firm and its real licences (see docs/reference.md, 'A sponsored US product').",
+  "placeholder": true,
+  "placeholder_note": "Staging and tests only. 'Example Money Transmitter (placeholder)' is not a real firm and every registration number below is fake. Never run this file against production.",
+  "region": "US",
+  "licence_provider": {
+    "name": "Example Money Transmitter (placeholder)",
+    "entity_id": null,
+    "member_email": "licence-provider@example.com",
+    "legal_form": "company_private",
+    "incorporation": { "country": "us", "subdivision": "us-de" },
+    "regions": ["US"],
+    "licences": [
+      { "key": "msb", "regulator_id": "fincen", "license_id": "fincen_msb", "registration_number": "PLACEHOLDER-FINCEN-MSB-000000" },
+      { "key": "ny", "regulator_id": "nydfs", "license_id": "nydfs_money_transmitter", "registration_number": "PLACEHOLDER-NY-MT-000000" },
+      { "key": "ca", "regulator_id": "ca_dfpi", "license_id": "ca_dfpi_money_transmitter", "registration_number": "PLACEHOLDER-CA-MT-000000" }
+    ],
+    "roster": [
+      { "person": { "name": "Placeholder AML Compliance Officer" }, "fills": [{ "licence": "msb", "stakeholder": "fincen_aml_compliance_officer" }] }
+    ]
+  },
+  "builder": {
+    "name": "Example Builder (placeholder)",
+    "legal_form": "company_private",
+    "incorporation": { "country": "us", "subdivision": "us-ca" },
+    "regions": ["US"]
+  },
+  "product": {
+    "id": "example-dollar-transfer",
+    "template": "money-transmission.v2.json",
+    "product_name": "Example dollar transfer (placeholder)",
+    "sponsored_component": "transmission",
+    "offered_in": ["us-ny", "us-ca"],
+    "changelog": "Sponsored by the licence provider under its state money transmitter licences"
+  }
+}

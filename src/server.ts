@@ -999,22 +999,38 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
       const report = runProductTests(data, await store.referenceData());
       if (draft) await store.saveDraftVersionTest(id, report);
       else await store.saveTestReport(id, report);
-      // Advisory here; publish_product enforces it.
+      const regime = record.components.length ? await productRegime(store, record) : null;
+      const blocking = regime ? blockingComponents(regime, data.region) : [];
+      // Advisory here; publish_product enforces it. A composed product needs its firm's own licences only for the
+      // components it provides itself: one whose every component a licence provider sponsors (or a partner
+      // provides) needs none, so it isn't warned about a licence it needn't hold.
       const held = await coveringLicenses(store, user.entity_id, data.region, data.category, record.action);
+      const rows = regime?.regions.flatMap((r) => r.components) ?? [];
+      const providedByOthers = rows.length > 0 && rows.every((c) => c.provider?.by === "sponsor" || c.provider?.by === "party");
+      const coveredBy = (c: (typeof rows)[number]) => {
+        const where = c.jurisdictions?.filter((j) => j.coverage.status === "covered").map((j) => j.jurisdiction) ?? (c.coverage.status === "covered" ? [c.country] : []);
+        return c.sponsor ? `${c.sponsor.name} sponsors '${c.key}'${where.length ? ` in ${where.join(", ")}` : ""}` : `a partner on your roster provides '${c.key}'`;
+      };
       const licence = held.length
         ? { name: "licence_held", status: "pass", message: `Your entity holds ${held.map((h) => `${h.license_id} (${h.regulator_id}, ${h.registration_number})`).join(", ")}` }
-        : {
-            name: "licence_held",
-            status: "warn",
-            message: user.entity_id
-              ? `Your entity holds no verified licence for ${record.action} of '${data.category}' in ${data.region}; register one with register_license`
-              : "You don't belong to an entity yet; create one with create_entity, then register its licences",
-          };
+        : providedByOthers && !blocking.length
+          ? { name: "licence_held", status: "pass", message: `Your firm needn't hold a licence: it provides no component itself; ${rows.map(coveredBy).join("; ")}` }
+          : providedByOthers
+            ? {
+                name: "licence_held",
+                status: "warn",
+                message: "Your firm needn't hold a licence (it provides no component itself), but not every component is covered yet: see composition_coverage (a sponsorship to request or approve, or a partner's licence)",
+              }
+            : {
+                name: "licence_held",
+                status: "warn",
+                message: user.entity_id
+                  ? `Your entity holds no verified licence for ${record.action} of '${data.category}' in ${data.region}; register one with register_license, or have a licence provider sponsor the components (request_sponsorship)`
+                  : "You don't belong to an entity yet; create one with create_entity, then register its licences",
+              };
       // The product's composition, if it has one: every component covered by a licence (its firm's or a partner's).
       const composition: { name: string; status: "pass" | "warn" | "fail"; message: string }[] = [];
-      if (record.components.length) {
-        const regime = await productRegime(store, record);
-        const blocking = blockingComponents(regime, data.region);
+      if (regime) {
         const gaps = partnerGaps(regime);
         composition.push(
           blocking.length
