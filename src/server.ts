@@ -38,7 +38,8 @@ import {
   type Store,
   type User,
 } from "./store.js";
-import { registerFirmTools, registerMarketplaceTools } from "./marketplace.js";
+import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
+import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
@@ -75,8 +76,10 @@ const productFields = {
 };
 
 // Tools are registered per user, so each role only sees what it is allowed to call. Roles nest
-// (admin > innovator > developer > consumer); vendors are a peer of innovators with vendor tools only, and
-// admins are both. Guests (no token) get the read-only catalog tools.
+// (admin > builder > consumer). Innovators and developers are one role, the builder: each name implies the
+// other, so both compose and publish products and build apps on them. Vendors and licence providers are peers
+// of builders with their own tools only, and admins are all of them. Guests (no token) get the read-only
+// catalog tools.
 export function createServer(store: Store, user: User | null = null, ctx: AdminContext = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, title: "Mynt: financial products", version: "0.6.0" });
   const roles = effectiveRoles(user?.roles ?? []);
@@ -88,10 +91,10 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerBdAgentTools(server, ctx.bd, ctx.bdRun.id);
     return server;
   }
-  // A vendor-only user (no consumer role) gets the public catalogue, its firm and its vendor tools.
-  const vendorOnly = has("vendor") && !has("consumer");
-  if (user && ctx.bd && !vendorOnly) registerConnectTools(server, ctx.bd, user);
-  if (user && !vendorOnly) registerProductRequestTools(server, store, user);
+  // A vendor or licence provider (no consumer role) gets the public catalogue, its firm and its own tools.
+  const peerOnly = (has("vendor") || has("license_provider")) && !has("consumer");
+  if (user && ctx.bd && !peerOnly) registerConnectTools(server, ctx.bd, user);
+  if (user && !peerOnly) registerProductRequestTools(server, store, user);
   if (has("consumer")) registerConsumerTools(server, store, user!);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
@@ -112,10 +115,17 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerTakeRateTools(server, store, user!);
     registerDefinitionTools(server, store, user!, { admin: has("admin") });
     registerVendorInnovatorTools(server, store, user!, { admin: has("admin") });
+    registerSponsorshipBuilderTools(server, store, user!);
   }
   if (has("vendor") || has("innovator")) registerServiceTypeCatalog(server, store);
+  // A vendor's or licence provider's firm (an admin registers it): its record and licences, once.
+  if ((has("vendor") || has("license_provider")) && !has("innovator")) registerFirmTools(server, store, user!);
+  if (has("license_provider")) {
+    // Its roster fills the stakeholders its licences mandate, which products it sponsors rest on.
+    if (!has("innovator")) registerRosterTools(server, store, user!);
+    registerLicenseProviderTools(server, store, user!);
+  }
   if (has("vendor")) {
-    if (!has("innovator")) registerFirmTools(server, store, user!);
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
@@ -379,7 +389,7 @@ function registerCatalogTools(server: McpServer, store: Store, user: User | null
     {
       title: "Who am I",
       description:
-        "Return the current user, the roles they were granted and what those include (innovators are developers, developers are consumers). Guests can only browse.",
+        "Return the current user, the roles they were granted and what those include (innovator and developer are one builder role, each including the other; builders are consumers). Guests can only browse.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -910,7 +920,7 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     {
       title: "Create a financial product",
       description:
-        "Innovator: create a draft financial product. action says what your firm does with it: issuance (you are the issuer), sale (you distribute another issuer's products, e.g. as a mutual fund distributor) or repackaging (you bundle others' products, e.g. a model portfolio); for sale and repackaging name the underlying products. Publishing needs a verified licence covering that action. Run test_product, then publish_product.",
+        "Innovator: create a draft financial product. action says what your firm does with it: issuance (you are the issuer), sale (you distribute another issuer's products, e.g. as a mutual fund distributor) or repackaging (you bundle others' products, e.g. a model portfolio); for sale and repackaging name the underlying products. Publishing needs a verified licence covering that action: your firm's, or, for a composed product, a licence provider's that sponsors a component (request_sponsorship). Run test_product, then publish_product.",
       inputSchema: {
         id: z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, "Use a lowercase slug like 'green-fd'"),
         ...productFields,
@@ -953,7 +963,7 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     {
       title: "Set a product's composition",
       description:
-        "Innovator: what your product is made of, and who stands behind it. Each component is a primitive (the line: credit, payments, account_operations, …) with an action, in a country, provided by your firm (by: self, optionally naming the licence) or by an external party on your firm's roster (by: party). Example: a recurring deposit = payments sale (by a partner bank on your roster) + account_operations issuance (by you). parties binds roster parties to components: the stakeholders each licence you provide under mandates must be bound. Collateral, segment and purpose are business context, not components. On a published product this edits the working copy; it goes live with the next published version.",
+        "Innovator: what your product is made of, and who stands behind it. Each component is a primitive (the line: credit, payments, account_operations, …) with an action, in a country, provided by your firm (by: self, optionally naming the licence), by an external party on your firm's roster (by: party), or by a licence provider sponsoring it under its licences (by: sponsor, its firm id; then request_sponsorship). Example: a recurring deposit = payments sale (by a partner bank on your roster) + account_operations issuance (by you). parties binds roster parties to components: the stakeholders each licence you provide under mandates must be bound. Collateral, segment and purpose are business context, not components. On a published product this edits the working copy; it goes live with the next published version.",
       inputSchema: {
         product_id: z.string(),
         components: z.array(ComponentSchema).min(1).max(20),

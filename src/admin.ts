@@ -409,7 +409,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "add_entity_member",
     {
       title: "Add someone to a firm",
-      description: "Admin: make a signed-in user a member of a firm (they then act for it as an innovator or a vendor, by their roles).",
+      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles).",
       inputSchema: { email: z.string().email(), entity_id: z.string() },
     },
     async ({ email, entity_id }) => {
@@ -494,7 +494,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     {
       title: "Whitelist someone",
       description:
-        "Admin: allow an email to sign in with the given roles, or change the roles of someone already whitelisted. Roles nest: admin > innovator > developer > consumer; vendor (firms offering standard services) is a peer of innovator with vendor tools only.",
+        "Admin: allow an email to sign in with the given roles, or change the roles of someone already whitelisted. Roles nest: admin > builder > consumer, where innovator and developer are two names for the builder role (each gets the other's tools); vendor (firms offering standard services) and license_provider (firms holding the licences that sponsor builders' products) are peers of builders with their own tools only.",
       inputSchema: {
         email: z.string().email(),
         roles: z.array(z.enum(ROLES)).min(1),

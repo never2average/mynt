@@ -3,7 +3,7 @@ import { licenseInForce } from "./access.js";
 import { PRODUCT_LINES, UNDERLYINGS, WRAPPERS } from "./catalog.js";
 import { partyActive, reconcileLicence, type LicenceReconciliation } from "./parties.js";
 import { coversJurisdiction, JURISDICTION, licenceJurisdictions, licenseProducts, normalizeModel, PRODUCT_ACTIONS, type Regulator } from "./regulatory.js";
-import type { HeldLicense, Party, ProductRecord, ReferenceData, Store } from "./store.js";
+import type { HeldLicense, Party, ProductRecord, ReferenceData, Sponsorship, Store } from "./store.js";
 
 // Products are compositions of regulated primitives: a recurring deposit is a recurring payments mandate
 // plus a term deposit; a cross-border transfer is an exchange plus a payment. The primitive is the product
@@ -26,6 +26,15 @@ import type { HeldLicense, Party, ProductRecord, ReferenceData, Store } from "./
 // A licence type may require others (requires: a state money transmitter licence counts only alongside the
 // FinCEN registration), and a licence type may cover nowhere by itself (covers: [], that registration).
 //
+// A component may instead be provided by a licence provider sponsoring it (by: sponsor): a firm, added by hand,
+// that holds the licences and approved this component of this product under some of them, for some
+// jurisdictions (see sponsorships.ts). It's covered in a jurisdiction only by a licence of that provider which
+// an approved sponsorship names for that jurisdiction, verified, in force, covering it, with the provider's own
+// prerequisites (its FinCEN registration). The licence's mandated stakeholders are the licensee's: they must be
+// filled on the provider's roster (enforced, as for the owner's own licences), but aren't bound to the
+// builder's product, whose roster they aren't on. So a builder holding no licence publishes only where a
+// provider sponsors it, and revoking the sponsorship or the provider's licence lapsing drifts the product.
+//
 // A product may be built on others (underlying_product_ids; a v2 definition's builds_on): a dollar account
 // on the money transmission product, so it never re-declares transmission. It inherits their coverage: in
 // each jurisdiction it's offered in, every product it's built on must be published, not drifted, and
@@ -40,6 +49,10 @@ export const ProviderSchema = z.discriminatedUnion("by", [
     licence_id: z.string().uuid().optional().describe("One of your entity's held licences; omit to use whichever covers it (pinned at publish)"),
   }),
   z.object({ by: z.literal("party"), party_id: z.string().uuid().describe("An active external party on your entity's roster (see add_party)") }),
+  z.object({
+    by: z.literal("sponsor"),
+    entity_id: z.string().uuid().describe("A licence provider's firm id (shared out of band); it covers the component once it approves your request_sponsorship"),
+  }),
 ]);
 
 export const ComponentSchema = z.object({
@@ -78,7 +91,8 @@ type Stakeholders = LicenceReconciliation & { enforced: boolean; unbound: string
 type JurisdictionRow = { jurisdiction: string; coverage: Coverage; stakeholders: Stakeholders | null; prerequisites?: Stakeholders[] };
 // requires: the held licences the covering one counts only with (its type's prerequisites, e.g. the FinCEN
 // registration behind a state money transmitter licence); pinned with it at publish.
-type Covering = { entity_id: string; licence_id: string; regulator_id: string; license_id: string; registration_number: string; requires?: string[] };
+// sponsorship_id: the approved sponsorship it counts under, when a licence provider sponsors the component.
+type Covering = { entity_id: string; licence_id: string; regulator_id: string; license_id: string; registration_number: string; requires?: string[]; sponsorship_id?: string };
 type Coverage =
   | { status: "covered"; by: Covering[] }
   | { status: "uncovered"; reason: string }
@@ -117,7 +131,11 @@ export async function validateComposition(store: Store, product: ProductRecord, 
       if (c.provider) errors.push(`${where}: a reference product has no firm, so it names no provider`);
       continue;
     }
-    if (!c.provider) errors.push(`${where}: name its provider (by: self, or by: party with a party on your roster)`);
+    if (!c.provider) errors.push(`${where}: name its provider (by: self, by: party with a party on your roster, or by: sponsor with a licence provider's firm id)`);
+    else if (c.provider.by === "sponsor") {
+      if (c.provider.entity_id === product.entity_id) errors.push(`${where}: your own firm can't sponsor your product; use by: self`);
+      else if (!(await store.getEntity(c.provider.entity_id))) errors.push(`${where}: no firm '${c.provider.entity_id}' on Mynt to sponsor it`);
+    }
     else if (c.provider.by === "self") {
       const licenceId = c.provider.licence_id;
       const licence = licenceId && held.find((h) => h.id === licenceId && h.region === regionOf(c));
@@ -154,6 +172,9 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
     return cache.get(id)!;
   };
   const owner = product.entity_id ? await entityData(product.entity_id) : null;
+  // Licence providers' approved sponsorships of this product's components (by: sponsor).
+  const sponsored: Sponsorship[] =
+    product.entity_id && components.some((c) => c.provider?.by === "sponsor") ? await store.sponsorships({ product_id: product.product.id, status: "approved" }) : [];
 
   const out = [];
   for (const region of [...new Set(components.map(regionOf))]) {
@@ -195,10 +216,19 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
       // Who provides it, and which of their in-force licences grant it.
       let providerEntity: string | null = null;
       let providerParty: Party | null = null;
+      let sponsor: { entity_id: string; name: string; sponsorships: Sponsorship[] } | null = null;
       if (c.provider?.by === "self") providerEntity = product.entity_id;
       else if (c.provider?.by === "party") {
         providerParty = owner?.[1].find((p) => p.id === (c.provider as { party_id: string }).party_id) ?? null;
         providerEntity = providerParty?.legal_entity_id ?? null;
+      } else if (c.provider?.by === "sponsor") {
+        providerEntity = c.provider.entity_id;
+        const entity = await store.getEntity(providerEntity);
+        sponsor = {
+          entity_id: providerEntity,
+          name: entity?.name ?? providerEntity,
+          sponsorships: sponsored.filter((x) => x.component_key === c.key && x.provider_entity_id === providerEntity && x.builder_entity_id === product.entity_id),
+        };
       }
       const grants = new Set(licences.map((l) => `${l.regulator_id}/${l.license_id}`));
       // A reason that holds wherever it's offered: no firm, not modelled, no provider, an inactive partner.
@@ -209,10 +239,24 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
       else if (!inPerimeter.length) pre = { status: "unmodelled", reason: `No regulated product type in ${region} covers ${c.action} of ${c.primitive}${c.underlying ? ` (${c.underlying})` : ""}${c.wrapper ? ` in a ${c.wrapper} wrapper` : ""} yet` };
       else if (!c.provider) pre = { status: "unassigned", reason: "No provider named" };
       else if (!providerEntity || (providerParty && !partyActive(providerParty))) pre = { status: "uncovered", reason: "The providing party isn't active on your roster" };
+      else if (sponsor && !sponsor.sponsorships.length)
+        pre = { status: "uncovered", reason: `${sponsor.name} (licence provider) hasn't approved a sponsorship of '${c.key}' in this product; ask with request_sponsorship` };
       else [held, roster] = await entityData(providerEntity);
       const pinnedLicence = c.provider?.by === "self" ? c.provider.licence_id : undefined;
-      const who = c.provider?.by === "self" ? "Your entity" : "The partner";
-      const granting = held.filter((h) => h.region === region && licenseInForce(h) && grants.has(`${h.regulator_id}/${h.license_id}`) && (!pinnedLicence || h.id === pinnedLicence));
+      const who = c.provider?.by === "self" ? "Your entity" : sponsor ? `${sponsor.name} (sponsor)` : "The partner";
+      const whoLower = sponsor ? who : who.toLowerCase();
+      // A sponsor's licences count only as its approved sponsorships name them, and only where they're approved.
+      const sponsoredLicences = new Set(sponsor?.sponsorships.flatMap((x) => x.licence_ids) ?? []);
+      const sponsoringIn = (h: HeldLicense, j: string | null) =>
+        sponsor?.sponsorships.find((x) => x.licence_ids.includes(h.id) && (j === null || coversJurisdiction(x.jurisdictions.map((w) => (w === country ? "*" : w)), j)));
+      const granting = held.filter(
+        (h) =>
+          h.region === region &&
+          licenseInForce(h) &&
+          grants.has(`${h.regulator_id}/${h.license_id}`) &&
+          (!pinnedLicence || h.id === pinnedLicence) &&
+          (!sponsor || sponsoredLicences.has(h.id)),
+      );
       // A held licence counts only with its type's prerequisites held by the same provider, verified and in force.
       const typeOf = (h: HeldLicense) => regulators.get(h.regulator_id)?.license_types.find((x) => x._id === h.license_id);
       const prerequisites = (h: HeldLicense) => {
@@ -228,16 +272,41 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
       // Covered in one jurisdiction (null: the country as a whole, any licence in the region counting).
       const coverIn = (j: string | null): Coverage => {
         if (pre) return pre;
-        const there = counting.filter((h) => j === null || coversJurisdiction(whereHeld(h), j));
+        const geographic = counting.filter((h) => j === null || coversJurisdiction(whereHeld(h), j));
+        const there = sponsor ? geographic.filter((h) => sponsoringIn(h, j)) : geographic;
+        // The sponsor holds a licence that could cover it here, but hasn't sponsored the component under it here.
+        const couldSponsor =
+          sponsor &&
+          held.some(
+            (h) =>
+              h.region === region &&
+              licenseInForce(h) &&
+              grants.has(`${h.regulator_id}/${h.license_id}`) &&
+              whereHeld(h).length > 0 &&
+              (j === null || coversJurisdiction(whereHeld(h), j)),
+          );
+        if (sponsor && couldSponsor && !there.length) {
+          const approvedIn = [...new Set(sponsor.sponsorships.flatMap((x) => x.jurisdictions))].map(label);
+          return { status: "uncovered", reason: `${who} doesn't sponsor this in ${j === null ? region : label(j)}: its approved sponsorship covers ${approvedIn.join(", ") || "nowhere yet"}; ask it to extend with request_sponsorship` };
+        }
         const by = there
           .filter((h) => prerequisites(h).missing.length === 0)
           .map((h) => {
             const requires = prerequisites(h).held.map((p) => p.id);
-            return { entity_id: providerEntity!, licence_id: h.id, regulator_id: h.regulator_id, license_id: h.license_id, registration_number: h.registration_number, ...(requires.length ? { requires } : {}) };
+            const through = sponsor ? sponsoringIn(h, j) : undefined;
+            return {
+              entity_id: providerEntity!,
+              licence_id: h.id,
+              regulator_id: h.regulator_id,
+              license_id: h.license_id,
+              registration_number: h.registration_number,
+              ...(requires.length ? { requires } : {}),
+              ...(through ? { sponsorship_id: through.id } : {}),
+            };
           });
         if (by.length) return { status: "covered", by };
         const notes = nowhere.length ? `; ${nowhere.map((h) => h.license_id).join(", ")} ${nowhere.length > 1 ? "cover" : "covers"} nowhere by itself: other licences require it` : "";
-        const lacking = there.map((h) => `${h.license_id} (${whereHeld(h).map(label).join(", ") || "no jurisdiction recorded"}) counts only alongside ${prerequisites(h).missing.join(", ")}, verified and in force, which ${who.toLowerCase()} doesn't hold`);
+        const lacking = there.map((h) => `${h.license_id} (${whereHeld(h).map(label).join(", ") || "no jurisdiction recorded"}) counts only alongside ${prerequisites(h).missing.join(", ")}, verified and in force, which ${whoLower} doesn't hold`);
         if (lacking.length) return { status: "uncovered", reason: `${who}'s ${lacking.join("; ")}${notes}` };
         if (pinnedLicence) return { status: "uncovered", reason: `Licence '${pinnedLicence}' isn't verified and in force, or doesn't grant this${j ? ` in ${label(j)}` : ""}${notes}` };
         if (!licences.length) return { status: "uncovered", reason: "No licence in the regulatory model grants this yet" };
@@ -256,9 +325,11 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
       const reconcile = (licenceId: string): Stakeholders => {
         const licence = held.find((h) => h.id === licenceId)!;
         const r = reconcileLicence(ref, licence, roster);
-        const enforced = c.provider?.by === "self";
+        // The owner's and a sponsor's licences are enforced (filled on the licensee's roster); only the owner's
+        // stakeholders are also bound to the component, since only they are on the owner's roster.
+        const enforced = c.provider?.by === "self" || c.provider?.by === "sponsor";
         const bound = new Set(parties.filter((b) => b.for === c.key).map((b) => b.party_id));
-        const unbound = enforced ? r.filled.map((f) => f.party_ids.find((id) => bound.has(id)) ?? f.party_ids[0]).filter((id) => !bound.has(id)) : [];
+        const unbound = c.provider?.by === "self" ? r.filled.map((f) => f.party_ids.find((id) => bound.has(id)) ?? f.party_ids[0]).filter((id) => !bound.has(id)) : [];
         return { ...r, enforced, unbound };
       };
       // The covering licence's, and its prerequisites' (the FinCEN registration's AML officer behind a state licence).
@@ -290,6 +361,7 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
         ...c,
         region,
         provider_entity_id: providerEntity,
+        ...(sponsor ? { sponsor: { entity_id: sponsor.entity_id, name: sponsor.name, sponsorship_ids: sponsor.sponsorships.map((x) => x.id) } } : {}),
         perimeter: inPerimeter.map((t) => ({ id: t.id, name: t.name, category: t.type_id })),
         supervised_by,
         licences,

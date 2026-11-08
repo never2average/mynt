@@ -283,7 +283,9 @@ test("an innovator mints a recurring deposit end to end through MCP tools, and a
   const dev = await signIn("dev@apps.example", "Dev");
   const developer = dev.client;
   const developerTools = await tools(developer);
-  assert.ok(!developerTools.includes("create_product"), "developers don't mint products");
+  // Innovator and developer are one builder role (2026-11-08): a developer may compose products too.
+  assert.ok(developerTools.includes("create_product") && developerTools.includes("create_app"), "developers are builders");
+  assert.ok(!developerTools.includes("review_license"), "builders can't verify licences");
   const buildable = await ok(developer, "list_buildable_products", { product_line: "account_operations" });
   const listed = buildable.find((p) => p.id === PRODUCT);
   assert.ok(listed, `in the developer's catalogue: ${JSON.stringify(buildable).slice(0, 500)}`);

@@ -2293,6 +2293,23 @@
     }
    }
   },
+  "ref_sponsor": {
+   "type": "object",
+   "required": [
+    "kind",
+    "id"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "kind": {
+     "const": "sponsor"
+    },
+    "id": {
+     "$ref": "#/$defs/uuid",
+     "description": "A licence provider's firm id (shared out of band). It covers the component under its held licences once it approves the owner's sponsorship request (request_sponsorship), in the jurisdictions it approved"
+    }
+   }
+  },
   "ref_register_persona": {
    "type": "object",
    "required": [
@@ -2845,9 +2862,9 @@
    ]
   },
   "conn_component_provided_by": {
-   "description": "Who provides a component: the owner (optionally under a named held licence) or an external party on the owner's roster. Projects to the v1 component provider.",
+   "description": "Who provides a component: the owner (optionally under a named held licence), an external party on the owner's roster, or a licence provider sponsoring it under its own held licences (once it approves the owner's request). Projects to the v1 component provider.",
    "x-cardinality": "exactly one per component on an owned product; none on a reference product or template",
-   "x-pinned": "yes: the party (and its legal entity) or the licence is hashed into pins.state and drift-checked",
+   "x-pinned": "yes: the party (and its legal entity), the licence, or the sponsor's approved sponsorship and licences are hashed into pins.state and drift-checked",
    "required": [
     "attributes"
    ],
@@ -2871,6 +2888,9 @@
       },
       {
        "$ref": "#/$defs/ref_party"
+      },
+      {
+       "$ref": "#/$defs/ref_sponsor"
       }
      ]
     },
@@ -5124,7 +5144,7 @@
        "additionalProperties": {
         "type": "string"
        },
-       "description": "Field name to type for each quote (integer, number, date-time, fee_list, \u2026)"
+       "description": "Field name to type for each quote (integer, number, date-time, fee_list, …)"
       },
       "window": {
        "type": "object",
