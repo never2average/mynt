@@ -144,6 +144,8 @@ if (values.help) {
 } else if (command === "serve-http") {
   const port = Number(values.port);
   const { store, builds, bd, desk, review, explore, hosting, modules, solana } = await openServices();
+  // This process runs deploys, so it alone recovers ones a previous run of it left behind.
+  solana.recovery = true;
   builds.startWorker();
   bd.startWorker();
   desk.startWorker();

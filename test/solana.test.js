@@ -305,6 +305,7 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
   const program = (size = 5000, seed = 1) => {
     const bytes = Buffer.alloc(size);
     for (let i = 0; i < size - 64; i++) bytes[i] = (i * 31 + seed) % 251 || 1;
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46]).copy(bytes); // an ELF file, as a Solana program is
     return new Uint8Array(bytes); // trailing zero padding, as an ELF often has
   };
   return {
@@ -643,10 +644,10 @@ test("builds: Mynt reads back the programs its verification built, hashes them i
       return files[path] ?? null;
     },
     async exec(_id, command) {
-      const m = command.match(/^tail -c \+(\d+) (\S+) \| head -c (\d+) \| base64 -w0$/);
+      const m = command.match(/^\[ -f (\S+) \] && \[ ! -L \1 \] && tail -c \+(\d+) \1 \| head -c (\d+) \| base64 -w0$/);
       assert.ok(m, command);
-      assert.equal(m[2], "/home/user/mynt-verify/solana/mynt_program.so");
-      const start = Number(m[1]) - 1;
+      assert.equal(m[1], "/home/user/mynt-verify/solana/mynt_program.so");
+      const start = Number(m[2]) - 1;
       return { exitCode: 0, stdout: Buffer.from(code.subarray(start, start + Number(m[3]))).toString("base64"), stderr: "" };
     },
   };
@@ -668,7 +669,8 @@ test("toolchain and verification scripts: pinned, checksum-verified, and valid b
   assert.match(SOLANA_TOOLCHAIN_SCRIPT, /sha256sum -c/);
   assert.match(SOLANA_TOOLCHAIN.anchorImage, /@sha256:[0-9a-f]{64}$/);
   assert.ok(SOLANA_VERIFY_SCRIPT.includes(SOLANA_TOOLCHAIN.anchorImage));
-  assert.match(SOLANA_VERIFY_SCRIPT, /anchor build --verifiable/);
+  assert.match(SOLANA_VERIFY_SCRIPT, /cargo build-sbf --manifest-path/);
+  assert.ok(!/anchor build --verifiable/.test(SOLANA_VERIFY_SCRIPT.replace(/^#.*$/gm, "")), "the IDL step of anchor build --verifiable would run developer code on the host");
   assert.match(SOLANA_VERIFY_SCRIPT, /anchor test --skip-build/);
   assert.match(VERIFY_SCRIPT, /solana-verify\.sh/);
   for (const script of [SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, VERIFY_SCRIPT]) {
@@ -836,13 +838,19 @@ test("verification: the Solana build runs alone, everything it started is killed
   const programsJson = JSON.stringify([{ workspace: "solana", name: "mynt_program", size: code.length, sha256: sha, declared_id: "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME" }]);
   const commands = [];
   let rehash = sha;
+  let solanaChecks = JSON.stringify({ name: "solana_build", status: "pass", detail: "1 program(s) built verifiably" });
+  let report = null;
   const boat = {
     async getSandbox() {
       return { state: "ready" };
     },
-    async writeFile() {},
+    async writeFile(_id, path) {
+      commands.push(`write ${path}`);
+    },
     async readFile(_id, path) {
       if (path.endsWith("/solana/programs.json")) return programsJson;
+      if (path.endsWith("/solana/checks.jsonl")) return solanaChecks;
+      if (path.endsWith("/report.json")) return report;
       return null;
     },
     async costDollars() {
@@ -856,10 +864,10 @@ test("verification: the Solana build runs alone, everything it started is killed
     },
     async exec(_id, command, opts = {}) {
       commands.push(command);
-      const m = command.match(/^tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
-      if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
+      const m = command.match(/^\[ -f (\S+) \] && \[ ! -L \1 \] && tail -c \+(\d+) \1 \| head -c (\d+) \| base64 -w0$/);
+      if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[2]) - 1, Number(m[2]) - 1 + Number(m[3]))).toString("base64"), stderr: "" };
       if (command.includes("hashlib.sha256")) return { exitCode: 0, stdout: `${sha}\n${rehash}\n`, stderr: "" };
-      if (command.startsWith("tar -tzf")) return { exitCode: 0, stdout: "anchor-workspace\n", stderr: "" };
+      if (command.includes("verify.sh --fetch")) return { exitCode: 0, stdout: "anchor-workspace\nfetched\n", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "", ...(opts.detached ? { processId: commands.length } : {}) };
     },
   };
@@ -875,19 +883,27 @@ test("verification: the Solana build runs alone, everything it started is killed
     return id;
   };
 
-  // provisioning: the first run is the Solana build alone.
+  // provisioning: Mynt fetches the source in the verify sandbox and reads, itself, that it has an Anchor
+  // workspace (never asking the agent's sandbox); the first run is the Solana build alone.
   const a = await run("provisioning");
   await builds.verify(await builds.get(a));
-  assert.match(commands.at(-1), /verify\.sh --solana-build /);
+  assert.ok(commands.some((c) => /verify\.sh --fetch 'https:\/\/dl\.example\.com\/x' a{64}/.test(c)));
+  assert.match(commands.at(-1), /verify\.sh --solana-build a{64}$/);
   assert.equal((await builds.get(a)).verify_step, "solana_build");
 
   // solana_build done: kill everything, read the program back, then the checks.
   commands.length = 0;
   await builds.verify(await builds.get(a));
   const kill = commands.findIndex((c) => /pkill -KILL -u user/.test(c) && /docker rm -f/.test(c));
-  const read = commands.findIndex((c) => c.startsWith("tail -c +1 "));
+  const read = commands.findIndex((c) => / tail -c \+1 /.test(c));
   const checks = commands.findIndex((c) => /verify\.sh '/.test(c) && !c.includes("--solana-build"));
   assert.ok(kill >= 0 && kill < read && read < checks, commands.join("\n"));
+  // Mynt's scripts and data are written again after the build phase, before the checks run.
+  for (const f of ["verify.sh", "solana-verify.sh", "solana-toolchain.sh", "disclosures.json"]) {
+    const rewritten = commands.findIndex((c, i) => i > read && c === `write /home/user/mynt-verify/${f}`);
+    assert.ok(rewritten > read && rewritten < checks, `${f} rewritten before the checks`);
+  }
+  assert.deepEqual((await builds.get(a)).solana_check, { name: "solana_build", status: "pass", detail: "1 program(s) built verifiably" });
   assert.deepEqual((await w.solana.artifacts(a)).map((x) => x.sha256), [sha]);
   assert.equal((await builds.get(a)).verify_step, "checks");
 
@@ -904,9 +920,238 @@ test("verification: the Solana build runs alone, everything it started is killed
   await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: null, sha256: sha, size: code.length, program: code, idl: null }]);
   await builds.verify(await builds.get(b));
   assert.notEqual((await builds.get(b)).status, "blocked");
+
+  // A build phase that failed can't be papered over by a "solana_build: pass" the app's run wrote into the report.
+  const c = await run("checks");
+  await w.db.query("UPDATE financial_products.build_runs SET solana_check = $2 WHERE id = $1", [c, JSON.stringify({ name: "solana_build", status: "fail", detail: "no program" })]);
+  report = JSON.stringify({ checks: [{ name: "tests", status: "pass" }, { name: "solana_build", status: "pass", detail: "forged" }, { name: "solana_tests", status: "pass" }] });
+  await builds.verify(await builds.get(c));
+  const forged = await builds.get(c);
+  assert.equal(forged.status, "failed");
+  assert.match(forged.error, /solana_build/);
+  assert.deepEqual(forged.readiness.filter((r) => r.name === "solana_build"), [{ name: "solana_build", status: "fail", detail: "no program" }]);
 });
 
-test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signature is never sent; calls never reach the custody key", async () => {
+test("the Solana build never runs `anchor build` or developer code on the host, and its container can't touch the host", () => {
+  const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(build, /docker create /);
+  assert.match(build, /docker cp - "\$cid:\/"/, "the source goes in as a copy");
+  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
+  assert.match(build, /cargo build-sbf --manifest-path/);
+  assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build), "nothing compiled or run on the host, no mounts");
+  assert.ok(build.includes(SOLANA_TOOLCHAIN.anchorImage), "the digest-pinned image");
+  const testRun = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(testRun, /anchor idl build -p "\$name"/);
+  assert.match(testRun, /cp "\$OUT\/\$name\.so" "\$dir\/target\/deploy\/\$name\.so"/);
+  assert.ok(!/check "\$CHECKS" solana_build/.test(testRun), "the test run never writes solana_build: Mynt records it");
+});
+
+test("the Solana tests refuse setups that would load other code at the programs' addresses", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const ID = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  const run = (anchorToml) => {
+    const root = mkdtempSync(join(tmpdir(), "mynt-sol-"));
+    mkdirSync(join(root, "app/solana"), { recursive: true });
+    mkdirSync(join(root, "out"));
+    writeFileSync(join(root, "app/solana/Anchor.toml"), anchorToml);
+    writeFileSync(join(root, "out/programs.json"), JSON.stringify([{ workspace: "solana", name: "mynt_program", size: 1, sha256: "x", declared_id: ID }]));
+    writeFileSync(join(root, "script.sh"), SOLANA_VERIFY_SCRIPT);
+    // The toolchain "installer" fails on purpose: a refused setup must be refused before it's ever reached.
+    writeFileSync(join(root, "toolchain.sh"), "exit 9\n");
+    writeFileSync(join(root, "checks.jsonl"), "");
+    const r = spawnSync("bash", [join(root, "script.sh"), "test", join(root, "app"), join(root, "out"), join(root, "checks.jsonl"), join(root, "toolchain.sh")]);
+    assert.equal(r.status, 0, r.stderr.toString());
+    return readFileSync(join(root, "checks.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  };
+  const base = `[programs.localnet]\nmynt_program = "${ID}"\n`;
+  for (const [toml, why] of [
+    [`${base}\n[[test.genesis]]\naddress = "${ID}"\nprogram = "evil.so"\n`, /test\.genesis/],
+    [`${base}\n[test.validator]\nurl = "https://api.mainnet-beta.solana.com"\n[[test.validator.clone]]\naddress = "${ID}"\n`, /clone/],
+    [`${base}\n[[test.validator.account]]\naddress = "${ID}"\nfilename = "evil.json"\n`, /preloads/],
+    [`[programs.localnet]\nmynt_program = "HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw"\n`, /not its declared/],
+  ]) {
+    const [row] = run(toml);
+    assert.equal(row.name, "solana_tests");
+    assert.equal(row.status, "fail");
+    assert.match(row.detail, why);
+  }
+  // A clean setup gets past the policy (to the toolchain, which fails here on purpose).
+  const [row] = run(base);
+  assert.match(row.detail, /could not install the pinned Solana toolchain/);
+});
+
+test("a retry with a newer build, after an earlier build landed unrecorded, records that one and upgrades to the new", async () => {
+  const w = await world({ confirmTimeoutMs: 50 });
+  const { program_id, build_id: first, code } = await readyToDeploy(w);
+  const chain = w.clusters.devnet;
+  chain.withhold = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 2);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: first });
+  await w.solana.settled(program_id);
+  assert.equal((await w.ok(w.dev, "get_program", { program_id })).status, "failed");
+  chain.withhold = () => false;
+  const second = await w.build();
+  const code2 = w.program(1400, 4);
+  await w.solana.recordArtifacts(second, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code2), size: code2.length, program: code2, idl: null }]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.deepEqual(p.versions.map((v) => [v.action, v.build_id, v.verifiable_hash]), [
+    ["deploy", first, executableHash(code)],
+    ["upgrade", second, executableHash(code2)],
+  ]);
+  assert.equal(executableHash(chain.accounts.get(p.programdata_address).data.subarray(45)), executableHash(code2));
+});
+
+test("only the server process recovers stale operations: another process sharing the database leaves them alone", async () => {
+  const w = await world();
+  const { program_id, build_id } = await readyToDeploy(w);
+  const p = await w.solana.get(program_id);
+  const stale = new Date(Date.now() - SolanaService.STALE_OPERATION_MS - 60_000);
+  await w.db.query("UPDATE financial_products.solana_programs SET status = 'deploying', operation = 'deploy', operation_started_at = $2, pending_build_id = $3 WHERE id = $1", [p.id, stale, build_id]);
+  // A stdio server or CLI command opening the same database: no recovery on open, none on a poll.
+  const elsewhere = await SolanaService.open(w.db, w.store, w.solana.config, { rpc: (c) => w.clusters[c] });
+  await elsewhere.pollEvents();
+  assert.equal((await w.solana.get(program_id)).operation, "deploy");
+  w.solana.recovery = true;
+  await w.solana.pollEvents();
+  assert.equal((await w.solana.get(program_id)).operation, null);
+});
+
+// ---- third review ----
+
+// Mynt's read-back, with a verify sandbox whose program file is whatever `file` says.
+async function readBack(w, file) {
+  const code = file.code;
+  const boat = {
+    async readFile(_id, path) {
+      if (path.endsWith("/solana/programs.json")) return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null }]);
+      if (path.endsWith("/solana/checks.jsonl")) return JSON.stringify({ name: "solana_build", status: "pass", detail: "built" });
+      return null;
+    },
+    async exec(_id, command) {
+      const m = command.match(/^\[ -f (\S+) \] && \[ ! -L \1 \] && tail -c \+(\d+) \1 \| head -c (\d+) \| base64 -w0$/);
+      assert.ok(m, command);
+      // A link (or anything but a regular file) fails the test in the same command, so nothing is read.
+      if (file.link) return { exitCode: 1, stdout: "", stderr: "" };
+      const start = Number(m[2]) - 1;
+      return { exitCode: 0, stdout: Buffer.from(code.subarray(start, start + Number(m[3]))).toString("base64"), stderr: "" };
+    },
+  };
+  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  builds.solana = w.solana;
+  const id = await w.build();
+  await builds.collectPrograms(await builds.get(id), "vm-verify");
+  return { id, build: await builds.get(id), kept: await w.solana.artifacts(id) };
+}
+
+test("Mynt reads back only a regular ELF file: a link to a host file, or anything that isn't a program, is refused", async () => {
+  const w = await world();
+  const ok = await readBack(w, { code: w.program(2000) });
+  assert.equal(ok.kept.length, 1);
+  assert.equal(ok.build.solana_check.status, "pass");
+  // The build's .so replaced by a link to a host file (e.g. a key): never read, never stored.
+  const link = await readBack(w, { code: Buffer.from("-----BEGIN PRIVATE KEY-----\nhost secret\n"), link: true });
+  assert.deepEqual(link.kept, []);
+  assert.equal(link.build.solana_check.status, "fail");
+  assert.match(link.build.solana_check.detail, /not a regular ELF program file/);
+  // A regular file that isn't a program (a host file copied in some other way): not stored either.
+  const notElf = await readBack(w, { code: Buffer.from("root:x:0:0:root:/root:/bin/bash\n") });
+  assert.deepEqual(notElf.kept, []);
+  assert.match(notElf.build.solana_check.detail, /not a regular ELF program file/);
+});
+
+test("the build follows links inside the container only, keeps only regular ELF files, and compiles with no network", () => {
+  const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
+  assert.ok(!/docker cp "\$cid:/.test(build), "every copy out follows links in the container");
+  assert.match(build, /\[ -L "\$OUT\/\$name\.so" \] \|\| \[ ! -f "\$OUT\/\$name\.so" \] \|\| \[ "\$\(head -c 4 "\$OUT\/\$name\.so" \| od -An -tx1 \| tr -d ' \\n'\)" != 7f454c46 \]/);
+  // Network: the crates are fetched first (no build scripts run), then the container is cut off, checked, and
+  // only then compiles, offline.
+  const fetch = build.indexOf("cargo fetch --manifest-path");
+  const disconnect = build.indexOf("docker network disconnect");
+  const verified = build.indexOf("couldn't cut the build container off the network");
+  const compile = build.indexOf("cargo build-sbf --manifest-path");
+  assert.ok(fetch > 0 && fetch < disconnect && disconnect < verified && verified < compile, "fetch, disconnect, check, then compile");
+  assert.match(build.slice(compile - 200, compile), /CARGO_NET_OFFLINE=true/);
+  assert.match(build, /sleep infinity/);
+});
+
+test("program crate names must be plain identifiers, and the Anchor check ignores node_modules, target and .git", () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = require_fs();
+  const py = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("python3 - \"$1\" <<'PY'\n") + "python3 - \"$1\" <<'PY'\n".length);
+  const programsPy = py.slice(0, py.indexOf("\nPY\n"));
+  const ws = (crateName, libName) => {
+    const root = mkdtempSync(`${require_os().tmpdir()}/mynt-ws-`);
+    writeFileSync(`${root}/Cargo.toml`, '[workspace]\nmembers = ["programs/*"]\n');
+    mkdirSync(`${root}/programs/p/src`, { recursive: true });
+    writeFileSync(`${root}/programs/p/Cargo.toml`, `[package]\nname = "${crateName}"\nversion = "0.1.0"\n\n[lib]\ncrate-type = ["cdylib", "lib"]\n${libName ? `name = "${libName}"\n` : ""}`);
+    writeFileSync(`${root}/programs/p/src/lib.rs`, 'declare_id!("EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME");\n');
+    return spawnSync("python3", ["-c", programsPy, root]);
+  };
+  const good = ws("my-ledger");
+  assert.equal(good.status, 0, good.stderr.toString());
+  assert.equal(good.stdout.toString().trim(), "programs/p/Cargo.toml\tmy_ledger\tEsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME");
+  for (const [crate, lib] of [["Evil", null], ["x", "../../etc/passwd"], ["x", "a b"], ["x", "$(id)"]]) {
+    const r = ws(crate, lib);
+    assert.notEqual(r.status, 0, `${crate}/${lib} accepted`);
+    assert.match(r.stderr.toString(), /lowercase letters, digits and underscores/);
+  }
+  // The --fetch check runs the same filter the build uses.
+  const line = VERIFY_SCRIPT.split("\n").find((l) => l.includes("tar -tzf \"$V/app.tgz\"") && l.includes("Anchor"));
+  const pipeline = line.slice(line.indexOf("| grep -vE") + 2, line.indexOf("; then"));
+  const detects = (listing) => spawnSync("bash", ["-c", `printf '%s\\n' ${listing.map((l) => `'${l}'`).join(" ")} | ${pipeline} && echo yes`]).stdout.toString().trim() === "yes";
+  assert.equal(detects(["./api/index.ts", "./solana/Anchor.toml"]), true);
+  assert.equal(detects(["./Anchor.toml"]), true);
+  assert.equal(detects(["./node_modules/pkg/Anchor.toml", "./solana/target/x/Anchor.toml", "./.git/Anchor.toml"]), false);
+});
+
+test("an earlier build is adopted from the chain only if it's the owner's (or the firm's) and shipped; the operation stays claimed", async () => {
+  const w = await world({ confirmTimeoutMs: 50 });
+  const { program_id, build_id: first } = await readyToDeploy(w);
+  const chain = w.clusters.devnet;
+  const lose = () => (chain.withhold = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 2));
+  lose();
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: first });
+  await w.solana.settled(program_id);
+  chain.withhold = () => false;
+  const second = await w.build();
+  const code2 = w.program(1400, 4);
+  await w.solana.recordArtifacts(second, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code2), size: code2.length, program: code2, idl: null }]);
+
+  // The build on chain belongs to someone outside the owner's firm, or never shipped: not adopted.
+  for (const [sql, params] of [
+    ["UPDATE financial_products.build_runs SET developer_id = $2 WHERE id = $1", [first, w.otherUser.id]],
+    ["UPDATE financial_products.build_runs SET developer_id = $2, status = 'failed' WHERE id = $1", [first, w.devUser.id]],
+  ]) {
+    await w.db.query(sql, params);
+    await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+    await w.solana.settled(program_id);
+    const p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "failed");
+    assert.match(p.error, /different program already exists/);
+  }
+  // A firm colleague's shipped build counts.
+  await w.store.setUserEntity(w.otherUser.id, w.entity.id);
+  await w.db.query("UPDATE financial_products.build_runs SET developer_id = $2, status = 'succeeded' WHERE id = $1", [first, w.otherUser.id]);
+  const writes = [];
+  const update = w.solana.update.bind(w.solana);
+  w.solana.update = async (id, fields) => {
+    if ("operation" in fields) writes.push(fields.operation);
+    return update(id, fields);
+  };
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.deepEqual(p.versions.map((v) => [v.action, v.build_id]), [["deploy", first], ["upgrade", second]]);
+  // Recording the earlier build hands the operation straight to the upgrade; it's released only at the end.
+  assert.deepEqual(writes, ["upgrade", null]);
+});
+
+test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signature is never sent; the custody key never pays for or signs calls", async () => {
   const { fakeTurnkey, apiKeyPair } = await import("./fake-turnkey.js");
   const { TurnkeyClient } = await import("../dist/solana/custody/turnkey.js");
   const tk = await fakeTurnkey();
@@ -939,6 +1184,7 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.equal(ready.mainnet.ready, true, JSON.stringify(ready.mainnet.missing));
     assert.equal(ready.mainnet.authority, tk.address);
     assert.equal(ready.mainnet.custody_provider, "turnkey");
+    assert.match(ready.funding, new RegExp(`Fund ${tk.address}`));
 
     const chain = w.clusters.mainnet;
     chain.fund(tk.address, 10_000_000_000);
@@ -957,39 +1203,60 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
 
     // An upgrade signs the same way.
     const b2 = await w.build();
-    await record(b2, w.program(2600, 2));
+    const code2 = w.program(2600, 2);
+    await record(b2, code2);
     await w.ok(w.dev, "upgrade_program", { program_id, build_id: b2 });
     await w.solana.settled(program_id);
     p = await w.ok(w.dev, "get_program", { program_id });
     assert.equal(p.status, "deployed", p.error);
     assert.equal(p.version, 2);
 
+    // Recovery of an interrupted upgrade compares the chain's authority with the custody address; it signs nothing.
+    const row = await w.solana.get(program_id);
+    const stale = new Date(Date.now() - SolanaService.STALE_OPERATION_MS - 60_000);
+    await w.db.query("UPDATE financial_products.solana_programs SET operation = 'upgrade', operation_started_at = $2, pending_build_id = $3, version = 1 WHERE id = $1", [row.id, stale, b2]);
+    const signedBefore = tk.signed;
+    assert.equal(await w.solana.recoverStale(), 1);
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.in_progress, null);
+    assert.equal(p.verifiable_hash, executableHash(code2), "adopted from the chain under the custody address");
+    assert.equal(tk.signed, signedBefore, "recovery asked Turnkey for nothing");
+
     // A signature that doesn't verify is refused before anything is sent.
     tk.mode = "bad-signature";
     const b3 = await w.build();
     await record(b3, w.program(2600, 3));
     const sentBefore = chain.sent.length;
+    const versionBefore = p.version;
     await w.ok(w.dev, "upgrade_program", { program_id, build_id: b3 });
     await w.solana.settled(program_id);
     p = await w.ok(w.dev, "get_program", { program_id });
-    assert.equal(p.version, 2);
+    assert.equal(p.version, versionBefore);
     assert.match(p.error, /doesn't verify for .* it wasn't used/);
     assert.equal(chain.sent.length, sentBefore, "nothing signed badly reached the cluster");
     tk.mode = "sign";
 
-    // Program calls never sign with the custody key: on mainnet they need per-developer vault keys, and no call
-    // may name the deploy authority at all.
+    // The custody key never pays for or signs a developer's call: on mainnet, calls need per-developer vault keys
+    // (mainnet-vault); on devnet, they pay with the developer's own fee payer and may not name the custody key.
     const turnkeyRequests = tk.requests.length;
     r = await w.call(w.dev, "call_program", { program_id, instruction: { method: "record", accounts: [] } });
     assert.match(r.data.error, /program calls: they sign with per-developer keys in Mynt's vault/);
-    const { program_id: devnetId } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
-    const bd = await w.build();
-    const cd = w.program(1500, 4);
-    await w.solana.recordArtifacts(bd, [{ name: "mynt_program", declared_id: devnetId, sha256: executableHash(cd), size: cd.length, program: cd, idl: null }]);
-    await w.ok(w.dev, "deploy_program", { program_id: devnetId, build_id: bd });
-    await w.solana.settled(devnetId);
-    r = await w.call(w.dev, "call_program", { program_id: devnetId, instruction: { method: "record", accounts: [{ pubkey: tk.address, signer: true }] } });
-    assert.match(r.data.error, /deploy authority/);
+    r = await w.call(w.dev, "simulate_program_call", { program_id, instruction: { method: "record", accounts: [] } });
+    assert.match(r.data.error, /program calls: they sign with per-developer keys in Mynt's vault/);
+    const dn = await readyToDeploy(w);
+    await w.ok(w.dev, "deploy_program", { program_id: dn.program_id, build_id: dn.build_id });
+    await w.solana.settled(dn.program_id);
+    for (const accounts of [[{ pubkey: tk.address, signer: true }], [{ pubkey: tk.address, writable: true }]]) {
+      r = await w.call(w.dev, "call_program", { program_id: dn.program_id, instruction: { method: "record", accounts } });
+      assert.match(r.data.error, /deploy authority/);
+    }
+    const instruction = { method: "record", accounts: [{ pubkey: "$caller", signer: true }] };
+    const sim = await w.ok(w.dev, "simulate_program_call", { program_id: dn.program_id, instruction });
+    const sent = await w.ok(w.dev, "call_program", { program_id: dn.program_id, instruction });
+    const tx = w.clusters.devnet.sent.find((t) => t.signature === sent.signature);
+    assert.deepEqual(tx.signers, [sim.fee_payer, sim.caller], "the developer's own fee payer pays and their caller signs");
+    assert.ok(![sim.fee_payer, sim.caller].includes(tk.address));
+    assert.ok(!tx.signers.includes(tk.address) && !tx.ixs.some((i) => i.accounts.includes(tk.address)));
     assert.equal(tk.requests.length, turnkeyRequests, "no call reached Turnkey");
 
     // The API private key never appears in a response, a log or a program's error.
@@ -1003,3 +1270,12 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     await tk.close();
   }
 });
+
+import { createRequire } from "node:module";
+const require_ = createRequire(import.meta.url);
+function require_fs() {
+  return require_("node:fs");
+}
+function require_os() {
+  return require_("node:os");
+}

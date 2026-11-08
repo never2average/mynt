@@ -239,9 +239,7 @@ export class SolanaService {
     await db.exec(TABLES);
     // The custody provider comes from the server's environment (Turnkey's variables) unless one is passed in.
     const custody = opts.custody !== undefined ? opts.custody : turnkeyFromEnv();
-    const service = new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), custody, opts.multisig ?? null);
-    await service.recoverStale().catch((e) => console.error(`solana: recovering stale operations: ${(e as Error).message.slice(0, 200)}`));
-    return service;
+    return new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), custody, opts.multisig ?? null);
   }
 
   // ---- persistence ----
@@ -493,6 +491,11 @@ export class SolanaService {
     return kept;
   }
 
+  // The IDL a later, untrusted run produced: used only to name events, never deployed.
+  async recordIdl(buildId: string, name: string, idl: unknown) {
+    await this.db.query(`UPDATE ${T}.solana_program_artifacts SET idl = $3 WHERE build_id = $1 AND name = $2`, [buildId, name, JSON.stringify(idl)]);
+  }
+
   async artifacts(buildId: string) {
     return (await this.db.query(`SELECT name, declared_id, sha256, size FROM ${T}.solana_program_artifacts WHERE build_id = $1 ORDER BY name`, [buildId])).rows as {
       name: string;
@@ -527,6 +530,9 @@ export class SolanaService {
   static STALE_OPERATION_MS = 30 * 60_000;
   // Transactions the indexer reads per program per poll; a longer backlog continues on the next poll.
   static INDEX_PER_POLL = 1000;
+  // Only the process that runs deploys (the HTTP server) recovers stale ones; a stdio server or a CLI command
+  // sharing the database never touches another process's operation.
+  recovery = false;
 
   // Starts a first deploy (or, for a deployed program, an upgrade) in the background; get_program follows it.
   async deploy(user: User, p: ProgramRecord, buildId: string, action: "deploy" | "upgrade") {
@@ -552,8 +558,19 @@ export class SolanaService {
     return (await this.get(p.program_id))!;
   }
 
-  private async markFailed(p: ProgramRecord, action: "deploy" | "upgrade", error: string) {
-    await this.update(p.id, { operation: null, operation_started_at: null, pending_build_id: null, error: error.slice(0, 1000), ...(action === "deploy" ? { status: "failed" } : {}) });
+  // A running deploy's sign of life: recovery leaves an operation alone while this keeps moving.
+  private async heartbeat(id: string) {
+    await this.db.query(`UPDATE ${T}.solana_programs SET operation_started_at = now() WHERE id = $1 AND operation IS NOT NULL`, [id]);
+  }
+
+  // A program that is deployed stays deployed (a failed upgrade, or a deploy that turned into one); only a first
+  // deploy still in progress becomes failed.
+  private async markFailed(p: ProgramRecord, _action: "deploy" | "upgrade", error: string) {
+    await this.db.query(
+      `UPDATE ${T}.solana_programs SET operation = NULL, operation_started_at = NULL, pending_build_id = NULL, error = $2,
+         status = CASE WHEN status = 'deploying' THEN 'failed' ELSE status END, updated_at = now() WHERE id = $1`,
+      [p.id, error.slice(0, 1000)],
+    );
   }
 
   // Resolves once a background deploy or upgrade of `programId` has finished (tests; graceful shutdown).
@@ -601,8 +618,18 @@ export class SolanaService {
     }
     let tx: string;
     let maxDataLen = p.max_data_len;
+    if (action === "deploy" && chain) {
+      // An earlier build of this program, deployed by Mynt's signer but never recorded (a retry with a newer
+      // build after a lost confirmation): record that one, then this build goes through as an upgrade.
+      const prior = chain.authority === signer.address ? await this.artifactByHash(p, chain.hash) : null;
+      if (!prior) throw new SolanaError(`A different program already exists at ${p.program_id}`);
+      // Recorded and handed over to the upgrade in one write: the operation stays claimed throughout.
+      await this.finish(userId, p, prior.build_id, chain.hash, await this.latestSignature(p), signer, "deploy", chain.capacity, { continueAs: "upgrade", pendingBuildId: buildId });
+      p = (await this.get(p.program_id))!;
+      action = "upgrade";
+      maxDataLen = chain.capacity;
+    }
     if (action === "deploy") {
-      if (chain) throw new SolanaError(`A different program already exists at ${p.program_id}`);
       maxDataLen = len * 2; // room to grow, as the Solana CLI leaves
       const programRent = await rent(PROGRAM_ACCOUNT_SIZE);
       const need = (await rent(BUFFER_HEADER + len)) + programRent + (await rent(PROGRAMDATA_HEADER + maxDataLen)) + FEE_MARGIN;
@@ -621,7 +648,7 @@ export class SolanaService {
           system.assign(p.program_id, UPGRADEABLE_LOADER),
         ];
       else throw new SolanaError(`An account owned by ${existing.owner} already exists at ${p.program_id}`);
-      const buffer = await this.writeBuffer(rpc, signer, artifact.program);
+      const buffer = await this.writeBuffer(rpc, signer, artifact.program, () => this.heartbeat(p.id));
       try {
         tx = await this.send(rpc, signer, [
           ...open,
@@ -635,7 +662,7 @@ export class SolanaService {
       const capacity = chain?.capacity ?? p.max_data_len ?? 0;
       if (len > capacity) throw new SolanaError(`The new program (${len} bytes) is larger than the ${capacity} bytes reserved at first deploy; deploy it as a new program`);
       await this.fund(rpc, p.cluster, signer.address, (await rent(BUFFER_HEADER + len)) + FEE_MARGIN);
-      const buffer = await this.writeBuffer(rpc, signer, artifact.program);
+      const buffer = await this.writeBuffer(rpc, signer, artifact.program, () => this.heartbeat(p.id));
       try {
         tx = await this.send(rpc, signer, [loader.upgrade({ programData: p.programdata_address!, program: p.program_id, buffer, spill: signer.address, authority: signer.address })]);
       } catch (e) {
@@ -647,7 +674,17 @@ export class SolanaService {
   }
 
   // The deploy or upgrade is on chain: record the version and tell the firm.
-  private async finish(userId: string | null, p: ProgramRecord, buildId: string, sha256: string, tx: string, signer: SolanaSigner, action: "deploy" | "upgrade", maxDataLen: number | null) {
+  private async finish(
+    userId: string | null,
+    p: ProgramRecord,
+    buildId: string,
+    sha256: string,
+    tx: string,
+    signer: SolanaSigner,
+    action: "deploy" | "upgrade",
+    maxDataLen: number | null,
+    next: { continueAs: "upgrade"; pendingBuildId: string } | null = null,
+  ) {
     const version = p.version + 1;
     await this.db.query(
       `INSERT INTO ${T}.solana_program_versions (id, program, version, action, build_id, verifiable_hash, tx, signer_backend, by_user) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -655,9 +692,9 @@ export class SolanaService {
     );
     await this.update(p.id, {
       status: "deployed",
-      operation: null,
-      operation_started_at: null,
-      pending_build_id: null,
+      operation: next ? next.continueAs : null,
+      operation_started_at: next ? new Date() : null,
+      pending_build_id: next ? next.pendingBuildId : null,
       version,
       build_id: buildId,
       verifiable_hash: sha256,
@@ -684,6 +721,21 @@ export class SolanaService {
   private async storedArtifact(p: ProgramRecord, buildId: string) {
     const r = await this.one(`SELECT sha256 FROM ${T}.solana_program_artifacts WHERE build_id = $1 AND declared_id = $2`, [buildId, p.program_id]);
     return r ? { sha256: r.sha256 as string } : null;
+  }
+
+  // A build of this program that Mynt verified and shipped, by its owner or someone of the owner's firm, whose
+  // program hashes as `sha256`. Nobody else's build can be recorded as this program's.
+  private async artifactByHash(p: ProgramRecord, sha256: string) {
+    const r = await this.one(
+      `SELECT a.build_id FROM ${T}.solana_program_artifacts a
+         JOIN ${T}.build_runs b ON b.id = a.build_id
+         JOIN ${T}.users u ON u.id = b.developer_id
+       WHERE a.declared_id = $1 AND a.sha256 = $2 AND b.status = 'succeeded'
+         AND (b.developer_id = $3 OR ($4::uuid IS NOT NULL AND u.entity_id = $4))
+       ORDER BY a.created_at DESC LIMIT 1`,
+      [p.program_id, sha256, p.owner_id, p.entity_id],
+    );
+    return r ? { build_id: r.build_id as string } : null;
   }
 
   private async latestSignature(p: ProgramRecord) {
@@ -739,7 +791,7 @@ export class SolanaService {
   }
 
   // The program bytes into a fresh buffer account, a Write per chunk, confirmed in batches.
-  private async writeBuffer(rpc: SolanaRpc, signer: SolanaSigner, program: Uint8Array) {
+  private async writeBuffer(rpc: SolanaRpc, signer: SolanaSigner, program: Uint8Array, alive: () => Promise<void> = async () => undefined) {
     const buffer = Keypair.generate();
     const size = BUFFER_HEADER + program.length;
     const lamports = await rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
@@ -752,6 +804,7 @@ export class SolanaService {
         const sigs = [];
         for (const w of writes.slice(i, i + 16)) sigs.push(await this.submit(rpc, signer, [w], [], blockhash));
         await this.confirm(rpc, sigs);
+        await alive();
       }
     } catch (e) {
       await this.closeBuffer(rpc, signer, buffer.address);
@@ -884,7 +937,7 @@ export class SolanaService {
   // New transactions of every deployed program, oldest first; each Anchor event its own logs carry (the
   // "Program data:" lines while the program is the one running) goes to the owning firm's webhooks.
   async pollEvents() {
-    await this.recoverStale().catch(() => undefined);
+    if (this.recovery) await this.recoverStale().catch((e) => console.error(`solana: recovering stale operations: ${(e as Error).message.slice(0, 200)}`));
     const programs = (await this.db.query(`SELECT * FROM ${T}.solana_programs WHERE status = 'deployed' ORDER BY updated_at`)).rows.map((r) => toProgram(r as Row));
     let emitted = 0;
     for (const p of programs) {
