@@ -28,7 +28,7 @@ const instruction = z
     accounts: z
       .array(
         z.object({
-          pubkey: z.string().describe("An address, or \"$caller\" for your caller key (the fee payer, and the only signer a call may have)"),
+          pubkey: z.string().describe("An address, or \"$caller\" for your caller key (the only signer a call may have; it signs only when listed with signer: true)"),
           writable: z.boolean().optional(),
           signer: z.boolean().optional(),
         }),
@@ -136,7 +136,7 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
     {
       title: "Simulate a call to a Solana program",
       description:
-        "Developer: run an instruction against one of your deployed programs without sending it: the logs, compute used and any error. The fee payer is your caller key ($caller).",
+        "Developer: run an instruction against one of your deployed programs without sending it: the logs, compute used and any error. Fees come from your fee payer, which no program sees; $caller is your caller key.",
       inputSchema: { program_id: ADDRESS, instruction },
       annotations: { readOnlyHint: true },
     },
@@ -148,7 +148,7 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
     {
       title: "Call a Solana program",
       description:
-        "Developer: send an instruction to one of your deployed programs. Mynt simulates it first and sends it only if the simulation succeeds, signed by your caller key (never Mynt's deploy authority). Mainnet is refused until it's configured and enabled.",
+        "Developer: send an instruction to one of your deployed programs. Mynt simulates it first and sends it only if the simulation succeeds, with fees from your own fee payer (never passed to the program) and signed by your caller key only where the instruction lists $caller as a signer; never Mynt's deploy authority. Mainnet is refused until it's configured and enabled.",
       inputSchema: { program_id: ADDRESS, instruction },
     },
     async ({ program_id, instruction }) => withProgram(program_id, (p) => solana.call(user, p, instruction as CallInput)),

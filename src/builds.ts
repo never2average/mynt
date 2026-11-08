@@ -102,7 +102,7 @@ export interface Build {
   sandbox_id: string | null;
   sandbox_key_id: string | null; // the app's Mynt sandbox key this build uses
   verify_sandbox_id: string | null; // the clean sandbox Mynt verifies the build in
-  verify_step: "provisioning" | "checks" | "audit" | null;
+  verify_step: "provisioning" | "solana_build" | "checks" | "audit" | null;
   verify_process_id: number | null;
   verify_prompt_id: string | null; // the auditor's runner process in the verify sandbox
   audit_started_at: string | null;
@@ -210,6 +210,7 @@ export interface BuildSolanaHooks {
     buildId: string,
     artifacts: { name: string; declared_id: string | null; sha256: string; size: number; program: Uint8Array; idl: unknown; reported_sha256?: string }[],
   ): Promise<string[]>;
+  artifacts(buildId: string): Promise<{ name: string; sha256: string }[]>;
 }
 // The largest program Mynt reads back from its verify sandbox.
 const MAX_PROGRAM_BYTES = 4 * 1024 * 1024;
@@ -718,16 +719,37 @@ export class BuildService {
       await boat.writeFile(vid, `${VERIFY_DIR}/solana-toolchain.sh`, SOLANA_TOOLCHAIN_SCRIPT);
       await boat.writeFile(vid, `${VERIFY_DIR}/solana-verify.sh`, SOLANA_VERIFY_SCRIPT);
       await boat.writeFile(vid, `${VERIFY_DIR}/disclosures.json`, JSON.stringify(await this.requiredDisclosures(b)));
+      // First Mynt's Solana build on its own (it finishes at once when the source has no Anchor workspace), so
+      // the programs are read back before any of the app's code runs; then the checks.
+      const run = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --solana-build '${b.source_url}' ${b.source_sha256}`, { detached: true });
+      await this.update(b.id, { verify_step: "solana_build", verify_process_id: run.processId ?? null });
+      await this.event(b.id, "verifying", "Building any Solana programs verifiably, before the checks");
+      return;
+    }
+
+    if (b.verify_step === "solana_build") {
+      if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
+      // Nothing the build started may outlive it: every process and container of the sandbox's user goes before
+      // Mynt reads the programs back.
+      await boat.exec(vid, "docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1; pkill -KILL -u user >/dev/null 2>&1; true", { timeoutSeconds: 60 }).catch(() => undefined);
+      await this.collectPrograms(b, vid);
       const run = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh '${b.source_url}' ${b.source_sha256}`, { detached: true });
       await this.update(b.id, { verify_step: "checks", verify_process_id: run.processId ?? null });
-      await this.event(b.id, "verifying", "Running Mynt's checks: tests, lint and types, secrets, dependencies, SBOM, disclosures");
+      await this.event(b.id, "verifying", "Running Mynt's checks: tests, lint and types, secrets, dependencies, SBOM, disclosures, Solana tests");
       return;
     }
 
     if (b.verify_step === "checks") {
       if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
-      // The Solana programs Mynt built, read back now, before an auditor runs in this sandbox.
-      await this.collectPrograms(b, vid);
+      // The tests ran against the programs Mynt hashed; they must still be exactly those bytes.
+      const swapped = await this.recheckPrograms(b, vid);
+      if (swapped) {
+        await boat.stop(vid).catch(() => {});
+        await this.retireKey(b);
+        await this.update(b.id, { status: "blocked", error: swapped });
+        await this.event(b.id, "blocked", swapped);
+        return;
+      }
       const { audit } = this.config;
       if (audit.mode === "none") {
         // No agent audit: the source can't change after Mynt's checks, so decide on their report alone.
@@ -815,6 +837,25 @@ export class BuildService {
     await this.event(b.id, "verifying", `Mynt built ${kept.length} Solana program(s) for deploys: ${kept.join(", ") || "none matched their hash"}`, {
       programs: listed.map((p) => ({ name: p.name, sha256: p.sha256, declared_id: p.declared_id })),
     });
+  }
+
+  // After the tests: every copy of each program Mynt read back (its own copy, and the one the tests loaded) must
+  // still hash as it did. Returns why not, or null.
+  private async recheckPrograms(b: Build, vid: string): Promise<string | null> {
+    if (!this.solana) return null;
+    const kept = await this.solana.artifacts(b.id);
+    for (const a of kept) {
+      if (!/^[a-z0-9_]+$/.test(a.name)) continue;
+      const r = await this.boat!.exec(
+        vid,
+        `cd ${VERIFY_APP} && for f in ${VERIFY_DIR}/solana/${a.name}.so $(find . -path '*/node_modules' -prune -o -path '*/target/deploy/${a.name}.so' -print); do python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read().rstrip(b"\\0")).hexdigest())' "$f" 2>/dev/null || echo missing; done`,
+        { timeoutSeconds: 120 },
+      );
+      const hashes = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (r.exitCode !== 0 || !hashes.length || hashes.some((h) => h !== a.sha256))
+        return `The Solana program ${a.name} changed after Mynt built it (its tests didn't run against the bytes Mynt hashed); the result can't be trusted`;
+    }
+    return null;
   }
 
   // Ship only what Mynt itself verified: the source unchanged through the audit, no critical or high

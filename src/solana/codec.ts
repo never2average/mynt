@@ -59,12 +59,17 @@ export const isAddress = (s: string) => {
 const b64url = (b: Uint8Array) => Buffer.from(b).toString("base64url");
 
 // The Solana CLI's keypair: 64 bytes, the ed25519 seed then the public key.
+// The private key and seed are JS #private fields: no log, inspection or JSON serialisation can reach them.
 export class Keypair {
-  private constructor(
-    private readonly key: KeyObject,
-    readonly publicKey: Uint8Array,
-    private readonly seed: Uint8Array,
-  ) {}
+  readonly #key: KeyObject;
+  readonly #seed: Uint8Array;
+  readonly publicKey: Uint8Array;
+
+  private constructor(key: KeyObject, publicKey: Uint8Array, seed: Uint8Array) {
+    this.#key = key;
+    this.#seed = seed;
+    this.publicKey = publicKey;
+  }
 
   static generate(): Keypair {
     const { privateKey } = generateKeyPairSync("ed25519");
@@ -95,11 +100,11 @@ export class Keypair {
 
   // The 64-byte secret, as the Solana CLI stores it. Only ever sealed; never shown, logged or returned.
   secret(): Uint8Array {
-    return Uint8Array.from([...this.seed, ...this.publicKey]);
+    return Uint8Array.from([...this.#seed, ...this.publicKey]);
   }
 
   sign(message: Uint8Array): Uint8Array {
-    return new Uint8Array(edSign(null, message, this.key));
+    return new Uint8Array(edSign(null, message, this.#key));
   }
 }
 

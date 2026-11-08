@@ -29,6 +29,16 @@ if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then
   exit 0
 fi
 
+# Mynt's Solana build, a run of its own before any of the app's code (installs, tests) runs: Mynt reads back
+# and hashes what it built as soon as this exits, then starts the checks below.
+if [ "$#" -gt 0 ] && [ "$1" = "--solana-build" ]; then
+  URL="$2"; WANT="$3"
+  if curl -fsSL "$URL" -o "$V/app.tgz" && [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$WANT" ] && mkdir -p "$APP" && tar -xzf "$V/app.tgz" -C "$APP"; then
+    [ -f "$V/solana-verify.sh" ] && bash "$V/solana-verify.sh" build "$APP" "$V/solana" "$V/solana-toolchain.sh"
+  fi
+  exit 0
+fi
+
 URL="$1"; WANT="$2"
 CHECKS="$V/checks.jsonl"; : > "$CHECKS"
 check() {
@@ -182,8 +192,9 @@ fi
 
 # --- Solana programs: Mynt's own verifiable build of every Anchor workspace, and its tests on a local validator
 # (solana-verify.sh, from src/solana/toolchain.ts). Its artifacts are what Mynt deploys, never the agent's.
+# The build ran before this script, on its own (verify.sh --solana-build), and Mynt read the programs back then.
 if [ -f "$V/solana-verify.sh" ]; then
-  bash "$V/solana-verify.sh" "$APP" "$V/solana" "$CHECKS" "$V/solana-toolchain.sh"
+  bash "$V/solana-verify.sh" test "$APP" "$V/solana" "$CHECKS"
 fi
 
 # --- required disclosures ---

@@ -102,6 +102,17 @@ export const system = {
       data: Uint8Array.from([...u32(0), ...u64(lamports), ...u64(space), ...pubkeyBytes(owner)]),
     };
   },
+  // For an address someone already sent lamports to: top it up, size it and hand it to its owner program, as the
+  // Solana CLI does, instead of a create-account that would fail.
+  transfer(from: string, to: string, lamports: bigint | number): Instruction {
+    return { programId: SYSTEM_PROGRAM, keys: [meta(from, true, true), meta(to, false, true)], data: Uint8Array.from([...u32(2), ...u64(lamports)]) };
+  },
+  allocate(account: string, space: number): Instruction {
+    return { programId: SYSTEM_PROGRAM, keys: [meta(account, true, true)], data: Uint8Array.from([...u32(8), ...u64(space)]) };
+  },
+  assign(account: string, owner: string): Instruction {
+    return { programId: SYSTEM_PROGRAM, keys: [meta(account, true, true)], data: Uint8Array.from([...u32(1), ...pubkeyBytes(owner)]) };
+  },
 };
 
 // Sizes of the loader's accounts: a buffer's header (enum tag, an authority option) and the program data's.

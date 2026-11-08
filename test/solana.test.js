@@ -14,6 +14,7 @@ const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
 const { open } = await import("../dist/vault.js");
 const { SolanaService, programEvents, eventName } = await import("../dist/solana/service.js");
+const { GENESIS_HASH, HttpSolanaRpc } = await import("../dist/solana/rpc.js");
 const codec = await import("../dist/solana/codec.js");
 const { UPGRADEABLE_LOADER, SYSTEM_PROGRAM, WRITE_CHUNK } = await import("../dist/solana/tx.js");
 const { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } = await import("../dist/solana/toolchain.js");
@@ -70,7 +71,9 @@ function parseTx(wire) {
 const edKey = (address) => createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(base58Decode(address)).toString("base64url") }, format: "jwk" });
 
 class FakeCluster {
-  constructor() {
+  constructor(genesis) {
+    this.genesis = genesis;
+    this.withhold = () => false; // a transaction that lands but whose confirmation Mynt never sees
     this.accounts = new Map();
     this.history = []; // newest last: { signature, slot, keys, logs, err }
     this.sent = []; // every transaction sent: { signature, signers, ixs }
@@ -102,11 +105,25 @@ class FakeCluster {
       if (ix.program === SYSTEM_PROGRAM && tag === 0) {
         const [from, to] = ix.accounts;
         assert.ok(signed.has(from) && signed.has(to), "create-account needs both signatures");
-        assert.ok(!this.accounts.get(to)?.data.length && !this.accounts.get(to)?.lamports, `account ${to} already exists`);
+        if (this.accounts.get(to)?.data.length || this.accounts.get(to)?.lamports) throw new Error(`account ${to} already in use`);
         const lamports = Number(ix.data.readBigUInt64LE(4));
         const space = Number(ix.data.readBigUInt64LE(12));
         this.debit(from, lamports);
         this.accounts.set(to, { lamports, owner: base58Encode(ix.data.subarray(20, 52)), data: Buffer.alloc(space) });
+      } else if (ix.program === SYSTEM_PROGRAM && tag === 2) {
+        const [from, to] = ix.accounts;
+        assert.ok(signed.has(from));
+        const lamports = Number(ix.data.readBigUInt64LE(4));
+        this.debit(from, lamports);
+        this.fund(to, lamports);
+      } else if (ix.program === SYSTEM_PROGRAM && tag === 8) {
+        const a = this.accounts.get(ix.accounts[0]);
+        assert.ok(signed.has(ix.accounts[0]) && !a.data.length && a.owner === SYSTEM_PROGRAM);
+        a.data = Buffer.alloc(Number(ix.data.readBigUInt64LE(4)));
+      } else if (ix.program === SYSTEM_PROGRAM && tag === 1) {
+        const a = this.accounts.get(ix.accounts[0]);
+        assert.ok(signed.has(ix.accounts[0]) && a.owner === SYSTEM_PROGRAM);
+        a.owner = base58Encode(ix.data.subarray(4, 36));
       } else if (ix.program === UPGRADEABLE_LOADER) {
         if (tag === 0) {
           const buf = this.accounts.get(ix.accounts[0]);
@@ -139,6 +156,8 @@ class FakeCluster {
           this.accounts.get(payer).lamports += buf.lamports;
           this.accounts.delete(bufAddr);
           const prog = this.accounts.get(program);
+          assert.equal(prog.owner, UPGRADEABLE_LOADER);
+          assert.ok(prog.lamports >= this.rent(36), "the program account is rent-exempt");
           prog.executable = true;
           prog.data.writeUInt32LE(2, 0);
           Buffer.from(base58Decode(programData)).copy(prog.data, 4);
@@ -177,6 +196,8 @@ class FakeCluster {
   async call(method, params = []) {
     this.calls.push(method);
     switch (method) {
+      case "getGenesisHash":
+        return this.genesis;
       case "getLatestBlockhash":
         return { value: { blockhash: base58Encode(randomBytes(32)), lastValidBlockHeight: 1000 } };
       case "getMinimumBalanceForRentExemption":
@@ -191,7 +212,10 @@ class FakeCluster {
       }
       case "getAccountInfo": {
         const a = this.accounts.get(params[0]);
-        return { value: a && (a.lamports || a.data.length) ? { lamports: a.lamports, owner: a.owner, space: a.data.length, executable: !!a.executable } : null };
+        if (!a || !(a.lamports || a.data.length)) return { value: null };
+        const slice = params[1]?.dataSlice;
+        const data = slice ? a.data.subarray(slice.offset, slice.offset + slice.length) : a.data;
+        return { value: { lamports: a.lamports, owner: a.owner, space: a.data.length, executable: !!a.executable, data: [data.toString("base64"), "base64"] } };
       }
       case "sendTransaction": {
         const wire = Buffer.from(params[0], "base64");
@@ -202,7 +226,7 @@ class FakeCluster {
         const logs = this.apply(tx);
         this.sent.push({ signature, signers: tx.signers, ixs: tx.ixs });
         this.history.push({ signature, slot: ++this.slot, keys: tx.keys, logs, err: null });
-        this.statuses.set(signature, { confirmationStatus: "confirmed", err: null });
+        if (!this.withhold(tx)) this.statuses.set(signature, { confirmationStatus: "confirmed", err: null });
         return signature;
       }
       case "getSignatureStatuses":
@@ -233,16 +257,16 @@ class FakeCluster {
 
 // ---- the world: a store, users, a verified build, Mynt's Solana service on fake clusters ----
 
-async function world({ mainnetUrl = null, mainnetVaultAllowed = false } = {}) {
+async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000 } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const builds = await BuildService.open(db, store, null, null, buildConfigFromEnv({}));
-  const clusters = { devnet: new FakeCluster(), mainnet: new FakeCluster() };
+  const clusters = { devnet: new FakeCluster(GENESIS_HASH.devnet), mainnet: new FakeCluster(GENESIS_HASH.mainnet) };
   const solana = await SolanaService.open(
     db,
     store,
-    { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs: 2000, pollMs: 0 },
+    { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs, pollMs: 0 },
     { rpc: (cluster) => clusters[cluster] },
   );
   builds.solana = solana;
@@ -479,7 +503,8 @@ test("calls: simulated first and sent only if that succeeds, signed by the devel
 
   const sim = await w.ok(w.dev, "simulate_program_call", { program_id, instruction });
   assert.equal(sim.ok, true);
-  assert.notEqual(sim.caller, p.upgrade_authority, "calls pay from a key of the developer's own");
+  assert.notEqual(sim.caller, p.upgrade_authority, "calls sign with a key of the developer's own");
+  assert.notEqual(sim.fee_payer, sim.caller, "fees come from a key no program sees");
 
   chain.simulateFails = true;
   const before = chain.sent.length;
@@ -492,7 +517,11 @@ test("calls: simulated first and sent only if that succeeds, signed by the devel
   const sent = await w.ok(w.dev, "call_program", { program_id, instruction });
   assert.equal(sent.sent, true);
   const tx = chain.sent.find((t) => t.signature === sent.signature);
-  assert.deepEqual(tx.signers, [sim.caller]);
+  assert.deepEqual(tx.signers, [sim.fee_payer, sim.caller]);
+  assert.ok(!tx.ixs[0].accounts.includes(sim.fee_payer), "the program never sees the fee payer");
+  // $caller signs only when the call lists it.
+  const unsigned = await w.ok(w.dev, "call_program", { program_id, instruction: { method: "record", accounts: [{ pubkey: sim.caller }] } });
+  assert.deepEqual(chain.sent.find((t) => t.signature === unsigned.signature).signers, [sim.fee_payer]);
   assert.equal(tx.ixs[0].program, program_id);
   assert.ok(tx.ixs[0].data.subarray(0, 8).equals(Buffer.from(anchorDiscriminator("global", "record"))));
 
@@ -500,6 +529,8 @@ test("calls: simulated first and sent only if that succeeds, signed by the devel
   assert.match(r.data.error, /deploy authority/);
   r = await w.call(w.dev, "call_program", { program_id, instruction: { method: "record", accounts: [{ pubkey: codec.Keypair.generate().address, signer: true }] } });
   assert.match(r.data.error, /only signer/);
+  r = await w.call(w.dev, "call_program", { program_id, instruction: { method: "record", accounts: [{ pubkey: sim.fee_payer, writable: true }] } });
+  assert.match(r.data.error, /fee payer/);
   // Another developer's caller key is another key.
   const { program_id: theirs } = await w.ok(w.other, "reserve_program_id", { name: "theirs", cluster: "devnet" });
   assert.notEqual(theirs, program_id);
@@ -648,3 +679,228 @@ test("toolchain and verification scripts: pinned, checksum-verified, and valid b
 });
 
 const PDA_VECTOR = ["GHkbQ3XaJaBXVDq1SSuyanwZ8D8KFqzawnMEPacYjMyJ", 251];
+
+// ---- review findings ----
+
+// A reserved program with a verified build of `code`, ready to deploy.
+async function readyToDeploy(w, code = w.program(1500)) {
+  const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
+  const b = await w.build();
+  await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
+  return { program_id, build_id: b, code };
+}
+
+test("a deploy whose job died is recovered from the chain, or cleared, instead of blocking the program for good", async () => {
+  const w = await world();
+  const { program_id, build_id } = await readyToDeploy(w);
+  const p = await w.solana.get(program_id);
+  const stale = new Date(Date.now() - SolanaService.STALE_OPERATION_MS - 60_000);
+  // A deploy marked as running by a process that's gone, with nothing on chain.
+  await w.db.query("UPDATE financial_products.solana_programs SET status = 'deploying', operation = 'deploy', operation_started_at = $2, pending_build_id = $3 WHERE id = $1", [p.id, stale, build_id]);
+  let r = await w.call(w.dev, "deploy_program", { program_id, build_id });
+  assert.match(r.data.error, /The program is deploying|already running/);
+  assert.equal(await w.solana.recoverStale(), 1);
+  let got = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(got.status, "failed");
+  assert.match(got.error, /interrupted/);
+  assert.equal(got.in_progress, null);
+  // A fresh operation isn't touched.
+  await w.db.query("UPDATE financial_products.solana_programs SET operation = 'deploy', operation_started_at = now() WHERE id = $1", [p.id]);
+  assert.equal(await w.solana.recoverStale(), 0);
+  await w.db.query("UPDATE financial_products.solana_programs SET operation = NULL, operation_started_at = NULL WHERE id = $1", [p.id]);
+  // It can be deployed again; and a deploy that landed while its job died is adopted from the chain.
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  await w.db.query("UPDATE financial_products.solana_programs SET status = 'deploying', operation = 'deploy', operation_started_at = $2, pending_build_id = $3, version = 0 WHERE id = $1", [p.id, stale, build_id]);
+  assert.equal(await w.solana.recoverStale(), 1);
+  got = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(got.status, "deployed");
+  assert.equal(got.in_progress, null);
+});
+
+test("a deploy that landed although its confirmation timed out is recorded on retry, not refused", async () => {
+  const w = await world({ confirmTimeoutMs: 50 });
+  const { program_id, build_id, code } = await readyToDeploy(w);
+  const chain = w.clusters.devnet;
+  // The deploy transaction lands, but Mynt never sees it confirmed.
+  chain.withhold = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 2);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  let p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "failed");
+  assert.match(p.error, /wasn't confirmed in time/);
+  chain.withhold = () => false;
+  const sentBefore = chain.sent.length;
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.equal(p.verifiable_hash, executableHash(code));
+  assert.equal(chain.sent.length, sentBefore, "nothing sent again: the chain already had it");
+  // A different program at the address (another authority's) is still refused.
+  const other = await readyToDeploy(w, w.program(1500, 9));
+  const otherRow = await w.solana.get(other.program_id);
+  chain.accounts.set(other.program_id, { ...chain.accounts.get(p.program_id), data: Buffer.from(chain.accounts.get(p.program_id).data) });
+  Buffer.from(base58Decode(otherRow.programdata_address)).copy(chain.accounts.get(other.program_id).data, 4);
+  const pd = chain.accounts.get(p.programdata_address);
+  chain.accounts.set(otherRow.programdata_address, { ...pd, data: Buffer.from(pd.data) });
+  await w.ok(w.dev, "deploy_program", { program_id: other.program_id, build_id: other.build_id });
+  await w.solana.settled(other.program_id);
+  assert.match((await w.ok(w.dev, "get_program", { program_id: other.program_id })).error, /different program already exists/);
+});
+
+test("someone pre-funding the reserved address can't block the deploy: Mynt tops it up, sizes and assigns it", async () => {
+  const w = await world();
+  const { program_id, build_id } = await readyToDeploy(w);
+  w.clusters.devnet.fund(program_id, 1000); // a stranger's dust
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  const acct = w.clusters.devnet.accounts.get(program_id);
+  assert.equal(acct.owner, UPGRADEABLE_LOADER);
+  assert.ok(acct.executable);
+  const deployTx = w.clusters.devnet.sent.find((t) => t.signature === p.deployed_tx);
+  assert.deepEqual(
+    deployTx.ixs.filter((i) => i.program === SYSTEM_PROGRAM).map((i) => i.data.readUInt32LE(0)),
+    [2, 8, 1],
+    "transfer, allocate, assign instead of create-account",
+  );
+});
+
+test("an RPC serving another network is refused before anything is signed or sent", async () => {
+  const w = await world();
+  w.clusters.devnet.genesis = GENESIS_HASH.mainnet; // a 'devnet' URL that points at mainnet
+  const { program_id, build_id } = await readyToDeploy(w);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "failed");
+  assert.match(p.error, /devnet RPC serves another network/);
+  assert.deepEqual(w.clusters.devnet.calls, ["getGenesisHash"]);
+});
+
+test("outbound refusals reaching program errors never name the RPC's host or its key", async () => {
+  const rpc = new HttpSolanaRpc("https://10.0.0.7/rpc?api-key=sekret-key");
+  await assert.rejects(rpc.call("getGenesisHash"), (e) => {
+    assert.match(e.message, /refused by Mynt's outbound rules/);
+    assert.ok(!/10\.0\.0\.7|sekret/.test(e.message), e.message);
+    return true;
+  });
+});
+
+test("import-key never echoes a malformed file; keypairs can't be logged or serialised", async () => {
+  const w = await world();
+  for (const bad of ['[12,34,"sekret-part', "{\"secret\": \"sekret-part\"}", "[1,2,3]", "sekret-part"]) {
+    await assert.rejects(w.solana.importAuthority("mainnet", bad), (e) => {
+      assert.match(e.message, /isn't a Solana keypair/);
+      assert.ok(!e.message.includes("sekret") && !e.message.includes("12,34"));
+      return true;
+    });
+  }
+  const kp = codec.Keypair.generate();
+  const secret = Buffer.from(kp.secret());
+  const { inspect } = await import("node:util");
+  for (const shown of [JSON.stringify(kp), inspect(kp, { showHidden: true, depth: 5 }), String(kp), JSON.stringify({ ...kp })]) {
+    assert.ok(!shown.includes(secret.subarray(0, 32).toString("hex")) && !shown.includes(secret.toString("base64")) && !shown.includes(String([...secret.subarray(0, 8)])), shown);
+  }
+  const imported = await w.solana.importAuthority("mainnet", JSON.stringify([...secret]));
+  assert.equal(imported, kp.address);
+});
+
+test("the indexer pages through a backlog longer than one poll without skipping any of it", async () => {
+  const w = await world();
+  const { program_id, build_id } = await readyToDeploy(w);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  const chain = w.clusters.devnet;
+  const event = (n) => Buffer.concat([Buffer.from(anchorDiscriminator("event", "EntryRecorded")), Buffer.from([n])]).toString("base64");
+  for (let n = 0; n < 12; n++) chain.record(program_id, [`Program ${program_id} invoke [1]`, `Program data: ${event(n)}`, `Program ${program_id} success`]);
+  const before = SolanaService.INDEX_PER_POLL;
+  SolanaService.INDEX_PER_POLL = 5;
+  try {
+    const counts = [];
+    for (let i = 0; i < 4; i++) counts.push((await w.solana.pollEvents()).events);
+    assert.deepEqual(counts, [5, 5, 2, 0]);
+  } finally {
+    SolanaService.INDEX_PER_POLL = before;
+  }
+  const sent = await deliveries(w, "program.event");
+  assert.deepEqual(sent.map((d) => Buffer.from(d.payload.data.data_base64, "base64")[8]), [...Array(12).keys()], "every event, oldest first, once");
+});
+
+test("verification: the Solana build runs alone, everything it started is killed, Mynt reads the program back, and a swap during the tests blocks the build", async () => {
+  const w = await world();
+  const code = w.program(3000, 7);
+  const sha = executableHash(code);
+  const programsJson = JSON.stringify([{ workspace: "solana", name: "mynt_program", size: code.length, sha256: sha, declared_id: "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME" }]);
+  const commands = [];
+  let rehash = sha;
+  const boat = {
+    async getSandbox() {
+      return { state: "ready" };
+    },
+    async writeFile() {},
+    async readFile(_id, path) {
+      if (path.endsWith("/solana/programs.json")) return programsJson;
+      return null;
+    },
+    async costDollars() {
+      return 0;
+    },
+    async stop(id) {
+      commands.push(`stop ${id}`);
+    },
+    async commandStatus() {
+      return { running: false, exitCode: 0 };
+    },
+    async exec(_id, command, opts = {}) {
+      commands.push(command);
+      const m = command.match(/^tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
+      if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
+      if (command.includes("hashlib.sha256")) return { exitCode: 0, stdout: `${sha}\n${rehash}\n`, stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "", ...(opts.detached ? { processId: commands.length } : {}) };
+    },
+  };
+  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  builds.solana = w.solana;
+  const run = async (step) => {
+    const id = await w.build();
+    await w.db.query("UPDATE financial_products.build_runs SET status = 'verifying', verify_step = $2, verify_sandbox_id = 'vm-v', sandbox_id = 'vm-b', verify_process_id = 1, source_url = 'https://dl.example.com/x', source_sha256 = $3 WHERE id = $1", [
+      id,
+      step,
+      "a".repeat(64),
+    ]);
+    return id;
+  };
+
+  // provisioning: the first run is the Solana build alone.
+  const a = await run("provisioning");
+  await builds.verify(await builds.get(a));
+  assert.match(commands.at(-1), /verify\.sh --solana-build /);
+  assert.equal((await builds.get(a)).verify_step, "solana_build");
+
+  // solana_build done: kill everything, read the program back, then the checks.
+  commands.length = 0;
+  await builds.verify(await builds.get(a));
+  const kill = commands.findIndex((c) => /pkill -KILL -u user/.test(c) && /docker rm -f/.test(c));
+  const read = commands.findIndex((c) => c.startsWith("tail -c +1 "));
+  const checks = commands.findIndex((c) => /verify\.sh '/.test(c) && !c.includes("--solana-build"));
+  assert.ok(kill >= 0 && kill < read && read < checks, commands.join("\n"));
+  assert.deepEqual((await w.solana.artifacts(a)).map((x) => x.sha256), [sha]);
+  assert.equal((await builds.get(a)).verify_step, "checks");
+
+  // checks done, the program swapped during the tests: blocked.
+  rehash = "f".repeat(64);
+  await builds.verify(await builds.get(a));
+  const blocked = await builds.get(a);
+  assert.equal(blocked.status, "blocked");
+  assert.match(blocked.error, /changed after Mynt built it/);
+
+  // The same bytes after the tests: on to the decision.
+  rehash = sha;
+  const b = await run("checks");
+  await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: null, sha256: sha, size: code.length, program: code, idl: null }]);
+  await builds.verify(await builds.get(b));
+  assert.notEqual((await builds.get(b)).status, "blocked");
+});

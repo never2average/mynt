@@ -3,8 +3,8 @@ import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
 import type { Store, User } from "../store.js";
 import { open, seal, vaultAvailable } from "../vault.js";
-import { anchorDiscriminator, executableHash, findProgramAddress, isAddress, Keypair } from "./codec.js";
-import { CLUSTERS, HttpSolanaRpc, rpcUrlsFromEnv, type Cluster, type SolanaRpc } from "./rpc.js";
+import { anchorDiscriminator, base58Encode, executableHash, findProgramAddress, isAddress, Keypair } from "./codec.js";
+import { CLUSTERS, GenesisCheckedRpc, HttpSolanaRpc, rpcUrlsFromEnv, type Cluster, type SolanaRpc } from "./rpc.js";
 import {
   CustodyServiceSigner,
   MAINNET_NOT_CONFIGURED,
@@ -23,6 +23,7 @@ import {
   PROGRAM_ACCOUNT_SIZE,
   PROGRAMDATA_HEADER,
   serializeTransaction,
+  SYSTEM_PROGRAM,
   signatureOf,
   system,
   UPGRADEABLE_LOADER,
@@ -72,10 +73,12 @@ const TABLES = `
     programdata_address text,
     max_data_len integer,
     index_cursor text,
+    pending_build_id uuid,
     error text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   );
+  ALTER TABLE ${T}.solana_programs ADD COLUMN IF NOT EXISTS pending_build_id uuid;
   CREATE INDEX IF NOT EXISTS solana_programs_owner_idx ON ${T}.solana_programs (owner_id, created_at DESC);
   CREATE TABLE IF NOT EXISTS ${T}.solana_program_versions (
     id uuid PRIMARY KEY,
@@ -205,6 +208,8 @@ const toProgram = (r: Row): ProgramRecord => ({
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const FEE_MARGIN = 20_000_000; // 0.02 SOL for the transactions' fees
 const AIRDROP_MAX = 2 * LAMPORTS_PER_SOL;
+const CALL_FEE_RESERVE = 5_000_000; // what a developer's fee payer keeps for calls' fees
+const DEVNET_CALLER_FLOAT = 50_000_000; // devnet only: enough for a call to pay an account's rent
 const sol = (lamports: number) => `${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`;
 const explorer = (cluster: Cluster, kind: "tx" | "address", id: string) =>
   `https://explorer.solana.com/${kind}/${id}${cluster === "devnet" ? "?cluster=devnet" : ""}`;
@@ -231,7 +236,9 @@ export class SolanaService {
     opts: { rpc?: (cluster: Cluster, url: string) => SolanaRpc; custody?: CustodyServiceClient | null; multisig?: MultisigClient | null } = {},
   ) {
     await db.exec(TABLES);
-    return new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), opts.custody ?? null, opts.multisig ?? null);
+    const service = new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), opts.custody ?? null, opts.multisig ?? null);
+    await service.recoverStale().catch((e) => console.error(`solana: recovering stale operations: ${(e as Error).message.slice(0, 200)}`));
+    return service;
   }
 
   // ---- persistence ----
@@ -268,7 +275,7 @@ export class SolanaService {
     ).rows.map((r: Row) => ({ ...r, slot: r.slot == null ? null : Number(r.slot), created_at: iso(r.created_at) }));
   }
 
-  private async update(id: string, fields: Partial<Record<keyof ProgramRecord | "operation_started_at", unknown>>) {
+  private async update(id: string, fields: Partial<Record<keyof ProgramRecord | "operation_started_at" | "pending_build_id", unknown>>) {
     const keys = Object.keys(fields);
     if (!keys.length) return;
     await this.db.query(`UPDATE ${T}.solana_programs SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(", ")}, updated_at = now() WHERE id = $1`, [
@@ -338,8 +345,15 @@ export class SolanaService {
   // Imports an existing keypair (the Solana CLI's JSON array) as a cluster's deploy authority. For the operator,
   // from the server's command line; the key never passes through a tool.
   async importAuthority(cluster: Cluster, secretJson: string) {
-    const secret = Uint8Array.from(JSON.parse(secretJson) as number[]);
-    const kp = Keypair.fromSecret(secret);
+    // A parse error quotes the text it choked on: here, part of a secret. Only a fixed message ever leaves.
+    let kp: Keypair;
+    try {
+      const parsed: unknown = JSON.parse(secretJson);
+      if (!Array.isArray(parsed) || parsed.length !== 64 || !parsed.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) throw new Error();
+      kp = Keypair.fromSecret(Uint8Array.from(parsed as number[]));
+    } catch {
+      throw new SolanaError("The file isn't a Solana keypair (a JSON array of 64 numbers, as solana-keygen writes)");
+    }
     if (await this.keyRow(cluster, "authority", "")) throw new SolanaError(`A ${cluster} authority is already in the vault`);
     await this.db.query(`INSERT INTO ${T}.solana_keys (id, cluster, role, scope, public_key, sealed) VALUES ($1, $2, 'authority', '', $3, $4)`, [
       randomUUID(),
@@ -382,23 +396,26 @@ export class SolanaService {
     return new MultisigSigner(settings.multisig!.vault, this.multisig);
   }
 
-  // A developer's caller key on a cluster: the fee payer (and the one signer allowed) of their program calls.
-  // One per developer, never the deploy authority, so one firm's program can't act with another's signature.
-  private async caller(cluster: Cluster, ownerId: string): Promise<Keypair> {
+  // A developer's keys for program calls on a cluster: a fee payer, which pays every call's fees and is never
+  // passed to a program, and a caller ($caller), which signs only when a call lists it. Neither is ever the deploy
+  // authority, so one firm's program can't act with a key that controls another's or spend the fee payer's SOL.
+  private async callKeys(cluster: Cluster, ownerId: string): Promise<{ payer: Keypair; caller: Keypair }> {
     if (cluster === "mainnet") {
       const { settings, ready, reasons } = await this.mainnetReadiness();
       if (!ready) throw new SignerNotConfigured(`${MAINNET_NOT_CONFIGURED}: ${reasons.join("; ")}`);
       if (settings.backend !== "mainnet-vault")
-        throw new SignerNotConfigured(`${MAINNET_NOT_CONFIGURED} for program calls: they sign with a per-developer key in Mynt's vault, which needs the mainnet-vault backend`);
+        throw new SignerNotConfigured(`${MAINNET_NOT_CONFIGURED} for program calls: they sign with per-developer keys in Mynt's vault, which needs the mainnet-vault backend`);
     } else if (!vaultAvailable(false)) throw new SignerNotConfigured("The devnet signer needs MYNT_VAULT_KEY set on the server");
-    return (await this.vaultKey(cluster, "caller", ownerId)) ?? (await this.createKey(cluster, "caller", ownerId));
+    const key = async (role: string) => (await this.vaultKey(cluster, role, ownerId)) ?? (await this.createKey(cluster, role, ownerId));
+    return { payer: await key("payer"), caller: await key("caller") };
   }
 
   rpc(cluster: Cluster): SolanaRpc {
     const url = this.config.rpcUrls[cluster];
     if (!url) throw new SignerNotConfigured(`${MAINNET_NOT_CONFIGURED}: SOLANA_RPC_URL_MAINNET isn't set on the server`);
     let r = this.rpcs.get(cluster);
-    if (!r) this.rpcs.set(cluster, (r = this.rpcFactory(cluster, url)));
+    // Checked once that it really serves this cluster (its genesis hash), before anything is sent.
+    if (!r) this.rpcs.set(cluster, (r = new GenesisCheckedRpc(cluster, this.rpcFactory(cluster, url))));
     return r;
   }
 
@@ -497,6 +514,12 @@ export class SolanaService {
 
   // ---- deploy and upgrade ----
 
+  // A deploy or upgrade whose job has gone (a restart, a crash) would block the program for good: after this
+  // long without its job, the chain decides what happened (recoverStale).
+  static STALE_OPERATION_MS = 30 * 60_000;
+  // Transactions the indexer reads per program per poll; a longer backlog continues on the next poll.
+  static INDEX_PER_POLL = 1000;
+
   // Starts a first deploy (or, for a deployed program, an upgrade) in the background; get_program follows it.
   async deploy(user: User, p: ProgramRecord, buildId: string, action: "deploy" | "upgrade") {
     if (action === "deploy" && !["reserved", "failed"].includes(p.status))
@@ -509,19 +532,20 @@ export class SolanaService {
     if (action === "upgrade" && p.upgrade_authority !== signer.address)
       throw new SolanaError(`The program's upgrade authority is ${p.upgrade_authority}, but ${p.cluster}'s signer is now ${signer.address}; transfer the authority first`);
     const claimed = await this.db.query(
-      `UPDATE ${T}.solana_programs SET operation = $2, operation_started_at = now(), error = NULL${action === "deploy" ? ", status = 'deploying'" : ""}, updated_at = now()
+      `UPDATE ${T}.solana_programs SET operation = $2, operation_started_at = now(), pending_build_id = $3, error = NULL${action === "deploy" ? ", status = 'deploying'" : ""}, updated_at = now()
        WHERE id = $1 AND operation IS NULL RETURNING id`,
-      [p.id, action],
+      [p.id, action, buildId],
     );
     if (!claimed.rows.length) throw new SolanaError("Another deploy or upgrade of this program just started");
-    const job = this.runDeploy(user, p, buildId, artifact, signer, action)
-      .catch(async (e) => {
-        const error = (e as Error).message.slice(0, 1000);
-        await this.update(p.id, { operation: null, operation_started_at: null, error, ...(action === "deploy" ? { status: "failed" } : {}) });
-      })
+    const job = this.runDeploy(user.id, p, buildId, artifact, signer, action)
+      .catch((e) => this.markFailed(p, action, (e as Error).message))
       .finally(() => this.jobs.delete(p.id));
     this.jobs.set(p.id, job);
     return (await this.get(p.program_id))!;
+  }
+
+  private async markFailed(p: ProgramRecord, action: "deploy" | "upgrade", error: string) {
+    await this.update(p.id, { operation: null, operation_started_at: null, pending_build_id: null, error: error.slice(0, 1000), ...(action === "deploy" ? { status: "failed" } : {}) });
   }
 
   // Resolves once a background deploy or upgrade of `programId` has finished (tests; graceful shutdown).
@@ -530,34 +554,77 @@ export class SolanaService {
     await Promise.all(p ? [this.jobs.get(p.id)] : [...this.jobs.values()]);
   }
 
-  private async runDeploy(user: User, p: ProgramRecord, buildId: string, artifact: { sha256: string; program: Uint8Array }, signer: SolanaSigner, action: "deploy" | "upgrade") {
+  // Deploys and upgrades no live job owns, older than STALE_OPERATION_MS: if the chain holds exactly the build's
+  // program under Mynt's signer, it went through; otherwise it's marked interrupted, and can be started again.
+  async recoverStale(now = Date.now()) {
+    const cutoff = new Date(now - SolanaService.STALE_OPERATION_MS);
+    const rows = (await this.db.query(`SELECT * FROM ${T}.solana_programs WHERE operation IS NOT NULL AND operation_started_at < $1`, [cutoff])).rows as Row[];
+    let recovered = 0;
+    for (const r of rows) {
+      const p = toProgram(r);
+      if (this.jobs.has(p.id)) continue;
+      const action = p.operation!;
+      const buildId = r.pending_build_id as string | null;
+      try {
+        const artifact = buildId ? await this.storedArtifact(p, buildId) : null;
+        const signer = await this.authority(p.cluster);
+        const chain = artifact ? await this.onChain(this.rpc(p.cluster), p) : null;
+        if (artifact && chain && chain.authority === signer.address && chain.hash === artifact.sha256) {
+          await this.finish(null, p, buildId!, artifact.sha256, await this.latestSignature(p), signer, action, chain.capacity);
+        } else await this.markFailed(p, action, `The ${action} was interrupted before it finished; start it again`);
+      } catch (e) {
+        await this.markFailed(p, action, `The ${action} was interrupted (${(e as Error).message.slice(0, 300)}); start it again`);
+      }
+      recovered++;
+    }
+    return recovered;
+  }
+
+  private async runDeploy(userId: string, p: ProgramRecord, buildId: string, artifact: { sha256: string; program: Uint8Array }, signer: SolanaSigner, action: "deploy" | "upgrade") {
     const rpc = this.rpc(p.cluster);
     const len = artifact.program.length;
     const rent = (size: number) => rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
+    // A deploy or upgrade that landed although Mynt didn't see it confirmed (a timeout, a restart): the chain
+    // already holds exactly this program under Mynt's signer, so record it instead of failing again.
+    const chain = await this.onChain(rpc, p);
+    if (chain && chain.authority === signer.address && chain.hash === artifact.sha256) {
+      await this.finish(userId, p, buildId, artifact.sha256, await this.latestSignature(p), signer, action, chain.capacity);
+      return;
+    }
     let tx: string;
     let maxDataLen = p.max_data_len;
     if (action === "deploy") {
-      if (await this.accountInfo(rpc, p.program_id)) throw new SolanaError(`An account already exists at ${p.program_id}`);
+      if (chain) throw new SolanaError(`A different program already exists at ${p.program_id}`);
       maxDataLen = len * 2; // room to grow, as the Solana CLI leaves
-      const need = (await rent(BUFFER_HEADER + len)) + (await rent(PROGRAM_ACCOUNT_SIZE)) + (await rent(PROGRAMDATA_HEADER + maxDataLen)) + FEE_MARGIN;
+      const programRent = await rent(PROGRAM_ACCOUNT_SIZE);
+      const need = (await rent(BUFFER_HEADER + len)) + programRent + (await rent(PROGRAMDATA_HEADER + maxDataLen)) + FEE_MARGIN;
       await this.fund(rpc, p.cluster, signer.address, need);
       const programKey = await this.vaultKey(p.cluster, "program", p.id);
       if (!programKey) throw new SolanaError("The program's reserved keypair is missing");
+      // The address is public once reserved: anyone may have sent it lamports. Then it can't be created, but, as
+      // the Solana CLI does, it can be topped up, sized and handed to the loader, signed by its own keypair.
+      const existing = await this.accountInfo(rpc, p.program_id);
+      let open: Instruction[];
+      if (!existing) open = [system.createAccount(signer.address, p.program_id, programRent, PROGRAM_ACCOUNT_SIZE, UPGRADEABLE_LOADER)];
+      else if (existing.owner === SYSTEM_PROGRAM && !existing.space)
+        open = [
+          ...(existing.lamports < programRent ? [system.transfer(signer.address, p.program_id, programRent - existing.lamports)] : []),
+          system.allocate(p.program_id, PROGRAM_ACCOUNT_SIZE),
+          system.assign(p.program_id, UPGRADEABLE_LOADER),
+        ];
+      else throw new SolanaError(`An account owned by ${existing.owner} already exists at ${p.program_id}`);
       const buffer = await this.writeBuffer(rpc, signer, artifact.program);
       try {
         tx = await this.send(rpc, signer, [
-          system.createAccount(signer.address, p.program_id, await rent(PROGRAM_ACCOUNT_SIZE), PROGRAM_ACCOUNT_SIZE, UPGRADEABLE_LOADER),
+          ...open,
           loader.deployWithMaxDataLen({ payer: signer.address, programData: p.programdata_address!, program: p.program_id, buffer, authority: signer.address, maxDataLen }),
         ], [programKey]);
       } catch (e) {
         await this.closeBuffer(rpc, signer, buffer);
         throw e;
       }
-      // The program's own keypair has done its one job; only the upgrade authority matters from here on.
-      await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role = 'program' AND scope = $2`, [p.cluster, p.id]);
     } else {
-      const data = await this.accountInfo(rpc, p.programdata_address!);
-      const capacity = data?.space != null ? Number(data.space) - PROGRAMDATA_HEADER : (p.max_data_len ?? 0);
+      const capacity = chain?.capacity ?? p.max_data_len ?? 0;
       if (len > capacity) throw new SolanaError(`The new program (${len} bytes) is larger than the ${capacity} bytes reserved at first deploy; deploy it as a new program`);
       await this.fund(rpc, p.cluster, signer.address, (await rent(BUFFER_HEADER + len)) + FEE_MARGIN);
       const buffer = await this.writeBuffer(rpc, signer, artifact.program);
@@ -568,18 +635,24 @@ export class SolanaService {
         throw e;
       }
     }
+    await this.finish(userId, p, buildId, artifact.sha256, tx, signer, action, maxDataLen);
+  }
+
+  // The deploy or upgrade is on chain: record the version and tell the firm.
+  private async finish(userId: string | null, p: ProgramRecord, buildId: string, sha256: string, tx: string, signer: SolanaSigner, action: "deploy" | "upgrade", maxDataLen: number | null) {
     const version = p.version + 1;
     await this.db.query(
       `INSERT INTO ${T}.solana_program_versions (id, program, version, action, build_id, verifiable_hash, tx, signer_backend, by_user) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [randomUUID(), p.id, version, action, buildId, artifact.sha256, tx, signer.backend, user.id],
+      [randomUUID(), p.id, version, action, buildId, sha256, tx, signer.backend, userId],
     );
     await this.update(p.id, {
       status: "deployed",
       operation: null,
       operation_started_at: null,
+      pending_build_id: null,
       version,
       build_id: buildId,
-      verifiable_hash: artifact.sha256,
+      verifiable_hash: sha256,
       deployer: signer.address,
       upgrade_authority: signer.address,
       signer_backend: signer.backend,
@@ -588,14 +661,26 @@ export class SolanaService {
       error: null,
       ...(action === "deploy" ? { index_cursor: tx } : {}),
     });
+    // The program's own keypair has done its one job; only the upgrade authority matters from here on.
+    if (action === "deploy") await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role = 'program' AND scope = $2`, [p.cluster, p.id]);
     if (p.entity_id)
       await emitFirmEvent(
         this.store,
         p.entity_id,
         action === "deploy" ? "program.deployed" : "program.upgraded",
-        { program_id: p.program_id, name: p.name, cluster: p.cluster, version, verifiable_hash: artifact.sha256, signature: tx, build_id: buildId },
+        { program_id: p.program_id, name: p.name, cluster: p.cluster, version, verifiable_hash: sha256, signature: tx, build_id: buildId },
         p.cluster !== "mainnet",
       );
+  }
+
+  private async storedArtifact(p: ProgramRecord, buildId: string) {
+    const r = await this.one(`SELECT sha256 FROM ${T}.solana_program_artifacts WHERE build_id = $1 AND declared_id = $2`, [buildId, p.program_id]);
+    return r ? { sha256: r.sha256 as string } : null;
+  }
+
+  private async latestSignature(p: ProgramRecord) {
+    const sigs = await this.rpc(p.cluster).call<{ signature: string }[]>("getSignaturesForAddress", [p.programdata_address, { limit: 1, commitment: "confirmed" }]);
+    return sigs[0]?.signature ?? "unknown";
   }
 
   private async accountInfo(rpc: SolanaRpc, address: string) {
@@ -604,6 +689,26 @@ export class SolanaService {
       { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 0 } },
     ]);
     return r?.value ?? null;
+  }
+
+  private async accountData(rpc: SolanaRpc, address: string) {
+    const r = await rpc.call<{ value: { owner: string; data: [string, string] } | null }>("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }]);
+    return r?.value ? { owner: r.value.owner, data: Buffer.from(r.value.data[0], "base64") } : null;
+  }
+
+  // What the chain holds at a program's address: an upgradeable program (its program data's upgrade authority,
+  // the hash of its code and the space reserved for it), or null when there's no such program there.
+  private async onChain(rpc: SolanaRpc, p: ProgramRecord) {
+    const prog = await this.accountData(rpc, p.program_id);
+    if (!prog || prog.owner !== UPGRADEABLE_LOADER || prog.data.length < 36 || prog.data.readUInt32LE(0) !== 2) return null;
+    if (base58Encode(prog.data.subarray(4, 36)) !== p.programdata_address) return null;
+    const pd = await this.accountData(rpc, p.programdata_address!);
+    if (!pd || pd.data.length < PROGRAMDATA_HEADER || pd.data.readUInt32LE(0) !== 3) return null;
+    return {
+      authority: pd.data[12] === 1 ? base58Encode(pd.data.subarray(13, 45)) : null,
+      hash: executableHash(pd.data.subarray(PROGRAMDATA_HEADER)),
+      capacity: pd.data.length - PROGRAMDATA_HEADER,
+    };
   }
 
   // Enough SOL for what's next: devnet asks its faucet; mainnet must be funded by the operator.
@@ -656,7 +761,7 @@ export class SolanaService {
     return (await rpc.call<{ value: { blockhash: string } }>("getLatestBlockhash", [{ commitment: "confirmed" }])).value;
   }
 
-  // Signs (the signer pays; `extra` are keypairs Mynt generated for this transaction) and sends, without waiting.
+  // Signs (`signer` pays; `extra` are other keys that must sign) and sends, without waiting.
   private async submit(rpc: SolanaRpc, signer: { address: string; sign(m: Uint8Array): Promise<Uint8Array> }, ixs: Instruction[], extra: Keypair[], blockhash: string) {
     const message = compileMessage(signer.address, ixs, blockhash);
     const sigs = new Map<string, Uint8Array>();
@@ -699,7 +804,7 @@ export class SolanaService {
 
   // ---- calls ----
 
-  private async instruction(p: ProgramRecord, input: CallInput, caller: string): Promise<Instruction> {
+  private async instruction(p: ProgramRecord, input: CallInput, keys: { payer: string; caller: string }): Promise<Instruction> {
     let data: Buffer;
     if (input.method) {
       if (!/^[a-z_][a-z0-9_]*$/.test(input.method)) throw new SolanaError("method is the Anchor instruction's name, in snake_case");
@@ -714,14 +819,15 @@ export class SolanaService {
     const s = await this.mainnetSettings();
     if (s.custody) authorities.add(s.custody.address);
     if (s.multisig) authorities.add(s.multisig.vault);
-    const keys = input.accounts.map((a) => {
-      const pubkey = a.pubkey === "$caller" ? caller : a.pubkey;
+    const metas = input.accounts.map((a) => {
+      const pubkey = a.pubkey === "$caller" ? keys.caller : a.pubkey;
       if (!isAddress(pubkey)) throw new SolanaError(`'${a.pubkey}' isn't a Solana address`);
       if (authorities.has(pubkey)) throw new SolanaError("A program call may not include Mynt's deploy authority");
-      if (a.signer && pubkey !== caller) throw new SolanaError("The only signer a call may have is your caller key ($caller)");
+      if (pubkey === keys.payer) throw new SolanaError("A program call may not include its fee payer; use $caller");
+      if (a.signer && pubkey !== keys.caller) throw new SolanaError("The only signer a call may have is your caller key ($caller)");
       return { pubkey, isSigner: !!a.signer, isWritable: !!a.writable };
     });
-    return { programId: p.program_id, keys, data: new Uint8Array(data) };
+    return { programId: p.program_id, keys: metas, data: new Uint8Array(data) };
   }
 
   private async callable(p: ProgramRecord) {
@@ -730,27 +836,37 @@ export class SolanaService {
 
   async simulate(p: ProgramRecord, input: CallInput) {
     await this.callable(p);
-    const caller = await this.caller(p.cluster, p.owner_id);
+    const { payer, caller } = await this.callKeys(p.cluster, p.owner_id);
     const rpc = this.rpc(p.cluster);
-    const ix = await this.instruction(p, input, caller.address);
-    const message = compileMessage(caller.address, [ix], (await this.blockhash(rpc)).blockhash);
+    const ix = await this.instruction(p, input, { payer: payer.address, caller: caller.address });
+    const message = compileMessage(payer.address, [ix], (await this.blockhash(rpc)).blockhash);
     const wire = serializeTransaction(message, new Map());
     const r = await rpc.call<{ value: { err: unknown; logs: string[] | null; unitsConsumed?: number } }>("simulateTransaction", [
       Buffer.from(wire).toString("base64"),
       { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" },
     ]);
-    return { ok: !r.value.err, err: r.value.err ?? null, logs: (r.value.logs ?? []).slice(-60), units_consumed: r.value.unitsConsumed ?? null, caller: caller.address };
+    return {
+      ok: !r.value.err,
+      err: r.value.err ?? null,
+      logs: (r.value.logs ?? []).slice(-60),
+      units_consumed: r.value.unitsConsumed ?? null,
+      fee_payer: payer.address,
+      caller: caller.address,
+    };
   }
 
-  // Simulated first; sent only if the simulation succeeds.
+  // Simulated first; sent only if the simulation succeeds. Fees come from the developer's fee payer, which no
+  // program ever sees; $caller signs only when the call lists it.
   async call(user: User, p: ProgramRecord, input: CallInput) {
     const simulation = await this.simulate(p, input);
     if (!simulation.ok) return { sent: false, simulation };
-    const caller = await this.caller(p.cluster, p.owner_id);
+    const { payer, caller } = await this.callKeys(p.cluster, p.owner_id);
     const rpc = this.rpc(p.cluster);
-    await this.fund(rpc, p.cluster, caller.address, 5_000_000);
-    const ix = await this.instruction(p, input, caller.address);
-    const signature = await this.send(rpc, { address: caller.address, sign: async (m) => caller.sign(m) }, [ix]);
+    await this.fund(rpc, p.cluster, payer.address, CALL_FEE_RESERVE);
+    const ix = await this.instruction(p, input, { payer: payer.address, caller: caller.address });
+    const callerSigns = ix.keys.some((k) => k.pubkey === caller.address && k.isSigner);
+    if (callerSigns && p.cluster === "devnet") await this.fund(rpc, p.cluster, caller.address, DEVNET_CALLER_FLOAT).catch(() => undefined);
+    const signature = await this.send(rpc, { address: payer.address, sign: async (m) => payer.sign(m) }, [ix], callerSigns ? [caller] : []);
     await this.store.audit(user.id, "call_program", p.program_id, { cluster: p.cluster, signature, method: input.method ?? null });
     return { sent: true, signature, explorer_url: explorer(p.cluster, "tx", signature), simulation };
   }
@@ -760,6 +876,7 @@ export class SolanaService {
   // New transactions of every deployed program, oldest first; each Anchor event its own logs carry (the
   // "Program data:" lines while the program is the one running) goes to the owning firm's webhooks.
   async pollEvents() {
+    await this.recoverStale().catch(() => undefined);
     const programs = (await this.db.query(`SELECT * FROM ${T}.solana_programs WHERE status = 'deployed' ORDER BY updated_at`)).rows.map((r) => toProgram(r as Row));
     let emitted = 0;
     for (const p of programs) {
@@ -775,21 +892,23 @@ export class SolanaService {
 
   private async indexProgram(p: ProgramRecord) {
     const rpc = this.rpc(p.cluster);
+    // Every signature since the cursor (newest first, a page at a time), so none is skipped however long the
+    // backlog; then the oldest INDEX_PER_POLL of them are read, and the cursor moves only past what was read.
     const fresh: { signature: string; slot: number; err: unknown }[] = [];
     let before: string | undefined;
-    for (let page = 0; page < 10; page++) {
+    for (;;) {
       const sigs = await rpc.call<{ signature: string; slot: number; err: unknown }[]>("getSignaturesForAddress", [
         p.program_id,
-        { limit: 100, commitment: "confirmed", ...(p.index_cursor ? { until: p.index_cursor } : {}), ...(before ? { before } : {}) },
+        { limit: 1000, commitment: "confirmed", ...(p.index_cursor ? { until: p.index_cursor } : {}), ...(before ? { before } : {}) },
       ]);
       fresh.push(...sigs);
-      if (sigs.length < 100) break;
+      if (sigs.length < 1000) break;
       before = sigs[sigs.length - 1].signature;
     }
     if (!fresh.length) return 0;
     const idl = await this.idlFor(p);
     let emitted = 0;
-    for (const s of fresh.reverse()) {
+    for (const s of fresh.reverse().slice(0, SolanaService.INDEX_PER_POLL)) {
       const tx = await rpc.call<{ slot: number; meta: { err: unknown; logMessages?: string[] } | null } | null>("getTransaction", [
         s.signature,
         { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" },

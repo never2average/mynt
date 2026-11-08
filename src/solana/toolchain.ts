@@ -66,41 +66,45 @@ solana --version; anchor --version; rustc --version
 touch "$READY"
 `;
 
-// Mynt's own build and test of every Anchor workspace in a verified source tree. The program is built with
-// Anchor's verifiable (reproducible) build, its artifacts are copied out before anything else runs, and then its
-// tests run against exactly those artifacts on a local validator. Writes <out>/programs.json and appends the
-// solana_build and solana_tests checks.
-// Usage: solana-verify.sh <app-dir> <out-dir> <checks.jsonl> <toolchain-script>
+// Mynt's own build and test of every Anchor workspace in a verified source tree, in two separate runs so no
+// developer test code runs between the build and Mynt reading the program back:
+//   build <app> <out> <toolchain>: Anchor's verifiable (reproducible) build of each workspace; each program and
+//     its IDL are copied to <out>, listed in <out>/programs.json, and the solana_build check written to
+//     <out>/checks.jsonl. No npm install and no tests: Mynt reads back and hashes the programs straight after.
+//   test <app> <out> <checks.jsonl>: the workspaces' tests on a local validator, against the programs in <out>
+//     (the bytes Mynt hashed), appending solana_build and solana_tests to the checks. Mynt re-hashes afterwards.
 export const SOLANA_VERIFY_SCRIPT = String.raw`#!/usr/bin/env bash
 set -uo pipefail
-APP="$1"; OUT="$2"; CHECKS="$3"; TOOLCHAIN="$4"
-check() {
-  python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "status": sys.argv[2], "detail": sys.argv[3][-1500:]}))' "$1" "$2" "$3" >> "$CHECKS"
+MODE="$1"; APP="$2"; OUT="$3"
+check() { # checks-file name status detail
+  python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "status": sys.argv[2], "detail": sys.argv[3][-1500:]}))' "$2" "$3" "$4" >> "$1"
 }
 mapfile -t WS < <(cd "$APP" && find . \( -name node_modules -o -name target -o -name .git \) -prune -o -name Anchor.toml -print | sed -e 's|^\./||' -e 's|/*Anchor.toml$||' | LC_ALL=C sort)
 [ "${"${"}#WS[@]}" -gt 0 ] || exit 0
-mkdir -p "$OUT"; echo "[]" > "$OUT/programs.json"
-if ! bash "$TOOLCHAIN" > "$OUT/toolchain.log" 2>&1; then
-  check solana_build fail "could not install the pinned Solana toolchain: $(tail -c 600 "$OUT/toolchain.log")"
-  exit 0
-fi
-. "${"${"}MYNT_SOLANA_HOME:-$HOME/.mynt-solana}/env"
-BUILD_FAIL=""; TEST_FAIL=""; BUILT=0
-for w in "${"${"}WS[@]}"; do
-  label="${"${"}w:-.}"; dir="$APP/$label"; log="$OUT/$(echo "$label" | tr '/.' '__')"
-  (cd "$dir" && { npm ci --no-audit --no-fund || npm install --no-audit --no-fund; }) > "$log.npm.log" 2>&1
-  rm -rf "$dir/target/verifiable"
-  # Anchor runs its build container with a terminal; script(1) gives it one.
-  if ! (cd "$dir" && script -qefc "anchor build --verifiable --docker-image ${T.anchorImage}" /dev/null) > "$log.build.log" 2>&1; then
-    BUILD_FAIL+="$label: $(tail -c 700 "$log.build.log" | tr -d '\r') "
-    continue
+
+if [ "$MODE" = build ]; then
+  TOOLCHAIN="$4"
+  rm -rf "$OUT"; mkdir -p "$OUT"; echo "[]" > "$OUT/programs.json"; : > "$OUT/checks.jsonl"
+  if ! bash "$TOOLCHAIN" > "$OUT/toolchain.log" 2>&1; then
+    check "$OUT/checks.jsonl" solana_build fail "could not install the pinned Solana toolchain: $(tail -c 600 "$OUT/toolchain.log")"
+    exit 0
   fi
-  for so in "$dir"/target/verifiable/*.so; do
-    [ -f "$so" ] || continue
-    name=$(basename "$so" .so)
-    cp "$so" "$OUT/$name.so"
-    cp "$dir/target/idl/$name.json" "$OUT/$name.idl.json" 2>/dev/null || true
-    python3 - "$OUT" "$name" "$label" <<'PY'
+  . "${"${"}MYNT_SOLANA_HOME:-$HOME/.mynt-solana}/env"
+  BUILD_FAIL=""; BUILT=0
+  for w in "${"${"}WS[@]}"; do
+    label="${"${"}w:-.}"; dir="$APP/$label"; log="$OUT/$(echo "$label" | tr '/.' '__')"
+    rm -rf "$dir/target/verifiable"
+    # Anchor runs its build container with a terminal; script(1) gives it one.
+    if ! (cd "$dir" && script -qefc "anchor build --verifiable --docker-image ${T.anchorImage}" /dev/null) > "$log.build.log" 2>&1; then
+      BUILD_FAIL+="$label: $(tail -c 700 "$log.build.log" | tr -d '\r') "
+      continue
+    fi
+    for so in "$dir"/target/verifiable/*.so; do
+      [ -f "$so" ] || continue
+      name=$(basename "$so" .so)
+      cp "$so" "$OUT/$name.so"
+      cp "$dir/target/idl/$name.json" "$OUT/$name.idl.json" 2>/dev/null || true
+      python3 - "$OUT" "$name" "$label" <<'PY'
 import hashlib, json, os, sys
 out, name, ws = sys.argv[1:4]
 data = open(os.path.join(out, name + ".so"), "rb").read()
@@ -113,18 +117,44 @@ progs = json.load(open(os.path.join(out, "programs.json")))
 progs.append({"workspace": ws, "name": name, "size": len(data), "sha256": hashlib.sha256(data.rstrip(b"\0")).hexdigest(), "declared_id": idl.get("address")})
 json.dump(progs, open(os.path.join(out, "programs.json"), "w"), indent=2)
 PY
-    mkdir -p "$dir/target/deploy" && cp "$so" "$dir/target/deploy/$name.so"
-    BUILT=$((BUILT + 1))
+      BUILT=$((BUILT + 1))
+    done
+  done
+  if [ -n "$BUILD_FAIL" ]; then check "$OUT/checks.jsonl" solana_build fail "$BUILD_FAIL"
+  elif [ "$BUILT" = 0 ]; then check "$OUT/checks.jsonl" solana_build fail "an Anchor workspace built no program"
+  else check "$OUT/checks.jsonl" solana_build pass "$BUILT program(s) built verifiably (Anchor ${T.anchor.version}, Agave ${T.agave.version})"; fi
+  exit 0
+fi
+
+# test
+CHECKS="$4"
+if [ ! -f "$OUT/checks.jsonl" ]; then
+  check "$CHECKS" solana_build fail "Mynt's Solana build didn't run"
+  check "$CHECKS" solana_tests fail "not run: no build"
+  exit 0
+fi
+cat "$OUT/checks.jsonl" >> "$CHECKS"
+if ! grep -q '"solana_build", "status": "pass"' "$OUT/checks.jsonl"; then
+  check "$CHECKS" solana_tests fail "not run: the build failed"
+  exit 0
+fi
+. "${"${"}MYNT_SOLANA_HOME:-$HOME/.mynt-solana}/env"
+TEST_FAIL=""
+for w in "${"${"}WS[@]}"; do
+  label="${"${"}w:-.}"; dir="$APP/$label"; log="$OUT/$(echo "$label" | tr '/.' '__')"
+  (cd "$dir" && { npm ci --no-audit --no-fund || npm install --no-audit --no-fund; }) > "$log.npm.log" 2>&1
+  # The bytes Mynt read back and hashed, not whatever the workspace's target/ holds now.
+  mkdir -p "$dir/target/deploy"
+  for so in "$dir"/target/verifiable/*.so; do
+    [ -f "$so" ] || continue
+    name=$(basename "$so" .so)
+    cp "$OUT/$name.so" "$dir/target/deploy/$name.so"
   done
   if ! (cd "$dir" && anchor test --skip-build) > "$log.test.log" 2>&1; then
     TEST_FAIL+="$label: $(tail -c 700 "$log.test.log" | tr -d '\r') "
   fi
 done
-if [ -n "$BUILD_FAIL" ]; then check solana_build fail "$BUILD_FAIL"
-elif [ "$BUILT" = 0 ]; then check solana_build fail "an Anchor workspace built no program"
-else check solana_build pass "$BUILT program(s) built verifiably (Anchor ${T.anchor.version}, Agave ${T.agave.version})"; fi
-if [ -n "$TEST_FAIL" ]; then check solana_tests fail "$TEST_FAIL"
-elif [ -n "$BUILD_FAIL" ]; then check solana_tests fail "not run: the build failed"
-else check solana_tests pass "anchor test passed on a local validator against the verifiable build"; fi
+if [ -n "$TEST_FAIL" ]; then check "$CHECKS" solana_tests fail "$TEST_FAIL"
+else check "$CHECKS" solana_tests pass "anchor test passed on a local validator against the verifiable build"; fi
 exit 0
 `;

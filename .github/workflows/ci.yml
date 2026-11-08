@@ -48,7 +48,11 @@ jobs:
       - name: Verifiable build and tests on a local validator, as Mynt verifies a build
         run: |
           : > "$RUNNER_TEMP/checks.jsonl"
-          bash "$RUNNER_TEMP/mynt/solana-verify.sh" "$RUNNER_TEMP/app" "$RUNNER_TEMP/out" "$RUNNER_TEMP/checks.jsonl" "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+          # Two runs, as in Mynt's verify sandbox: the build alone, then (after Mynt has read the programs back) the tests.
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app" "$RUNNER_TEMP/out" "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+          sha256sum "$RUNNER_TEMP"/out/*.so | tee "$RUNNER_TEMP/built.sha"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" test "$RUNNER_TEMP/app" "$RUNNER_TEMP/out" "$RUNNER_TEMP/checks.jsonl"
+          sha256sum -c "$RUNNER_TEMP/built.sha"
           cat "$RUNNER_TEMP/checks.jsonl" "$RUNNER_TEMP/out/programs.json"
           python3 - "$RUNNER_TEMP" <<'PY'
           import json, sys
