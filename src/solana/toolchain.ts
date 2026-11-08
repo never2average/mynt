@@ -123,6 +123,9 @@ if [ "$MODE" = build ]; then
     mapfile -t PROGS < <(programs "$dir" 2> "$log.programs.log")
     if [ "${"${"}#PROGS[@]}" = 0 ]; then BUILD_FAIL+="$label: no program crate found ($(tail -c 300 "$log.programs.log")) "; continue; fi
     manifests=(); for p in "${"${"}PROGS[@]}"; do manifests+=("$(cut -f1 <<<"$p")"); done
+    # Both cargos fetch: the host toolchain's, and the SBF platform tools' (the one cargo build-sbf compiles with,
+    # which keeps its own crate cache), so the offline build finds every crate.
+    FETCH='set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; for pc in /root/.cache/solana/*/platform-tools/rust/bin/cargo; do if [ -x "$pc" ]; then "$pc" fetch --manifest-path "$m"; fi; done; done'
     # One container per workspace, never with a mount of the host. It fetches the crates while it has a network
     # (cargo fetch runs no build scripts), is then cut off from every network, and only then compiles: the
     # developer's build scripts and macros run with no network and no access to the host.
@@ -133,7 +136,7 @@ if [ "$MODE" = build ]; then
     # The source goes in as a copy: the container never sees the host's files, and can't change them.
     if ! tar -C "$dir" --exclude=./target --exclude=./node_modules --exclude=./.anchor --transform 's,^\.$,workdir,;s,^\./,workdir/,' -cf - . | docker cp - "$cid:/" >> "$log.build.log" 2>&1 \
        || ! docker start "$cid" >> "$log.build.log" 2>&1 \
-       || ! docker exec "$cid" bash -c 'set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; done' _ "${"${"}manifests[@]}" >> "$log.build.log" 2>&1; then
+       || ! docker exec "$cid" bash -c "$FETCH" _ "${"${"}manifests[@]}" >> "$log.build.log" 2>&1; then
       BUILD_FAIL+="$label: $(tail -c 700 "$log.build.log" | tr -d '\r') "
       docker rm -f "$cid" >/dev/null 2>&1; continue
     fi
