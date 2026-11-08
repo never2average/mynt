@@ -1,0 +1,4 @@
+# Resolve dependencies the SBF platform tools' cargo (1.84, with Agave 2.3) can build: newer releases that
+# need a later Rust are skipped in favour of the latest compatible one.
+[resolver]
+incompatible-rust-versions = "fallback"

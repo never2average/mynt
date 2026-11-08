@@ -37,6 +37,7 @@ import { reconcileEntityGrc } from "./entity-grc.js";
 import { reconcileEntity } from "./parties.js";
 import { ComponentSchema, PartyBindingSchema, productRegime, validateComposition } from "./regime.js";
 import { ENTITY_STATUSES } from "./store.js";
+import type { SolanaService } from "./solana/service.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -51,6 +52,7 @@ export interface AdminContext {
   bdRun?: { id: string } | null; // set when the caller is a connector agent run, not a person
   hosting?: HostingService | null; // developers' isolated app hosting, when configured
   modules?: ModuleRegistry | null; // developers' published modules
+  solana?: SolanaService | null; // developers' Solana programs: registry, deployer, signer, indexer
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
 }
 

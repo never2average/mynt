@@ -1941,7 +1941,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Receive your vendor services' results",
       description:
-        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
+        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. It also gets your Solana programs' deploys, upgrades and events (program.deployed, program.upgraded, program.event). Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
       inputSchema: { url: z.string().url(), events: z.array(z.enum(FIRM_WEBHOOK_EVENTS)).min(1).default([...FIRM_WEBHOOK_EVENTS]) },
     },
     async ({ url, events }) => {

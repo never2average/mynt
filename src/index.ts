@@ -21,6 +21,9 @@ import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
 import { createServer } from "./server.js";
+import { SolanaService } from "./solana/service.js";
+import { CLUSTERS, type Cluster } from "./solana/rpc.js";
+import { readFileSync } from "node:fs";
 import { ROLES, Store, type Role } from "./store.js";
 
 const USAGE = `Usage:
@@ -34,6 +37,7 @@ const USAGE = `Usage:
   mynt hosting wg-peers                The gateway's WireGuard peers (running tenants)
   mynt hosting egress-allowlist        Hosts tenant VMs may reach through the gateway
   mynt hosting routes                  Caddy sites for hosted apps (<app>.<HOSTING_APPS_DOMAIN> to the tenant tunnel)
+  mynt solana import-key --cluster mainnet --file <keypair.json>   Seal an existing Solana keypair as that cluster's deploy authority
 
 Environment:
   DATABASE_URL              Postgres connection string, e.g. your Supabase database (required)
@@ -52,6 +56,9 @@ Environment:
   BD_ENABLED=1              Runs Mynt's connector agent (business development) on the same harness (BD_DAILY_CAP, BD_RUN_CAP_USD, ...)
   ANTHROPIC_API_KEY         Otherwise, build agents use the Anthropic API. Either way the credentials stay on Mynt's server
   GITHUB_APP_ID             With GITHUB_APP_PRIVATE_KEY and GITHUB_APP_SLUG: builds push branches and open PRs
+  SOLANA_RPC_URL_DEVNET     Solana programs: devnet RPC (default the public devnet endpoint); keys sealed with MYNT_VAULT_KEY
+  SOLANA_RPC_URL_MAINNET    Mainnet RPC (no default). Mainnet also needs an admin's configure_solana_signer, and for
+                            the mainnet-vault backend SOLANA_MAINNET_VAULT_SIGNER=enabled
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
                             (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)`;
 
@@ -64,6 +71,8 @@ const { positionals, values } = parseArgs({
     port: { type: "string", default: process.env.PORT ?? "3000" },
     host: { type: "string", default: process.env.HOST ?? "127.0.0.1" },
     help: { type: "boolean", short: "h" },
+    cluster: { type: "string" },
+    file: { type: "string" },
   },
 });
 
@@ -99,10 +108,13 @@ const openServices = async () => {
     return installation ? github.readTokenFor(repository, Number(installation)).catch(() => null) : null;
   });
   const modules = await ModuleRegistry.open(db);
+  // Developers' Solana programs; builds hand it the programs Mynt built while verifying.
+  const solana = await SolanaService.open(db, store);
+  builds.solana = solana;
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore]) s.meter = meter;
-  return { store, builds, bd, desk, review, explore, hosting, modules };
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana };
 };
 
 const parseRoles = (): Role[] => {
@@ -125,13 +137,15 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana } = await openServices();
+  // This process runs deploys, so it alone recovers ones a previous run of it left behind.
+  solana.recovery = true;
   builds.startWorker();
   bd.startWorker();
   desk.startWorker();
@@ -139,7 +153,7 @@ if (values.help) {
   review.startWorker();
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Sends queued webhook deliveries (events from any process sharing the database).
@@ -156,9 +170,13 @@ if (values.help) {
     pollRampAdapterTransfers(store).catch((e) => console.error("ramp adapter poll:", (e as Error).message));
   }, 60 * 1000);
   vendorRuns.unref();
+  // Deployed Solana programs' new events go to their firms' webhooks.
+  const programEvents = setInterval(() => solana.pollEvents().catch((e) => console.error("solana indexer:", (e as Error).message)), Number(process.env.SOLANA_INDEX_POLL_MS ?? 30_000));
+  programEvents.unref();
   process.on("SIGTERM", () => {
     clearInterval(drift);
     clearInterval(vendorRuns);
+    clearInterval(programEvents);
     webhooks.stop();
     builds.stopWorker();
     bd.stopWorker();
@@ -209,6 +227,16 @@ if (values.help) {
     for (const h of await hosting.hostedApps()) if (running.has(h.tenant_id)) for (const host of await egressFor(store, hosting, h.app_id)) hosts.add(host);
     console.log([...hosts].sort().join("\n"));
   }
+  await store.close();
+} else if (command === "solana" && sub === "import-key") {
+  // The operator's own keypair file, sealed into the vault; it is read here and never printed.
+  const cluster = values.cluster as Cluster;
+  if (!(CLUSTERS as readonly string[]).includes(cluster ?? "") || !values.file) die("Usage: mynt solana import-key --cluster <devnet|mainnet> --file <keypair.json>");
+  const db = openDb();
+  const store = await Store.open(db);
+  const solana = await SolanaService.open(db, store);
+  const address = await solana.importAuthority(cluster, readFileSync(values.file!, "utf8")).catch((e) => die((e as Error).message));
+  console.log(`Sealed the ${cluster} deploy authority ${address} in the vault`);
   await store.close();
 } else if (command === "clerk" && sub === "setup") {
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");

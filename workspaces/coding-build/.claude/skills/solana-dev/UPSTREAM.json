@@ -1,0 +1,12 @@
+{
+  "repo": "solana-foundation/solana-dev-skill",
+  "path": "skills/solana-dev/SKILL.md",
+  "commit": "33e2663540685ae699039907cae080b72f1c2681",
+  "url": "https://github.com/solana-foundation/solana-dev-skill/blob/33e2663540685ae699039907cae080b72f1c2681/skills/solana-dev/SKILL.md",
+  "license": "MIT",
+  "found_by": "HyDE",
+  "draft": "solana-program",
+  "query": "Anchor program PDA \"anchor test\" security filename:SKILL.md (GitHub code search with the draft's key terms)",
+  "score": null,
+  "modified": "SKILL.md verbatim. Only the references a program engineer needs are vendored (references/programs/anchor.md, programs/design-patterns.md, anchor/migrating-v0.32-to-v1.md, compatibility-matrix.md, concepts.md, testing.md, security.md, common-errors.md); links to the others are left as they were upstream."
+}

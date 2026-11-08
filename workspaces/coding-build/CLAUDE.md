@@ -26,6 +26,28 @@ Every app is a Docker Compose project with up to three parts, started from `temp
 The developer may want only some of these; ask the goal, not yourself. Mynt hosts the Compose project as it is
 (see the `docker` and `docker-patterns` skills).
 
+## Solana programs (when `job/build.json` has `solana`)
+Some apps need a Solana program (a smart contract) beside them. `solana.programs` lists the addresses Mynt
+reserved for this app (`name`, `cluster`, `program_id`); `solana.toolchain` the pinned versions.
+- **Where:** `solana/` in the app, an Anchor workspace started from `templates/solana-program/`:
+  `python3 scripts/scaffold_program.py ~/workspace/app/solana` (it takes the first reserved program; `--name`
+  picks another). It writes the reserved address into `declare_id!` and `Anchor.toml`. Never change that
+  address and never generate a program keypair to replace it: Mynt deploys only a program that declares its
+  reserved address.
+- **Toolchain:** Mynt installs it when the sandbox starts (Agave, Anchor, Rust, pinned). Wait for
+  `~/.mynt-solana/env` to exist, then `. ~/.mynt-solana/env` in each shell. Use exactly these versions
+  (Anchor 0.32.1, `@coral-xyz/anchor` 0.32.1, `anchor test` on `solana-test-validator`), even where the
+  `solana-dev` skill recommends newer defaults.
+- **Who:** `server-engineer` owns `solana/` too, with the `solana-dev` skill; `qa-engineer` runs `anchor test`.
+- **Test:** `anchor test` on the local validator; every instruction and every refusal (wrong signer, wrong
+  account) has a test. Mynt rebuilds the program itself (Anchor's verifiable build), runs these tests against
+  that build in a clean sandbox, and deploys only what it built: never commit `target/`, a keypair, or a `.so`.
+- **What a program may do:** record and check state, and emit events (`emit!`), which Mynt forwards to the
+  firm's webhooks. No program moves customers' money, holds tokens for them, or shows them anything: customers
+  only ever see dollars, never crypto, in any screen or message.
+- **Never** deploy anything yourself, run `solana program deploy` or `anchor deploy`, or use a network other
+  than the local validator. The developer deploys from Mynt (`deploy_program`) after the build ships.
+
 ## Your team
 Delegate with the Task tool; give each agent the part of the goal it owns and the files it may touch.
 - `architect`: turns the goal into a plan: which products and actions, which journeys, which parts (api, web,
