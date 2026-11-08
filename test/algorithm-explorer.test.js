@@ -622,7 +622,7 @@ test("the budget is shared and enforced: over the cap, everything stops", async 
   assert.equal(await explore.agentTokenActive(auth.token), false);
 });
 
-test("explorations are the firm's own, and only innovators get the tools", async () => {
+test("explorations are the firm's own, and only builders get the tools", async () => {
   const { store, explore, call, ready, innovator, connect } = await setup();
   const { client } = await ready();
   const job = (await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw" })).data;
@@ -633,9 +633,15 @@ test("explorations are the firm's own, and only innovators get the tools", async
   assert.equal((await call(other, "stop_exploration", { job_id: job.id })).isError, true);
   assert.equal((await call(other, "adopt_variant", { job_id: job.id, explorer: 1 })).isError, true);
   assert.match((await call(other, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw" })).data.error, /No product of your firm's/);
+  // Innovator and developer are one builder role: a developer gets the tools, a consumer doesn't.
   const { user: dev } = await store.createUser("Dev", ["developer"]);
-  const tools = (await (await connect(dev)).listTools()).tools.map((t) => t.name);
-  for (const t of ["start_exploration", "get_exploration", "adopt_variant", "stop_exploration"]) assert.ok(!tools.includes(t));
+  const devTools = (await (await connect(dev)).listTools()).tools.map((t) => t.name);
+  const { user: consumer } = await store.createUser("Casey", ["consumer"]);
+  const tools = (await (await connect(consumer)).listTools()).tools.map((t) => t.name);
+  for (const t of ["start_exploration", "get_exploration", "adopt_variant", "stop_exploration"]) {
+    assert.ok(devTools.includes(t), `developers are builders: ${t}`);
+    assert.ok(!tools.includes(t), `consumers don't explore: ${t}`);
+  }
   assert.equal((await call(client, "get_exploration")).data.length, 1);
   assert.equal((await call(client, "stop_exploration", { job_id: job.id })).data.stopped, job.id);
   assert.equal((await explore.get(job.id)).status, "stopped");
