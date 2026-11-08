@@ -34,7 +34,8 @@ fi
 if [ "$#" -gt 0 ] && [ "$1" = "--fetch" ]; then
   curl -fsSL "$2" -o "$V/app.tgz" || { echo "could not download the source" >&2; exit 2; }
   [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$3" ] || { echo "source checksum mismatch" >&2; exit 2; }
-  if tar -tzf "$V/app.tgz" | grep -qE '(^|/)Anchor\.toml$'; then echo anchor-workspace; fi
+  # The same places the build looks: not inside node_modules, target or .git.
+  if tar -tzf "$V/app.tgz" | grep -vE '(^|/)(node_modules|target|\.git)/' | grep -qE '(^|/)Anchor\.toml$'; then echo anchor-workspace; fi
   echo fetched
   exit 0
 fi

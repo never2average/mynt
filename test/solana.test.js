@@ -305,6 +305,7 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
   const program = (size = 5000, seed = 1) => {
     const bytes = Buffer.alloc(size);
     for (let i = 0; i < size - 64; i++) bytes[i] = (i * 31 + seed) % 251 || 1;
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46]).copy(bytes); // an ELF file, as a Solana program is
     return new Uint8Array(bytes); // trailing zero padding, as an ELF often has
   };
   return {
@@ -643,10 +644,10 @@ test("builds: Mynt reads back the programs its verification built, hashes them i
       return files[path] ?? null;
     },
     async exec(_id, command) {
-      const m = command.match(/^tail -c \+(\d+) (\S+) \| head -c (\d+) \| base64 -w0$/);
+      const m = command.match(/^\[ -f (\S+) \] && \[ ! -L \1 \] && tail -c \+(\d+) \1 \| head -c (\d+) \| base64 -w0$/);
       assert.ok(m, command);
-      assert.equal(m[2], "/home/user/mynt-verify/solana/mynt_program.so");
-      const start = Number(m[1]) - 1;
+      assert.equal(m[1], "/home/user/mynt-verify/solana/mynt_program.so");
+      const start = Number(m[2]) - 1;
       return { exitCode: 0, stdout: Buffer.from(code.subarray(start, start + Number(m[3]))).toString("base64"), stderr: "" };
     },
   };
@@ -863,8 +864,8 @@ test("verification: the Solana build runs alone, everything it started is killed
     },
     async exec(_id, command, opts = {}) {
       commands.push(command);
-      const m = command.match(/^tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
-      if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
+      const m = command.match(/^\[ -f (\S+) \] && \[ ! -L \1 \] && tail -c \+(\d+) \1 \| head -c (\d+) \| base64 -w0$/);
+      if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[2]) - 1, Number(m[2]) - 1 + Number(m[3]))).toString("base64"), stderr: "" };
       if (command.includes("hashlib.sha256")) return { exitCode: 0, stdout: `${sha}\n${rehash}\n`, stderr: "" };
       if (command.includes("verify.sh --fetch")) return { exitCode: 0, stdout: "anchor-workspace\nfetched\n", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "", ...(opts.detached ? { processId: commands.length } : {}) };
@@ -894,7 +895,7 @@ test("verification: the Solana build runs alone, everything it started is killed
   commands.length = 0;
   await builds.verify(await builds.get(a));
   const kill = commands.findIndex((c) => /pkill -KILL -u user/.test(c) && /docker rm -f/.test(c));
-  const read = commands.findIndex((c) => c.startsWith("tail -c +1 "));
+  const read = commands.findIndex((c) => / tail -c \+1 /.test(c));
   const checks = commands.findIndex((c) => /verify\.sh '/.test(c) && !c.includes("--solana-build"));
   assert.ok(kill >= 0 && kill < read && read < checks, commands.join("\n"));
   // Mynt's scripts and data are written again after the build phase, before the checks run.
@@ -935,7 +936,7 @@ test("the Solana build never runs `anchor build` or developer code on the host, 
   const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
   assert.match(build, /docker create /);
   assert.match(build, /docker cp - "\$cid:\/"/, "the source goes in as a copy");
-  assert.match(build, /docker cp "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
+  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
   assert.match(build, /cargo build-sbf --manifest-path/);
   assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build), "nothing compiled or run on the host, no mounts");
   assert.ok(build.includes(SOLANA_TOOLCHAIN.anchorImage), "the digest-pinned image");
@@ -1018,3 +1019,143 @@ test("only the server process recovers stale operations: another process sharing
   await w.solana.pollEvents();
   assert.equal((await w.solana.get(program_id)).operation, null);
 });
+
+// ---- third review ----
+
+// Mynt's read-back, with a verify sandbox whose program file is whatever `file` says.
+async function readBack(w, file) {
+  const code = file.code;
+  const boat = {
+    async readFile(_id, path) {
+      if (path.endsWith("/solana/programs.json")) return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null }]);
+      if (path.endsWith("/solana/checks.jsonl")) return JSON.stringify({ name: "solana_build", status: "pass", detail: "built" });
+      return null;
+    },
+    async exec(_id, command) {
+      const m = command.match(/^\[ -f (\S+) \] && \[ ! -L \1 \] && tail -c \+(\d+) \1 \| head -c (\d+) \| base64 -w0$/);
+      assert.ok(m, command);
+      // A link (or anything but a regular file) fails the test in the same command, so nothing is read.
+      if (file.link) return { exitCode: 1, stdout: "", stderr: "" };
+      const start = Number(m[2]) - 1;
+      return { exitCode: 0, stdout: Buffer.from(code.subarray(start, start + Number(m[3]))).toString("base64"), stderr: "" };
+    },
+  };
+  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  builds.solana = w.solana;
+  const id = await w.build();
+  await builds.collectPrograms(await builds.get(id), "vm-verify");
+  return { id, build: await builds.get(id), kept: await w.solana.artifacts(id) };
+}
+
+test("Mynt reads back only a regular ELF file: a link to a host file, or anything that isn't a program, is refused", async () => {
+  const w = await world();
+  const ok = await readBack(w, { code: w.program(2000) });
+  assert.equal(ok.kept.length, 1);
+  assert.equal(ok.build.solana_check.status, "pass");
+  // The build's .so replaced by a link to a host file (e.g. a key): never read, never stored.
+  const link = await readBack(w, { code: Buffer.from("-----BEGIN PRIVATE KEY-----\nhost secret\n"), link: true });
+  assert.deepEqual(link.kept, []);
+  assert.equal(link.build.solana_check.status, "fail");
+  assert.match(link.build.solana_check.detail, /not a regular ELF program file/);
+  // A regular file that isn't a program (a host file copied in some other way): not stored either.
+  const notElf = await readBack(w, { code: Buffer.from("root:x:0:0:root:/root:/bin/bash\n") });
+  assert.deepEqual(notElf.kept, []);
+  assert.match(notElf.build.solana_check.detail, /not a regular ELF program file/);
+});
+
+test("the build follows links inside the container only, keeps only regular ELF files, and compiles with no network", () => {
+  const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
+  assert.ok(!/docker cp "\$cid:/.test(build), "every copy out follows links in the container");
+  assert.match(build, /\[ -L "\$OUT\/\$name\.so" \] \|\| \[ ! -f "\$OUT\/\$name\.so" \] \|\| \[ "\$\(head -c 4 "\$OUT\/\$name\.so" \| od -An -tx1 \| tr -d ' \\n'\)" != 7f454c46 \]/);
+  // Network: the crates are fetched first (no build scripts run), then the container is cut off, checked, and
+  // only then compiles, offline.
+  const fetch = build.indexOf("cargo fetch --manifest-path");
+  const disconnect = build.indexOf("docker network disconnect");
+  const verified = build.indexOf("couldn't cut the build container off the network");
+  const compile = build.indexOf("cargo build-sbf --manifest-path");
+  assert.ok(fetch > 0 && fetch < disconnect && disconnect < verified && verified < compile, "fetch, disconnect, check, then compile");
+  assert.match(build.slice(compile - 200, compile), /CARGO_NET_OFFLINE=true/);
+  assert.match(build, /sleep infinity/);
+});
+
+test("program crate names must be plain identifiers, and the Anchor check ignores node_modules, target and .git", () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = require_fs();
+  const py = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("python3 - \"$1\" <<'PY'\n") + "python3 - \"$1\" <<'PY'\n".length);
+  const programsPy = py.slice(0, py.indexOf("\nPY\n"));
+  const ws = (crateName, libName) => {
+    const root = mkdtempSync(`${require_os().tmpdir()}/mynt-ws-`);
+    writeFileSync(`${root}/Cargo.toml`, '[workspace]\nmembers = ["programs/*"]\n');
+    mkdirSync(`${root}/programs/p/src`, { recursive: true });
+    writeFileSync(`${root}/programs/p/Cargo.toml`, `[package]\nname = "${crateName}"\nversion = "0.1.0"\n\n[lib]\ncrate-type = ["cdylib", "lib"]\n${libName ? `name = "${libName}"\n` : ""}`);
+    writeFileSync(`${root}/programs/p/src/lib.rs`, 'declare_id!("EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME");\n');
+    return spawnSync("python3", ["-c", programsPy, root]);
+  };
+  const good = ws("my-ledger");
+  assert.equal(good.status, 0, good.stderr.toString());
+  assert.equal(good.stdout.toString().trim(), "programs/p/Cargo.toml\tmy_ledger\tEsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME");
+  for (const [crate, lib] of [["Evil", null], ["x", "../../etc/passwd"], ["x", "a b"], ["x", "$(id)"]]) {
+    const r = ws(crate, lib);
+    assert.notEqual(r.status, 0, `${crate}/${lib} accepted`);
+    assert.match(r.stderr.toString(), /lowercase letters, digits and underscores/);
+  }
+  // The --fetch check runs the same filter the build uses.
+  const line = VERIFY_SCRIPT.split("\n").find((l) => l.includes("tar -tzf \"$V/app.tgz\"") && l.includes("Anchor"));
+  const pipeline = line.slice(line.indexOf("| grep -vE") + 2, line.indexOf("; then"));
+  const detects = (listing) => spawnSync("bash", ["-c", `printf '%s\\n' ${listing.map((l) => `'${l}'`).join(" ")} | ${pipeline} && echo yes`]).stdout.toString().trim() === "yes";
+  assert.equal(detects(["./api/index.ts", "./solana/Anchor.toml"]), true);
+  assert.equal(detects(["./Anchor.toml"]), true);
+  assert.equal(detects(["./node_modules/pkg/Anchor.toml", "./solana/target/x/Anchor.toml", "./.git/Anchor.toml"]), false);
+});
+
+test("an earlier build is adopted from the chain only if it's the owner's (or the firm's) and shipped; the operation stays claimed", async () => {
+  const w = await world({ confirmTimeoutMs: 50 });
+  const { program_id, build_id: first } = await readyToDeploy(w);
+  const chain = w.clusters.devnet;
+  const lose = () => (chain.withhold = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 2));
+  lose();
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: first });
+  await w.solana.settled(program_id);
+  chain.withhold = () => false;
+  const second = await w.build();
+  const code2 = w.program(1400, 4);
+  await w.solana.recordArtifacts(second, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code2), size: code2.length, program: code2, idl: null }]);
+
+  // The build on chain belongs to someone outside the owner's firm, or never shipped: not adopted.
+  for (const [sql, params] of [
+    ["UPDATE financial_products.build_runs SET developer_id = $2 WHERE id = $1", [first, w.otherUser.id]],
+    ["UPDATE financial_products.build_runs SET developer_id = $2, status = 'failed' WHERE id = $1", [first, w.devUser.id]],
+  ]) {
+    await w.db.query(sql, params);
+    await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+    await w.solana.settled(program_id);
+    const p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "failed");
+    assert.match(p.error, /different program already exists/);
+  }
+  // A firm colleague's shipped build counts.
+  await w.store.setUserEntity(w.otherUser.id, w.entity.id);
+  await w.db.query("UPDATE financial_products.build_runs SET developer_id = $2, status = 'succeeded' WHERE id = $1", [first, w.otherUser.id]);
+  const writes = [];
+  const update = w.solana.update.bind(w.solana);
+  w.solana.update = async (id, fields) => {
+    if ("operation" in fields) writes.push(fields.operation);
+    return update(id, fields);
+  };
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.deepEqual(p.versions.map((v) => [v.action, v.build_id]), [["deploy", first], ["upgrade", second]]);
+  // Recording the earlier build hands the operation straight to the upgrade; it's released only at the end.
+  assert.deepEqual(writes, ["upgrade", null]);
+});
+
+import { createRequire } from "node:module";
+const require_ = createRequire(import.meta.url);
+function require_fs() {
+  return require_("node:fs");
+}
+function require_os() {
+  return require_("node:os");
+}

@@ -70,7 +70,8 @@ touch "$READY"
 // programs back between them, so no developer code ever runs on the host before Mynt has the bytes:
 //   build <src> <out>: each program crate is compiled with cargo build-sbf inside Anchor's verifiable-build image
 //     (pinned by digest), the same command `anchor build --verifiable` runs there, but with the source COPIED into
-//     a container that has no mount of the host, and the program copied out with docker cp. `anchor build
+//     a container that has no mount of the host and, once its crates are fetched, no network; the program is
+//     copied out with docker cp -L and kept only if it is a regular ELF file. `anchor build
 //     --verifiable` itself isn't used: after its container it builds the IDL on the host, which compiles and runs
 //     the developer's build scripts and macros there. Writes <out>/<name>.so, <out>/programs.json and
 //     <out>/checks.jsonl (solana_build). Needs only docker and python3.
@@ -105,6 +106,8 @@ for pattern in members:
         if "cdylib" not in (lib.get("crate-type") or []):
             continue
         name = (lib.get("name") or crate["package"]["name"]).replace("-", "_")
+        if not re.fullmatch(r"[a-z0-9_]+", name):
+            sys.exit(f"the program crate name {name!r} must be lowercase letters, digits and underscores")
         src = open(os.path.join(d, lib.get("path") or "src/lib.rs"), errors="ignore").read()
         m = re.search(r'declare_id!\(\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"\s*\)', src)
         print(f"{os.path.relpath(manifest, ws)}\t{name}\t{m.group(1) if m else ''}")
@@ -120,19 +123,38 @@ if [ "$MODE" = build ]; then
     mapfile -t PROGS < <(programs "$dir" 2> "$log.programs.log")
     if [ "${"${"}#PROGS[@]}" = 0 ]; then BUILD_FAIL+="$label: no program crate found ($(tail -c 300 "$log.programs.log")) "; continue; fi
     manifests=(); for p in "${"${"}PROGS[@]}"; do manifests+=("$(cut -f1 <<<"$p")"); done
+    # One container per workspace, never with a mount of the host. It fetches the crates while it has a network
+    # (cargo fetch runs no build scripts), is then cut off from every network, and only then compiles: the
+    # developer's build scripts and macros run with no network and no access to the host.
     cid=$(docker create --workdir /workdir -e CARGO_TARGET_DIR=/workdir/docker-target \
       -e PATH=/root/.local/share/solana/install/active_release/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-      ${T.anchorImage} bash -c 'set -e; for m in "$@"; do cargo build-sbf --manifest-path "$m"; done' _ "${"${"}manifests[@]}" 2> "$log.build.log")
+      ${T.anchorImage} sleep infinity 2> "$log.build.log")
     if [ -z "$cid" ]; then BUILD_FAIL+="$label: $(tail -c 500 "$log.build.log") "; continue; fi
     # The source goes in as a copy: the container never sees the host's files, and can't change them.
     if ! tar -C "$dir" --exclude=./target --exclude=./node_modules --exclude=./.anchor --transform 's,^\.$,workdir,;s,^\./,workdir/,' -cf - . | docker cp - "$cid:/" >> "$log.build.log" 2>&1 \
-       || ! docker start -a "$cid" >> "$log.build.log" 2>&1; then
+       || ! docker start "$cid" >> "$log.build.log" 2>&1 \
+       || ! docker exec "$cid" bash -c 'set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; done' _ "${"${"}manifests[@]}" >> "$log.build.log" 2>&1; then
+      BUILD_FAIL+="$label: $(tail -c 700 "$log.build.log" | tr -d '\r') "
+      docker rm -f "$cid" >/dev/null 2>&1; continue
+    fi
+    for net in $(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid"); do docker network disconnect -f "$net" "$cid" >> "$log.build.log" 2>&1; done
+    if [ -n "$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$cid")" ]; then
+      BUILD_FAIL+="$label: couldn't cut the build container off the network "
+      docker rm -f "$cid" >/dev/null 2>&1; continue
+    fi
+    if ! docker exec -e CARGO_NET_OFFLINE=true "$cid" bash -c 'set -e; for m in "$@"; do cargo build-sbf --manifest-path "$m"; done' _ "${"${"}manifests[@]}" >> "$log.build.log" 2>&1; then
       BUILD_FAIL+="$label: $(tail -c 700 "$log.build.log" | tr -d '\r') "
       docker rm -f "$cid" >/dev/null 2>&1; continue
     fi
     for p in "${"${"}PROGS[@]}"; do
       name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
-      if ! docker cp "$cid:/workdir/docker-target/deploy/$name.so" "$OUT/$name.so" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $name.so wasn't built "; continue; fi
+      # -L: a link in the container is resolved there, to the container's own file, never copied out as a link
+      # that would point at the host. Then only a regular file that is an ELF program counts.
+      rm -f "$OUT/$name.so"
+      if ! docker cp -L "$cid:/workdir/docker-target/deploy/$name.so" "$OUT/$name.so" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $name.so wasn't built "; continue; fi
+      if [ -L "$OUT/$name.so" ] || [ ! -f "$OUT/$name.so" ] || [ "$(head -c 4 "$OUT/$name.so" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
+        BUILD_FAIL+="$label: $name.so isn't a program (not a regular ELF file) "; rm -f "$OUT/$name.so"; continue
+      fi
       python3 - "$OUT" "$name" "$label" "$declared" <<'PY'
 import hashlib, json, os, sys
 out, name, ws, declared = sys.argv[1:5]

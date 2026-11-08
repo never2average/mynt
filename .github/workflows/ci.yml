@@ -73,7 +73,12 @@ jobs:
           use std::{env, fs, path::Path};
           fn main() {
               println!("cargo:rerun-if-changed=build.rs");
-              if Path::new("/.dockerenv").exists() { return; }
+              if Path::new("/.dockerenv").exists() {
+                  // Inside the build container the network must be gone: reaching out fails the build.
+                  let addr = "1.1.1.1:443".parse().unwrap();
+                  if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok() { panic!("the build container reached the network"); }
+                  return;
+              }
               let Ok(dir) = env::var("MYNT_CI_ATTACK_DIR") else { return };
               fs::write(Path::new(&dir).join("host-ran"), b"").unwrap();
               for e in fs::read_dir(&dir).unwrap().flatten() {
@@ -100,6 +105,30 @@ jobs:
           [ -e "$RUNNER_TEMP/out2/host-ran" ] || { echo "the attack never ran: this check proves nothing"; exit 1; }
           if (cd "$RUNNER_TEMP/out2" && sha256sum -c "$RUNNER_TEMP/captured.sha"); then echo "the host-side rewrite went unnoticed"; exit 1; fi
           echo "caught: the program changed after Mynt captured it"
+      - name: A build script that swaps a program for a link to a host file is refused
+        run: |
+          python3 workspaces/coding-build/scripts/scaffold_program.py "$RUNNER_TEMP/app3/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw
+          # A second crate, built after ci_ledger, whose build script (in the container) replaces ci_ledger.so with
+          # a link to /etc/hostname: copied out as a link, the host would read its own /etc/hostname.
+          cp -r "$RUNNER_TEMP/app3/solana/programs/ci_ledger" "$RUNNER_TEMP/app3/solana/programs/zz_attacker"
+          sed -i 's/ci_ledger/zz_attacker/g' "$RUNNER_TEMP/app3/solana/programs/zz_attacker/Cargo.toml"
+          cat > "$RUNNER_TEMP/app3/solana/programs/zz_attacker/build.rs" <<'RS'
+          use std::{fs, os::unix::fs::symlink, path::Path};
+          fn main() {
+              println!("cargo:rerun-if-changed=build.rs");
+              if !Path::new("/.dockerenv").exists() { return; }
+              let target = Path::new("/workdir/docker-target/deploy/ci_ledger.so");
+              let _ = fs::remove_file(target);
+              symlink("/etc/hostname", target).unwrap();
+          }
+          RS
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app3" "$RUNNER_TEMP/out3"
+          cat "$RUNNER_TEMP/out3/checks.jsonl"
+          grep -q '"name": "solana_build", "status": "fail"' "$RUNNER_TEMP/out3/checks.jsonl"
+          grep -q "ci_ledger.so isn't a program" "$RUNNER_TEMP/out3/checks.jsonl"
+          [ -z "$(find "$RUNNER_TEMP/out3" -type l)" ] || { echo "a link was copied out"; exit 1; }
+          [ ! -e "$RUNNER_TEMP/out3/ci_ledger.so" ] || { echo "the swapped program was kept"; exit 1; }
+          echo "refused: the swapped program was never kept"
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done

@@ -615,9 +615,9 @@ export class SolanaService {
       // build after a lost confirmation): record that one, then this build goes through as an upgrade.
       const prior = chain.authority === signer.address ? await this.artifactByHash(p, chain.hash) : null;
       if (!prior) throw new SolanaError(`A different program already exists at ${p.program_id}`);
-      await this.finish(userId, p, prior.build_id, chain.hash, await this.latestSignature(p), signer, "deploy", chain.capacity);
+      // Recorded and handed over to the upgrade in one write: the operation stays claimed throughout.
+      await this.finish(userId, p, prior.build_id, chain.hash, await this.latestSignature(p), signer, "deploy", chain.capacity, { continueAs: "upgrade", pendingBuildId: buildId });
       p = (await this.get(p.program_id))!;
-      await this.update(p.id, { operation: "upgrade", operation_started_at: new Date(), pending_build_id: buildId });
       action = "upgrade";
       maxDataLen = chain.capacity;
     }
@@ -666,7 +666,17 @@ export class SolanaService {
   }
 
   // The deploy or upgrade is on chain: record the version and tell the firm.
-  private async finish(userId: string | null, p: ProgramRecord, buildId: string, sha256: string, tx: string, signer: SolanaSigner, action: "deploy" | "upgrade", maxDataLen: number | null) {
+  private async finish(
+    userId: string | null,
+    p: ProgramRecord,
+    buildId: string,
+    sha256: string,
+    tx: string,
+    signer: SolanaSigner,
+    action: "deploy" | "upgrade",
+    maxDataLen: number | null,
+    next: { continueAs: "upgrade"; pendingBuildId: string } | null = null,
+  ) {
     const version = p.version + 1;
     await this.db.query(
       `INSERT INTO ${T}.solana_program_versions (id, program, version, action, build_id, verifiable_hash, tx, signer_backend, by_user) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -674,9 +684,9 @@ export class SolanaService {
     );
     await this.update(p.id, {
       status: "deployed",
-      operation: null,
-      operation_started_at: null,
-      pending_build_id: null,
+      operation: next ? next.continueAs : null,
+      operation_started_at: next ? new Date() : null,
+      pending_build_id: next ? next.pendingBuildId : null,
       version,
       build_id: buildId,
       verifiable_hash: sha256,
@@ -705,9 +715,18 @@ export class SolanaService {
     return r ? { sha256: r.sha256 as string } : null;
   }
 
-  // A build of this program that Mynt verified, whose program hashes as `sha256`.
+  // A build of this program that Mynt verified and shipped, by its owner or someone of the owner's firm, whose
+  // program hashes as `sha256`. Nobody else's build can be recorded as this program's.
   private async artifactByHash(p: ProgramRecord, sha256: string) {
-    const r = await this.one(`SELECT build_id FROM ${T}.solana_program_artifacts WHERE declared_id = $1 AND sha256 = $2 ORDER BY created_at DESC LIMIT 1`, [p.program_id, sha256]);
+    const r = await this.one(
+      `SELECT a.build_id FROM ${T}.solana_program_artifacts a
+         JOIN ${T}.build_runs b ON b.id = a.build_id
+         JOIN ${T}.users u ON u.id = b.developer_id
+       WHERE a.declared_id = $1 AND a.sha256 = $2 AND b.status = 'succeeded'
+         AND (b.developer_id = $3 OR ($4::uuid IS NOT NULL AND u.entity_id = $4))
+       ORDER BY a.created_at DESC LIMIT 1`,
+      [p.program_id, sha256, p.owner_id, p.entity_id],
+    );
     return r ? { build_id: r.build_id as string } : null;
   }
 

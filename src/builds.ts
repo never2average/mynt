@@ -217,6 +217,8 @@ export interface BuildSolanaHooks {
 }
 // The largest program Mynt reads back from its verify sandbox.
 const MAX_PROGRAM_BYTES = 4 * 1024 * 1024;
+// A Solana program is an ELF file.
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 
 // Files the agent reads and writes inside the sandbox. boat.dev's file API only accepts paths under
 // the sandbox user's home (/home/user) or /tmp.
@@ -849,22 +851,33 @@ export class BuildService {
     const listed = parseJson<{ name: string; size: number; sha256: string; declared_id: string | null }[]>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
     if (!listed?.length) return;
     const artifacts = [];
+    const refused: string[] = [];
     for (const p of listed) {
       if (!/^[a-z0-9_]+$/.test(p.name) || !(p.size > 0 && p.size <= MAX_PROGRAM_BYTES)) continue;
       const chunks: Buffer[] = [];
       const path = `${VERIFY_DIR}/solana/${p.name}.so`;
+      // Only ever a regular file, never through a link (which could point anywhere on the machine): checked in
+      // the same command as each read.
+      let readable = true;
       for (let offset = 0; offset < p.size; offset += 192 * 1024) {
-        const r = await this.boat!.exec(vid, `tail -c +${offset + 1} ${path} | head -c ${192 * 1024} | base64 -w0`, { timeoutSeconds: 60 });
-        if (r.exitCode !== 0) throw new Error(`Couldn't read the program ${p.name} Mynt built`);
+        const r = await this.boat!.exec(vid, `[ -f ${path} ] && [ ! -L ${path} ] && tail -c +${offset + 1} ${path} | head -c ${192 * 1024} | base64 -w0`, { timeoutSeconds: 60 });
+        if (r.exitCode !== 0) {
+          readable = false;
+          break;
+        }
         chunks.push(Buffer.from(r.stdout.trim(), "base64"));
       }
       const program = Buffer.concat(chunks);
-      if (program.length !== p.size) throw new Error(`The program ${p.name} read back at ${program.length} bytes, not ${p.size}`);
+      if (!readable || program.length !== p.size || !program.subarray(0, 4).equals(ELF_MAGIC)) {
+        refused.push(p.name);
+        continue;
+      }
       // The IDL comes later, from the test run; it only names events, it's never deployed.
       artifacts.push({ name: p.name, declared_id: p.declared_id ?? null, sha256: p.sha256, reported_sha256: p.sha256, size: p.size, program: new Uint8Array(program), idl: null });
     }
     const kept = await this.solana.recordArtifacts(b.id, artifacts);
-    if (kept.length < listed.length) await record({ name: "solana_build", status: "fail", detail: "a program Mynt read back didn't match the hash its build reported" });
+    if (refused.length) await record({ name: "solana_build", status: "fail", detail: `not a regular ELF program file of the size its build reported: ${refused.join(", ")}` });
+    else if (kept.length < listed.length) await record({ name: "solana_build", status: "fail", detail: "a program Mynt read back didn't match the hash its build reported" });
     await this.event(b.id, "verifying", `Mynt built ${kept.length} Solana program(s) for deploys: ${kept.join(", ") || "none matched their hash"}`, {
       programs: listed.map((p) => ({ name: p.name, sha256: p.sha256, declared_id: p.declared_id })),
     });
