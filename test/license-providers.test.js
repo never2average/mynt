@@ -273,3 +273,38 @@ test("a declined request leaves the product blocked; requests go only to licence
   const self = await ivy.call("check_product_definition", { product_id: "mt-ivy", definition: definition(ivy, "mt-ivy", { kind: "sponsor", id: ivy.entity.id }, ["us-ny"]) });
   assert.match(JSON.stringify(self.data), /the owner can't sponsor its own product/);
 });
+
+test("test_product doesn't warn an unlicensed builder about a licence once an approved sponsorship covers the composition", async () => {
+  const ctx = await setup();
+  const partner = await ctx.provider("Covering Partner");
+  const msb = await partner.hold("fincen", "fincen_msb");
+  const ny = await partner.hold("nydfs", "nydfs_money_transmitter");
+  await partner.staff(msb);
+  const neo = await ctx.builder("Neo");
+  ok(await neo.call("create_product", catalogue("mt-covered")));
+  const licenceCheck = async () => ok(await neo.call("test_product", { id: "mt-covered" })).checks.find((c) => c.name === "licence_held");
+
+  // Provided by the builder itself, unlicensed: still warned, as before.
+  ok(await neo.call("set_product_definition", { product_id: "mt-covered", definition: definition(neo, "mt-covered", { kind: "owner" }, ["us-ny"]) }));
+  const own = await licenceCheck();
+  assert.equal(own.status, "warn");
+  assert.match(own.message, /holds no verified licence/);
+
+  // Sponsored, not yet approved: the builder needn't hold a licence, but the composition isn't covered yet.
+  const sponsor = { kind: "sponsor", id: partner.entity.id };
+  ok(await neo.call("set_product_definition", { product_id: "mt-covered", definition: definition(neo, "mt-covered", sponsor, ["us-ny"]) }));
+  const r = ok(await neo.call("request_sponsorship", { product_id: "mt-covered", component_key: "transmission", provider_entity_id: partner.entity.id }));
+  const pending = await licenceCheck();
+  assert.equal(pending.status, "warn");
+  assert.doesNotMatch(pending.message, /holds no verified licence|register_license/);
+  assert.match(pending.message, /needn't hold a licence.*composition_coverage/);
+
+  // Approved: the sponsorship covers it, so there's nothing to warn about.
+  ok(await partner.call("approve_sponsorship", { sponsorship_id: r.id, licence_ids: [ny.id] }));
+  const covered = await licenceCheck();
+  assert.equal(covered.status, "pass");
+  assert.equal(covered.message, "Your firm needn't hold a licence: it provides no component itself; Covering Partner Inc sponsors 'transmission' in us-ny");
+  const report = ok(await neo.call("test_product", { id: "mt-covered" }));
+  assert.equal(report.passed, true);
+  assert.deepEqual(report.checks.filter((c) => c.status === "warn").map((c) => c.name), ["launch_procedure"]);
+});
