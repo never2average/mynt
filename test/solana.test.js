@@ -1348,11 +1348,66 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.equal(p.version, versionBefore);
     assert.match(p.error, /doesn't verify for .* it wasn't used/);
     assert.equal(custodySigned().length, custodySentBefore, "nothing signed badly reached the cluster");
-    const closes = chain.sent.slice(-2);
-    assert.equal(closes[0].ixs[0].data.readUInt32LE(0), 5, "the buffer was closed, on the buffer key's authority");
+    const shape = (t) => t.ixs.map((i) => `${i.program === SYSTEM_PROGRAM ? "s" : i.program === UPGRADEABLE_LOADER ? "l" : "?"}${i.data.readUInt32LE(0)}`).join(",");
+    // One transaction from the deploy payer: advance the nonce (every message signed on it is now dead) and close
+    // the buffer, on the buffer key's authority.
+    const invalidations = () => chain.sent.filter((t) => shape(t) === "s4,l5" || (shape(t) === "s4" && !t.signers.includes(tk.address)));
+    assert.equal(invalidations().length, 1);
+    assert.equal(invalidations()[0].signers[0], payer);
     assert.deepEqual(await bufferKeys(), []);
     assert.ok(payerBefore - chain.accounts.get(payer).lamports < 100_000, "all but the fees came back to the deploy payer");
     tk.mode = "sign";
+
+    // Every key Mynt makes for a deploy, so a test can sign as Mynt would (to show an old message is dead).
+    const madeKeys = (svc) => {
+      const made = [];
+      const fresh = svc.freshKey.bind(svc);
+      svc.freshKey = async (...a) => {
+        const k = await fresh(...a);
+        made.push(k);
+        return k;
+      };
+      return made;
+    };
+    const signAll = (wire, keys) => {
+      const t = parseTx(wire);
+      const sigs = t.signers.map((s) => {
+        const k = keys.find((x) => x.address === s);
+        assert.ok(k, `no key for ${s}`);
+        return Buffer.from(k.sign(t.message));
+      });
+      return Buffer.concat([Buffer.from([sigs.length]), ...sigs, Buffer.from(t.message)]).toString("base64");
+    };
+
+    // A send that fails after Turnkey signed (the connection drops; the transaction may still be out there): the
+    // deploy fails, the nonce is advanced and the buffer closed in one go, and the fully signed transaction Mynt
+    // tried to send can never land.
+    const made = madeKeys(w.solana);
+    const b4 = await w.build();
+    await record(b4, w.program(2600, 4));
+    let inFlight = null;
+    const realCall = chain.call.bind(chain);
+    chain.call = async (method, params) => {
+      if (method === "sendTransaction" && !inFlight && parseTx(Buffer.from(params[0], "base64")).signers.includes(tk.address)) {
+        inFlight = params[0];
+        throw new Error("connection reset");
+      }
+      return realCall(method, params);
+    };
+    try {
+      await w.ok(w.dev, "upgrade_program", { program_id, build_id: b4 });
+      await w.solana.settled(program_id);
+    } finally {
+      chain.call = realCall;
+    }
+    assert.ok(inFlight, "Mynt sent the custody-signed transaction");
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.version, versionBefore, "the upgrade didn't happen");
+    assert.equal(invalidations().length, 2);
+    assert.equal(shape(invalidations()[1]), "s4,l5", "the nonce advanced and the buffer closed, together");
+    await assert.rejects(chain.call("sendTransaction", [inFlight]), /nonce has moved/, "the earlier signed transaction is dead");
+    assert.deepEqual(await bufferKeys(), []);
+    assert.equal(made.length, 2, "a fresh buffer key and buffer for that deploy");
 
     // A crash mid-write (the process dies: nothing more reaches the cluster, nothing is cleaned up). The next
     // deploy of the program closes the buffer the dead one left, from the address stored with its key, and its
@@ -1396,6 +1451,25 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     const big = w.program(WRITE_CHUNK * 4, 6);
     const crashed = await crash(await recordSecond(big), "deploy_program");
     const closeOf = (buffer) => chain.sent.find((t) => t.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 5 && i.accounts[0] === buffer));
+    // While the leftover can't be cleaned up (nothing reaches the cluster), a new deploy refuses to start rather
+    // than reuse the old buffer key.
+    const leftover = (await w.db.query("SELECT role, public_key FROM financial_products.solana_keys WHERE scope = $1 AND role IN ('buffer', 'buffer-authority') ORDER BY role", [crashed.id])).rows;
+    const callOk = chain.call.bind(chain);
+    chain.call = async (method, params) => {
+      if (method === "sendTransaction") throw new Error("connection reset");
+      return callOk(method, params);
+    };
+    try {
+      await w.ok(w.dev, "deploy_program", { program_id: second, build_id: await recordSecond(w.program(1800, 10)) });
+      await w.solana.settled(second);
+    } finally {
+      chain.call = callOk;
+    }
+    const refusedDeploy = await w.ok(w.dev, "get_program", { program_id: second });
+    assert.equal(refusedDeploy.status, "failed");
+    assert.match(refusedDeploy.error, /left a buffer key .*Nothing was started/);
+    assert.deepEqual((await w.db.query("SELECT role, public_key FROM financial_products.solana_keys WHERE scope = $1 AND role IN ('buffer', 'buffer-authority') ORDER BY role", [crashed.id])).rows, leftover, "the old keys untouched, no new ones");
+    assert.ok(chain.accounts.get(crashed.buffer)?.lamports > 0);
     await w.ok(w.dev, "deploy_program", { program_id: second, build_id: await recordSecond(w.program(1800, 7)) });
     await w.solana.settled(second);
     assert.equal((await w.ok(w.dev, "get_program", { program_id: second })).status, "deployed");
@@ -1421,13 +1495,31 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     const cs = slow.program(1500, 5);
     await slow.solana.recordArtifacts(bs, [{ name: "mynt_program", declared_id: slowId, sha256: executableHash(cs), size: cs.length, program: cs, idl: null }]);
     tk.mode = "consensus";
+    const slowMade = madeKeys(slow.solana);
+    const slowProgramKey = await slow.solana.vaultKey("mainnet", "program", (await slow.solana.get(slowId)).id);
+    const asksBefore = tk.requests.filter((q) => q.path === "/public/v1/submit/sign_transaction").length;
     await slow.ok(slow.dev, "deploy_program", { program_id: slowId, build_id: bs });
     await slow.solana.settled(slowId);
     const sp = await slow.ok(slow.dev, "get_program", { program_id: slowId });
     assert.equal(sp.status, "failed");
     assert.match(sp.error, /still ACTIVITY_STATUS_CONSENSUS_NEEDED .*Mynt sent nothing/);
-    assert.ok(!slow.clusters.mainnet.sent.some((t) => t.signers.includes(tk.address)));
+    const slowChain = slow.clusters.mainnet;
+    assert.ok(!slowChain.sent.some((t) => t.signers.includes(tk.address)));
     assert.equal((await slow.db.query("SELECT 1 FROM financial_products.solana_keys WHERE role = 'buffer-authority'")).rows.length, 0);
+    // Giving up advanced the nonce and closed the buffer in one transaction from the deploy payer.
+    const slowPayer = await slow.solana.vaultKey("mainnet", "deploy-payer", "");
+    const gaveUp = slowChain.sent.filter((t) => shape(t) === "s4,l5");
+    assert.equal(gaveUp.length, 1);
+    assert.equal(gaveUp[0].signers[0], slowPayer.address);
+    // Someone approves in Turnkey afterwards: the signature comes back, but even with every one of Mynt's own
+    // signatures added, the transaction can't land: its nonce has moved.
+    const lateAsk = tk.requests.filter((q) => q.path === "/public/v1/submit/sign_transaction")[asksBefore];
+    const late = [...tk.activities.values()].find((a) => a.status === "ACTIVITY_STATUS_CONSENSUS_NEEDED" && a.pendingResult);
+    assert.ok(lateAsk && late, "the activity Mynt gave up on");
+    const lateSigned = Buffer.from(late.pendingResult.signTransactionResult.signedTransaction, "hex");
+    assert.ok(lateSigned.subarray(-parseTx(lateSigned).message.length).equals(Buffer.from(JSON.parse(lateAsk.raw).parameters.unsignedTransaction, "hex").subarray(-parseTx(lateSigned).message.length)));
+    const replay = signAll(lateSigned, [tk.wallet, slowPayer, slowProgramKey, ...slowMade]);
+    await assert.rejects(slowChain.call("sendTransaction", [replay]), /nonce has moved/);
     tk.mode = "sign";
 
     // The custody key never pays for or signs a developer's call: on mainnet, calls need per-developer vault keys

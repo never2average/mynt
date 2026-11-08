@@ -2,9 +2,17 @@
 //
 // A small interpreter for the part of Turnkey's policy language that policy uses, written from Turnkey's
 // language reference (https://docs.turnkey.com/concepts/policies/language): ==, !=, &&, ||, !, `in` a list,
-// list literals, strings, ints, field access, list indexing x[i], string slicing s[a..b] (end exclusive),
-// and the list functions all, any, filter and count. As Turnkey documents, && and || don't short-circuit,
-// and a condition that can't be evaluated (a missing field, an index out of range) doesn't allow.
+// list literals, strings, ints, field access, list indexing x[i], slicing x[a..b], and the list functions all,
+// any, filter and count. As Turnkey documents:
+//   - && and || have the same precedence and group left to right ("a || b && c" is "(a || b) && c");
+//     comparisons group before them;
+//   - && and || don't short-circuit, and a condition that can't be evaluated (a missing field, an index out
+//     of range) doesn't allow.
+// One ASSUMPTION Turnkey's reference doesn't settle: that a slice's end is exclusive ('abc'[0..2] is 'ab'), as
+// in most languages. The policy reads an instruction's 4-byte tag as instruction_data_hex[0..8]. If Turnkey's
+// end were inclusive, that would be 9 characters, no tag would match, and Turnkey would refuse Mynt's own
+// deploys: the policy fails closed, and the docs' live check before mainnet shows it. `sliceEnd: "inclusive"`
+// evaluates the policy under that reading.
 //
 // Turnkey's view of a Solana transaction (solana.tx.*) is built from the wire bytes the way its reference
 // describes the fields: account_keys, program_keys, instructions (program_key, accounts with account_key,
@@ -62,7 +70,9 @@ function tokenize(src) {
   return out;
 }
 
-function parse(src) {
+// `precedence: "turnkey"` (the default) is Turnkey's: && and || equal, left to right. "conventional" binds &&
+// tighter, as most languages do; the tests use it to show the policy means the same under both.
+function parse(src, { precedence = "turnkey" } = {}) {
   const toks = tokenize(src);
   let k = 0;
   const peek = (t) => toks[k]?.t === t;
@@ -70,7 +80,15 @@ function parse(src) {
     if (!peek(t)) throw new PolicyError(`expected ${t} at token ${k}`);
     return toks[k++];
   };
-  const or = () => {
+  const turnkey = () => {
+    let l = not();
+    while (peek("&&") || peek("||")) {
+      const op = toks[k++].t;
+      l = { op, l, r: not() };
+    }
+    return l;
+  };
+  const conventionalOr = () => {
     let l = and();
     while (peek("||")) (k++, (l = { op: "||", l, r: and() }));
     return l;
@@ -80,6 +98,7 @@ function parse(src) {
     while (peek("&&")) (k++, (l = { op: "&&", l, r: not() }));
     return l;
   };
+  const or = () => (precedence === "turnkey" ? turnkey() : conventionalOr());
   const not = () => (peek("!") ? (k++, { op: "!", e: not() }) : cmp());
   const cmp = () => {
     const l = postfix();
@@ -144,8 +163,8 @@ function parse(src) {
   return e;
 }
 
-function evaluate(e, env) {
-  const ev = (x, en = env) => evaluate(x, en);
+function evaluate(e, env, opts = {}) {
+  const ev = (x, en = env) => evaluate(x, en, opts);
   const bool = (v) => {
     if (typeof v !== "boolean") throw new PolicyError("not a boolean");
     return v;
@@ -173,7 +192,8 @@ function evaluate(e, env) {
     case "slice": {
       const t = ev(e.target);
       const a = ev(e.a);
-      const b = ev(e.b);
+      // The assumption above: the end is exclusive, unless asked to evaluate the other reading.
+      const b = ev(e.b) + (opts.sliceEnd === "inclusive" ? 1 : 0);
       if (!Array.isArray(t) && typeof t !== "string") throw new PolicyError("not sliceable");
       if (!(Number.isInteger(a) && Number.isInteger(b) && a >= 0 && a <= b && b <= t.length)) throw new PolicyError("slice out of range");
       return t.slice(a, b);
@@ -267,19 +287,28 @@ export function solanaTxView(wire) {
 }
 
 // Whether the policy allows Turnkey to sign `wire` with `custody`. An evaluation error doesn't allow.
-export function policyAllows(wire, custody, { condition = POLICY.condition, activityType = "ACTIVITY_TYPE_SIGN_TRANSACTION_V2", signWith = custody } = {}) {
-  const ast = parse(condition.replaceAll("<custody address>", custody));
+export function policyAllows(
+  wire,
+  custody,
+  { condition = POLICY.condition, activityType = "ACTIVITY_TYPE_SIGN_TRANSACTION_V2", signWith = custody, precedence = "turnkey", sliceEnd = "exclusive" } = {},
+) {
+  const ast = parse(condition.replaceAll("<custody address>", custody), { precedence });
   const env = {
     activity: { type: activityType, params: { type: "TRANSACTION_TYPE_SOLANA" } },
     wallet_account: { address: signWith },
     solana: { tx: solanaTxView(wire) },
   };
   try {
-    return evaluate(ast, env) === true;
+    return evaluate(ast, env, { sliceEnd }) === true;
   } catch (e) {
     if (e instanceof PolicyError) return false;
     throw e;
   }
+}
+
+// An expression on its own, for testing the interpreter's reading of the language.
+export function evaluateExpression(src, env = {}, { precedence = "turnkey", sliceEnd = "exclusive" } = {}) {
+  return evaluate(parse(src, { precedence }), env, { sliceEnd });
 }
 
 export { parse as parsePolicy };

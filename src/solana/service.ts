@@ -857,7 +857,12 @@ export class SolanaService {
     final: (payer: string, buffer: string) => Promise<{ before: Instruction[]; last: Instruction; extra: Keypair[] }>,
   ): Promise<string> {
     const payer = await this.deployPayer(p.cluster);
-    await this.sweepBufferKey(rpc, p, payer); // left by an interrupted deploy
+    // A buffer key left by an interrupted deploy is cleaned up first; if that can't be finished, nothing starts,
+    // so a deploy never reuses an old buffer key or buffer.
+    if (!(await this.sweepBufferKey(rpc, p, payer)))
+      throw new SolanaError(
+        "An earlier deploy of this program left a buffer key whose buffer couldn't be closed or whose SOL couldn't be returned to the deploy payer (the RPC may be unreachable). Nothing was started; start the deploy again once the RPC answers",
+      );
     const rent = (size: number) => rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
     // The buffer's rent; the buffer key's own rent-exempt minimum, which it keeps until the sweep empties it (an
     // account may not be left holding less than that, only nothing); and its fees: creating the buffer (two
@@ -865,11 +870,11 @@ export class SolanaService {
     const bufferNeed = (await rent(BUFFER_HEADER + program.length)) + (await rent(0)) + SIGNATURE_FEE * (Math.ceil(program.length / WRITE_CHUNK) + 3);
     const nonceKey = await this.vaultKey(p.cluster, NONCE_KEY, p.id);
     const nonceNeed = nonceKey && (await this.nonceValue(rpc, nonceKey.address, payer.address)) ? 0 : (await rent(NONCE_ACCOUNT_SIZE)) + 2 * SIGNATURE_FEE;
-    // The deploy payer's own: the funding transfer, a close if it fails.
-    await this.fund(rpc, p.cluster, payer.address, payerNeed + bufferNeed + nonceNeed + 2 * SIGNATURE_FEE);
+    // The deploy payer's own: the funding transfer, and the invalidation if it fails (two signatures).
+    await this.fund(rpc, p.cluster, payer.address, payerNeed + bufferNeed + nonceNeed + 3 * SIGNATURE_FEE);
     const nonce = await this.durableNonce(rpc, p, payer);
-    const temp = await this.createKey(p.cluster, BUFFER_KEY, p.id);
-    const bufferKey = await this.createKey(p.cluster, BUFFER_ACCOUNT, p.id); // its address, kept until it's closed or used
+    const temp = await this.freshKey(p.cluster, BUFFER_KEY, p.id);
+    const bufferKey = await this.freshKey(p.cluster, BUFFER_ACCOUNT, p.id); // its address, kept until it's closed or used
     try {
       await this.send(rpc, signs(payer), [system.transfer(payer.address, temp.address, bufferNeed)]);
       const buffer = await this.writeBuffer(rpc, signs(temp), program, () => this.heartbeat(p.id), bufferKey);
@@ -877,12 +882,46 @@ export class SolanaService {
         const { before, last, extra } = await final(payer.address, buffer);
         return await this.sendCustodySigned(rpc, payer, custody, nonce, [...before, loader.setBufferAuthority(buffer, temp.address, custody.address), last], [temp, ...extra]);
       } catch (e) {
-        await this.send(rpc, signs(payer), [loader.close(buffer, payer.address, temp.address)], [temp]).catch(() => undefined);
+        await this.invalidate(rpc, payer, nonce, temp, buffer);
         throw e;
       }
     } finally {
       await this.sweepBufferKey(rpc, p, payer);
     }
+  }
+
+  // After anything goes wrong once the custody service has been asked (an approval that timed out, a refusal, a
+  // send that failed or wasn't confirmed): one transaction, paid for and signed by the deploy payer, that advances
+  // the nonce and closes the buffer (signed by the buffer key, still its authority). Advancing the nonce makes
+  // every message signed on the old one permanently invalid, including one Turnkey signs after a late approval.
+  // If the deploy landed after all, its buffer is gone and only the nonce is advanced; the retry records the
+  // deploy from the chain. Best effort: the next custody deploy of the program advances the nonce anyway.
+  private async invalidate(rpc: SolanaRpc, payer: Keypair, nonce: string, temp: Keypair, buffer: string) {
+    try {
+      const value = await this.nonceValue(rpc, nonce, payer.address);
+      if (!value) return;
+      const a = await this.accountData(rpc, buffer);
+      const stillOurs = a && a.owner === UPGRADEABLE_LOADER && a.data.length >= BUFFER_HEADER && a.data.readUInt32LE(0) === 1 && base58Encode(a.data.subarray(5, 37)) === temp.address;
+      const ixs = [system.advanceNonce(nonce, payer.address), ...(stillOurs ? [loader.close(buffer, payer.address, temp.address)] : [])];
+      const message = compileMessage(payer.address, ixs, value);
+      const sigs = new Map(message.signers.map((s) => [s, (s === payer.address ? payer : temp).sign(message.bytes)]));
+      const wire = serializeTransaction(message, sigs);
+      const signature = (await rpc.call<string>("sendTransaction", [Buffer.from(wire).toString("base64"), { encoding: "base64", preflightCommitment: "confirmed" }])) || signatureOf(wire);
+      await this.confirm(rpc, [signature]);
+    } catch {
+      /* the next custody deploy of this program advances the nonce */
+    }
+  }
+
+  // A key that must be new: a deploy never reuses an earlier deploy's buffer key or buffer.
+  private async freshKey(cluster: Cluster, role: string, scope: string) {
+    const kp = Keypair.generate();
+    const r = await this.db.query(
+      `INSERT INTO ${T}.solana_keys (id, cluster, role, scope, public_key, sealed) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (cluster, role, scope) DO NOTHING RETURNING id`,
+      [randomUUID(), cluster, role, scope, kp.address, seal(Buffer.from(kp.secret()).toString("base64"), false)],
+    );
+    if (!r.rows.length) throw new SolanaError(`A ${role} key for this program is still in the vault from an earlier deploy; start the deploy again to clean it up`);
+    return kp;
   }
 
   // The program's durable nonce for custody deploys, authorised by the deploy payer: created by its first custody
@@ -913,9 +952,14 @@ export class SolanaService {
   // A deploy's buffer key, after its deploy or after a crash: every buffer it still controls is closed to the
   // deploy payer (the one stored with it, and any the loader lists under it), its lamports go back to the deploy
   // payer, and it's gone from the vault. Kept if anything fails, so the next deploy of the program tries again.
-  private async sweepBufferKey(rpc: SolanaRpc, p: ProgramRecord, payer: Keypair) {
+  // True when nothing is left.
+  private async sweepBufferKey(rpc: SolanaRpc, p: ProgramRecord, payer: Keypair): Promise<boolean> {
+    const clear = () => this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role IN ($2, $3) AND scope = $4`, [p.cluster, BUFFER_KEY, BUFFER_ACCOUNT, p.id]);
     const key = await this.vaultKey(p.cluster, BUFFER_KEY, p.id);
-    if (!key) return;
+    if (!key) {
+      await clear(); // a buffer address without its key can't be closed by Mynt anyway
+      return true;
+    }
     try {
       const buffers = new Set<string>(await this.buffersOf(rpc, key.address));
       const stored = await this.keyRow(p.cluster, BUFFER_ACCOUNT, p.id);
@@ -929,9 +973,10 @@ export class SolanaService {
       // All of it, less the fee: an account left with fewer lamports than rent would be refused.
       if (value > SIGNATURE_FEE) await this.send(rpc, signs(key), [system.transfer(key.address, payer.address, value - SIGNATURE_FEE)]);
     } catch {
-      return;
+      return false;
     }
-    await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role IN ($2, $3) AND scope = $4`, [p.cluster, BUFFER_KEY, BUFFER_ACCOUNT, p.id]);
+    await clear();
+    return true;
   }
 
   // Buffers whose authority is `authority`, as the loader lists them (its authority sits at bytes 5..37). Best
