@@ -129,6 +129,30 @@ jobs:
           [ -z "$(find "$RUNNER_TEMP/out3" -type l)" ] || { echo "a link was copied out"; exit 1; }
           [ ! -e "$RUNNER_TEMP/out3/ci_ledger.so" ] || { echo "the swapped program was kept"; exit 1; }
           echo "refused: the swapped program was never kept"
+      - name: A rustc wrapper in the source's cargo config never runs with network, and can't swap the program after the build
+        run: |
+          python3 workspaces/coding-build/scripts/scaffold_program.py "$RUNNER_TEMP/app4/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw
+          printf '\n[build]\nrustc-wrapper = "./wrap.sh"\n' >> "$RUNNER_TEMP/app4/solana/.cargo/config.toml"
+          cat > "$RUNNER_TEMP/app4/solana/wrap.sh" <<'SH'
+          #!/bin/bash
+          # Run with a network (as the old fetch step did): fail loudly, so a passing build proves it never was.
+          if timeout 3 bash -c '</dev/tcp/1.1.1.1/443' 2>/dev/null; then echo "MYNT-ATTACK: the wrapper ran with network" >&2; exit 97; fi
+          # Offline (the build): leave a process behind that, once the program exists, swaps it for another valid ELF.
+          if mkdir /tmp/mynt-swapper 2>/dev/null; then
+            ( f=/workdir/docker-target/deploy/ci_ledger.so
+              while :; do if [ -f "$f" ]; then sleep 2; cp "$f" /tmp/x && printf X >> /tmp/x && cp /tmp/x "$f"; exit; fi; sleep 0.2; done ) >/dev/null 2>&1 &
+          fi
+          exec "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/app4/solana/wrap.sh"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app4" "$RUNNER_TEMP/out4"
+          cat "$RUNNER_TEMP/out4/checks.jsonl"
+          ! grep -q MYNT-ATTACK "$RUNNER_TEMP"/out4/*.log || { echo "the wrapper ran with network"; exit 1; }
+          grep -q '"name": "solana_build", "status": "pass"' "$RUNNER_TEMP/out4/checks.jsonl"
+          [ "$(tail -c 1 "$RUNNER_TEMP/out4/ci_ledger.so")" != X ] || { echo "the program was swapped after the build"; exit 1; }
+          (cd "$RUNNER_TEMP/out4" && sha256sum ci_ledger.so)
+          [ "$(sha256sum < "$RUNNER_TEMP/out4/ci_ledger.so" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$RUNNER_TEMP/built.sha")" ] || { echo "the captured program isn't the honest build"; exit 1; }
+          echo "held: the wrapper never had a network and the captured program is the honest build"
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done

