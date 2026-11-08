@@ -54,6 +54,8 @@ const INNOVATOR_TOOLS = [
   "list_my_vendor_subscriptions", "list_service_types", "list_vendor_offerings", "set_subscription_live", "subscribe_vendor_service", "unsubscribe_vendor_service",
   // the firm's webhooks for its vendor services' results
   "create_firm_webhook", "delete_firm_webhook", "list_firm_webhooks",
+  // licence providers' sponsorship of its products
+  "list_my_sponsorships", "request_sponsorship",
 ];
 
 async function connect(store, user = null) {
@@ -103,17 +105,17 @@ const greenFd = {
   key_features: ["Fixed rate", "Funds green projects"],
 };
 
-test("roles nest: innovators are developers, developers are consumers", async () => {
+test("roles nest: innovator and developer are one builder role, builders are consumers", async () => {
   const { store, as, consumer, developer, innovator } = await setup();
   assert.deepEqual(await toolNames(await connect(store)), CATALOG_TOOLS);
   assert.deepEqual(await toolNames(await connect(store, consumer)), [...CATALOG_TOOLS, ...CONSUMER_TOOLS].sort());
-  assert.deepEqual(await toolNames(await connect(store, developer)), [...CATALOG_TOOLS, ...CONSUMER_TOOLS, ...DEVELOPER_TOOLS].sort());
   const all = [...CATALOG_TOOLS, ...CONSUMER_TOOLS, ...DEVELOPER_TOOLS, ...INNOVATOR_TOOLS].sort();
+  assert.deepEqual(await toolNames(await connect(store, developer)), all);
   assert.deepEqual(await toolNames(await connect(store, innovator)), all);
   const multi = await as("Max", ["consumer", "innovator"]);
   assert.deepEqual(await toolNames(await connect(store, multi)), all);
   const me = (await (await connect(store, developer)).callTool({ name: "whoami", arguments: {} })).content[0].text;
-  assert.deepEqual(JSON.parse(me).effective_roles, ["consumer", "developer"]);
+  assert.deepEqual(JSON.parse(me).effective_roles, ["consumer", "developer", "innovator"]);
 });
 
 test("a developer can enroll and an innovator can build apps", async () => {
@@ -123,8 +125,9 @@ test("a developer can enroll and an innovator can build apps", async () => {
   const inno = await connect(store, innovator);
   const app = (await call(inno, "create_app", { name: "A", description: "B", audience: "C", product_ids: ["ppf"] })).data;
   assert.equal(app.owner_id, innovator.id);
-  // ...but nobody gains a role above their own.
-  assert.equal((await dev.listTools()).tools.some((t) => t.name === "create_product"), false);
+  // ...and a developer composes products: the two names are one role. Nobody gains admin.
+  assert.equal((await dev.listTools()).tools.some((t) => t.name === "create_product"), true);
+  assert.equal((await dev.listTools()).tools.some((t) => t.name === "invite_user"), false);
 });
 
 test("catalog counts every functional product line the fixture uses, with T-bills under credit", async () => {

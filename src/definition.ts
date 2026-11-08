@@ -145,6 +145,8 @@ export async function checkDefinition(store: Store, record: ProductRecord | null
   const models = regions.map((r) => normalizeModel(ref.regions.find((x) => x.code === r)?.regulatory));
 
   const comp = nodes.get("component")!;
+  const sponsorIds = [...new Set(conns(def).flatMap((c) => [c.from, c.to]).filter((e) => e.kind === "sponsor" && e.id).map((e) => e.id!))];
+  const sponsors = new Set((await Promise.all(sponsorIds.map((id) => store.getEntity(id)))).filter((e) => e).map((e) => e!.id));
   const resolve = (end: End, at: string): boolean => {
     if (COLLECTIONS[end.kind]) {
       if (!nodes.get(end.kind)!.has(end.id ?? "")) {
@@ -159,6 +161,12 @@ export async function checkDefinition(store: Store, record: ProductRecord | null
       case "owner":
         if (!entityId) errors.push(`${at}: a reference product has no owner`);
         else if (end.licence_id && !held.some((h) => h.id === end.licence_id)) errors.push(`${at}: the owner holds no licence '${end.licence_id}'`);
+        return true;
+      // A licence provider sponsoring a component: a firm on Mynt other than the owner's (see sponsorships.ts).
+      case "sponsor":
+        if (!entityId) errors.push(`${at}: a reference product names no sponsor`);
+        else if (end.id === entityId) errors.push(`${at}: the owner can't sponsor its own product; provide it as the owner`);
+        else if (!sponsors.has(end.id ?? "")) errors.push(`${at}: no firm '${end.id}' on Mynt to sponsor it`);
         return true;
       case "party": {
         const p = roster.find((x) => x.id === end.id);
@@ -295,7 +303,13 @@ export function toV1Composition(def: Definition): { components: Component[]; par
   const out: Component[] = components(def).map((c) => {
     const p = provided.find((x) => x.from.id === c.key)?.to;
     const provider: Component["provider"] =
-      p?.kind === "owner" ? { by: "self", ...(p.licence_id ? { licence_id: p.licence_id } : {}) } : p?.kind === "party" ? { by: "party", party_id: p.id! } : undefined;
+      p?.kind === "owner"
+        ? { by: "self", ...(p.licence_id ? { licence_id: p.licence_id } : {}) }
+        : p?.kind === "party"
+          ? { by: "party", party_id: p.id! }
+          : p?.kind === "sponsor"
+            ? { by: "sponsor", entity_id: p.id! }
+            : undefined;
     const offered = (def.offered_in ?? []).filter((j) => j === c.country || j.startsWith(`${c.country}-`));
     return {
       key: c.key,

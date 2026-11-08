@@ -369,7 +369,8 @@ test("the desk is the firm's: other firms can't use your products or jobs, and b
 
   const { user: dev } = await store.createUser("Dev", ["developer"]);
   const devTools = (await (await connect(dev)).listTools()).tools.map((t) => t.name);
-  assert.ok(!devTools.includes("analyze_product"), "developers don't get the desk");
+  // Innovator and developer are one builder role (2026-11-08), so a developer gets the desk too.
+  assert.ok(devTools.includes("analyze_product"), "developers are builders, with the desk");
 
   // US$50 a month: the run reserves US$1, nine agent tasks US$5 each; a tenth would go over.
   for (let i = 0; i < 9; i++) assert.equal((await call(client, "desk_task", { goal: `Model scenario ${i} for our loan book` })).isError, false);

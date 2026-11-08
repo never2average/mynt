@@ -157,9 +157,9 @@ Mynt's platform ships as an MCP server covering eleven lines, grouped by economi
 | Who | What Mynt gives them |
 | --- | --- |
 | **Consumers** | Products and offers they can actually use, and a way to ask for what doesn't exist yet |
-| **Innovators** (licensed firms) | A product foundry: composition from regulated primitives, term sheets and feasibility analysis in their own model repository, versioning, licensing checks and distribution |
-| **Developers** | Apps on top of products: SDKs, APIs, webhooks, a sandbox, GTM campaigns, and coding agents that build, verify and host them |
-| **Vendors** | A marketplace for standard services (identity, KYC, account data, bureau, e-sign, e-mandate) that innovators plug into their products, tested by Mynt before they're listed |
+| **Builders** (innovators and developers: one role under either name) | A product foundry: composition from regulated primitives, term sheets and feasibility analysis in their own model repository, versioning, licensing checks and distribution. And apps on top of products: SDKs, APIs, webhooks, a sandbox, GTM campaigns, and coding agents that build, verify and host them. Builders needn't be licensed |
+| **Licence providers** | Firms holding the licences: they sponsor builders' products under them, in the jurisdictions they cover, and can revoke a sponsorship |
+| **Vendors** | A marketplace for standard services (identity, KYC, account data, bureau, e-sign, e-mandate) that builders plug into their products, tested by Mynt before they're listed |
 | **Admins** | The regulatory model (regulators, licences, law, GRC), a governance desk that reviews firms, licences and products, and `ops_status` for what needs attention |
 
 **Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](docs/reference.md#install--build) · **Technical reference:** [`docs/reference.md`](docs/reference.md) · **Architecture:** [`docs/architecture.md`](docs/architecture.md) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md)

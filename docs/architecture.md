@@ -75,7 +75,7 @@ Locally, `mynt serve` speaks MCP over stdio for one user instead.
 `createServer(store, user, ctx)` in `src/server.ts` builds a fresh MCP server **per signed-in user** and registers only the tools that user's roles allow, so a client never even sees a tool it can't call. Roles nest (`effectiveRoles` in `src/store.ts`):
 
 ```
-admin ⊃ innovator ⊃ developer ⊃ consumer          vendor stands beside innovator
+admin ⊃ builder (innovator = developer) ⊃ consumer          vendor and license_provider stand beside the builder
 ```
 
 Each feature module owns its tools and registers them from `server.ts`:
@@ -88,6 +88,7 @@ Each feature module owns its tools and registers them from `server.ts`:
 | `src/definition-tools.ts` | v2 product definitions and developer contracts |
 | `src/versions.ts` | product versions, diffs, restores, enrollment upgrades |
 | `src/vendors.ts` | service types, offerings, conformance, subscriptions, firm webhooks |
+| `src/sponsorships.ts` | licence providers' sponsorships of builders' product components |
 | `src/runtime.ts` | API keys, webhooks, sandbox hand-offs, releases, app metrics |
 | `src/journeys-tools.ts`, `src/modules.ts` | journeys, developer modules |
 | `src/gtm.ts` | segments and campaigns |
