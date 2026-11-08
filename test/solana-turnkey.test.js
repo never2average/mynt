@@ -183,6 +183,65 @@ test("turnkey: the approval wait is TURNKEY_APPROVAL_TIMEOUT_SECONDS, 60 s by de
   }
 });
 
+test("turnkey policy: the docs' policy allows Mynt's custody transactions and refuses everything else it should", async () => {
+  const { POLICY, policyAllows, parsePolicy } = await import("./turnkey-policy.js");
+  const { loader, serializeTransaction, UPGRADEABLE_LOADER } = await import("../dist/solana/tx.js");
+  const { readFileSync } = await import("node:fs");
+  const { findProgramAddress } = await import("../dist/solana/codec.js");
+  const custody = Keypair.generate().address;
+  const [payer, temp, attacker, nonce, program, buffer] = Array.from({ length: 6 }, () => Keypair.generate().address);
+  const programData = findProgramAddress([base58Decode(program)], UPGRADEABLE_LOADER)[0];
+  const wire = (feePayer, ixs) => serializeTransaction(compileMessage(feePayer, ixs, base58Encode(randomBytes(32))), new Map());
+  const upgrade = (buf = buffer, prog = program) => loader.upgrade({ programData: findProgramAddress([base58Decode(prog)], UPGRADEABLE_LOADER)[0], program: prog, buffer: buf, spill: payer, authority: custody });
+  const deploy = loader.deployWithMaxDataLen({ payer, programData, program, buffer, authority: custody, maxDataLen: 4000 });
+  const ix = (programId, tag, keys) => ({ programId, keys: keys.map(([pubkey, isSigner, isWritable]) => ({ pubkey, isSigner, isWritable })), data: Uint8Array.from([tag, 0, 0, 0]) });
+
+  // The docs show exactly this policy.
+  const reference = readFileSync(new URL("../docs/reference.md", import.meta.url), "utf8");
+  const shown = /```json\n([\s\S]*?)\n\s*```/g;
+  const blocks = [...reference.matchAll(shown)].map((m) => m[1].replace(/^ {3}/gm, ""));
+  assert.ok(blocks.some((b) => { try { return JSON.stringify(JSON.parse(b)) === JSON.stringify(POLICY); } catch { return false; } }), "docs/reference.md shows docs/turnkey-solana-policy.json verbatim");
+  parsePolicy(POLICY.condition); // it parses under the documented grammar
+
+  // Mynt's own shapes (the integration test in solana.test.js checks the real ones Mynt sends).
+  const mine = [
+    [system.advanceNonce(nonce, payer), system.createAccount(payer, program, 1, 36, UPGRADEABLE_LOADER), loader.setBufferAuthority(buffer, temp, custody), deploy],
+    [system.advanceNonce(nonce, payer), system.transfer(payer, program, 1), system.allocate(program, 36), system.assign(program, UPGRADEABLE_LOADER), loader.setBufferAuthority(buffer, temp, custody), deploy],
+    [system.advanceNonce(nonce, payer), loader.setBufferAuthority(buffer, temp, custody), upgrade()],
+  ];
+  for (const ixs of mine) assert.equal(policyAllows(wire(payer, ixs), custody), true);
+
+  // The reviewer's point: a clause on signer flags would refuse Mynt's own SetAuthority, because the custody
+  // address signs the transaction (it's a signer wherever it appears), here as the buffer's new authority.
+  const signerClause = POLICY.condition.replace(
+    "i.accounts.count() == 3 && i.accounts[1].account_key != '<custody address>' && i.accounts[2].account_key == '<custody address>'",
+    "i.accounts.all(a, a.account_key != '<custody address>' || !a.signer)",
+  );
+  assert.notEqual(signerClause, POLICY.condition);
+  assert.equal(policyAllows(wire(payer, mine[2]), custody, { condition: signerClause }), false);
+
+  const refused = {
+    "moving the custody address's SOL": [system.transfer(custody, attacker, 1_000_000)],
+    "a transfer from the custody address alongside an upgrade": [system.transfer(custody, attacker, 1), loader.setBufferAuthority(buffer, temp, custody), upgrade()],
+    "giving a program away (SetAuthority signed by the custody address)": [loader.setBufferAuthority(programData, custody, attacker), upgrade()],
+    "SetAuthorityChecked (7)": [ix(UPGRADEABLE_LOADER, 7, [[programData, false, true], [custody, true, false], [attacker, true, false]]), upgrade()],
+    "closing a program or buffer (5)": [loader.close(programData, attacker, custody), upgrade()],
+    "two upgrades in one": [loader.setBufferAuthority(buffer, temp, custody), upgrade(), upgrade(buffer, Keypair.generate().address)],
+    "no deploy or upgrade at all": [loader.setBufferAuthority(buffer, temp, custody)],
+    "a buffer write": [loader.write(buffer, custody, 0, new Uint8Array(10)), upgrade()],
+    "another program": [ix(Keypair.generate().address, 0, [[custody, true, false]]), upgrade()],
+    "a short loader instruction": [{ programId: UPGRADEABLE_LOADER, keys: [], data: Uint8Array.of(3) }, upgrade()],
+  };
+  for (const [what, ixs] of Object.entries(refused)) assert.equal(policyAllows(wire(payer, ixs), custody), false, what);
+  assert.equal(policyAllows(wire(custody, mine[2]), custody), false, "the custody address as the fee payer");
+  assert.equal(policyAllows(wire(payer, mine[2]), custody, { activityType: "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2" }), false, "raw payload signing");
+  assert.equal(policyAllows(wire(payer, mine[2]), custody, { signWith: attacker }), false, "another wallet account");
+
+  // What it can't stop, as the docs say: someone holding the API key hands their own buffer to the custody
+  // address and upgrades a program to it. Only a person's approval in the consensus catches that.
+  assert.equal(policyAllows(wire(attacker, [loader.setBufferAuthority(Keypair.generate().address, attacker, custody), upgrade()]), custody), true);
+});
+
 test("turnkey: requests follow Mynt's outbound rules (HTTPS only, no private addresses)", async () => {
   const key = apiKeyPair();
   const base = { organizationId: "5b0b2c5e-9f0a-4c3d-9a7e-0e2f4b6c8d10", apiPublicKey: key.publicKey, apiPrivateKey: key.privateKey, pollMs: 0 };

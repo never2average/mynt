@@ -111,6 +111,7 @@ export async function fakeTurnkey({ organizationId = randomUUID(), apiKey = apiK
       if (req.method === "POST" && req.url === "/public/v1/query/get_activity") {
         const a = state.activities.get(body.activityId);
         if (!a) return reply(404, { code: 5, message: "activity not found" });
+        state.onPoll?.(a); // tests: what happens in the world while someone approves
         // Approved by the second time it's asked about.
         a.polls = (a.polls ?? 0) + 1;
         if (a.status === "ACTIVITY_STATUS_CONSENSUS_NEEDED" && a.polls >= 2) Object.assign(a, { status: "ACTIVITY_STATUS_COMPLETED", result: a.pendingResult });

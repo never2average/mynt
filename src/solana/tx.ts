@@ -8,6 +8,9 @@ export const SYSTEM_PROGRAM = "11111111111111111111111111111111";
 export const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 export const SYSVAR_RENT = "SysvarRent111111111111111111111111111111111";
 export const SYSVAR_CLOCK = "SysvarC1ock11111111111111111111111111111111";
+export const SYSVAR_RECENT_BLOCKHASHES = "SysvarRecentB1ockHashes11111111111111111111";
+// A durable nonce account: version, state, authority, the nonce (used as a transaction's blockhash), a fee.
+export const NONCE_ACCOUNT_SIZE = 80;
 
 // The most a serialized transaction may be.
 export const PACKET_DATA_SIZE = 1232;
@@ -112,6 +115,22 @@ export const system = {
   },
   assign(account: string, owner: string): Instruction {
     return { programId: SYSTEM_PROGRAM, keys: [meta(account, true, true)], data: Uint8Array.from([...u32(1), ...pubkeyBytes(owner)]) };
+  },
+  // A durable nonce: a transaction whose first instruction advances it uses the nonce as its blockhash, and stays
+  // valid until the nonce moves, however long its signatures take.
+  initializeNonce(nonce: string, authority: string): Instruction {
+    return {
+      programId: SYSTEM_PROGRAM,
+      keys: [meta(nonce, false, true), meta(SYSVAR_RECENT_BLOCKHASHES, false, false), meta(SYSVAR_RENT, false, false)],
+      data: Uint8Array.from([...u32(6), ...pubkeyBytes(authority)]),
+    };
+  },
+  advanceNonce(nonce: string, authority: string): Instruction {
+    return {
+      programId: SYSTEM_PROGRAM,
+      keys: [meta(nonce, false, true), meta(SYSVAR_RECENT_BLOCKHASHES, false, false), meta(authority, true, false)],
+      data: Uint8Array.from(u32(4)),
+    };
   },
 };
 

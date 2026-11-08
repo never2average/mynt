@@ -21,6 +21,7 @@ import {
   BUFFER_HEADER,
   compileMessage,
   loader,
+  NONCE_ACCOUNT_SIZE,
   PROGRAM_ACCOUNT_SIZE,
   PROGRAMDATA_HEADER,
   serializeTransaction,
@@ -212,8 +213,10 @@ const SIGNATURE_FEE = 5_000; // lamports per signature, Solana's base fee
 // Custody deploys: Mynt's deploy payer (SOL only, no program) and each deploy's temporary buffer key.
 const DEPLOY_PAYER = "deploy-payer";
 const BUFFER_KEY = "buffer-authority";
-const CUSTODY_ATTEMPTS = 3; // fresh blockhashes for the custody-signed transaction before giving up
+const BUFFER_ACCOUNT = "buffer"; // the buffer a buffer key is writing, so a crash's leftover can be closed
+const NONCE_KEY = "custody-nonce"; // a program's durable nonce account for its custody-signed transactions
 type Signs = { address: string; sign(m: Uint8Array): Promise<Uint8Array> };
+const signs = (k: Keypair): Signs => ({ address: k.address, sign: async (m) => k.sign(m) });
 const AIRDROP_MAX = 2 * LAMPORTS_PER_SOL;
 const CALL_FEE_RESERVE = 5_000_000; // what a developer's fee payer keeps for calls' fees
 const DEVNET_CALLER_FLOAT = 50_000_000; // devnet only: enough for a call to pay an account's rent
@@ -833,8 +836,10 @@ export class SolanaService {
   //      signed by the buffer key; the loader requires the buffer's authority to be the upgrade authority) and
   //      Deploy or Upgrade (signed by the custody address). The deploy payer pays its fees and rent; the custody
   //      address pays nothing, so it needs no SOL. The handover is in the same transaction, so if that one fails
-  //      the buffer is still the buffer key's, and closed.
-  //   4. Whatever is left with the buffer key goes back to the deploy payer and the key is deleted.
+  //      the buffer is still the buffer key's, and closed. It runs on the program's durable nonce, not a recent
+  //      blockhash, so a person can take as long as TURNKEY_APPROVAL_TIMEOUT_SECONDS to approve it.
+  //   4. Whatever is left with the buffer key goes back to the deploy payer and the key is deleted. The buffer's
+  //      address is stored with the key, so a buffer left by a crash is closed by the next deploy.
   private async custodyDeploy(
     rpc: SolanaRpc,
     p: ProgramRecord,
@@ -844,26 +849,51 @@ export class SolanaService {
     final: (payer: string, buffer: string) => Promise<{ before: Instruction[]; last: Instruction; extra: Keypair[] }>,
   ): Promise<string> {
     const payer = await this.deployPayer(p.cluster);
-    const asSigner = (k: Keypair) => ({ address: k.address, sign: async (m: Uint8Array) => k.sign(m) });
-    await this.sweepBufferKey(rpc, p, payer.address); // left by an interrupted deploy
-    const bufferRent = await rpc.call<number>("getMinimumBalanceForRentExemption", [BUFFER_HEADER + program.length]);
-    // Its transactions: create the buffer (two signatures), the writes, a close if it fails, the sweep.
-    const bufferNeed = bufferRent + SIGNATURE_FEE * (Math.ceil(program.length / WRITE_CHUNK) + 4);
-    await this.fund(rpc, p.cluster, payer.address, payerNeed + bufferNeed + SIGNATURE_FEE);
+    await this.sweepBufferKey(rpc, p, payer); // left by an interrupted deploy
+    const rent = (size: number) => rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
+    // The buffer's rent; the buffer key's own rent-exempt minimum, which it keeps until the sweep empties it (an
+    // account may not be left holding less than that, only nothing); and its fees: creating the buffer (two
+    // signatures), the writes, the sweep.
+    const bufferNeed = (await rent(BUFFER_HEADER + program.length)) + (await rent(0)) + SIGNATURE_FEE * (Math.ceil(program.length / WRITE_CHUNK) + 3);
+    const nonceKey = await this.vaultKey(p.cluster, NONCE_KEY, p.id);
+    const nonceNeed = nonceKey && (await this.nonceValue(rpc, nonceKey.address, payer.address)) ? 0 : (await rent(NONCE_ACCOUNT_SIZE)) + 2 * SIGNATURE_FEE;
+    // The deploy payer's own: the funding transfer, a close if it fails.
+    await this.fund(rpc, p.cluster, payer.address, payerNeed + bufferNeed + nonceNeed + 2 * SIGNATURE_FEE);
+    const nonce = await this.durableNonce(rpc, p, payer);
     const temp = await this.createKey(p.cluster, BUFFER_KEY, p.id);
+    const bufferKey = await this.createKey(p.cluster, BUFFER_ACCOUNT, p.id); // its address, kept until it's closed or used
     try {
-      await this.send(rpc, asSigner(payer), [system.transfer(payer.address, temp.address, bufferNeed)]);
-      const buffer = await this.writeBuffer(rpc, asSigner(temp), program, () => this.heartbeat(p.id));
+      await this.send(rpc, signs(payer), [system.transfer(payer.address, temp.address, bufferNeed)]);
+      const buffer = await this.writeBuffer(rpc, signs(temp), program, () => this.heartbeat(p.id), bufferKey);
       try {
         const { before, last, extra } = await final(payer.address, buffer);
-        return await this.sendCustodySigned(rpc, payer, custody, [...before, loader.setBufferAuthority(buffer, temp.address, custody.address), last], [temp, ...extra]);
+        return await this.sendCustodySigned(rpc, payer, custody, nonce, [...before, loader.setBufferAuthority(buffer, temp.address, custody.address), last], [temp, ...extra]);
       } catch (e) {
-        await this.closeBuffer(rpc, asSigner(temp), buffer);
+        await this.send(rpc, signs(payer), [loader.close(buffer, payer.address, temp.address)], [temp]).catch(() => undefined);
         throw e;
       }
     } finally {
-      await this.sweepBufferKey(rpc, p, payer.address);
+      await this.sweepBufferKey(rpc, p, payer);
     }
+  }
+
+  // The program's durable nonce for custody deploys, authorised by the deploy payer: created by its first custody
+  // deploy (one per program, so two deploys at once never race for it), and kept for its upgrades.
+  private async durableNonce(rpc: SolanaRpc, p: ProgramRecord, payer: Keypair) {
+    const key = (await this.vaultKey(p.cluster, NONCE_KEY, p.id)) ?? (await this.createKey(p.cluster, NONCE_KEY, p.id));
+    if (await this.nonceValue(rpc, key.address, payer.address)) return key.address;
+    if (await this.accountInfo(rpc, key.address)) throw new SolanaError(`${key.address} is in use, but isn't this program's nonce account`);
+    const lamports = await rpc.call<number>("getMinimumBalanceForRentExemption", [NONCE_ACCOUNT_SIZE]);
+    await this.send(rpc, signs(payer), [system.createAccount(payer.address, key.address, lamports, NONCE_ACCOUNT_SIZE, SYSTEM_PROGRAM), system.initializeNonce(key.address, payer.address)], [key]);
+    return key.address;
+  }
+
+  // A nonce account's current nonce, if it is one, initialised, and authorised by `authority`.
+  private async nonceValue(rpc: SolanaRpc, address: string, authority: string): Promise<string | null> {
+    const a = await this.accountData(rpc, address);
+    if (!a || a.owner !== SYSTEM_PROGRAM || a.data.length !== NONCE_ACCOUNT_SIZE || a.data.readUInt32LE(4) !== 1) return null;
+    if (base58Encode(a.data.subarray(8, 40)) !== authority) return null;
+    return base58Encode(a.data.subarray(40, 72));
   }
 
   // The deploy payer for custody deploys: Mynt-held, sealed in the vault; the operator funds it.
@@ -872,51 +902,68 @@ export class SolanaService {
     return (await this.vaultKey(cluster, DEPLOY_PAYER, "")) ?? (await this.createKey(cluster, DEPLOY_PAYER, ""));
   }
 
-  // A deploy's buffer key: its lamports back to the deploy payer, then gone from the vault. Kept if they
-  // couldn't be moved, so the next deploy of the program tries again.
-  private async sweepBufferKey(rpc: SolanaRpc, p: ProgramRecord, to: string) {
+  // A deploy's buffer key, after its deploy or after a crash: every buffer it still controls is closed to the
+  // deploy payer (the one stored with it, and any the loader lists under it), its lamports go back to the deploy
+  // payer, and it's gone from the vault. Kept if anything fails, so the next deploy of the program tries again.
+  private async sweepBufferKey(rpc: SolanaRpc, p: ProgramRecord, payer: Keypair) {
     const key = await this.vaultKey(p.cluster, BUFFER_KEY, p.id);
     if (!key) return;
     try {
+      const buffers = new Set<string>(await this.buffersOf(rpc, key.address));
+      const stored = await this.keyRow(p.cluster, BUFFER_ACCOUNT, p.id);
+      if (stored) buffers.add(stored.public_key);
+      for (const b of buffers) {
+        const a = await this.accountData(rpc, b);
+        const isOurs = a && a.owner === UPGRADEABLE_LOADER && a.data.length >= BUFFER_HEADER && a.data.readUInt32LE(0) === 1 && a.data[4] === 1 && base58Encode(a.data.subarray(5, 37)) === key.address;
+        if (isOurs) await this.send(rpc, signs(payer), [loader.close(b, payer.address, key.address)], [key]);
+      }
       const { value } = await rpc.call<{ value: number }>("getBalance", [key.address, { commitment: "confirmed" }]);
       // All of it, less the fee: an account left with fewer lamports than rent would be refused.
-      if (value > SIGNATURE_FEE) await this.send(rpc, { address: key.address, sign: async (m) => key.sign(m) }, [system.transfer(key.address, to, value - SIGNATURE_FEE)]);
+      if (value > SIGNATURE_FEE) await this.send(rpc, signs(key), [system.transfer(key.address, payer.address, value - SIGNATURE_FEE)]);
     } catch {
       return;
     }
-    await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role = $2 AND scope = $3`, [p.cluster, BUFFER_KEY, p.id]);
+    await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role IN ($2, $3) AND scope = $4`, [p.cluster, BUFFER_KEY, BUFFER_ACCOUNT, p.id]);
   }
 
-  // The one transaction the custody service signs, paid for by the deploy payer. Its signature is checked by
-  // the signer (the custody address's, over exactly this message). An approval can take longer than a
-  // blockhash lasts (about a minute): then the transaction is built again on a fresh one and signed again.
-  private async sendCustodySigned(rpc: SolanaRpc, payer: Keypair, custody: SolanaSigner, ixs: Instruction[], extra: Keypair[]) {
-    for (let attempt = 0; attempt < CUSTODY_ATTEMPTS; attempt++) {
-      const { blockhash } = await this.blockhash(rpc);
-      const message = compileMessage(payer.address, ixs, blockhash);
-      const sigs = new Map<string, Uint8Array>([[custody.address, await custody.sign(message.bytes)]]);
-      for (const s of message.signers) {
-        if (sigs.has(s)) continue;
-        const kp = [payer, ...extra].find((k) => k.address === s);
-        if (!kp) throw new SolanaError(`No signature available for ${s}`);
-        sigs.set(s, kp.sign(message.bytes));
-      }
-      const fresh = await rpc.call<{ value: boolean }>("isBlockhashValid", [blockhash, { commitment: "confirmed" }]);
-      if (!fresh.value) continue;
-      const wire = serializeTransaction(message, sigs);
-      const signature = (await rpc.call<string>("sendTransaction", [Buffer.from(wire).toString("base64"), { encoding: "base64", preflightCommitment: "confirmed" }])) || signatureOf(wire);
-      await this.confirm(rpc, [signature]);
-      return signature;
+  // Buffers whose authority is `authority`, as the loader lists them (its authority sits at bytes 5..37). Best
+  // effort: some RPC providers don't serve getProgramAccounts; the stored buffer address covers that.
+  private async buffersOf(rpc: SolanaRpc, authority: string): Promise<string[]> {
+    try {
+      const r = await rpc.call<{ pubkey: string }[]>("getProgramAccounts", [
+        UPGRADEABLE_LOADER,
+        { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 0 }, filters: [{ memcmp: { offset: 0, bytes: base58Encode(Uint8Array.of(1, 0, 0, 0, 1)) } }, { memcmp: { offset: 5, bytes: authority } }] },
+      ]);
+      return Array.isArray(r) ? r.map((x) => x.pubkey).filter((k) => typeof k === "string" && isAddress(k)) : [];
+    } catch {
+      return [];
     }
-    throw new SolanaError(
-      `The custody service's approval took longer than a blockhash lasts, ${CUSTODY_ATTEMPTS} times; nothing was sent. Approve sooner, or raise TURNKEY_APPROVAL_TIMEOUT_SECONDS, and start the deploy again`,
-    );
+  }
+
+  // The one transaction the custody service signs, paid for by the deploy payer, on the program's durable nonce:
+  // it starts by advancing the nonce and uses the nonce as its blockhash, so it stays valid however long the
+  // approval takes, until it lands or the nonce moves. The custody signature is checked by the signer (the
+  // custody address's, over exactly this message) before anything is sent.
+  private async sendCustodySigned(rpc: SolanaRpc, payer: Keypair, custody: SolanaSigner, nonce: string, ixs: Instruction[], extra: Keypair[]) {
+    const value = await this.nonceValue(rpc, nonce, payer.address);
+    if (!value) throw new SolanaError(`The durable nonce ${nonce} isn't ready`);
+    const message = compileMessage(payer.address, [system.advanceNonce(nonce, payer.address), ...ixs], value);
+    const sigs = new Map<string, Uint8Array>([[custody.address, await custody.sign(message.bytes)]]);
+    for (const s of message.signers) {
+      if (sigs.has(s)) continue;
+      const kp = [payer, ...extra].find((k) => k.address === s);
+      if (!kp) throw new SolanaError(`No signature available for ${s}`);
+      sigs.set(s, kp.sign(message.bytes));
+    }
+    const wire = serializeTransaction(message, sigs);
+    const signature = (await rpc.call<string>("sendTransaction", [Buffer.from(wire).toString("base64"), { encoding: "base64", preflightCommitment: "confirmed" }])) || signatureOf(wire);
+    await this.confirm(rpc, [signature]);
+    return signature;
   }
 
   // The program bytes into a fresh buffer account, a Write per chunk, confirmed in batches, each batch on a
   // fresh blockhash.
-  private async writeBuffer(rpc: SolanaRpc, signer: Signs, program: Uint8Array, alive: () => Promise<void> = async () => undefined) {
-    const buffer = Keypair.generate();
+  private async writeBuffer(rpc: SolanaRpc, signer: Signs, program: Uint8Array, alive: () => Promise<void> = async () => undefined, buffer = Keypair.generate()) {
     const size = BUFFER_HEADER + program.length;
     const lamports = await rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
     await this.send(rpc, signer, [system.createAccount(signer.address, buffer.address, lamports, size, UPGRADEABLE_LOADER), loader.initializeBuffer(buffer.address, signer.address)], [buffer]);

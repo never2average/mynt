@@ -16,7 +16,7 @@ const { open } = await import("../dist/vault.js");
 const { SolanaService, programEvents, eventName } = await import("../dist/solana/service.js");
 const { GENESIS_HASH, HttpSolanaRpc } = await import("../dist/solana/rpc.js");
 const codec = await import("../dist/solana/codec.js");
-const { UPGRADEABLE_LOADER, SYSTEM_PROGRAM, WRITE_CHUNK } = await import("../dist/solana/tx.js");
+const { UPGRADEABLE_LOADER, SYSTEM_PROGRAM, SYSVAR_RECENT_BLOCKHASHES, WRITE_CHUNK } = await import("../dist/solana/tx.js");
 const { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } = await import("../dist/solana/toolchain.js");
 const { VERIFY_SCRIPT } = await import("../dist/verify-script.js");
 const { CATALOG } = await import("./helpers.js");
@@ -48,7 +48,8 @@ function parseTx(wire) {
   [nkeys, p] = readShortVec(message, p);
   const keys = [];
   for (let i = 0; i < nkeys; i++, p += 32) keys.push(base58Encode(message.subarray(p, p + 32)));
-  p += 32; // blockhash
+  const blockhash = base58Encode(message.subarray(p, p + 32));
+  p += 32;
   let nix;
   [nix, p] = readShortVec(message, p);
   const ixs = [];
@@ -65,7 +66,7 @@ function parseTx(wire) {
   }
   const signers = keys.slice(0, numSigners);
   const writable = new Set(keys.filter((_, i) => (i < numSigners ? i < numSigners - roSigned : i < nkeys - roUnsigned)));
-  return { sigs, message, keys, signers, writable, ixs };
+  return { sigs, message, keys, signers, writable, ixs, blockhash };
 }
 
 const edKey = (address) => createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(base58Decode(address)).toString("base64url") }, format: "jwk" });
@@ -81,7 +82,12 @@ class FakeCluster {
     this.slot = 100;
     this.calls = [];
     this.simulateFails = false;
-    this.expire = 0;
+    this.nonceAdvances = 0;
+    this.recent = new Set(); // blockhashes still valid
+  }
+  // Time passes (a slow approval): every blockhash handed out so far expires.
+  expireBlockhashes() {
+    this.recent.clear();
   }
   fund(address, lamports) {
     const a = this.accounts.get(address) ?? { lamports: 0, owner: SYSTEM_PROGRAM, data: Buffer.alloc(0) };
@@ -125,6 +131,28 @@ class FakeCluster {
         const a = this.accounts.get(ix.accounts[0]);
         assert.ok(signed.has(ix.accounts[0]) && a.owner === SYSTEM_PROGRAM);
         a.owner = base58Encode(ix.data.subarray(4, 36));
+      } else if (ix.program === SYSTEM_PROGRAM && tag === 6) {
+        // InitializeNonceAccount: [nonce, recent blockhashes sysvar, rent sysvar]; version 1, initialised, its authority, a nonce.
+        const [nonce, sysvar] = ix.accounts;
+        assert.equal(sysvar, SYSVAR_RECENT_BLOCKHASHES);
+        const a = this.accounts.get(nonce);
+        assert.ok(a && a.owner === SYSTEM_PROGRAM && a.data.length === 80 && a.data.readUInt32LE(4) === 0, "a fresh 80-byte system account");
+        a.data.writeUInt32LE(1, 0);
+        a.data.writeUInt32LE(1, 4);
+        ix.data.subarray(4, 36).copy(a.data, 8);
+        randomBytes(32).copy(a.data, 40);
+      } else if (ix.program === SYSTEM_PROGRAM && tag === 4) {
+        // AdvanceNonceAccount: [nonce, recent blockhashes sysvar, authority (signs)]; first in its transaction,
+        // whose blockhash must be the stored nonce. Then the nonce moves.
+        const [nonce, sysvar, authority] = ix.accounts;
+        assert.equal(sysvar, SYSVAR_RECENT_BLOCKHASHES);
+        assert.equal(tx.ixs[0], ix, "AdvanceNonceAccount comes first");
+        const a = this.accounts.get(nonce);
+        assert.ok(a && a.data.readUInt32LE(4) === 1, "an initialised nonce account");
+        assert.ok(signed.has(authority) && base58Encode(a.data.subarray(8, 40)) === authority, "the nonce's authority signs");
+        if (base58Encode(a.data.subarray(40, 72)) !== tx.blockhash) throw new Error("Blockhash not found (the nonce has moved)");
+        randomBytes(32).copy(a.data, 40);
+        this.nonceAdvances++;
       } else if (ix.program === UPGRADEABLE_LOADER) {
         if (tag === 0) {
           const buf = this.accounts.get(ix.accounts[0]);
@@ -211,15 +239,19 @@ class FakeCluster {
     switch (method) {
       case "getGenesisHash":
         return this.genesis;
-      case "getLatestBlockhash":
-        return { value: { blockhash: base58Encode(randomBytes(32)), lastValidBlockHeight: 1000 } };
-      case "isBlockhashValid":
-        // A blockhash that expired while someone was approving: the next `expire` checks say so.
-        if (this.expire > 0) {
-          this.expire--;
-          return { value: false };
-        }
-        return { value: true };
+      case "getLatestBlockhash": {
+        const blockhash = base58Encode(randomBytes(32));
+        this.recent.add(blockhash);
+        return { value: { blockhash, lastValidBlockHeight: 1000 } };
+      }
+      case "getProgramAccounts": {
+        // The loader's accounts matching every memcmp filter (bytes in base58), as the RPC serves them.
+        const [owner, o] = params;
+        return [...this.accounts.entries()]
+          .filter(([, a]) => a.owner === owner)
+          .filter(([, a]) => (o.filters ?? []).every((f) => Buffer.from(base58Decode(f.memcmp.bytes)).equals(a.data.subarray(f.memcmp.offset, f.memcmp.offset + base58Decode(f.memcmp.bytes).length))))
+          .map(([pubkey, a]) => ({ pubkey, account: { lamports: a.lamports, owner: a.owner, data: ["", "base64"] } }));
+      }
       case "getMinimumBalanceForRentExemption":
         return this.rent(params[0]);
       case "getBalance":
@@ -242,8 +274,21 @@ class FakeCluster {
         assert.ok(wire.length <= 1232, `transaction of ${wire.length} bytes`);
         const tx = parseTx(wire);
         tx.signers.forEach((s, i) => assert.ok(verify(null, tx.message, edKey(s), tx.sigs[i]), `signature of ${s}`));
+        // A recent blockhash (one this cluster handed out since it last expired them), or a durable nonce, which
+        // AdvanceNonceAccount checks.
+        const nonced = tx.ixs[0]?.program === SYSTEM_PROGRAM && tx.ixs[0].data.readUInt32LE(0) === 4;
+        if (!nonced && !this.recent.has(tx.blockhash)) throw new Error("Blockhash not found");
         const signature = base58Encode(tx.sigs[0]);
+        // Solana's rent rule: an account the transaction touches ends with nothing or at least its rent-exempt
+        // minimum, unless it already held less and gained nothing.
+        const before = new Map(tx.keys.map((k) => [k, this.accounts.get(k)?.lamports ?? 0]));
         const logs = this.apply(tx);
+        for (const k of tx.keys) {
+          const a = this.accounts.get(k);
+          if (!a || !a.lamports || a.executable || a.lamports >= this.rent(a.data.length)) continue;
+          const was = before.get(k);
+          if (!(was > 0 && was < this.rent(a.data.length) && a.lamports <= was)) throw new Error(`Transaction results in an account (${k}) with insufficient funds for rent`);
+        }
         this.sent.push({ signature, signers: tx.signers, ixs: tx.ixs });
         this.history.push({ signature, slot: ++this.slot, keys: tx.keys, logs, err: null });
         if (!this.withhold(tx)) this.statuses.set(signature, { confirmationStatus: "confirmed", err: null });
@@ -1228,6 +1273,14 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     const [final] = custodySigned();
     assert.equal(final.signers[0], payer, "the deploy payer is the final transaction's fee payer");
     assert.deepEqual(final.ixs.filter((i) => i.program === UPGRADEABLE_LOADER).map((i) => i.data.readUInt32LE(0)), [4, 2], "SetAuthority on the buffer, then Deploy");
+    // On the program's durable nonce: AdvanceNonceAccount first, authorised by the deploy payer.
+    assert.equal(final.ixs[0].program, SYSTEM_PROGRAM);
+    assert.equal(final.ixs[0].data.readUInt32LE(0), 4);
+    const nonce = final.ixs[0].accounts[0];
+    assert.equal(final.ixs[0].accounts[2], payer);
+    assert.equal(chain.accounts.get(nonce).owner, SYSTEM_PROGRAM);
+    assert.equal(base58Encode(chain.accounts.get(nonce).data.subarray(8, 40)), payer, "the nonce's authority is the deploy payer");
+    assert.equal(chain.nonceAdvances, 1);
     // The buffer was written by a temporary key, never the custody key, each batch on a fresh blockhash.
     const writes = chain.sent.filter((t) => t.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 1));
     assert.equal(writes.length, Math.ceil(code1.length / WRITE_CHUNK));
@@ -1240,10 +1293,10 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.equal(chain.accounts.get(tk.address)?.lamports ?? 0, 0, "the custody address never paid for anything");
     assert.equal(tk.refusedStamps, 0);
 
-    // An upgrade: one Turnkey activity again, waiting for a person's approval, and signed again on a fresh
-    // blockhash when the first one expired during the approval.
+    // An upgrade: one Turnkey activity again, waiting for a person's approval. Every recent blockhash expires
+    // while they approve; the transaction lands anyway, on the same durable nonce (now advanced), signed once.
     tk.mode = "consensus";
-    chain.expire = 1;
+    tk.onPoll = () => chain.expireBlockhashes();
     const b2 = await w.build();
     const code2 = w.program(2600, 2);
     await record(b2, code2);
@@ -1252,14 +1305,17 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     p = await w.ok(w.dev, "get_program", { program_id });
     assert.equal(p.status, "deployed", p.error);
     assert.equal(p.version, 2);
-    assert.equal(tk.signed, 3, "the upgrade's transaction was signed twice: once on the expired blockhash, once on a fresh one");
-    assert.equal(custodySigned().length, 2, "only one of them was sent");
+    assert.equal(tk.signed, 2, "one Turnkey signature for the upgrade");
+    assert.equal(custodySigned().length, 2);
     const upgrade = custodySigned()[1];
     assert.equal(upgrade.signers[0], payer);
-    assert.deepEqual(upgrade.ixs.map((i) => i.data.readUInt32LE(0)), [4, 3], "SetAuthority on the buffer, then Upgrade");
-    assert.equal(upgrade.ixs[1].accounts[3], payer, "the buffer's rent comes back to the deploy payer as the spill");
+    assert.deepEqual(upgrade.ixs.map((i) => [i.program === SYSTEM_PROGRAM ? "system" : "loader", i.data.readUInt32LE(0)]), [["system", 4], ["loader", 4], ["loader", 3]], "AdvanceNonce, SetAuthority on the buffer, then Upgrade");
+    assert.equal(upgrade.ixs[0].accounts[0], nonce, "the program's nonce, reused");
+    assert.equal(upgrade.ixs[2].accounts[3], payer, "the buffer's rent comes back to the deploy payer as the spill");
+    assert.equal(chain.nonceAdvances, 2);
     assert.ok(tk.requests.some((r) => r.path === "/public/v1/query/get_activity"), "the approval was waited for");
     assert.deepEqual(await bufferKeys(), []);
+    tk.onPoll = undefined;
     tk.mode = "sign";
 
     // Recovery of an interrupted upgrade compares the chain's authority with the custody address; it signs nothing.
@@ -1288,10 +1344,68 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.match(p.error, /doesn't verify for .* it wasn't used/);
     assert.equal(custodySigned().length, custodySentBefore, "nothing signed badly reached the cluster");
     const closes = chain.sent.slice(-2);
-    assert.equal(closes[0].ixs[0].data.readUInt32LE(0), 5, "the buffer was closed by its own key");
+    assert.equal(closes[0].ixs[0].data.readUInt32LE(0), 5, "the buffer was closed, on the buffer key's authority");
     assert.deepEqual(await bufferKeys(), []);
     assert.ok(payerBefore - chain.accounts.get(payer).lamports < 100_000, "all but the fees came back to the deploy payer");
     tk.mode = "sign";
+
+    // A crash mid-write (the process dies: nothing more reaches the cluster, nothing is cleaned up). The next
+    // deploy of the program closes the buffer the dead one left, from the address stored with its key, and its
+    // rent comes back to the deploy payer. A program whose address someone pre-funded, for the policy's sake.
+    const { program_id: second } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "mainnet" });
+    chain.fund(second, 1_000);
+    const recordSecond = async (code) => {
+      const b = await w.build();
+      await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: second, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
+      return b;
+    };
+    const crash = async (buildId, action) => {
+      // Two writes get through; then the process is gone, and nothing it sends arrives.
+      const call = chain.call.bind(chain);
+      let writes = 0;
+      let dead = false;
+      chain.call = async (method, params) => {
+        if (method === "sendTransaction") {
+          if (dead) throw new Error("connection reset");
+          const t = parseTx(Buffer.from(params[0], "base64"));
+          if (t.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 1) && ++writes > 2) {
+            dead = true;
+            throw new Error("connection reset");
+          }
+        }
+        return call(method, params);
+      };
+      try {
+        await w.ok(w.dev, action, { program_id: second, build_id: buildId });
+        await w.solana.settled(second);
+      } finally {
+        chain.call = call;
+      }
+      const row = await w.solana.get(second);
+      const left = (await w.db.query("SELECT role, public_key FROM financial_products.solana_keys WHERE scope = $1 AND role IN ('buffer', 'buffer-authority')", [row.id])).rows;
+      const buffer = left.find((k) => k.role === "buffer")?.public_key;
+      assert.ok(buffer && chain.accounts.get(buffer)?.lamports > 0, `the dead deploy left a funded buffer behind (${row.error}; ${JSON.stringify(left)})`);
+      assert.equal(left.length, 2, "and its keys, buffer address included");
+      return { buffer, id: row.id };
+    };
+    const big = w.program(WRITE_CHUNK * 4, 6);
+    const crashed = await crash(await recordSecond(big), "deploy_program");
+    const closeOf = (buffer) => chain.sent.find((t) => t.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 5 && i.accounts[0] === buffer));
+    await w.ok(w.dev, "deploy_program", { program_id: second, build_id: await recordSecond(w.program(1800, 7)) });
+    await w.solana.settled(second);
+    assert.equal((await w.ok(w.dev, "get_program", { program_id: second })).status, "deployed");
+    assert.equal(chain.accounts.get(crashed.buffer), undefined, "the leftover buffer was closed");
+    assert.equal(closeOf(crashed.buffer).ixs[0].accounts[1], payer, "its rent went to the deploy payer");
+    // Belt and braces: with the stored address lost too, the loader's own list of the key's buffers finds it.
+    const crashed2 = await crash(await recordSecond(w.program(3000, 8)), "upgrade_program"); // three writes, within the 3600 bytes reserved
+    await w.db.query("DELETE FROM financial_products.solana_keys WHERE scope = $1 AND role = 'buffer'", [crashed2.id]);
+    await w.ok(w.dev, "upgrade_program", { program_id: second, build_id: await recordSecond(w.program(1800, 9)) });
+    await w.solana.settled(second);
+    assert.equal((await w.ok(w.dev, "get_program", { program_id: second })).version, 2);
+    assert.equal(chain.accounts.get(crashed2.buffer), undefined, "found through getProgramAccounts and closed");
+    assert.equal(closeOf(crashed2.buffer).ixs[0].accounts[1], payer);
+    assert.ok(chain.calls.includes("getProgramAccounts"));
+    assert.equal((await w.db.query("SELECT 1 FROM financial_products.solana_keys WHERE role IN ('buffer', 'buffer-authority')")).rows.length, 0);
 
     // A Turnkey approval that never comes: Mynt gives up, sends nothing, and the buffer is cleaned up the same way.
     const slow = await world({ mainnetUrl: "https://rpc.example.com", custody: new TurnkeyClient({ ...opts, apiPrivateKey: tk.apiKey.privateKey, approvalTimeoutMs: 0, pollMs: 1 }) });
@@ -1333,6 +1447,15 @@ test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signatu
     assert.ok(![sim.fee_payer, sim.caller].includes(tk.address));
     assert.ok(!tx.signers.includes(tk.address) && !tx.ixs.some((i) => i.accounts.includes(tk.address)));
     assert.equal(tk.requests.length, turnkeyRequests, "no call reached Turnkey");
+
+    // The Turnkey policy in the docs allows every transaction Mynt asked Turnkey to sign: first deploys (a fresh
+    // program account and a pre-funded one), upgrades, retries after a crash.
+    const { policyAllows } = await import("./turnkey-policy.js");
+    const asked = tk.requests.filter((q) => q.path === "/public/v1/submit/sign_transaction").map((q) => Buffer.from(JSON.parse(q.raw).parameters.unsignedTransaction, "hex"));
+    assert.ok(asked.length >= 6);
+    for (const wire of asked) assert.ok(policyAllows(wire, tk.address), `the policy refuses Mynt's own transaction ${wire.toString("hex").slice(0, 40)}…`);
+    const kinds = new Set(asked.map((wire) => parseTx(wire).ixs.map((i) => `${i.program === SYSTEM_PROGRAM ? "s" : i.program === UPGRADEABLE_LOADER ? "l" : "?"}${i.data.readUInt32LE(0)}`).join(",")));
+    assert.ok(kinds.has("s4,s0,l4,l2") && kinds.has("s4,s2,s8,s1,l4,l2") && kinds.has("s4,l4,l3"), [...kinds].join(" | "));
 
     // The API private key never appears in a response, a log or a program's error.
     const hex = tk.apiKey.privateKey;
