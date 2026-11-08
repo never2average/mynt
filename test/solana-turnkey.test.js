@@ -240,6 +240,32 @@ test("turnkey policy: the docs' policy allows Mynt's custody transactions and re
   // What it can't stop, as the docs say: someone holding the API key hands their own buffer to the custody
   // address and upgrades a program to it. Only a person's approval in the consensus catches that.
   assert.equal(policyAllows(wire(attacker, [loader.setBufferAuthority(Keypair.generate().address, attacker, custody), upgrade()]), custody), true);
+
+  // The policy doesn't depend on precedence: every clause that mixes && and || is parenthesised, so it means
+  // the same under Turnkey's grouping (equal, left to right) and the conventional one (&& first).
+  const every = [...mine.map((ixs) => wire(payer, ixs)), ...Object.values(refused).map((ixs) => wire(payer, ixs)), wire(custody, mine[2])];
+  for (const w of every) assert.equal(policyAllows(w, custody, { precedence: "conventional" }), policyAllows(w, custody));
+
+  // The slicing assumption: if Turnkey's slice end were inclusive, [0..8] would read 9 hex characters, no tag
+  // would match, and Mynt's own transactions would be refused. The policy fails closed; the live check shows it.
+  for (const ixs of mine) assert.equal(policyAllows(wire(payer, ixs), custody, { sliceEnd: "inclusive" }), false);
+  for (const ixs of Object.values(refused)) assert.equal(policyAllows(wire(payer, ixs), custody, { sliceEnd: "inclusive" }), false);
+});
+
+test("turnkey policy interpreter: Turnkey's grouping, and the slice assumption, made explicit", async () => {
+  const { evaluateExpression } = await import("./turnkey-policy.js");
+  // && and || have the same precedence and group left to right, as Turnkey documents.
+  assert.equal(evaluateExpression("1 == 1 || 1 == 2 && 1 == 2"), false, "(true || false) && false");
+  assert.equal(evaluateExpression("1 == 1 || 1 == 2 && 1 == 2", {}, { precedence: "conventional" }), true, "true || (false && false)");
+  assert.equal(evaluateExpression("1 == 2 && 1 == 2 || 1 == 1"), true, "(false && false) || true");
+  assert.equal(evaluateExpression("1 == 2 && (1 == 2 || 1 == 1)"), false);
+  // No short-circuit: an error on either side is an error, even when the other side decides.
+  assert.throws(() => evaluateExpression("1 == 2 && x.y == 1", { x: {} }));
+  assert.throws(() => evaluateExpression("1 == 1 || [1][3] == 1"));
+  // ASSUMPTION (not stated by Turnkey's reference): a slice's end is exclusive, so 'abc'[0..2] is 'ab'.
+  assert.equal(evaluateExpression("'abc'[0..2]"), "ab");
+  assert.equal(evaluateExpression("'02000000ffff'[0..8] == '02000000'"), true);
+  assert.equal(evaluateExpression("'abc'[0..2]", {}, { sliceEnd: "inclusive" }), "abc");
 });
 
 test("turnkey: requests follow Mynt's outbound rules (HTTPS only, no private addresses)", async () => {
