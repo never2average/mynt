@@ -37,7 +37,7 @@
       "NDBF",
       "Nevada FID",
       "NHBD",
-      "DOBI",
+      "NJDOBI",
       "NM FID",
       "NCCOB",
       "ND DFI",
@@ -4690,7 +4690,7 @@
     {
       "id": "nj_dobi",
       "name": "New Jersey Department of Banking and Insurance",
-      "short_name": "DOBI",
+      "short_name": "NJDOBI",
       "jurisdiction": "us-nj",
       "scope": {
         "product_types": [
