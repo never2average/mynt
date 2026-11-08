@@ -257,7 +257,7 @@ class FakeCluster {
 
 // ---- the world: a store, users, a verified build, Mynt's Solana service on fake clusters ----
 
-async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000 } = {}) {
+async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000, custody = null } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
@@ -267,7 +267,7 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
     db,
     store,
     { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs, pollMs: 0 },
-    { rpc: (cluster) => clusters[cluster] },
+    { rpc: (cluster) => clusters[cluster], custody },
   );
   builds.solana = solana;
   const responses = [];
@@ -904,4 +904,102 @@ test("verification: the Solana build runs alone, everything it started is killed
   await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: null, sha256: sha, size: code.length, program: code, idl: null }]);
   await builds.verify(await builds.get(b));
   assert.notEqual((await builds.get(b)).status, "blocked");
+});
+
+test("custody-service: Turnkey signs mainnet deploys and upgrades; a bad signature is never sent; calls never reach the custody key", async () => {
+  const { fakeTurnkey, apiKeyPair } = await import("./fake-turnkey.js");
+  const { TurnkeyClient } = await import("../dist/solana/custody/turnkey.js");
+  const tk = await fakeTurnkey();
+  const logged = [];
+  const orig = { error: console.error, log: console.log, warn: console.warn };
+  for (const k of Object.keys(orig)) console[k] = (...a) => logged.push(a.map(String).join(" "));
+  try {
+    const opts = { organizationId: tk.organizationId, apiPublicKey: tk.apiKey.publicKey, baseUrl: tk.baseUrl, outbound: { allowInsecureLoopback: true }, pollMs: 0 };
+    // A Turnkey connection whose key pair doesn't match is reported, not used.
+    const broken = await world({ mainnetUrl: "https://rpc.example.com", custody: new TurnkeyClient({ ...opts, apiPrivateKey: apiKeyPair().privateKey }) });
+    const st = await broken.ok(broken.admin, "configure_solana_signer", { backend: "custody-service", custody_address: tk.address, enabled: true });
+    assert.equal(st.mainnet.ready, false);
+    assert.match(st.mainnet.missing.join("; "), /turnkey custody provider isn't usable: TURNKEY_API_PRIVATE_KEY doesn't belong/);
+
+    const w = await world({ mainnetUrl: "https://rpc.example.com", custody: new TurnkeyClient({ ...opts, apiPrivateKey: tk.apiKey.privateKey }) });
+    const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "mainnet" });
+    const record = async (buildId, code) =>
+      w.solana.recordArtifacts(buildId, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
+    const b1 = await w.build();
+    const code1 = w.program(2500, 1);
+    await record(b1, code1);
+    // Mainnet gating is unchanged: chosen but not enabled, nothing is signed.
+    let ready = await w.ok(w.admin, "configure_solana_signer", { backend: "custody-service", custody_provider: "turnkey", custody_address: tk.address });
+    assert.equal(ready.mainnet.ready, false);
+    assert.deepEqual(ready.mainnet.missing, ["an admin hasn't enabled mainnet (configure_solana_signer with enabled: true)"]);
+    let r = await w.call(w.dev, "deploy_program", { program_id, build_id: b1 });
+    assert.match(r.data.error, /hasn't enabled mainnet/);
+    assert.equal(tk.requests.length, 0, "nothing went to Turnkey");
+    ready = await w.ok(w.admin, "configure_solana_signer", { enabled: true });
+    assert.equal(ready.mainnet.ready, true, JSON.stringify(ready.mainnet.missing));
+    assert.equal(ready.mainnet.authority, tk.address);
+    assert.equal(ready.mainnet.custody_provider, "turnkey");
+
+    const chain = w.clusters.mainnet;
+    chain.fund(tk.address, 10_000_000_000);
+    await w.ok(w.dev, "deploy_program", { program_id, build_id: b1 });
+    await w.solana.settled(program_id);
+    let p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "deployed", p.error);
+    assert.equal(p.signer_backend, "custody-service");
+    assert.equal(p.upgrade_authority, tk.address);
+    assert.equal(base58Encode(chain.accounts.get(p.programdata_address).data.subarray(13, 45)), tk.address, "Turnkey's account is the upgrade authority on chain");
+    // Every transaction the authority signed went through Turnkey (the fake cluster checked each signature).
+    const byAuthority = chain.sent.filter((t) => t.signers.includes(tk.address)).length;
+    assert.ok(byAuthority > Math.ceil(code1.length / WRITE_CHUNK));
+    assert.equal(tk.signed, byAuthority);
+    assert.equal(tk.refusedStamps, 0);
+
+    // An upgrade signs the same way.
+    const b2 = await w.build();
+    await record(b2, w.program(2600, 2));
+    await w.ok(w.dev, "upgrade_program", { program_id, build_id: b2 });
+    await w.solana.settled(program_id);
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "deployed", p.error);
+    assert.equal(p.version, 2);
+
+    // A signature that doesn't verify is refused before anything is sent.
+    tk.mode = "bad-signature";
+    const b3 = await w.build();
+    await record(b3, w.program(2600, 3));
+    const sentBefore = chain.sent.length;
+    await w.ok(w.dev, "upgrade_program", { program_id, build_id: b3 });
+    await w.solana.settled(program_id);
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.version, 2);
+    assert.match(p.error, /doesn't verify for .* it wasn't used/);
+    assert.equal(chain.sent.length, sentBefore, "nothing signed badly reached the cluster");
+    tk.mode = "sign";
+
+    // Program calls never sign with the custody key: on mainnet they need per-developer vault keys, and no call
+    // may name the deploy authority at all.
+    const turnkeyRequests = tk.requests.length;
+    r = await w.call(w.dev, "call_program", { program_id, instruction: { method: "record", accounts: [] } });
+    assert.match(r.data.error, /program calls: they sign with per-developer keys in Mynt's vault/);
+    const { program_id: devnetId } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
+    const bd = await w.build();
+    const cd = w.program(1500, 4);
+    await w.solana.recordArtifacts(bd, [{ name: "mynt_program", declared_id: devnetId, sha256: executableHash(cd), size: cd.length, program: cd, idl: null }]);
+    await w.ok(w.dev, "deploy_program", { program_id: devnetId, build_id: bd });
+    await w.solana.settled(devnetId);
+    r = await w.call(w.dev, "call_program", { program_id: devnetId, instruction: { method: "record", accounts: [{ pubkey: tk.address, signer: true }] } });
+    assert.match(r.data.error, /deploy authority/);
+    assert.equal(tk.requests.length, turnkeyRequests, "no call reached Turnkey");
+
+    // The API private key never appears in a response, a log or a program's error.
+    const hex = tk.apiKey.privateKey;
+    const forms = [hex, hex.toUpperCase(), Buffer.from(hex, "hex").toString("base64"), Buffer.from(hex, "hex").toString("base64url")];
+    const seen = [...w.responses, ...broken.responses, ...logged].join("\n");
+    for (const s of forms) assert.ok(!seen.includes(s), "the Turnkey API private key leaked");
+    assert.ok(!/x-stamp/i.test(seen), "a stamp leaked");
+  } finally {
+    Object.assign(console, orig);
+    await tk.close();
+  }
 });

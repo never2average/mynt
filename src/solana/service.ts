@@ -16,6 +16,7 @@ import {
   type MultisigClient,
   type SolanaSigner,
 } from "./signer.js";
+import { turnkeyFromEnv } from "./custody/turnkey.js";
 import {
   BUFFER_HEADER,
   compileMessage,
@@ -236,7 +237,9 @@ export class SolanaService {
     opts: { rpc?: (cluster: Cluster, url: string) => SolanaRpc; custody?: CustodyServiceClient | null; multisig?: MultisigClient | null } = {},
   ) {
     await db.exec(TABLES);
-    const service = new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), opts.custody ?? null, opts.multisig ?? null);
+    // The custody provider comes from the server's environment (Turnkey's variables) unless one is passed in.
+    const custody = opts.custody !== undefined ? opts.custody : turnkeyFromEnv();
+    const service = new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), custody, opts.multisig ?? null);
     await service.recoverStale().catch((e) => console.error(`solana: recovering stale operations: ${(e as Error).message.slice(0, 200)}`));
     return service;
   }
@@ -375,8 +378,13 @@ export class SolanaService {
       if (!vaultAvailable(false)) reasons.push("MYNT_VAULT_KEY isn't set on the server");
       else if (!(await this.keyRow("mainnet", "authority", ""))) reasons.push("no mainnet key is in the vault (configure_solana_signer with generate_key, or `mynt solana import-key`)");
     }
-    if (s.backend === "custody-service" && !this.custody) reasons.push("no custody provider is connected to this Mynt");
-    if (s.backend === "custody-service" && !s.custody) reasons.push("no custody address is configured");
+    if (s.backend === "custody-service") {
+      if (!this.custody) reasons.push("no custody provider is connected to this Mynt (for Turnkey: set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PUBLIC_KEY and TURNKEY_API_PRIVATE_KEY on the server)");
+      else if (this.custody.problem) reasons.push(`the ${this.custody.provider} custody provider isn't usable: ${this.custody.problem}`);
+      if (!s.custody) reasons.push("no custody address is configured");
+      else if (this.custody && s.custody.provider !== this.custody.provider)
+        reasons.push(`the custody provider configured is '${s.custody.provider}', but this Mynt is connected to ${this.custody.provider}`);
+    }
     if (s.backend === "multisig") reasons.push(this.multisig ? "multisig deploys are approved as proposals, which this Mynt doesn't raise yet" : "no multisig client is connected to this Mynt");
     if (!s.enabled) reasons.push("an admin hasn't enabled mainnet (configure_solana_signer with enabled: true)");
     return { settings: s, ready: reasons.length === 0, reasons };

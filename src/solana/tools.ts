@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Store, User } from "../store.js";
 import { CLUSTERS } from "./rpc.js";
 import type { CallInput, SolanaService } from "./service.js";
-import { MAINNET_BACKENDS } from "./signer.js";
+import { CUSTODY_PROVIDERS, MAINNET_BACKENDS } from "./signer.js";
 import { SOLANA_TOOLCHAIN } from "./toolchain.js";
 
 // Tools for Solana programs: developers (and innovators, who are developers too) reserve, deploy, upgrade,
@@ -161,13 +161,13 @@ export function registerSolanaAdminTools(server: McpServer, store: Store, user: 
     {
       title: "Configure the Solana mainnet signer",
       description:
-        "Admin: choose who signs Mynt's mainnet deploys and upgrades, and turn mainnet on or off. Backends: mainnet-vault (a key in Mynt's vault; the server must also set SOLANA_MAINNET_VAULT_SIGNER=enabled), custody-service (a Turnkey- or Fireblocks-style service signs; Mynt never sees the key), multisig (Squads-style; members approve each change). Mainnet stays refused until the backend is ready and enabled is true. Call with no arguments to see the current state and what's missing.",
+        "Admin: choose who signs Mynt's mainnet deploys and upgrades, and turn mainnet on or off. Backends: mainnet-vault (a key in Mynt's vault; the server must also set SOLANA_MAINNET_VAULT_SIGNER=enabled), custody-service (Turnkey signs each transaction with a Solana wallet account it holds; Mynt never sees the key, and the server must set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PUBLIC_KEY and TURNKEY_API_PRIVATE_KEY), multisig (Squads-style; members approve each change). Mainnet stays refused until the backend is ready and enabled is true. Call with no arguments to see the current state and what's missing.",
       inputSchema: {
         backend: z.enum(MAINNET_BACKENDS).optional(),
         enabled: z.boolean().optional(),
         generate_key: z.boolean().optional().describe("mainnet-vault: generate the mainnet key in Mynt's vault (only its address is ever shown)"),
-        custody_provider: z.string().min(2).max(40).optional(),
-        custody_address: ADDRESS.optional().describe("custody-service: the address of the key the service holds"),
+        custody_provider: z.enum(CUSTODY_PROVIDERS).optional().describe("custody-service: the provider that holds the key (default turnkey)"),
+        custody_address: ADDRESS.optional().describe("custody-service: the Solana wallet account address the provider signs with (Turnkey's signWith)"),
         multisig_address: ADDRESS.optional(),
         multisig_vault: ADDRESS.optional().describe("multisig: the vault address that holds the upgrade authority"),
       },
@@ -179,14 +179,19 @@ export function registerSolanaAdminTools(server: McpServer, store: Store, user: 
         const r = await solana.configureMainnet(user, {
           ...(a.backend !== undefined ? { backend: a.backend } : {}),
           ...(a.enabled !== undefined ? { enabled: a.enabled } : {}),
-          ...(a.custody_address ? { custody: { provider: a.custody_provider ?? "custody service", address: a.custody_address } } : {}),
+          ...(a.custody_address ? { custody: { provider: a.custody_provider ?? "turnkey", address: a.custody_address } } : {}),
           ...(a.multisig_address && a.multisig_vault ? { multisig: { address: a.multisig_address, vault: a.multisig_vault } } : {}),
           generate_key: a.generate_key,
         });
-        await store.audit(user.id, "configure_solana_signer", "mainnet", { backend: a.backend, enabled: a.enabled, generate_key: a.generate_key ?? false });
+        await store.audit(user.id, "configure_solana_signer", "mainnet", {
+          backend: a.backend,
+          enabled: a.enabled,
+          generate_key: a.generate_key ?? false,
+          ...(a.custody_address ? { custody_provider: a.custody_provider ?? "turnkey", custody_address: a.custody_address } : {}),
+        });
         return {
           ...r,
-          ...(r.mainnet.authority && r.mainnet.backend === "mainnet-vault"
+          ...(r.mainnet.authority && (r.mainnet.backend === "mainnet-vault" || r.mainnet.backend === "custody-service")
             ? { funding: `Fund ${r.mainnet.authority} with SOL before the first mainnet deploy: about 0.021 SOL per KB of program (its program data reserves twice its size for upgrades, and the upload buffer holds a copy until the deploy), plus fees.` }
             : {}),
         };

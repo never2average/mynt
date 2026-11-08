@@ -1,4 +1,5 @@
-import { Keypair } from "./codec.js";
+import { createPublicKey, verify } from "node:crypto";
+import { Keypair, pubkeyBytes } from "./codec.js";
 import type { Cluster } from "./rpc.js";
 
 // Who signs Mynt's Solana transactions. Every deploy, upgrade and program call goes through one interface, so
@@ -41,12 +42,26 @@ export class VaultSigner implements SolanaSigner {
   }
 }
 
-// A key-custody service (Turnkey or Fireblocks style): it holds the key and signs raw messages on request, so
-// Mynt never sees the key. A provider integration implements this; none is connected by default.
+// Whether `signature` is `address`'s ed25519 signature over `message`.
+export function verifyEd25519(address: string, message: Uint8Array, signature: Uint8Array): boolean {
+  if (signature.length !== 64) return false;
+  try {
+    const key = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(pubkeyBytes(address)).toString("base64url") }, format: "jwk" });
+    return verify(null, message, key, signature);
+  } catch {
+    return false;
+  }
+}
+
+// A key-custody service (Turnkey: src/solana/custody/turnkey.ts): it holds the key and signs on request, so
+// Mynt never sees the key. Connected when the server sets the provider's variables; none by default.
 export interface CustodyServiceClient {
   readonly provider: string;
+  // Why it can't sign (a variable missing, a key pair that doesn't match), or null when it can.
+  readonly problem?: string | null;
   signSolanaMessage(address: string, message: Uint8Array): Promise<Uint8Array>;
 }
+export const CUSTODY_PROVIDERS = ["turnkey"] as const;
 
 export class CustodyServiceSigner implements SolanaSigner {
   readonly backend = "custody-service" as const;
@@ -61,7 +76,9 @@ export class CustodyServiceSigner implements SolanaSigner {
         `${MAINNET_NOT_CONFIGURED}: the custody-service backend is selected, but no custody provider is connected to this Mynt. An admin can choose mainnet-vault instead with configure_solana_signer.`,
       );
     const sig = await this.client.signSolanaMessage(this.address, message);
-    if (sig.length !== 64) throw new Error(`The custody service (${this.client.provider}) returned a malformed signature`);
+    // Never trusted as returned: it must be this address's signature over exactly this message.
+    if (!verifyEd25519(this.address, message, sig))
+      throw new Error(`The custody service (${this.client.provider}) returned a signature that doesn't verify for ${this.address}; it wasn't used`);
     return sig;
   }
 }
