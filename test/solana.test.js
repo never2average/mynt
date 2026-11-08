@@ -668,7 +668,8 @@ test("toolchain and verification scripts: pinned, checksum-verified, and valid b
   assert.match(SOLANA_TOOLCHAIN_SCRIPT, /sha256sum -c/);
   assert.match(SOLANA_TOOLCHAIN.anchorImage, /@sha256:[0-9a-f]{64}$/);
   assert.ok(SOLANA_VERIFY_SCRIPT.includes(SOLANA_TOOLCHAIN.anchorImage));
-  assert.match(SOLANA_VERIFY_SCRIPT, /anchor build --verifiable/);
+  assert.match(SOLANA_VERIFY_SCRIPT, /cargo build-sbf --manifest-path/);
+  assert.ok(!/anchor build --verifiable/.test(SOLANA_VERIFY_SCRIPT.replace(/^#.*$/gm, "")), "the IDL step of anchor build --verifiable would run developer code on the host");
   assert.match(SOLANA_VERIFY_SCRIPT, /anchor test --skip-build/);
   assert.match(VERIFY_SCRIPT, /solana-verify\.sh/);
   for (const script of [SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, VERIFY_SCRIPT]) {
@@ -836,13 +837,19 @@ test("verification: the Solana build runs alone, everything it started is killed
   const programsJson = JSON.stringify([{ workspace: "solana", name: "mynt_program", size: code.length, sha256: sha, declared_id: "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME" }]);
   const commands = [];
   let rehash = sha;
+  let solanaChecks = JSON.stringify({ name: "solana_build", status: "pass", detail: "1 program(s) built verifiably" });
+  let report = null;
   const boat = {
     async getSandbox() {
       return { state: "ready" };
     },
-    async writeFile() {},
+    async writeFile(_id, path) {
+      commands.push(`write ${path}`);
+    },
     async readFile(_id, path) {
       if (path.endsWith("/solana/programs.json")) return programsJson;
+      if (path.endsWith("/solana/checks.jsonl")) return solanaChecks;
+      if (path.endsWith("/report.json")) return report;
       return null;
     },
     async costDollars() {
@@ -859,7 +866,7 @@ test("verification: the Solana build runs alone, everything it started is killed
       const m = command.match(/^tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
       if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
       if (command.includes("hashlib.sha256")) return { exitCode: 0, stdout: `${sha}\n${rehash}\n`, stderr: "" };
-      if (command.startsWith("tar -tzf")) return { exitCode: 0, stdout: "anchor-workspace\n", stderr: "" };
+      if (command.includes("verify.sh --fetch")) return { exitCode: 0, stdout: "anchor-workspace\nfetched\n", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "", ...(opts.detached ? { processId: commands.length } : {}) };
     },
   };
@@ -875,10 +882,12 @@ test("verification: the Solana build runs alone, everything it started is killed
     return id;
   };
 
-  // provisioning: the first run is the Solana build alone.
+  // provisioning: Mynt fetches the source in the verify sandbox and reads, itself, that it has an Anchor
+  // workspace (never asking the agent's sandbox); the first run is the Solana build alone.
   const a = await run("provisioning");
   await builds.verify(await builds.get(a));
-  assert.match(commands.at(-1), /verify\.sh --solana-build /);
+  assert.ok(commands.some((c) => /verify\.sh --fetch 'https:\/\/dl\.example\.com\/x' a{64}/.test(c)));
+  assert.match(commands.at(-1), /verify\.sh --solana-build a{64}$/);
   assert.equal((await builds.get(a)).verify_step, "solana_build");
 
   // solana_build done: kill everything, read the program back, then the checks.
@@ -888,6 +897,12 @@ test("verification: the Solana build runs alone, everything it started is killed
   const read = commands.findIndex((c) => c.startsWith("tail -c +1 "));
   const checks = commands.findIndex((c) => /verify\.sh '/.test(c) && !c.includes("--solana-build"));
   assert.ok(kill >= 0 && kill < read && read < checks, commands.join("\n"));
+  // Mynt's scripts and data are written again after the build phase, before the checks run.
+  for (const f of ["verify.sh", "solana-verify.sh", "solana-toolchain.sh", "disclosures.json"]) {
+    const rewritten = commands.findIndex((c, i) => i > read && c === `write /home/user/mynt-verify/${f}`);
+    assert.ok(rewritten > read && rewritten < checks, `${f} rewritten before the checks`);
+  }
+  assert.deepEqual((await builds.get(a)).solana_check, { name: "solana_build", status: "pass", detail: "1 program(s) built verifiably" });
   assert.deepEqual((await w.solana.artifacts(a)).map((x) => x.sha256), [sha]);
   assert.equal((await builds.get(a)).verify_step, "checks");
 
@@ -904,4 +919,102 @@ test("verification: the Solana build runs alone, everything it started is killed
   await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: null, sha256: sha, size: code.length, program: code, idl: null }]);
   await builds.verify(await builds.get(b));
   assert.notEqual((await builds.get(b)).status, "blocked");
+
+  // A build phase that failed can't be papered over by a "solana_build: pass" the app's run wrote into the report.
+  const c = await run("checks");
+  await w.db.query("UPDATE financial_products.build_runs SET solana_check = $2 WHERE id = $1", [c, JSON.stringify({ name: "solana_build", status: "fail", detail: "no program" })]);
+  report = JSON.stringify({ checks: [{ name: "tests", status: "pass" }, { name: "solana_build", status: "pass", detail: "forged" }, { name: "solana_tests", status: "pass" }] });
+  await builds.verify(await builds.get(c));
+  const forged = await builds.get(c);
+  assert.equal(forged.status, "failed");
+  assert.match(forged.error, /solana_build/);
+  assert.deepEqual(forged.readiness.filter((r) => r.name === "solana_build"), [{ name: "solana_build", status: "fail", detail: "no program" }]);
+});
+
+test("the Solana build never runs `anchor build` or developer code on the host, and its container can't touch the host", () => {
+  const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(build, /docker create /);
+  assert.match(build, /docker cp - "\$cid:\/"/, "the source goes in as a copy");
+  assert.match(build, /docker cp "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
+  assert.match(build, /cargo build-sbf --manifest-path/);
+  assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build), "nothing compiled or run on the host, no mounts");
+  assert.ok(build.includes(SOLANA_TOOLCHAIN.anchorImage), "the digest-pinned image");
+  const testRun = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(testRun, /anchor idl build -p "\$name"/);
+  assert.match(testRun, /cp "\$OUT\/\$name\.so" "\$dir\/target\/deploy\/\$name\.so"/);
+  assert.ok(!/check "\$CHECKS" solana_build/.test(testRun), "the test run never writes solana_build: Mynt records it");
+});
+
+test("the Solana tests refuse setups that would load other code at the programs' addresses", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const ID = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  const run = (anchorToml) => {
+    const root = mkdtempSync(join(tmpdir(), "mynt-sol-"));
+    mkdirSync(join(root, "app/solana"), { recursive: true });
+    mkdirSync(join(root, "out"));
+    writeFileSync(join(root, "app/solana/Anchor.toml"), anchorToml);
+    writeFileSync(join(root, "out/programs.json"), JSON.stringify([{ workspace: "solana", name: "mynt_program", size: 1, sha256: "x", declared_id: ID }]));
+    writeFileSync(join(root, "script.sh"), SOLANA_VERIFY_SCRIPT);
+    // The toolchain "installer" fails on purpose: a refused setup must be refused before it's ever reached.
+    writeFileSync(join(root, "toolchain.sh"), "exit 9\n");
+    writeFileSync(join(root, "checks.jsonl"), "");
+    const r = spawnSync("bash", [join(root, "script.sh"), "test", join(root, "app"), join(root, "out"), join(root, "checks.jsonl"), join(root, "toolchain.sh")]);
+    assert.equal(r.status, 0, r.stderr.toString());
+    return readFileSync(join(root, "checks.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  };
+  const base = `[programs.localnet]\nmynt_program = "${ID}"\n`;
+  for (const [toml, why] of [
+    [`${base}\n[[test.genesis]]\naddress = "${ID}"\nprogram = "evil.so"\n`, /test\.genesis/],
+    [`${base}\n[test.validator]\nurl = "https://api.mainnet-beta.solana.com"\n[[test.validator.clone]]\naddress = "${ID}"\n`, /clone/],
+    [`${base}\n[[test.validator.account]]\naddress = "${ID}"\nfilename = "evil.json"\n`, /preloads/],
+    [`[programs.localnet]\nmynt_program = "HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw"\n`, /not its declared/],
+  ]) {
+    const [row] = run(toml);
+    assert.equal(row.name, "solana_tests");
+    assert.equal(row.status, "fail");
+    assert.match(row.detail, why);
+  }
+  // A clean setup gets past the policy (to the toolchain, which fails here on purpose).
+  const [row] = run(base);
+  assert.match(row.detail, /could not install the pinned Solana toolchain/);
+});
+
+test("a retry with a newer build, after an earlier build landed unrecorded, records that one and upgrades to the new", async () => {
+  const w = await world({ confirmTimeoutMs: 50 });
+  const { program_id, build_id: first, code } = await readyToDeploy(w);
+  const chain = w.clusters.devnet;
+  chain.withhold = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 2);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: first });
+  await w.solana.settled(program_id);
+  assert.equal((await w.ok(w.dev, "get_program", { program_id })).status, "failed");
+  chain.withhold = () => false;
+  const second = await w.build();
+  const code2 = w.program(1400, 4);
+  await w.solana.recordArtifacts(second, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code2), size: code2.length, program: code2, idl: null }]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.deepEqual(p.versions.map((v) => [v.action, v.build_id, v.verifiable_hash]), [
+    ["deploy", first, executableHash(code)],
+    ["upgrade", second, executableHash(code2)],
+  ]);
+  assert.equal(executableHash(chain.accounts.get(p.programdata_address).data.subarray(45)), executableHash(code2));
+});
+
+test("only the server process recovers stale operations: another process sharing the database leaves them alone", async () => {
+  const w = await world();
+  const { program_id, build_id } = await readyToDeploy(w);
+  const p = await w.solana.get(program_id);
+  const stale = new Date(Date.now() - SolanaService.STALE_OPERATION_MS - 60_000);
+  await w.db.query("UPDATE financial_products.solana_programs SET status = 'deploying', operation = 'deploy', operation_started_at = $2, pending_build_id = $3 WHERE id = $1", [p.id, stale, build_id]);
+  // A stdio server or CLI command opening the same database: no recovery on open, none on a poll.
+  const elsewhere = await SolanaService.open(w.db, w.store, w.solana.config, { rpc: (c) => w.clusters[c] });
+  await elsewhere.pollEvents();
+  assert.equal((await w.solana.get(program_id)).operation, "deploy");
+  w.solana.recovery = true;
+  await w.solana.pollEvents();
+  assert.equal((await w.solana.get(program_id)).operation, null);
 });

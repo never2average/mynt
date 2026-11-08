@@ -29,12 +29,25 @@ if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then
   exit 0
 fi
 
-# Mynt's Solana build, a run of its own before any of the app's code (installs, tests) runs: Mynt reads back
-# and hashes what it built as soon as this exits, then starts the checks below.
+# Mynt fetches the source first, alone, and reads this run's answer itself: whether the hash-verified source has
+# an Anchor workspace. Nothing from the source runs here.
+if [ "$#" -gt 0 ] && [ "$1" = "--fetch" ]; then
+  curl -fsSL "$2" -o "$V/app.tgz" || { echo "could not download the source" >&2; exit 2; }
+  [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$3" ] || { echo "source checksum mismatch" >&2; exit 2; }
+  if tar -tzf "$V/app.tgz" | grep -qE '(^|/)Anchor\.toml$'; then echo anchor-workspace; fi
+  echo fetched
+  exit 0
+fi
+
+# Mynt's Solana build, a run of its own on its own copy of the fetched source, before any of the app's code runs
+# on this machine: the programs are compiled only inside a container (solana-verify.sh build), and Mynt reads them
+# back and hashes them as soon as this exits.
 if [ "$#" -gt 0 ] && [ "$1" = "--solana-build" ]; then
-  URL="$2"; WANT="$3"
-  if curl -fsSL "$URL" -o "$V/app.tgz" && [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$WANT" ] && mkdir -p "$APP" && tar -xzf "$V/app.tgz" -C "$APP"; then
-    [ -f "$V/solana-verify.sh" ] && bash "$V/solana-verify.sh" build "$APP" "$V/solana" "$V/solana-toolchain.sh"
+  SRC="$V/solana-src"; rm -rf "$SRC"; mkdir -p "$SRC"
+  if [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$2" ] && tar -xzf "$V/app.tgz" -C "$SRC"; then
+    bash "$V/solana-verify.sh" build "$SRC" "$V/solana"
+  else
+    mkdir -p "$V/solana"; echo '{"name": "solana_build", "status": "fail", "detail": "the fetched source failed its checksum"}' > "$V/solana/checks.jsonl"
   fi
   exit 0
 fi
@@ -192,9 +205,10 @@ fi
 
 # --- Solana programs: Mynt's own verifiable build of every Anchor workspace, and its tests on a local validator
 # (solana-verify.sh, from src/solana/toolchain.ts). Its artifacts are what Mynt deploys, never the agent's.
-# The build ran before this script, on its own (verify.sh --solana-build), and Mynt read the programs back then.
+# The build ran before this script, on its own (verify.sh --solana-build), and Mynt read the programs back and
+# recorded solana_build then; this adds solana_tests.
 if [ -f "$V/solana-verify.sh" ]; then
-  bash "$V/solana-verify.sh" test "$APP" "$V/solana" "$CHECKS"
+  bash "$V/solana-verify.sh" test "$APP" "$V/solana" "$CHECKS" "$V/solana-toolchain.sh"
 fi
 
 # --- required disclosures ---
