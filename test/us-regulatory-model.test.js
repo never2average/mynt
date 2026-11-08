@@ -238,3 +238,46 @@ test("every US template's customer-facing copy is dollars only", () => {
     assert.doesNotMatch(facing, /usdc|solana|ethereum|stablecoin|crypto|wallet|token|blockchain/i, `${f}: ${facing}`);
   }
 });
+
+// Every state and the District of Columbia has a state money transmitter licence in the model: a licence type
+// that grants us_money_transmission, counts only alongside the FinCEN registration, and covers that state alone.
+// Montana is the exception: it has no money transmitter licence, so its regulator has no licence types and the
+// model's description says why.
+test("every US state and DC has a money transmitter licence, or is Montana with its note", () => {
+  const STATES = "al ak az ar ca co ct de fl ga hi id il in ia ks ky la me md ma mi mn ms mo mt ne nv nh nj nm ny nc nd oh ok or pa ri sc sd tn tx ut vt va wa wv wi wy dc"
+    .split(" ")
+    .map((s) => `us-${s}`);
+  assert.equal(STATES.length, 51);
+  const msb = new Set(MODEL.regulators.find((r) => r.id === "fincen").license_types.map((l) => l._id));
+  const mtl = (code) =>
+    MODEL.regulators.flatMap((r) =>
+      r.license_types
+        .filter((l) => (l.covers ?? (r.jurisdiction ? [r.jurisdiction] : [])).includes(code))
+        .filter((l) => l.grc.allowed_product_types.some((g) => (typeof g === "string" ? g : g.id) === "us_money_transmission"))
+        .filter((l) => (l.requires ?? []).some((e) => (typeof e === "string" ? [e] : e).some((id) => msb.has(id))))
+        .map((l) => ({ regulator: r, licence: l })),
+    );
+  for (const code of STATES) {
+    const found = mtl(code);
+    if (code === "us-mt") {
+      assert.equal(found.length, 0, "Montana has no money transmitter licence");
+      const mt = MODEL.regulators.filter((r) => r.jurisdiction === "us-mt");
+      assert.equal(mt.length, 1, "Montana's regulator is kept");
+      assert.deepEqual(mt[0].license_types, []);
+      assert.match(MODEL.description, /Montana has no money transmitter licence/);
+      continue;
+    }
+    assert.equal(found.length, 1, `${code} has one money transmitter licence`);
+    const { regulator, licence } = found[0];
+    assert.equal(regulator.jurisdiction, code, `${licence._id} is its state's regulator's`);
+    assert.deepEqual(licence.covers, [code], `${licence._id} covers ${code} only`);
+    assert.ok(licence.coverage_note, `${licence._id} says what's assumed`);
+  }
+  // One regulator per state, and the short names products cite are unique.
+  const jurisdictions = MODEL.regulators.map((r) => r.jurisdiction).filter(Boolean);
+  assert.equal(new Set(jurisdictions).size, jurisdictions.length);
+  assert.deepEqual([...jurisdictions].sort(), [...STATES].sort());
+  const shorts = MODEL.region_definition.regulators;
+  assert.equal(new Set(shorts).size, shorts.length);
+  for (const r of MODEL.regulators) assert.ok(shorts.includes(r.short_name ?? r.name), `${r.id} is in the region's regulator list`);
+});
