@@ -559,6 +559,35 @@ A builder needn't hold licences. A **licence provider** is a firm that does: an 
 
 **Pins and drift.** Publishing pins each covering sponsorship (with the jurisdictions it covers), the provider's licences and its stakeholder parties, and the provider's firm. Revoking the sponsorship, or the provider's licence lapsing or being suspended, drifts the product, naming the jurisdictions. The stored `regime_summary` shows `provided_by: "sponsor"`, the provider's name, and on each covered jurisdiction a note such as "Covered by Ramp Partner Inc's Money transmitter licence (New York Banking Law Article 13-B) (sponsored)".
 
+**`test_product`** doesn't warn a builder that holds no licence when it needn't hold one: if it provides no component itself and every component is covered by a sponsor (or a partner), `licence_held` passes and names who covers what ("Example Money Transmitter (placeholder) sponsors 'transmission' in us-ny, us-ca"); while a sponsorship is still pending it warns only that the composition isn't covered yet. A builder providing a component itself is still warned when it holds no licence.
+
+### A sponsored US product, end to end
+
+`scripts/sponsored-product.mjs` runs the whole path from an unlicensed builder to a developer-ready US product: the licence provider's firm (registered by hand), its licences (registered, then verified by an admin) and the roster filling the stakeholders they mandate; the builder's firm and its product, the money transmission template (`schemas/examples/us/money-transmission.v2.json`) with transmission provided by the sponsor; `request_sponsorship` and `approve_sponsorship` for every state it's offered in; `test_product`, `publish_product`; and a check that `list_products` with `developer_ready` lists it. `test/sponsored-product-e2e.test.js` runs the same function on an in-process server.
+
+What it runs on is a JSON fixture. The shipped one, `schemas/examples/us/sponsored-product.placeholder.json`, is a **placeholder for staging and tests only**: "Example Money Transmitter (placeholder)" isn't a real firm, its registration numbers start `PLACEHOLDER-`, and it has `"placeholder": true`, so the script refuses it unless told it's staging. It holds a FinCEN MSB registration and money transmitter licences for New York and California, the states the US model (`schemas/regulatory/us.json`) has regulators for; another state needs its regulator and licence type added to the model first, researched from the state's own sources.
+
+Every step reads first and does only what's missing, so rerunning is safe and picks up where a run stopped. Three people act, each in their own session (`MYNT_ADMIN_TOKEN`, `MYNT_LICENCE_PROVIDER_TOKEN`, `MYNT_BUILDER_TOKEN`, from the environment, never the command line); with only some of them set, it does their steps and stops naming who's needed next (the partner usually approves in its own session).
+
+```bash
+node scripts/apply-sponsored-product.mjs --url <a staging server's MCP URL> --staging --dry-run   # read only: what it would do
+node scripts/apply-sponsored-product.mjs --url <a staging server's MCP URL> --staging             # run it with the placeholder
+```
+
+**When the real partner signs**, an admin swaps it in and reruns:
+
+1. Copy the fixture (say `sponsored-product.partner.json`, kept out of the repository if it names the partner before that's public) and set `"placeholder": false`; delete `placeholder_note`.
+2. In `licence_provider`: the partner's legal name (or `entity_id`, if its firm is already on Mynt), the email its person signs in with (`member_email`; invite them with the `license_provider` role first), its legal form and incorporation, each licence it holds as on the regulator's register (`regulator_id`, `license_id`, `registration_number`, and `valid_from`/`valid_to` when known), and the people who fill each stakeholder its licences mandate (`roster`).
+3. Change `product.offered_in` to the states it will sponsor in.
+4. Check every licence against the regulator's public register, then run with `--verify-licences` (without it the run stops for `review_license`):
+
+```bash
+node scripts/apply-sponsored-product.mjs --url <the server's MCP URL> --fixture sponsored-product.partner.json --dry-run
+node scripts/apply-sponsored-product.mjs --url <the server's MCP URL> --fixture sponsored-product.partner.json --verify-licences
+```
+
+A product already live under the placeholder gets a new version sponsored by the partner (its definition changes, so it's saved as the draft version, sponsored, tested and published). The placeholder firm's own sponsorship is then left over: revoke it (`revoke_sponsorship`, as the placeholder's licence provider) and suspend its licences (`review_license`) so nothing can rest on it again.
+
 ## Product lines, actions and primitives
 
 Product lines group products by **economic function**, not asset class: what a product does for the person or firm using it. Every product has one `product_line`:
