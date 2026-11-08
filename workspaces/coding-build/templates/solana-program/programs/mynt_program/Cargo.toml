@@ -3,6 +3,7 @@ name = "mynt_program"
 version = "0.1.0"
 description = "A Solana program built on Mynt"
 edition = "2021"
+rust-version = "1.84"
 
 [lib]
 crate-type = ["cdylib", "lib"]
