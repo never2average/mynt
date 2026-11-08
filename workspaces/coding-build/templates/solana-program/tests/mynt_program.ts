@@ -12,6 +12,12 @@ describe("mynt_program", () => {
   const authority = provider.wallet.publicKey;
   const [ledger] = anchor.web3.PublicKey.findProgramAddressSync([Buffer.from("ledger"), authority.toBuffer()], program.programId);
 
+  // A fresh local validator can refuse the first transactions ("Blockhash not found"); wait until it has
+  // produced some blocks, as Anchor 0.32.2's own test runner does.
+  before(async () => {
+    while ((await provider.connection.getBlockHeight("confirmed")) < 25) await new Promise((r) => setTimeout(r, 400));
+  });
+
   it("opens a ledger for its authority", async () => {
     await program.methods.initialize().accountsPartial({ ledger, authority }).rpc({ commitment: "confirmed" });
     const account = await program.account.ledger.fetch(ledger, "confirmed");
