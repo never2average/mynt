@@ -26,9 +26,10 @@ export const REPO_URL: string = (() => {
 
 export const ROLE_SUMMARY: Record<Role, string> = {
   consumer: "uses financial products: enrols, sees offers, asks for products that don't exist yet.",
-  developer: "builds apps on innovators' products (keys, webhooks, SDKs, journeys, GTM campaigns), with coding agents Mynt verifies and hosts. Also a consumer.",
-  innovator: "a licensed firm's person: composes, tests, publishes and versions financial products from regulated primitives, and decides who may build on them. Also a developer.",
-  vendor: "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that innovators plug into products. A peer of innovators.",
+  developer: "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
+  innovator: "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
+  vendor: "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
+  license_provider: "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
   admin: "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
 };
 
@@ -55,6 +56,13 @@ export const GET_STARTED: Record<Role, { tool: string; why: string }[]> = {
     { tool: "set_product_definition", why: "compose it from regulated primitives (validate with check_product_definition)" },
     { tool: "publish_product", why: "publish once its tests pass (test_product)" },
   ],
+  license_provider: [
+    { tool: "get_my_entity", why: "your firm, as an admin registered it; share its id with builders" },
+    { tool: "register_license", why: "add the licences an admin will verify" },
+    { tool: "list_sponsorship_requests", why: "builders asking you to sponsor their products" },
+    { tool: "approve_sponsorship", why: "sponsor a product under your licences, where they cover" },
+    { tool: "list_sponsored_products", why: "what you sponsor (revoke_sponsorship to stop)" },
+  ],
   vendor: [
     { tool: "get_my_entity", why: "your firm, as an admin registered it" },
     { tool: "list_service_types", why: "the standard services defined per region" },
@@ -78,11 +86,11 @@ export function llmsTxt(base: string): string {
   ).join("\n\n");
   return `# Mynt
 
-> Mynt is Lovable for finance apps: a platform where licensed firms compose financial products from regulated primitives, admins keep the regulatory model, vendors offer standard services per region, and developers build apps on those products with coding agents that Mynt verifies and hosts. Everything is reached through one MCP server.
+> Mynt is Lovable for finance apps: a platform where builders compose financial products from regulated primitives and build apps on them with coding agents that Mynt verifies and hosts, licence providers sponsor those products under their licences, vendors offer standard services per region, and admins keep the regulatory model. Everything is reached through one MCP server.
 
 Mynt's MCP endpoint is \`${base}/mcp\` (Streamable HTTP, JSON-RPC over POST). Sign in with OAuth: the authorization server is advertised at \`${base}/.well-known/oauth-protected-resource/mcp\` (RFC 9728), and any MCP client that supports OAuth discovers it from the \`WWW-Authenticate\` header of a 401. Access is by invitation: an admin invites you with your roles, and you sign in with the email they invited.
 
-Tools are registered per user, so you only see the tools your roles allow. Roles nest (admin > innovator > developer > consumer); vendors stand beside innovators:
+Tools are registered per user, so you only see the tools your roles allow. Roles nest (admin > builder > consumer); innovator and developer are two names for the builder role, and vendors and licence providers stand beside builders:
 
 ${ROLES.map((r) => `- **${r}**: ${ROLE_SUMMARY[r]}`).join("\n")}
 

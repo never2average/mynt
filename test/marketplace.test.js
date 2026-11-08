@@ -236,13 +236,16 @@ test("a developer's campaign over an innovator's product waits for the innovator
   assert.equal((await ctx.call(inno, "review_request", { request_id: next.id, decision: "reject", note: "Not this month" })).data.campaign_status, "draft");
 });
 
-test("developers build software only: no financial-layer tools", async () => {
+// Innovator and developer are one builder role (2026-11-08): a developer gets the financial-layer tools too,
+// but never an admin's or a licence provider's.
+test("developers are builders: the financial-layer tools as well as the software ones", async () => {
   const ctx = await setup();
   const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
   const tools = (await dev.listTools()).tools.map((t) => t.name);
   for (const t of ["create_product", "publish_product", "register_license", "create_entity", "set_product_access", "review_request", "list_requests"]) {
-    assert.ok(!tools.includes(t), t);
+    assert.ok(tools.includes(t), t);
   }
+  for (const t of ["review_license", "approve_sponsorship", "register_firm"]) assert.ok(!tools.includes(t), t);
   for (const t of ["list_buildable_products", "get_product_sdk", "request_product_access", "check_experience"]) assert.ok(tools.includes(t), t);
 });
 

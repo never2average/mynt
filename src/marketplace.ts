@@ -8,13 +8,13 @@ import { driftSweep } from "./pins.js";
 import { vendorDriftSweep } from "./vendors.js";
 import { licenceJurisdictions, normalizeModel, SUBDIVISION } from "./regulatory.js";
 import { emitProductEvent, emitRequestEvent } from "./runtime.js";
-import { ACCESS_MODES, type AccessRequest, type Store, type User } from "./store.js";
+import { ACCESS_MODES, effectiveRoles, type AccessRequest, type Store, type User } from "./store.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
 
-// Innovators (licensed firms): their entity and licences, who may build on their products, and the
-// inbox of developers' requests.
+// Builders (innovators and developers, one role): their entity and licences, who may build on their products,
+// and the inbox of other builders' requests.
 export function registerMarketplaceTools(server: McpServer, store: Store, user: User) {
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
   const answered = async () => productsAnsweredBy(store, user);
@@ -25,13 +25,14 @@ export function registerMarketplaceTools(server: McpServer, store: Store, user: 
   // ---- entity and licences ----
 
   registerFirmTools(server, store, user);
+  registerRosterTools(server, store, user);
 
   server.registerTool(
     "create_entity",
     {
       title: "Register your firm",
       description:
-        "Innovator: register the legal entity you act for (once), as typed facts: legal form, incorporation (lowercase ISO codes, e.g. { country: 'in', subdivision: 'in-mh' }) and identifiers ({ scheme: 'in_cin' | 'lei' | …, value }). Its licences let you publish products; its party roster (add_party) says who stands behind them.",
+        "Innovator: register the legal entity you act for (once), as typed facts: legal form, incorporation (lowercase ISO codes, e.g. { country: 'in', subdivision: 'in-mh' }) and identifiers ({ scheme: 'in_cin' | 'lei' | …, value }). Its licences, or a licence provider's sponsorship (request_sponsorship), let you publish products; its party roster (add_party) says who stands behind them.",
       inputSchema: {
         name: z.string().min(1),
         ...EntityFactsSchema,
@@ -101,76 +102,6 @@ export function registerMarketplaceTools(server: McpServer, store: Store, user: 
         ...(history ? { history: records.filter((r) => r.status === "superseded") } : {}),
         reconciliation: await reconcileEntityGrc(store, entity_id),
       });
-    },
-  );
-
-  server.registerTool(
-    "set_entity_facts",
-    {
-      title: "Update your firm's facts",
-      description: "Innovator: set your entity's legal form, incorporation or identifiers (each replaces what's there). Products resting on it are re-checked.",
-      inputSchema: EntityFactsSchema,
-    },
-    async (facts) => {
-      const { entity_id } = await me();
-      if (!entity_id) return fail("You don't belong to an entity yet; create one with create_entity");
-      const entity = await store.setEntityFacts(entity_id, facts);
-      await audit("set_entity_facts", entity_id, facts);
-      return json({ ...entity, drifted_products: await driftSweep(store, entity_id) });
-    },
-  );
-
-  server.registerTool(
-    "add_party",
-    {
-      title: "Add a party to your firm's roster",
-      description:
-        "Innovator: add who fills a role at your entity: an internal person or an external legal entity, the mandatory stakeholders they fill on the licences you hold (fills: licence id + stakeholder id from the licence type's mandatory_stakeholders, see get_regulator), facts for the stakeholders' qualification criteria, and for counterparties the relationship. Products can only name parties on this roster. get_my_entity shows each licence's stakeholders reconciled against it.",
-      inputSchema: PartyInputSchema,
-    },
-    async (p) => {
-      const { entity_id } = await me();
-      if (!entity_id) return fail("You don't belong to an entity yet; create one with create_entity");
-      const errors = await validateParty(store, entity_id, p);
-      if (errors.length) return { ...json({ error: "The party can't be added", errors }), isError: true };
-      let legalEntityId = p.legal_entity_id ?? null;
-      if (p.kind === "external" && p.new_legal_entity) {
-        const created = await store.createEntity(user.id, { ...p.new_legal_entity, registration_numbers: {}, regions: [] });
-        await audit("create_entity", created.id, { name: created.name, as_party_of: entity_id });
-        legalEntityId = created.id;
-      }
-      const party = await store.addParty(user.id, {
-        entity_id,
-        kind: p.kind,
-        person: p.kind === "internal" ? { name: p.person!.name, identifiers: p.person!.identifiers } : null,
-        legal_entity_id: p.kind === "external" ? legalEntityId : null,
-        attributes: p.attributes,
-        fills: p.fills,
-        relationship: p.relationship ?? null,
-        since: p.since ?? null,
-      });
-      await audit("add_party", party.id, { entity_id, kind: party.kind, fills: party.fills.length });
-      return json({ ...party, drifted_products: await driftSweep(store, entity_id) });
-    },
-  );
-
-  server.registerTool(
-    "end_party",
-    {
-      title: "End a party's role at your firm",
-      description:
-        "Innovator: record that a party no longer fills its role (a person left, an agreement ended). Parties aren't edited: to change one, end it and add the new one. Published products bound to it drift and pause new sales until a new version is published.",
-      inputSchema: { party_id: z.string(), until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD; today by default") },
-      annotations: { destructiveHint: true },
-    },
-    async ({ party_id, until }) => {
-      const { entity_id } = await me();
-      const party = await store.getParty(party_id);
-      if (!entity_id || party?.entity_id !== entity_id) return fail(`No party '${party_id}' on your entity's roster`);
-      if (party.status === "ended") return fail("That party has already ended");
-      const ended = await store.endParty(party_id, until ?? new Date().toISOString().slice(0, 10));
-      await audit("end_party", party_id, { entity_id, until: ended.until });
-      return json({ ...ended, drifted_products: await driftSweep(store, entity_id) });
     },
   );
 
@@ -366,11 +297,92 @@ export async function settleCampaign(store: Store, campaignId: string): Promise<
   return (await store.saveCampaign({ ...c, status: lint.passed ? "live" : "draft", last_lint: lint })).status;
 }
 
-// A firm's own record and licences: innovators', and vendors' (whose firm an admin registers).
+// A firm's facts and party roster (who fills the stakeholders its licences mandate): builders', and licence
+// providers' (whose licences' stakeholders must be filled for the products they sponsor).
+export function registerRosterTools(server: McpServer, store: Store, user: User) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
+  const me = async () => (await store.getUser(user.id)) ?? user;
+  const noFirm = effectiveRoles(user.roles).includes("innovator")
+    ? "You don't belong to an entity yet; create one with create_entity"
+    : "You don't belong to a firm yet; an admin adds you to one";
+
+  server.registerTool(
+    "set_entity_facts",
+    {
+      title: "Update your firm's facts",
+      description: "Set your firm's legal form, incorporation or identifiers (each replaces what's there). Products resting on it are re-checked.",
+      inputSchema: EntityFactsSchema,
+    },
+    async (facts) => {
+      const { entity_id } = await me();
+      if (!entity_id) return fail(noFirm);
+      const entity = await store.setEntityFacts(entity_id, facts);
+      await audit("set_entity_facts", entity_id, facts);
+      return json({ ...entity, drifted_products: await driftSweep(store, entity_id) });
+    },
+  );
+
+  server.registerTool(
+    "add_party",
+    {
+      title: "Add a party to your firm's roster",
+      description:
+        "Add who fills a role at your firm: an internal person or an external legal entity, the mandatory stakeholders they fill on the licences you hold (fills: licence id + stakeholder id from the licence type's mandatory_stakeholders, see get_regulator), facts for the stakeholders' qualification criteria, and for counterparties the relationship. Products can only name parties on this roster. get_my_entity shows each licence's stakeholders reconciled against it.",
+      inputSchema: PartyInputSchema,
+    },
+    async (p) => {
+      const { entity_id } = await me();
+      if (!entity_id) return fail(noFirm);
+      const errors = await validateParty(store, entity_id, p);
+      if (errors.length) return { ...json({ error: "The party can't be added", errors }), isError: true };
+      let legalEntityId = p.legal_entity_id ?? null;
+      if (p.kind === "external" && p.new_legal_entity) {
+        const created = await store.createEntity(user.id, { ...p.new_legal_entity, registration_numbers: {}, regions: [] });
+        await audit("create_entity", created.id, { name: created.name, as_party_of: entity_id });
+        legalEntityId = created.id;
+      }
+      const party = await store.addParty(user.id, {
+        entity_id,
+        kind: p.kind,
+        person: p.kind === "internal" ? { name: p.person!.name, identifiers: p.person!.identifiers } : null,
+        legal_entity_id: p.kind === "external" ? legalEntityId : null,
+        attributes: p.attributes,
+        fills: p.fills,
+        relationship: p.relationship ?? null,
+        since: p.since ?? null,
+      });
+      await audit("add_party", party.id, { entity_id, kind: party.kind, fills: party.fills.length });
+      return json({ ...party, drifted_products: await driftSweep(store, entity_id) });
+    },
+  );
+
+  server.registerTool(
+    "end_party",
+    {
+      title: "End a party's role at your firm",
+      description:
+        "Record that a party no longer fills its role at your firm (a person left, an agreement ended). Parties aren't edited: to change one, end it and add the new one. Published products bound to it drift and pause new sales until a new version is published.",
+      inputSchema: { party_id: z.string(), until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD; today by default") },
+      annotations: { destructiveHint: true },
+    },
+    async ({ party_id, until }) => {
+      const { entity_id } = await me();
+      const party = await store.getParty(party_id);
+      if (!entity_id || party?.entity_id !== entity_id) return fail(`No party '${party_id}' on your entity's roster`);
+      if (party.status === "ended") return fail("That party has already ended");
+      const ended = await store.endParty(party_id, until ?? new Date().toISOString().slice(0, 10));
+      await audit("end_party", party_id, { entity_id, until: ended.until });
+      return json({ ...ended, drifted_products: await driftSweep(store, entity_id) });
+    },
+  );
+
+}
+
+// A firm's own record and licences: builders', vendors' and licence providers' (whose firm an admin registers).
 export function registerFirmTools(server: McpServer, store: Store, user: User) {
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
   const me = async () => (await store.getUser(user.id)) ?? user;
-  const noFirm = user.roles.some((r) => r === "innovator" || r === "admin")
+  const noFirm = effectiveRoles(user.roles).includes("innovator")
     ? "You don't belong to an entity yet; create one with create_entity"
     : "You don't belong to a firm yet; an admin adds you to one";
 

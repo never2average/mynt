@@ -37,17 +37,22 @@ export async function regimeSummary(store: Store, record: ProductRecord, regime?
     regions: regime.regions.map((r) => {
       const model = normalizeModel(ref.regions.find((x) => x.code === r.region)?.regulatory);
       const regulator = (id: string) => ({ regulator_id: id, name: model.regulators.find((x) => x.id === id)?.name ?? id });
-      const coverageOf = (cov: (typeof r.components)[number]["coverage"], c: (typeof r.components)[number]) =>
-        cov.status === "covered"
-          ? {
-              status: cov.status,
-              by: cov.by.map((b) => ({
-                ...regulator(b.regulator_id),
-                license_id: b.license_id,
-                licence: c.licences.find((l) => l.regulator_id === b.regulator_id && l.license_id === b.license_id)?.name ?? b.license_id,
-              })),
-            }
-          : { status: cov.status, reason: redact(cov.reason), by: [] };
+      // A licence provider's sponsored coverage names the provider (the firm the builder chose to stand behind it).
+      const coverageOf = (cov: (typeof r.components)[number]["coverage"], c: (typeof r.components)[number]) => {
+        if (cov.status !== "covered") return { status: cov.status, reason: redact(cov.reason), by: [] };
+        const by = cov.by.map((b) => ({
+          ...regulator(b.regulator_id),
+          license_id: b.license_id,
+          licence: c.licences.find((l) => l.regulator_id === b.regulator_id && l.license_id === b.license_id)?.name ?? b.license_id,
+          ...(b.sponsorship_id && c.sponsor ? { sponsored_by: c.sponsor.name } : {}),
+        }));
+        const sponsored = by.filter((b) => "sponsored_by" in b);
+        return {
+          status: cov.status,
+          by,
+          ...(sponsored.length ? { note: `Covered by ${sponsored.map((b) => `${b.sponsored_by}'s ${b.licence}`).join(", ")} (sponsored)` } : {}),
+        };
+      };
       return {
         region: r.region,
         covered: r.covered,
@@ -74,7 +79,8 @@ export async function regimeSummary(store: Store, record: ProductRecord, regime?
             action: c.action,
             ...(c.underlying ? { underlying: c.underlying } : {}),
             ...(c.wrapper ? { wrapper: c.wrapper } : {}),
-            provided_by: c.provider?.by === "self" ? ("self" as const) : c.provider?.by === "party" ? ("partner" as const) : null,
+            provided_by: c.provider?.by === "self" ? ("self" as const) : c.provider?.by === "party" ? ("partner" as const) : c.provider?.by === "sponsor" ? ("sponsor" as const) : null,
+            ...(c.sponsor ? { sponsor: c.sponsor.name } : {}),
             coverage: coverageOf(cov, c),
             ...(c.jurisdictions
               ? {
@@ -96,7 +102,7 @@ export async function regimeSummary(store: Store, record: ProductRecord, regime?
                   required: s.mandated,
                   filled: s.filled.map((f) => f.stakeholder),
                   // Bound to this component in the product: checked only where the owner provides it.
-                  bound: s.enforced ? s.filled.length - s.unbound.length : null,
+                  bound: s.enforced && c.provider?.by === "self" ? s.filled.length - s.unbound.length : null,
                   missing: s.missing.map((m) => ({ stakeholder: m.stakeholder, name: m.name, kind: m.kind })),
                   unqualified: s.unqualified.map((u) => ({ stakeholder: u.stakeholder, failed: u.failed })),
                   unbound: s.unbound.length,

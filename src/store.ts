@@ -14,13 +14,23 @@ import {
   type RegulatoryModel,
 } from "./regulatory.js";
 
-export const ROLES = ["consumer", "developer", "innovator", "vendor", "admin"] as const;
+export const ROLES = ["consumer", "developer", "innovator", "vendor", "license_provider", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
-// Roles nest: every admin is an innovator, every innovator a developer, every developer a consumer. Vendors
-// (firms offering standard services innovators plug in) are a peer of innovators: they get vendor tools only,
-// and an admin is both.
-const IMPLIES: Record<Role, Role[]> = { consumer: [], developer: ["consumer"], innovator: ["developer"], vendor: [], admin: ["innovator", "vendor"] };
+// Roles nest: every admin is a builder, every builder a consumer. Builders compose and publish products and
+// build apps on them: "innovator" and "developer" are two names for the same role (each implies the other),
+// kept so existing users, invites and docs keep working. A builder needn't be licensed: a component can be
+// covered by a licence provider's licence instead (see sponsorships.ts). Vendors (firms offering standard
+// services builders plug in) and licence providers (firms holding the licences that sponsor builders'
+// products) are peers of builders with their own tools only, and an admin is all of them.
+const IMPLIES: Record<Role, Role[]> = {
+  consumer: [],
+  developer: ["consumer", "innovator"],
+  innovator: ["developer"],
+  vendor: [],
+  license_provider: [],
+  admin: ["innovator", "vendor", "license_provider"],
+};
 
 // Reference data admins manage: where products may be offered and what kinds of product exist.
 // How a product line is legally brought to market in a region: licences, approvals, filings.
@@ -246,11 +256,20 @@ export interface Pins {
   parties: PartyBinding[];
   entity_ids: string[];
   // products: the products it is built on (underlying_product_ids), so it drifts when one is unpublished or drifts
-  state: { entities: Record<string, string>; licences: Record<string, string>; parties: Record<string, string>; vendors?: Record<string, string>; products?: Record<string, string> };
+  // sponsorships: the licence providers' sponsorships covering its components (see sponsorships.ts)
+  state: {
+    entities: Record<string, string>;
+    licences: Record<string, string>;
+    parties: Record<string, string>;
+    vendors?: Record<string, string>;
+    products?: Record<string, string>;
+    sponsorships?: Record<string, string>;
+  };
   definition_hash?: string; // the live v2 definition (see definition.ts), when the product has one
   contract?: DeveloperContract; // what developers build against, derived from that definition (see contract.ts)
   vendor_bindings?: VendorBinding[]; // handoffs the live version runs through a vendor subscription (see vendors.ts)
   licence_jurisdictions?: Record<string, string[]>; // pinned licence id -> the jurisdictions it covers this product in (see regime.ts)
+  sponsorship_jurisdictions?: Record<string, string[]>; // pinned sponsorship id -> the jurisdictions it covers this product in
 }
 export interface VendorBinding {
   handoff_id: string;
@@ -259,7 +278,29 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product"; id: string; was: string; now: string; jurisdictions?: string[] };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship"; id: string; was: string; now: string; jurisdictions?: string[] };
+
+// A licence provider's sponsorship of one component of a builder's product: the builder asks (pending), the
+// provider approves it under some of its held licences for some jurisdictions, declines it, or later revokes it.
+export const SPONSORSHIP_STATUSES = ["pending", "approved", "declined", "revoked"] as const;
+export type SponsorshipStatus = (typeof SPONSORSHIP_STATUSES)[number];
+export interface Sponsorship {
+  id: string;
+  product_id: string;
+  component_key: string;
+  builder_entity_id: string;
+  provider_entity_id: string;
+  requested_jurisdictions: string[]; // what the builder asked for (ISO 3166-2 codes, or the country code); empty: the country as a whole
+  licence_ids: string[]; // the provider's held licences it's approved under (set on approval)
+  jurisdictions: string[]; // where it's approved (set on approval); the country code means the whole country
+  status: SponsorshipStatus;
+  note: string | null;
+  decision_note: string | null;
+  requested_by: string | null;
+  decided_by: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
 export interface ProductRecord {
   product: FinancialProduct;
   owner_id: string | null; // null = bundled catalog product
@@ -1237,6 +1278,29 @@ const TABLES = `
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS regime_summary jsonb;
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS take_rate jsonb;
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS derived_at timestamptz;
+  -- Licence providers' sponsorships: one component of a builder's product covered by the provider's held
+  -- licences in the jurisdictions it approved (see sponsorships.ts).
+  CREATE TABLE IF NOT EXISTS financial_products.sponsorships (
+    id uuid PRIMARY KEY,
+    product_id text NOT NULL,
+    component_key text NOT NULL,
+    builder_entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    provider_entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    requested_jurisdictions text[] NOT NULL DEFAULT '{}',
+    licence_ids uuid[] NOT NULL DEFAULT '{}',
+    jurisdictions text[] NOT NULL DEFAULT '{}',
+    status text NOT NULL CHECK (status IN ('pending', 'approved', 'declined', 'revoked')),
+    note text,
+    decision_note text,
+    requested_by uuid REFERENCES financial_products.users(id),
+    decided_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    decided_at timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS sponsorships_product_idx ON financial_products.sponsorships (product_id, component_key);
+  CREATE INDEX IF NOT EXISTS sponsorships_provider_idx ON financial_products.sponsorships (provider_entity_id, status);
+  -- One pending request per component and provider at a time; approved ones may add up (more jurisdictions).
+  CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_one_pending_idx ON financial_products.sponsorships (product_id, component_key, provider_entity_id) WHERE status = 'pending';
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -1425,6 +1489,24 @@ const toParty = (r: Row): Party => ({
   created_by: (r.created_by as string | null) ?? null,
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
+});
+
+const toSponsorship = (r: Row): Sponsorship => ({
+  id: r.id as string,
+  product_id: r.product_id as string,
+  component_key: r.component_key as string,
+  builder_entity_id: r.builder_entity_id as string,
+  provider_entity_id: r.provider_entity_id as string,
+  requested_jurisdictions: (r.requested_jurisdictions as string[]) ?? [],
+  licence_ids: ((r.licence_ids as string[]) ?? []).map(String),
+  jurisdictions: (r.jurisdictions as string[]) ?? [],
+  status: r.status as SponsorshipStatus,
+  note: (r.note as string | null) ?? null,
+  decision_note: (r.decision_note as string | null) ?? null,
+  requested_by: (r.requested_by as string | null) ?? null,
+  decided_by: (r.decided_by as string | null) ?? null,
+  created_at: iso(r.created_at)!,
+  decided_at: iso(r.decided_at),
 });
 
 const toHeldLicense = (r: Row): HeldLicense => ({
@@ -2505,6 +2587,7 @@ export class Store {
     const rows = await this.all(
       `SELECT p.* FROM financial_products.products p
         WHERE p.entity_id = $1 OR p.pins->'entity_ids' ? $1::text
+           OR p.components @> jsonb_build_array(jsonb_build_object('provider', jsonb_build_object('by', 'sponsor', 'entity_id', $1::text)))
            OR EXISTS (SELECT 1 FROM financial_products.entity_parties pa
                        WHERE pa.legal_entity_id = $1
                          AND p.components @> jsonb_build_array(jsonb_build_object('provider', jsonb_build_object('by', 'party', 'party_id', pa.id::text))))
@@ -2986,6 +3069,51 @@ export class Store {
       [randomUUID(), l.entity_id, l.region, l.regulator_id, l.license_id, l.registration_number, l.valid_from, l.valid_to, submittedBy, l.jurisdiction ?? null],
     );
     return toHeldLicense(r!);
+  }
+
+  // ---- licence providers' sponsorships (see sponsorships.ts) ----
+
+  async requestSponsorship(
+    requestedBy: string,
+    s: Pick<Sponsorship, "product_id" | "component_key" | "builder_entity_id" | "provider_entity_id" | "requested_jurisdictions" | "note">,
+  ): Promise<Sponsorship> {
+    const r = await this.one(
+      `INSERT INTO financial_products.sponsorships
+         (id, product_id, component_key, builder_entity_id, provider_entity_id, requested_jurisdictions, status, note, requested_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8) RETURNING *`,
+      [randomUUID(), s.product_id, s.component_key, s.builder_entity_id, s.provider_entity_id, s.requested_jurisdictions, s.note, requestedBy],
+    );
+    return toSponsorship(r!);
+  }
+
+  async getSponsorship(id: string): Promise<Sponsorship | undefined> {
+    const r = await this.one("SELECT * FROM financial_products.sponsorships WHERE id::text = $1", [id]);
+    return r && toSponsorship(r);
+  }
+
+  async sponsorships(where: { product_id?: string; provider_entity_id?: string; builder_entity_id?: string; status?: SponsorshipStatus }): Promise<Sponsorship[]> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    for (const k of ["product_id", "provider_entity_id", "builder_entity_id", "status"] as const) {
+      if (where[k] === undefined) continue;
+      params.push(where[k]);
+      clauses.push(`${k} = $${params.length}`);
+    }
+    const sql = `SELECT * FROM financial_products.sponsorships${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at, id`;
+    return (await this.all(sql, params)).map(toSponsorship);
+  }
+
+  async decideSponsorship(
+    id: string,
+    decision: { status: SponsorshipStatus; decided_by: string; note: string | null; licence_ids?: string[]; jurisdictions?: string[] },
+  ): Promise<Sponsorship> {
+    const r = await this.one(
+      `UPDATE financial_products.sponsorships SET status = $2, decided_by = $3, decision_note = $4, decided_at = now(),
+         licence_ids = COALESCE($5::uuid[], licence_ids), jurisdictions = COALESCE($6::text[], jurisdictions)
+       WHERE id::text = $1 RETURNING *`,
+      [id, decision.status, decision.decided_by, decision.note, decision.licence_ids ?? null, decision.jurisdictions ?? null],
+    );
+    return toSponsorship(r!);
   }
 
   async getHeldLicense(id: string): Promise<HeldLicense | undefined> {

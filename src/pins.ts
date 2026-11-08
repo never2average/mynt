@@ -3,7 +3,7 @@ import { licenseInForce } from "./access.js";
 import { partyActive } from "./parties.js";
 import type { productRegime } from "./regime.js";
 import { emitProductEvent } from "./runtime.js";
-import type { DriftChange, Entity, HeldLicense, Party, Pins, ProductRecord, Store } from "./store.js";
+import type { DriftChange, Entity, HeldLicense, Party, Pins, ProductRecord, Sponsorship, Store } from "./store.js";
 import { recomputeDerived } from "./derived.js";
 import { vendorStateOf } from "./vendors.js";
 
@@ -16,6 +16,9 @@ const hash = (v: unknown) => "sha256:" + createHash("sha256").update(JSON.string
 const entityState = (e: Entity | undefined) => (e ? hash({ status: e.status, legal_form: e.legal_form, identifiers: e.identifiers }) : "missing");
 const licenceState = (l: HeldLicense | undefined) =>
   l ? hash({ status: l.status, in_force: licenseInForce(l), registration_number: l.registration_number, valid_from: l.valid_from, valid_to: l.valid_to }) : "missing";
+// A licence provider's sponsorship: approved, under which licences, where (see sponsorships.ts).
+const sponsorshipState = (s: Sponsorship | undefined) =>
+  s ? hash({ status: s.status, licence_ids: [...s.licence_ids].sort(), jurisdictions: [...s.jurisdictions].sort() }) : "missing";
 const partyState = (p: Party | undefined) =>
   p ? hash({ active: partyActive(p), status: p.status, until: p.until, person: p.person, legal_entity_id: p.legal_entity_id, fills: p.fills, attributes: p.attributes }) : "missing";
 
@@ -27,6 +30,8 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
   const partyIds = new Set<string>(record.parties.map((b) => b.party_id));
   // The jurisdictions each pinned licence covers this product in, so a drift says which states it touches.
   const licenceJurisdictions: Record<string, string[]> = {};
+  // The sponsorships covering a component, with the jurisdictions each covers this product in.
+  const sponsorshipJurisdictions: Record<string, string[]> = {};
   for (const c of rows) {
     if (c.provider_entity_id) entityIds.add(c.provider_entity_id);
     if (c.provider?.by === "party") partyIds.add(c.provider.party_id);
@@ -38,10 +43,16 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
             licenceIds.add(id);
             licenceJurisdictions[id] = [...new Set([...(licenceJurisdictions[id] ?? []), j.jurisdiction])];
           }
+          const sponsorship = j.coverage.by[0].sponsorship_id;
+          if (sponsorship) sponsorshipJurisdictions[sponsorship] = [...new Set([...(sponsorshipJurisdictions[sponsorship] ?? []), j.jurisdiction])];
         }
         for (const s of [j.stakeholders, ...(j.prerequisites ?? [])]) for (const f of s?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
       }
-    } else if (c.coverage.status === "covered") for (const id of [c.coverage.by[0].licence_id, ...(c.coverage.by[0].requires ?? [])]) licenceIds.add(id);
+    } else if (c.coverage.status === "covered") {
+      for (const id of [c.coverage.by[0].licence_id, ...(c.coverage.by[0].requires ?? [])]) licenceIds.add(id);
+      const sponsorship = c.coverage.by[0].sponsorship_id;
+      if (sponsorship) sponsorshipJurisdictions[sponsorship] ??= [];
+    }
     for (const s of [c.stakeholders, ...(c.prerequisites ?? [])]) for (const f of s?.filled ?? []) for (const id of f.party_ids) partyIds.add(id);
   }
   // The products it's built on: their state, and the entities they rest on (so a sweep for the partner's
@@ -75,6 +86,10 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
   for (const id of licenceIds) state.licences[id] = licenceState(await store.getHeldLicense(id));
   for (const [id, p] of parties) state.parties[id] = partyState(p);
   if (Object.keys(products).length) state.products = products;
+  if (Object.keys(sponsorshipJurisdictions).length) {
+    state.sponsorships = {};
+    for (const id of Object.keys(sponsorshipJurisdictions)) state.sponsorships[id] = sponsorshipState(await store.getSponsorship(id));
+  }
   return {
     version,
     pinned_at: new Date().toISOString(),
@@ -83,6 +98,9 @@ export async function buildPins(store: Store, record: ProductRecord, version: nu
     entity_ids: [...entityIds],
     state,
     ...(Object.keys(licenceJurisdictions).length ? { licence_jurisdictions: licenceJurisdictions } : {}),
+    ...(Object.values(sponsorshipJurisdictions).some((j) => j.length)
+      ? { sponsorship_jurisdictions: Object.fromEntries(Object.entries(sponsorshipJurisdictions).filter(([, j]) => j.length)) }
+      : {}),
   };
 }
 
@@ -100,6 +118,10 @@ export async function pinChanges(store: Store, pins: Pins, depth = 0): Promise<D
   // A licence pinned for named jurisdictions (a state licence) says which ones lose coverage.
   for (const c of changes) if (c.kind === "licence" && pins.licence_jurisdictions?.[c.id]) c.jurisdictions = pins.licence_jurisdictions[c.id];
   await check("party", pins.state.parties, async (id) => partyState(await store.getParty(id)));
+  // Licence providers' sponsorships (revoked: the states it covered lose coverage).
+  const before = changes.length;
+  await check("sponsorship", pins.state.sponsorships ?? {}, async (id) => sponsorshipState(await store.getSponsorship(id)));
+  for (const c of changes.slice(before)) if (pins.sponsorship_jurisdictions?.[c.id]) c.jurisdictions = pins.sponsorship_jurisdictions[c.id];
   // Vendor services the live version hands off through (see vendors.ts).
   await check("vendor", pins.state.vendors ?? {}, (id) => vendorStateOf(store, id));
   // Products it's built on: unpublished, offered somewhere else, or drifted themselves (checked afresh, so the
