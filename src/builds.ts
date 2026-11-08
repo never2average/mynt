@@ -719,8 +719,16 @@ export class BuildService {
       await boat.writeFile(vid, `${VERIFY_DIR}/solana-toolchain.sh`, SOLANA_TOOLCHAIN_SCRIPT);
       await boat.writeFile(vid, `${VERIFY_DIR}/solana-verify.sh`, SOLANA_VERIFY_SCRIPT);
       await boat.writeFile(vid, `${VERIFY_DIR}/disclosures.json`, JSON.stringify(await this.requiredDisclosures(b)));
-      // First Mynt's Solana build on its own (it finishes at once when the source has no Anchor workspace), so
-      // the programs are read back before any of the app's code runs; then the checks.
+      // A source with an Anchor workspace gets Mynt's Solana build first, on its own, so the programs are read
+      // back before any of the app's code runs; then the checks. Fail-safe: should the listing miss a workspace,
+      // the checks find no Mynt build of it and fail solana_build.
+      const anchor = await boat.exec(b.sandbox_id!, `tar -tzf ${OUT}/app.tgz | grep -qE '(^|/)Anchor\\.toml$' && echo anchor-workspace`, { timeoutSeconds: 120 });
+      if (!anchor.stdout.includes("anchor-workspace")) {
+        const run = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh '${b.source_url}' ${b.source_sha256}`, { detached: true });
+        await this.update(b.id, { verify_step: "checks", verify_process_id: run.processId ?? null });
+        await this.event(b.id, "verifying", "Running Mynt's checks: tests, lint and types, secrets, dependencies, SBOM, disclosures");
+        return;
+      }
       const run = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --solana-build '${b.source_url}' ${b.source_sha256}`, { detached: true });
       await this.update(b.id, { verify_step: "solana_build", verify_process_id: run.processId ?? null });
       await this.event(b.id, "verifying", "Building any Solana programs verifiably, before the checks");

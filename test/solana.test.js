@@ -605,7 +605,7 @@ test("keys never appear in responses, logs or the registry's views", async () =>
   }
 });
 
-test("tool gating: developers (and innovators) get the program tools, admins the signer; consumers and vendors neither", async () => {
+test("tool gating: developers (and innovators) get the program tools, admins the signer; consumers, vendors and licence providers neither", async () => {
   const w = await world();
   const names = async (client) => (await client.listTools()).tools.map((t) => t.name);
   const DEV = ["reserve_program_id", "deploy_program", "upgrade_program", "list_programs", "get_program", "simulate_program_call", "call_program"];
@@ -618,7 +618,7 @@ test("tool gating: developers (and innovators) get the program tools, admins the
   for (const t of DEV) assert.ok(inn.includes(t), `innovator: ${t}`);
   const admin = await names(w.admin);
   for (const t of [...DEV, ...ADMIN]) assert.ok(admin.includes(t), `admin: ${t}`);
-  for (const roles of [["consumer"], ["vendor"]]) {
+  for (const roles of [["consumer"], ["vendor"], ["license_provider"]]) {
     const { user } = await w.store.createUser(roles[0], roles);
     const got = await names(await w.connect(user));
     for (const t of [...DEV, ...ADMIN]) assert.ok(!got.includes(t), `${roles[0]}: ${t}`);
@@ -859,6 +859,7 @@ test("verification: the Solana build runs alone, everything it started is killed
       const m = command.match(/^tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
       if (m) return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
       if (command.includes("hashlib.sha256")) return { exitCode: 0, stdout: `${sha}\n${rehash}\n`, stderr: "" };
+      if (command.startsWith("tar -tzf")) return { exitCode: 0, stdout: "anchor-workspace\n", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "", ...(opts.detached ? { processId: commands.length } : {}) };
     },
   };
