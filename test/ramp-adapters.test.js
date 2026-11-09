@@ -532,10 +532,14 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.equal((await movement(q8.body.reference)).status, "settled", "a run that ended another way doesn't stop the ledger hearing of the money");
   assert.equal((await movement(q2.body.reference)).status, "failed", "returned before it settled, by the poller");
   assert.equal((await movement(q3.body.reference)).status, "failed", "undeliverable, by webhook");
+  // A session of its own: this test's first has used up its allowance of requests by now on a fast machine.
+  const second = (await api("POST", "/v1/client_sessions", appKey, { product_ids: ["everyday-rd"], scopes: KEYS, customer_ref: "cust_b1" })).body.client_secret;
+  assert.equal((await api("POST", "/v1/client/evidence", second, { product_id: P, type: "consent_given", subject: "fiat_onramp" })).status, 201);
+  const startAgain = (action, extra) => api("POST", `/v1/client/actions/${action}`, second, { product_id: P, ...extra });
   const refusedWith = async (amount, reply) => {
-    const q = await start("onramp_quote", { params: { direction: "in", amount_usd: amount } });
+    const q = await startAgain("onramp_quote", { params: { direction: "in", amount_usd: amount } });
     bridge.state.nextTransferReply = reply;
-    const t = await start("onramp_transfer", { quote: q.body.reference });
+    const t = await startAgain("onramp_transfer", { quote: q.body.reference });
     assert.equal(t.status, 502, t.text);
     return movement(q.body.reference);
   };
