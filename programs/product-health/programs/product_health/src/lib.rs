@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::hash::hashv;
+use solana_sha256_hasher::hashv;
 
 // A placeholder nobody holds a key for: scripts/product-health-deploy.sh writes the real address into a copy of the
 // program before it builds, and CI builds this file as it stands. It can never be deployed under this address.
