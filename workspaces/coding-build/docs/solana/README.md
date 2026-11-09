@@ -13,7 +13,7 @@ already installed (`. ~/.mynt-solana/env`).
 | Agave (`solana`, `solana-test-validator`, `cargo build-sbf`) | 2.3.13 |
 | Anchor CLI and `anchor-lang` | 0.32.1 |
 | `@coral-xyz/anchor` | 0.32.1 |
-| Rust | 1.89.0 |
+| Rust | 1.99.1 |
 | Verifiable-build image | `solanafoundation/anchor:v0.32.1` |
 
 - `anchor/`: The Anchor framework: program structure, accounts and constraints, PDAs, CPIs, errors, events, IDL, testing, clients, Anchor.toml, the CLI and verifiable builds. From [solana-foundation/anchor](https://github.com/solana-foundation/anchor) at `v0.32.1` (1ebbe58158d0), Apache-2.0; see `anchor/UPSTREAM.json`.
