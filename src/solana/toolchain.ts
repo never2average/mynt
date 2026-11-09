@@ -1,16 +1,84 @@
 // The Solana toolchain Mynt installs in developers' build sandboxes and in its own clean verify sandbox: the
 // Agave release (solana, solana-test-validator, cargo-build-sbf), the Anchor CLI and Rust, each a pinned
 // release checked against its published sha256 before it is used. Anchor's verifiable builds run in Anchor's
-// own image, pinned by digest. Versions move together: Anchor 0.32 is built and tested against Agave 2.3 and
-// needs Rust 1.89 for its IDL.
+// own image, pinned by digest. Versions move together: Agave follows the release the pinned Anchor builds its
+// image with, and Rust must be new enough for Anchor's IDL build.
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-export const SOLANA_TOOLCHAIN = {
-  agave: { version: "2.3.13", sha256: "c43539ebdf6942472e8b87635d6ea55f428a51e3d0219f7b6f720fc6b19fade0" },
-  anchor: { version: "0.32.1", sha256: "5f25b850ce80278507a98947833fcd48423391f6d145046ffb0c5fd130dec436", commit: "1ebbe58158d089a2a40b5e35ebead5a10db9090d" },
-  rust: { version: "1.89.0", rustup: "1.28.2", rustupSha256: "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c" },
-  // Anchor's verifiable-build image for the same Anchor version.
-  anchorImage: "solanafoundation/anchor:v0.32.1@sha256:facc4ebd0738ba7ebc1eb4ef000deab6b37e7747960d3f400c73c40c5421b5de",
-} as const;
+// The pins live in schemas/solana-toolchain.json, the one file the weekly watcher (scripts/solana-toolchain-watch.mjs)
+// rewrites in a pull request.
+export interface SolanaToolchainPins {
+  agave: { version: string; sha256: string };
+  anchor: { version: string; sha256: string; commit: string };
+  rust: { version: string; rustup: string; rustupSha256: string };
+  anchorImage: string; // Anchor's verifiable-build image for the same Anchor version, by digest
+  anchorTs: { package: string; version: string }; // the TypeScript client the template's tests use
+}
+
+export const TOOLCHAIN_PINS_FILE = fileURLToPath(new URL("../../schemas/solana-toolchain.json", import.meta.url));
+
+// Every pin is checked for shape before it reaches a shell script.
+export function parseToolchainPins(text: string): SolanaToolchainPins {
+  const j = JSON.parse(text);
+  const version = /^\d+\.\d+\.\d+$/;
+  const sha = /^[0-9a-f]{64}$/;
+  const ok =
+    version.test(j?.agave?.version) &&
+    sha.test(j?.agave?.sha256) &&
+    version.test(j?.anchor?.version) &&
+    sha.test(j?.anchor?.sha256) &&
+    /^[0-9a-f]{40}$/.test(j?.anchor?.commit) &&
+    version.test(j?.rust?.version) &&
+    version.test(j?.rust?.rustup) &&
+    sha.test(j?.rust?.rustupSha256) &&
+    /^[a-z0-9][a-z0-9./_-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$/.test(j?.anchorImage) &&
+    /^[@a-z0-9/._-]+$/.test(j?.anchorTs?.package) &&
+    version.test(j?.anchorTs?.version);
+  if (!ok) throw new Error("schemas/solana-toolchain.json: a pin is missing or malformed");
+  const { agave, anchor, rust, anchorImage, anchorTs } = j;
+  return {
+    agave: { version: agave.version, sha256: agave.sha256 },
+    anchor: { version: anchor.version, sha256: anchor.sha256, commit: anchor.commit },
+    rust: { version: rust.version, rustup: rust.rustup, rustupSha256: rust.rustupSha256 },
+    anchorImage,
+    anchorTs: { package: anchorTs.package, version: anchorTs.version },
+  };
+}
+
+// The same canonical form the watcher hashes: keys sorted at every level.
+const canonical = (v: unknown): string =>
+  Array.isArray(v)
+    ? `[${v.map(canonical).join(",")}]`
+    : v && typeof v === "object"
+      ? `{${Object.keys(v)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
+          .join(",")}}`
+      : JSON.stringify(v);
+export const pinsSha256 = (p: SolanaToolchainPins) => createHash("sha256").update(canonical(p)).digest("hex");
+
+export const SOLANA_TOOLCHAIN: Readonly<SolanaToolchainPins> = parseToolchainPins(readFileSync(TOOLCHAIN_PINS_FILE, "utf8"));
+// This exact toolchain: kept with every program Mynt builds, and part of the pre-built environment's key.
+export const TOOLCHAIN_PINS_SHA256 = pinsSha256(SOLANA_TOOLCHAIN);
+
+// What Mynt records with each build's programs, so an old version can be rebuilt with the same tools.
+export function toolchainRecord(environment: { source: "snapshot" | "install"; snapshot_id?: string | null } | null = null) {
+  const t = SOLANA_TOOLCHAIN;
+  return {
+    agave: t.agave.version,
+    anchor: t.anchor.version,
+    anchor_commit: t.anchor.commit,
+    rust: t.rust.version,
+    rustup: t.rust.rustup,
+    anchor_image: t.anchorImage,
+    anchor_ts: t.anchorTs.version,
+    pins_sha256: TOOLCHAIN_PINS_SHA256,
+    ...(environment ? { environment } : {}),
+  };
+}
+export type ToolchainRecord = ReturnType<typeof toolchainRecord>;
 
 const T = SOLANA_TOOLCHAIN;
 

@@ -1,0 +1,64 @@
+# Every Monday: new stable releases of the pinned Solana toolchain (Agave, Anchor and its verifiable-build image,
+# Rust, rustup, @coral-xyz/anchor), their checksums and digest computed here, advisories checked, the
+# version-matched docs and the solana-dev skill refreshed. Any change goes to a pull request whose CI builds and
+# tests the template program with the new pins. Nothing here merges.
+name: Solana toolchain watch
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      anchor_line:
+        description: "patch: the newest Anchor of the pinned line; latest: the newest Anchor (breaking); or an exact version"
+        default: patch
+        type: string
+      rust:
+        description: "stable: Rust's current stable; pinned: keep the pinned Rust"
+        default: stable
+        type: choice
+        options: [stable, pinned]
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+concurrency:
+  group: solana-toolchain-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: New releases, checksums, advisories, docs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ANCHOR_LINE: ${{ inputs.anchor_line || 'patch' }}
+          RUST_TRACK: ${{ inputs.rust || 'stable' }}
+        run: |
+          node scripts/solana-toolchain-watch.mjs --apply --anchor-line "$ANCHOR_LINE" --rust "$RUST_TRACK" \
+            --title "$RUNNER_TEMP/title.txt" --body "$RUNNER_TEMP/body.md" --branch-file "$RUNNER_TEMP/branch.txt"
+      - name: Open a pull request (never merged here)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          paths="schemas/solana-toolchain.json workspaces/coding-build/templates/solana-program workspaces/coding-build/docs/solana workspaces/coding-build/.claude/skills/solana-dev"
+          git add -A -- $paths
+          if git diff --cached --quiet; then echo "Nothing to update."; exit 0; fi
+          branch=$(cat "$RUNNER_TEMP/branch.txt")
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then echo "A pull request for these pins is already open ($branch)."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -q -F "$RUNNER_TEMP/title.txt"
+          git diff --stat HEAD~1 > "$RUNNER_TEMP/diffstat.txt"
+          # The body, with the diff's summary (the full diff is the pull request's own).
+          { cat "$RUNNER_TEMP/body.md"; printf '\n## Diff\n\n```\n'; cat "$RUNNER_TEMP/diffstat.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr.md"
+          git push -q origin "$branch"
+          gh pr create --base main --head "$branch" --title "$(cat "$RUNNER_TEMP/title.txt")" --body-file "$RUNNER_TEMP/pr.md"
+          # Pushes made with the workflow's token don't start other workflows; run CI on the branch so the pull
+          # request gets its checks (the solana-program job builds and tests the template with these pins).
+          gh workflow run ci.yml --ref "$branch"
