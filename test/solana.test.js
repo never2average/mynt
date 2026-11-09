@@ -82,7 +82,9 @@ class FakeCluster {
     this.statuses = new Map();
     this.slot = 100;
     this.calls = [];
+    this.simulations = []; // every simulation: its accounts and fee payer
     this.simulateFails = false;
+    this.faucetFails = false; // the devnet faucet's rate limit, as servers meet it
     this.nonceAdvances = 0;
     this.recent = new Set(); // blockhashes still valid
   }
@@ -220,12 +222,42 @@ class FakeCluster {
           this.accounts.delete(bufAddr);
         } else throw new Error(`loader instruction ${tag}`);
       } else {
-        // A developer's program: `record` logs an Anchor event, as the template does.
+        // A developer's program: `record` logs an Anchor event, as the template does; `initialize` creates its
+        // state account (a PDA, its size the u32 argument, 200 bytes by default) paid for by the signer it lists,
+        // as Anchor's `init, payer = ...` does through the system program.
         logs.push(`Program ${ix.program} invoke [1]`);
+        if (ix.data.subarray(0, 8).equals(Buffer.from(anchorDiscriminator("global", "initialize")))) {
+          const [state, payer] = ix.accounts;
+          assert.ok(signed.has(payer), "the payer of an init signs");
+          if (this.accounts.get(state)?.lamports) throw new Error(`account ${state} already in use`);
+          const space = ix.data.length >= 12 ? ix.data.readUInt32LE(8) : 200;
+          const need = this.rent(space);
+          const have = this.accounts.get(payer)?.lamports ?? 0;
+          if (have < need) {
+            const err = new Error(`Transfer: insufficient lamports ${have}, need ${need}`);
+            err.logs = [...logs, `Program ${SYSTEM_PROGRAM} invoke [2]`, `Transfer: insufficient lamports ${have}, need ${need}`, `Program ${SYSTEM_PROGRAM} failed: custom program error: 0x1`];
+            throw err;
+          }
+          this.debit(payer, need);
+          this.accounts.set(state, { lamports: need, owner: ix.program, data: Buffer.alloc(space) });
+        }
         if (ix.data.subarray(0, 8).equals(Buffer.from(anchorDiscriminator("global", "record"))))
           logs.push(`Program data: ${Buffer.concat([Buffer.from(anchorDiscriminator("event", "EntryRecorded")), ix.data.subarray(8)]).toString("base64")}`);
         logs.push(`Program ${ix.program} success`);
       }
+    }
+    return logs;
+  }
+  // What a transaction does, with Solana's rent rule: an account the transaction touches ends with nothing or at
+  // least its rent-exempt minimum, unless it already held less and gained nothing.
+  execute(tx) {
+    const before = new Map(tx.keys.map((k) => [k, this.accounts.get(k)?.lamports ?? 0]));
+    const logs = this.apply(tx);
+    for (const k of tx.keys) {
+      const a = this.accounts.get(k);
+      if (!a || !a.lamports || a.executable || a.lamports >= this.rent(a.data.length)) continue;
+      const was = before.get(k);
+      if (!(was > 0 && was < this.rent(a.data.length) && a.lamports <= was)) throw new Error(`Transaction results in an account (${k}) with insufficient funds for rent`);
     }
     return logs;
   }
@@ -258,6 +290,7 @@ class FakeCluster {
       case "getBalance":
         return { value: this.accounts.get(params[0])?.lamports ?? 0 };
       case "requestAirdrop": {
+        if (this.faucetFails) throw new Error("airdrop request failed: the faucet's limit was reached");
         this.fund(params[0], params[1]);
         const sig = base58Encode(randomBytes(64));
         this.statuses.set(sig, { confirmationStatus: "confirmed", err: null });
@@ -280,17 +313,8 @@ class FakeCluster {
         const nonced = tx.ixs[0]?.program === SYSTEM_PROGRAM && tx.ixs[0].data.readUInt32LE(0) === 4;
         if (!nonced && !this.recent.has(tx.blockhash)) throw new Error("Blockhash not found");
         const signature = base58Encode(tx.sigs[0]);
-        // Solana's rent rule: an account the transaction touches ends with nothing or at least its rent-exempt
-        // minimum, unless it already held less and gained nothing.
-        const before = new Map(tx.keys.map((k) => [k, this.accounts.get(k)?.lamports ?? 0]));
-        const logs = this.apply(tx);
-        for (const k of tx.keys) {
-          const a = this.accounts.get(k);
-          if (!a || !a.lamports || a.executable || a.lamports >= this.rent(a.data.length)) continue;
-          const was = before.get(k);
-          if (!(was > 0 && was < this.rent(a.data.length) && a.lamports <= was)) throw new Error(`Transaction results in an account (${k}) with insufficient funds for rent`);
-        }
-        this.sent.push({ signature, signers: tx.signers, ixs: tx.ixs });
+        const logs = this.execute(tx);
+        this.sent.push({ signature, signers: tx.signers, keys: tx.keys, ixs: tx.ixs });
         this.history.push({ signature, slot: ++this.slot, keys: tx.keys, logs, err: null });
         if (!this.withhold(tx)) this.statuses.set(signature, { confirmationStatus: "confirmed", err: null });
         return signature;
@@ -300,8 +324,19 @@ class FakeCluster {
       case "simulateTransaction": {
         const tx = parseTx(Buffer.from(params[0], "base64"));
         assert.equal(params[1].sigVerify, false);
+        this.simulations.push({ keys: tx.keys, feePayer: tx.keys[0] });
+        // As Solana does: a fee payer that doesn't exist fails before anything runs.
+        if (!this.accounts.get(tx.keys[0])?.lamports) return { value: { err: "AccountNotFound", logs: [], unitsConsumed: 0 } };
         if (this.simulateFails) return { value: { err: { InstructionError: [0, { Custom: 6000 }] }, logs: ["Program log: AnchorError: refused"], unitsConsumed: 1200 } };
-        return { value: { err: null, logs: [`Program ${tx.ixs[0].program} invoke [1]`, `Program ${tx.ixs[0].program} success`], unitsConsumed: 3400 } };
+        // Run on a copy of the accounts, which is then put back: a simulation changes nothing.
+        const saved = new Map([...this.accounts].map(([k, a]) => [k, { ...a, data: Buffer.from(a.data) }]));
+        try {
+          return { value: { err: null, logs: this.execute(tx), unitsConsumed: 3400 } };
+        } catch (e) {
+          return { value: { err: { InstructionError: [0, { Custom: 1 }] }, logs: e.logs ?? [e.message], unitsConsumed: 1500 } };
+        } finally {
+          this.accounts = saved;
+        }
       }
       case "getSignaturesForAddress": {
         const [address, o] = params;
@@ -324,7 +359,7 @@ class FakeCluster {
 // ---- the world: a store, users, a verified build, Mynt's Solana service on fake clusters ----
 
 // `rpc(cluster, fake)` puts something in front of a fake cluster (an HTTP RPC); `maxRps` paces deploys' writes.
-async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000, custody = null, rpc = null, maxRps = undefined } = {}) {
+async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000, custody = null, rpc = null, maxRps = undefined, devnetTopUp = undefined } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
@@ -333,7 +368,7 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
   const solana = await SolanaService.open(
     db,
     store,
-    { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs, pollMs: 0, maxRps },
+    { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs, pollMs: 0, maxRps, devnetTopUp },
     { rpc: (cluster) => (rpc ? rpc(cluster, clusters[cluster]) : clusters[cluster]), custody },
   );
   builds.solana = solana;
@@ -602,6 +637,166 @@ test("calls: simulated first and sent only if that succeeds, signed by the devel
   // Another developer's caller key is another key.
   const { program_id: theirs } = await w.ok(w.other, "reserve_program_id", { name: "theirs", cluster: "devnet" });
   assert.notEqual(theirs, program_id);
+});
+
+// ---- funding developers' call keys ----
+
+const deployedOn = async (w, cluster = "devnet") => {
+  const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster });
+  const b = await w.build();
+  const code = w.program(1500);
+  await w.solana.recordArtifacts(b, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: b });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  return p;
+};
+// Anchor's `initialize` creating the program's state account (its size the u32 argument), paid for by $caller.
+const initialize = (state, space) => ({
+  method: "initialize",
+  ...(space ? { args_base64: Buffer.from(Uint32Array.of(space).buffer).toString("base64") } : {}),
+  accounts: [{ pubkey: state, writable: true }, { pubkey: "$caller", signer: true, writable: true }],
+});
+// The system transfers a key signed, as [to, lamports].
+const transfersFrom = (chain, from) =>
+  chain.sent
+    .filter((t) => t.signers[0] === from && t.ixs.length === 1 && t.ixs[0].program === SYSTEM_PROGRAM && t.ixs[0].data.readUInt32LE(0) === 2)
+    .map((t) => [t.ixs[0].accounts[1], Number(t.ixs[0].data.readBigUInt64LE(4))]);
+const topUps = async (w) =>
+  (await w.db.query("SELECT target, details FROM financial_products.audit_log WHERE action = 'solana_devnet_topup' ORDER BY created_at")).rows;
+// No transaction that calls the program carries the deploy authority, as signer, payer or account.
+const authorityNeverInCalls = (chain, programId, authority) => {
+  const calls = chain.sent.filter((t) => t.ixs.some((i) => i.program === programId));
+  assert.ok(calls.length > 0);
+  for (const t of calls) assert.ok(!t.keys.includes(authority) && !t.signers.includes(authority), "the deploy authority is in a call");
+  for (const s of chain.simulations.filter((x) => x.keys.includes(programId))) assert.ok(!s.keys.includes(authority), "the deploy authority is in a simulated call");
+};
+
+test("devnet calls: a fresh developer's first simulation and call succeed, their keys funded before the simulation", async () => {
+  const w = await world();
+  const p = await deployedOn(w);
+  const chain = w.clusters.devnet;
+  const [state] = findProgramAddress([Buffer.from("state")], p.program_id);
+  const authorityTransfers = transfersFrom(chain, p.upgrade_authority).length;
+
+  // Nothing of the developer's exists on chain yet: the fee payer would fail the simulation with AccountNotFound.
+  const sim = await w.ok(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(state) });
+  assert.equal(sim.ok, true, JSON.stringify(sim));
+  assert.equal(chain.simulations.at(-1).feePayer, sim.fee_payer);
+  assert.ok(chain.accounts.get(sim.fee_payer).lamports >= 5_000_000, "the fee payer holds its reserve");
+  assert.ok(chain.accounts.get(sim.caller).lamports >= 20_000_000, "the caller holds enough for a small account's rent");
+  assert.equal(chain.accounts.get(state), undefined, "a simulation creates nothing");
+
+  // initialize creates the PDA with the caller paying its rent; then a record call.
+  const init = await w.ok(w.dev, "call_program", { program_id: p.program_id, instruction: initialize(state) });
+  assert.equal(init.sent, true, JSON.stringify(init));
+  assert.equal(chain.accounts.get(state).owner, p.program_id);
+  assert.equal(chain.accounts.get(state).lamports, chain.rent(200));
+  const rec = await w.ok(w.dev, "call_program", { program_id: p.program_id, instruction: { method: "record", accounts: [{ pubkey: "$caller", signer: true }] } });
+  assert.equal(rec.sent, true);
+  assert.deepEqual(chain.sent.find((t) => t.signature === rec.signature).signers, [sim.fee_payer, sim.caller]);
+
+  // The faucet paid; Mynt's own SOL wasn't needed.
+  assert.equal(transfersFrom(chain, p.upgrade_authority).length, authorityTransfers);
+  const audited = await topUps(w);
+  assert.ok(audited.length >= 2 && audited.every((r) => r.details.source === "faucet" && r.details.owner_id === w.devUser.id));
+  authorityNeverInCalls(chain, p.program_id, p.upgrade_authority);
+});
+
+test("devnet calls: when the faucet refuses, Mynt's devnet authority sends only the shortfall, within its limits", async () => {
+  const limits = { maxLamports: 50_000_000, dailyLamports: 40_000_000, authorityKeepLamports: 100_000_000 };
+  const w = await world({ devnetTopUp: limits });
+  const p = await deployedOn(w);
+  const chain = w.clusters.devnet;
+  const authority = p.upgrade_authority;
+  chain.fund(authority, 1_000_000_000);
+  chain.faucetFails = true;
+  const [state] = findProgramAddress([Buffer.from("state")], p.program_id);
+
+  const sim = await w.ok(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(state) });
+  assert.equal(sim.ok, true, JSON.stringify(sim));
+  assert.deepEqual(transfersFrom(chain, authority), [
+    [sim.fee_payer, 5_000_000],
+    [sim.caller, 20_000_000],
+  ]);
+  const sent = await w.ok(w.dev, "call_program", { program_id: p.program_id, instruction: initialize(state) });
+  assert.equal(sent.sent, true, JSON.stringify(sent));
+  assert.equal(chain.accounts.get(state).owner, p.program_id);
+  assert.equal(transfersFrom(chain, authority).length, 2, "already funded: nothing more sent");
+
+  // An account bigger than the caller's float: the simulation's shortfall is sent, and it's simulated once more.
+  const big = codec.Keypair.generate().address;
+  const bigSim = await w.ok(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(big, 4000) });
+  assert.equal(bigSim.ok, true, JSON.stringify(bigSim));
+  assert.equal(chain.accounts.get(sim.caller).lamports, chain.rent(4000), "exactly what the account's rent needs");
+  // One bigger than a single top-up allows is refused, with the address to fund.
+  let r = await w.call(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(codec.Keypair.generate().address, 12_000) });
+  assert.ok(r.isError);
+  assert.match(r.data.error, new RegExp(`devnet caller ${sim.caller} needs .* over the 0.0500 SOL Mynt tops up at once.*faucet.solana.com`));
+  const transfers = transfersFrom(chain, authority);
+  assert.ok(transfers.every(([to, lamports]) => [sim.fee_payer, sim.caller].includes(to) && lamports <= limits.maxLamports));
+  const total = transfers.reduce((n, [, l]) => n + l, 0);
+  const audited = (await topUps(w)).filter((a) => a.details.source === "devnet-authority");
+  assert.equal(audited.reduce((n, a) => n + Number(a.details.lamports), 0), total, "every top-up is audited");
+  assert.ok(audited.every((a) => a.details.owner_id === w.devUser.id && a.details.cluster === "devnet" && a.details.signature));
+
+  // The authority keeps enough for its own rent and fees: it doesn't send what it can't spare.
+  chain.accounts.get(sim.caller).lamports = 19_000_000;
+  chain.accounts.get(authority).lamports = limits.authorityKeepLamports + 5_000 + 1_000;
+  r = await w.call(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(codec.Keypair.generate().address) });
+  assert.match(r.data.error, /Mynt's own devnet SOL is low; fund .* at https:\/\/faucet.solana.com/);
+  assert.equal(chain.accounts.get(authority).lamports, limits.authorityKeepLamports + 6_000);
+  chain.accounts.get(authority).lamports = 1_000_000_000;
+
+  // The daily limit per developer: past it, nothing more is sent.
+  chain.accounts.get(sim.caller).lamports = 0;
+  r = await w.call(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(codec.Keypair.generate().address) });
+  assert.match(r.data.error, /daily limit is 0.0400 SOL\) and the devnet faucet refused/);
+  assert.equal(transfersFrom(chain, authority).length, transfers.length);
+  // The faucet back: it funds again, outside Mynt's limit.
+  chain.faucetFails = false;
+  const again = await w.ok(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(codec.Keypair.generate().address) });
+  assert.equal(again.ok, true);
+  assert.equal(transfersFrom(chain, authority).length, transfers.length);
+
+  authorityNeverInCalls(chain, p.program_id, authority);
+});
+
+test("mainnet calls: nothing is funded automatically, and an unfunded fee payer is named", async () => {
+  const w = await world({ mainnetUrl: "https://rpc.example.com", mainnetVaultAllowed: true });
+  const ready = await w.ok(w.admin, "configure_solana_signer", { backend: "mainnet-vault", generate_key: true, enabled: true });
+  const chain = w.clusters.mainnet;
+  chain.fund(ready.mainnet.authority, 10_000_000_000);
+  // Even with SOL in Mynt's devnet authority and the faucet's limit reached, mainnet is never topped up.
+  w.clusters.devnet.faucetFails = true;
+  const p = await deployedOn(w, "mainnet");
+  const [state] = findProgramAddress([Buffer.from("state")], p.program_id);
+  const before = chain.sent.length;
+
+  let r = await w.call(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: initialize(state) });
+  assert.ok(r.isError);
+  const m = /Your mainnet fee payer (\w+) holds 0.0000 SOL .*Mynt never funds mainnet keys: send SOL to \1/.exec(r.data.error);
+  assert.ok(m, r.data.error);
+  const feePayer = m[1];
+  assert.equal(chain.simulations.length, 0, "nothing simulated against a fee payer that doesn't exist");
+  r = await w.call(w.dev, "call_program", { program_id: p.program_id, instruction: initialize(state) });
+  assert.match(r.data.error, new RegExp(`fee payer ${feePayer} holds`));
+  assert.ok(!chain.calls.includes("requestAirdrop"));
+  assert.equal(chain.sent.length, before, "nothing sent");
+  assert.ok(!(await topUps(w)).length);
+
+  // Funded by the developer: the call goes, the caller paying from what they gave it.
+  chain.fund(feePayer, 10_000_000);
+  const sim = await w.ok(w.dev, "simulate_program_call", { program_id: p.program_id, instruction: { method: "record", accounts: [{ pubkey: "$caller", signer: true }] } });
+  assert.equal(sim.ok, true);
+  assert.equal(sim.fee_payer, feePayer);
+  const sent = await w.ok(w.dev, "call_program", { program_id: p.program_id, instruction: { method: "record", accounts: [{ pubkey: "$caller", signer: true }] } });
+  assert.equal(sent.sent, true);
+  assert.equal(chain.accounts.get(sim.caller), undefined, "the caller was never funded");
+  assert.ok(!chain.calls.includes("requestAirdrop"));
+  assert.equal(w.clusters.devnet.sent.length, 0, "Mynt's devnet SOL never reaches mainnet keys");
+  authorityNeverInCalls(chain, p.program_id, ready.mainnet.authority);
 });
 
 test("the indexer forwards a program's own Anchor events to its firm, once each", async () => {
@@ -936,6 +1131,12 @@ test("RPC: rate limits and overloaded nodes are retried with backoff and jitter,
     faults.push({ status: 502 });
     await assert.rejects(rpc.call("requestAirdrop", ["x", 1]), /requestAirdrop failed \(http 502\)/);
     assert.equal(srv.calls.length, before + 1, "an airdrop isn't sent twice");
+    // The faucet's rate limit lasts hours: an airdrop it refuses fails at once, so Mynt can fund another way.
+    const waitsBefore = clock.waits.length;
+    faults.push({ status: 429 });
+    await assert.rejects(rpc.call("requestAirdrop", ["x", 1]), /faucet's limit was reached/);
+    assert.equal(srv.calls.length, before + 2);
+    assert.equal(clock.waits.length, waitsBefore, "no waiting on the faucet");
 
     // A rate limit that outlasts SOLANA_RPC_MAX_RETRY_SECONDS fails with a clear message that never names the URL.
     srv.fault = () => ({ status: 429 });

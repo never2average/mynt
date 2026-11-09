@@ -142,6 +142,29 @@ export interface SolanaConfig {
   maxRps?: Record<Cluster, number>;
   // How long one RPC call keeps retrying a rate limit before it fails (SOLANA_RPC_MAX_RETRY_SECONDS).
   rpcMaxRetryMs?: number;
+  // Devnet only: how much Mynt's devnet deploy authority may send a developer's call keys when the faucet
+  // won't. Mainnet keys are never funded automatically.
+  devnetTopUp?: DevnetTopUpLimits;
+}
+
+export interface DevnetTopUpLimits {
+  maxLamports: number; // one top-up, at most (SOLANA_DEVNET_TOPUP_MAX_SOL, default 0.05)
+  dailyLamports: number; // one developer's top-ups in any 24 hours (SOLANA_DEVNET_TOPUP_DAILY_SOL, default 0.25)
+  authorityKeepLamports: number; // what the authority always keeps for its own rent and fees (SOLANA_DEVNET_AUTHORITY_KEEP_SOL, default 0.1)
+}
+
+export const DEFAULT_DEVNET_TOPUP: DevnetTopUpLimits = { maxLamports: 50_000_000, dailyLamports: 250_000_000, authorityKeepLamports: 100_000_000 };
+
+export function devnetTopUpFromEnv(env = process.env): DevnetTopUpLimits {
+  const lamports = (name: string, fallback: number) => {
+    const v = Number(env[name]);
+    return env[name] && Number.isFinite(v) && v >= 0 ? Math.round(v * 1_000_000_000) : fallback;
+  };
+  return {
+    maxLamports: lamports("SOLANA_DEVNET_TOPUP_MAX_SOL", DEFAULT_DEVNET_TOPUP.maxLamports),
+    dailyLamports: lamports("SOLANA_DEVNET_TOPUP_DAILY_SOL", DEFAULT_DEVNET_TOPUP.dailyLamports),
+    authorityKeepLamports: lamports("SOLANA_DEVNET_AUTHORITY_KEEP_SOL", DEFAULT_DEVNET_TOPUP.authorityKeepLamports),
+  };
 }
 
 export function solanaConfigFromEnv(env = process.env): SolanaConfig {
@@ -152,6 +175,7 @@ export function solanaConfigFromEnv(env = process.env): SolanaConfig {
     pollMs: Number(env.SOLANA_CONFIRM_POLL_MS ?? 1_000),
     maxRps: rpcPaceFromEnv(env),
     rpcMaxRetryMs: rpcMaxRetryMsFromEnv(env),
+    devnetTopUp: devnetTopUpFromEnv(env),
   };
 }
 
@@ -234,7 +258,13 @@ type Signs = { address: string; sign(m: Uint8Array): Promise<Uint8Array> };
 const signs = (k: Keypair): Signs => ({ address: k.address, sign: async (m) => k.sign(m) });
 const AIRDROP_MAX = 2 * LAMPORTS_PER_SOL;
 const CALL_FEE_RESERVE = 5_000_000; // what a developer's fee payer keeps for calls' fees
-const DEVNET_CALLER_FLOAT = 50_000_000; // devnet only: enough for a call to pay an account's rent
+// Devnet only: what a developer's caller holds before a call that names it, enough for the rent of a typical small
+// account an Anchor `initialize` creates with $caller as its payer (about 2.7 KB). A bigger one is topped up from
+// the simulation's own shortfall, once.
+const DEVNET_CALLER_FLOAT = 20_000_000;
+const TOPUP_ACTION = "solana_devnet_topup";
+// What the system program logs when a transfer (an account's creation, its rent) has too little.
+const SHORTFALL = /insufficient lamports (\d+), need (\d+)/;
 const sol = (lamports: number) => `${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`;
 const explorer = (cluster: Cluster, kind: "tx" | "address", id: string) =>
   `https://explorer.solana.com/${kind}/${id}${cluster === "devnet" ? "?cluster=devnet" : ""}`;
@@ -250,6 +280,7 @@ export class SolanaService {
   private jobs = new Map<string, Promise<void>>();
   private rpcs = new Map<Cluster, SolanaRpc>();
   private pacers = new Map<Cluster, RateLimiter>();
+  private topUps = new Map<string, Promise<unknown>>(); // one developer's devnet top-ups, one at a time
 
   private constructor(
     private readonly db: Db,
@@ -1198,17 +1229,26 @@ export class SolanaService {
     if (p.status !== "deployed") throw new SolanaError(`The program is ${p.status}; only a deployed program can be called`);
   }
 
-  async simulate(p: ProgramRecord, input: CallInput) {
+  async simulate(user: User, p: ProgramRecord, input: CallInput) {
     await this.callable(p);
     const { payer, caller } = await this.callKeys(p.cluster, p.owner_id);
     const rpc = this.rpc(p.cluster);
     const ix = await this.instruction(p, input, { payer: payer.address, caller: caller.address });
-    const message = compileMessage(payer.address, [ix], (await this.blockhash(rpc)).blockhash);
-    const wire = serializeTransaction(message, new Map());
-    const r = await rpc.call<{ value: { err: unknown; logs: string[] | null; unitsConsumed?: number } }>("simulateTransaction", [
-      Buffer.from(wire).toString("base64"),
-      { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" },
-    ]);
+    // On devnet the developer's keys are funded before the simulation, which fails with AccountNotFound for a fee
+    // payer that doesn't exist yet. On mainnet nothing is funded for them: an unfunded fee payer is named.
+    const callerUsed = ix.keys.some((k) => k.pubkey === caller.address && (k.isSigner || k.isWritable));
+    if (p.cluster === "devnet") {
+      await this.devnetFloat(user, p.owner_id, payer.address, "fee payer", CALL_FEE_RESERVE);
+      if (callerUsed) await this.devnetFloat(user, p.owner_id, caller.address, "caller", DEVNET_CALLER_FLOAT);
+    } else await this.mainnetFunded(rpc, payer.address, 2 * SIGNATURE_FEE);
+    let r = await this.simulateOnce(rpc, payer.address, ix);
+    // An account bigger than the caller's float: its shortfall, from the system program's log, then once more.
+    const short = p.cluster === "devnet" && callerUsed && r.value.err ? (r.value.logs ?? []).map((l) => SHORTFALL.exec(l)).find((m) => m) : null;
+    if (short) {
+      const have = await this.balance(rpc, caller.address);
+      await this.devnetFloat(user, p.owner_id, caller.address, "caller", have + Number(short[2]) - Number(short[1]));
+      r = await this.simulateOnce(rpc, payer.address, ix);
+    }
     return {
       ok: !r.value.err,
       err: r.value.err ?? null,
@@ -1219,20 +1259,100 @@ export class SolanaService {
     };
   }
 
+  private async simulateOnce(rpc: SolanaRpc, payer: string, ix: Instruction) {
+    const message = compileMessage(payer, [ix], (await this.blockhash(rpc)).blockhash);
+    const wire = serializeTransaction(message, new Map());
+    return rpc.call<{ value: { err: unknown; logs: string[] | null; unitsConsumed?: number } }>("simulateTransaction", [
+      Buffer.from(wire).toString("base64"),
+      { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" },
+    ]);
+  }
+
   // Simulated first; sent only if the simulation succeeds. Fees come from the developer's fee payer, which no
-  // program ever sees; $caller signs only when the call lists it.
+  // program ever sees; $caller signs only when the call lists it. On devnet the simulation has already funded
+  // both keys; on mainnet the fee payer must hold its reserve, which Mynt never sends it.
   async call(user: User, p: ProgramRecord, input: CallInput) {
-    const simulation = await this.simulate(p, input);
+    const simulation = await this.simulate(user, p, input);
     if (!simulation.ok) return { sent: false, simulation };
     const { payer, caller } = await this.callKeys(p.cluster, p.owner_id);
     const rpc = this.rpc(p.cluster);
-    await this.fund(rpc, p.cluster, payer.address, CALL_FEE_RESERVE);
+    if (p.cluster === "mainnet") await this.mainnetFunded(rpc, payer.address, CALL_FEE_RESERVE);
     const ix = await this.instruction(p, input, { payer: payer.address, caller: caller.address });
     const callerSigns = ix.keys.some((k) => k.pubkey === caller.address && k.isSigner);
-    if (callerSigns && p.cluster === "devnet") await this.fund(rpc, p.cluster, caller.address, DEVNET_CALLER_FLOAT).catch(() => undefined);
     const signature = await this.send(rpc, { address: payer.address, sign: async (m) => payer.sign(m) }, [ix], callerSigns ? [caller] : []);
     await this.store.audit(user.id, "call_program", p.program_id, { cluster: p.cluster, signature, method: input.method ?? null });
     return { sent: true, signature, explorer_url: explorer(p.cluster, "tx", signature), simulation };
+  }
+
+  private async balance(rpc: SolanaRpc, address: string) {
+    return (await rpc.call<{ value: number }>("getBalance", [address, { commitment: "confirmed" }])).value;
+  }
+
+  // Mainnet: a developer's fee payer is theirs to fund. Says which address, and how much it needs.
+  private async mainnetFunded(rpc: SolanaRpc, address: string, need: number) {
+    const have = await this.balance(rpc, address);
+    if (have < need)
+      throw new SolanaError(
+        `Your mainnet fee payer ${address} holds ${sol(have)} and needs at least ${sol(need)} to pay for calls. Mynt never funds mainnet keys: send SOL to ${address} and try again`,
+      );
+  }
+
+  // Devnet only: a developer's call key holds at least `need`. The faucet first; if it refuses (it rate-limits
+  // servers), a transfer of just the shortfall from Mynt's devnet deploy authority, within the top-up limits.
+  // That transfer is its own transaction, signed only by the authority, to the developer's own key: the
+  // authority never signs, pays for or appears in a developer's call. One developer's top-ups run one at a time,
+  // so the daily limit holds.
+  private async devnetFloat(user: User, ownerId: string, address: string, role: string, need: number) {
+    const prior = this.topUps.get(ownerId) ?? Promise.resolve();
+    const run = prior.catch(() => undefined).then(() => this.devnetFloatNow(user, ownerId, address, role, need));
+    this.topUps.set(ownerId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.topUps.get(ownerId) === run) this.topUps.delete(ownerId);
+    }
+  }
+
+  private async devnetFloatNow(user: User, ownerId: string, address: string, role: string, need: number) {
+    const rpc = this.rpc("devnet");
+    let have = await this.balance(rpc, address);
+    if (have >= need) return;
+    const audit = (source: string, lamports: number, signature: string) =>
+      this.store.audit(user.id, TOPUP_ACTION, address, { cluster: "devnet", owner_id: ownerId, role, source, lamports, signature });
+    try {
+      const lamports = Math.min(AIRDROP_MAX, need);
+      const sig = await rpc.call<string>("requestAirdrop", [address, lamports]);
+      await this.confirm(rpc, [sig]);
+      await audit("faucet", lamports, sig);
+      have = await this.balance(rpc, address);
+      if (have >= need) return;
+    } catch {
+      // the faucet's limits: Mynt's own devnet SOL instead
+    }
+    const limits = this.config.devnetTopUp ?? DEFAULT_DEVNET_TOPUP;
+    const shortfall = need - have;
+    const fundIt = `fund ${address} at https://faucet.solana.com and try again`;
+    if (shortfall > limits.maxLamports)
+      throw new SolanaError(
+        `Your devnet ${role} ${address} needs ${sol(shortfall)} more, over the ${sol(limits.maxLamports)} Mynt tops up at once, and the devnet faucet refused; ${fundIt}`,
+      );
+    const row = await this.one(
+      `SELECT COALESCE(SUM((details->>'lamports')::bigint), 0) AS used FROM financial_products.audit_log
+       WHERE action = $1 AND details->>'owner_id' = $2 AND details->>'source' = 'devnet-authority' AND created_at > now() - interval '24 hours'`,
+      [TOPUP_ACTION, ownerId],
+    );
+    const used = Number(row?.used ?? 0);
+    if (used + shortfall > limits.dailyLamports)
+      throw new SolanaError(
+        `Mynt has topped up your devnet keys with ${sol(used)} in the last 24 hours (its daily limit is ${sol(limits.dailyLamports)}) and the devnet faucet refused; ${fundIt}`,
+      );
+    // Only the devnet authority (a vault key, never a custody or multisig key), and only what it can spare
+    // while keeping enough for its own rent and fees.
+    const authority = await this.vaultKey("devnet", "authority", "");
+    const spare = authority ? (await this.balance(rpc, authority.address)) - limits.authorityKeepLamports - SIGNATURE_FEE : 0;
+    if (!authority || spare < shortfall) throw new SolanaError(`The devnet faucet refused and Mynt's own devnet SOL is low; ${fundIt}`);
+    const signature = await this.send(rpc, signs(authority), [system.transfer(authority.address, address, shortfall)]);
+    await audit("devnet-authority", shortfall, signature);
   }
 
   // ---- the indexer ----

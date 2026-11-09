@@ -94,6 +94,9 @@ export class HttpSolanaRpc implements SolanaRpc {
       // Slow down and try again: a rate limit (HTTP or JSON-RPC), an unavailable node, or a gateway error for a
       // method that is safe to repeat.
       const limited = status === 429 || (!!body?.error && isRateLimitError(body.error.code, body.error.message));
+      // The devnet faucet's limit lasts hours, not seconds: an airdrop it refuses fails at once, so the caller
+      // can fund another way instead of waiting out the retries.
+      if (limited && method === "requestAirdrop") throw new RpcError(`Solana RPC requestAirdrop: the faucet's limit was reached`, body?.error?.code);
       const retryable = limited || status === 503 || ((status === 502 || status === 504) && !NOT_REPEATABLE.has(method));
       if (retryable) {
         const backoff = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
