@@ -1,0 +1,18 @@
+{
+ "instructions": [
+  {
+   "name": "reset",
+   "accounts": [
+    {
+     "name": "ledger",
+     "writable": true
+    },
+    {
+     "name": "admin",
+     "signer": true,
+     "address": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+    }
+   ]
+  }
+ ]
+}

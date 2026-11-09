@@ -1,0 +1,28 @@
+{
+ "instructions": [
+  {
+   "name": "withdraw",
+   "accounts": [
+    {
+     "name": "vault",
+     "writable": true
+    },
+    {
+     "name": "destination",
+     "writable": true
+    },
+    {
+     "name": "vault_authority"
+    },
+    {
+     "name": "owner",
+     "signer": true
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ]
+  }
+ ]
+}

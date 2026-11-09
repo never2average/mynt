@@ -17,6 +17,7 @@ import {
   type SolanaSigner,
 } from "./signer.js";
 import { turnkeyFromEnv } from "./custody/turnkey.js";
+import type { DepInfoCapture } from "./crate-tree.js";
 import {
   BUFFER_HEADER,
   compileMessage,
@@ -111,6 +112,34 @@ const TABLES = `
   );
   ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS cargo_lock_sha256 text;
   ALTER TABLE ${T}.solana_program_versions ADD COLUMN IF NOT EXISTS cargo_lock_sha256 text;
+  -- The workspace source Mynt captured with a build's programs (Rust, manifests, the Cargo.lock it built with), by
+  -- the sha256 of the JSON Mynt read back: what the mainnet program gate audits.
+  CREATE TABLE IF NOT EXISTS ${T}.solana_program_sources (
+    sha256 text PRIMARY KEY,
+    files jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS sources_sha256 text;
+  -- The workspace's non-text files and links, as they went into the build container.
+  ALTER TABLE ${T}.solana_program_sources ADD COLUMN IF NOT EXISTS binary_files jsonb;
+  ALTER TABLE ${T}.solana_program_sources ADD COLUMN IF NOT EXISTS links jsonb;
+  -- Every crate of the Cargo.lock a build used (checksums checked against the downloaded crates), and the source of
+  -- those not on Mynt's crate allowlist, by the sha256 of what Mynt read back.
+  CREATE TABLE IF NOT EXISTS ${T}.solana_program_deps (
+    sha256 text PRIMARY KEY,
+    data jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS deps_sha256 text;
+  -- What the compiler read (rustc's dep-info) and the hashes of the build container's copies of those files.
+  CREATE TABLE IF NOT EXISTS ${T}.solana_program_depinfo (
+    sha256 text PRIMARY KEY,
+    data jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS depinfo_sha256 text;
+  -- Where the IDL came from: 'build' (Mynt's offline container) or 'test-run' (the workspace's own code, on the host).
+  ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS idl_source text;
   -- The exact toolchain (versions, image digest, pins hash) each program was built with, to rebuild it.
   ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS toolchain jsonb;
   ALTER TABLE ${T}.solana_program_versions ADD COLUMN IF NOT EXISTS toolchain jsonb;
@@ -275,6 +304,29 @@ const explorer = (cluster: Cluster, kind: "tx" | "address", id: string) =>
   `https://explorer.solana.com/${kind}/${id}${cluster === "devnet" ? "?cluster=devnet" : ""}`;
 
 export class SolanaError extends Error {}
+
+// What deploys ask of the mainnet program gate: claim, atomically, the approved review that covers exactly these
+// bytes for this program and action (an upgrade's timelock over, a first deploy's approval unexpired, the current
+// vulnerability database's hard rules still passing), or throw saying why. The claim consumes the approval; it is
+// released only if the deploy never got started.
+export interface MainnetGateClaim {
+  reviewId: string;
+  release(): Promise<void>;
+}
+export interface MainnetGateCheck {
+  check(p: ProgramRecord, sha256: string, action: "deploy" | "upgrade"): Promise<unknown>;
+  claim(p: ProgramRecord, sha256: string, action: "deploy" | "upgrade"): Promise<MainnetGateClaim>;
+}
+
+// What a build kept of its dependencies (solana-verify.sh): every crate of the Cargo.lock with its checksum and the
+// sha256 of the crate cargo downloaded, and the source of those not on Mynt's crate allowlist.
+export interface DepsCapture {
+  packages: { name: string; version: string; source?: string | null; checksum?: string | null; crate_sha256?: string; allowlisted: boolean }[];
+  sources: Record<string, Record<string, string>>;
+  complete: boolean;
+  problems: string[];
+  lock?: string | null; // the Cargo.lock the build used
+}
 // A transaction that wasn't confirmed before SOLANA_CONFIRM_TIMEOUT_MS: it may still land, or its blockhash may
 // have expired.
 class Unconfirmed extends SolanaError {}
@@ -555,25 +607,70 @@ export class SolanaService {
 
   // What Mynt built in its verify sandbox. The hash is Mynt's own, over the bytes it read back; it must agree
   // with the one the sandbox computed, or the artifact isn't kept.
-  async recordArtifacts(buildId: string, artifacts: (ProgramArtifact & { reported_sha256?: string; cargo_lock_sha256?: string | null; toolchain?: object | null })[]) {
+  async recordArtifacts(
+    buildId: string,
+    artifacts: (ProgramArtifact & {
+      reported_sha256?: string;
+      cargo_lock_sha256?: string | null;
+      sources?: { sha256: string; files: Record<string, string>; binary?: Record<string, string>; links?: Record<string, string> } | null;
+      deps?: { sha256: string; data: unknown } | null;
+      depinfo?: { sha256: string; data: unknown } | null;
+      idl_source?: "build" | null;
+      toolchain?: object | null;
+    })[],
+  ) {
     const kept: string[] = [];
     for (const a of artifacts) {
       const sha = executableHash(a.program);
       if (a.reported_sha256 && a.reported_sha256 !== sha) continue;
+      const sources = a.sources && /^[0-9a-f]{64}$/.test(a.sources.sha256) ? a.sources : null;
+      if (sources)
+        await this.db.query(`INSERT INTO ${T}.solana_program_sources (sha256, files, binary_files, links) VALUES ($1, $2, $3, $4) ON CONFLICT (sha256) DO NOTHING`, [
+          sources.sha256,
+          JSON.stringify(sources.files),
+          JSON.stringify(sources.binary ?? {}),
+          JSON.stringify(sources.links ?? {}),
+        ]);
+      const deps = a.deps && /^[0-9a-f]{64}$/.test(a.deps.sha256) ? a.deps : null;
+      if (deps) await this.db.query(`INSERT INTO ${T}.solana_program_deps (sha256, data) VALUES ($1, $2) ON CONFLICT (sha256) DO NOTHING`, [deps.sha256, JSON.stringify(deps.data)]);
+      const depinfo = a.depinfo && /^[0-9a-f]{64}$/.test(a.depinfo.sha256) ? a.depinfo : null;
+      if (depinfo)
+        await this.db.query(`INSERT INTO ${T}.solana_program_depinfo (sha256, data) VALUES ($1, $2) ON CONFLICT (sha256) DO NOTHING`, [depinfo.sha256, JSON.stringify(depinfo.data)]);
       await this.db.query(
-        `INSERT INTO ${T}.solana_program_artifacts (id, build_id, name, declared_id, sha256, size, program_b64, idl, cargo_lock_sha256, toolchain) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO ${T}.solana_program_artifacts (id, build_id, name, declared_id, sha256, size, program_b64, idl, cargo_lock_sha256, sources_sha256, deps_sha256, idl_source, depinfo_sha256, toolchain)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (build_id, name) DO UPDATE SET declared_id = EXCLUDED.declared_id, sha256 = EXCLUDED.sha256, size = EXCLUDED.size, program_b64 = EXCLUDED.program_b64, idl = EXCLUDED.idl,
-           cargo_lock_sha256 = EXCLUDED.cargo_lock_sha256, toolchain = EXCLUDED.toolchain`,
-        [randomUUID(), buildId, a.name, a.declared_id, sha, a.program.length, Buffer.from(a.program).toString("base64"), a.idl == null ? null : JSON.stringify(a.idl), /^[0-9a-f]{64}$/.test(a.cargo_lock_sha256 ?? "") ? a.cargo_lock_sha256 : null, a.toolchain ? JSON.stringify(a.toolchain) : null],
+           cargo_lock_sha256 = EXCLUDED.cargo_lock_sha256, sources_sha256 = EXCLUDED.sources_sha256, deps_sha256 = EXCLUDED.deps_sha256, idl_source = EXCLUDED.idl_source, depinfo_sha256 = EXCLUDED.depinfo_sha256, toolchain = EXCLUDED.toolchain`,
+        [
+          randomUUID(),
+          buildId,
+          a.name,
+          a.declared_id,
+          sha,
+          a.program.length,
+          Buffer.from(a.program).toString("base64"),
+          a.idl == null ? null : JSON.stringify(a.idl),
+          /^[0-9a-f]{64}$/.test(a.cargo_lock_sha256 ?? "") ? a.cargo_lock_sha256 : null,
+          sources?.sha256 ?? null,
+          deps?.sha256 ?? null,
+          a.idl != null ? (a.idl_source ?? null) : null,
+          depinfo?.sha256 ?? null,
+          a.toolchain ? JSON.stringify(a.toolchain) : null,
+        ],
       );
       kept.push(a.name);
     }
     return kept;
   }
 
-  // The IDL a later, untrusted run produced: used only to name events, never deployed.
+  // The IDL a later, untrusted run produced (the test run, on the host): used only to name events, never deployed,
+  // and never over the IDL Mynt built in its own container.
   async recordIdl(buildId: string, name: string, idl: unknown) {
-    await this.db.query(`UPDATE ${T}.solana_program_artifacts SET idl = $3 WHERE build_id = $1 AND name = $2`, [buildId, name, JSON.stringify(idl)]);
+    await this.db.query(`UPDATE ${T}.solana_program_artifacts SET idl = $3, idl_source = 'test-run' WHERE build_id = $1 AND name = $2 AND idl_source IS DISTINCT FROM 'build'`, [
+      buildId,
+      name,
+      JSON.stringify(idl),
+    ]);
   }
 
   async artifacts(buildId: string) {
@@ -587,9 +684,10 @@ export class SolanaService {
 
   // The verified program for `p` in a build: the build must be the developer's, verified and shipped by Mynt,
   // and Mynt's own build of it must declare exactly this program's address.
-  private async verifiedArtifact(user: User, p: ProgramRecord, buildId: string) {
+  // `user` null: Mynt itself, re-reading a build a person's request already checked (the mainnet gate's worker).
+  private async verifiedArtifact(user: User | null, p: ProgramRecord, buildId: string) {
     const b = await this.one(`SELECT developer_id, status FROM ${T}.build_runs WHERE id::text = $1`, [buildId]);
-    if (!b || (b.developer_id !== user.id && b.developer_id !== p.owner_id)) throw new SolanaError(`No build of yours with id '${buildId}'`);
+    if (!b || (user && b.developer_id !== user.id && b.developer_id !== p.owner_id)) throw new SolanaError(`No build of yours with id '${buildId}'`);
     if (b.status !== "succeeded") throw new SolanaError(`Build ${buildId} is ${b.status}: only a build Mynt verified can be deployed`);
     const rows = (await this.db.query(`SELECT * FROM ${T}.solana_program_artifacts WHERE build_id = $1`, [buildId])).rows as Row[];
     if (!rows.length) throw new SolanaError(`Mynt's verification of build ${buildId} built no Solana program`);
@@ -600,7 +698,48 @@ export class SolanaService {
       );
     const program = Buffer.from(r.program_b64 as string, "base64");
     if (executableHash(program) !== r.sha256) throw new SolanaError("The stored artifact doesn't match its recorded hash");
-    return { name: r.name as string, sha256: r.sha256 as string, program: new Uint8Array(program) };
+    return {
+      name: r.name as string,
+      sha256: r.sha256 as string,
+      program: new Uint8Array(program),
+      idl: (r.idl as unknown) ?? null,
+      idl_source: (r.idl_source as string | null) ?? null,
+      sources_sha256: (r.sources_sha256 as string | null) ?? null,
+      deps_sha256: (r.deps_sha256 as string | null) ?? null,
+      depinfo_sha256: (r.depinfo_sha256 as string | null) ?? null,
+    };
+  }
+
+  // ---- the mainnet program gate (src/solana/mainnet-gate.ts) ----
+
+  // Every mainnet deploy and upgrade must have an approved review for exactly the bytes it ships. Without a gate
+  // connected, mainnet deploys are refused.
+  gate: MainnetGateCheck | null = null;
+
+  // What the gate reviews of a build: the exact bytes Mynt stored, their IDL, and the source Mynt captured with them.
+  async reviewMaterial(user: User | null, p: ProgramRecord, buildId: string) {
+    const a = await this.verifiedArtifact(user, p, buildId);
+    const src = a.sources_sha256 ? await this.one(`SELECT files, binary_files AS "binary", links FROM ${T}.solana_program_sources WHERE sha256 = $1`, [a.sources_sha256]) : undefined;
+    const deps = a.deps_sha256 ? await this.one(`SELECT data FROM ${T}.solana_program_deps WHERE sha256 = $1`, [a.deps_sha256]) : undefined;
+    const depinfo = a.depinfo_sha256 ? await this.one(`SELECT data FROM ${T}.solana_program_depinfo WHERE sha256 = $1`, [a.depinfo_sha256]) : undefined;
+    return {
+      ...a,
+      sources: (src?.files as Record<string, string> | undefined) ?? null,
+      binary: (src?.binary as Record<string, string> | undefined) ?? {},
+      links: (src?.links as Record<string, string> | undefined) ?? {},
+      deps: (deps?.data as DepsCapture | undefined) ?? null,
+      depinfo: (depinfo?.data as DepInfoCapture | undefined) ?? null,
+    };
+  }
+
+  // Mynt's mainnet signer as it stands, or null while mainnet isn't ready. Never throws.
+  async mainnetSigner(): Promise<{ backend: string; address: string } | null> {
+    try {
+      const s = await this.authority("mainnet");
+      return { backend: s.backend, address: s.address };
+    } catch {
+      return null;
+    }
   }
 
   // ---- deploy and upgrade ----
@@ -622,15 +761,28 @@ export class SolanaService {
     if (p.operation) throw new SolanaError(`A ${p.operation} of this program is already running`);
     const artifact = await this.verifiedArtifact(user, p, buildId);
     if (action === "upgrade" && artifact.sha256 === p.verifiable_hash) throw new SolanaError("This build's program is the one already deployed");
+    if (p.cluster === "mainnet") {
+      if (!this.gate) throw new SolanaError("Mainnet deploys and upgrades need an approved mainnet review (request_mainnet_review), and the review gate isn't running on this Mynt");
+      // First, so a program without an approved review learns that before anything else (the claim comes last).
+      await this.gate.check(p, artifact.sha256, action);
+    }
     const signer = await this.authority(p.cluster); // refuses here, before anything starts, when it isn't configured
+    if (p.cluster === "mainnet" && !["mainnet-vault", "custody-service"].includes(signer.backend))
+      throw new SolanaError(`Mainnet programs' upgrade authority must be Mynt's own signer (mainnet-vault or custody-service), not ${signer.backend}`);
     if (action === "upgrade" && p.upgrade_authority !== signer.address)
       throw new SolanaError(`The program's upgrade authority is ${p.upgrade_authority}, but ${p.cluster}'s signer is now ${signer.address}; transfer the authority first`);
+    // The mainnet program gate, last, so nothing after it can refuse: its approved review of exactly these bytes
+    // is claimed (consumed) here, and given back only if the operation below can't be claimed.
+    const review = p.cluster === "mainnet" ? await this.gate!.claim(p, artifact.sha256, action) : null;
     const claimed = await this.db.query(
       `UPDATE ${T}.solana_programs SET operation = $2, operation_started_at = now(), pending_build_id = $3, error = NULL${action === "deploy" ? ", status = 'deploying'" : ""}, updated_at = now()
        WHERE id = $1 AND operation IS NULL RETURNING id`,
       [p.id, action, buildId],
     );
-    if (!claimed.rows.length) throw new SolanaError("Another deploy or upgrade of this program just started");
+    if (!claimed.rows.length) {
+      await review?.release();
+      throw new SolanaError("Another deploy or upgrade of this program just started");
+    }
     const job = this.runDeploy(user.id, p, buildId, artifact, signer, action)
       .catch((e) => this.markFailed(p, action, (e as Error).message))
       .finally(() => this.jobs.delete(p.id));
@@ -703,6 +855,14 @@ export class SolanaService {
       // build after a lost confirmation): record that one, then this build goes through as an upgrade.
       const prior = chain.authority === signer.address ? await this.artifactByHash(p, chain.hash) : null;
       if (!prior) throw new SolanaError(`A different program already exists at ${p.program_id}`);
+      // On mainnet the review covered a first deploy, not an upgrade over what's there: record what's on chain and
+      // stop. The new build needs a review of its own, as an upgrade (announced, timelocked).
+      if (p.cluster === "mainnet") {
+        await this.finish(userId, p, prior.build_id, chain.hash, await this.latestSignature(p), signer, "deploy", chain.capacity);
+        throw new SolanaError(
+          `An earlier build of this program (${chain.hash}) was already on mainnet; Mynt recorded it as deployed. This build's review covered a first deploy, so it wasn't used: request a mainnet review again, which now runs as an upgrade`,
+        );
+      }
       // Recorded and handed over to the upgrade in one write: the operation stays claimed throughout.
       await this.finish(userId, p, prior.build_id, chain.hash, await this.latestSignature(p), signer, "deploy", chain.capacity, { continueAs: "upgrade", pendingBuildId: buildId });
       p = (await this.get(p.program_id))!;

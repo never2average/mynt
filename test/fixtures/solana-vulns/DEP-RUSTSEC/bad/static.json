@@ -1,0 +1,26 @@
+{
+ "tools": [
+  {
+   "name": "cargo-audit",
+   "version": "0.22.2",
+   "status": "ran",
+   "detail": "",
+   "findings": [
+    {
+     "severity": "high",
+     "title": "RUSTSEC-2024-0344: Timing variability in curve25519-dalek's Scalar29::sub/Scalar52::sub",
+     "location": "curve25519-dalek 3.2.1",
+     "detail": "",
+     "id": "RUSTSEC-2024-0344"
+    }
+   ]
+  },
+  {
+   "name": "radar",
+   "version": "3439053",
+   "status": "ran",
+   "detail": "",
+   "findings": []
+  }
+ ]
+}

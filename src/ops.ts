@@ -137,6 +137,12 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
       )
     ).rows as typeof vendors.erroring_subscriptions;
   }
+  // The mainnet program gate: programs a newer vulnerability database flagged, and reviews waiting for an admin.
+  const solana: { flagged_programs: unknown[]; reviews_awaiting_approval: number } = { flagged_programs: [], reviews_awaiting_approval: 0 };
+  if (await exists("solana_program_flags"))
+    solana.flagged_programs = (await db.query("SELECT id, program_id, db_version, created_at FROM financial_products.solana_program_flags WHERE status = 'open' ORDER BY created_at LIMIT 20")).rows;
+  if (await exists("solana_mainnet_reviews"))
+    solana.reviews_awaiting_approval = Number((await db.query("SELECT count(*)::int AS n FROM financial_products.solana_mainnet_reviews WHERE status = 'awaiting_approval'")).rows[0]?.n ?? 0);
   // A provider out of allowance stops everything that needs a machine: say so first, with what to do.
   const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
   const backups = await backupStatus(opts.backupStatusFile);
@@ -153,8 +159,10 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(vendors.failed_conformance.length ? [`vendors: ${vendors.failed_conformance.length} conformance run(s) failed in the last ${hours}h`] : []),
     ...vendors.erroring_subscriptions.map((v) => `vendors: subscription ${v.subscription_id} erred on ${v.errors} of ${v.calls} calls`),
     ...backups.attention,
+    ...(solana.flagged_programs.length ? [`solana: ${solana.flagged_programs.length} mainnet program(s) flagged by the vulnerability database; review with list_program_flags`] : []),
+    ...(solana.reviews_awaiting_approval ? [`solana: ${solana.reviews_awaiting_approval} mainnet review(s) awaiting approval (list_mainnet_reviews)`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors, solana, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {
