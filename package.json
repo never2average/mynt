@@ -14,7 +14,8 @@
   },
   "files": [
     "dist",
-    "workspaces"
+    "workspaces",
+    "schemas"
   ],
   "engines": {
     "node": ">=22.13"

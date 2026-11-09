@@ -1,5 +1,6 @@
 name: CI
-on: [push, pull_request]
+# workflow_dispatch: the toolchain watcher runs CI on the branches it opens (its pushes start no workflows).
+on: [push, pull_request, workflow_dispatch]
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -42,7 +43,22 @@ jobs:
           mkdir -p "$RUNNER_TEMP/mynt"
           node -e 'import("./dist/solana/toolchain.js").then((m) => { const fs = require("fs"); fs.writeFileSync(process.argv[1] + "/solana-toolchain.sh", m.SOLANA_TOOLCHAIN_SCRIPT); fs.writeFileSync(process.argv[1] + "/solana-verify.sh", m.SOLANA_VERIFY_SCRIPT); })' "$RUNNER_TEMP/mynt"
       - name: Install the pinned toolchain
-        run: bash "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+        run: |
+          s=$(date +%s)
+          bash "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+          echo "::notice title=Toolchain install::$(( $(date +%s) - s ))s"
+      # What a sandbox booted from the pre-built environment (src/build-env.ts) does instead of the install above and
+      # the image pull: re-hash the installed toolchain and image against the recorded hash. Run on the real
+      # toolchain, timed, so the saving is measured.
+      - name: The pre-built environment's state hash and check, on the real toolchain
+        run: |
+          node -e 'import("./dist/build-env.js").then((m) => { const fs = require("fs"); const d = process.argv[1]; fs.writeFileSync(d + "/env-state.sh", m.SOLANA_ENV_STATE_SCRIPT); fs.writeFileSync(d + "/env-check.sh", m.SOLANA_ENV_CHECK_SCRIPT.replaceAll(m.ENV_FILES.state, d + "/env-state.sh")); })' "$RUNNER_TEMP/mynt"
+          image=$(node -e 'import("./dist/solana/toolchain.js").then((m) => console.log(m.SOLANA_TOOLCHAIN.anchorImage))')
+          s=$(date +%s); docker pull -q "$image"; echo "::notice title=Image pull::$(( $(date +%s) - s ))s"
+          s=$(date +%s); state=$(bash "$RUNNER_TEMP/mynt/env-state.sh"); echo "::notice title=State hash::$(( $(date +%s) - s ))s"
+          [ "$(bash "$RUNNER_TEMP/mynt/env-state.sh")" = "$state" ] || { echo "the state hash isn't stable"; exit 1; }
+          s=$(date +%s); bash "$RUNNER_TEMP/mynt/env-check.sh" "$state" "$(openssl rand -hex 32)"; echo "::notice title=Snapshot check::$(( $(date +%s) - s ))s"
+          du -sh ~/.mynt-solana
       - name: Scaffold the template program, as a coding agent would
         run: python3 workspaces/coding-build/scripts/scaffold_program.py "$RUNNER_TEMP/app/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw
       - name: Verifiable build in a container, then tests on a local validator, as Mynt verifies a build

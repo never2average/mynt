@@ -24,6 +24,7 @@ Never:
 Write tests for every route (the session's scopes, a bad webhook signature, a replayed event).
 
 When the build has a Solana program (`solana/`, see CLAUDE.md), use the `solana-dev` skill on Mynt's pinned
-versions: keep the reserved `declare_id!`, emit an event for each state change the firm should hear about, and
+versions, and check APIs in `docs/solana/` (the Anchor and Agave docs for exactly those versions; start with its
+`README.md`) rather than newer docs on the web: keep the reserved `declare_id!`, emit an event for each state change the firm should hear about, and
 test every instruction and every refusal with `anchor test`. The program never moves customers' money and
 never reaches customers; Mynt sends its events to the firm's webhooks (`program.event`).

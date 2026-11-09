@@ -111,6 +111,10 @@ const TABLES = `
   );
   ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS cargo_lock_sha256 text;
   ALTER TABLE ${T}.solana_program_versions ADD COLUMN IF NOT EXISTS cargo_lock_sha256 text;
+  -- The exact toolchain (versions, image digest, pins hash) each program was built with, to rebuild it.
+  ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS toolchain jsonb;
+  ALTER TABLE ${T}.solana_program_versions ADD COLUMN IF NOT EXISTS toolchain jsonb;
+  ALTER TABLE ${T}.solana_programs ADD COLUMN IF NOT EXISTS toolchain jsonb;
   CREATE TABLE IF NOT EXISTS ${T}.solana_program_events (
     id uuid PRIMARY KEY,
     program uuid NOT NULL REFERENCES ${T}.solana_programs(id),
@@ -202,6 +206,7 @@ export interface ProgramRecord {
   build_id: string | null;
   verifiable_hash: string | null;
   cargo_lock_sha256: string | null;
+  toolchain: Record<string, unknown> | null;
   deployer: string | null;
   upgrade_authority: string | null;
   signer_backend: string | null;
@@ -323,7 +328,7 @@ export class SolanaService {
   async versions(p: ProgramRecord) {
     return (
       await this.db.query(
-        `SELECT version, action, build_id, verifiable_hash, cargo_lock_sha256, tx, signer_backend, created_at FROM ${T}.solana_program_versions WHERE program = $1 ORDER BY version`,
+        `SELECT version, action, build_id, verifiable_hash, cargo_lock_sha256, toolchain, tx, signer_backend, created_at FROM ${T}.solana_program_versions WHERE program = $1 ORDER BY version`,
         [p.id],
       )
     ).rows.map((r: Row) => ({ ...r, created_at: iso(r.created_at) }));
@@ -550,16 +555,16 @@ export class SolanaService {
 
   // What Mynt built in its verify sandbox. The hash is Mynt's own, over the bytes it read back; it must agree
   // with the one the sandbox computed, or the artifact isn't kept.
-  async recordArtifacts(buildId: string, artifacts: (ProgramArtifact & { reported_sha256?: string; cargo_lock_sha256?: string | null })[]) {
+  async recordArtifacts(buildId: string, artifacts: (ProgramArtifact & { reported_sha256?: string; cargo_lock_sha256?: string | null; toolchain?: object | null })[]) {
     const kept: string[] = [];
     for (const a of artifacts) {
       const sha = executableHash(a.program);
       if (a.reported_sha256 && a.reported_sha256 !== sha) continue;
       await this.db.query(
-        `INSERT INTO ${T}.solana_program_artifacts (id, build_id, name, declared_id, sha256, size, program_b64, idl, cargo_lock_sha256) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `INSERT INTO ${T}.solana_program_artifacts (id, build_id, name, declared_id, sha256, size, program_b64, idl, cargo_lock_sha256, toolchain) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (build_id, name) DO UPDATE SET declared_id = EXCLUDED.declared_id, sha256 = EXCLUDED.sha256, size = EXCLUDED.size, program_b64 = EXCLUDED.program_b64, idl = EXCLUDED.idl,
-           cargo_lock_sha256 = EXCLUDED.cargo_lock_sha256`,
-        [randomUUID(), buildId, a.name, a.declared_id, sha, a.program.length, Buffer.from(a.program).toString("base64"), a.idl == null ? null : JSON.stringify(a.idl), /^[0-9a-f]{64}$/.test(a.cargo_lock_sha256 ?? "") ? a.cargo_lock_sha256 : null],
+           cargo_lock_sha256 = EXCLUDED.cargo_lock_sha256, toolchain = EXCLUDED.toolchain`,
+        [randomUUID(), buildId, a.name, a.declared_id, sha, a.program.length, Buffer.from(a.program).toString("base64"), a.idl == null ? null : JSON.stringify(a.idl), /^[0-9a-f]{64}$/.test(a.cargo_lock_sha256 ?? "") ? a.cargo_lock_sha256 : null, a.toolchain ? JSON.stringify(a.toolchain) : null],
       );
       kept.push(a.name);
     }
@@ -572,7 +577,7 @@ export class SolanaService {
   }
 
   async artifacts(buildId: string) {
-    return (await this.db.query(`SELECT name, declared_id, sha256, size, cargo_lock_sha256 FROM ${T}.solana_program_artifacts WHERE build_id = $1 ORDER BY name`, [buildId])).rows as {
+    return (await this.db.query(`SELECT name, declared_id, sha256, size, cargo_lock_sha256, toolchain FROM ${T}.solana_program_artifacts WHERE build_id = $1 ORDER BY name`, [buildId])).rows as {
       name: string;
       declared_id: string | null;
       sha256: string;
@@ -788,10 +793,12 @@ export class SolanaService {
     next: { continueAs: "upgrade"; pendingBuildId: string } | null = null,
   ) {
     const version = p.version + 1;
-    const lock = (await this.one(`SELECT cargo_lock_sha256 FROM ${T}.solana_program_artifacts WHERE build_id = $1 AND declared_id = $2`, [buildId, p.program_id]))?.cargo_lock_sha256 ?? null;
+    const built = await this.one(`SELECT cargo_lock_sha256, toolchain FROM ${T}.solana_program_artifacts WHERE build_id = $1 AND declared_id = $2`, [buildId, p.program_id]);
+    const lock = built?.cargo_lock_sha256 ?? null;
+    const toolchain = built?.toolchain ?? null;
     await this.db.query(
-      `INSERT INTO ${T}.solana_program_versions (id, program, version, action, build_id, verifiable_hash, cargo_lock_sha256, tx, signer_backend, by_user) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [randomUUID(), p.id, version, action, buildId, sha256, lock, tx, signer.backend, userId],
+      `INSERT INTO ${T}.solana_program_versions (id, program, version, action, build_id, verifiable_hash, cargo_lock_sha256, toolchain, tx, signer_backend, by_user) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [randomUUID(), p.id, version, action, buildId, sha256, lock, toolchain == null ? null : JSON.stringify(toolchain), tx, signer.backend, userId],
     );
     await this.update(p.id, {
       status: "deployed",
@@ -802,6 +809,7 @@ export class SolanaService {
       build_id: buildId,
       verifiable_hash: sha256,
       cargo_lock_sha256: lock,
+      toolchain: toolchain == null ? null : JSON.stringify(toolchain),
       deployer: signer.address,
       upgrade_authority: signer.address,
       signer_backend: signer.backend,
@@ -1442,6 +1450,7 @@ export class SolanaService {
       build_id: p.build_id,
       verifiable_hash: p.verifiable_hash,
       cargo_lock_sha256: p.cargo_lock_sha256,
+      toolchain: p.toolchain ?? null,
       deployer: p.deployer,
       upgrade_authority: p.upgrade_authority,
       signer_backend: p.signer_backend,

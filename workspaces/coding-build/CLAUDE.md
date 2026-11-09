@@ -35,9 +35,11 @@ reserved for this app (`name`, `cluster`, `program_id`); `solana.toolchain` the 
   address and never generate a program keypair to replace it: Mynt deploys only a program that declares its
   reserved address.
 - **Toolchain:** Mynt installs it when the sandbox starts (Agave, Anchor, Rust, pinned). Wait for
-  `~/.mynt-solana/env` to exist, then `. ~/.mynt-solana/env` in each shell. Use exactly these versions
-  (Anchor 0.32.1, `@coral-xyz/anchor` 0.32.1, `anchor test` on `solana-test-validator`), even where the
-  `solana-dev` skill recommends newer defaults.
+  `~/.mynt-solana/env` to exist, then `. ~/.mynt-solana/env` in each shell. Use exactly the versions in
+  `solana.toolchain` and `docs/solana/README.md` (the template already does; `anchor test` on
+  `solana-test-validator`), even where the `solana-dev` skill recommends newer defaults.
+- **Docs:** `docs/solana/` holds the Anchor and Agave docs for exactly those versions (start with its
+  `README.md`). Read them before the web or your memory: APIs and defaults change between releases.
 - **Who:** `server-engineer` owns `solana/` too, with the `solana-dev` skill; `qa-engineer` runs `anchor test`.
 - **Test:** `anchor test` on the local validator; every instruction and every refusal (wrong signer, wrong
   account) has a test. Mynt rebuilds the program itself (Anchor's verifiable build), runs these tests against

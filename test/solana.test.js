@@ -2174,3 +2174,42 @@ test("the build records the Cargo.lock it used and warns, without failing, when 
   assert.match(build, /check "\$OUT\/checks\.jsonl" solana_build pass "[^"]*\$WARN"/, "the warning rides on a pass");
   assert.match(build, /warning: no Cargo\.lock committed in \$NO_LOCK/);
 });
+
+test("the exact toolchain each program was built with is kept with it, its deployed versions and get_program", async () => {
+  const { toolchainRecord, TOOLCHAIN_PINS_SHA256 } = await import("../dist/solana/toolchain.js");
+  const w = await world();
+  const code = w.program(2000, 3);
+  const boat = {
+    async readFile(_id, path) {
+      if (path.endsWith("/solana/programs.json")) return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null }]);
+      if (path.endsWith("/solana/checks.jsonl")) return JSON.stringify({ name: "solana_build", status: "pass", detail: "built" });
+      return null;
+    },
+    async exec(_id, command) {
+      const m = command.match(/tail -c \+(\d+) \S+ \| head -c (\d+) \| base64 -w0$/);
+      return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
+    },
+  };
+  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  builds.solana = w.solana;
+  const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
+  const id = await w.build();
+  // What the verification recorded when it started: from the pre-built environment.
+  const used = toolchainRecord({ source: "snapshot", snapshot_id: "sh-1" });
+  await w.db.query("UPDATE financial_products.build_runs SET solana_toolchain = $2 WHERE id = $1", [id, JSON.stringify(used)]);
+  await builds.collectPrograms(await builds.get(id), "vm-verify");
+  assert.deepEqual((await w.solana.artifacts(id))[0].toolchain, used);
+  await w.db.query("UPDATE financial_products.solana_program_artifacts SET declared_id = $2 WHERE build_id = $1", [id, program_id]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: id });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.deepEqual(p.toolchain, used);
+  assert.deepEqual(p.versions[0].toolchain, used);
+  assert.equal(p.toolchain.pins_sha256, TOOLCHAIN_PINS_SHA256);
+  for (const k of ["agave", "anchor", "anchor_commit", "rust", "rustup", "anchor_image", "anchor_ts"]) assert.ok(p.toolchain[k], k);
+  // A build verified before toolchains were recorded keeps null, never a guess.
+  const old = await w.build();
+  await w.solana.recordArtifacts(old, [{ name: "x", declared_id: null, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
+  assert.equal((await w.solana.artifacts(old))[0].toolchain, null);
+});

@@ -2,7 +2,7 @@
 // backed by a Freestyle VM per sandbox. Everything runs as a `user` account (home /home/user, the paths agents
 // expect), with the sandbox's env loaded from a 0600 file. Previews and downloads are served at unguessable
 // style.dev names, so a URL is its own credential, like boat's token-gated links.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { HttpBoatClient, type BoatClient, type SandboxState } from "./boat.js";
 import { shellQuote } from "./boxes.js";
 import { FreestyleProvider } from "./freestyle.js";
@@ -60,6 +60,8 @@ const STATES: Record<string, SandboxState> = {
 };
 
 export class FreestyleSandboxes implements BoatClient {
+  // What every machine's first boot installs: part of the key of any snapshot taken of one.
+  readonly setupFingerprint = createHash("sha256").update([SETUP, NODE_VERSION, SOPS_VERSION].join("\n\0")).digest("hex");
   constructor(
     private readonly fs: FreestyleProvider,
     private readonly opts: { usdPerHour?: number; setupTimeoutMs?: number } = {},
@@ -69,12 +71,14 @@ export class FreestyleSandboxes implements BoatClient {
     return this.fs.run(id, wrap(command), { ...opts, linuxUser: USER });
   }
 
-  async createSandbox(opts: { name: string; type?: string; ttlSeconds?: number; labels?: Record<string, string>; env?: Record<string, string> }) {
+  async createSandbox(opts: { name: string; type?: string; ttlSeconds?: number; labels?: Record<string, string>; env?: Record<string, string>; snapshot?: string }) {
     const slug = opts.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 63).replace(/-$/, "");
     // Agents need the open Internet (packages, GitHub, Mynt's API and agent proxy), as on boat.
     const vm = await this.fs.call<{ id: string }>("POST", "/vms", {
       slug,
       displayName: opts.name,
+      // A snapshot Mynt took of its own pre-built environment (see build-env.ts); setup below runs again on it.
+      ...(opts.snapshot ? { snapshotId: opts.snapshot } : {}),
       ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}),
       metadata: Object.fromEntries(Object.entries(opts.labels ?? {}).map(([k, v]) => [k.slice(0, 63), v.slice(0, 63)])),
       firewall: { rules: [{ action: "allow", source: {}, destination: { public: true } }] },
@@ -152,6 +156,22 @@ export class FreestyleSandboxes implements BoatClient {
   // Machine time, at the configured hourly rate; the agent's model spend is tracked by Mynt's runner.
   async costDollars(id: string) {
     return ((await this.fs.usage(id)).seconds / 3600) * (this.opts.usdPerHour ?? 0.2);
+  }
+
+  // The VM's exact state, memory and disk, as a private snapshot new VMs can boot from (Freestyle's
+  // POST /vms/{id}/snapshot). Kept until Mynt deletes it, or 30 days after a VM was last created from it.
+  async snapshot(id: string, opts: { slug: string; displayName?: string }) {
+    const r = await this.fs.call<{ snapshotId: string }>("POST", `/vms/${encodeURIComponent(id)}/snapshot`, {
+      slug: opts.slug,
+      ...(opts.displayName ? { displayName: opts.displayName.slice(0, 120) } : {}),
+      autoDeleteSeconds: 30 * 24 * 3600,
+    });
+    if (!r.snapshotId) throw new Error("Freestyle returned no snapshot id");
+    return { snapshotId: r.snapshotId };
+  }
+
+  async deleteSnapshot(snapshotId: string) {
+    await this.fs.call("DELETE", `/snapshots/${encodeURIComponent(snapshotId)}`);
   }
 
   // Stopping a sandbox ends it: the VM and everything routed to it go.

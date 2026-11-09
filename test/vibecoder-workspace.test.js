@@ -24,7 +24,8 @@ test("the coding agent's team: every specialist has frontmatter, and every skill
 });
 
 test("skills found by HyDE search are vendored verbatim with their upstream licence and source", () => {
-  const vendored = Object.keys(files).filter((p) => p.endsWith("UPSTREAM.json"));
+  // Skills and agents (under .claude/); the version-matched docs under docs/ are checked below.
+  const vendored = Object.keys(files).filter((p) => p.startsWith(".claude/") && p.endsWith("UPSTREAM.json"));
   assert.ok(vendored.length >= 12);
   for (const p of vendored) {
     const u = JSON.parse(files[p]);
@@ -71,4 +72,52 @@ test("native mobile starters (Kotlin, Swift, Flutter) run a journey on a client 
   assert.match(t("swift/Sources/MyntStarter/MyntStarterApp.swift"), /ASWebAuthenticationSession/);
   assert.match(t("swift/Sources/MyntStarter/MyntStarterApp.swift"), /SecureField/);
   assert.match(t("flutter/lib/main.dart"), /obscureText[\s\S]*inAppBrowserView/);
+});
+
+test("the Solana docs are vendored for exactly the pinned toolchain, with their upstream, tag and licence", async () => {
+  const { SOLANA_TOOLCHAIN } = await import("../dist/solana/toolchain.js");
+  const pins = { anchor: SOLANA_TOOLCHAIN.anchor.version, agave: SOLANA_TOOLCHAIN.agave.version };
+  for (const name of ["anchor", "agave"]) {
+    const u = JSON.parse(files[`docs/solana/${name}/UPSTREAM.json`] ?? "null");
+    assert.ok(u, `docs/solana/${name}/UPSTREAM.json exists`);
+    assert.equal(u.license, "Apache-2.0");
+    assert.ok(PERMISSIVE.includes(u.license));
+    assert.match(files[`docs/solana/${name}/LICENSE`], /Apache License\s+Version 2\.0/);
+    assert.match(u.commit, /^[0-9a-f]{40}$/);
+    assert.equal(u.url, `https://github.com/${u.repo}/tree/${u.commit}/${u.path}`);
+    // The docs are the pinned release's own.
+    assert.equal(u.version, pins[u.pin]);
+    assert.equal(u.tag, `v${pins[u.pin]}`);
+    assert.ok(u.files.length >= 10);
+    for (const f of u.files) assert.ok(files[`docs/solana/${name}/${f}`]?.length > 0, `${name}/${f}`);
+    // Only what is listed: nothing hand-added beside the vendored files.
+    const prefix = `docs/solana/${name}/`;
+    const present = Object.keys(files).filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+    assert.deepEqual(present.filter((p) => p !== "UPSTREAM.json" && p !== "LICENSE").sort(), [...u.files].sort());
+  }
+  for (const f of ["anchor/basics/pda.mdx", "anchor/basics/cpi.mdx", "anchor/references/account-constraints.mdx", "agave/cli/examples/test-validator.md"]) assert.ok(files[`docs/solana/${f}`], f);
+  // The index names exactly the pinned versions.
+  const index = files["docs/solana/README.md"];
+  for (const v of [SOLANA_TOOLCHAIN.agave.version, SOLANA_TOOLCHAIN.anchor.version, SOLANA_TOOLCHAIN.rust.version, SOLANA_TOOLCHAIN.anchorTs.version]) assert.ok(index.includes(`| ${v} |`), v);
+  assert.ok(index.includes(SOLANA_TOOLCHAIN.anchorImage.split("@")[0]));
+  // The agents are pointed at them, and their instructions name no version of their own that could go stale.
+  assert.match(files["CLAUDE.md"], /docs\/solana\//);
+  assert.match(files[".claude/agents/server-engineer.md"], /docs\/solana\//);
+  assert.doesNotMatch(files["CLAUDE.md"], /Anchor \d+\.\d+\.\d+|@coral-xyz\/anchor` \d/);
+});
+
+test("the starter program uses exactly the pinned Anchor, client and Rust", async () => {
+  const { SOLANA_TOOLCHAIN } = await import("../dist/solana/toolchain.js");
+  const t = (p) => files[`templates/solana-program/${p}`];
+  const esc = (v) => v.replace(/\./g, "\\.");
+  assert.equal(JSON.parse(t("package.json")).dependencies[SOLANA_TOOLCHAIN.anchorTs.package], SOLANA_TOOLCHAIN.anchorTs.version);
+  assert.equal(JSON.parse(t("package-lock.json")).packages[`node_modules/${SOLANA_TOOLCHAIN.anchorTs.package}`].version, SOLANA_TOOLCHAIN.anchorTs.version);
+  assert.match(t("programs/mynt_program/Cargo.toml"), new RegExp(`^anchor-lang = "=${esc(SOLANA_TOOLCHAIN.anchor.version)}"$`, "m"));
+  assert.match(t("rust-toolchain.toml"), new RegExp(`^channel = "${esc(SOLANA_TOOLCHAIN.rust.version)}"$`, "m"));
+});
+
+test("the vendored solana-dev skill lists the files the watcher refreshes, all present", () => {
+  const u = JSON.parse(files[".claude/skills/solana-dev/UPSTREAM.json"]);
+  assert.ok(u.files.includes("SKILL.md"));
+  for (const f of u.files) assert.ok(files[`.claude/skills/solana-dev/${f}`], f);
 });

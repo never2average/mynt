@@ -16,7 +16,13 @@ export type SandboxState =
   | "cancelled";
 
 export interface BoatClient {
-  createSandbox(opts: { name: string; type?: string; ttlSeconds?: number; labels?: Record<string, string>; env?: Record<string, string> }): Promise<{ id: string; state: SandboxState }>;
+  // `snapshot`: boot from a snapshot this host took earlier (see `snapshot`); hosts without snapshots ignore it.
+  createSandbox(opts: { name: string; type?: string; ttlSeconds?: number; labels?: Record<string, string>; env?: Record<string, string>; snapshot?: string }): Promise<{ id: string; state: SandboxState }>;
+  // Pre-built environments, on hosts that can snapshot a machine (memory and disk) and boot new ones from it.
+  snapshot?(id: string, opts: { slug: string; displayName?: string }): Promise<{ snapshotId: string }>;
+  deleteSnapshot?(snapshotId: string): Promise<void>;
+  // A fingerprint of the host's own first-boot setup, so a snapshot is rebuilt when that setup changes.
+  readonly setupFingerprint?: string;
   getSandbox(id: string): Promise<{ id: string; state: SandboxState; error?: string | null }>;
   writeFile(id: string, path: string, content: string): Promise<void>;
   // Many files at once, when the host can do it faster than one by one.
