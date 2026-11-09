@@ -28,6 +28,10 @@ import {
 
 const { SOLANA_TOOLCHAIN, TOOLCHAIN_PINS_SHA256, parseToolchainPins, toolchainRecord } = await import("../dist/solana/toolchain.js");
 const PINS = JSON.parse(readFileSync(join(ROOT, PATHS.pins), "utf8"));
+// The weekly plan's tests run against a frozen set of pins, the versions their fake releases are newer than. They
+// must not read the live pins: a real toolchain bump would make the fake "new" release the current one.
+const WATCH_PINS_TEXT = readFileSync(join(ROOT, "test/fixtures/solana-toolchain-watch-pins.json"), "utf8");
+const WATCH_PINS = JSON.parse(WATCH_PINS_TEXT);
 const H = (c) => c.repeat(64);
 
 test("the pins live in one JSON file that the server reads, checks and hashes the same way as the watcher", () => {
@@ -158,16 +162,16 @@ const WORLD = {
   anchorTags: ["v2.0.0-rc.2", "v1.2.2", "v0.32.3", "v0.32.2", "v0.32.1"],
   agaveTags: ["v4.5.0-beta.0", "v4.4.1", "v4.1.4-rc.1", "v4.1.3", "v4.1.2", "v2.3.14", "v2.3.13"],
   images: {
-    [`solanafoundation/anchor:v0.32.1`]: PINS.anchorImage.split("@")[1],
+    [`solanafoundation/anchor:v0.32.1`]: WATCH_PINS.anchorImage.split("@")[1],
     [`quay.io/ottersec/anchor:v1.2.2`]: `sha256:${H("c")}`,
   },
 };
 
 test("the weekly plan: patch releases without a published image aren't adopted, Agave follows Anchor's line, a newer Anchor line is named but not applied", async () => {
   const net = fakeNet(WORLD);
-  const p = await plan(net, PINS, { anchorLine: "patch" });
-  assert.equal(p.next.anchor.version, PINS.anchor.version, "0.32.2 and 0.32.3 have no image: kept");
-  assert.equal(p.next.anchorImage, PINS.anchorImage);
+  const p = await plan(net, WATCH_PINS, { anchorLine: "patch" });
+  assert.equal(p.next.anchor.version, WATCH_PINS.anchor.version, "0.32.2 and 0.32.3 have no image: kept");
+  assert.equal(p.next.anchorImage, WATCH_PINS.anchorImage);
   assert.ok(p.notes.some((n) => /Anchor 0\.32\.3 .*no verifiable-build image/.test(n)));
   assert.ok(p.notes.some((n) => /Anchor 1\.2\.2 is the newest release: a breaking upgrade/.test(n)));
   // Agave: the newest of the line the pinned Anchor's image is built with (2.3), its archive hashed by the watcher.
@@ -176,9 +180,9 @@ test("the weekly plan: patch releases without a published image aren't adopted, 
   assert.equal(p.next.rust.version, "1.99.1");
   assert.deepEqual([p.next.rust.rustup, p.next.rust.rustupSha256], ["1.29.3", H("9")]);
   assert.deepEqual(p.changes.map((c) => [c.tool, c.from, c.to, c.breaking]), [
-    ["agave", PINS.agave.version, "2.3.14", false],
-    ["rust", PINS.rust.version, "1.99.1", false],
-    ["rustup", PINS.rust.rustup, "1.29.3", false],
+    ["agave", WATCH_PINS.agave.version, "2.3.14", false],
+    ["rust", WATCH_PINS.rust.version, "1.99.1", false],
+    ["rustup", WATCH_PINS.rust.rustup, "1.29.3", false],
   ]);
   const pr = renderPr({ ...p });
   assert.match(pr.title, /^Solana toolchain: agave 2\.3\.14, rust 1\.99\.1, rustup 1\.29\.3$/);
@@ -188,15 +192,15 @@ test("the weekly plan: patch releases without a published image aren't adopted, 
 });
 
 test("anchor_line latest adopts the newest Anchor with its image by digest, moves Agave to its line, and flags the breaking change", async () => {
-  const p = await plan(fakeNet({ ...WORLD, npmVersions: ["0.32.1"] }), PINS, { anchorLine: "latest", rust: "pinned" });
+  const p = await plan(fakeNet({ ...WORLD, npmVersions: ["0.32.1"] }), WATCH_PINS, { anchorLine: "latest", rust: "pinned" });
   assert.equal(p.next.anchor.version, "1.2.2");
   assert.equal(p.next.anchor.sha256, H("b"));
   assert.match(p.next.anchor.commit, /^[0-9a-f]{40}$/);
   assert.equal(p.next.anchorImage, `quay.io/ottersec/anchor:v1.2.2@sha256:${H("c")}`);
   assert.equal(p.next.agave.version, "4.1.3", "the newest stable 4.1.x, not 4.4 and never an -rc");
-  assert.equal(p.next.rust.version, PINS.rust.version, "--rust pinned");
+  assert.equal(p.next.rust.version, WATCH_PINS.rust.version, "--rust pinned");
   // No @coral-xyz/anchor for 1.2: kept, and said.
-  assert.equal(p.next.anchorTs.version, PINS.anchorTs.version);
+  assert.equal(p.next.anchorTs.version, WATCH_PINS.anchorTs.version);
   assert.ok(p.notes.some((n) => /no release for Anchor 1\.2\.2's line/.test(n)));
   const pr = renderPr(p);
   assert.match(pr.title, /^BREAKING: Solana toolchain: agave 4\.1\.3, anchor 1\.2\.2/);
@@ -209,9 +213,9 @@ test("an advisory on a pinned tool marks the pull request urgent, and says wheth
     ...WORLD,
     advisoriesByRepo: { "rust-lang/rust": [{ ghsa_id: "GHSA-test-std", severity: "high", summary: "std flaw", html_url: "https://github.com/advisories/GHSA-test-std", vulnerabilities: [{ package: { name: "std" }, vulnerable_version_range: ">= 1.87.0, < 1.90.0" }] }] },
   });
-  const before = await advisories(net, PINS);
-  assert.deepEqual(before.map((a) => [a.id, a.tool, a.version]), [["GHSA-test-std", "rust", PINS.rust.version]]);
-  const p = await plan(net, PINS, { anchorLine: "patch" });
+  const before = await advisories(net, WATCH_PINS);
+  assert.deepEqual(before.map((a) => [a.id, a.tool, a.version]), [["GHSA-test-std", "rust", WATCH_PINS.rust.version]]);
+  const p = await plan(net, WATCH_PINS, { anchorLine: "patch" });
   const after = await advisories(net, p.next);
   assert.deepEqual(after, []);
   const pr = renderPr({ ...p, advisoriesBefore: before, advisoriesAfter: after });
@@ -219,21 +223,21 @@ test("an advisory on a pinned tool marks the pull request urgent, and says wheth
   assert.match(pr.body, /GHSA-test-std.*fixed by this update/);
   // RustSec findings come through OSV for the crates the template builds with.
   const osvNet = fakeNet({ ...WORLD, osv: { results: [{ vulns: [{ id: "RUSTSEC-2099-0001" }] }] } });
-  const viaOsv = await advisories(osvNet, PINS);
+  const viaOsv = await advisories(osvNet, WATCH_PINS);
   assert.deepEqual(viaOsv.map((a) => [a.id, a.package]), [["RUSTSEC-2099-0001", "anchor-lang"]]);
 });
 
 test("applying a plan rewrites every pin: the pins file, the starter program's Anchor, client and Rust", () => {
   const root = mkdtempSync(join(tmpdir(), "mynt-watch-"));
   mkdirSync(join(root, "schemas"));
-  cpSync(join(ROOT, PATHS.pins), join(root, PATHS.pins));
+  writeFileSync(join(root, PATHS.pins), WATCH_PINS_TEXT);
   cpSync(join(ROOT, PATHS.template), join(root, PATHS.template), { recursive: true });
-  const next = { ...PINS, anchor: { version: "0.32.9", sha256: H("b"), commit: "f".repeat(40) }, rust: { ...PINS.rust, version: "1.99.1" }, anchorTs: { ...PINS.anchorTs, version: "0.32.9" } };
-  const { clientChanged } = applyPins(root, PINS, next);
+  const next = { ...WATCH_PINS, anchor: { version: "0.32.9", sha256: H("b"), commit: "f".repeat(40) }, rust: { ...WATCH_PINS.rust, version: "1.99.1" }, anchorTs: { ...WATCH_PINS.anchorTs, version: "0.32.9" } };
+  const { clientChanged } = applyPins(root, WATCH_PINS, next);
   assert.equal(clientChanged, true);
   const pins = JSON.parse(readFileSync(join(root, PATHS.pins), "utf8"));
   assert.equal(pins.anchor.version, "0.32.9");
-  assert.equal(pins.description, PINS.description, "the description stays");
+  assert.equal(pins.description, WATCH_PINS.description, "the description stays");
   assert.equal(pinsSha256(pins), pinsSha256(next));
   assert.equal(JSON.parse(readFileSync(join(root, PATHS.template, "package.json"), "utf8")).dependencies["@coral-xyz/anchor"], "0.32.9");
   assert.match(readFileSync(join(root, PATHS.template, "programs/mynt_program/Cargo.toml"), "utf8"), /^anchor-lang = "=0\.32\.9"$/m);
@@ -265,14 +269,14 @@ test("docs are re-vendored at the pinned tag (only the listed subset, with the l
       },
     },
   });
-  const u = await vendorDocs(net, root, "agave", PINS);
-  assert.equal(u.tag, `v${PINS.agave.version}`);
+  const u = await vendorDocs(net, root, "agave", WATCH_PINS);
+  assert.equal(u.tag, `v${WATCH_PINS.agave.version}`);
   assert.deepEqual(u.files, ["cli/examples/test-validator.md", "proposals/log_data.md", "runtime/sysvars.md"], "the validator-operations page isn't vendored");
   assert.ok(existsSync(join(root, PATHS.docs, "agave/LICENSE")));
   assert.equal(readFileSync(join(root, PATHS.docs, "agave/runtime/sysvars.md"), "utf8"), "content of sysvars.md");
   assert.ok(Object.keys(raw).every((url) => url.includes(`/${u.commit}/`)), "fetched at the tag's commit");
-  const index = docsIndex(PINS, { agave: u, anchor: { ...u, repo: "solana-foundation/anchor", tag: `v${PINS.anchor.version}` } });
-  assert.match(index, new RegExp(`\\| ${PINS.agave.version.replace(/\./g, "\\.")} \\|`));
+  const index = docsIndex(WATCH_PINS, { agave: u, anchor: { ...u, repo: "solana-foundation/anchor", tag: `v${WATCH_PINS.anchor.version}` } });
+  assert.match(index, new RegExp(`\\| ${WATCH_PINS.agave.version.replace(/\./g, "\\.")} \\|`));
 
   // The skill: the same files at the upstream's newest commit; one removed upstream is dropped and named.
   const skillDir = join(root, PATHS.skill);
@@ -292,12 +296,12 @@ test("docs are re-vendored at the pinned tag (only the listed subset, with the l
 test("a dry run writes the pull request's title and body and changes no file", async () => {
   const root = mkdtempSync(join(tmpdir(), "mynt-watch-dry-"));
   mkdirSync(join(root, "schemas"));
-  cpSync(join(ROOT, PATHS.pins), join(root, PATHS.pins));
+  writeFileSync(join(root, PATHS.pins), WATCH_PINS_TEXT);
   const title = join(root, "title.txt");
   const body = join(root, "body.md");
   const branch = join(root, "branch.txt");
   const r = await main(["--title", title, "--body", body, "--branch-file", branch], { root, net: fakeNet(WORLD) });
-  assert.equal(readFileSync(join(root, PATHS.pins), "utf8"), readFileSync(join(ROOT, PATHS.pins), "utf8"));
+  assert.equal(readFileSync(join(root, PATHS.pins), "utf8"), WATCH_PINS_TEXT);
   assert.equal(readFileSync(title, "utf8"), r.title);
   assert.match(readFileSync(body, "utf8"), /## Changes/);
   assert.match(readFileSync(branch, "utf8"), /^solana-toolchain\/[0-9a-f]{12}$/);
@@ -313,21 +317,21 @@ test("supply chain: releases younger than the minimum age wait, the Solana Found
     published: { "v2.3.14": young, "1.29.3": young, "v1.2.2": "2026-11-01T00:00:00Z" },
     rustDate: "2026-11-08",
   };
-  const p = await plan(fakeNet(world), PINS, { anchorLine: "latest", now, minAge: 3 * 86_400_000 });
+  const p = await plan(fakeNet(world), WATCH_PINS, { anchorLine: "latest", now, minAge: 3 * 86_400_000 });
   assert.equal(p.next.anchorImage, `solanafoundation/anchor:v1.2.2@sha256:${H("d")}`, "the Solana Foundation's registry first, though the Makefile names quay.io");
-  const q = await plan(fakeNet(world), PINS, { anchorLine: "patch", now, minAge: 3 * 86_400_000 });
-  assert.equal(q.next.agave.version, PINS.agave.version, "Agave 2.3.14 is a day old");
-  assert.equal(q.next.rust.version, PINS.rust.version, "Rust 1.99.1's channel is a day old");
-  assert.equal(q.next.rust.rustup, PINS.rust.rustup, "rustup 1.29.3's tag is a day old");
+  const q = await plan(fakeNet(world), WATCH_PINS, { anchorLine: "patch", now, minAge: 3 * 86_400_000 });
+  assert.equal(q.next.agave.version, WATCH_PINS.agave.version, "Agave 2.3.14 is a day old");
+  assert.equal(q.next.rust.version, WATCH_PINS.rust.version, "Rust 1.99.1's channel is a day old");
+  assert.equal(q.next.rust.rustup, WATCH_PINS.rust.rustup, "rustup 1.29.3's tag is a day old");
   for (const re of [/Agave 2\.3\.14 is less than 3 days old/, /Rust 1\.99\.1 is less than 3 days old/, /rustup 1\.29\.3 is less than 3 days old/]) assert.ok(q.notes.some((n) => re.test(n)), String(re));
   // With no minimum, they'd be adopted: the age is what held them back.
-  const r = await plan(fakeNet(world), PINS, { anchorLine: "patch", now, minAge: 0 });
+  const r = await plan(fakeNet(world), WATCH_PINS, { anchorLine: "patch", now, minAge: 0 });
   assert.equal(r.next.agave.version, "2.3.14");
   const pr = renderPr(q);
   assert.match(pr.body, /A person must review this pull request before it is merged/);
   assert.match(pr.body, /excluded from any standing instruction to merge green pull requests/);
   // The docs tell agents who deploys.
-  assert.match(docsIndex(PINS, { agave: { repo: "anza-xyz/agave", tag: "v1", commit: "c".repeat(40), license: "Apache-2.0" }, anchor: { repo: "solana-foundation/anchor", tag: "v1", commit: "c".repeat(40), license: "Apache-2.0" } }), /Mynt deploys; never run `anchor deploy`, `solana program deploy` or `curl \| sh` installers/);
+  assert.match(docsIndex(WATCH_PINS, { agave: { repo: "anza-xyz/agave", tag: "v1", commit: "c".repeat(40), license: "Apache-2.0" }, anchor: { repo: "solana-foundation/anchor", tag: "v1", commit: "c".repeat(40), license: "Apache-2.0" } }), /Mynt deploys; never run `anchor deploy`, `solana program deploy` or `curl \| sh` installers/);
 });
 
 test("the solana-dev skill moves only to a tagged release, or to a commit at least the minimum age old, with a link to the upstream diff", async () => {
