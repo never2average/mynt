@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { licenseInForce } from "./access.js";
+import { legitimacyState } from "./firm-checks.js";
 import { partyActive } from "./parties.js";
 import type { productRegime } from "./regime.js";
 import { emitProductEvent } from "./runtime.js";
@@ -122,6 +123,18 @@ export async function pinChanges(store: Store, pins: Pins, depth = 0): Promise<D
   const before = changes.length;
   await check("sponsorship", pins.state.sponsorships ?? {}, async (id) => sponsorshipState(await store.getSponsorship(id)));
   for (const c of changes.slice(before)) if (pins.sponsorship_jurisdictions?.[c.id]) c.jurisdictions = pins.sponsorship_jurisdictions[c.id];
+  // The sponsoring firms must stay shown to be real: a mismatch or lapse in the public checks of a licence
+  // provider (see firm-checks.ts) drifts the product as its licence lapsing would. Nothing is pinned for this:
+  // the expected state is always "clear", so products published before these checks existed are covered too.
+  const providers = new Map<string, string[]>();
+  for (const id of Object.keys(pins.state.sponsorships ?? {})) {
+    const s = await store.getSponsorship(id);
+    if (s) providers.set(s.provider_entity_id, [...new Set([...(providers.get(s.provider_entity_id) ?? []), ...(pins.sponsorship_jurisdictions?.[id] ?? [])])]);
+  }
+  for (const [entityId, jurisdictions] of providers) {
+    const now = await legitimacyState(store, entityId);
+    if (now !== "clear") changes.push({ kind: "legitimacy", id: entityId, was: "clear", now, ...(jurisdictions.length ? { jurisdictions } : {}) });
+  }
   // Vendor services the live version hands off through (see vendors.ts).
   await check("vendor", pins.state.vendors ?? {}, (id) => vendorStateOf(store, id));
   // Products it's built on: unpublished, offered somewhere else, or drifted themselves (checked afresh, so the

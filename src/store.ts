@@ -278,7 +278,24 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship"; id: string; was: string; now: string; jurisdictions?: string[] };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship" | "legitimacy"; id: string; was: string; now: string; jurisdictions?: string[] };
+
+// One public check that a firm is a real, legitimate company (see firm-checks.ts).
+export const FIRM_CHECK_STATUSES = ["match", "mismatch", "not_found", "unavailable"] as const;
+export type FirmCheckStatus = (typeof FIRM_CHECK_STATUSES)[number];
+export interface FirmCheck {
+  id: string;
+  entity_id: string;
+  source: string; // gleif_lei, fincen_msb
+  subject: string; // what was looked up: the LEI, or the legal name as matched
+  url: string;
+  retrieved_at: string;
+  status: FirmCheckStatus;
+  fields: Record<string, unknown>; // the source's fields as matched against the firm's
+  response_hash: string | null; // sha256 of the source's answer about this firm, in a stable form
+  note: string | null;
+  run_by: string | null;
+}
 
 // A licence provider's sponsorship of one component of a builder's product: the builder asks (pending), the
 // provider approves it under some of its held licences for some jurisdictions, declines it, or later revokes it.
@@ -1301,6 +1318,22 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS sponsorships_provider_idx ON financial_products.sponsorships (provider_entity_id, status);
   -- One pending request per component and provider at a time; approved ones may add up (more jurisdictions).
   CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_one_pending_idx ON financial_products.sponsorships (product_id, component_key, provider_entity_id) WHERE status = 'pending';
+  -- Public checks that a firm is a real, legitimate company (GLEIF's LEI record, FinCEN's MSB registrant list),
+  -- run by Mynt itself and kept as history: a licence provider sponsors only once they pass (see firm-checks.ts).
+  CREATE TABLE IF NOT EXISTS financial_products.firm_checks (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    source text NOT NULL,
+    subject text NOT NULL,
+    url text NOT NULL,
+    retrieved_at timestamptz NOT NULL DEFAULT now(),
+    status text NOT NULL CHECK (status IN ('match', 'mismatch', 'not_found', 'unavailable')),
+    fields jsonb NOT NULL DEFAULT '{}',
+    response_hash text,
+    note text,
+    run_by uuid REFERENCES financial_products.users(id)
+  );
+  CREATE INDEX IF NOT EXISTS firm_checks_entity_idx ON financial_products.firm_checks (entity_id, source, retrieved_at DESC);
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -1507,6 +1540,20 @@ const toSponsorship = (r: Row): Sponsorship => ({
   decided_by: (r.decided_by as string | null) ?? null,
   created_at: iso(r.created_at)!,
   decided_at: iso(r.decided_at),
+});
+
+const toFirmCheck = (r: Row): FirmCheck => ({
+  id: r.id as string,
+  entity_id: r.entity_id as string,
+  source: r.source as string,
+  subject: r.subject as string,
+  url: r.url as string,
+  retrieved_at: iso(r.retrieved_at)!,
+  status: r.status as FirmCheckStatus,
+  fields: (r.fields as Record<string, unknown>) ?? {},
+  response_hash: (r.response_hash as string | null) ?? null,
+  note: (r.note as string | null) ?? null,
+  run_by: (r.run_by as string | null) ?? null,
 });
 
 const toHeldLicense = (r: Row): HeldLicense => ({
@@ -3114,6 +3161,24 @@ export class Store {
       [id, decision.status, decision.decided_by, decision.note, decision.licence_ids ?? null, decision.jurisdictions ?? null],
     );
     return toSponsorship(r!);
+  }
+
+  // ---- public checks that a firm is real (see firm-checks.ts) ----
+
+  async recordFirmCheck(c: Omit<FirmCheck, "id" | "retrieved_at"> & { retrieved_at?: string }): Promise<FirmCheck> {
+    const r = await this.one(
+      `INSERT INTO financial_products.firm_checks (id, entity_id, source, subject, url, retrieved_at, status, fields, response_hash, note, run_by)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()), $7, $8, $9, $10, $11) RETURNING *`,
+      [randomUUID(), c.entity_id, c.source, c.subject, c.url, c.retrieved_at ?? null, c.status, JSON.stringify(c.fields), c.response_hash, c.note, c.run_by],
+    );
+    return toFirmCheck(r!);
+  }
+
+  // A firm's checks, newest first.
+  async firmChecks(entityId: string, limit = 200): Promise<FirmCheck[]> {
+    return (
+      await this.all("SELECT * FROM financial_products.firm_checks WHERE entity_id = $1 ORDER BY retrieved_at DESC, id LIMIT $2", [entityId, limit])
+    ).map(toFirmCheck);
   }
 
   async getHeldLicense(id: string): Promise<HeldLicense | undefined> {

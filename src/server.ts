@@ -40,6 +40,7 @@ import {
 } from "./store.js";
 import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
+import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
@@ -137,6 +138,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
     registerTakeRateAdminTools(server, store, user!);
     registerVendorAdminTools(server, store, user!);
+    registerFirmCheckAdminTools(server, store, user!);
     if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
     if (ctx.solana) registerSolanaAdminTools(server, store, user!, ctx.solana);

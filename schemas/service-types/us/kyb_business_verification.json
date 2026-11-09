@@ -1,0 +1,156 @@
+{
+  "region": "US",
+  "key": "kyb_business_verification",
+  "name": "Business verification (state good standing)",
+  "category": "kyc",
+  "description": "Checks a business against the Secretary of State registry of the state it was formed in: whether it exists and is in good standing, its officers and its registered agent, matched against the legal name, state and EIN given. Vendors such as Middesk or Baselayer serve it. Mynt uses it to show a licence provider's firm is a real company in good standing, alongside its free GLEIF and FinCEN checks.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "legal_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "formation_state": {
+        "type": "string",
+        "pattern": "^[A-Z]{2}$"
+      },
+      "ein": {
+        "type": "string",
+        "pattern": "^[0-9]{2}-?[0-9]{7}$"
+      },
+      "address": {
+        "type": "string",
+        "maxLength": 500
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "result"
+    ],
+    "properties": {
+      "result": {
+        "enum": [
+          "match",
+          "mismatch",
+          "not_found",
+          "unavailable"
+        ]
+      },
+      "good_standing": {
+        "enum": [
+          "good_standing",
+          "not_in_good_standing",
+          "dissolved",
+          "unknown"
+        ]
+      },
+      "legal_name": {
+        "type": "string"
+      },
+      "formation_state": {
+        "type": "string"
+      },
+      "formation_date": {
+        "type": "string",
+        "format": "date"
+      },
+      "entity_type": {
+        "type": "string"
+      },
+      "registry_id": {
+        "type": "string"
+      },
+      "ein_match": {
+        "type": "boolean"
+      },
+      "officers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "registered_agent": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          }
+        }
+      },
+      "registrations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "state",
+            "status"
+          ],
+          "properties": {
+            "state": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "registry_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "source_url": {
+        "type": "string"
+      },
+      "retrieved_at": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "business_verification",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": [],
+  "fixtures": [
+    {
+      "legal_name": "Example Money Transmitter (placeholder)",
+      "formation_state": "NY",
+      "ein": "00-0000000"
+    }
+  ],
+  "client_result": {
+    "status": {
+      "from": "result",
+      "map": {
+        "match": "verified",
+        "mismatch": "not_verified",
+        "not_found": "not_verified",
+        "unavailable": "failed"
+      }
+    },
+    "fields": [
+      "good_standing"
+    ],
+    "redirect": false
+  }
+}
