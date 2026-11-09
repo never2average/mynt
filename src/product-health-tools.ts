@@ -4,8 +4,8 @@ import { effectiveRoles, type Store, type User } from "./store.js";
 import { SCHEMA, type ProductHealthService } from "./product-health.js";
 
 // Tools for each product's financial health. Numbers go only to the product's licence provider and liquidity
-// providers, admins included: an admin sees status and fingerprints (list_product_health) and reads numbers only as
-// a member of an entitled firm, so a Mynt admin account can't quietly open a product's books.
+// providers. An admin account sees status and fingerprints (list_product_health) and is refused the numbers, even if it
+// also holds the licence-provider role or belongs to the firm, so a Mynt admin account can't open a product's books.
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -81,8 +81,8 @@ export function registerProductHealthTools(server: McpServer, _store: Store, use
     {
       title: "Start a product's on-chain health record again",
       description:
-        "Admin: after a chain reset or a move to a new program, start a product's on-chain health record again at sequence 1. Only for a record whose head no longer matches Mynt's (shown as stalled, chain_behind or chain_ahead in list_product_health): it's refused while the chain still matches. Earlier snapshots stay readable but are marked previous_chain, and the re-anchor stays visible as a gap to everyone who monitors the product.",
-      inputSchema: { product_id: product, pool_id: pool, reason: z.string().min(10).describe("What happened to the chain") },
+        "Admin: after a chain reset or a move to a new program, start a product's on-chain health record again at sequence 1. Only when the chain has no record for the product: a head that disagrees with Mynt's record is refused, because that needs investigating, not starting over. What the old record looked like is saved, its snapshots stay readable and report that verdict, and the re-anchor stays visible as a gap to everyone who monitors the product. Refusals are audited.",
+      inputSchema: { product_id: product, pool_id: pool, reason: z.string().min(10).max(500).describe("What happened to the chain") },
       annotations: { destructiveHint: true },
     },
     async ({ product_id, pool_id, reason }) => attempt(() => health.reanchor(user, product_id, pool_id ?? null, reason)),

@@ -149,7 +149,12 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     const s = "financial_products.product_health_snapshots";
     productHealth.stalled = (await db.query(`SELECT product_id, pool_id, sequence, stalled_reason FROM ${s} WHERE stalled_reason IS NOT NULL ORDER BY created_at LIMIT 20`)).rows;
     productHealth.overdue = Number(
-      (await db.query(`SELECT count(*)::int AS n FROM ${s} WHERE NOT on_chain AND publish_deadline < now() AND (status = 'ready' OR status = 'missed')`)).rows[0]?.n ?? 0,
+      (
+        await db.query(
+          `SELECT count(*)::int AS n FROM ${s} r WHERE NOT r.on_chain AND r.publish_deadline < now() AND (r.status = 'ready' OR r.status = 'missed')
+             AND r.epoch = (SELECT COALESCE(MAX(a.epoch), 0) FROM financial_products.product_health_anchors a WHERE a.subject = r.subject)`,
+        )
+      ).rows[0]?.n ?? 0,
     );
     if (await exists("sponsorships")) productHealth.sponsored_products = Number((await db.query("SELECT count(DISTINCT product_id)::int AS n FROM financial_products.sponsorships WHERE status = 'approved'")).rows[0]?.n ?? 0);
     const tick = (await db.query("SELECT last_tick_at FROM financial_products.product_health_worker WHERE id = 'worker'")).rows[0]?.last_tick_at as string | Date | undefined;

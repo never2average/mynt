@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { defaultLedgerFor, isLedgerError, type PartnerLedger, type PartnerLedgerReading } from "./partner-ledger/index.js";
 import type { Db } from "./db.js";
 import { base58Decode, isAddress, isWeakEd25519Key, Keypair } from "./solana/codec.js";
@@ -53,6 +53,7 @@ export const TABLES = `
     public_key text NOT NULL,
     registered_by uuid,
     registered_at timestamptz NOT NULL DEFAULT now(),
+    mac text NOT NULL, -- under a key derived from the vault: someone who can only write the database can't plant a key
     PRIMARY KEY (entity_id, public_key)
   );
   -- Per product (or pool): the data key its reports are encrypted with, sealed under MYNT_VAULT_KEY.
@@ -61,13 +62,18 @@ export const TABLES = `
     sealed_key text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
   );
-  -- Each time an admin started a subject's on-chain record again (a chain reset, a new program).
+  -- Each on-chain record of a subject: the first, and each one an admin started after a chain reset or a new program.
+  -- The prev_ columns are what the record before it looked like when it ended, so a re-anchor can't launder it.
   CREATE TABLE IF NOT EXISTS ${T}.product_health_anchors (
     subject text NOT NULL,
     epoch integer NOT NULL,
     reason text NOT NULL,
     anchored_by uuid,
     anchored_at timestamptz NOT NULL DEFAULT now(),
+    program_id text,
+    prev_verdict text,
+    prev_head_sequence integer,
+    prev_head_chain text,
     PRIMARY KEY (subject, epoch)
   );
   -- When the worker last ran, for ops_status.
@@ -143,8 +149,10 @@ export const fingerprintOf = (canonical: string) => createHash("sha256").update(
 export interface Figure {
   value: number | null;
   reason: string | null;
+  partial?: boolean; // a total of only what could be measured: `reason` says what's left out
 }
 export const measured = (value: number): Figure => ({ value, reason: null });
+export const partialFigure = (value: number, reason: string): Figure => ({ value, reason, partial: true });
 export const unmeasured = (reason: string): Figure => ({ value: null, reason });
 
 export const FIGURE_NAMES = [
@@ -153,6 +161,7 @@ export const FIGURE_NAMES = [
   "coverage_bps",
   "requested_in_cents",
   "requested_out_cents",
+  "unresolved_cents",
   "flows_in_cents",
   "flows_out_cents",
   "pending_settlements_cents",
@@ -167,28 +176,36 @@ export type Figures = Record<(typeof FIGURE_NAMES)[number], Figure>;
 // What every flow figure in a report measures, stated in the report: the money rails total movements by when they
 // were requested, so a period's figures are that period's requests, not the money that settled in it.
 export const FLOWS_BASIS =
-  "Movements requested in this period, by each one's status when the snapshot was computed. requested_* is every movement requested; flows_* is the part of those already settled, so payments that take days to settle show as pending here and aren't counted in a later period; pending_settlements covers this period's requests only. Rates are by value, among this period's completed requests.";
+  "Movements requested in this period, by each one's status when the snapshot was computed. requested_* is every movement requested; flows_* is the part of those already settled, so payments that take days to settle show as pending here and aren't counted in a later period; pending_settlements covers this period's requests only. Movements nobody ever answered for are in unresolved_cents and in requested_*, and in no other total. Rates are by value, among this period's completed requests. A figure marked partial totals only the directions the rails can see.";
 
 export interface FlowBuckets {
   settled: number | null;
   pending: number | null;
   failed: number | null;
   reversed: number | null;
+  unresolved: number | null;
 }
 export interface NormalizedFlows {
   in: FlowBuckets;
   out: FlowBuckets;
 }
+export interface PartialFlows {
+  in: string | null; // what the money-in totals leave out, when they only cover part of it
+  out: string | null;
+  overall: string | null;
+}
 export interface AdaptedFlows {
   flows: NormalizedFlows | null;
   reason: string | null; // why anything is unmeasured
   not_measured: Record<string, string>; // the directions the rails can't see
+  partial: PartialFlows;
 }
 // The money rails, bound to the store: what they report for a product and period.
 export type FlowsFor = (productId: string, from: Date, to: Date) => Promise<unknown>;
 
 const cents = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
-const NULL_BUCKETS: FlowBuckets = { settled: null, pending: null, failed: null, reversed: null };
+const NULL_BUCKETS: FlowBuckets = { settled: null, pending: null, failed: null, reversed: null, unresolved: null };
+const NOT_PARTIAL: PartialFlows = { in: null, out: null, overall: null };
 const FLOWS_UNAVAILABLE = "The money rails aren't connected to this Mynt";
 const FLOWS_UNREADABLE = "The money rails answered with something Mynt can't read";
 
@@ -203,13 +220,14 @@ type Rail = Record<string, Tally | undefined>;
 const amount = (d: Rail, status: string) => cents(d[status]?.amount_cents);
 
 // Sums directions: only those the rails can see. Statuses requested and submitted are both still pending.
-function sumDirections(directions: Rail[]): FlowBuckets {
+function sumDirections(directions: Rail[], unresolved: (number | null)[]): FlowBuckets {
   if (!directions.length) return { ...NULL_BUCKETS };
   return {
     settled: sumOrNull(...directions.map((d) => amount(d, "settled"))),
     pending: sumOrNull(...directions.flatMap((d) => [amount(d, "requested"), amount(d, "submitted")])),
     failed: sumOrNull(...directions.map((d) => amount(d, "failed"))),
     reversed: sumOrNull(...directions.map((d) => amount(d, "reversed"))),
+    unresolved: sumOrNull(...unresolved),
   };
 }
 
@@ -217,17 +235,25 @@ function sumDirections(directions: Rail[]): FlowBuckets {
 export function adaptRailFlows(raw: unknown): AdaptedFlows {
   if (!raw || typeof raw !== "object" || typeof (raw as { flows?: unknown }).flows !== "object" || (raw as { flows?: unknown }).flows === null) {
     console.error("product health: the money rails answered in an unknown shape");
-    return { flows: null, reason: FLOWS_UNREADABLE, not_measured: {} };
+    return { flows: null, reason: FLOWS_UNREADABLE, not_measured: {}, partial: NOT_PARTIAL };
   }
-  const r = raw as { measured?: unknown; flows: Record<string, Rail | null | undefined>; not_measured?: Record<string, string> };
+  const r = raw as { measured?: unknown; flows: Record<string, Rail | null | undefined>; unresolved?: Record<string, Tally | null | undefined>; not_measured?: Record<string, string> };
   const notMeasured = r.not_measured && typeof r.not_measured === "object" ? r.not_measured : {};
   const reasons = [...new Set(Object.values(notMeasured))];
-  if (r.measured !== true) return { flows: null, reason: reasons.join("; ") || "The money rails can't measure this period", not_measured: notMeasured };
-  const seen = (names: string[]) => names.map((n) => r.flows[n]).filter((d): d is Rail => !!d && typeof d === "object");
+  if (r.measured !== true) return { flows: null, reason: reasons.join("; ") || "The money rails can't measure this period", not_measured: notMeasured, partial: NOT_PARTIAL };
+  const has = (n: string) => !!r.flows[n] && typeof r.flows[n] === "object";
+  const leftOut = (names: string[]) => names.filter((n) => !has(n)).map((n) => `${n}: ${notMeasured[n] ?? "not measured"}`).join("; ") || null;
+  const side = (names: string[]) => {
+    const present = names.filter(has);
+    return sumDirections(present.map((n) => r.flows[n] as Rail), present.map((n) => cents(r.unresolved?.[n]?.amount_cents)));
+  };
+  const IN = ["on_ramp", "deposit"];
+  const OUT = ["off_ramp", "payout"];
   return {
-    flows: { in: sumDirections(seen(["on_ramp", "deposit"])), out: sumDirections(seen(["off_ramp", "payout"])) },
+    flows: { in: side(IN), out: side(OUT) },
     reason: reasons.join("; ") || null,
     not_measured: notMeasured,
+    partial: { in: IN.some(has) ? leftOut(IN) : null, out: OUT.some(has) ? leftOut(OUT) : null, overall: [...IN, ...OUT].some(has) ? leftOut([...IN, ...OUT]) : null },
   };
 }
 
@@ -250,6 +276,7 @@ export function buildFigures(i: {
   reading: PartnerLedgerReading | { error: { code: string; message: string } } | null;
   flows: NormalizedFlows | null;
   flowsReason?: string | null;
+  partial?: PartialFlows;
   complaints?: number | null;
   incidents?: number | null;
 }): Figures {
@@ -267,9 +294,13 @@ export function buildFigures(i: {
 
   const f = i.flows;
   const why = i.flowsReason ?? (f ? null : FLOWS_UNAVAILABLE);
-  const figure = (v: number | null, label: string): Figure => (v !== null ? measured(v) : unmeasured(why ?? `The money rails gave no ${label} total`));
+  const partial = i.partial ?? NOT_PARTIAL;
+  const figure = (v: number | null, label: string, leavesOut: string | null): Figure => {
+    if (v === null) return unmeasured(why ?? `The money rails gave no ${label} total`);
+    return leavesOut ? partialFigure(v, `Partial: leaves out ${leavesOut}`) : measured(v);
+  };
   const sides = f ? [f.in, f.out].filter(sideSeen) : [];
-  const requested = (b: FlowBuckets | undefined) => (b && sideSeen(b) ? sumOrNull(b.settled, b.pending, b.failed, b.reversed) : null);
+  const requested = (b: FlowBuckets | undefined) => (b && sideSeen(b) ? sumOrNull(b.settled, b.pending, b.failed, b.reversed, b.unresolved) : null);
 
   const rate = (top: (b: FlowBuckets) => number | null, parts: ((b: FlowBuckets) => number | null)[], what: string): Figure => {
     if (!sides.length) return unmeasured(why ?? `The money rails gave no ${what} totals`);
@@ -277,18 +308,20 @@ export function buildFigures(i: {
     const denominator = sumOrNull(...parts.flatMap((p) => sides.map(p)));
     if (numerator === null || denominator === null) return unmeasured(`The money rails gave no ${what} totals`);
     if (denominator === 0) return unmeasured(`No requests from this period have completed yet, so there's no ${what} rate`);
-    return basisPointsUp(numerator, denominator);
+    const up = basisPointsUp(numerator, denominator);
+    return up.value !== null && partial.overall ? partialFigure(up.value, `Partial: leaves out ${partial.overall}`) : up;
   };
 
   return {
     reserves_cents: reservesFig,
     obligations_cents: obligationsFig,
     coverage_bps: coverage,
-    requested_in_cents: figure(requested(f?.in), "requested inflow"),
-    requested_out_cents: figure(requested(f?.out), "requested outflow"),
-    flows_in_cents: figure(f?.in.settled ?? null, "settled inflow"),
-    flows_out_cents: figure(f?.out.settled ?? null, "settled outflow"),
-    pending_settlements_cents: figure(sides.length ? sumOrNull(...sides.map((b) => b.pending)) : null, "pending"),
+    requested_in_cents: figure(requested(f?.in), "requested inflow", partial.in),
+    requested_out_cents: figure(requested(f?.out), "requested outflow", partial.out),
+    unresolved_cents: figure(sides.length ? sumOrNull(...sides.map((b) => b.unresolved)) : null, "unresolved", partial.overall),
+    flows_in_cents: figure(f?.in.settled ?? null, "settled inflow", partial.in),
+    flows_out_cents: figure(f?.out.settled ?? null, "settled outflow", partial.out),
+    pending_settlements_cents: figure(sides.length ? sumOrNull(...sides.map((b) => b.pending)) : null, "pending", partial.overall),
     reversal_rate_bps: rate((b) => b.reversed, [(b) => b.settled, (b) => b.reversed], "reversal"),
     failure_rate_bps: rate((b) => b.failed, [(b) => b.settled, (b) => b.reversed, (b) => b.failed], "failure"),
     open_withdrawal_requests: unmeasured("Withdrawal requests aren't a feature of Mynt yet"),
@@ -409,7 +442,9 @@ export function findGaps(rows: GapRow[], head: HeadAccount | null, now: Date, in
     if (at > lastOnChain) {
       // One ahead and it's the next row of ours: that transaction landed and Mynt just hasn't recorded it yet.
       const next = rows.find((r) => r.sequence === at);
-      const landing = !!head && at === lastOnChain + 1 && !!next?.fingerprint && next.fingerprint === hexOf(head.fingerprint);
+      const snapshotLanding = !!next?.fingerprint && !!head && next.fingerprint === hexOf(head.fingerprint);
+      const markerLanding = next?.status === "missed" && head?.kind === KIND_MISSED;
+      const landing = !!head && at === lastOnChain + 1 && (snapshotLanding || markerLanding);
       if (!landing) gaps.push({ kind: "chain_ahead", detail: `The chain's head is at sequence ${at}, past Mynt's own record (${lastOnChain})` });
     }
   }
@@ -467,9 +502,11 @@ export interface ProductHealthConfig {
   programId: string | null; // the deployed product-health program; none, and the worker doesn't run
 }
 
+export const MAX_INTERVAL_MINUTES = 24 * 60;
+
 export function productHealthConfigFromEnv(env = process.env): ProductHealthConfig {
   const minutes = Number(env.PRODUCT_HEALTH_INTERVAL_MINUTES);
-  const intervalMs = (env.PRODUCT_HEALTH_INTERVAL_MINUTES && minutes >= 1 ? Math.floor(minutes) : 60) * 60_000;
+  const intervalMs = (env.PRODUCT_HEALTH_INTERVAL_MINUTES && minutes >= 1 ? Math.min(Math.floor(minutes), MAX_INTERVAL_MINUTES) : 60) * 60_000;
   const window = Number(env.PRODUCT_HEALTH_COSIGN_WINDOW_MINUTES);
   const cosignWindowMs = Math.min(env.PRODUCT_HEALTH_COSIGN_WINDOW_MINUTES && window >= 0 ? window * 60_000 : intervalMs / 2, intervalMs / 2);
   const programId = env.PRODUCT_HEALTH_PROGRAM_ID || null;
@@ -479,7 +516,8 @@ export function productHealthConfigFromEnv(env = process.env): ProductHealthConf
 export interface HealthChain {
   readonly programId: string;
   readonly publisher: string;
-  head(subject: Uint8Array): Promise<HeadAccount | null>;
+  head(subject: Uint8Array, programId?: string): Promise<HeadAccount | null>; // of another program, to read one retired
+  latestRecordTx?(subject: Uint8Array): Promise<string | null>; // the newest successful transaction on a subject's head
   publishSnapshot(subject: Uint8Array, entry: SnapshotEntry, opening: boolean): Promise<string>;
   publishMissed(subject: Uint8Array, entry: MissedEntry, opening: boolean): Promise<string>;
 }
@@ -497,6 +535,19 @@ export class HealthError extends Error {}
 
 const unix = (t: string | Date) => Math.floor(new Date(t).getTime() / 1000);
 const ERROR_LIMIT = 300;
+
+export const MAX_REANCHOR_REASON = 500;
+
+export interface Anchor {
+  subject: string;
+  epoch: number;
+  reason: string;
+  anchored_at: string;
+  program_id: string | null;
+  prev_verdict: string | null; // matches, mismatch, or gone (the old chain couldn't be read to compare)
+  prev_head_sequence: number | null;
+  prev_head_chain: string | null;
+}
 
 interface Subject {
   productId: string;
@@ -546,14 +597,22 @@ export class ProductHealthService {
     return Buffer.from(openSealed(row!.sealed_key, false), "base64");
   }
 
+  private keyMac(entityId: string, publicKey: string): string {
+    const key = derivedKey("product-health-signing-key-history");
+    if (!key) throw new HealthError("Product health needs MYNT_VAULT_KEY set on the server");
+    return createHmac("sha256", key).update(`${entityId}\u0000${publicKey}`).digest("hex");
+  }
+
+  // The firm's current key, only if it's one Mynt really recorded: a key written straight into the table doesn't count.
   async signingKey(entityId: string): Promise<string | null> {
     const { rows } = await this.db.query(`SELECT public_key FROM ${T}.product_health_signing_keys WHERE entity_id = $1`, [entityId]);
-    return (rows[0] as { public_key: string } | undefined)?.public_key ?? null;
+    const key = (rows[0] as { public_key: string } | undefined)?.public_key ?? null;
+    return key && (await this.keyHistory(entityId)).has(key) ? key : null;
   }
 
   private async keyHistory(entityId: string): Promise<Set<string>> {
-    const { rows } = await this.db.query(`SELECT public_key FROM ${T}.product_health_signing_key_history WHERE entity_id = $1`, [entityId]);
-    return new Set((rows as unknown as { public_key: string }[]).map((r) => r.public_key));
+    const { rows } = await this.db.query(`SELECT public_key, mac FROM ${T}.product_health_signing_key_history WHERE entity_id = $1`, [entityId]);
+    return new Set((rows as unknown as { public_key: string; mac: string }[]).filter((r) => r.mac === this.keyMac(entityId, r.public_key)).map((r) => r.public_key));
   }
 
   // ---- entitlement ----
@@ -573,10 +632,11 @@ export class ProductHealthService {
     return firms;
   }
 
-  // A named licence-provider role is needed: admin implies the role for tools, but must not open a firm's books.
+  // A named licence-provider role is needed, and an admin account is refused even if it also holds one: Mynt's own
+  // staff don't open a firm's books, or sign or replace keys in its name.
   async entitlement(user: User, productId: string): Promise<{ entity_id: string; as: string } | null> {
     const me = (await this.store.getUser(user.id)) ?? user;
-    if (!me.entity_id) return null;
+    if (!me.entity_id || me.roles.includes("admin")) return null;
     const firms = await this.entitledFirms(productId);
     const hit = firms.find((f) => f.entity_id === me.entity_id);
     if (!hit) return null;
@@ -630,13 +690,13 @@ export class ProductHealthService {
 
   private async flows(s: Subject, start: Date, end: Date, source: HealthReport["source"]): Promise<AdaptedFlows> {
     // The rails leave out sandbox movements, so a sandbox report showing them would put real money beside test figures.
-    if (source === "sandbox") return { flows: null, reason: "Sandbox ledger: real money flows aren't shown beside test figures", not_measured: {} };
-    if (!this.deps.flowsFor) return { flows: null, reason: FLOWS_UNAVAILABLE, not_measured: {} };
+    if (source === "sandbox") return { flows: null, reason: "Sandbox ledger: real money flows aren't shown beside test figures", not_measured: {}, partial: NOT_PARTIAL };
+    if (!this.deps.flowsFor) return { flows: null, reason: FLOWS_UNAVAILABLE, not_measured: {}, partial: NOT_PARTIAL };
     try {
       return adaptRailFlows(await this.deps.flowsFor(s.productId, start, end));
     } catch (e) {
       console.error("product health: the money rails failed:", (e as Error).message);
-      return { flows: null, reason: "The money rails failed to answer for this period", not_measured: {} };
+      return { flows: null, reason: "The money rails failed to answer for this period", not_measured: {}, partial: NOT_PARTIAL };
     }
   }
 
@@ -650,7 +710,7 @@ export class ProductHealthService {
     // partner_ledger only ever means a ledger that says it's live; anything else counts as sandbox.
     const source: HealthReport["source"] = failed ? "unavailable" : ledger.kind === "live" ? "partner_ledger" : "sandbox";
     const flows = await this.flows(s, start, end, source);
-    const figures = buildFigures({ reading, flows: flows.flows, flowsReason: flows.reason });
+    const figures = buildFigures({ reading, flows: flows.flows, flowsReason: flows.reason, partial: flows.partial });
     const report: HealthReport = {
       schema: SCHEMA,
       product_id: s.productId,
@@ -684,6 +744,8 @@ export class ProductHealthService {
     let periodStart = new Date(lastEnd.getTime() - interval);
     const last = await this.lastRow(s.subject);
     if (last && new Date(last.period_end).getTime() >= lastEnd.getTime()) return;
+    // The first record names the program it's on, so a later change of program can be told from anything else.
+    await this.db.query(`INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, program_id) VALUES ($1, 0, 'first record', $2) ON CONFLICT DO NOTHING`, [s.subject, this.chain?.programId ?? this.config.programId]);
     const epoch = await this.currentEpoch(s.subject);
     let sequence = last && last.epoch === epoch ? last.sequence + 1 : 1;
     if (last) {
@@ -796,20 +858,27 @@ export class ProductHealthService {
     try {
       const at = head?.sequence ?? 0;
       if (at >= r.sequence) {
-        // Already there (a confirmation Mynt never saw): adopted, whatever its deadline said.
+        // Already there (a confirmation Mynt never saw): adopted, whatever its deadline said, with its transaction.
+        const landedTx = async () => (chain.latestRecordTx ? await chain.latestRecordTx(subject).catch(() => null) : null);
         if (at === r.sequence && head && r.fingerprint && head.kind === KIND_SNAPSHOT && same(head.fingerprint, hexToBytes(r.fingerprint))) {
-          await this.markLanded(r, true, null, now);
+          await this.markLanded(r, true, await landedTx(), now);
           return true;
         }
         if (at === r.sequence && head && r.status === "missed" && head.kind === KIND_MISSED) {
-          await this.markLanded(r, false, null, now);
+          await this.markLanded(r, false, await landedTx(), now);
           return true;
         }
-        await this.stall(r, `The chain's head is at sequence ${at} and doesn't match this record; an admin can re-anchor it (reanchor_product_health)`, now);
+        await this.stall(r, `The chain's head is at sequence ${at} and doesn't match this record. Re-anchoring doesn't apply while the chain holds a record: this needs investigating`, now);
         return false;
       }
       if (at !== r.sequence - 1) {
-        await this.stall(r, `The chain's head is at sequence ${at}, not the one before ${r.sequence}${head ? "" : " (the chain has no record: a chain reset or a new program)"}; an admin can re-anchor it (reanchor_product_health)`, now);
+        await this.stall(
+          r,
+          head
+            ? `The chain's head is at sequence ${at}, not the one before ${r.sequence}. Re-anchoring doesn't apply while the chain holds a record: this needs investigating`
+            : `The chain has no record at sequence ${r.sequence - 1} (a chain reset or a new program); an admin can re-anchor it (reanchor_product_health)`,
+          now,
+        );
         return false;
       }
       if (r.status === "ready" && r.publish_deadline && new Date(r.publish_deadline) <= now) {
@@ -875,7 +944,7 @@ export class ProductHealthService {
   async registerSigningKey(user: User, publicKey: string) {
     const me = (await this.store.getUser(user.id)) ?? user;
     if (!me.entity_id) throw new HealthError("You don't belong to a firm yet");
-    if (!me.roles.includes("license_provider")) throw new HealthError("Only a licence provider firm's own member registers a signing key");
+    if (!me.roles.includes("license_provider") || me.roles.includes("admin")) throw new HealthError("Only a licence provider firm's own member registers a signing key");
     if (!isAddress(publicKey) || isWeakEd25519Key(base58Decode(publicKey))) throw new HealthError("public_key must be a usable Ed25519 public key, base58 (a Solana-style address)");
     await this.db.query(
       `INSERT INTO ${T}.product_health_signing_keys (entity_id, public_key, registered_by) VALUES ($1, $2, $3)
@@ -883,7 +952,10 @@ export class ProductHealthService {
       [me.entity_id, publicKey, me.id],
     );
     // Earlier snapshots stay checkable against the key that signed them.
-    await this.db.query(`INSERT INTO ${T}.product_health_signing_key_history (entity_id, public_key, registered_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [me.entity_id, publicKey, me.id]);
+    await this.db.query(
+      `INSERT INTO ${T}.product_health_signing_key_history (entity_id, public_key, registered_by, mac) VALUES ($1, $2, $3, $4) ON CONFLICT (entity_id, public_key) DO UPDATE SET mac = EXCLUDED.mac`,
+      [me.entity_id, publicKey, me.id, this.keyMac(me.entity_id, publicKey)],
+    );
     await this.store.audit(user.id, "register_partner_signing_key", me.entity_id, { public_key: publicKey });
     return { entity_id: me.entity_id, public_key: publicKey, sign: "with Ed25519, the UTF-8 text 'mynt.product_health.cosign.v1', one zero byte, then the 32 bytes of the snapshot's fingerprint (sha256, hex in list_product_health)" };
   }
@@ -933,11 +1005,30 @@ export class ProductHealthService {
     }
   }
 
-  // Replays the chain from Mynt's own rows and compares it to the head: any change to history shows. `epoch` limits
-  // it to the record now on chain; earlier epochs were anchored to a chain that's gone.
-  verifyAgainstChain(rows: SnapshotRow[], head: HeadAccount | null, chainError: string | null, epoch: number) {
+  private replayTo(rows: SnapshotRow[], upto: number): Uint8Array {
+    let chain: Uint8Array = ZERO_32;
+    for (const r of rows.filter((x) => x.on_chain && x.sequence <= upto)) chain = nextChain(chain, this.linkOf(r));
+    return chain;
+  }
+
+  // What an earlier record's rows say now, against what was saved when it ended: a record that didn't match then, or
+  // has been changed since, doesn't read as if it did.
+  private previousVerdict(rows: SnapshotRow[], a: Anchor | undefined): string {
+    if (!a || a.prev_verdict === "gone" || !a.prev_head_chain || a.prev_head_sequence === null) return "previous_chain_unverifiable";
+    if (a.prev_verdict !== "matches") return "previous_chain_mismatch";
+    return hexOf(this.replayTo(rows, a.prev_head_sequence)) === a.prev_head_chain ? "previous_chain_matched" : "previous_chain_mismatch";
+  }
+
+  // Replays the chain from Mynt's own rows and compares it to the head: any change to history shows. Earlier epochs are
+  // judged against what was saved when they ended.
+  verifyAgainstChain(rows: SnapshotRow[], head: HeadAccount | null, chainError: string | null, epoch: number, anchors: Anchor[] = []) {
     const verdict = new Map<string, string>();
-    for (const r of rows) verdict.set(r.id, r.epoch !== epoch ? "previous_chain" : r.on_chain ? "pending" : "not_on_chain");
+    for (const r of rows) verdict.set(r.id, r.on_chain ? "pending" : "not_on_chain");
+    for (const e of new Set(rows.filter((r) => r.epoch !== epoch).map((r) => r.epoch))) {
+      const old = rows.filter((r) => r.epoch === e);
+      const v = this.previousVerdict(old, anchors.find((a) => a.epoch === e + 1));
+      for (const r of old) if (r.on_chain) verdict.set(r.id, v);
+    }
     const current = rows.filter((r) => r.epoch === epoch);
     const ours = current.filter((r) => r.on_chain);
     if (chainError) {
@@ -1005,13 +1096,19 @@ export class ProductHealthService {
     return out;
   }
 
-  private async anchors(subject: string): Promise<Gap[]> {
-    const { rows } = await this.db.query(`SELECT epoch, reason, anchored_at FROM ${T}.product_health_anchors WHERE subject = $1 ORDER BY epoch`, [subject]);
-    return (rows as unknown as { epoch: number; reason: string; anchored_at: string }[]).map((a) => ({ kind: "re_anchored", from: iso(a.anchored_at), detail: `An admin started this product's on-chain record again (epoch ${a.epoch}): ${a.reason}` }));
+  private async anchors(subject: string): Promise<Anchor[]> {
+    return (await this.db.query(`SELECT * FROM ${T}.product_health_anchors WHERE subject = $1 ORDER BY epoch`, [subject])).rows as unknown as Anchor[];
   }
 
-  private async gapsOf(all: SnapshotRow[], subject: string, epoch: number, head: HeadAccount | null, error: string | null): Promise<Gap[]> {
-    return [...(await this.anchors(subject)), ...findGaps(all.filter((r) => r.epoch === epoch), head, this.now(), this.config.intervalMs, !error)];
+  private async gapsOf(all: SnapshotRow[], anchors: Anchor[], epoch: number, head: HeadAccount | null, error: string | null): Promise<Gap[]> {
+    const gaps: Gap[] = anchors
+      .filter((a) => a.epoch > 0)
+      .map((a) => ({ kind: "re_anchored", from: iso(a.anchored_at), detail: `An admin started this product's on-chain record again (epoch ${a.epoch}): ${a.reason}. The record before it: ${a.prev_verdict ?? "unknown"}${a.prev_head_sequence === null ? "" : `, head at sequence ${a.prev_head_sequence}`}` }));
+    // Holes in earlier records stay visible; only the current one is compared with the chain or can be overdue.
+    for (const e of new Set(all.filter((r) => r.epoch !== epoch).map((r) => r.epoch))) gaps.push(...findGaps(all.filter((r) => r.epoch === e), null, this.now(), this.config.intervalMs, false).filter((g) => g.kind !== "overdue"));
+    gaps.push(...findGaps(all.filter((r) => r.epoch === epoch), head, this.now(), this.config.intervalMs, !error));
+    if (!all.length) gaps.push({ kind: "no_record", detail: "This sponsored product has no health record yet" });
+    return gaps;
   }
 
   // What anyone allowed to see a product's record gets: fingerprints and status, no numbers.
@@ -1033,10 +1130,10 @@ export class ProductHealthService {
       const all = await this.rows(row.subject);
       const { head, error } = await this.headOf(hexToBytes(row.subject));
       const epoch = await this.currentEpoch(row.subject);
-      const { verdict } = this.verifyAgainstChain(all, head, error, epoch);
+      const anchors = await this.anchors(row.subject);
+      const { verdict } = this.verifyAgainstChain(all, head, error, epoch, anchors);
       const assessed = await this.assess(all.slice(-limit), row.subject, verdict);
-      const gaps = await this.gapsOf(all, row.subject, epoch, head, error);
-      if (!all.length) gaps.push({ kind: "no_record", detail: "This sponsored product has no health record yet" });
+      const gaps = await this.gapsOf(all, anchors, epoch, head, error);
       out.push({
         product_id: row.product_id,
         pool_id: row.pool_id || null,
@@ -1059,7 +1156,8 @@ export class ProductHealthService {
     const all = await this.rows(subject);
     const { head, error } = await this.headOf(subjectBytes);
     const epoch = await this.currentEpoch(subject);
-    const { verdict } = this.verifyAgainstChain(all, head, error, epoch);
+    const anchors = await this.anchors(subject);
+    const { verdict } = this.verifyAgainstChain(all, head, error, epoch, anchors);
     // A sponsor's numbers are its own books: another sponsor of the product doesn't read them.
     const visible = all.filter((r) => firm.as !== "licence_provider" || r.partner_entity_id === firm.entity_id);
     const slice = visible.slice(-limit);
@@ -1070,6 +1168,9 @@ export class ProductHealthService {
         ...snapshotStatus(r, a),
         // Withheld on a missed period: it never reached the chain, so nothing can vouch for it.
         report: a.report,
+        // Entitled readers only: what they need to check the co-signature themselves.
+        partner_key: r.partner_key,
+        partner_signature: r.partner_signature,
         verification: {
           report_matches_fingerprint: a.report_matches,
           partner_signature_valid: a.signature_ok,
@@ -1086,36 +1187,78 @@ export class ProductHealthService {
       entitled_as: firm.as,
       latest: history[0] ?? null,
       history,
-      gaps: await this.gapsOf(all, subject, epoch, head, error),
-      chain: { program_id: this.chain?.programId ?? null, cluster: "devnet", epoch, head_sequence: head?.sequence ?? null, ...(error ? { unavailable: error } : {}) },
+      gaps: await this.gapsOf(all, anchors, epoch, head, error),
+      chain: {
+        program_id: this.chain?.programId ?? null,
+        cluster: "devnet",
+        epoch,
+        // Entitled readers only: where to look on chain, to check this without Mynt (scripts/product-health-verify.mjs).
+        subject,
+        head_address: this.chain ? headAddress(this.chain.programId, subjectBytes) : null,
+        head_sequence: head?.sequence ?? null,
+        ...(error ? { unavailable: error } : {}),
+      },
     };
   }
 
   // After a chain reset or a move to a new program, a product's record can't continue where it was. An admin starts it
-  // again, in the open: refused while the chain still matches, audited, and shown as a gap from then on.
+  // again, in the open. Only when the chain has no record for it: a head that disagrees with Mynt is evidence, not
+  // something an admin can start over from. What the old record looked like is saved and stays reported.
   async reanchor(user: User, productId: string, poolId: string | null, reason: string) {
     const me = (await this.store.getUser(user.id)) ?? user;
-    if (!me.roles.includes("admin")) throw new HealthError("Only an admin can re-anchor a product's record");
+    const refuse = async (message: string): Promise<never> => {
+      await this.store.audit(user.id, "reanchor_product_health_refused", productId, { pool_id: poolId, reason: reason.slice(0, MAX_REANCHOR_REASON), refused: message.slice(0, ERROR_LIMIT) });
+      throw new HealthError(message);
+    };
+    if (!me.roles.includes("admin")) return refuse("Only an admin can re-anchor a product's record");
+    if (reason.trim().length < 10 || reason.length > MAX_REANCHOR_REASON) return refuse(`Say what happened to the chain, in 10 to ${MAX_REANCHOR_REASON} characters`);
+    const chain = this.chain;
+    if (!chain) return refuse("The product-health program isn't deployed on this Mynt yet");
     const subjectBytes = this.subjectOf(productId, poolId);
     const subject = hexOf(subjectBytes);
     const all = await this.rows(subject);
-    if (!all.length) throw new HealthError("That product has no record to re-anchor");
+    if (!all.length) return refuse("That product has no record to re-anchor");
     const { head, error } = await this.headOf(subjectBytes);
-    if (error) throw new HealthError(`The chain can't be read, so a reset can't be confirmed: ${error}`);
+    if (error) return refuse(`The chain can't be read, so a reset can't be confirmed: ${error}`);
+    if (head) return refuse(`The chain still holds this product's record, at sequence ${head.sequence}, so it can't be re-anchored. If it disagrees with Mynt's record, that needs investigating`);
     const epoch = await this.currentEpoch(subject);
     const current = all.filter((r) => r.epoch === epoch);
-    const { ok } = this.verifyAgainstChain(all, head, null, epoch);
-    const onChain = current.some((r) => r.on_chain);
-    if (ok || (!head && !onChain)) throw new HealthError("The chain still matches Mynt's record, so there's nothing to re-anchor");
-    const next = epoch + 1;
-    await this.db.query(`INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, anchored_by) VALUES ($1, $2, $3, $4)`, [subject, next, reason, me.id]);
-    await this.db.query(
-      `UPDATE ${T}.product_health_snapshots SET status = 'missed', missed_reason = COALESCE(missed_reason, $3), stalled_reason = NULL WHERE subject = $1 AND epoch = $2 AND NOT on_chain`,
-      [subject, epoch, `Not published: the record was re-anchored (${reason})`.slice(0, ERROR_LIMIT)],
+    const anchors = await this.anchors(subject);
+    const previousProgram = anchors.find((a) => a.epoch === epoch)?.program_id ?? null;
+    const programChanged = !!previousProgram && previousProgram !== chain.programId;
+    if (!programChanged && !current.some((r) => r.on_chain)) return refuse("Nothing of this product's record has reached the chain, so there's nothing to re-anchor");
+    // A program that was replaced may still be there to compare against; a reset chain isn't.
+    let oldHead: HeadAccount | null = null;
+    if (programChanged) {
+      try {
+        oldHead = await chain.head(subjectBytes, previousProgram!);
+      } catch (e) {
+        return refuse(`The previous program can't be read, so its record can't be saved: ${(e as Error).message.slice(0, ERROR_LIMIT)}`);
+      }
+    }
+    const verdict = oldHead ? (this.verifyAgainstChain(current, oldHead, null, epoch).ok ? "matches" : "mismatch") : "gone";
+    // One statement, so one transaction: the epoch is read again where it's written, and the old record's rows change
+    // with it or not at all.
+    const { rows } = await this.db.query(
+      `WITH cur AS (SELECT COALESCE(MAX(epoch), 0)::int AS e FROM ${T}.product_health_anchors WHERE subject = $1),
+       ins AS (
+         INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, anchored_by, program_id, prev_verdict, prev_head_sequence, prev_head_chain)
+         SELECT $1, e + 1, $2, $3::uuid, $4, $5, $6::int, $7 FROM cur WHERE e = $8::int RETURNING epoch
+       ),
+       upd AS (
+         UPDATE ${T}.product_health_snapshots
+            SET status = CASE WHEN on_chain THEN status ELSE 'missed' END,
+                missed_reason = CASE WHEN on_chain THEN missed_reason ELSE COALESCE(missed_reason, $9) END,
+                stalled_reason = NULL
+          WHERE subject = $1 AND epoch = $8::int AND EXISTS (SELECT 1 FROM ins) RETURNING 1
+       )
+       SELECT epoch FROM ins`,
+      [subject, reason, me.id, chain.programId, verdict, oldHead?.sequence ?? null, oldHead ? hexOf(oldHead.chain) : null, epoch, `Not published: the record was re-anchored (${reason})`.slice(0, ERROR_LIMIT)],
     );
-    await this.db.query(`UPDATE ${T}.product_health_snapshots SET stalled_reason = NULL WHERE subject = $1 AND epoch = $2`, [subject, epoch]);
-    await this.store.audit(user.id, "reanchor_product_health", productId, { pool_id: poolId, from_epoch: epoch, to_epoch: next, reason, head_sequence: head?.sequence ?? null });
-    return { product_id: productId, pool_id: poolId, epoch: next, next_sequence: 1 };
+    const next = (rows[0] as { epoch: number } | undefined)?.epoch;
+    if (next === undefined) return refuse("Someone else re-anchored this record first");
+    await this.store.audit(user.id, "reanchor_product_health", productId, { pool_id: poolId, from_epoch: epoch, to_epoch: next, reason, previous_record: verdict, previous_program: previousProgram, program_id: chain.programId });
+    return { product_id: productId, pool_id: poolId, epoch: next, next_sequence: 1, previous_record: verdict };
   }
 }
 
@@ -1142,13 +1285,18 @@ export class SolanaHealthChain implements HealthChain {
     return this.publisherKey;
   }
 
-  async head(subject: Uint8Array): Promise<HeadAccount | null> {
+  async latestRecordTx(subject: Uint8Array): Promise<string | null> {
+    const list = await this.solana.rpc("devnet").call<{ signature: string; err: unknown }[]>("getSignaturesForAddress", [headAddress(this.programId, subject), { limit: 10, commitment: "confirmed" }]);
+    return list.find((s) => s.err === null)?.signature ?? null;
+  }
+
+  async head(subject: Uint8Array, programId: string = this.programId): Promise<HeadAccount | null> {
     const { value } = await this.solana.rpc("devnet").call<{ value: { data: [string, string]; owner: string } | null }>("getAccountInfo", [
-      headAddress(this.programId, subject),
+      headAddress(programId, subject),
       { encoding: "base64", commitment: "confirmed" },
     ]);
     if (!value) return null;
-    if (value.owner !== this.programId) throw new HealthError("The product's head account isn't owned by the product-health program");
+    if (value.owner !== programId) throw new HealthError("The product's head account isn't owned by the product-health program");
     const head = decodeHead(Buffer.from(value.data[0], "base64"));
     if (!head) throw new HealthError("The product's head account can't be read");
     return head;

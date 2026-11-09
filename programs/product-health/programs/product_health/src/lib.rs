@@ -15,8 +15,9 @@ declare_id!("GLi9SM8q1Q8S1k5SFHWpZ7v9uWK9M5ZDxhd6ESjuSfVz");
 /// being replaced: whoever holds the upgrade authority can change it until it's frozen or put behind a timelock.
 ///
 /// The program can't check the co-signature: `partner_signed` says only that the publisher supplied a non-zero
-/// commitment. Readers verify the signature itself against the licence provider's key and this commitment (Mynt does so
-/// in get_product_health). An on-chain Ed25519 check would have to publish the partner's key and link its products.
+/// commitment. An entitled reader gets the key and signature from get_product_health and checks them against this
+/// commitment itself (scripts/product-health-verify.mjs). An on-chain Ed25519 check would have to publish the partner's
+/// key and link its products.
 ///
 /// It holds nothing and moves nothing: no token program is ever called, and no account here pays anyone. The publisher
 /// is whoever the program's own upgrade authority installed at initialisation; there's no hard-coded key.

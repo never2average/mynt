@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,7 +19,7 @@ process.env.MYNT_VAULT_KEY = randomBytes(32).toString("base64");
 const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
 const { opsStatus } = await import("../dist/ops.js");
-const { adaptRailFlows, ProductHealthService, buildFigures, canonicalJson, findGaps, fingerprintOf, loadFlowsFor, openReport, sealReport, snapshotStatus, SolanaHealthChain } = await import("../dist/product-health.js");
+const { adaptRailFlows, ProductHealthService, buildFigures, canonicalJson, findGaps, fingerprintOf, loadFlowsFor, openReport, productHealthConfigFromEnv, sealReport, snapshotStatus, SolanaHealthChain } = await import("../dist/product-health.js");
 const chainLib = await import("../dist/solana/product-health-chain.js");
 const { compileMessage } = await import("../dist/solana/tx.js");
 const { Keypair, base58Encode, anchorDiscriminator, findProgramAddress, isWeakEd25519Key } = await import("../dist/solana/codec.js");
@@ -36,13 +39,16 @@ class FakeChain {
   heads = new Map();
   log = [];
   failing = false;
-  async head(subject) {
+  async head(subject, programId = this.programId) {
     if (this.failing) throw new Error("the RPC was unreachable");
-    return this.heads.get(Buffer.from(subject).toString("hex")) ?? null;
+    return this.heads.get(`${programId}:${Buffer.from(subject).toString("hex")}`) ?? null;
+  }
+  async latestRecordTx() {
+    return "recovered-transaction";
   }
   apply(subject, kind, e, opening) {
     if (this.failing) throw new Error("the RPC was unreachable");
-    const k = Buffer.from(subject).toString("hex");
+    const k = `${this.programId}:${Buffer.from(subject).toString("hex")}`;
     const head = this.heads.get(k);
     assert.equal(opening, head === undefined, "opening only when no head exists");
     const at = head?.sequence ?? 0;
@@ -172,16 +178,35 @@ test("the rails' real shape: on_ramp and deposit are in, off_ramp and payout are
     product_id: "p",
     measured: true,
     flows: { on_ramp: railDirection({ settled: tally(8_00), requested: tally(50), submitted: tally(50), reversed: tally(1_00) }), deposit: railDirection({ settled: tally(1_00), failed: tally(1_00) }), off_ramp: railDirection({ settled: tally(2_00) }), payout: null },
+    unresolved: { on_ramp: tally(0, 0), deposit: tally(3_00), off_ramp: tally(0, 0), payout: null },
     not_measured: { payout: "Mynt doesn't instruct payout for this product, so it can't see any" },
   });
-  assert.deepEqual(flows.in, { settled: 9_00, pending: 1_00, failed: 1_00, reversed: 1_00 });
-  assert.deepEqual(flows.out, { settled: 2_00, pending: 0, failed: 0, reversed: 0 });
+  assert.deepEqual(flows.in, { settled: 9_00, pending: 1_00, failed: 1_00, reversed: 1_00, unresolved: 3_00 });
+  assert.deepEqual(flows.out, { settled: 2_00, pending: 0, failed: 0, reversed: 0, unresolved: 0 });
   assert.match(reason, /payout/);
+  const adapted = adaptRailFlows({
+    measured: true,
+    flows: { on_ramp: railDirection({ settled: tally(8_00) }), deposit: railDirection(), off_ramp: railDirection({ settled: tally(2_00) }), payout: null },
+    unresolved: { on_ramp: tally(0, 0), deposit: tally(0, 0), off_ramp: tally(0, 0), payout: null },
+    not_measured: { payout: "no payouts here" },
+  });
+  // A total that leaves a direction out says so.
+  assert.equal(adapted.partial.in, null);
+  assert.match(adapted.partial.out, /payout: no payouts here/);
+  const p = buildFigures({ reading: null, flows: adapted.flows, flowsReason: adapted.reason, partial: adapted.partial });
+  assert.equal(p.flows_in_cents.partial, undefined);
+  assert.equal(p.flows_in_cents.reason, null);
+  assert.equal(p.flows_out_cents.value, 2_00);
+  assert.equal(p.flows_out_cents.partial, true);
+  assert.match(p.flows_out_cents.reason, /Partial: leaves out payout/);
+  assert.equal(p.pending_settlements_cents.partial, true);
+
   const f = buildFigures({ reading: { reserves_held_cents: 150_00, customer_obligations_cents: 100_00, as_of: "2026-11-09T00:00:00Z" }, flows, flowsReason: reason });
   assert.equal(f.coverage_bps.value, 15_000);
   assert.equal(f.flows_in_cents.value, 9_00);
   assert.equal(f.flows_out_cents.value, 2_00);
-  assert.equal(f.requested_in_cents.value, 12_00);
+  assert.equal(f.requested_in_cents.value, 15_00, "requested counts what nobody answered for");
+  assert.equal(f.unresolved_cents.value, 3_00);
   assert.equal(f.pending_settlements_cents.value, 1_00);
   // Failure and reversal rates round up, never down.
   assert.equal(f.reversal_rate_bps.value, 834); // 1 of (9 + 2 + 1) = 8.33...%
@@ -274,15 +299,19 @@ test("against the real money-rails module", { skip: !existsSync(new URL("../dist
   await insert("requested", "on_ramp", 2_00);
   await insert("failed", "off_ramp", 50);
   await insert("settled", "on_ramp", 99_00, true); // sandbox: the rails leave it out
+  await pg.query("INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, sponsor_entity_id, rail_id, direction, amount_cents, status, status_detail, created_at) VALUES (gen_random_uuid(), gen_random_uuid()::text, $1, $2, gen_random_uuid(), 'on_ramp', 700, 'failed', 'stale_no_answer', $3)", [productId, provider.entity.id, new Date(T0 - 30 * 60_000)]);
   const adapted = adaptRailFlows(await bound(productId, new Date(T0 - HOUR), new Date(T0)));
   assert.equal(adapted.flows.in.settled, 10_00);
   assert.equal(adapted.flows.in.pending, 2_00);
+  assert.equal(adapted.flows.in.unresolved, 7_00);
+  assert.equal(adapted.flows.in.failed, 0, "nobody answered: it isn't known to have failed");
   assert.equal(adapted.flows.out.failed, 50);
   const live = await ProductHealthService.open(health.db ?? { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() }, store, health.config, { chain: health.chain, flowsFor: bound, ledgerFor: () => liveLedger, now: () => new Date(T0 + 5 * 60_000) });
   await tickAt(T0 + 5 * 60_000, live);
   const figures = (await live.get(provider.user, productId, null, 1)).latest.report.figures;
   assert.equal(figures.flows_in_cents.value, 10_00);
-  assert.equal(figures.requested_in_cents.value, 12_00);
+  assert.equal(figures.requested_in_cents.value, 19_00);
+  assert.equal(figures.unresolved_cents.value, 7_00);
 });
 
 // ---- entitlement (H1, H2, H3) ----
@@ -543,6 +572,106 @@ test("a co-signature that lands while the worker holds a stale row still goes on
   assert.ok(Buffer.from(chain.log[0].partner_commitment).some((b) => b !== 0));
 });
 
+test("an account that's an admin is refused even with the licence-provider role and a seat at the firm", async () => {
+  const { store, health, productId, provider, tickAt } = await setup();
+  const key = edKeyPair();
+  await health.registerSigningKey(provider.user, key.address);
+  await tickAt(T0 + 5 * 60_000);
+  const snap = await firstSnapshot(health, provider.user, productId);
+  const { user: both } = await store.createUser("Both", ["admin", "license_provider"]);
+  await store.setUserEntity(both.id, provider.entity.id);
+  both.entity_id = provider.entity.id;
+  await assert.rejects(health.get(both, productId, null, 5), /aren't entitled/);
+  await assert.rejects(health.registerSigningKey(both, edKeyPair().address), /own member/);
+  await assert.rejects(health.submitSignature(both, productId, null, 1, key.sign(snap.fingerprint)), /Only the licence provider/);
+});
+
+test("a key written straight into the history table counts for nothing", async () => {
+  const { health, pg, productId, provider, raw, tickAt } = await setup({ ledger: liveLedger });
+  const real = edKeyPair();
+  await health.registerSigningKey(provider.user, real.address);
+  await tickAt(T0 + 5 * 60_000);
+  const [row] = await raw(`SELECT id, fingerprint FROM ${SNAPSHOTS}`);
+  const planted = edKeyPair();
+  await pg.query("INSERT INTO financial_products.product_health_signing_key_history (entity_id, public_key, mac) VALUES ($1, $2, $3)", [provider.entity.id, planted.address, "00".repeat(32)]);
+  await pg.query(`UPDATE ${SNAPSHOTS} SET partner_key = $2, partner_signature = $3 WHERE id = $1`, [row.id, planted.address, planted.sign(row.fingerprint)]);
+  const latest = (await health.get(provider.user, productId, null, 1)).latest;
+  assert.equal(latest.attestation, "invalid_signature");
+  assert.equal(latest.verification.partner_signature_valid, false);
+  // Nor can the current key be swapped under the firm.
+  await pg.query("UPDATE financial_products.product_health_signing_keys SET public_key = $2 WHERE entity_id = $1", [provider.entity.id, planted.address]);
+  assert.equal(await health.signingKey(provider.entity.id), null);
+});
+
+test("readers get what they need to check the signature and find the head; the list never carries it", async () => {
+  const { health, productId, provider, chain, tickAt, tool } = await setup({ ledger: liveLedger });
+  const key = edKeyPair();
+  await health.registerSigningKey(provider.user, key.address);
+  await tickAt(T0 + 5 * 60_000);
+  const snap = await firstSnapshot(health, provider.user, productId);
+  const signature = key.sign(snap.fingerprint);
+  await health.submitSignature(provider.user, productId, null, 1, signature);
+  await tickAt(T0 + 6 * 60_000);
+  const out = await health.get(provider.user, productId, null, 1);
+  assert.equal(out.latest.partner_key, key.address);
+  assert.equal(out.latest.partner_signature, signature);
+  assert.equal(out.chain.subject, Buffer.from(health.subjectOf(productId, null)).toString("hex"));
+  assert.equal(out.chain.head_address, chainLib.headAddress(chain.programId, health.subjectOf(productId, null)));
+  const listed = JSON.stringify((await tool(provider.user, "list_product_health", { product_id: productId })).data);
+  for (const field of ['"subject"', "head_address", "partner_key", "partner_signature", key.address, signature]) assert.equal(listed.includes(field), false, field);
+});
+
+test("an entitled reader can verify a snapshot with the standalone script, and a forgery fails it", async () => {
+  const { health, productId, provider, chain, tickAt } = await setup({ ledger: liveLedger });
+  const key = edKeyPair();
+  await health.registerSigningKey(provider.user, key.address);
+  await tickAt(T0 + 5 * 60_000);
+  const snap = await firstSnapshot(health, provider.user, productId);
+  await health.submitSignature(provider.user, productId, null, 1, key.sign(snap.fingerprint));
+  await tickAt(T0 + 6 * 60_000);
+  const answer = await health.get(provider.user, productId, null, 5);
+  const h = chain.log[0];
+  // A head account as the program stores it, served by a stand-in RPC.
+  const data = Buffer.alloc(chainLib.HEAD_SIZE);
+  Buffer.from(anchorDiscriminator("account", "Head")).copy(data, 0);
+  Buffer.from(h.subject).copy(data, 8);
+  data.writeBigUInt64LE(1n, 40);
+  Buffer.from(h.fingerprint).copy(data, 48);
+  Buffer.from(h.partner_commitment).copy(data, 99);
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const { method, id } = JSON.parse(body);
+      assert.equal(method, "getAccountInfo");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result: { value: { owner: PROGRAM_ID, data: [data.toString("base64"), "base64"] } } }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const dir = mkdtempSync(join(tmpdir(), "health-verify-"));
+  const run = async (doc) => {
+    const file = join(dir, "answer.json");
+    writeFileSync(file, JSON.stringify(doc, null, 2));
+    const script = new URL("../scripts/product-health-verify.mjs", import.meta.url).pathname;
+    return new Promise((resolve) => execFile(process.execPath, [script, "--file", file, "--rpc", `http://127.0.0.1:${server.address().port}`], (error, stdout) => resolve({ code: error ? error.code : 0, stdout })));
+  };
+  try {
+    const good = await run(answer);
+    assert.equal(good.code, 0, good.stdout);
+    assert.match(good.stdout, /PASS {2}report hashes/);
+    assert.match(good.stdout, /PASS {2}partner signature/);
+    assert.match(good.stdout, /PASS {2}fingerprint matches/);
+    assert.match(good.stdout, /PASS {2}partner commitment/);
+    const forged = JSON.parse(JSON.stringify(answer));
+    forged.latest.report.figures.reserves_cents.value += 1;
+    const bad = await run(forged);
+    assert.equal(bad.code, 1);
+    assert.match(bad.stdout, /FAIL {2}report hashes/);
+  } finally {
+    server.close();
+  }
+});
+
 test("the signing key must be a usable Ed25519 key of a licence provider firm", async () => {
   const { health, builder, provider } = await setup();
   await assert.rejects(health.registerSigningKey(builder.user, edKeyPair().address), /Only a licence provider/);
@@ -640,6 +769,7 @@ test("a snapshot that landed unseen is adopted, even past its deadline after the
   const view = await firstSnapshot(health, provider.user, productId);
   assert.equal(view.status, "published");
   assert.equal(view.on_chain, true);
+  assert.equal(view.tx_signature, "recovered-transaction", "the transaction is recovered, so a reader can look it up");
   assert.equal(chain.log.filter((l) => l.sequence === 1).length, 1);
 });
 
@@ -675,7 +805,7 @@ test("changing the interval never produces an overlapping period", async () => {
 test("after a chain reset the record stalls in the open, and an admin re-anchors it", async () => {
   const { health, productId, provider, admin, builder, chain, db, tool, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
   await tickAt(T0 + 5 * 60_000);
-  await assert.rejects(health.reanchor(admin, productId, null, "the chain looks fine"), /still matches/);
+  await assert.rejects(health.reanchor(admin, productId, null, "the chain looks fine"), /still holds/);
   chain.heads.clear(); // devnet was reset
   let [view] = await health.listFor(admin, productId, 5);
   assert.ok(view.gaps.some((g) => g.kind === "chain_behind"), "a missing head is chain_behind");
@@ -694,9 +824,94 @@ test("after a chain reset the record stalls in the open, and an admin re-anchors
   assert.equal(out.latest.sequence, 1);
   assert.equal(out.latest.epoch, 1);
   assert.equal(out.latest.verification.on_chain, "matches");
-  assert.equal(out.history.find((h) => h.epoch === 0 && h.sequence === 1).verification.on_chain, "previous_chain");
-  assert.ok(out.gaps.some((g) => g.kind === "re_anchored"));
+  assert.equal(out.history.find((h) => h.epoch === 0 && h.sequence === 1).verification.on_chain, "previous_chain_unverifiable", "the old chain is gone, so nothing vouches for it");
+  assert.ok(out.gaps.some((g) => g.kind === "re_anchored" && /gone/.test(g.detail)));
   assert.doesNotMatch((await opsStatus(db, { backupStatusFile: "/nonexistent" })).attention.join("\n"), /stalled/);
+});
+
+test("a tampered record can't be re-anchored away, and a disagreeing head isn't advertised as re-anchorable", async () => {
+  const { store, health, productId, provider, admin, chain, raw, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  const [row] = await raw(`SELECT id, fingerprint FROM ${SNAPSHOTS}`);
+  await pg.query(`UPDATE ${SNAPSHOTS} SET fingerprint = $2 WHERE id = $1`, [row.id, "ab".repeat(32)]);
+  assert.equal((await health.get(provider.user, productId, null, 5)).latest.verification.on_chain, "mismatch");
+  await assert.rejects(health.reanchor(admin, productId, null, "hide what happened"), /still holds/);
+  const refusals = await raw("SELECT action FROM financial_products.audit_log WHERE action = 'reanchor_product_health_refused'");
+  assert.equal(refusals.length, 1);
+  assert.equal((await health.get(provider.user, productId, null, 5)).latest.epoch, 0);
+  // Next period, the row disagrees with the head: stalled, with no advice to re-anchor.
+  await pg.query(`UPDATE ${SNAPSHOTS} SET on_chain = false, status = 'ready', publish_deadline = NULL WHERE id = $1`, [row.id]);
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  const [view] = await health.listFor(admin, productId, 5);
+  const stall = view.gaps.find((g) => g.kind === "stalled");
+  assert.ok(stall);
+  assert.match(stall.detail, /needs investigating/);
+  assert.doesNotMatch(stall.detail, /can re-anchor/);
+  assert.ok(chain.log.length >= 1);
+  await assert.rejects(health.reanchor(admin, productId, null, "x".repeat(501)), /10 to 500/);
+  assert.ok(store);
+});
+
+test("moving to a new program keeps the old record's verdict, and tampering with it afterwards shows", async () => {
+  const { health, productId, provider, admin, chain, raw, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.programId = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  const done = await health.reanchor(admin, productId, null, "moved to a new program");
+  assert.equal(done.previous_record, "matches");
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  let out = await health.get(provider.user, productId, null, 5);
+  const old = () => out.history.find((h) => h.epoch === 0 && h.sequence === 1);
+  assert.equal(old().verification.on_chain, "previous_chain_matched");
+  assert.equal(old().verification.integrity_ok, false, "only the current chain can vouch for integrity");
+  const [{ program_id, prev_head_sequence, prev_head_chain }] = await raw("SELECT program_id, prev_head_sequence, prev_head_chain FROM financial_products.product_health_anchors WHERE epoch = 1");
+  assert.equal(program_id, chain.programId);
+  assert.equal(prev_head_sequence, 1);
+  assert.equal(prev_head_chain.length, 64);
+  await pg.query(`UPDATE ${SNAPSHOTS} SET fingerprint = $1 WHERE epoch = 0`, ["cd".repeat(32)]);
+  out = await health.get(provider.user, productId, null, 5);
+  assert.equal(old().verification.on_chain, "previous_chain_mismatch");
+});
+
+test("holes in an earlier record stay visible after a re-anchor, and the overdue count is the current record's", async () => {
+  const { health, productId, admin, chain, db, raw, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  await tickAt(T0 + 4 * HOUR + 5 * 60_000); // a stretch Mynt missed
+  chain.heads.clear();
+  await health.reanchor(admin, productId, null, "devnet was reset");
+  await tickAt(T0 + 5 * HOUR + 5 * 60_000);
+  const [view] = await health.listFor(admin, productId, 10);
+  assert.ok(view.gaps.some((g) => g.kind === "missed" && g.sequence === 2));
+  const old = await raw(`SELECT count(*)::int AS n FROM ${SNAPSHOTS} WHERE epoch = 0 AND NOT on_chain`);
+  assert.equal(old[0].n, 0, "this history was on chain");
+  const report = await opsStatus(db, { backupStatusFile: "/nonexistent" });
+  assert.equal(report.product_health.overdue, 0);
+});
+
+test("a stale old-epoch row doesn't count as overdue", async () => {
+  const { health, productId, admin, chain, db, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  chain.failing = true;
+  await tickAt(T0 + 5 * 60_000);
+  chain.failing = false;
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  chain.heads.clear();
+  await health.reanchor(admin, productId, null, "devnet was reset");
+  await pg.query(`INSERT INTO ${SNAPSHOTS} (id, subject, epoch, product_id, sequence, period_start, period_end, status, source, publish_deadline) SELECT gen_random_uuid(), subject, 0, product_id, 99, now() - interval '2 hours', now() - interval '1 hour', 'ready', 'sandbox', now() - interval '1 minute' FROM ${SNAPSHOTS} LIMIT 1`);
+  assert.equal((await opsStatus(db, { backupStatusFile: "/nonexistent" })).product_health.overdue, 0);
+  assert.ok(productId);
+});
+
+test("a record with a sponsored product and no rows shows no_record to its reader too; a landing marker is pending", async () => {
+  const { health, productId, provider } = await setup();
+  assert.ok((await health.get(provider.user, productId, null, 5)).gaps.some((g) => g.kind === "no_record"));
+  const row = { sequence: 2, period_start: new Date(T0), period_end: new Date(T0 + HOUR), status: "missed", on_chain: false, missed_reason: "x", fingerprint: null };
+  const earlier = { sequence: 1, period_start: new Date(T0 - HOUR), period_end: new Date(T0), status: "published", on_chain: true, missed_reason: null };
+  const gaps = findGaps([earlier, row], { sequence: 2, kind: chainLib.KIND_MISSED, fingerprint: new Uint8Array(32) }, new Date(T0 + HOUR), HOUR);
+  assert.ok(!gaps.some((g) => g.kind === "chain_ahead"));
+});
+
+test("the interval is capped", () => {
+  assert.equal(productHealthConfigFromEnv({ PRODUCT_HEALTH_INTERVAL_MINUTES: "999999" }).intervalMs, 24 * HOUR);
+  assert.equal(productHealthConfigFromEnv({}).intervalMs, HOUR);
 });
 
 test("findGaps sees a missed record, a broken sequence, a stretch of nothing and a stale record", () => {
