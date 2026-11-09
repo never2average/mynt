@@ -1,0 +1,22 @@
+{
+  "description": "The Solana toolchain Mynt installs in build and verify sandboxes, and the versions its coding agents build against. One place for every pin: src/solana/toolchain.ts reads it, the weekly watcher (scripts/solana-toolchain-watch.mjs) rewrites it in a pull request, and test/solana-toolchain.test.js checks that the starter program, the vendored docs and the agents' instructions agree with it.",
+  "agave": {
+    "version": "2.3.13",
+    "sha256": "c43539ebdf6942472e8b87635d6ea55f428a51e3d0219f7b6f720fc6b19fade0"
+  },
+  "anchor": {
+    "version": "0.32.1",
+    "sha256": "5f25b850ce80278507a98947833fcd48423391f6d145046ffb0c5fd130dec436",
+    "commit": "1ebbe58158d089a2a40b5e35ebead5a10db9090d"
+  },
+  "rust": {
+    "version": "1.89.0",
+    "rustup": "1.28.2",
+    "rustupSha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+  },
+  "anchorImage": "solanafoundation/anchor:v0.32.1@sha256:facc4ebd0738ba7ebc1eb4ef000deab6b37e7747960d3f400c73c40c5421b5de",
+  "anchorTs": {
+    "package": "@coral-xyz/anchor",
+    "version": "0.32.1"
+  }
+}
