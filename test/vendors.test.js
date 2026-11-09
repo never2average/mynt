@@ -199,7 +199,7 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   const inTypes = await ok(vera, "list_service_types", { region: "IN" });
   const usTypes = await ok(vera, "list_service_types", { region: "US" });
   assert.equal(inTypes.length, 8);
-  assert.equal(usTypes.length, 3);
+  assert.equal(usTypes.length, 4);
   assert.ok(!usTypes.some((t) => t.key === "ckyc_search_download"), "service types are per region");
   assert.deepEqual(inTypes.find((t) => t.key === "ckyc_search_download").vendor_licences, ["rbi_pa"]);
   assert.deepEqual((await ok(vera, "list_service_types", { category: "credit_bureau" })).map((t) => t.region).sort(), ["IN", "US"]);
