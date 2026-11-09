@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { licenseInForce, productsAnsweredBy } from "./access.js";
 import { rederiveProduct } from "./derived.js";
+import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import { driftSweep } from "./pins.js";
 import { compositionOf, productRegime } from "./regime.js";
 import { coversJurisdiction, JURISDICTION, licenceJurisdictions, normalizeModel } from "./regulatory.js";
@@ -96,7 +97,7 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
     {
       title: "Requests to sponsor products",
       description:
-        "Licence provider: builders' requests to sponsor a component of their product under your licences (pending by default), each with the product, the component (primitive, action, country, where it's offered), the jurisdictions asked for, and which of your verified licences grant that component.",
+        "Licence provider: builders' requests to sponsor a component of their product under your licences (pending by default), each with the product, the component (primitive, action, country, where it's offered), the jurisdictions asked for, which of your verified licences grant that component, and your firm's legitimacy: whether Mynt's public checks (GLEIF LEI, FinCEN MSB) show it's a real company, which approving needs.",
       inputSchema: { status: z.enum(SPONSORSHIP_STATUSES).default("pending") },
       annotations: { readOnlyHint: true },
     },
@@ -104,6 +105,8 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
       const entity = await myEntity();
       if (!entity) return fail(noFirm);
       const held = await store.licensesOf(entity);
+      // Whether your firm may sponsor at all: Mynt's public checks that it's a real company (see firm-checks.ts).
+      const legitimacy = legitimacySummary(await firmLegitimacy(store, entity));
       const out = [];
       for (const s of await store.sponsorships({ provider_entity_id: entity, status })) {
         const d = await describe(store, s);
@@ -118,7 +121,7 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
             .filter((h) => types.has(`${h.regulator_id}/${h.license_id}`) && h.region === row?.region)
             .map((h) => ({ id: h.id, regulator_id: h.regulator_id, license_id: h.license_id, jurisdiction: h.jurisdiction, in_force: licenseInForce(h) }));
         }
-        out.push({ ...d, your_licences_granting_it: granting });
+        out.push({ ...d, your_licences_granting_it: granting, your_firm_legitimacy: legitimacy });
       }
       return json(out);
     },
@@ -129,7 +132,7 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
     {
       title: "Sponsor a product under your licences",
       description:
-        "Licence provider: approve a pending request to sponsor a builder's product component, naming the held licences it's under (verified and in force; licences that only back others, like a federal registration a state licence requires, are counted automatically and aren't named) and the jurisdictions you sponsor it in (ISO 3166-2 codes like 'us-ny', or the country code for the whole country; by default those asked for that the licences cover). The component is then covered there only, by your licence, and your roster must fill the stakeholders that licence mandates. Revoke it later with revoke_sponsorship.",
+        "Licence provider: approve a pending request to sponsor a builder's product component, naming the held licences it's under (verified and in force; licences that only back others, like a federal registration a state licence requires, are counted automatically and aren't named) and the jurisdictions you sponsor it in (ISO 3166-2 codes like 'us-ny', or the country code for the whole country; by default those asked for that the licences cover). The component is then covered there only, by your licence, and your roster must fill the stakeholders that licence mandates. Your firm must first pass Mynt's public checks that it's a real company (see get_my_entity's legitimacy). Revoke it later with revoke_sponsorship.",
       inputSchema: {
         sponsorship_id: z.string(),
         licence_ids: z.array(z.string().uuid()).min(1).describe("Your held licences to sponsor it under (see list_my_licenses)"),
@@ -141,6 +144,18 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
       const s = await mine(sponsorship_id);
       if (!s) return fail(`No sponsorship request '${sponsorship_id}' to your firm`);
       if (s.status !== "pending") return fail(`The request is ${s.status}, not pending`);
+      // Only a firm Mynt has shown to be a real company sponsors (SPONSOR_LEGITIMACY_RULE; see firm-checks.ts).
+      const legitimacy = await firmLegitimacy(store, s.provider_entity_id);
+      if (!legitimacy?.passes)
+        return {
+          ...json({
+            error: "Your firm can't sponsor products until Mynt's public checks show it's a real company",
+            rule: legitimacy?.rule_text ?? null,
+            reasons: legitimacy?.reasons ?? [],
+            next: "Record your firm's LEI (set_entity_facts identifiers: { scheme: 'lei', value }) and ask a Mynt admin to run the checks (run_firm_checks); see get_my_entity",
+          }),
+          isError: true,
+        };
       const { record, component } = await componentOf(store, s);
       if (!record || !component) return fail(`The product '${s.product_id}' no longer has a component '${s.component_key}'`);
       const country = component.country;

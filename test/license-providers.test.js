@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
+import { normalizeName } from "../dist/firm-checks.js";
 import { applyRegulatoryModel } from "../scripts/regulatory-model.mjs";
 import { CATALOG } from "./helpers.js";
 
@@ -56,6 +57,19 @@ async function setup() {
     await store.setUserEntity(p.user.id, firm.id);
     p.user.entity_id = firm.id;
     p.entity = firm;
+    // A licence provider sponsors only once Mynt's public checks show it's a real company (firm-checks.ts, tested
+    // in firm-checks.test.js): here, a matching FinCEN MSB answer for its name, as run_firm_checks would record.
+    await store.recordFirmCheck({
+      entity_id: firm.id,
+      source: "fincen_msb",
+      subject: normalizeName(firm.name),
+      url: "https://msb.fincen.gov/",
+      status: "match",
+      fields: { legal_name: firm.name },
+      response_hash: null,
+      note: null,
+      run_by: null,
+    });
     // Registers a licence (the provider's own tool) and an admin verifies it.
     p.hold = async (regulator_id, license_id) => {
       const held = ok(await p.call("register_license", { region: "US", regulator_id, license_id, registration_number: `${license_id}-test` }));

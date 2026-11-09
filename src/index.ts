@@ -9,6 +9,7 @@ import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./
 import { egressFor } from "./hosting-tools.js";
 import { ModuleRegistry } from "./modules.js";
 import { driftSweep } from "./pins.js";
+import { startFirmChecksWorker } from "./firm-check-tools.js";
 import { recomputeDerived } from "./derived.js";
 import { DeskService, deskConfigFromEnv } from "./desk.js";
 import { ExploreService, exploreConfigFromEnv } from "./explore.js";
@@ -161,6 +162,8 @@ if (values.help) {
   // Licences lapse with time: re-check pinned products hourly (changes made through Mynt re-check at once).
   const drift = setInterval(() => driftSweep(store).catch((e) => console.error("drift sweep:", e)), 60 * 60 * 1000);
   drift.unref();
+  // Licence providers' firms: GLEIF and FinCEN re-checked monthly (see firm-checks.ts); a lapse drifts what they sponsor.
+  const firmChecks = startFirmChecksWorker(store);
   // Products without a stored regime summary and take rate yet get one (in the background; see derived.ts).
   void recomputeDerived(store, { missing_only: true }).then((r) => r.recomputed && console.error(`derived values computed for ${r.recomputed} products`));
   // Vendor-served actions that will never finish (a call cut short, a customer who never came back) end as expired.
@@ -175,6 +178,7 @@ if (values.help) {
   programEvents.unref();
   process.on("SIGTERM", () => {
     clearInterval(drift);
+    clearInterval(firmChecks);
     clearInterval(vendorRuns);
     clearInterval(programEvents);
     webhooks.stop();

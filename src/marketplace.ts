@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import { BuildTermsSchema, productsAnsweredBy } from "./access.js";
 import { lintCampaign } from "./gtm.js";
 import { folder, folderOf, GrcRecordInputSchema, reconcileEntityGrc, validateGrcRecord } from "./entity-grc.js";
@@ -390,7 +391,7 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
     "get_my_entity",
     {
       title: "My firm",
-      description: "Your firm: its members, its licences with their review status, its roster and GRC.",
+      description: "Your firm: its members, its licences with their review status, its roster and GRC, and legitimacy: Mynt's own public checks that it's a real company (GLEIF's record of its LEI, FinCEN's MSB registrant list), which a licence provider must pass to sponsor products.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -406,6 +407,8 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
         parties: await store.partiesOf(entity_id),
         reconciliation: await reconcileEntity(store, entity_id),
         grc: await reconcileEntityGrc(store, entity_id),
+        // Mynt's public checks that the firm is a real company (an admin runs them; see firm-checks.ts).
+        legitimacy: legitimacySummary(await firmLegitimacy(store, entity_id)),
       });
     },
   );

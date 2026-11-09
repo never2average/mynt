@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import type { ClerkAdmin } from "./auth.js";
 import type { BuildService } from "./builds.js";
 import type { BdService } from "./bd.js";
@@ -370,7 +371,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "list_entities",
     {
       title: "Firms",
-      description: "Admin: every registered legal entity with its members, licences, party roster, and each licence's mandated stakeholders reconciled against the roster.",
+      description: "Admin: every registered legal entity with its members, licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -385,6 +386,8 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
             parties: await store.partiesOf(e.id),
             reconciliation: await reconcileEntity(store, e.id, ref),
             grc: await reconcileEntityGrc(store, e.id, ref),
+            // Mynt's public checks that it's a real company (run_firm_checks; see firm-checks.ts).
+            legitimacy: legitimacySummary(await firmLegitimacy(store, e.id)),
           })),
         ),
       );

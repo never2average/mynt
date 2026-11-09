@@ -194,12 +194,12 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   assert.match(JSON.stringify(firstLoad.skipped), /no licence type 'rbi_nbfc'/);
   const mapped = await ok(admin, "load_service_types", { region: "IN", licence_map: { rbi_nbfc: "rbi_bank", rbi_cic: "rbi_pa", cca_esp: "rbi_pa" } });
   assert.equal(mapped.loaded.length, 8, JSON.stringify(mapped.skipped));
-  assert.deepEqual((await ok(admin, "load_service_types", { region: "US" })).loaded.sort(), ["US/bank_account_verification", "US/credit_bureau_report", "US/identity_verification"]);
+  assert.deepEqual((await ok(admin, "load_service_types", { region: "US" })).loaded.sort(), ["US/bank_account_verification", "US/credit_bureau_report", "US/identity_verification", "US/kyb_business_verification"]);
   await ok(admin, "define_service_type", { service_type: CKYC });
   const inTypes = await ok(vera, "list_service_types", { region: "IN" });
   const usTypes = await ok(vera, "list_service_types", { region: "US" });
   assert.equal(inTypes.length, 8);
-  assert.equal(usTypes.length, 3);
+  assert.equal(usTypes.length, 4);
   assert.ok(!usTypes.some((t) => t.key === "ckyc_search_download"), "service types are per region");
   assert.deepEqual(inTypes.find((t) => t.key === "ckyc_search_download").vendor_licences, ["rbi_pa"]);
   assert.deepEqual((await ok(vera, "list_service_types", { category: "credit_bureau" })).map((t) => t.region).sort(), ["IN", "US"]);
