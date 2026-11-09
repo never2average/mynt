@@ -15,7 +15,7 @@ import { checkProgramRules, upgradeAuthorityRule, type RuleFinding } from "./pro
 import type { MainnetGateCheck, MainnetGateClaim, ProgramRecord, SolanaService } from "./service.js";
 import { SOLANA_TOOLCHAIN_SCRIPT } from "./toolchain.js";
 import { agentChecklist, entryProblems, loadCrateAllowlist, loadVulnDb, VULN_CATEGORIES, type CrateAllowlist, type VulnDb } from "./vuln-db.js";
-import { dependencyVerdict, resolveCrateTree, stripIdlDocs, verifyIdl, workspaceExceptions, type Exception } from "./crate-tree.js";
+import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, stripIdlDocs, verifyIdl, workspaceExceptions, type DepInfoCapture, type Exception } from "./crate-tree.js";
 import { runDetections } from "./program-rules.js";
 
 // The mainnet program gate. Every mainnet deploy and every mainnet upgrade must pass, in order:
@@ -443,6 +443,12 @@ export class MainnetGateService implements MainnetGateCheck {
     // What the compiler compiles, and what in the workspace can change the build: exceptions an admin must allow.
     const tree = resolveCrateTree(m.sources ?? {});
     const exceptions: Exception[] = m.sources ? workspaceExceptions({ files: m.sources, binary: m.binary, links: m.links }, tree) : [];
+    // What the compiler actually read (rustc's dep-info from Mynt's build container) is the authority: every file
+    // it lists must be one Mynt captured, unchanged, and the rules read exactly those. The module-tree resolver is
+    // a cross-check whose disagreements are exceptions.
+    const compiled = this.compiledFiles(m);
+    refusals.push(...compiled.problems);
+    exceptions.push(...crossCheck(tree, compiled));
     // The dependencies: crates.io only, checksums matching, the allowlist or an admin's allowance; the hard rules run
     // over the source of every crate off the allowlist.
     const allow = this.allowlist;
@@ -460,11 +466,24 @@ export class MainnetGateService implements MainnetGateCheck {
     const idlCheck = m.idl ? { source: m.idl_source ?? "test-run", ...verifyIdl(m.idl, m.program) } : { source: null, verified: false, checked: 0, problems: ["no IDL was built for this program"] };
     if (m.idl && !idlCheck.verified) refusals.push(`The IDL doesn't match the program: ${idlCheck.problems.slice(0, 3).join("; ")}`);
     const idl = m.idl && idlCheck.verified ? m.idl : null;
-    const result = checkProgramRules({ name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null }, this.vulnDb);
+    const result = checkProgramRules(
+      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null, compiled_files: compiled.workspace },
+      this.vulnDb,
+    );
     const authority = upgradeAuthorityRule({ action, signer, recorded_authority: p.upgrade_authority });
     const findings: RuleFinding[] = [...result.findings, ...depFindings, authority];
     const passed = result.passed && !authority.blocks && !depFindings.length && !refusals.length;
-    const rules = { passed, db_version: result.db_version, flags: result.flags, findings, signals: result.signals, limits: result.limits, upgrade_authority: authority.status, signer: signer ?? null };
+    const rules = {
+      passed,
+      db_version: result.db_version,
+      flags: result.flags,
+      findings,
+      signals: result.signals,
+      limits: result.limits,
+      upgrade_authority: authority.status,
+      signer: signer ?? null,
+      compiled: { workspace_files: compiled.workspace, registry_files: compiled.registry.length, generated_files: compiled.generated.map((g) => g.path), problems: compiled.problems },
+    };
     const dependencies = { crates: deps.crates, allowlist_version: allow.version, off_allowlist: deps.exceptions.map((e) => e.id), refusals: deps.refusals };
     const id = randomUUID();
     const blockedBy = findings.filter((f) => f.blocks);
@@ -496,7 +515,7 @@ export class MainnetGateService implements MainnetGateCheck {
           passed ? null : `Hard rules: ${reasons.join("; ").slice(0, 3000)}`,
           this.config.auditCapUsd,
           this.config.redTeamCapUsd,
-          JSON.stringify(exceptions),
+          JSON.stringify(exceptions.filter((e, i) => exceptions.findIndex((x) => x.id === e.id) === i)),
           JSON.stringify(dependencies),
           JSON.stringify(idlCheck),
           budgetKey,
@@ -649,6 +668,8 @@ export class MainnetGateService implements MainnetGateCheck {
     if (action === "upgrade") {
       const at = r.executes_at ? new Date(r.executes_at as string).getTime() : NaN;
       if (!Number.isFinite(at) || at > Date.now()) throw new GateError(`This upgrade is timelocked until ${iso(r.executes_at)}; it runs then (cancel_mainnet_review stops it)`);
+      if (Date.now() - at > this.config.approvalTtlDays * 86_400_000)
+        throw new GateError(`The approval (review ${r.id}) expired: an approved upgrade must start within ${this.config.approvalTtlDays} days of its timelock ending (MAINNET_APPROVAL_TTL_DAYS); request a new review`);
     } else {
       const decided = r.decided_at ? new Date(r.decided_at as string).getTime() : 0;
       if (Date.now() - decided > this.config.approvalTtlDays * 86_400_000)
@@ -658,7 +679,12 @@ export class MainnetGateService implements MainnetGateCheck {
     const m = await this.solana.reviewMaterial(null, p, r.build_id as string);
     if (m.sha256 !== sha256) throw new GateError("The stored program no longer matches the reviewed hash");
     const idl = (r.idl_check as { verified?: boolean } | null)?.verified ? m.idl : null;
-    const now = checkProgramRules({ name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null }, this.vulnDb);
+    const compiled = this.compiledFiles(m);
+    if (compiled.problems.length) throw new GateError(`What the compiler read no longer checks out: ${compiled.problems.slice(0, 3).join("; ")}`);
+    const now = checkProgramRules(
+      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null, compiled_files: compiled.workspace },
+      this.vulnDb,
+    );
     if (!now.passed)
       throw new GateError(
         `The vulnerability database's current rules (v${now.db_version}) refuse this program: ${now.findings
@@ -759,6 +785,12 @@ export class MainnetGateService implements MainnetGateCheck {
     const m = await this.solana.reviewMaterial(null, p, r.build_id as string);
     if (m.sha256 !== r.sha256) throw new Error("The stored program no longer matches the reviewed hash");
     return { p, m };
+  }
+
+  // What the compiler read for a build, checked against what Mynt captured.
+  private compiledFiles(m: { sources: Record<string, string> | null; binary?: Record<string, string>; deps: { packages: { name: string; version: string; source?: string | null }[] } | null; depinfo?: DepInfoCapture | null }) {
+    const lockCrates = new Set((m.deps?.packages ?? []).filter((x) => x.source).map((x) => `${x.name}-${x.version}`));
+    return evaluateDepInfo(m.depinfo ?? null, { files: m.sources ?? {}, binary: m.binary }, lockCrates);
   }
 
   // The IDL the agents and the PoC re-run get: only one Mynt checked against the bytes, without doc strings.
@@ -1064,7 +1096,19 @@ export class MainnetGateService implements MainnetGateCheck {
       let why: string | null = null;
       try {
         const m = await this.solana.reviewMaterial(null, p, p.build_id!);
-        result = checkProgramRules({ name: m.name, program_id: p.program_id, program: m.program, idl: m.idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null }, this.vulnDb);
+        const compiled = this.compiledFiles(m);
+        result = checkProgramRules(
+          {
+            name: m.name,
+            program_id: p.program_id,
+            program: m.program,
+            idl: m.idl && verifyIdl(m.idl, m.program).verified ? m.idl : null,
+            sources: m.sources,
+            mynt_signer: (await this.solana.mainnetSigner())?.address ?? null,
+            compiled_files: compiled.problems.length ? null : compiled.workspace,
+          },
+          this.vulnDb,
+        );
       } catch (e) {
         why = `Mynt couldn't re-check it: ${(e as Error).message}`;
       }

@@ -224,6 +224,7 @@ export interface BuildSolanaHooks {
       sources?: { sha256: string; files: Record<string, string>; binary?: Record<string, string>; links?: Record<string, string> } | null;
       // Every crate of the Cargo.lock the build used, and the source of those not on Mynt's crate allowlist.
       deps?: { sha256: string; data: unknown } | null;
+      depinfo?: { sha256: string; data: unknown } | null;
       idl_source?: "build" | null;
     }[],
   ): Promise<string[]>;
@@ -867,7 +868,8 @@ export class BuildService {
     const record = async (c: Check) => this.update(b.id, { solana_check: { name: "solana_build", status: c.status, detail: (c.detail ?? "").slice(0, 1500) } });
     await record(row ?? { name: "solana_build", status: "fail", detail: "Mynt's Solana build didn't finish" });
     if (!this.solana) return;
-    type Kept = { [k in "sources" | "deps" | "idl"]?: string } & { [k in "sources_size" | "deps_size" | "idl_size"]?: number } & { [k in "sources_sha256" | "deps_sha256" | "idl_sha256"]?: string };
+    type K = "sources" | "deps" | "idl" | "depinfo";
+    type Kept = { [k in K]?: string } & { [k in `${K}_size`]?: number } & { [k in `${K}_sha256`]?: string };
     const listed = parseJson<({ name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null } & Kept)[]>(
       await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`),
     );
@@ -889,7 +891,7 @@ export class BuildService {
     // A JSON file the build run kept beside a program (its workspace's source, its dependencies, its IDL), hashed
     // here by Mynt and kept only if it matches what the build recorded. Shared files are read once.
     const cache = new Map<string, { sha256: string; json: unknown } | null>();
-    const keptJson = async (p: Kept, key: "sources" | "deps" | "idl", max: number) => {
+    const keptJson = async (p: Kept, key: K, max: number) => {
       const file = p[key];
       const size = p[`${key}_size`];
       const sha = p[`${key}_sha256`];
@@ -911,6 +913,8 @@ export class BuildService {
       const src = await keptJson(p, "sources", MAX_SOURCES_BYTES);
       const bundle = src?.json as { files?: Record<string, string>; binary?: Record<string, string>; links?: Record<string, string> } | null;
       const deps = await keptJson(p, "deps", MAX_SOURCES_BYTES);
+      // What the compiler read (rustc's dep-info) and the build container's copies' hashes.
+      const depinfo = await keptJson(p, "depinfo", MAX_SOURCES_BYTES);
       // The IDL Mynt built in its own offline container, after the program was out. (The test run's IDL, built on the
       // host by the workspace's own code, is recorded later only to name events.)
       const idl = await keptJson(p, "idl", 2 * 1024 * 1024);
@@ -926,6 +930,7 @@ export class BuildService {
         idl_source: idl?.json ? ("build" as const) : null,
         sources: bundle && typeof bundle.files === "object" ? { sha256: src!.sha256, files: bundle.files, binary: bundle.binary ?? {}, links: bundle.links ?? {} } : null,
         deps: deps?.json && typeof deps.json === "object" ? { sha256: deps.sha256, data: deps.json } : null,
+        depinfo: depinfo?.json && typeof depinfo.json === "object" ? { sha256: depinfo.sha256, data: depinfo.json } : null,
       });
     }
     const kept = await this.solana.recordArtifacts(b.id, artifacts);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parse as parseToml } from "smol-toml";
 import { stripComments } from "./program-rules.js";
 
 // What the compiler actually compiles from a captured workspace, and what in the workspace can change the build
@@ -11,9 +12,11 @@ export interface Package {
   manifest: string;
   name: string;
   lib: string | null; // the lib target's root file, when the workspace has it
+  bins: string[]; // binary targets' roots
   build: string | null; // the build script, when there is one
   procMacro: boolean;
   patch: boolean; // [patch] or [replace]: dependencies redirected
+  unparsed?: string; // the manifest isn't valid TOML
 }
 
 export interface CrateTree {
@@ -24,6 +27,8 @@ export interface CrateTree {
   includes: { from: string; line: number; macro: string; target: string | null; resolved: string | null }[];
   paths: { from: string; line: number; target: string; resolved: string }[];
   missing: { from: string; line: number; module: string }[];
+  // cfg_attr(..., path = ...): which file is compiled depends on cfg; the resolver follows every candidate.
+  cfgPaths: { from: string; line: number; detail: string }[];
 }
 
 const norm = (p: string) => {
@@ -39,49 +44,46 @@ const dirOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) :
 const join = (...ps: string[]) => norm(ps.filter((x) => x !== "").join("/"));
 const lineOf = (t: string, i: number) => t.slice(0, i).split("\n").length;
 
-// Enough of TOML for Cargo manifests: sections, and string, boolean and inline-table keys.
-function manifest(text: string) {
-  const sections = new Map<string, Map<string, string>>();
-  let current = "";
-  sections.set("", new Map());
-  for (const raw of text.split("\n")) {
-    const line = raw.replace(/#.*$/, "").trim();
-    const h = /^\[\[?\s*([^\]]+?)\s*\]\]?$/.exec(line);
-    if (h) {
-      current = h[1].replace(/\s+/g, "");
-      if (!sections.has(current)) sections.set(current, new Map());
-      continue;
-    }
-    const kv = /^([A-Za-z0-9_.\-"]+)\s*=\s*(.+)$/.exec(line);
-    if (kv) sections.get(current)!.set(kv[1].replace(/"/g, ""), kv[2].trim());
-  }
-  return sections;
-}
-const str = (v: string | undefined) => (v && /^"(.*)"$/.test(v) ? v.slice(1, -1) : v && /^'(.*)'$/.test(v) ? v.slice(1, -1) : null);
+type Toml = Record<string, unknown>;
+const obj = (v: unknown): Toml | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Toml) : null);
+const text = (v: unknown) => (typeof v === "string" ? v : null);
 
+// Manifests read with a real TOML parser (smol-toml, pinned), so a dotted key (package.build = ...) or an inline
+// table (lib = { path = ... }) means exactly what it means to cargo.
 export function packagesOf(files: Record<string, string>): Package[] {
   const out: Package[] = [];
-  for (const [path, text] of Object.entries(files)) {
+  for (const [path, body] of Object.entries(files)) {
     if (!/(^|\/)Cargo\.toml$/.test(path)) continue;
-    const m = manifest(text);
-    const pkg = m.get("package");
-    const patch = [...m.keys()].some((k) => k.startsWith("patch") || k === "replace");
-    if (!pkg) {
-      if (patch) out.push({ dir: dirOf(path), manifest: path, name: "(workspace)", lib: null, build: null, procMacro: false, patch });
+    const dir = dirOf(path);
+    let m: Toml;
+    try {
+      m = parseToml(body) as Toml;
+    } catch (e) {
+      out.push({ dir, manifest: path, name: "(unreadable)", lib: null, bins: [], build: null, procMacro: false, patch: false, unparsed: (e as Error).message.slice(0, 200) });
       continue;
     }
-    const dir = dirOf(path);
-    const lib = m.get("lib");
-    const libPath = join(dir, str(lib?.get("path")) ?? "src/lib.rs");
-    const buildKey = pkg.get("build");
-    const build = buildKey === "false" ? null : str(buildKey) ? join(dir, str(buildKey)!) : files[join(dir, "build.rs")] !== undefined ? join(dir, "build.rs") : null;
+    const pkg = obj(m.package);
+    const patch = !!(obj(m.patch) || obj(m.replace));
+    if (!pkg) {
+      if (patch) out.push({ dir, manifest: path, name: "(workspace)", lib: null, bins: [], build: null, procMacro: false, patch });
+      continue;
+    }
+    const lib = obj(m.lib);
+    const libPath = join(dir, text(lib?.path) ?? "src/lib.rs");
+    const b = pkg.build;
+    const build = b === false ? null : text(b) ? join(dir, text(b)!) : b === true || files[join(dir, "build.rs")] !== undefined ? join(dir, "build.rs") : null;
+    const bins = [
+      ...(Array.isArray(m.bin) ? (m.bin as unknown[]).map((x) => obj(x)).filter((x): x is Toml => !!x).map((x) => join(dir, text(x.path) ?? `src/bin/${text(x.name) ?? ""}.rs`)) : []),
+      ...(pkg.autobins === false ? [] : Object.keys(files).filter((f) => f === join(dir, "src/main.rs") || (dirOf(f) === join(dir, "src/bin") && f.endsWith(".rs")))),
+    ].filter((f, i, all) => files[f] !== undefined && all.indexOf(f) === i);
     out.push({
       dir,
       manifest: path,
-      name: str(pkg.get("name")) ?? dir,
+      name: text(pkg.name) ?? dir,
       lib: files[libPath] !== undefined ? libPath : null,
+      bins,
       build,
-      procMacro: lib?.get("proc-macro") === "true" || lib?.get("proc_macro") === "true",
+      procMacro: lib?.["proc-macro"] === true || lib?.proc_macro === true,
       patch,
     });
   }
@@ -92,17 +94,26 @@ export function packagesOf(files: Record<string, string>): Package[] {
 // is a root; with none of those either, every .rs file.
 export function resolveCrateTree(files: Record<string, string>): CrateTree {
   const packages = packagesOf(files);
-  let roots = [...new Set(packages.flatMap((p) => [p.lib, p.build].filter((x): x is string => !!x)))];
-  if (!packages.some((p) => p.name !== "(workspace)")) {
+  let roots = [...new Set(packages.flatMap((p) => [p.lib, p.build, ...p.bins].filter((x): x is string => !!x)))];
+  if (!packages.some((p) => !p.name.startsWith("("))) {
     roots = Object.keys(files).filter((p) => /(^|\/)src\/lib\.rs$/.test(p));
     if (!roots.length) roots = Object.keys(files).filter((p) => p.endsWith(".rs"));
   }
-  const tree: CrateTree = { packages, roots, code: new Map(), includes: [], paths: [], missing: [] };
+  return { ...resolveCrateTreeFrom(files, roots), packages };
+}
+
+function resolveCrateTreeFrom(files: Record<string, string>, roots: string[]): CrateTree {
+  const packages: Package[] = [];
+  const tree: CrateTree = { packages, roots, code: new Map(), includes: [], paths: [], missing: [], cfgPaths: [] };
   const visit = (file: string, childDir: string, pathBase: string) => {
     if (tree.code.has(file) || files[file] === undefined) return;
-    const text = files[file];
-    tree.code.set(file, text);
-    region(file, stripComments(text), 0, childDir, pathBase);
+    const body = files[file];
+    tree.code.set(file, body);
+    const code = stripComments(body);
+    for (const m of code.matchAll(/#\s*!?\s*\[\s*cfg_attr\s*\(([^\]]*)\]/g))
+      if (/\bpath\s*=/.test(m[1]) && !tree.cfgPaths.some((c) => c.from === file && c.line === lineOf(code, m.index!)))
+        tree.cfgPaths.push({ from: file, line: lineOf(code, m.index!), detail: m[0].replace(/\s+/g, " ").slice(0, 200) });
+    region(file, code, 0, childDir, pathBase);
   };
   // One region of a file (the whole file, or an inline module's body): its mod declarations and includes.
   const region = (file: string, code: string, offset: number, childDir: string, pathBase: string) => {
@@ -120,6 +131,9 @@ export function resolveCrateTree(files: Record<string, string>): CrateTree {
       }
       const attrs = m[1] ?? "";
       const name = m[2];
+      // A path chosen by cfg_attr: rustc picks it, or not, by cfg. Every candidate is followed, and it's an exception.
+      const conditional = /\bcfg_attr\s*\(/.test(attrs) && /\bpath\s*=/.test(attrs);
+      if (conditional) tree.cfgPaths.push({ from: file, line, detail: attrs.replace(/\s+/g, " ").trim().slice(0, 200) + ` mod ${name}` });
       const pathAttr = /\bpath\s*=\s*"([^"]+)"/.exec(attrs);
       if (m[3] === "{") {
         const open = m.index + m[0].length - 1;
@@ -148,7 +162,7 @@ export function resolveCrateTree(files: Record<string, string>): CrateTree {
         // A #[path] file behaves like a mod.rs: its own modules sit beside it.
         if (files[resolved] !== undefined) visit(resolved, dirOf(resolved), dirOf(resolved));
         else tree.missing.push({ from: file, line, module: `${name} (#[path = "${pathAttr[1]}"])` });
-        continue;
+        if (!conditional) continue;
       }
       const flat = join(childDir, `${name}.rs`);
       const nested = join(childDir, name, "mod.rs");
@@ -170,7 +184,20 @@ export function resolveCrateTree(files: Record<string, string>): CrateTree {
 
 export interface Exception {
   id: string;
-  kind: "cargo_config" | "build_script" | "proc_macro" | "non_rust_include" | "dynamic_include" | "unresolved_module" | "link" | "cargo_patch" | "crate";
+  kind:
+    | "cargo_config"
+    | "build_script"
+    | "proc_macro"
+    | "non_rust_include"
+    | "dynamic_include"
+    | "unresolved_module"
+    | "link"
+    | "cargo_patch"
+    | "crate"
+    | "cfg_attr_path"
+    | "manifest_unparsed"
+    | "module_tree_mismatch"
+    | "generated_code";
   detail: string;
 }
 
@@ -190,7 +217,10 @@ export function workspaceExceptions(bundle: { files: Record<string, string>; bin
     if (!lines.every((l) => SAFE_CARGO_CONFIG.test(l)))
       out.push({ id: `cargo-config:${path}`, kind: "cargo_config", detail: `${path} sets cargo configuration (wrappers, flags, sources or registries can change what's compiled): ${lines.slice(0, 6).join("; ").slice(0, 300)}` });
   }
+  for (const c of tree.cfgPaths)
+    out.push({ id: `cfg-attr-path:${c.from}:${c.line}`, kind: "cfg_attr_path", detail: `${c.from}:${c.line}: ${c.detail}: which file is compiled depends on cfg` });
   for (const p of tree.packages) {
+    if (p.unparsed) out.push({ id: `manifest-unparsed:${p.manifest}`, kind: "manifest_unparsed", detail: `${p.manifest} isn't valid TOML (${p.unparsed})` });
     if (p.build) out.push({ id: `build-script:${p.manifest}`, kind: "build_script", detail: `${p.name} has a build script (${p.build}), which runs at build time and can generate code` });
     if (p.procMacro) out.push({ id: `proc-macro:${p.manifest}`, kind: "proc_macro", detail: `${p.name} is a procedural macro crate: it runs at build time and writes code the source doesn't show` });
     if (p.patch) out.push({ id: `cargo-patch:${p.manifest}`, kind: "cargo_patch", detail: `${p.manifest} has [patch] or [replace]: dependencies are redirected` });
@@ -243,10 +273,24 @@ export function verifyIdl(idl: unknown, program: Uint8Array) {
   return { verified: problems.length === 0, checked: ixs.length, forms, problems };
 }
 
-// An IDL as the agents get it: no doc strings (they're the developer's text, which could carry instructions).
-export function stripIdlDocs(idl: unknown): unknown {
-  if (Array.isArray(idl)) return idl.map(stripIdlDocs);
-  if (idl && typeof idl === "object") return Object.fromEntries(Object.entries(idl).filter(([k]) => k !== "docs").map(([k, v]) => [k, stripIdlDocs(v)]));
+// An IDL as the agents get it, with the developer's free text neutralised (it could carry instructions to them): no
+// doc strings, no error messages, no constant values, and names cut to 64 characters.
+export function stripIdlDocs(idl: unknown, key = ""): unknown {
+  if (Array.isArray(idl)) return idl.map((x) => stripIdlDocs(x, key));
+  if (idl && typeof idl === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(idl)) {
+      if (k === "docs") continue;
+      if (key === "errors" && k === "msg") continue;
+      if (key === "constants" && k === "value") {
+        out[k] = "(removed by Mynt)";
+        continue;
+      }
+      out[k] = stripIdlDocs(v, k);
+    }
+    return out;
+  }
+  if (typeof idl === "string" && key === "name" && idl.length > 64) return `${idl.slice(0, 64)}…`;
   return idl;
 }
 
@@ -297,3 +341,119 @@ export function dependencyVerdict(
 }
 
 export const discriminatorOf = (name: string) => createHash("sha256").update(`global:${name}`).digest().subarray(0, 8);
+
+// ---- what the compiler actually read: rustc's dep-info, from Mynt's build container ----
+
+// What the build kept (solana-verify.sh): every dep-info file cargo wrote in the build container, the sha256 of
+// every workspace file and every unpacked registry file as the container held them after the build, and the sha256
+// of every file in each .crate cargo downloaded.
+export interface DepInfoCapture {
+  d_files: Record<string, string>;
+  workdir: Record<string, string>; // path relative to /workdir -> sha256
+  registry: Record<string, string>; // "<index>/<name>-<version>/<path>" -> sha256
+  crate_files: Record<string, Record<string, string>>; // "<name>-<version>" -> path -> sha256
+  problems?: string[];
+}
+
+// Every source path a dep-info (Makefile-style) file lists: the prerequisites of its rules, with escaped spaces.
+export function parseDepInfo(d: string): string[] {
+  const out = new Set<string>();
+  for (const raw of d.replace(/\\\n/g, " ").split("\n")) {
+    if (!raw.trim() || raw.startsWith("#")) continue;
+    const colon = raw.search(/:(\s|$)/);
+    if (colon < 0) continue;
+    const deps = raw.slice(colon + 1);
+    for (const tok of deps.match(/(?:\\ |[^\s])+/g) ?? []) out.add(tok.replace(/\\ /g, " "));
+  }
+  return [...out];
+}
+
+const sha = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+const REGISTRY = /^\/root\/\.cargo\/registry\/src\/([^/]+)\/([^/]+)\/(.+)$/;
+
+export interface CompiledFiles {
+  workspace: string[]; // relative to the workspace: what the rules must read
+  registry: { crate: string; path: string }[];
+  generated: { path: string; package: string | null }[];
+  problems: string[]; // the review is refused
+}
+
+// The authoritative list of what was compiled, checked file by file: a workspace file must be in the captured
+// archive with the same contents the container compiled; a registry file must be in the .crate cargo downloaded
+// for a crate of the Cargo.lock, unchanged; generated files (a build script's OUT_DIR) are listed; anything else
+// is refused.
+export function evaluateDepInfo(
+  depinfo: DepInfoCapture | null,
+  bundle: { files: Record<string, string>; binary?: Record<string, string> },
+  lockCrates: Set<string>, // "<name>-<version>" of every registry package in the Cargo.lock
+): CompiledFiles {
+  const r: CompiledFiles = { workspace: [], registry: [], generated: [], problems: [] };
+  if (!depinfo || !Object.keys(depinfo.d_files ?? {}).length) {
+    r.problems.push("Mynt has no record of the files the compiler read (rustc's dep-info) for this build; build it again");
+    return r;
+  }
+  r.problems.push(...(depinfo.problems ?? []));
+  const captured = (rel: string) =>
+    bundle.files[rel] !== undefined ? sha(Buffer.from(bundle.files[rel], "utf8")) : bundle.binary?.[rel] !== undefined ? sha(Buffer.from(bundle.binary[rel], "base64")) : null;
+  const seen = new Set<string>();
+  for (const [dfile, body] of Object.entries(depinfo.d_files)) {
+    for (const raw of parseDepInfo(body)) {
+      if (seen.has(raw)) continue;
+      seen.add(raw);
+      // Paths are relative to the workspace (/workdir) or absolute.
+      const abs = raw.startsWith("/") ? norm(raw).replace(/^/, "/") : `/workdir/${norm(raw)}`;
+      if (abs.startsWith("/workdir/docker-target/")) {
+        const out = /\/build\/([A-Za-z0-9_-]+?)-[0-9a-f]{16}\/out\//.exec(abs);
+        r.generated.push({ path: abs.slice("/workdir/".length), package: out ? out[1] : null });
+        continue;
+      }
+      if (abs.startsWith("/workdir/")) {
+        const rel = abs.slice("/workdir/".length);
+        const mine = captured(rel);
+        if (mine === null) r.problems.push(`the compiler read ${rel}, which isn't in the workspace Mynt captured (in ${dfile})`);
+        else if (depinfo.workdir[rel] !== mine) r.problems.push(`${rel} in the build container isn't the file Mynt captured: something rewrote it during the build`);
+        r.workspace.push(rel);
+        continue;
+      }
+      const reg = REGISTRY.exec(abs);
+      if (reg) {
+        const [, index, crate, path] = reg;
+        if (!lockCrates.has(crate)) r.problems.push(`the compiler read ${crate}/${path}, from a crate that isn't in the Cargo.lock`);
+        else if (!depinfo.crate_files[crate] || depinfo.crate_files[crate][path] === undefined) r.problems.push(`the compiler read ${crate}/${path}, which isn't in the .crate cargo downloaded`);
+        else if (depinfo.registry[`${index}/${crate}/${path}`] !== depinfo.crate_files[crate][path]) r.problems.push(`${crate}/${path} in the build container isn't the file in its .crate: something rewrote it during the build`);
+        r.registry.push({ crate, path });
+        continue;
+      }
+      r.problems.push(`the compiler read ${raw}, outside the workspace and the crates.io registry cache`);
+    }
+  }
+  r.workspace = [...new Set(r.workspace)].sort();
+  return r;
+}
+
+// The module-tree resolver as a cross-check of dep-info: a disagreement is an exception an admin must name. Only
+// packages the compiler built count (a crate nobody compiled has no dep-info).
+export function crossCheck(tree: CrateTree, compiled: CompiledFiles): Exception[] {
+  const listed = new Set(compiled.workspace);
+  const roots = tree.roots.filter((r) => listed.has(r));
+  const reached = new Set<string>();
+  const sub = resolveFrom(tree, roots);
+  for (const f of sub) reached.add(f);
+  for (const i of tree.includes) if (i.resolved && reached.has(i.from)) reached.add(i.resolved);
+  const out: Exception[] = [];
+  for (const f of listed)
+    if (!reached.has(f)) out.push({ id: `module-tree-mismatch:${f}`, kind: "module_tree_mismatch", detail: `the compiler read ${f}, which Mynt's own module resolution didn't reach` });
+  for (const f of reached)
+    if (!listed.has(f) && f.endsWith(".rs")) out.push({ id: `module-tree-mismatch:${f}`, kind: "module_tree_mismatch", detail: `Mynt's module resolution reached ${f}, which the compiler didn't read (cfg'd out?)` });
+  for (const g of compiled.generated)
+    if (g.package && tree.packages.some((p) => p.name.replace(/-/g, "_") === g.package!.replace(/-/g, "_")))
+      out.push({ id: `generated:${g.path}`, kind: "generated_code", detail: `the compiler read ${g.path}, generated by ${g.package}'s build script: not in the reviewed source` });
+  return out;
+}
+
+// The files the resolver reached from some roots only.
+function resolveFrom(tree: CrateTree, roots: string[]) {
+  const files = Object.fromEntries(tree.code);
+  const sub = resolveCrateTreeFrom(files, roots);
+  return [...sub.code.keys()];
+}

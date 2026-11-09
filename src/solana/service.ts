@@ -17,6 +17,7 @@ import {
   type SolanaSigner,
 } from "./signer.js";
 import { turnkeyFromEnv } from "./custody/turnkey.js";
+import type { DepInfoCapture } from "./crate-tree.js";
 import {
   BUFFER_HEADER,
   compileMessage,
@@ -130,6 +131,13 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS deps_sha256 text;
+  -- What the compiler read (rustc's dep-info) and the hashes of the build container's copies of those files.
+  CREATE TABLE IF NOT EXISTS ${T}.solana_program_depinfo (
+    sha256 text PRIMARY KEY,
+    data jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS depinfo_sha256 text;
   -- Where the IDL came from: 'build' (Mynt's offline container) or 'test-run' (the workspace's own code, on the host).
   ALTER TABLE ${T}.solana_program_artifacts ADD COLUMN IF NOT EXISTS idl_source text;
   CREATE TABLE IF NOT EXISTS ${T}.solana_program_events (
@@ -601,6 +609,7 @@ export class SolanaService {
       cargo_lock_sha256?: string | null;
       sources?: { sha256: string; files: Record<string, string>; binary?: Record<string, string>; links?: Record<string, string> } | null;
       deps?: { sha256: string; data: unknown } | null;
+      depinfo?: { sha256: string; data: unknown } | null;
       idl_source?: "build" | null;
     })[],
   ) {
@@ -618,11 +627,14 @@ export class SolanaService {
         ]);
       const deps = a.deps && /^[0-9a-f]{64}$/.test(a.deps.sha256) ? a.deps : null;
       if (deps) await this.db.query(`INSERT INTO ${T}.solana_program_deps (sha256, data) VALUES ($1, $2) ON CONFLICT (sha256) DO NOTHING`, [deps.sha256, JSON.stringify(deps.data)]);
+      const depinfo = a.depinfo && /^[0-9a-f]{64}$/.test(a.depinfo.sha256) ? a.depinfo : null;
+      if (depinfo)
+        await this.db.query(`INSERT INTO ${T}.solana_program_depinfo (sha256, data) VALUES ($1, $2) ON CONFLICT (sha256) DO NOTHING`, [depinfo.sha256, JSON.stringify(depinfo.data)]);
       await this.db.query(
-        `INSERT INTO ${T}.solana_program_artifacts (id, build_id, name, declared_id, sha256, size, program_b64, idl, cargo_lock_sha256, sources_sha256, deps_sha256, idl_source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `INSERT INTO ${T}.solana_program_artifacts (id, build_id, name, declared_id, sha256, size, program_b64, idl, cargo_lock_sha256, sources_sha256, deps_sha256, idl_source, depinfo_sha256)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (build_id, name) DO UPDATE SET declared_id = EXCLUDED.declared_id, sha256 = EXCLUDED.sha256, size = EXCLUDED.size, program_b64 = EXCLUDED.program_b64, idl = EXCLUDED.idl,
-           cargo_lock_sha256 = EXCLUDED.cargo_lock_sha256, sources_sha256 = EXCLUDED.sources_sha256, deps_sha256 = EXCLUDED.deps_sha256, idl_source = EXCLUDED.idl_source`,
+           cargo_lock_sha256 = EXCLUDED.cargo_lock_sha256, sources_sha256 = EXCLUDED.sources_sha256, deps_sha256 = EXCLUDED.deps_sha256, idl_source = EXCLUDED.idl_source, depinfo_sha256 = EXCLUDED.depinfo_sha256`,
         [
           randomUUID(),
           buildId,
@@ -636,6 +648,7 @@ export class SolanaService {
           sources?.sha256 ?? null,
           deps?.sha256 ?? null,
           a.idl != null ? (a.idl_source ?? null) : null,
+          depinfo?.sha256 ?? null,
         ],
       );
       kept.push(a.name);
@@ -686,6 +699,7 @@ export class SolanaService {
       idl_source: (r.idl_source as string | null) ?? null,
       sources_sha256: (r.sources_sha256 as string | null) ?? null,
       deps_sha256: (r.deps_sha256 as string | null) ?? null,
+      depinfo_sha256: (r.depinfo_sha256 as string | null) ?? null,
     };
   }
 
@@ -700,12 +714,14 @@ export class SolanaService {
     const a = await this.verifiedArtifact(user, p, buildId);
     const src = a.sources_sha256 ? await this.one(`SELECT files, binary_files AS "binary", links FROM ${T}.solana_program_sources WHERE sha256 = $1`, [a.sources_sha256]) : undefined;
     const deps = a.deps_sha256 ? await this.one(`SELECT data FROM ${T}.solana_program_deps WHERE sha256 = $1`, [a.deps_sha256]) : undefined;
+    const depinfo = a.depinfo_sha256 ? await this.one(`SELECT data FROM ${T}.solana_program_depinfo WHERE sha256 = $1`, [a.depinfo_sha256]) : undefined;
     return {
       ...a,
       sources: (src?.files as Record<string, string> | undefined) ?? null,
       binary: (src?.binary as Record<string, string> | undefined) ?? {},
       links: (src?.links as Record<string, string> | undefined) ?? {},
       deps: (deps?.data as DepsCapture | undefined) ?? null,
+      depinfo: (depinfo?.data as DepInfoCapture | undefined) ?? null,
     };
   }
 

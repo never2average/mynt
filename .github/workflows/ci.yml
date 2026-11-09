@@ -105,7 +105,8 @@ jobs:
           open(f"{tmp}/captured/Cargo.lock", "w").write(deps["lock"])
           PY
           node scripts/program-rules.mjs --sources "$RUNNER_TEMP/captured.json" --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw \
-            --so "$RUNNER_TEMP/out/ci_ledger.so" --idl "$RUNNER_TEMP/out/ci_ledger.build-idl.json" --deps "$RUNNER_TEMP/out/solana.deps.json" > "$RUNNER_TEMP/rules.json" || { cat "$RUNNER_TEMP/rules.json"; exit 1; }
+            --so "$RUNNER_TEMP/out/ci_ledger.so" --idl "$RUNNER_TEMP/out/ci_ledger.build-idl.json" --deps "$RUNNER_TEMP/out/solana.deps.json" \
+            --depinfo "$RUNNER_TEMP/out/solana.depinfo.json" > "$RUNNER_TEMP/rules.json" || { cat "$RUNNER_TEMP/rules.json"; exit 1; }
           python3 - "$RUNNER_TEMP/rules.json" <<'PY'
           import json, sys
           r = json.load(open(sys.argv[1]))
@@ -114,7 +115,12 @@ jobs:
           assert r["idl"]["verified"], r["idl"]
           assert r["exceptions"] == [], r["exceptions"]
           assert r["dependencies"]["refusals"] == [] and r["dependencies"]["off_allowlist"] == [], r["dependencies"]
+          # What rustc read, from the build container's dep-info: exactly the program's one source file of the workspace,
+          # and crates' files that match their .crate.
+          print("compiled:", r["compiled"]["registry_files"], "registry files;", "generated:", r["compiled"]["generated"])
+          assert r["compiled"]["problems"] == [], r["compiled"]["problems"]
           assert r["compiled_files"] == ["programs/ci_ledger/src/lib.rs"], r["compiled_files"]
+          assert r["compiled"]["registry_files"] > 100, r["compiled"]
           PY
           if node scripts/program-rules.mjs --workspace test/fixtures/solana-programs/token_vault --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw > "$RUNNER_TEMP/bad.json"; then
             echo "the token vault passed the hard rules"; cat "$RUNNER_TEMP/bad.json"; exit 1
@@ -124,6 +130,28 @@ jobs:
           bash "$RUNNER_TEMP/mynt/program-analysis.sh" "$RUNNER_TEMP/captured" "$RUNNER_TEMP/analysis"
           cat "$RUNNER_TEMP/analysis/static.json"
           node -e 'import("./dist/solana/mainnet-gate.js").then((m) => { const r = m.assessStatic(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))); console.log(JSON.stringify(r.reasons)); if (!r.passed) process.exit(1); })' "$RUNNER_TEMP/analysis/static.json"
+      - name: A module whose file is picked by cfg_attr is read as rustc reads it (dep-info), and refused
+        run: |
+          python3 workspaces/coding-build/scripts/scaffold_program.py "$RUNNER_TEMP/app5/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw
+          src="$RUNNER_TEMP/app5/solana/programs/ci_ledger/src"
+          printf '\n#[cfg_attr(any(), path = "clean.rs")]\npub mod y;\n' >> "$src/lib.rs"
+          echo 'pub fn ok() {}' > "$src/clean.rs"
+          echo 'pub fn permanent_delegate_note() {}' > "$src/y.rs"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app5" "$RUNNER_TEMP/out5" "$PWD/schemas/solana-crate-allowlist.json"
+          grep -q '"status": "pass"' "$RUNNER_TEMP/out5/checks.jsonl" || { cat "$RUNNER_TEMP/out5/checks.jsonl"; exit 1; }
+          if node scripts/program-rules.mjs --sources "$RUNNER_TEMP/out5/solana.sources.json" --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw \
+              --deps "$RUNNER_TEMP/out5/solana.deps.json" --depinfo "$RUNNER_TEMP/out5/solana.depinfo.json" > "$RUNNER_TEMP/rules5.json"; then
+            echo "the cfg_attr module passed"; cat "$RUNNER_TEMP/rules5.json"; exit 1
+          fi
+          python3 - "$RUNNER_TEMP/rules5.json" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print(r["compiled_files"], [e["id"] for e in r["exceptions"]])
+          assert r["compiled"]["problems"] == [], r["compiled"]
+          assert "programs/ci_ledger/src/y.rs" in r["compiled_files"] and "programs/ci_ledger/src/clean.rs" not in r["compiled_files"], r["compiled_files"]
+          assert any(f["rule"] == "RUG-TOKEN2022-EXTENSIONS" and f["file"] == "programs/ci_ledger/src/y.rs" for f in r["rules"]["findings"]), r["rules"]["findings"]
+          assert any(e["kind"] == "cfg_attr_path" for e in r["exceptions"]), r["exceptions"]
+          PY
       - name: A build script that rewrites the program on the host can't change what Mynt captures, and is caught
         run: |
           # The attack: outside a container, the program's build.rs overwrites every built program it can reach.

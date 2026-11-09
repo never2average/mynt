@@ -79,6 +79,9 @@ export interface ProgramUnderReview {
   sources: Record<string, string> | null;
   // Mynt's own mainnet signer: the one key a program may pin as its admin (and never should).
   mynt_signer?: string | null;
+  // The workspace files the compiler read (rustc's dep-info, from Mynt's build container): when given, the rules
+  // read exactly these, and the module-tree resolver is only a cross-check.
+  compiled_files?: string[] | null;
 }
 
 // ---- source ----
@@ -300,10 +303,14 @@ class SourceIndex {
   constructor(
     readonly all: Record<string, string>,
     readonly programId: string,
+    compiled: string[] | null = null,
   ) {
-    // Every file the compiler reads from a crate root (mod, #[path], include!), wherever it lives; nothing else.
+    // Every file the compiler read (dep-info) when Mynt has that; otherwise every file reachable from a crate root
+    // (mod, #[path], include!), wherever it lives. Nothing else.
     this.tree = resolveCrateTree(all);
-    this.code = new Map([...this.tree.code].map(([p, t]) => [p, stripComments(t)]));
+    this.code = compiled
+      ? new Map(compiled.filter((p) => all[p] !== undefined).map((p) => [p, stripComments(all[p])]))
+      : new Map([...this.tree.code].map(([p, t]) => [p, stripComments(t)]));
     this.structs = [...this.code].flatMap(([file, text]) => accountsStructs(file, text));
     this.byName = new Map(this.structs.map((s) => [s.name, s]));
     this.handlers = [...this.code].flatMap(([file, text]) => handlers(file, text).map((h) => ({ ...h, text })));
@@ -582,7 +589,7 @@ function patternHits(d: { pattern?: string; absent?: string; flags?: string; unl
     ? Object.keys(ix.all)
         .filter((p) => fileRe.test(p))
         .map((p) => [p, ix.code.get(p) ?? (p.endsWith(".rs") ? stripComments(ix.all[p]) : ix.all[p].replace(/#[^\n]*/g, ""))] as const)
-    : [...ix.code].filter(([p]) => /\.rs$/.test(p) || ix.tree.includes.some((i) => i.macro === "include" && i.resolved === p));
+    : [...ix.code];
   const flags = (d.flags ?? "").replace("g", "");
   if (d.absent) {
     if (!files.length) return [];
@@ -605,7 +612,7 @@ function patternHits(d: { pattern?: string; absent?: string; flags?: string; unl
 // Runs every machine-run detection of the database (or of `only` its entries) on a program.
 export function runDetections(p: ProgramUnderReview, db: VulnDb = loadVulnDb(), only?: (e: VulnEntry) => boolean): RuleFinding[] {
   const signer = p.mynt_signer ?? null;
-  const ix = p.sources && Object.keys(p.sources).length ? new SourceIndex(p.sources, p.program_id) : null;
+  const ix = p.sources && Object.keys(p.sources).length ? new SourceIndex(p.sources, p.program_id, p.compiled_files ?? null) : null;
   const findings: RuleFinding[] = [];
   for (const e of db.entries) {
     if (only && !only(e)) continue;

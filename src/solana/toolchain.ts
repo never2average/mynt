@@ -183,6 +183,27 @@ if [ "$MODE" = build ]; then
   rm -rf "$OUT"; mkdir -p "$OUT"; echo "[]" > "$OUT/programs.json"; : > "$OUT/checks.jsonl"
   command -v docker >/dev/null || { check "$OUT/checks.jsonl" solana_build fail "docker isn't available for the verifiable build"; exit 0; }
   BUILD_FAIL=""; BUILT=0; NO_LOCK=""
+  cat > "$OUT/.depinfo.py" <<'PY'
+import hashlib, json, sys, tarfile
+mode, out = sys.argv[1], sys.argv[2]
+res, dsize = {"d_files": {}, "hashes": {}}, 0
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as t:
+    for m in t:
+        name = m.name.split("/", 1)[1] if "/" in m.name else ""
+        if not name or not m.isfile():
+            continue
+        if mode == "workdir" and name.startswith("docker-target/"):
+            # cargo's and rustc's dep-info, not a build script's own output
+            if name.endswith(".d") and "/out/" not in name:
+                data = t.extractfile(m).read()
+                dsize += len(data)
+                if dsize > 16 * 1024 * 1024:
+                    sys.exit("the dep-info files are over 16 MB")
+                res["d_files"][name] = data.decode("utf-8", "replace")
+            continue
+        res["hashes"][name] = hashlib.sha256(t.extractfile(m).read()).hexdigest()
+json.dump(res, open(out, "w"))
+PY
   # Both cargos fetch: the host toolchain's (it resolves Cargo.lock) and the SBF platform tools' (the one cargo
   # build-sbf compiles with, which keeps its own crate cache), so the offline build finds every crate.
   FETCH='set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; for pc in /root/.cache/solana/*/platform-tools/rust/bin/cargo; do if [ -x "$pc" ]; then "$pc" fetch --manifest-path "$m"; fi; done; done'
@@ -297,6 +318,10 @@ PY
         BUILD_FAIL+="$label: $name.so isn't a program (not a regular ELF file) "; rm -f "$OUT/$name.so"; continue
       fi
     done
+    # What the compiler actually read: every dep-info file cargo wrote, and the workspace and the unpacked crates as
+    # the stopped container holds them (streamed out as tar and hashed, never unpacked here).
+    docker cp -L "$cid:/workdir" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" workdir "$OUT/$slug.depinfo.workdir.json" >> "$log.build.log" 2>&1
+    docker cp -L "$cid:/root/.cargo/registry/src" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" registry "$OUT/$slug.depinfo.registry.json" >> "$log.build.log" 2>&1
     docker rm -f "$cid" >/dev/null 2>&1
     # 3. The IDL, in its own container, after the programs are out.
     if [ -n "$icid" ] && timeout 1800 docker start -a "$icid" >> "$log.idl.log" 2>&1; then
@@ -351,8 +376,27 @@ for p in packages:
                     sources[f"{name}@{version}"] = files
     entries.append(e)
 json.dump({"packages": entries, "sources": sources, "complete": not problems and bool(packages), "problems": problems[:50], "lock": open(lock, encoding="utf-8", errors="replace").read() if os.path.isfile(lock) else None}, open(out, "w"), sort_keys=True)
+# The dep-info record: what the compiler read, the container's copies' hashes, and every file of each .crate.
+slug = out[: -len(".deps.json")]
+def part(kind):
+    try:
+        return json.load(open(f"{slug}.depinfo.{kind}.json"))
+    except Exception:
+        return None
+w, r = part("workdir"), part("registry")
+crate_files = {}
+for key, data in cache.items():
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as c:
+        for m in c.getmembers():
+            if m.isfile() and "/" in m.name:
+                files[m.name.split("/", 1)[1]] = hashlib.sha256(c.extractfile(m).read()).hexdigest()
+    crate_files[key] = files
+depinfo_problems = [] if w and r else ["Mynt couldn't read the build container's dep-info and files back"]
+json.dump({"d_files": (w or {}).get("d_files", {}), "workdir": (w or {}).get("hashes", {}), "registry": (r or {}).get("hashes", {}), "crate_files": crate_files, "problems": depinfo_problems},
+          open(f"{slug}.depinfo.json", "w"), sort_keys=True)
 PY
-    rm -f "$OUT/$slug.crates.tar" "$srctar"
+    rm -f "$OUT/$slug.crates.tar" "$srctar" "$OUT/$slug.depinfo.workdir.json" "$OUT/$slug.depinfo.registry.json"
     for p in "${"${"}PROGS[@]}"; do
       name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
       [ -f "$OUT/$name.so" ] || continue
@@ -369,7 +413,7 @@ def kept(key, f):
     return {key: f, f"{key}_size": len(raw), f"{key}_sha256": hashlib.sha256(raw).hexdigest()}
 progs.append({"workspace": ws, "name": name, "size": len(data), "sha256": hashlib.sha256(data.rstrip(b"\0")).hexdigest(), "declared_id": declared or None,
               "cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1",
-              **kept("sources", srcs), **kept("deps", deps), **kept("idl", name + ".build-idl.json")})
+              **kept("sources", srcs), **kept("deps", deps), **kept("idl", name + ".build-idl.json"), **kept("depinfo", deps[: -len(".deps.json")] + ".depinfo.json")})
 json.dump(progs, open(os.path.join(out, "programs.json"), "w"), indent=2)
 PY
       BUILT=$((BUILT + 1))
