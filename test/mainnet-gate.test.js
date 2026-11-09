@@ -52,7 +52,7 @@ const DEPINFO = (sources, read = null, o = {}) => {
   const { resolveCrateTree: tree } = CRATE_TREE;
   const files = read ?? [...tree(sources).code.keys()];
   return {
-    d_files: { "docker-target/sbf-solana-solana/release/deps/mynt_program-0123456789abcdef.d": `/workdir/docker-target/sbf-solana-solana/release/deps/libmynt_program.so: ${files.join(" ")}\n\n${files.map((f) => `${f}:`).join("\n")}\n`, ...(o.extra ?? {}) },
+    d_files: { "sbpf-solana-solana/release/deps/mynt_program-0123456789abcdef.d": `/mynt-target/sbpf-solana-solana/release/deps/libmynt_program.so: ${files.join(" ")}\n\n${files.map((f) => `${f}:`).join("\n")}\n`, ...(o.extra ?? {}) },
     workdir: Object.fromEntries(Object.entries(sources).map(([p, t]) => [p, createHash("sha256").update(Buffer.from(t, "utf8")).digest("hex")])),
     registry: o.registry ?? {},
     crate_files: o.crate_files ?? {},
@@ -1039,10 +1039,20 @@ test("dep-info: parsed as make rules, and every file the compiler read checked a
   };
   const d = (...paths) => ({ ...base, d_files: { "docker-target/sbf/release/deps/p.d": `out.so: ${paths.join(" ")}\n` } });
   const lock = new Set(["borsh-1.5.7"]);
-  const ok = evaluateDepInfo(d("programs/p/src/lib.rs", "/workdir/programs/p/src/a.rs", "/root/.cargo/registry/src/index.crates.io-1/borsh-1.5.7/src/lib.rs", "/workdir/docker-target/release/build/mynt_program-0123456789abcdef/out/gen.rs"), { files }, lock);
+  const ok = evaluateDepInfo(d("programs/p/src/lib.rs", "/workdir/programs/p/src/a.rs", "/root/.cargo/registry/src/index.crates.io-1/borsh-1.5.7/src/lib.rs", "/mynt-target/release/build/mynt_program-0123456789abcdef/out/gen.rs"), { files }, lock, new Set(["mynt_program"]));
   assert.deepEqual(ok.problems, []);
   assert.deepEqual(ok.workspace, ["programs/p/src/a.rs", "programs/p/src/lib.rs"]);
-  assert.deepEqual(ok.generated, [{ path: "docker-target/release/build/mynt_program-0123456789abcdef/out/gen.rs", package: "mynt_program" }]);
+  assert.deepEqual(ok.generated, [{ path: "mynt-target/release/build/mynt_program-0123456789abcdef/out/gen.rs", package: "mynt_program" }]);
+  // In the target dir, only a known build script's OUT_DIR: nothing else Mynt didn't capture.
+  const tgt = (...paths) => evaluateDepInfo(d(...paths), { files }, lock, new Set(["borsh", "mynt_program"])).problems.join(" | ");
+  assert.equal(tgt("/mynt-target/sbpf-solana-solana/release/build/borsh-0123456789abcdef/out/gen.rs"), "");
+  assert.match(tgt("/mynt-target/release/build/sneaky-0123456789abcdef/out/gen.rs"), /in the target dir but not a known build script's output/);
+  assert.match(tgt("/mynt-target/sbpf-solana-solana/release/deps/hidden.rs"), /in the target dir but not a known build script's output/);
+  // A #[path] into a shipped docker-target is a workspace file Mynt never captured (the archive refuses one).
+  assert.match(tgt("programs/p/src/../../../docker-target/x.rs"), /read docker-target\/x.rs, which isn't in the workspace Mynt captured/);
+  // Lines that aren't rules, and names with control characters, are problems, not guesses.
+  assert.match(evaluateDepInfo({ ...base, d_files: { "p.d": "out.so: programs/p/src/lib.rs\nnot a rule at all\n" } }, { files }, lock).problems.join(" | "), /a dep-info line that isn't a rule/);
+  assert.match(evaluateDepInfo({ ...base, d_files: { "p.d": "out.so: programs/p/src/lib\u0007.rs\n" } }, { files }, lock).problems.join(" | "), /control characters/);
   const problems = (...paths) => evaluateDepInfo(d(...paths), { files }, lock).problems.join(" | ");
   assert.match(problems("programs/p/src/extra.rs"), /read programs\/p\/src\/extra.rs, which isn't in the workspace Mynt captured/);
   assert.match(evaluateDepInfo({ ...d("programs/p/src/lib.rs"), workdir: { "programs/p/src/lib.rs": h("rewritten") } }, { files }, lock).problems[0], /isn't the file Mynt captured: something rewrote it/);
@@ -1053,8 +1063,8 @@ test("dep-info: parsed as make rules, and every file the compiler read checked a
   assert.match(evaluateDepInfo(null, { files }, lock).problems[0], /no record of the files the compiler read/);
   // The resolver cross-checks dep-info both ways; generated code of a workspace crate is an exception.
   const ws = { "Cargo.toml": `[package]\nname = "mynt_program"\nversion = "0.1.0"\n`, "src/lib.rs": "mod a;\n", "src/a.rs": "", "src/b.rs": "" };
-  const ex = crossCheck(resolveCrateTree(ws), { workspace: ["src/lib.rs", "src/b.rs"], registry: [], generated: [{ path: "docker-target/release/build/mynt_program-0123456789abcdef/out/gen.rs", package: "mynt_program" }], problems: [] });
-  assert.deepEqual(ex.map((e) => e.id).sort(), ["generated:docker-target/release/build/mynt_program-0123456789abcdef/out/gen.rs", "module-tree-mismatch:src/a.rs", "module-tree-mismatch:src/b.rs"]);
+  const ex = crossCheck(resolveCrateTree(ws), { workspace: ["src/lib.rs", "src/b.rs"], registry: [], generated: [{ path: "mynt-target/release/build/mynt_program-0123456789abcdef/out/gen.rs", package: "mynt_program" }], problems: [] });
+  assert.deepEqual(ex.map((e) => e.id).sort(), ["generated:mynt-target/release/build/mynt_program-0123456789abcdef/out/gen.rs", "module-tree-mismatch:src/a.rs", "module-tree-mismatch:src/b.rs"]);
 });
 
 test("reviews use dep-info: a missing or rewritten file refuses, a disagreement with the module tree is an exception, and the rules read what was compiled", async () => {
@@ -1116,4 +1126,68 @@ test("an approved upgrade expires if it hasn't started within MAINNET_APPROVAL_T
   await assert.rejects(w.gate.check(await w.solana.get(id), next.sha256, "upgrade"), /expired: an approved upgrade must start within 14 days of its timelock ending/);
   await w.db.query("UPDATE financial_products.solana_mainnet_reviews SET executes_at = now() - interval '1 day' WHERE id = $1", [r.review_id]);
   await w.gate.check(await w.solana.get(id), next.sha256, "upgrade");
+});
+
+// ---- the final review: the target dir is Mynt's, and a source that ships build output is refused ----
+
+test("the capture refuses a workspace that ships build output or unprintable names, at any depth, and keeps a clean one", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync: read } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const { SOLANA_VERIFY_SCRIPT } = await import("../dist/solana/toolchain.js");
+  const start = SOLANA_VERIFY_SCRIPT.indexOf("import base64, json, re, sys, tarfile\n");
+  const capture = SOLANA_VERIFY_SCRIPT.slice(start, SOLANA_VERIFY_SCRIPT.indexOf("\nPY\n", start));
+  const run = (files) => {
+    const root = mkdtempSync(join(tmpdir(), "mynt-cap-"));
+    for (const [p, body] of Object.entries(files)) {
+      mkdirSync(join(root, "ws", p, ".."), { recursive: true });
+      writeFileSync(join(root, "ws", p), body);
+    }
+    // The same archive the build makes: top-level target, node_modules and .anchor left out.
+    spawnSync("tar", ["-C", join(root, "ws"), "--exclude=./target", "--exclude=./node_modules", "--exclude=./.anchor", "--transform", "s,^\\.$,workdir,;s,^\\./,workdir/,", "-cf", join(root, "src.tar"), "."]);
+    const r = spawnSync("python3", ["-c", capture, join(root, "src.tar"), join(root, "out.json"), String(16 * 1024 * 1024)]);
+    return r.status === 0 ? { ok: true, files: Object.keys(JSON.parse(read(join(root, "out.json"), "utf8")).files).sort() } : { ok: false, why: r.stderr.toString() };
+  };
+  const clean = { "Cargo.toml": "[workspace]\n", "programs/p/src/lib.rs": "pub fn ok() {}\n", "target/deploy/p.so": "left out at the top level" };
+  assert.deepEqual(run(clean), { ok: true, files: ["Cargo.toml", "programs/p/src/lib.rs"] });
+  for (const [bad, path] of [
+    ["seeded docker-target", "docker-target/deploy/p.so"],
+    ["nested target", "programs/p/target/release/deps/libp.rlib"],
+    ["fingerprints", "programs/p/.fingerprint/p-0123/lib-p"],
+    ["a prebuilt program", "programs/p/prebuilt.so"],
+    ["dep-info", "programs/p/src/lib.d"],
+    ["rmeta", "x/libp.rmeta"],
+    ["nested .anchor", "programs/p/.anchor/x"],
+    ["a control character", "programs/p/src/evil\u0007.rs"],
+  ]) {
+    const r = run({ ...clean, [path]: "x" });
+    assert.equal(r.ok, false, `${bad} wasn't refused`);
+    assert.match(r.why, /refused: the workspace ships build output/, bad);
+  }
+});
+
+test("when build-time code ran, the rules also read every captured .rs file, not just dep-info's list", async () => {
+  // The workspace has a build script: its dep-info could have been rewritten, so a file it leaves out is read anyway.
+  let w = await world();
+  let id = await w.mainnetProgram();
+  const lib = "programs/mynt_program/src/lib.rs";
+  const files = { ...TEMPLATE, "programs/mynt_program/build.rs": "fn main() {}\n", "programs/mynt_program/src/unlisted.rs": EVIL };
+  let b = await w.build(id, files, 1, { depinfo: DEPINFO(files, [lib, "programs/mynt_program/build.rs"]) });
+  let r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+  assert.match(r.blocked_reason, /RUG-TOKEN2022-EXTENSIONS \(source, programs\/mynt_program\/src\/unlisted.rs:1\)/);
+  assert.equal(r.checks.rules.compiled.rules_read_every_rust_file, true);
+  // A dependency with a build script counts too.
+  w = await world();
+  id = await w.mainnetProgram();
+  const files2 = { ...TEMPLATE, "programs/mynt_program/src/unlisted.rs": EVIL };
+  b = await w.build(id, files2, 1, { depinfo: DEPINFO(files2, [lib], { crate_files: { "anchor-lang-0.32.1": { "build.rs": sum("b") } } }) });
+  r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+  assert.match(r.blocked_reason, /unlisted.rs/);
+  // Without any build-time code, dep-info's list is what's read (the unreachable file is left alone).
+  w = await world();
+  id = await w.mainnetProgram();
+  b = await w.build(id, files2, 1, { depinfo: DEPINFO(files2, [lib]) });
+  r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+  assert.equal(r.status, "running", r.blocked_reason);
+  assert.equal(r.checks.rules.compiled.rules_read_every_rust_file, false);
 });

@@ -1463,14 +1463,14 @@ test("the Solana build never runs `anchor build` or developer code on the host, 
   const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
   assert.match(build, /docker create /);
   assert.match(build, /docker cp - "\$bcid:\/"/, "the source goes in as a copy");
-  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
+  assert.match(build, /docker cp -L "\$cid:\/mynt-target\/deploy\/\$name\.so"/);
   assert.match(build, /cargo build-sbf --manifest-path/);
   // The IDL is built only inside its own networkless container, started after the programs are out: the one
   // place `anchor idl build` appears is that container's command.
   const idlCommand = /IDL_BUILD='[^']*'/.exec(build)[0];
   assert.match(idlCommand, /anchor idl build/);
   assert.match(build, /icid=\$\(docker create --network none [^\n]*\n[^\n]*bash -c "\$IDL_BUILD"/);
-  assert.ok(build.indexOf('docker start -a "$icid"') > build.indexOf('docker cp -L "$cid:/workdir/docker-target/deploy/$name.so"'), "the IDL container starts after the programs are out");
+  assert.ok(build.indexOf('docker start -a "$icid"') > build.indexOf('docker cp -L "$cid:/mynt-target/deploy/$name.so"'), "the IDL container starts after the programs are out");
   assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build.replace(idlCommand, "")), "nothing compiled or run on the host, no mounts");
   // What Mynt keeps is the very archive the build container gets.
   assert.match(build, /tar -C "\$dir" --exclude=\.\/target --exclude=\.\/node_modules --exclude=\.\/\.anchor [^\n]*-cf "\$srctar" \./);
@@ -1630,7 +1630,10 @@ test("Mynt reads back only a regular ELF file: a link to a host file, or anythin
 
 test("the build follows links inside the container only, keeps only regular ELF files, and compiles with no network", () => {
   const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
-  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
+  assert.match(build, /docker cp -L "\$cid:\/mynt-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
+  // The target dir is outside the source, in both containers that compile: nothing shipped can be a "fresh" artifact.
+  assert.equal((build.match(/-e CARGO_TARGET_DIR=\/mynt-target /g) ?? []).length, 2);
+  assert.ok(!/CARGO_TARGET_DIR=\/workdir/.test(build));
   assert.ok(!/docker cp "\$cid:/.test(build), "every copy out follows links in the container");
   assert.match(build, /\[ -L "\$OUT\/\$name\.so" \] \|\| \[ ! -f "\$OUT\/\$name\.so" \] \|\| \[ "\$\(head -c 4 "\$OUT\/\$name\.so" \| od -An -tx1 \| tr -d ' \\n'\)" != 7f454c46 \]/);
   // Network: the crates are fetched in a separate, throwaway container that gets only a skeleton of the source;

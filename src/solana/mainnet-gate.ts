@@ -467,7 +467,7 @@ export class MainnetGateService implements MainnetGateCheck {
     if (m.idl && !idlCheck.verified) refusals.push(`The IDL doesn't match the program: ${idlCheck.problems.slice(0, 3).join("; ")}`);
     const idl = m.idl && idlCheck.verified ? m.idl : null;
     const result = checkProgramRules(
-      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null, compiled_files: compiled.workspace },
+      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null, compiled_files: compiled.rulesFiles },
       this.vulnDb,
     );
     const authority = upgradeAuthorityRule({ action, signer, recorded_authority: p.upgrade_authority });
@@ -482,7 +482,14 @@ export class MainnetGateService implements MainnetGateCheck {
       limits: result.limits,
       upgrade_authority: authority.status,
       signer: signer ?? null,
-      compiled: { workspace_files: compiled.workspace, registry_files: compiled.registry.length, generated_files: compiled.generated.map((g) => g.path), problems: compiled.problems },
+      compiled: {
+        workspace_files: compiled.workspace,
+        registry_files: compiled.registry.length,
+        generated_files: compiled.generated.map((g) => g.path),
+        problems: compiled.problems,
+        // Build-time code ran (a build script or proc macro): the rules also read every captured .rs file.
+        rules_read_every_rust_file: compiled.buildTimeCode,
+      },
     };
     const dependencies = { crates: deps.crates, allowlist_version: allow.version, off_allowlist: deps.exceptions.map((e) => e.id), refusals: deps.refusals };
     const id = randomUUID();
@@ -682,7 +689,7 @@ export class MainnetGateService implements MainnetGateCheck {
     const compiled = this.compiledFiles(m);
     if (compiled.problems.length) throw new GateError(`What the compiler read no longer checks out: ${compiled.problems.slice(0, 3).join("; ")}`);
     const now = checkProgramRules(
-      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null, compiled_files: compiled.workspace },
+      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null, compiled_files: compiled.rulesFiles },
       this.vulnDb,
     );
     if (!now.passed)
@@ -787,10 +794,21 @@ export class MainnetGateService implements MainnetGateCheck {
     return { p, m };
   }
 
-  // What the compiler read for a build, checked against what Mynt captured.
+  // What the compiler read for a build, checked against what Mynt captured, and the files the rules must read: the
+  // compiled workspace files, or, when any build script or proc macro ran (a workspace one, or a dependency's),
+  // every captured .rs file as well, since build-time code could have rewritten the dep-info itself.
   private compiledFiles(m: { sources: Record<string, string> | null; binary?: Record<string, string>; deps: { packages: { name: string; version: string; source?: string | null }[] } | null; depinfo?: DepInfoCapture | null }) {
-    const lockCrates = new Set((m.deps?.packages ?? []).filter((x) => x.source).map((x) => `${x.name}-${x.version}`));
-    return evaluateDepInfo(m.depinfo ?? null, { files: m.sources ?? {}, binary: m.binary }, lockCrates);
+    const lock = (m.deps?.packages ?? []).filter((x) => x.source);
+    const lockCrates = new Set(lock.map((x) => `${x.name}-${x.version}`));
+    const tree = resolveCrateTree(m.sources ?? {});
+    const scripts = new Set([...lock.map((x) => x.name), ...tree.packages.filter((p) => p.build).map((p) => p.name)]);
+    const compiled = evaluateDepInfo(m.depinfo ?? null, { files: m.sources ?? {}, binary: m.binary }, lockCrates, scripts);
+    const buildTimeCode =
+      tree.packages.some((p) => p.build || p.procMacro) ||
+      compiled.generated.length > 0 ||
+      Object.values(m.depinfo?.crate_files ?? {}).some((files) => files["build.rs"] !== undefined);
+    const rulesFiles = buildTimeCode ? [...new Set([...compiled.workspace, ...Object.keys(m.sources ?? {}).filter((f) => f.endsWith(".rs"))])].sort() : compiled.workspace;
+    return { ...compiled, rulesFiles, buildTimeCode };
   }
 
   // The IDL the agents and the PoC re-run get: only one Mynt checked against the bytes, without doc strings.
@@ -1105,7 +1123,7 @@ export class MainnetGateService implements MainnetGateCheck {
             idl: m.idl && verifyIdl(m.idl, m.program).verified ? m.idl : null,
             sources: m.sources,
             mynt_signer: (await this.solana.mainnetSigner())?.address ?? null,
-            compiled_files: compiled.problems.length ? null : compiled.workspace,
+            compiled_files: compiled.problems.length ? null : compiled.rulesFiles,
           },
           this.vulnDb,
         );

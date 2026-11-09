@@ -203,7 +203,7 @@ jobs:
           fn main() {
               println!("cargo:rerun-if-changed=build.rs");
               if !Path::new("/.dockerenv").exists() { return; }
-              let target = Path::new("/workdir/docker-target/deploy/ci_ledger.so");
+              let target = Path::new("/mynt-target/deploy/ci_ledger.so");
               let _ = fs::remove_file(target);
               symlink("/etc/hostname", target).unwrap();
           }
@@ -225,7 +225,7 @@ jobs:
           if timeout 3 bash -c '</dev/tcp/1.1.1.1/443' 2>/dev/null; then echo "MYNT-ATTACK: the wrapper ran with network" >&2; exit 97; fi
           # Offline (the build): leave a process behind that, once the program exists, swaps it for another valid ELF.
           if mkdir /tmp/mynt-swapper 2>/dev/null; then
-            ( f=/workdir/docker-target/deploy/ci_ledger.so
+            ( f=/mynt-target/deploy/ci_ledger.so
               while :; do if [ -f "$f" ]; then sleep 2; cp "$f" /tmp/x && printf X >> /tmp/x && cp /tmp/x "$f"; exit; fi; sleep 0.2; done ) >/dev/null 2>&1 &
           fi
           exec "$@"
@@ -239,6 +239,31 @@ jobs:
           (cd "$RUNNER_TEMP/out4" && sha256sum ci_ledger.so)
           [ "$(sha256sum < "$RUNNER_TEMP/out4/ci_ledger.so" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$RUNNER_TEMP/built.sha")" ] || { echo "the captured program isn't the honest build"; exit 1; }
           echo "held: the wrapper never had a network and the captured program is the honest build"
+      - name: A workspace that ships build output is refused before anything is built (a pre-seeded docker-target, a nested target, a prebuilt program)
+        run: |
+          # The attack: pre-build in the same image and ship the target dir, so cargo would find "fresh" artifacts
+          # and dep-info listing only clean files. Mynt's target dir is /mynt-target, outside the source, and a
+          # source carrying build output is refused outright.
+          plant() { # case
+            app="$RUNNER_TEMP/attack-$1"; rm -rf "$app"
+            python3 workspaces/coding-build/scripts/scaffold_program.py "$app/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw
+            case "$1" in
+              seeded) mkdir -p "$app/solana/docker-target/deploy" "$app/solana/docker-target/sbpf-solana-solana/release/.fingerprint/ci_ledger-0123456789abcdef"
+                      cp "$RUNNER_TEMP/out/ci_ledger.so" "$app/solana/docker-target/deploy/ci_ledger.so"
+                      echo "x: programs/ci_ledger/src/lib.rs" > "$app/solana/docker-target/sbpf-solana-solana/release/ci_ledger.d" ;;
+              nested) mkdir -p "$app/solana/programs/ci_ledger/target/release/deps"
+                      echo x > "$app/solana/programs/ci_ledger/target/release/deps/libci_ledger.rlib" ;;
+              prebuilt) cp "$RUNNER_TEMP/out/ci_ledger.so" "$app/solana/programs/ci_ledger/prebuilt.so" ;;
+            esac
+            bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$app" "$RUNNER_TEMP/attack-out-$1" "$PWD/schemas/solana-crate-allowlist.json"
+            cat "$RUNNER_TEMP/attack-out-$1/checks.jsonl"
+            grep -q '"name": "solana_build", "status": "fail"' "$RUNNER_TEMP/attack-out-$1/checks.jsonl"
+            grep -q "refused: the workspace ships build output" "$RUNNER_TEMP/attack-out-$1/checks.jsonl"
+            [ -z "$(ls "$RUNNER_TEMP/attack-out-$1"/*.so 2>/dev/null)" ] || { echo "$1: a program was kept"; exit 1; }
+            [ "$(cat "$RUNNER_TEMP/attack-out-$1/programs.json")" = "[]" ] || { echo "$1: something was built"; exit 1; }
+          }
+          plant seeded; plant nested; plant prebuilt
+          echo "refused: shipped build output never reaches a build"
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done

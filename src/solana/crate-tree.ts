@@ -356,17 +356,24 @@ export interface DepInfoCapture {
 }
 
 // Every source path a dep-info (Makefile-style) file lists: the prerequisites of its rules, with escaped spaces.
-export function parseDepInfo(d: string): string[] {
+// A line that isn't blank, a comment or a rule is a problem: Mynt doesn't guess what it means.
+export function parseDepInfoChecked(d: string): { paths: string[]; problems: string[] } {
   const out = new Set<string>();
+  const problems: string[] = [];
   for (const raw of d.replace(/\\\n/g, " ").split("\n")) {
     if (!raw.trim() || raw.startsWith("#")) continue;
     const colon = raw.search(/:(\s|$)/);
-    if (colon < 0) continue;
+    if (colon < 0) {
+      problems.push(`a dep-info line that isn't a rule: ${JSON.stringify(raw.slice(0, 120))}`);
+      continue;
+    }
     const deps = raw.slice(colon + 1);
     for (const tok of deps.match(/(?:\\ |[^\s])+/g) ?? []) out.add(tok.replace(/\\ /g, " "));
   }
-  return [...out];
+  for (const p of out) if (/[\u0000-\u001f\u007f]/.test(p)) problems.push(`a dep-info path with control characters: ${JSON.stringify(p.slice(0, 120))}`);
+  return { paths: [...out], problems };
 }
+export const parseDepInfo = (d: string) => parseDepInfoChecked(d).paths;
 
 const sha = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const REGISTRY = /^\/root\/\.cargo\/registry\/src\/([^/]+)\/([^/]+)\/(.+)$/;
@@ -382,10 +389,14 @@ export interface CompiledFiles {
 // archive with the same contents the container compiled; a registry file must be in the .crate cargo downloaded
 // for a crate of the Cargo.lock, unchanged; generated files (a build script's OUT_DIR) are listed; anything else
 // is refused.
+// The build's target dir, outside the workspace (solana-verify.sh): only build scripts' OUT_DIRs may be read there.
+export const TARGET_DIR = "/mynt-target/";
+
 export function evaluateDepInfo(
   depinfo: DepInfoCapture | null,
   bundle: { files: Record<string, string>; binary?: Record<string, string> },
   lockCrates: Set<string>, // "<name>-<version>" of every registry package in the Cargo.lock
+  buildScripts: Set<string> = new Set(), // packages whose build scripts' output may be compiled (normalised: _ for -)
 ): CompiledFiles {
   const r: CompiledFiles = { workspace: [], registry: [], generated: [], problems: [] };
   if (!depinfo || !Object.keys(depinfo.d_files ?? {}).length) {
@@ -396,15 +407,20 @@ export function evaluateDepInfo(
   const captured = (rel: string) =>
     bundle.files[rel] !== undefined ? sha(Buffer.from(bundle.files[rel], "utf8")) : bundle.binary?.[rel] !== undefined ? sha(Buffer.from(bundle.binary[rel], "base64")) : null;
   const seen = new Set<string>();
+  const ok = new Set([...buildScripts].map((x) => x.replace(/-/g, "_")));
   for (const [dfile, body] of Object.entries(depinfo.d_files)) {
-    for (const raw of parseDepInfo(body)) {
+    const parsed = parseDepInfoChecked(body);
+    r.problems.push(...parsed.problems.map((x) => `${dfile}: ${x}`));
+    for (const raw of parsed.paths) {
       if (seen.has(raw)) continue;
       seen.add(raw);
       // Paths are relative to the workspace (/workdir) or absolute.
       const abs = raw.startsWith("/") ? norm(raw).replace(/^/, "/") : `/workdir/${norm(raw)}`;
-      if (abs.startsWith("/workdir/docker-target/")) {
-        const out = /\/build\/([A-Za-z0-9_-]+?)-[0-9a-f]{16}\/out\//.exec(abs);
-        r.generated.push({ path: abs.slice("/workdir/".length), package: out ? out[1] : null });
+      if (abs.startsWith(TARGET_DIR)) {
+        // Only a build script's OUT_DIR, of a crate whose build script is allowlisted or an admin-named exception.
+        const out = /^\/mynt-target\/(?:[^/]+\/)?(?:release|debug)\/build\/([A-Za-z0-9_-]+?)-[0-9a-f]{16}\/out\//.exec(abs);
+        if (!out || !ok.has(out[1].replace(/-/g, "_"))) r.problems.push(`the compiler read ${abs}, in the target dir but not a known build script's output`);
+        else r.generated.push({ path: abs.slice(1), package: out[1] });
         continue;
       }
       if (abs.startsWith("/workdir/")) {
@@ -442,9 +458,9 @@ export function crossCheck(tree: CrateTree, compiled: CompiledFiles): Exception[
   for (const i of tree.includes) if (i.resolved && reached.has(i.from)) reached.add(i.resolved);
   const out: Exception[] = [];
   for (const f of listed)
-    if (!reached.has(f)) out.push({ id: `module-tree-mismatch:${f}`, kind: "module_tree_mismatch", detail: `the compiler read ${f}, which Mynt's own module resolution didn't reach` });
+    if (!reached.has(f)) out.push({ id: `module-tree-mismatch:${f}`, kind: "module_tree_mismatch", detail: `the compiler read ${f}, but Mynt's own module resolution didn't reach it: the two disagree on what this crate compiles` });
   for (const f of reached)
-    if (!listed.has(f) && f.endsWith(".rs")) out.push({ id: `module-tree-mismatch:${f}`, kind: "module_tree_mismatch", detail: `Mynt's module resolution reached ${f}, which the compiler didn't read (cfg'd out?)` });
+    if (!listed.has(f) && f.endsWith(".rs")) out.push({ id: `module-tree-mismatch:${f}`, kind: "module_tree_mismatch", detail: `Mynt's own module resolution reached ${f}, but the compiler didn't read it: the two disagree on what this crate compiles` });
   for (const g of compiled.generated)
     if (g.package && tree.packages.some((p) => p.name.replace(/-/g, "_") === g.package!.replace(/-/g, "_")))
       out.push({ id: `generated:${g.path}`, kind: "generated_code", detail: `the compiler read ${g.path}, generated by ${g.package}'s build script: not in the reviewed source` });

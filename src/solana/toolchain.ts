@@ -192,7 +192,7 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as t:
         name = m.name.split("/", 1)[1] if "/" in m.name else ""
         if not name or not m.isfile():
             continue
-        if mode == "workdir" and name.startswith("docker-target/"):
+        if mode == "target":
             # cargo's and rustc's dep-info, not a build script's own output
             if name.endswith(".d") and "/out/" not in name:
                 data = t.extractfile(m).read()
@@ -210,9 +210,11 @@ PY
   BUILD='set -e; for m in "$@"; do cargo build-sbf --manifest-path "$m"; done'
   # The IDL, built in a container of its own (no network, a fresh copy of the same source and crates) after the
   # programs are out: building the IDL runs the workspace's code, which must never touch the built programs.
-  IDL_BUILD='mkdir -p /workdir/mynt-idl; for n in "$@"; do anchor idl build -p "$n" -o "/workdir/mynt-idl/$n.json" > "/workdir/mynt-idl/$n.log" 2>&1 || true; done; true'
+  IDL_BUILD='mkdir -p /mynt-idl; for n in "$@"; do anchor idl build -p "$n" -o "/mynt-idl/$n.json" > "/mynt-idl/$n.log" 2>&1 || true; done; true'
   # Mynt's own settings in both containers, never the source's: the image's Rust for cargo itself (a
-  # rust-toolchain.toml can't swap it), and dependencies resolved to versions the platform tools can build.
+  # rust-toolchain.toml can't swap it), and dependencies resolved to versions the platform tools can build. The
+  # target dir is /mynt-target, outside /workdir and empty: nothing from the source can be a "fresh" artifact cargo
+  # would reuse instead of compiling, and the programs, dep-info and IDL Mynt reads come only from there.
   COMMON=(--workdir /workdir -e RUSTUP_TOOLCHAIN=stable -e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
     -e PATH=/root/.local/share/solana/install/active_release/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
   for w in "${"${"}WS[@]}"; do
@@ -226,13 +228,25 @@ PY
     tar -C "$dir" --exclude=./target --exclude=./node_modules --exclude=./.anchor --transform 's,^\.$,workdir,;s,^\./,workdir/,' -cf "$srctar" . 2>> "$log.build.log"
     srcs="$slug.sources.json"
     if ! python3 - "$srctar" "$OUT/$srcs" ${MAX_SOURCE_BYTES} <<'PY' >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $(tail -c 300 "$log.build.log") "; rm -f "$srctar" "$OUT/$srcs"; continue; fi
-import base64, json, sys, tarfile
+import base64, json, re, sys, tarfile
 src, out, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
-files, binary, links, total = {}, {}, {}, 0
+files, binary, links, total, refused = {}, {}, {}, 0, []
 with tarfile.open(src) as t:
     for m in t.getmembers():
         path = m.name[len("workdir/"):] if m.name.startswith("workdir/") else None
-        if not path or m.isdir():
+        if not path:
+            continue
+        # Never anything a build could reuse instead of compiling: no target folders at any depth (the top-level
+        # ones are left out of the archive), no cargo artifacts, fingerprints or dep-info, no prebuilt programs.
+        # Refused, not stripped: what Mynt keeps is what it compiles.
+        parts = path.split("/")
+        if re.search(r"[\x00-\x1f\x7f]", path):
+            refused.append(repr(path) + " (control characters in its name)")
+        elif any(x in ("target", "docker-target", ".anchor", ".fingerprint", "mynt-target", "mynt-idl") for x in parts):
+            refused.append(path)
+        elif not m.isdir() and re.search(r"\.(rlib|rmeta|d|so)$", parts[-1]):
+            refused.append(path)
+        if m.isdir():
             continue
         if m.issym() or m.islnk():
             links[path] = m.linkname
@@ -247,6 +261,8 @@ with tarfile.open(src) as t:
             files[path] = data.decode("utf-8")
         except UnicodeDecodeError:
             binary[path] = base64.b64encode(data).decode()
+if refused:
+    sys.exit("refused: the workspace ships build output (target folders, cargo artifacts, fingerprints, dep-info or prebuilt programs) or unprintable file names; remove them: " + ", ".join(sorted(refused)[:8]))
 json.dump({"files": files, "binary": binary, "links": links}, open(out, "w"), sort_keys=True)
 PY
     # 1. Fetch, networked, in a throwaway container that gets only the manifests, Cargo.lock and empty stub
@@ -269,7 +285,7 @@ PY
     #    fetch container (streamed container to container, never unpacked here). The fetch container is gone before
     #    the build starts. The build is the container's own process: when it ends the container stops, and anything
     #    it left running dies.
-    bcid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/workdir/docker-target -e CARGO_NET_OFFLINE=true \
+    bcid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/mynt-target -e CARGO_NET_OFFLINE=true \
       ${T.anchorImage} bash -c "$BUILD" _ "${"${"}manifests[@]}" 2>> "$log.build.log")
     ok=1
     if [ -z "$bcid" ]; then ok=0
@@ -282,7 +298,7 @@ PY
     fi
     # The IDL's container, created and filled the same way now, but started only after the programs are out:
     # building the IDL runs the workspace's code, which must never touch the built programs.
-    icid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/workdir/docker-target -e CARGO_NET_OFFLINE=true \
+    icid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/mynt-target -e CARGO_NET_OFFLINE=true \
       ${T.anchorImage} bash -c "$IDL_BUILD" _ "${"${"}names[@]}" 2>> "$log.idl.log")
     if [ -n "$icid" ] && [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$icid")" = none ] && docker cp - "$icid:/" < "$srctar" >> "$log.idl.log" 2>&1 \
        && docker cp "$fcid:/root/.cargo/registry" - | docker cp - "$icid:/root/.cargo" >> "$log.idl.log" 2>&1 \
@@ -313,7 +329,7 @@ PY
       # -L: a link in the container is resolved there, to the container's own file, never copied out as a link
       # that would point at the host. Then only a regular file that is an ELF program counts.
       rm -f "$OUT/$name.so"
-      if ! docker cp -L "$cid:/workdir/docker-target/deploy/$name.so" "$OUT/$name.so" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $name.so wasn't built "; continue; fi
+      if ! docker cp -L "$cid:/mynt-target/deploy/$name.so" "$OUT/$name.so" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $name.so wasn't built "; continue; fi
       if [ -L "$OUT/$name.so" ] || [ ! -f "$OUT/$name.so" ] || [ "$(head -c 4 "$OUT/$name.so" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
         BUILD_FAIL+="$label: $name.so isn't a program (not a regular ELF file) "; rm -f "$OUT/$name.so"; continue
       fi
@@ -321,14 +337,15 @@ PY
     # What the compiler actually read: every dep-info file cargo wrote, and the workspace and the unpacked crates as
     # the stopped container holds them (streamed out as tar and hashed, never unpacked here).
     docker cp -L "$cid:/workdir" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" workdir "$OUT/$slug.depinfo.workdir.json" >> "$log.build.log" 2>&1
+    docker cp -L "$cid:/mynt-target" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" target "$OUT/$slug.depinfo.target.json" >> "$log.build.log" 2>&1
     docker cp -L "$cid:/root/.cargo/registry/src" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" registry "$OUT/$slug.depinfo.registry.json" >> "$log.build.log" 2>&1
     docker rm -f "$cid" >/dev/null 2>&1
     # 3. The IDL, in its own container, after the programs are out.
     if [ -n "$icid" ] && timeout 1800 docker start -a "$icid" >> "$log.idl.log" 2>&1; then
       for n in "${"${"}names[@]}"; do
         rm -f "$OUT/$n.build-idl.json"
-        docker cp -L "$icid:/workdir/mynt-idl/$n.json" "$OUT/$n.build-idl.json" >> "$log.idl.log" 2>&1 || true
-        docker cp -L "$icid:/workdir/mynt-idl/$n.log" "$OUT/$n.build-idl.log" >> "$log.idl.log" 2>&1 || true
+        docker cp -L "$icid:/mynt-idl/$n.json" "$OUT/$n.build-idl.json" >> "$log.idl.log" 2>&1 || true
+        docker cp -L "$icid:/mynt-idl/$n.log" "$OUT/$n.build-idl.log" >> "$log.idl.log" 2>&1 || true
         { [ -L "$OUT/$n.build-idl.json" ] || ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OUT/$n.build-idl.json" 2>/dev/null; } && rm -f "$OUT/$n.build-idl.json"
       done
     fi
@@ -383,7 +400,7 @@ def part(kind):
         return json.load(open(f"{slug}.depinfo.{kind}.json"))
     except Exception:
         return None
-w, r = part("workdir"), part("registry")
+w, r, tg = part("workdir"), part("registry"), part("target")
 crate_files = {}
 for key, data in cache.items():
     files = {}
@@ -392,11 +409,11 @@ for key, data in cache.items():
             if m.isfile() and "/" in m.name:
                 files[m.name.split("/", 1)[1]] = hashlib.sha256(c.extractfile(m).read()).hexdigest()
     crate_files[key] = files
-depinfo_problems = [] if w and r else ["Mynt couldn't read the build container's dep-info and files back"]
-json.dump({"d_files": (w or {}).get("d_files", {}), "workdir": (w or {}).get("hashes", {}), "registry": (r or {}).get("hashes", {}), "crate_files": crate_files, "problems": depinfo_problems},
+depinfo_problems = [] if w and r and tg else ["Mynt couldn't read the build container's dep-info and files back"]
+json.dump({"d_files": (tg or {}).get("d_files", {}), "workdir": (w or {}).get("hashes", {}), "registry": (r or {}).get("hashes", {}), "crate_files": crate_files, "problems": depinfo_problems},
           open(f"{slug}.depinfo.json", "w"), sort_keys=True)
 PY
-    rm -f "$OUT/$slug.crates.tar" "$srctar" "$OUT/$slug.depinfo.workdir.json" "$OUT/$slug.depinfo.registry.json"
+    rm -f "$OUT/$slug.crates.tar" "$srctar" "$OUT/$slug.depinfo.workdir.json" "$OUT/$slug.depinfo.registry.json" "$OUT/$slug.depinfo.target.json"
     for p in "${"${"}PROGS[@]}"; do
       name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
       [ -f "$OUT/$name.so" ] || continue
