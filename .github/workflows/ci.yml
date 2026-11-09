@@ -288,7 +288,8 @@ jobs:
           docker compose --profile mobile down -v
   # Generates every device SDK for a defined product and compiles the native ones with their own toolchains.
   client-sdks:
-    runs-on: ubuntu-latest
+    # Pinned: swift-actions/setup-swift refuses Ubuntu 26.04, which ubuntu-latest has moved to.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
