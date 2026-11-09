@@ -236,6 +236,31 @@ if [ "$MODE" = build ]; then
       lock_sha=$(sha256sum "$lock" | cut -d' ' -f1)
     fi
     [ "$committed" = 1 ] || NO_LOCK+="$label "
+    # The workspace's source as Mynt fetched it (Rust, manifests and the Cargo.lock the build used), one JSON file
+    # Mynt reads back with the programs: the mainnet program gate audits exactly the source these bytes came from.
+    srcs="$(echo "$label" | tr '/.' '__').sources.json"
+    python3 - "$dir" "$lock" "$OUT/$srcs" <<'PY' >> "$log.build.log" 2>&1 || rm -f "$OUT/$srcs"
+import json, os, sys
+ws, lock, out = sys.argv[1:4]
+files, total = {}, 0
+for d, dirs, names in os.walk(ws):
+    dirs[:] = sorted(x for x in dirs if x not in ("target", "node_modules", "docker-target") and not x.startswith("."))
+    for n in sorted(names):
+        p = os.path.join(d, n)
+        rel = os.path.relpath(p, ws)
+        if os.path.islink(p) or not (n.endswith(".rs") or n in ("Cargo.toml", "Anchor.toml", "Cargo.lock", "Xargo.toml")):
+            continue
+        data = open(p, "rb").read()
+        if len(data) > 512 * 1024:
+            continue
+        total += len(data)
+        if total > 4 * 1024 * 1024:
+            sys.exit("the workspace's source is over 4 MB")
+        files[rel] = data.decode("utf-8", "replace")
+if os.path.isfile(lock) and not os.path.islink(lock):
+    files["Cargo.lock"] = open(lock, encoding="utf-8", errors="replace").read()
+json.dump({"files": files}, open(out, "w"), sort_keys=True)
+PY
     for p in "${"${"}PROGS[@]}"; do
       name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
       # -L: a link in the container is resolved there, to the container's own file, never copied out as a link
@@ -245,13 +270,15 @@ if [ "$MODE" = build ]; then
       if [ -L "$OUT/$name.so" ] || [ ! -f "$OUT/$name.so" ] || [ "$(head -c 4 "$OUT/$name.so" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
         BUILD_FAIL+="$label: $name.so isn't a program (not a regular ELF file) "; rm -f "$OUT/$name.so"; continue
       fi
-      python3 - "$OUT" "$name" "$label" "$declared" "$lock_sha" "$committed" <<'PY'
+      python3 - "$OUT" "$name" "$label" "$declared" "$lock_sha" "$committed" "$srcs" <<'PY'
 import hashlib, json, os, sys
-out, name, ws, declared, lock_sha, committed = sys.argv[1:7]
+out, name, ws, declared, lock_sha, committed, srcs = sys.argv[1:8]
 data = open(os.path.join(out, name + ".so"), "rb").read()
 progs = json.load(open(os.path.join(out, "programs.json")))
+src = os.path.join(out, srcs)
+sources = {"sources": srcs, "sources_size": os.path.getsize(src), "sources_sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()} if os.path.isfile(src) and not os.path.islink(src) else {}
 progs.append({"workspace": ws, "name": name, "size": len(data), "sha256": hashlib.sha256(data.rstrip(b"\0")).hexdigest(), "declared_id": declared or None,
-              "cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1"})
+              "cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1", **sources})
 json.dump(progs, open(os.path.join(out, "programs.json"), "w"), indent=2)
 PY
       BUILT=$((BUILT + 1))

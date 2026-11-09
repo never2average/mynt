@@ -22,6 +22,7 @@ import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
+import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
 import { CLUSTERS, type Cluster } from "./solana/rpc.js";
 import { readFileSync } from "node:fs";
 import { ROLES, Store, type Role } from "./store.js";
@@ -111,10 +112,12 @@ const openServices = async () => {
   // Developers' Solana programs; builds hand it the programs Mynt built while verifying.
   const solana = await SolanaService.open(db, store);
   builds.solana = solana;
+  // The mainnet program gate: every mainnet deploy and upgrade needs its approved review (solana.gate).
+  const gate = await MainnetGateService.open(db, store, solana, boat, gateConfigFromEnv(buildConfig));
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
-  for (const s of [builds, bd, desk, review, explore]) s.meter = meter;
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana };
+  for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate };
 };
 
 const parseRoles = (): Role[] => {
@@ -137,13 +140,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -151,9 +154,10 @@ if (values.help) {
   desk.startWorker();
   explore.startWorker();
   review.startWorker();
+  gate.startWorker();
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Sends queued webhook deliveries (events from any process sharing the database).
@@ -183,6 +187,7 @@ if (values.help) {
     desk.stopWorker();
     explore.stopWorker();
     review.stopWorker();
+    gate.stopWorker();
     http.close(() => process.exit(0));
   });
 } else if (command === "users" && sub === "invite") {

@@ -210,13 +210,26 @@ export interface BuildSolanaHooks {
   programsForApp(appId: string): Promise<{ name: string; cluster: string; program_id: string; status: string }[]>;
   recordArtifacts(
     buildId: string,
-    artifacts: { name: string; declared_id: string | null; sha256: string; size: number; program: Uint8Array; idl: unknown; reported_sha256?: string; cargo_lock_sha256?: string | null }[],
+    artifacts: {
+      name: string;
+      declared_id: string | null;
+      sha256: string;
+      size: number;
+      program: Uint8Array;
+      idl: unknown;
+      reported_sha256?: string;
+      cargo_lock_sha256?: string | null;
+      // The workspace's source Mynt captured with the program (for the mainnet program gate), as read back.
+      sources?: { sha256: string; files: Record<string, string> } | null;
+    }[],
   ): Promise<string[]>;
   artifacts(buildId: string): Promise<{ name: string; sha256: string }[]>;
   recordIdl(buildId: string, name: string, idl: unknown): Promise<void>;
 }
 // The largest program Mynt reads back from its verify sandbox.
 const MAX_PROGRAM_BYTES = 4 * 1024 * 1024;
+// The largest captured workspace source (solana-verify.sh caps the files at 4 MB; JSON adds escaping).
+const MAX_SOURCES_BYTES = 6 * 1024 * 1024;
 // A Solana program is an ELF file.
 const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 
@@ -848,29 +861,42 @@ export class BuildService {
     const record = async (c: Check) => this.update(b.id, { solana_check: { name: "solana_build", status: c.status, detail: (c.detail ?? "").slice(0, 1500) } });
     await record(row ?? { name: "solana_build", status: "fail", detail: "Mynt's Solana build didn't finish" });
     if (!this.solana) return;
-    const listed = parseJson<{ name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null }[]>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
+    const listed = parseJson<
+      { name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null; sources?: string; sources_size?: number; sources_sha256?: string }[]
+    >(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
     if (!listed?.length) return;
     const artifacts = [];
     const refused: string[] = [];
-    for (const p of listed) {
-      if (!/^[a-z0-9_]+$/.test(p.name) || !(p.size > 0 && p.size <= MAX_PROGRAM_BYTES)) continue;
+    // Only ever a regular file, never through a link (which could point anywhere on the machine): checked in the
+    // same command as each read.
+    const readBack = async (path: string, size: number) => {
       const chunks: Buffer[] = [];
-      const path = `${VERIFY_DIR}/solana/${p.name}.so`;
-      // Only ever a regular file, never through a link (which could point anywhere on the machine): checked in
-      // the same command as each read.
-      let readable = true;
-      for (let offset = 0; offset < p.size; offset += 192 * 1024) {
+      for (let offset = 0; offset < size; offset += 192 * 1024) {
         const r = await this.boat!.exec(vid, `[ -f ${path} ] && [ ! -L ${path} ] && tail -c +${offset + 1} ${path} | head -c ${192 * 1024} | base64 -w0`, { timeoutSeconds: 60 });
-        if (r.exitCode !== 0) {
-          readable = false;
-          break;
-        }
+        if (r.exitCode !== 0) return null;
         chunks.push(Buffer.from(r.stdout.trim(), "base64"));
       }
-      const program = Buffer.concat(chunks);
-      if (!readable || program.length !== p.size || !program.subarray(0, 4).equals(ELF_MAGIC)) {
+      const data = Buffer.concat(chunks);
+      return data.length === size ? data : null;
+    };
+    const sourcesRead = new Map<string, { sha256: string; files: Record<string, string> } | null>();
+    for (const p of listed) {
+      if (!/^[a-z0-9_]+$/.test(p.name) || !(p.size > 0 && p.size <= MAX_PROGRAM_BYTES)) continue;
+      const program = await readBack(`${VERIFY_DIR}/solana/${p.name}.so`, p.size);
+      if (!program || !program.subarray(0, 4).equals(ELF_MAGIC)) {
         refused.push(p.name);
         continue;
+      }
+      // The workspace's source, hashed here by Mynt; kept only if it matches what the build run recorded.
+      let sources: { sha256: string; files: Record<string, string> } | null = null;
+      if (p.sources && /^[A-Za-z0-9_]+\.sources\.json$/.test(p.sources) && p.sources_size && p.sources_size <= MAX_SOURCES_BYTES && /^[0-9a-f]{64}$/.test(p.sources_sha256 ?? "")) {
+        if (!sourcesRead.has(p.sources)) {
+          const raw = await readBack(`${VERIFY_DIR}/solana/${p.sources}`, p.sources_size);
+          const sha = raw ? createHash("sha256").update(raw).digest("hex") : null;
+          const files = raw && sha === p.sources_sha256 ? parseJson<{ files?: Record<string, string> }>(raw.toString("utf8"))?.files : null;
+          sourcesRead.set(p.sources, files && typeof files === "object" ? { sha256: sha!, files } : null);
+        }
+        sources = sourcesRead.get(p.sources) ?? null;
       }
       // The IDL comes later, from the test run; it only names events, it's never deployed.
       artifacts.push({
@@ -882,6 +908,7 @@ export class BuildService {
         size: p.size,
         program: new Uint8Array(program),
         idl: null,
+        sources,
       });
     }
     const kept = await this.solana.recordArtifacts(b.id, artifacts);

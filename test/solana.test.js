@@ -372,6 +372,9 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
     { rpc: (cluster) => (rpc ? rpc(cluster, clusters[cluster]) : clusters[cluster]), custody },
   );
   builds.solana = solana;
+  // Mainnet deploys now need the mainnet program gate's approval (test/mainnet-gate.test.js tests the gate itself);
+  // these tests are about the deployer, so their gate approves every build.
+  solana.gate = { assertDeployable: async () => {} };
   const responses = [];
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();

@@ -1,0 +1,12 @@
+{
+  "repo": "PlamenTSV/plamen",
+  "path": "agents/skills/solana/verification-protocol/SKILL.md",
+  "commit": "795962b96e254f2e423a2635fe7f8cb8ea1e6d69",
+  "url": "https://github.com/PlamenTSV/plamen/blob/795962b96e254f2e423a2635fe7f8cb8ea1e6d69/agents/skills/solana/verification-protocol/SKILL.md",
+  "license": "MIT",
+  "found_by": "HyDE",
+  "draft": "solana-exploit-poc",
+  "query": "Solana Anchor security audit skill (account validation, signer checks, PDA, CPI, proof of concept) filename:SKILL.md, MIT, maintained (GitHub code search with the draft's key terms)",
+  "score": null,
+  "modified": "SKILL.md and references/templates.md verbatim from Plamen's Solana skill set; its orchestration (phases, MCP tools, other skills it names) isn't vendored, and workspaces/program-red-team/CLAUDE.md says how Mynt uses it."
+}

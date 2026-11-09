@@ -38,6 +38,7 @@ import { reconcileEntity } from "./parties.js";
 import { ComponentSchema, PartyBindingSchema, productRegime, validateComposition } from "./regime.js";
 import { ENTITY_STATUSES } from "./store.js";
 import type { SolanaService } from "./solana/service.js";
+import type { MainnetGateService } from "./solana/mainnet-gate.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -53,6 +54,7 @@ export interface AdminContext {
   hosting?: HostingService | null; // developers' isolated app hosting, when configured
   modules?: ModuleRegistry | null; // developers' published modules
   solana?: SolanaService | null; // developers' Solana programs: registry, deployer, signer, indexer
+  gate?: MainnetGateService | null; // the mainnet program gate every mainnet deploy and upgrade passes
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
 }
 
