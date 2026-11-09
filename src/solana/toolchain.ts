@@ -262,7 +262,9 @@ with tarfile.open(src) as t:
         except UnicodeDecodeError:
             binary[path] = base64.b64encode(data).decode()
 if refused:
-    sys.exit("refused: the workspace ships build output (target folders, cargo artifacts, fingerprints, dep-info or prebuilt programs) or unprintable file names; remove them: " + ", ".join(sorted(refused)[:8]))
+    # Kept short: the build failure keeps only the log's last 300 characters, and this line must survive whole.
+    shown = ", ".join(sorted(refused)[:3])
+    sys.exit(("refused: the workspace ships build output (remove it): %d path(s), e.g. " % len(refused) + shown)[:250])
 json.dump({"files": files, "binary": binary, "links": links}, open(out, "w"), sort_keys=True)
 PY
     # 1. Fetch, networked, in a throwaway container that gets only the manifests, Cargo.lock and empty stub
