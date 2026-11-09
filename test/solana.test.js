@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import http from "node:http";
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -14,7 +15,7 @@ const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
 const { open } = await import("../dist/vault.js");
 const { SolanaService, programEvents, eventName } = await import("../dist/solana/service.js");
-const { GENESIS_HASH, HttpSolanaRpc } = await import("../dist/solana/rpc.js");
+const { GENESIS_HASH, HttpSolanaRpc, RateLimiter, rpcPaceFromEnv, rpcMaxRetryMsFromEnv, retryAfterMs } = await import("../dist/solana/rpc.js");
 const codec = await import("../dist/solana/codec.js");
 const { UPGRADEABLE_LOADER, SYSTEM_PROGRAM, SYSVAR_RECENT_BLOCKHASHES, WRITE_CHUNK } = await import("../dist/solana/tx.js");
 const { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } = await import("../dist/solana/toolchain.js");
@@ -322,7 +323,8 @@ class FakeCluster {
 
 // ---- the world: a store, users, a verified build, Mynt's Solana service on fake clusters ----
 
-async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000, custody = null } = {}) {
+// `rpc(cluster, fake)` puts something in front of a fake cluster (an HTTP RPC); `maxRps` paces deploys' writes.
+async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTimeoutMs = 2000, custody = null, rpc = null, maxRps = undefined } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
@@ -331,8 +333,8 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
   const solana = await SolanaService.open(
     db,
     store,
-    { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs, pollMs: 0 },
-    { rpc: (cluster) => clusters[cluster], custody },
+    { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: mainnetUrl }, mainnetVaultAllowed, confirmTimeoutMs, pollMs: 0, maxRps },
+    { rpc: (cluster) => (rpc ? rpc(cluster, clusters[cluster]) : clusters[cluster]), custody },
   );
   builds.solana = solana;
   const responses = [];
@@ -854,6 +856,262 @@ test("outbound refusals reaching program errors never name the RPC's host or its
     assert.ok(!/10\.0\.0\.7|sekret/.test(e.message), e.message);
     return true;
   });
+});
+
+// ---- an HTTP JSON-RPC endpoint in front of a fake cluster, which can answer like a rate-limited provider. ----
+// `fault(method, params)` returns null to serve the call, { status, retryAfter } for an HTTP error (plain text,
+// as providers send), or { error } for a JSON-RPC error.
+async function rpcServer(target, fault = () => null) {
+  const srv = { target, fault, calls: [], faults: 0 };
+  const server = http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const c of req) raw += c;
+    const { id, method, params } = JSON.parse(raw);
+    srv.calls.push(method);
+    const json = (body) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, ...body }));
+    };
+    const f = srv.fault(method, params);
+    if (f) srv.faults++;
+    if (f?.status) {
+      res.writeHead(f.status, { "Content-Type": "text/plain", ...(f.retryAfter !== undefined ? { "Retry-After": String(f.retryAfter) } : {}) });
+      return res.end("Too Many Requests");
+    }
+    if (f?.error) return json({ error: f.error });
+    try {
+      json({ result: await srv.target.call(method, params) });
+    } catch (e) {
+      json({ error: { code: -32002, message: e.message } });
+    }
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  srv.url = `http://127.0.0.1:${server.address().port}/?api-key=sekret-key`;
+  srv.close = () => {
+    server.closeAllConnections();
+    return new Promise((r) => server.close(r));
+  };
+  return srv;
+}
+
+// A clock whose sleeps return at once and only move its time on.
+const fakeClock = (start = Date.now()) => {
+  const c = { t: start, waits: [], now: () => c.t, sleep: async (ms) => void (c.waits.push(ms), (c.t += ms)) };
+  return c;
+};
+
+const leaksUrl = (message) => /127\.0\.0\.1|sekret|api-key|http:\/\//.test(message);
+
+test("RPC: rate limits and overloaded nodes are retried with backoff and jitter, honouring Retry-After; other errors aren't", async () => {
+  const faults = [];
+  const srv = await rpcServer({ call: async (m) => (m === "sendTransaction" ? "sig" : 42) }, () => faults.shift() ?? null);
+  const clock = fakeClock();
+  const rpc = new HttpSolanaRpc(srv.url, { allowInsecureLoopback: true }, { now: clock.now, sleep: clock.sleep, random: () => 0.5, baseDelayMs: 400 });
+  try {
+    // 429 with Retry-After in seconds, 429 without (exponential backoff, equal jitter), 503, then the answer.
+    faults.push({ status: 429, retryAfter: 3 }, { status: 429 }, { status: 503 });
+    assert.equal(await rpc.call("getSlot"), 42);
+    assert.deepEqual(clock.waits, [3000 + 200, 400 + 200, 800 + 400]);
+    // Retry-After as an HTTP date; and one longer than the cap waits the cap.
+    clock.waits.length = 0;
+    faults.push({ status: 429, retryAfter: new Date(clock.t + 10_000).toUTCString() }, { status: 429, retryAfter: 600 });
+    assert.equal(await rpc.call("getSlot"), 42);
+    assert.ok(clock.waits[0] >= 9000 && clock.waits[0] <= 10_200, `waited ${clock.waits[0]}`);
+    assert.equal(clock.waits[1], 60_000 + 200);
+    // JSON-RPC errors that mean "slow down" are retried too.
+    clock.waits.length = 0;
+    faults.push({ error: { code: -32005, message: "Node is behind by 42 slots" } }, { error: { code: -32000, message: "Too many requests for a specific RPC call" } });
+    assert.equal(await rpc.call("getSlot"), 42);
+    assert.equal(clock.waits.length, 2);
+    // Other errors aren't: a refused transaction fails at once.
+    clock.waits.length = 0;
+    faults.push({ error: { code: -32002, message: "Transaction simulation failed: Blockhash not found" } });
+    await assert.rejects(rpc.call("sendTransaction", ["AA=="]), /Blockhash not found/);
+    assert.equal(clock.waits.length, 0);
+    // A 502 or 504 may come back after the node took the request: a signed transaction is the same transaction
+    // however often it's sent, so it goes again; an airdrop doesn't.
+    faults.push({ status: 502 }, { status: 504 });
+    assert.equal(await rpc.call("sendTransaction", ["AA=="]), "sig");
+    const before = srv.calls.length;
+    faults.push({ status: 502 });
+    await assert.rejects(rpc.call("requestAirdrop", ["x", 1]), /requestAirdrop failed \(http 502\)/);
+    assert.equal(srv.calls.length, before + 1, "an airdrop isn't sent twice");
+
+    // A rate limit that outlasts SOLANA_RPC_MAX_RETRY_SECONDS fails with a clear message that never names the URL.
+    srv.fault = () => ({ status: 429 });
+    const capped = fakeClock();
+    const limited = new HttpSolanaRpc(srv.url, { allowInsecureLoopback: true }, { now: capped.now, sleep: capped.sleep, maxRetryMs: 30_000 });
+    await assert.rejects(limited.call("sendTransaction", ["AA=="]), (e) => {
+      assert.match(e.message, /sendTransaction failed \(http 429\).*still rate-limited after \d+ attempts over 30 s/);
+      assert.match(e.message, /SOLANA_RPC_URL_DEVNET/);
+      assert.ok(!leaksUrl(e.message), e.message);
+      return true;
+    });
+    assert.ok(capped.waits.length > 3 && capped.waits.reduce((a, b) => a + b, 0) <= 30_000, "it backed off, within the cap");
+    srv.fault = () => ({ error: { code: -32005, message: "rate limit exceeded" } });
+    await assert.rejects(limited.call("getSlot"), (e) => /still rate-limited/.test(e.message) && !leaksUrl(e.message));
+  } finally {
+    await srv.close();
+  }
+  assert.equal(retryAfterMs("soon"), null);
+  assert.equal(retryAfterMs("2"), 2000);
+});
+
+test("RPC pace: the limiter spaces requests evenly; the defaults suit the public devnet endpoint, more with a provider", async () => {
+  const clock = fakeClock(0);
+  const limiter = new RateLimiter(4, clock);
+  const at = [];
+  for (let i = 0; i < 9; i++) {
+    await limiter.take();
+    at.push(clock.t);
+  }
+  assert.deepEqual(at, [0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000], "4 a second, evenly");
+  clock.t += 10_000; // idle time isn't saved up into a burst
+  await limiter.take();
+  await limiter.take();
+  assert.equal(clock.t, 10_000 + 2000 + 250);
+  // Real timers: 50 a second for 6 requests takes about 100 ms.
+  const real = new RateLimiter(50);
+  const t0 = Date.now();
+  for (let i = 0; i < 6; i++) await real.take();
+  assert.ok(Date.now() - t0 >= 90, `took ${Date.now() - t0} ms`);
+  const unlimited = new RateLimiter(0, clock);
+  await unlimited.take();
+  await unlimited.take();
+
+  assert.deepEqual(rpcPaceFromEnv({}), { devnet: 4, mainnet: 25 });
+  assert.deepEqual(rpcPaceFromEnv({ SOLANA_RPC_URL_DEVNET: "https://api.devnet.solana.com" }), { devnet: 4, mainnet: 25 });
+  assert.deepEqual(rpcPaceFromEnv({ SOLANA_RPC_URL_DEVNET: "https://devnet.provider.example/?key=k" }), { devnet: 25, mainnet: 25 });
+  assert.deepEqual(rpcPaceFromEnv({ SOLANA_RPC_MAX_RPS: "10" }), { devnet: 10, mainnet: 10 });
+  assert.deepEqual(rpcPaceFromEnv({ SOLANA_RPC_MAX_RPS: "nonsense" }), { devnet: 4, mainnet: 25 });
+  assert.equal(rpcMaxRetryMsFromEnv({}), 120_000);
+  assert.equal(rpcMaxRetryMsFromEnv({ SOLANA_RPC_MAX_RETRY_SECONDS: "300" }), 300_000);
+});
+
+const isWrite = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 1);
+const buffersOn = (chain) => [...chain.accounts.entries()].filter(([, a]) => a.owner === UPGRADEABLE_LOADER && a.data.length >= 37 && a.data.readUInt32LE(0) === 1);
+
+test("a deploy through a rate-limited RPC (429s with and without Retry-After, JSON-RPC limits) completes, paced", async () => {
+  let sends = 0;
+  let statuses = 0;
+  const srv = await rpcServer(null, (method) => {
+    if (method === "sendTransaction" && ++sends % 3 === 0) return { status: 429, ...(sends % 2 ? { retryAfter: 1 } : {}) };
+    if (method === "getSignatureStatuses" && ++statuses % 5 === 0) return { error: statuses % 2 ? { code: -32005, message: "Node is unhealthy" } : { code: -32000, message: "Too many requests" } };
+    return null;
+  });
+  const w = await world({
+    rpc: (cluster, fake) => (cluster === "devnet" ? new HttpSolanaRpc(srv.url, { allowInsecureLoopback: true }, { baseDelayMs: 2, maxRetryAfterMs: 10, maxRetryMs: 10_000 }) : fake),
+    maxRps: { devnet: 100, mainnet: 100 },
+  });
+  srv.target = w.clusters.devnet;
+  try {
+    const { program_id, build_id, code } = await readyToDeploy(w, w.program(20_000));
+    const t0 = Date.now();
+    await w.ok(w.dev, "deploy_program", { program_id, build_id });
+    await w.solana.settled(program_id);
+    const p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "deployed", p.error);
+    assert.equal(p.verifiable_hash, executableHash(code));
+    const chain = w.clusters.devnet;
+    assert.ok(chain.accounts.get(p.programdata_address).data.subarray(45, 45 + code.length).equals(Buffer.from(code)));
+    const writes = Math.ceil(code.length / WRITE_CHUNK);
+    assert.equal(chain.sent.filter(isWrite).length, writes, "a 429 means the node didn't take it: each write landed once");
+    assert.ok(srv.faults >= 8, `${srv.faults} faults injected`);
+    assert.ok(Date.now() - t0 >= ((writes - 1) * 1000) / 100, "the writes were paced");
+    assert.equal(buffersOn(chain).length, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("a deploy that gives up on a persistent 429 says so without the URL, and a retry closes its buffer and deploys", async () => {
+  let blocked = false;
+  let lifted = false;
+  const srv = await rpcServer(null, (method) => {
+    // Partway through the buffer's writes, every transaction is refused with 429 (closing the buffer too).
+    if (!lifted && srv.target.sent.filter(isWrite).length >= 5) blocked = true;
+    return blocked && !lifted && method === "sendTransaction" ? { status: 429 } : null;
+  });
+  const w = await world({
+    rpc: (cluster, fake) => (cluster === "devnet" ? new HttpSolanaRpc(srv.url, { allowInsecureLoopback: true }, { baseDelayMs: 2, maxRetryMs: 100 }) : fake),
+    maxRps: { devnet: 1000, mainnet: 1000 },
+  });
+  srv.target = w.clusters.devnet;
+  const chain = w.clusters.devnet;
+  try {
+    const { program_id, build_id, code } = await readyToDeploy(w, w.program(20_000));
+    await w.ok(w.dev, "deploy_program", { program_id, build_id });
+    await w.solana.settled(program_id);
+    let p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "failed");
+    assert.match(p.error, /sendTransaction failed \(http 429\).*still rate-limited/);
+    assert.ok(!leaksUrl(p.error), p.error);
+    const [[leftover]] = buffersOn(chain);
+    assert.ok(leftover, "the buffer couldn't be closed while the RPC refused everything");
+    assert.equal(chain.accounts.get(program_id), undefined, "the program account isn't created before the buffer is written");
+
+    // The RPC answers again: the retry closes the old buffer first, then deploys with a new one.
+    lifted = true;
+    await w.ok(w.dev, "deploy_program", { program_id, build_id });
+    await w.solana.settled(program_id);
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.status, "deployed", p.error);
+    assert.equal(p.verifiable_hash, executableHash(code));
+    assert.equal(chain.accounts.get(leftover), undefined, "the leftover buffer was closed");
+    assert.ok(chain.sent.some((t) => t.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 5 && i.accounts[0] === leftover)));
+    assert.equal(buffersOn(chain).length, 0);
+    assert.equal((await w.db.query("SELECT 1 FROM financial_products.solana_keys WHERE role = 'vault-buffer'")).rows.length, 0);
+
+    // An upgrade that fails the same way is retryable too.
+    const b2 = await w.build();
+    const code2 = w.program(20_000, 5);
+    await w.solana.recordArtifacts(b2, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code2), size: code2.length, program: code2, idl: null }]);
+    const writesBefore = chain.sent.filter(isWrite).length;
+    lifted = false;
+    blocked = false;
+    srv.fault = (method) => (method === "sendTransaction" && chain.sent.filter(isWrite).length >= writesBefore + 3 && !lifted ? { status: 429 } : null);
+    await w.ok(w.dev, "upgrade_program", { program_id, build_id: b2 });
+    await w.solana.settled(program_id);
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.match(p.error, /http 429/);
+    assert.equal(p.verifiable_hash, executableHash(code), "still the first version");
+    assert.equal(buffersOn(chain).length, 1);
+    lifted = true;
+    await w.ok(w.dev, "upgrade_program", { program_id, build_id: b2 });
+    await w.solana.settled(program_id);
+    p = await w.ok(w.dev, "get_program", { program_id });
+    assert.equal(p.verifiable_hash, executableHash(code2), p.error);
+    assert.equal(buffersOn(chain).length, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("a batch of writes whose blockhash expired, or that wasn't confirmed, is signed again on a fresh blockhash", async () => {
+  const w = await world({ confirmTimeoutMs: 50 });
+  const chain = w.clusters.devnet;
+  const writes = () => chain.sent.filter(isWrite).length;
+  // After three writes every blockhash handed out so far expires (a long wait on a rate limit), and one later
+  // write lands but its confirmation is never seen.
+  let expired = false;
+  let seen = 0;
+  const call = chain.call.bind(chain);
+  chain.call = async (method, params) => {
+    if (method === "sendTransaction" && !expired && writes() === 3) {
+      expired = true;
+      chain.expireBlockhashes();
+    }
+    return call(method, params);
+  };
+  chain.withhold = (tx) => isWrite(tx) && seen++ === 8;
+  const { program_id, build_id, code } = await readyToDeploy(w, w.program(20_000));
+  await w.ok(w.dev, "deploy_program", { program_id, build_id });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  assert.ok(chain.accounts.get(p.programdata_address).data.subarray(45, 45 + code.length).equals(Buffer.from(code)));
+  assert.ok(expired);
+  assert.equal(writes(), Math.ceil(code.length / WRITE_CHUNK) + 1, "only the unconfirmed write went twice");
 });
 
 test("import-key never echoes a malformed file; keypairs can't be logged or serialised", async () => {
