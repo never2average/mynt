@@ -15,6 +15,7 @@ import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
 import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } from "./solana/toolchain.js";
+import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import type { Store, User } from "./store.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
@@ -219,8 +220,11 @@ export interface BuildSolanaHooks {
       idl: unknown;
       reported_sha256?: string;
       cargo_lock_sha256?: string | null;
-      // The workspace's source Mynt captured with the program (for the mainnet program gate), as read back.
-      sources?: { sha256: string; files: Record<string, string> } | null;
+      // The workspace exactly as it went into the build container (for the mainnet program gate), as read back.
+      sources?: { sha256: string; files: Record<string, string>; binary?: Record<string, string>; links?: Record<string, string> } | null;
+      // Every crate of the Cargo.lock the build used, and the source of those not on Mynt's crate allowlist.
+      deps?: { sha256: string; data: unknown } | null;
+      idl_source?: "build" | null;
     }[],
   ): Promise<string[]>;
   artifacts(buildId: string): Promise<{ name: string; sha256: string }[]>;
@@ -228,8 +232,9 @@ export interface BuildSolanaHooks {
 }
 // The largest program Mynt reads back from its verify sandbox.
 const MAX_PROGRAM_BYTES = 4 * 1024 * 1024;
-// The largest captured workspace source (solana-verify.sh caps the files at 4 MB; JSON adds escaping).
-const MAX_SOURCES_BYTES = 6 * 1024 * 1024;
+// The largest captured workspace source or dependency capture (solana-verify.sh caps each at 16 MB of files; JSON
+// adds escaping and base64).
+const MAX_SOURCES_BYTES = 24 * 1024 * 1024;
 // A Solana program is an ELF file.
 const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 
@@ -837,6 +842,7 @@ export class BuildService {
     await this.boat!.writeFile(vid, `${VERIFY_DIR}/verify.sh`, VERIFY_SCRIPT);
     await this.boat!.writeFile(vid, `${VERIFY_DIR}/solana-toolchain.sh`, SOLANA_TOOLCHAIN_SCRIPT);
     await this.boat!.writeFile(vid, `${VERIFY_DIR}/solana-verify.sh`, SOLANA_VERIFY_SCRIPT);
+    await this.boat!.writeFile(vid, `${VERIFY_DIR}/solana-crate-allowlist.json`, JSON.stringify(loadCrateAllowlist()));
     await this.boat!.writeFile(vid, `${VERIFY_DIR}/disclosures.json`, JSON.stringify(await this.requiredDisclosures(b)));
   }
 
@@ -861,9 +867,10 @@ export class BuildService {
     const record = async (c: Check) => this.update(b.id, { solana_check: { name: "solana_build", status: c.status, detail: (c.detail ?? "").slice(0, 1500) } });
     await record(row ?? { name: "solana_build", status: "fail", detail: "Mynt's Solana build didn't finish" });
     if (!this.solana) return;
-    const listed = parseJson<
-      { name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null; sources?: string; sources_size?: number; sources_sha256?: string }[]
-    >(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`));
+    type Kept = { [k in "sources" | "deps" | "idl"]?: string } & { [k in "sources_size" | "deps_size" | "idl_size"]?: number } & { [k in "sources_sha256" | "deps_sha256" | "idl_sha256"]?: string };
+    const listed = parseJson<({ name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null } & Kept)[]>(
+      await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`),
+    );
     if (!listed?.length) return;
     const artifacts = [];
     const refused: string[] = [];
@@ -879,7 +886,21 @@ export class BuildService {
       const data = Buffer.concat(chunks);
       return data.length === size ? data : null;
     };
-    const sourcesRead = new Map<string, { sha256: string; files: Record<string, string> } | null>();
+    // A JSON file the build run kept beside a program (its workspace's source, its dependencies, its IDL), hashed
+    // here by Mynt and kept only if it matches what the build recorded. Shared files are read once.
+    const cache = new Map<string, { sha256: string; json: unknown } | null>();
+    const keptJson = async (p: Kept, key: "sources" | "deps" | "idl", max: number) => {
+      const file = p[key];
+      const size = p[`${key}_size`];
+      const sha = p[`${key}_sha256`];
+      if (!file || !/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.json$/.test(file) || !size || size > max || !/^[0-9a-f]{64}$/.test(sha ?? "")) return null;
+      if (!cache.has(file)) {
+        const raw = await readBack(`${VERIFY_DIR}/solana/${file}`, size);
+        const got = raw ? createHash("sha256").update(raw).digest("hex") : null;
+        cache.set(file, raw && got === sha ? { sha256: got!, json: parseJson<unknown>(raw.toString("utf8")) } : null);
+      }
+      return cache.get(file) ?? null;
+    };
     for (const p of listed) {
       if (!/^[a-z0-9_]+$/.test(p.name) || !(p.size > 0 && p.size <= MAX_PROGRAM_BYTES)) continue;
       const program = await readBack(`${VERIFY_DIR}/solana/${p.name}.so`, p.size);
@@ -887,18 +908,12 @@ export class BuildService {
         refused.push(p.name);
         continue;
       }
-      // The workspace's source, hashed here by Mynt; kept only if it matches what the build run recorded.
-      let sources: { sha256: string; files: Record<string, string> } | null = null;
-      if (p.sources && /^[A-Za-z0-9_]+\.sources\.json$/.test(p.sources) && p.sources_size && p.sources_size <= MAX_SOURCES_BYTES && /^[0-9a-f]{64}$/.test(p.sources_sha256 ?? "")) {
-        if (!sourcesRead.has(p.sources)) {
-          const raw = await readBack(`${VERIFY_DIR}/solana/${p.sources}`, p.sources_size);
-          const sha = raw ? createHash("sha256").update(raw).digest("hex") : null;
-          const files = raw && sha === p.sources_sha256 ? parseJson<{ files?: Record<string, string> }>(raw.toString("utf8"))?.files : null;
-          sourcesRead.set(p.sources, files && typeof files === "object" ? { sha256: sha!, files } : null);
-        }
-        sources = sourcesRead.get(p.sources) ?? null;
-      }
-      // The IDL comes later, from the test run; it only names events, it's never deployed.
+      const src = await keptJson(p, "sources", MAX_SOURCES_BYTES);
+      const bundle = src?.json as { files?: Record<string, string>; binary?: Record<string, string>; links?: Record<string, string> } | null;
+      const deps = await keptJson(p, "deps", MAX_SOURCES_BYTES);
+      // The IDL Mynt built in its own offline container, after the program was out. (The test run's IDL, built on the
+      // host by the workspace's own code, is recorded later only to name events.)
+      const idl = await keptJson(p, "idl", 2 * 1024 * 1024);
       artifacts.push({
         name: p.name,
         declared_id: p.declared_id ?? null,
@@ -907,8 +922,10 @@ export class BuildService {
         cargo_lock_sha256: p.cargo_lock_sha256 ?? null,
         size: p.size,
         program: new Uint8Array(program),
-        idl: null,
-        sources,
+        idl: idl?.json ?? null,
+        idl_source: idl?.json ? ("build" as const) : null,
+        sources: bundle && typeof bundle.files === "object" ? { sha256: src!.sha256, files: bundle.files, binary: bundle.binary ?? {}, links: bundle.links ?? {} } : null,
+        deps: deps?.json && typeof deps.json === "object" ? { sha256: deps.sha256, data: deps.json } : null,
       });
     }
     const kept = await this.solana.recordArtifacts(b.id, artifacts);

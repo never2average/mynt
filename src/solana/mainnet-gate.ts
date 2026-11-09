@@ -12,9 +12,11 @@ import { defaultGraceMs, failureMessage, GraceTracker } from "../transient.js";
 import { serialLoop } from "../worker.js";
 import { GATE_ANALYSIS_SCRIPT, GATE_CONFIRM_SCRIPT, GATE_TOOLS } from "./gate-scripts.js";
 import { checkProgramRules, upgradeAuthorityRule, type RuleFinding } from "./program-rules.js";
-import type { MainnetGateCheck, ProgramRecord, SolanaService } from "./service.js";
+import type { MainnetGateCheck, MainnetGateClaim, ProgramRecord, SolanaService } from "./service.js";
 import { SOLANA_TOOLCHAIN_SCRIPT } from "./toolchain.js";
-import { agentChecklist, entryProblems, loadVulnDb, VULN_CATEGORIES, type VulnDb } from "./vuln-db.js";
+import { agentChecklist, entryProblems, loadCrateAllowlist, loadVulnDb, VULN_CATEGORIES, type CrateAllowlist, type VulnDb } from "./vuln-db.js";
+import { dependencyVerdict, resolveCrateTree, stripIdlDocs, verifyIdl, workspaceExceptions, type Exception } from "./crate-tree.js";
+import { runDetections } from "./program-rules.js";
 
 // The mainnet program gate. Every mainnet deploy and every mainnet upgrade must pass, in order:
 //   1. Mynt's hard rules (program-rules.ts): no value-moving program, no hidden admin, the upgrade authority stays
@@ -41,6 +43,7 @@ export interface GateConfig extends AgentHostConfig {
   analysisMinutes: number;
   monthlyCapUsd: number;
   timelockHours: number;
+  approvalTtlDays: number;
   cargoAuditIgnore: string[];
 }
 
@@ -60,6 +63,7 @@ export function gateConfigFromEnv(host: AgentHostConfig, env = process.env): Gat
     analysisMinutes: num("PROGRAM_ANALYSIS_MINUTES", 45),
     monthlyCapUsd: num("PROGRAM_GATE_MONTHLY_CAP_USD", 100),
     timelockHours: num("MAINNET_UPGRADE_TIMELOCK_HOURS", 48),
+    approvalTtlDays: num("MAINNET_APPROVAL_TTL_DAYS", 14),
     cargoAuditIgnore: (env.PROGRAM_GATE_CARGO_AUDIT_IGNORE ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -117,6 +121,19 @@ const TABLES = `
     updated_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS solana_mainnet_reviews_program_idx ON ${T}.solana_mainnet_reviews (program, created_at DESC);
+  -- What can change the build beyond the reviewed source (an admin must allow each by id), the dependencies as the
+  -- build used them, the IDL's check against the bytes, and what an admin allowed.
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS exceptions jsonb;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS allowed_exceptions jsonb;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS dependencies jsonb;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS idl_check jsonb;
+  -- The program's hash when a deploy or upgrade claimed the approval, and the month's budget it reserved.
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS claimed_hash text;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS last_attempt_at timestamptz;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS budget_key text;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS budget_settled boolean NOT NULL DEFAULT false;
+  -- One open review per program, whatever races.
+  CREATE UNIQUE INDEX IF NOT EXISTS solana_mainnet_reviews_open_idx ON ${T}.solana_mainnet_reviews (program) WHERE status IN ('running', 'awaiting_approval', 'approved', 'started');
   -- Every step of every review, append-only.
   CREATE TABLE IF NOT EXISTS ${T}.solana_mainnet_review_log (
     id uuid PRIMARY KEY,
@@ -155,10 +172,11 @@ const TABLES = `
   );
 `;
 
-export const REVIEW_STATUSES = ["running", "awaiting_approval", "approved", "executed", "blocked", "rejected", "cancelled", "failed"] as const;
+// started: a deploy or upgrade claimed (consumed) the approval; executed: the program holds exactly the reviewed bytes.
+export const REVIEW_STATUSES = ["running", "awaiting_approval", "approved", "started", "executed", "blocked", "rejected", "cancelled", "failed"] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 // Reviews that still hold the program: a new one waits until these end.
-const OPEN: ReviewStatus[] = ["running", "awaiting_approval", "approved"];
+const OPEN: ReviewStatus[] = ["running", "awaiting_approval", "approved", "started"];
 const SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
 type Severity = (typeof SEVERITIES)[number];
 const BLOCKING: Severity[] = ["critical", "high"];
@@ -183,7 +201,14 @@ const parse = <X>(text: string | null | undefined): X | null => {
     return null;
   }
 };
-const JSON_COLS = new Set(["rules", "static_analysis", "audit", "red_team", "confirmations"]);
+const JSON_COLS = new Set(["rules", "static_analysis", "audit", "red_team", "confirmations", "exceptions", "allowed_exceptions", "dependencies", "idl_check"]);
+
+// Said with every review, and with every approval: what the gate can't promise.
+export const REVIEW_CAVEATS = [
+  "A clean audit or red-team result isn't proof the program is safe: they found nothing in the time and budget they had. Mynt's hard rules block known shapes; they don't prove their absence.",
+  "Mynt's local validator can't show behaviour that depends on: time or slot (Clock, deadlines, vesting), live state of other programs and accounts on mainnet (oracle prices, pools, other programs' upgrades), the cluster itself (feature gates, compute limits, fees, rent), transaction ordering under load (front-running, sandwiching, MEV), or what an upgrade later changes.",
+  "The IDL only describes the instructions it lists: Mynt checks each against the program's bytes, but an instruction the IDL leaves out can't be found that way.",
+];
 
 export class GateError extends Error {}
 
@@ -360,6 +385,17 @@ export class MainnetGateService implements MainnetGateCheck {
         red_team: r.red_team ? (({ pocs: _, ...rest }) => rest)(r.red_team as Row) : null,
         poc_confirmations: r.confirmations ?? null,
       },
+      // Build-influencing configuration and dependencies off the allowlist: an admin must allow each by id.
+      exceptions: (r.exceptions as Exception[] | null) ?? [],
+      allowed_exceptions: (r.allowed_exceptions as string[] | null) ?? [],
+      dependencies: r.dependencies ?? null,
+      idl_check: r.idl_check ?? null,
+      caveats: [
+        ...REVIEW_CAVEATS,
+        ...(((r.exceptions as Exception[] | null) ?? []).length
+          ? [`Exceptions in this program, each needing an admin's explicit allowance: ${((r.exceptions as Exception[]) ?? []).map((e) => e.id).join(", ")}${(r.allowed_exceptions as string[] | null)?.length ? ` (allowed: ${(r.allowed_exceptions as string[]).join(", ")})` : ""}`]
+          : []),
+      ],
       cost_usd: Number(r.cost_usd ?? 0),
       caps_usd: { audit: Number(r.audit_cap_usd), red_team: Number(r.red_cap_usd) },
       timelock: r.action === "upgrade" ? { hours: this.config.timelockHours, executes_at: iso(r.executes_at), announced_at: iso(r.announced_at) } : null,
@@ -394,64 +430,132 @@ export class MainnetGateService implements MainnetGateCheck {
     const action: "deploy" | "upgrade" = p.status === "deployed" ? "upgrade" : "deploy";
     const open = await this.one(`SELECT id, status FROM ${T}.solana_mainnet_reviews WHERE program = $1 AND status = ANY($2) LIMIT 1`, [p.id, OPEN]);
     if (open) throw new GateError(`This program already has a review in progress (${open.id}, ${open.status}); cancel it first (cancel_mainnet_review)`);
-    const committed = Number(
-      (
-        await this.one(
-          `SELECT COALESCE(SUM(CASE WHEN status = 'running' THEN audit_cap_usd + red_cap_usd ELSE cost_usd END), 0) AS s FROM ${T}.solana_mainnet_reviews WHERE created_at >= date_trunc('month', now())`,
-        )
-      )?.s ?? 0,
-    );
-    if (committed + this.config.auditCapUsd + this.config.redTeamCapUsd > this.config.monthlyCapUsd)
-      throw new GateError(`This month's mainnet review budget of US$${this.config.monthlyCapUsd} is used up (PROGRAM_GATE_MONTHLY_CAP_USD)`);
     const m = await this.solana.reviewMaterial(user, p, buildId);
     if (action === "upgrade" && m.sha256 === p.verifiable_hash) throw new GateError("This build's program is the one already deployed");
-
-    // 1. The hard rules, here and now: cheap, and a program that breaks one never costs an agent.
-    const signer = await this.solana.mainnetSigner();
     if (action === "upgrade") {
       const flag = await this.openFlag(p.id);
       if (flag) throw new GateError(`Upgrades of this program are paused: vulnerability database v${flag.db_version} flagged it (${flag.id}); an admin must review it first (resolve_program_flag)`);
     }
-    const result = checkProgramRules({ name: m.name, program_id: p.program_id, program: m.program, idl: m.idl, sources: m.sources, mynt_signer: signer?.address ?? null }, this.vulnDb);
+
+    // 1. Everything Mynt checks itself, here and now: cheap, and a program that fails never costs an agent.
+    const signer = await this.solana.mainnetSigner();
+    const refusals: string[] = [];
+    // What the compiler compiles, and what in the workspace can change the build: exceptions an admin must allow.
+    const tree = resolveCrateTree(m.sources ?? {});
+    const exceptions: Exception[] = m.sources ? workspaceExceptions({ files: m.sources, binary: m.binary, links: m.links }, tree) : [];
+    // The dependencies: crates.io only, checksums matching, the allowlist or an admin's allowance; the hard rules run
+    // over the source of every crate off the allowlist.
+    const allow = this.allowlist;
+    const deps = dependencyVerdict(m.deps, new Set(allow.crates), tree.packages);
+    refusals.push(...deps.refusals);
+    for (const c of deps.crates) if (allow.never?.[c.name]) refusals.push(`${c.name} ${c.version}: ${allow.never[c.name]}`);
+    exceptions.push(...deps.exceptions);
+    const depFindings: RuleFinding[] = [];
+    for (const e of deps.exceptions) {
+      const files = m.deps?.sources[e.id.slice("crate:".length)] ?? {};
+      for (const f of runDetections({ name: e.id, program_id: p.program_id, program: null, idl: null, sources: files, mynt_signer: signer?.address ?? null }, this.vulnDb))
+        if (f.blocks) depFindings.push({ ...f, detail: `in dependency ${e.id.slice("crate:".length)}: ${f.detail}` });
+    }
+    // The IDL: Mynt's own (built offline) or the test run's, used only if every instruction it lists is in the bytes.
+    const idlCheck = m.idl ? { source: m.idl_source ?? "test-run", ...verifyIdl(m.idl, m.program) } : { source: null, verified: false, checked: 0, problems: ["no IDL was built for this program"] };
+    if (m.idl && !idlCheck.verified) refusals.push(`The IDL doesn't match the program: ${idlCheck.problems.slice(0, 3).join("; ")}`);
+    const idl = m.idl && idlCheck.verified ? m.idl : null;
+    const result = checkProgramRules({ name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null }, this.vulnDb);
     const authority = upgradeAuthorityRule({ action, signer, recorded_authority: p.upgrade_authority });
-    const findings: RuleFinding[] = [...result.findings, authority];
-    const passed = result.passed && !authority.blocks;
+    const findings: RuleFinding[] = [...result.findings, ...depFindings, authority];
+    const passed = result.passed && !authority.blocks && !depFindings.length && !refusals.length;
     const rules = { passed, db_version: result.db_version, flags: result.flags, findings, signals: result.signals, limits: result.limits, upgrade_authority: authority.status, signer: signer ?? null };
+    const dependencies = { crates: deps.crates, allowlist_version: allow.version, off_allowlist: deps.exceptions.map((e) => e.id), refusals: deps.refusals };
     const id = randomUUID();
     const blockedBy = findings.filter((f) => f.blocks);
-    await this.db.query(
-      `INSERT INTO ${T}.solana_mainnet_reviews (id, program, program_id, entity_id, build_id, sha256, action, status, step, phase_message, requested_by, rules, blocked_reason, audit_cap_usd, red_cap_usd, step_started_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())`,
-      [
-        id,
-        p.id,
-        p.program_id,
-        p.entity_id,
-        buildId,
-        m.sha256,
-        action,
-        passed ? "running" : "blocked",
-        passed ? "analysis_provisioning" : null,
-        passed ? "Hard rules passed; starting static analysis" : "Refused by Mynt's hard rules",
-        user.id,
-        JSON.stringify(rules),
-        passed ? null : `Hard rules: ${blockedBy.map((f) => `${f.rule} (${f.signal}${f.file ? `, ${f.file}:${f.line}` : ""}): ${f.detail}`).join("; ").slice(0, 3000)}`,
-        this.config.auditCapUsd,
-        this.config.redTeamCapUsd,
-      ],
-    );
+    // The month's budget, reserved atomically (a counter row updated only while it stays under the cap).
+    const budgetKey = passed ? await this.reserve(this.config.auditCapUsd + this.config.redTeamCapUsd) : null;
+    if (passed && !budgetKey) throw new GateError(`This month's mainnet review budget of US$${this.config.monthlyCapUsd} is used up (PROGRAM_GATE_MONTHLY_CAP_USD)`);
+    const reasons = [
+      ...refusals,
+      ...blockedBy.map((f) => `${f.rule} (${f.signal}${f.file ? `, ${f.file}:${f.line}` : ""}): ${f.detail}`),
+    ];
+    try {
+      await this.db.query(
+        `INSERT INTO ${T}.solana_mainnet_reviews (id, program, program_id, entity_id, build_id, sha256, action, status, step, phase_message, requested_by, rules, blocked_reason, audit_cap_usd, red_cap_usd, step_started_at,
+           exceptions, dependencies, idl_check, budget_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), $16, $17, $18, $19)`,
+        [
+          id,
+          p.id,
+          p.program_id,
+          p.entity_id,
+          buildId,
+          m.sha256,
+          action,
+          passed ? "running" : "blocked",
+          passed ? "analysis_provisioning" : null,
+          passed ? "Mynt's own checks passed; starting static analysis" : "Refused by Mynt's own checks",
+          user.id,
+          JSON.stringify(rules),
+          passed ? null : `Hard rules: ${reasons.join("; ").slice(0, 3000)}`,
+          this.config.auditCapUsd,
+          this.config.redTeamCapUsd,
+          JSON.stringify(exceptions),
+          JSON.stringify(dependencies),
+          JSON.stringify(idlCheck),
+          budgetKey,
+        ],
+      );
+    } catch (e) {
+      if (budgetKey) await this.release(budgetKey, this.config.auditCapUsd + this.config.redTeamCapUsd);
+      if (/duplicate key|unique/i.test((e as Error).message)) throw new GateError("This program already has a review in progress; cancel it first (cancel_mainnet_review)");
+      throw e;
+    }
     await this.log(id, user.id, "requested", { action, build_id: buildId, sha256: m.sha256 });
     await this.log(id, null, passed ? "rules_passed" : "blocked", { findings: findings.length, blocking: blockedBy.length });
     await this.store.audit(user.id, "request_mainnet_review", p.program_id, { review_id: id, build_id: buildId, sha256: m.sha256, action, rules_passed: passed });
     return (await this.row(id))!;
   }
 
+  // The crate allowlist (tests swap in another).
+  allowlist: CrateAllowlist = loadCrateAllowlist();
+
+  // ---- the month's budget: a counter row, reserved and released atomically ----
+
+  private async reserve(amount: number): Promise<string | null> {
+    const key = `gate_budget:${new Date().toISOString().slice(0, 7)}`;
+    await this.db.query(`INSERT INTO ${T}.solana_settings (key, value) VALUES ($1, '0'::jsonb) ON CONFLICT (key) DO NOTHING`, [key]);
+    const r = await this.db.query(
+      `UPDATE ${T}.solana_settings SET value = to_jsonb((value #>> '{}')::numeric + $2::numeric), updated_at = now()
+       WHERE key = $1 AND (value #>> '{}')::numeric + $2::numeric <= $3::numeric RETURNING key`,
+      [key, amount, this.config.monthlyCapUsd],
+    );
+    return r.rows.length ? key : null;
+  }
+
+  private async release(key: string, amount: number) {
+    if (amount > 0) await this.db.query(`UPDATE ${T}.solana_settings SET value = to_jsonb(GREATEST(0, (value #>> '{}')::numeric - $2::numeric)), updated_at = now() WHERE key = $1`, [key, amount]);
+  }
+
+  // Once a review's agents are done (or it ends): what it reserved but didn't spend goes back to the month.
+  private async settle(id: string) {
+    const r = await this.one(
+      `UPDATE ${T}.solana_mainnet_reviews SET budget_settled = true WHERE id = $1 AND budget_settled = false AND budget_key IS NOT NULL RETURNING budget_key, audit_cap_usd, red_cap_usd, cost_usd`,
+      [id],
+    );
+    if (r) await this.release(r.budget_key as string, Math.max(0, Number(r.audit_cap_usd) + Number(r.red_cap_usd) - Number(r.cost_usd)));
+  }
+
   // ---- decisions ----
 
-  async decide(admin: User, id: string, decision: "approve" | "reject", note: string) {
+  async decide(admin: User, id: string, decision: "approve" | "reject", note: string, allowExceptions: string[] = []) {
     const r = await this.row(id);
     if (!r) throw new GateError("No such mainnet review");
     if (r.status !== "awaiting_approval") throw new GateError(`The review is ${r.status}; only one awaiting approval can be ${decision === "approve" ? "approved" : "rejected"}`);
+    // Every exception must be allowed by name: nothing in the build is waved through by a blanket approval.
+    const exceptions = ((r.exceptions as Exception[] | null) ?? []).map((e) => e.id);
+    if (decision === "approve") {
+      const missing = exceptions.filter((e) => !allowExceptions.includes(e));
+      const unknown = allowExceptions.filter((e) => !exceptions.includes(e));
+      if (missing.length) throw new GateError(`Can't approve without allowing each exception by its id (allow_exceptions): ${missing.join(", ")}`);
+      if (unknown.length) throw new GateError(`Not exceptions of this review: ${unknown.join(", ")}`);
+    }
     // The authority rule once more, as things stand now.
     if (decision === "approve") {
       const p = (await this.solana.get(r.program_id as string))!;
@@ -461,7 +565,7 @@ export class MainnetGateService implements MainnetGateCheck {
     const status: ReviewStatus = decision === "approve" ? "approved" : "rejected";
     await this.db.query(
       `UPDATE ${T}.solana_mainnet_reviews SET status = $2, decision = $3, decision_note = $4, decided_by = $5, decided_at = now(), updated_at = now(),
-         phase_message = $6 WHERE id = $1 AND status = 'awaiting_approval'`,
+         phase_message = $6, allowed_exceptions = $7 WHERE id = $1 AND status = 'awaiting_approval'`,
       [
         id,
         status,
@@ -472,16 +576,18 @@ export class MainnetGateService implements MainnetGateCheck {
           ? "Rejected by an admin"
           : r.action === "upgrade"
             ? `Approved; the upgrade runs once its timelock ends (${iso(r.executes_at)})`
-            : "Approved; deploy_program may now deploy exactly this build",
+            : `Approved; deploy_program may deploy exactly this build, once, within ${this.config.approvalTtlDays} days`,
+        JSON.stringify(decision === "approve" ? allowExceptions : []),
       ],
     );
-    await this.log(id, admin.id, decision === "approve" ? "approved" : "rejected", { note });
+    await this.log(id, admin.id, decision === "approve" ? "approved" : "rejected", { note, allowed_exceptions: decision === "approve" ? allowExceptions : [] });
     await this.store.audit(admin.id, decision === "approve" ? "approve_mainnet_program" : "reject_mainnet_program", r.program_id as string, {
       review_id: id,
       build_id: r.build_id,
       sha256: r.sha256,
       action: r.action,
       note,
+      allowed_exceptions: decision === "approve" ? allowExceptions : [],
     });
     if (decision === "reject" && r.announced_at) await this.announceCancel(r, "rejected by an admin");
     return (await this.row(id))!;
@@ -493,14 +599,15 @@ export class MainnetGateService implements MainnetGateCheck {
     const p = await this.solana.get(r.program_id as string);
     if (!admin && !(p && this.solana.canAct(user, p))) throw new GateError("No such mainnet review");
     if (!OPEN.includes(r.status as ReviewStatus)) throw new GateError(`The review is ${r.status}; there's nothing to cancel`);
-    if (r.started_at) throw new GateError("The upgrade has already started; it can't be cancelled now");
+    if (r.started_at || r.status === "started") throw new GateError(`The ${r.action} has already started; it can't be cancelled now`);
     const done = await this.db.query(
       `UPDATE ${T}.solana_mainnet_reviews SET status = 'cancelled', cancelled_by = $2, cancelled_at = now(), audit_token_hash = NULL, red_token_hash = NULL, updated_at = now(),
          phase_message = 'Cancelled' WHERE id = $1 AND status = ANY($3) AND started_at IS NULL RETURNING id`,
-      [id, user.id, OPEN],
+      [id, user.id, ["running", "awaiting_approval", "approved"]],
     );
     if (!done.rows.length) throw new GateError("The review changed meanwhile; look again with get_mainnet_review");
     await this.stopSandboxes(r);
+    await this.settle(id);
     await this.log(id, user.id, "cancelled", { by: admin ? "admin" : "developer" });
     await this.store.audit(user.id, "cancel_mainnet_review", r.program_id as string, { review_id: id, as_admin: admin });
     if (r.announced_at) await this.announceCancel(r, admin ? "cancelled by an admin" : "cancelled by the developer");
@@ -514,20 +621,26 @@ export class MainnetGateService implements MainnetGateCheck {
 
   // ---- what deploys ask ----
 
-  async assertDeployable(p: ProgramRecord, sha256: string, action: "deploy" | "upgrade") {
+  // The approved review covering exactly these bytes, or why there's none. An approval is used once: a deploy or
+  // upgrade claims it, so going A -> B -> A needs a fresh review (and, for an upgrade, a fresh timelock and
+  // announcement).
+  async check(p: ProgramRecord, sha256: string, action: "deploy" | "upgrade") {
     if (action === "upgrade") {
       const flag = await this.openFlag(p.id);
       if (flag) throw new GateError(`Upgrades of this program are paused: vulnerability database v${flag.db_version} flagged it (${flag.id}); an admin must review it first`);
     }
-    const r = await this.one(
-      `SELECT * FROM ${T}.solana_mainnet_reviews WHERE program = $1 AND sha256 = $2 AND action = $3 AND status IN ('approved', 'executed') ORDER BY created_at DESC LIMIT 1`,
-      [p.id, sha256, action],
-    );
+    const r = await this.one(`SELECT * FROM ${T}.solana_mainnet_reviews WHERE program = $1 AND sha256 = $2 AND action = $3 AND status = 'approved' ORDER BY created_at DESC LIMIT 1`, [
+      p.id,
+      sha256,
+      action,
+    ]);
     if (!r) {
       const latest = await this.one(`SELECT id, status, sha256 FROM ${T}.solana_mainnet_reviews WHERE program = $1 ORDER BY created_at DESC LIMIT 1`, [p.id]);
       const about =
         latest && latest.sha256 === sha256
-          ? ` (its review ${latest.id} is ${latest.status}${latest.status === "awaiting_approval" ? ": an admin must approve it" : ""})`
+          ? latest.status === "executed" || latest.status === "started"
+            ? ` (its approval in review ${latest.id} was used by an earlier ${action}; each approval is used once)`
+            : ` (its review ${latest.id} is ${latest.status}${latest.status === "awaiting_approval" ? ": an admin must approve it" : ""})`
           : latest
             ? ` (the latest review, ${latest.id}, is for a different build's program)`
             : "";
@@ -536,7 +649,49 @@ export class MainnetGateService implements MainnetGateCheck {
     if (action === "upgrade") {
       const at = r.executes_at ? new Date(r.executes_at as string).getTime() : NaN;
       if (!Number.isFinite(at) || at > Date.now()) throw new GateError(`This upgrade is timelocked until ${iso(r.executes_at)}; it runs then (cancel_mainnet_review stops it)`);
+    } else {
+      const decided = r.decided_at ? new Date(r.decided_at as string).getTime() : 0;
+      if (Date.now() - decided > this.config.approvalTtlDays * 86_400_000)
+        throw new GateError(`The approval (review ${r.id}) expired: first-deploy approvals last ${this.config.approvalTtlDays} days (MAINNET_APPROVAL_TTL_DAYS); request a new review`);
     }
+    // The current vulnerability database's hard rules, once more, over exactly these bytes.
+    const m = await this.solana.reviewMaterial(null, p, r.build_id as string);
+    if (m.sha256 !== sha256) throw new GateError("The stored program no longer matches the reviewed hash");
+    const idl = (r.idl_check as { verified?: boolean } | null)?.verified ? m.idl : null;
+    const now = checkProgramRules({ name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null }, this.vulnDb);
+    if (!now.passed)
+      throw new GateError(
+        `The vulnerability database's current rules (v${now.db_version}) refuse this program: ${now.findings
+          .filter((f) => f.blocks)
+          .map((f) => `${f.rule}: ${f.detail}`)
+          .join("; ")
+          .slice(0, 600)}; request a new review`,
+      );
+    return r;
+  }
+
+  // Claims (consumes) the approval, atomically: two deploys at once can't both use it, and a cancel can't race it.
+  async claim(p: ProgramRecord, sha256: string, action: "deploy" | "upgrade"): Promise<MainnetGateClaim> {
+    const r = await this.check(p, sha256, action);
+    const claimed = await this.db.query(
+      `UPDATE ${T}.solana_mainnet_reviews SET status = 'started', started_at = now(), claimed_hash = $2, error = NULL, updated_at = now(), phase_message = $3
+       WHERE id = $1 AND status = 'approved' AND started_at IS NULL RETURNING id`,
+      [r.id, p.verifiable_hash, `The ${action} started`],
+    );
+    if (!claimed.rows.length) throw new GateError("The approval was just used or changed; look again with get_mainnet_review");
+    await this.log(r.id as string, null, "claimed", { action, program_hash_before: p.verifiable_hash });
+    const id = r.id as string;
+    return {
+      reviewId: id,
+      release: async () => {
+        await this.db.query(
+          `UPDATE ${T}.solana_mainnet_reviews SET status = 'approved', started_at = NULL, claimed_hash = NULL, updated_at = now(), phase_message = 'Approved; the last attempt didn''t start'
+           WHERE id = $1 AND status = 'started'`,
+          [id],
+        );
+        await this.log(id, null, "released", { why: "the deploy or upgrade couldn't start" });
+      },
+    };
   }
 
   // ---- the agents' tokens, for Mynt's agent proxy ----
@@ -575,6 +730,7 @@ export class MainnetGateService implements MainnetGateCheck {
   private async end(r: Row, status: ReviewStatus, f: Row = {}) {
     await this.stopSandboxes(r);
     await this.update(r.id as string, { ...f, status, step: null, audit_token_hash: null, red_token_hash: null });
+    await this.settle(r.id as string);
   }
 
   private async block(r: Row, reason: string, f: Row = {}) {
@@ -605,6 +761,11 @@ export class MainnetGateService implements MainnetGateCheck {
     return { p, m };
   }
 
+  // The IDL the agents and the PoC re-run get: only one Mynt checked against the bytes, without doc strings.
+  private agentIdl(r: Row, m: { idl: unknown }) {
+    return (r.idl_check as { verified?: boolean } | null)?.verified ? stripIdlDocs(m.idl) : null;
+  }
+
   private async newSandbox(r: Row, role: string) {
     return this.boat!.createSandbox({ name: `mynt-${role}-${r.id}`, type: this.config.sandboxType, ttlSeconds: 3 * 3600, labels: { mynt_mainnet_review: r.id as string, mynt_role: role }, env: {} });
   }
@@ -629,6 +790,13 @@ export class MainnetGateService implements MainnetGateCheck {
       const { m } = await this.material(r);
       const files: Record<string, string> = { [`${GATE_DIR}/analysis.sh`]: GATE_ANALYSIS_SCRIPT };
       for (const [path, text] of Object.entries(m.sources ?? {})) if (!path.split("/").includes("..")) files[`${GATE_DIR}/src/${path}`] = text;
+      // The Cargo.lock the build compiled with (what cargo-audit checks), whether or not the workspace committed one.
+      if (m.deps?.lock) files[`${GATE_DIR}/src/Cargo.lock`] = m.deps.lock;
+      // The source of each crate off the allowlist, for the auditor.
+      for (const e of ((r.exceptions as Exception[] | null) ?? []).filter((x) => x.kind === "crate")) {
+        const key = e.id.slice("crate:".length);
+        for (const [path, text] of Object.entries(m.deps?.sources[key] ?? {})) if (!path.split("/").includes("..")) files[`${GATE_DIR}/deps/${key}/${path}`] = text;
+      }
       await this.writeFiles(r.analysis_sandbox_id as string, files);
       const run = await boat.exec(r.analysis_sandbox_id as string, `bash ${GATE_DIR}/analysis.sh ${GATE_DIR}/src ${GATE_DIR}/out '${this.config.cargoAuditIgnore.join(",")}'`, { detached: true });
       await this.update(id, { step: "analysis", analysis_process_id: String(run.processId ?? ""), step_started_at: new Date(), phase_message: "Static analysis: cargo-audit and Radar" });
@@ -665,7 +833,8 @@ export class MainnetGateService implements MainnetGateCheck {
               files: Object.keys(m.sources ?? {}).sort(),
               deterministic_rules: (r.rules as Row | null) ?? null,
               static_analysis: record,
-              idl: m.idl ?? null,
+              idl: this.agentIdl(r, m),
+              dependency_dirs: Object.fromEntries(Object.keys(m.deps?.sources ?? {}).filter((k) => ((r.exceptions as Exception[] | null) ?? []).some((e) => e.id === `crate:${k}`)).map((k) => [k, `${GATE_DIR}/deps/${k}`])),
               output: "job/findings.json",
               minutes: this.config.auditMinutes,
             },
@@ -722,7 +891,7 @@ export class MainnetGateService implements MainnetGateCheck {
         model: this.config.gateModel,
         workspace: RED_WS,
         jobFiles: {
-          "job/idl.json": JSON.stringify(m.idl ?? null, null, 1),
+          "job/idl.json": JSON.stringify(this.agentIdl(r, m), null, 1),
           "job/vulnerabilities.json": JSON.stringify(agentChecklist(this.vulnDb), null, 1),
           "job/target.json": JSON.stringify(
             {
@@ -787,7 +956,7 @@ export class MainnetGateService implements MainnetGateCheck {
         [`${CONFIRM_DIR}/confirm.py`]: GATE_CONFIRM_SCRIPT,
         [`${CONFIRM_DIR}/toolchain.sh`]: SOLANA_TOOLCHAIN_SCRIPT,
         [`${CONFIRM_DIR}/program.so.b64`]: Buffer.from(m.program).toString("base64"),
-        [`${CONFIRM_DIR}/idl.json`]: JSON.stringify(m.idl ?? null),
+        [`${CONFIRM_DIR}/idl.json`]: JSON.stringify(this.agentIdl(r, m)),
         [`${CONFIRM_DIR}/job.json`]: JSON.stringify({ program_id: p.program_id, pocs: Object.keys(pocs), timeout_seconds: 600 }),
       };
       for (const [poc, fs] of Object.entries(pocs)) for (const [path, text] of Object.entries(fs)) files[`${CONFIRM_DIR}/pocs/${poc}/${path}`] = text;
@@ -830,6 +999,7 @@ export class MainnetGateService implements MainnetGateCheck {
   // Every automated gate passed: an admin decides. An upgrade is announced now, and its timelock starts.
   private async gatesPassed(r: Row) {
     const id = r.id as string;
+    await this.settle(id);
     if (r.action === "upgrade") {
       const executesAt = new Date(Date.now() + this.config.timelockHours * 3600_000);
       await this.update(id, { status: "awaiting_approval", step: null, executes_at: executesAt, announced_at: new Date(), phase_message: `Gates passed; awaiting an admin's approval. The upgrade can run from ${executesAt.toISOString()}` });
@@ -850,16 +1020,15 @@ export class MainnetGateService implements MainnetGateCheck {
 
   // Approved upgrades whose timelock is over: Mynt starts them, as the developer who asked.
   private async runDueUpgrades() {
+    // The deploy claims the approval itself (atomically); a failed start is retried no more than every 10 minutes.
     const due = await this.all(
-      `SELECT * FROM ${T}.solana_mainnet_reviews WHERE status = 'approved' AND action = 'upgrade' AND executes_at <= now() AND started_at IS NULL ORDER BY executes_at LIMIT 5`,
+      `SELECT * FROM ${T}.solana_mainnet_reviews WHERE status = 'approved' AND action = 'upgrade' AND executes_at <= now()
+         AND (last_attempt_at IS NULL OR last_attempt_at < now() - interval '10 minutes') ORDER BY executes_at LIMIT 5`,
     );
     for (const r of due) {
       const id = r.id as string;
-      const claimed = await this.db.query(`UPDATE ${T}.solana_mainnet_reviews SET started_at = now(), updated_at = now() WHERE id = $1 AND started_at IS NULL RETURNING id`, [id]);
-      if (!claimed.rows.length) continue;
+      await this.update(id, { last_attempt_at: new Date() });
       try {
-        const flag = await this.openFlag(r.program as string);
-        if (flag) throw new Error(`upgrades are paused: vulnerability database v${flag.db_version} flagged the program (${flag.id}) until an admin reviews it`);
         const p = await this.solana.get(r.program_id as string);
         const user = await this.store.getUser(r.requested_by as string);
         if (!p || !user) throw new Error("The program or the developer who asked is gone");
@@ -867,8 +1036,8 @@ export class MainnetGateService implements MainnetGateCheck {
         await this.update(id, { phase_message: "Timelock over; the upgrade is running (get_program follows it)" });
         await this.log(id, null, "upgrade_started", {});
       } catch (e) {
-        // Not started: kept approved, retried on a later tick, the reason shown.
-        await this.update(id, { started_at: null, error: `The upgrade couldn't start: ${(e as Error).message}`.slice(0, 1000) });
+        // Not started: still approved, retried later, the reason shown.
+        await this.update(id, { error: `The upgrade couldn't start: ${(e as Error).message}`.slice(0, 1000) });
         await this.log(id, null, "upgrade_not_started", { error: (e as Error).message.slice(0, 500) });
       }
     }
@@ -962,12 +1131,36 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   // Approved reviews whose program now holds exactly the reviewed bytes.
+  // Started reviews, settled from the registry: the program holds the reviewed bytes (executed); the attempt ended
+  // with nothing changed (the approval is given back, to retry); or the program now holds something else (failed:
+  // a new review is needed).
   private async markExecuted() {
     await this.db.query(
       `UPDATE ${T}.solana_mainnet_reviews r SET status = 'executed', executed_at = now(), updated_at = now(), error = NULL, phase_message = 'Deployed on mainnet'
-       FROM ${T}.solana_programs p WHERE r.program = p.id AND r.status = 'approved' AND p.status = 'deployed' AND p.verifiable_hash = r.sha256 AND p.operation IS NULL`,
+       FROM ${T}.solana_programs p WHERE r.program = p.id AND r.status = 'started' AND p.status = 'deployed' AND p.verifiable_hash = r.sha256 AND p.operation IS NULL`,
     );
+    const ended = await this.all(
+      `SELECT r.id, r.claimed_hash, p.verifiable_hash, p.error FROM ${T}.solana_mainnet_reviews r JOIN ${T}.solana_programs p ON p.id = r.program
+       WHERE r.status = 'started' AND p.operation IS NULL AND p.verifiable_hash IS DISTINCT FROM r.sha256 AND r.started_at < now() - interval '2 minutes'`,
+    );
+    for (const x of ended) {
+      if (x.verifiable_hash === x.claimed_hash || (x.verifiable_hash == null && x.claimed_hash == null)) {
+        await this.db.query(
+          `UPDATE ${T}.solana_mainnet_reviews SET status = 'approved', started_at = NULL, claimed_hash = NULL, error = $2, updated_at = now(), phase_message = 'Approved; the last attempt didn''t complete'
+           WHERE id = $1 AND status = 'started'`,
+          [x.id, `The last attempt didn't complete${x.error ? `: ${String(x.error).slice(0, 500)}` : ""}`],
+        );
+        await this.log(x.id as string, null, "released", { why: "the deploy or upgrade ended without changing the program" });
+      } else {
+        await this.db.query(
+          `UPDATE ${T}.solana_mainnet_reviews SET status = 'failed', error = $2, updated_at = now(), phase_message = 'Failed' WHERE id = $1 AND status = 'started'`,
+          [x.id, `The program now holds another build (${x.verifiable_hash}); request a new review`],
+        );
+        await this.log(x.id as string, null, "failed", { program_hash: x.verifiable_hash });
+      }
+    }
   }
+
 
   private async writeFiles(sandbox: string, files: Record<string, string>) {
     if (this.boat!.writeFiles) await this.boat!.writeFiles(sandbox, files);
@@ -1141,10 +1334,18 @@ export function registerMainnetGateTools(server: McpServer, store: Store, user: 
     {
       title: "Approve a mainnet program",
       description:
-        "Admin: approve a mainnet deploy or upgrade whose automated gates all passed. The answer shows the whole audit report again (hard rules, static analysis, audit and red-team findings, Mynt's PoC re-runs) as approved. A first deploy may then go ahead with deploy_program for exactly that build; an upgrade runs once its timelock ends. Recorded in the audit log.",
-      inputSchema: { review_id: z.string(), note: z.string().min(3).max(2000).describe("Why it's approved, for the audit log") },
+        "Admin: approve a mainnet deploy or upgrade whose automated gates all passed. Name every exception the review lists in allow_exceptions (what can change the build beyond the reviewed source, and crates off the allowlist); approval is refused otherwise. The answer shows the whole report again, with what the gate can't promise. The approval is used once: a first deploy may then go ahead with deploy_program for exactly that build within MAINNET_APPROVAL_TTL_DAYS (default 14); an upgrade runs once its timelock ends. Recorded in the audit log.",
+      inputSchema: {
+        review_id: z.string(),
+        note: z.string().min(3).max(2000).describe("Why it's approved, for the audit log"),
+        allow_exceptions: z
+          .array(z.string())
+          .max(200)
+          .optional()
+          .describe("The id of every exception the review lists (build scripts, proc macros, cargo config, non-Rust includes, crates off the allowlist...), each one you allow; approval is refused unless all are named"),
+      },
     },
-    async ({ review_id, note }) => attempt(async () => gate.view(await gate.decide(user, review_id, "approve", note), { log: true })),
+    async ({ review_id, note, allow_exceptions }) => attempt(async () => gate.view(await gate.decide(user, review_id, "approve", note, allow_exceptions ?? []), { log: true })),
   );
 
   server.registerTool(

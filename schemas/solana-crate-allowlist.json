@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "description": "Crates a mainnet Solana program may depend on (directly or transitively) without an admin allowing each by name in its review: the pinned Anchor (0.32.1) and its Solana program crates, as the coding agents' template resolves them (CI checks the template's Cargo.lock is fully covered), plus a reviewed list. Exact names only: crates.io has no namespaces. Every crate must still come from crates.io with the checksum in Cargo.lock. Changes land only by a reviewed pull request.",
+  "crates": [
+    "anchor-attribute-access-control",
+    "anchor-attribute-account",
+    "anchor-attribute-constant",
+    "anchor-attribute-error",
+    "anchor-attribute-event",
+    "anchor-attribute-program",
+    "anchor-derive-accounts",
+    "anchor-derive-serde",
+    "anchor-derive-space",
+    "anchor-lang",
+    "anchor-lang-idl",
+    "anchor-lang-idl-spec",
+    "anchor-syn",
+    "borsh",
+    "borsh-derive",
+    "bytemuck",
+    "bytemuck_derive",
+    "proc-macro2",
+    "quote",
+    "solana-program",
+    "syn",
+    "thiserror",
+    "thiserror-impl",
+    "unicode-ident"
+  ],
+  "never": {
+    "anchor-spl": "value-moving: token CPIs (the rug-pull rules refuse token programs on mainnet)",
+    "spl-token": "value-moving: the SPL Token program's client",
+    "spl-token-2022": "value-moving: Token-2022's client",
+    "spl-associated-token-account": "value-moving: the Associated Token program's client"
+  }
+}

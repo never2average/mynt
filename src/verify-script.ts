@@ -46,7 +46,7 @@ fi
 if [ "$#" -gt 0 ] && [ "$1" = "--solana-build" ]; then
   SRC="$V/solana-src"; rm -rf "$SRC"; mkdir -p "$SRC"
   if [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$2" ] && tar -xzf "$V/app.tgz" -C "$SRC"; then
-    bash "$V/solana-verify.sh" build "$SRC" "$V/solana"
+    bash "$V/solana-verify.sh" build "$SRC" "$V/solana" "$V/solana-crate-allowlist.json"
   else
     mkdir -p "$V/solana"; echo '{"name": "solana_build", "status": "fail", "detail": "the fetched source failed its checksum"}' > "$V/solana/checks.jsonl"
   fi

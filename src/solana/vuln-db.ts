@@ -204,3 +204,25 @@ export function suggestFromAdvisories(advisories: Advisory[], db: VulnDb, opts: 
   }
   return out;
 }
+
+// ---- the crate allowlist (schemas/solana-crate-allowlist.json) ----
+
+// Crates a mainnet program may depend on without an admin naming each: the pinned Anchor's own crates, Solana's
+// program crates and their standard transitive dependencies, by exact name (crates.io has no namespaces, so no
+// patterns: anyone could publish anchor-attribute-anything). Changes land by a reviewed pull request.
+export const CRATE_ALLOWLIST_PATH = fileURLToPath(new URL("../../schemas/solana-crate-allowlist.json", import.meta.url));
+export interface CrateAllowlist {
+  version: number;
+  description?: string;
+  crates: string[];
+  never?: Record<string, string>; // crates never allowed, with why
+}
+let allowCache: CrateAllowlist | null = null;
+export function loadCrateAllowlist(path = CRATE_ALLOWLIST_PATH): CrateAllowlist {
+  if (path === CRATE_ALLOWLIST_PATH && allowCache) return allowCache;
+  const a = JSON.parse(readFileSync(path, "utf8")) as CrateAllowlist;
+  if (!Array.isArray(a.crates) || !a.crates.every((c) => typeof c === "string" && /^[A-Za-z0-9_-]+$/.test(c))) throw new Error("The crate allowlist is invalid: crates must be plain crate names");
+  for (const n of Object.keys(a.never ?? {})) if (a.crates.includes(n)) throw new Error(`The crate allowlist both allows and forbids ${n}`);
+  if (path === CRATE_ALLOWLIST_PATH) allowCache = a;
+  return a;
+}

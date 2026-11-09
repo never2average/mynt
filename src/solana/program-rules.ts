@@ -1,6 +1,7 @@
 import { base58Decode, base58Encode, isAddress } from "./codec.js";
 import { SYSTEM_PROGRAM, UPGRADEABLE_LOADER } from "./tx.js";
 import { IDL_BUILTINS, loadVulnDb, SOURCE_BUILTINS, type VulnDb, type VulnEntry } from "./vuln-db.js";
+import { resolveCrateTree, type CrateTree } from "./crate-tree.js";
 
 // The mainnet program gate's hard rules: deterministic, run by Mynt itself, no model, driven by the vulnerability
 // database (schemas/solana-vulnerabilities.json, vuln-db.ts). An entry whose gate is "block" refuses the program;
@@ -285,11 +286,11 @@ interface Hit {
   allowed?: boolean; // found, but allowed (Mynt's own signer as a pinned admin): noted, never blocking
 }
 
-const EXCLUDED_DIRS = /(^|\/)(tests?|target|trident-tests|fuzz|migrations|node_modules)\//;
 
 // Everything the source detections share: the code with comments stripped, the accounts structs, the handlers,
 // the #[account] state structs and the hard-coded keys.
 class SourceIndex {
+  readonly tree: CrateTree;
   readonly code: Map<string, string>;
   readonly structs: AccountsStruct[];
   readonly byName: Map<string, AccountsStruct>;
@@ -300,7 +301,9 @@ class SourceIndex {
     readonly all: Record<string, string>,
     readonly programId: string,
   ) {
-    this.code = new Map(Object.entries(all).filter(([p]) => p.endsWith(".rs") && !EXCLUDED_DIRS.test(p)).map(([p, t]) => [p, stripComments(t)]));
+    // Every file the compiler reads from a crate root (mod, #[path], include!), wherever it lives; nothing else.
+    this.tree = resolveCrateTree(all);
+    this.code = new Map([...this.tree.code].map(([p, t]) => [p, stripComments(t)]));
     this.structs = [...this.code].flatMap(([file, text]) => accountsStructs(file, text));
     this.byName = new Map(this.structs.map((s) => [s.name, s]));
     this.handlers = [...this.code].flatMap(([file, text]) => handlers(file, text).map((h) => ({ ...h, text })));
@@ -572,10 +575,14 @@ function contains(hay: Uint8Array, needle: Uint8Array) {
 
 // One source_pattern regex detection over the files it names.
 function patternHits(d: { pattern?: string; absent?: string; flags?: string; unless?: string; files?: string; message: string }, ix: SourceIndex): Hit[] {
-  const fileRe = new RegExp(d.files ?? String.raw`\.rs$`);
-  const files = Object.keys(ix.all)
-    .filter((p) => fileRe.test(p) && !EXCLUDED_DIRS.test(p))
-    .map((p) => [p, p.endsWith(".rs") ? ix.code.get(p) ?? stripComments(ix.all[p]) : ix.all[p].replace(/#[^\n]*/g, "")] as const);
+  // Code patterns run over the files the compiler reads; a pattern naming other files (manifests) over every
+  // captured file that matches.
+  const fileRe = d.files ? new RegExp(d.files) : null;
+  const files = fileRe
+    ? Object.keys(ix.all)
+        .filter((p) => fileRe.test(p))
+        .map((p) => [p, ix.code.get(p) ?? (p.endsWith(".rs") ? stripComments(ix.all[p]) : ix.all[p].replace(/#[^\n]*/g, ""))] as const)
+    : [...ix.code].filter(([p]) => /\.rs$/.test(p) || ix.tree.includes.some((i) => i.macro === "include" && i.resolved === p));
   const flags = (d.flags ?? "").replace("g", "");
   if (d.absent) {
     if (!files.length) return [];

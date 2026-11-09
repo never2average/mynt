@@ -51,7 +51,7 @@ jobs:
           : > "$RUNNER_TEMP/checks.jsonl"
           # Two runs, as in Mynt's verify sandbox: the build alone (only inside a container that has a copy of the
           # source), then, after Mynt has read the programs back, the IDL and the tests on the host.
-          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app" "$RUNNER_TEMP/out"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app" "$RUNNER_TEMP/out" "$PWD/schemas/solana-crate-allowlist.json"
           cat "$RUNNER_TEMP/out/checks.jsonl" >> "$RUNNER_TEMP/checks.jsonl"
           sha256sum "$RUNNER_TEMP"/out/*.so | tee "$RUNNER_TEMP/built.sha"
           bash "$RUNNER_TEMP/mynt/solana-verify.sh" test "$RUNNER_TEMP/app" "$RUNNER_TEMP/out" "$RUNNER_TEMP/checks.jsonl" "$RUNNER_TEMP/mynt/solana-toolchain.sh"
@@ -73,30 +73,54 @@ jobs:
           assert hashlib.sha256(open(f"{tmp}/out/solana.Cargo.lock", "rb").read()).hexdigest() == programs[0]["cargo_lock_sha256"]
           assert "warning: no Cargo.lock committed" in checks["solana_build"]["detail"], checks["solana_build"]
           PY
-      - name: The mainnet program gate's hard rules and static analysis pass the template, and refuse a token vault
+      - name: The mainnet program gate passes the template as Mynt captured it, and refuses a token vault
         run: |
-          # The source Mynt captured with the build, as the gate reviews it.
+          # What the build kept: the workspace exactly as it went into the container, every crate of the Cargo.lock
+          # it used (and the source of any off the allowlist), and the IDL built in Mynt's own offline container.
           python3 - "$RUNNER_TEMP" <<'PY'
           import hashlib, json, os, sys
           tmp = sys.argv[1]
           [prog] = json.load(open(f"{tmp}/out/programs.json"))
-          assert prog["sources"] == "solana.sources.json", prog
-          raw = open(f"{tmp}/out/solana.sources.json", "rb").read()
-          assert hashlib.sha256(raw).hexdigest() == prog["sources_sha256"] and len(raw) == prog["sources_size"], prog
-          files = json.loads(raw)["files"]
-          assert "programs/ci_ledger/src/lib.rs" in files and "Cargo.lock" in files, sorted(files)
+          for key in ("sources", "deps", "idl"):
+              raw = open(f"{tmp}/out/{prog[key]}", "rb").read()
+              assert hashlib.sha256(raw).hexdigest() == prog[f"{key}_sha256"] and len(raw) == prog[f"{key}_size"], (key, prog)
+          bundle = json.load(open(f"{tmp}/out/{prog['sources']}"))
+          files = bundle["files"]
+          # Everything the container got, dot-folders and tests included; nothing it didn't.
+          for f in ("programs/ci_ledger/src/lib.rs", "programs/ci_ledger/Cargo.toml", "Anchor.toml", "package.json", ".cargo/config.toml", "tests/ci_ledger.ts"):
+              assert f in files, (f, sorted(files))
+          assert not any(f.startswith(("target/", "node_modules/", ".anchor/")) for f in list(files) + list(bundle["binary"])), sorted(files)
+          deps = json.load(open(f"{tmp}/out/{prog['deps']}"))
+          assert deps["complete"], deps["problems"]
+          off = sorted({p["name"] for p in deps["packages"] if p.get("source") and not p["allowlisted"]})
+          print("crates in the template's Cargo.lock:", len(deps["packages"]), "| off the allowlist:", off)
+          assert not off, f"add the template's crates to schemas/solana-crate-allowlist.json after review: {off}"
+          assert all(p.get("crate_sha256") == p.get("checksum") for p in deps["packages"] if p.get("source")), "checksums"
+          idl = json.load(open(f"{tmp}/out/{prog['idl']}"))
+          assert [i["name"] for i in idl["instructions"]] == ["initialize", "record"], idl["instructions"]
+          json.dump(bundle, open(f"{tmp}/captured.json", "w"))
           for path, text in files.items():
               os.makedirs(os.path.dirname(f"{tmp}/captured/{path}") or f"{tmp}/captured", exist_ok=True)
               open(f"{tmp}/captured/{path}", "w").write(text)
+          open(f"{tmp}/captured/Cargo.lock", "w").write(deps["lock"])
           PY
-          node scripts/program-rules.mjs --workspace "$RUNNER_TEMP/captured" --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw \
-            --so "$RUNNER_TEMP/out/ci_ledger.so" --idl "$RUNNER_TEMP/out/ci_ledger.idl.json" > "$RUNNER_TEMP/rules.json"
-          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["passed"] and all(r["signals"].values()), r' "$RUNNER_TEMP/rules.json"
+          node scripts/program-rules.mjs --sources "$RUNNER_TEMP/captured.json" --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw \
+            --so "$RUNNER_TEMP/out/ci_ledger.so" --idl "$RUNNER_TEMP/out/ci_ledger.build-idl.json" --deps "$RUNNER_TEMP/out/solana.deps.json" > "$RUNNER_TEMP/rules.json" || { cat "$RUNNER_TEMP/rules.json"; exit 1; }
+          python3 - "$RUNNER_TEMP/rules.json" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print("IDL check:", r["idl"])
+          assert r["passed"] and all(r["rules"]["signals"].values()), r
+          assert r["idl"]["verified"], r["idl"]
+          assert r["exceptions"] == [], r["exceptions"]
+          assert r["dependencies"]["refusals"] == [] and r["dependencies"]["off_allowlist"] == [], r["dependencies"]
+          assert r["compiled_files"] == ["programs/ci_ledger/src/lib.rs"], r["compiled_files"]
+          PY
           if node scripts/program-rules.mjs --workspace test/fixtures/solana-programs/token_vault --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw > "$RUNNER_TEMP/bad.json"; then
             echo "the token vault passed the hard rules"; cat "$RUNNER_TEMP/bad.json"; exit 1
           fi
           grep -q "anchor_spl::token" "$RUNNER_TEMP/bad.json"
-          # Static analysis, as in the gate's sandbox: cargo-audit and Radar, pinned.
+          # Static analysis, as in the gate's sandbox: cargo-audit (on the Cargo.lock the build used) and Radar, pinned.
           bash "$RUNNER_TEMP/mynt/program-analysis.sh" "$RUNNER_TEMP/captured" "$RUNNER_TEMP/analysis"
           cat "$RUNNER_TEMP/analysis/static.json"
           node -e 'import("./dist/solana/mainnet-gate.js").then((m) => { const r = m.assessStatic(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))); console.log(JSON.stringify(r.reasons)); if (!r.passed) process.exit(1); })' "$RUNNER_TEMP/analysis/static.json"
