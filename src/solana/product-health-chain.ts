@@ -1,19 +1,19 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { anchorDiscriminator, base58Encode, findProgramAddress, Keypair, pubkeyBytes } from "./codec.js";
 import { SYSTEM_PROGRAM, type AccountMeta, type Instruction } from "./tx.js";
 
 // The product-health program (programs/product-health) from Mynt's side: its instructions, its accounts, and the
-// publisher key, which only ever signs those instructions. Nothing about a product but the fingerprint of its
-// snapshot and its period goes on chain; no customer data, no numbers.
+// publisher key, which only ever signs those instructions. Nothing about a product but a keyed hash of its id, the
+// fingerprint of its snapshot, its period and a commitment to the partner's co-signature goes on chain.
 
 export const SOURCE_FLAG = { unavailable: 0, sandbox: 1, partner_ledger: 2 } as const;
 export const KIND_SNAPSHOT = 0;
 export const KIND_MISSED = 1;
 export const ZERO_32 = new Uint8Array(32);
-export const ZERO_64 = new Uint8Array(64);
 
-// A product (or a pool of it) on chain: the sha256 of its id, never its name.
-export const subjectKey = (productId: string, poolId: string | null): Uint8Array => Uint8Array.from(createHash("sha256").update(`${productId}\u0000${poolId ?? ""}`).digest());
+// A product (or a pool of it) on chain: an HMAC under a key derived from Mynt's vault, so nobody can test a guessed
+// product id against the chain.
+export const subjectKey = (key: Uint8Array, productId: string, poolId: string | null): Uint8Array => Uint8Array.from(createHmac("sha256", key).update(`${productId}\u0000${poolId ?? ""}`).digest());
 
 export const configAddress = (programId: string) => findProgramAddress([Buffer.from("config")], programId)[0];
 export const headAddress = (programId: string, subject: Uint8Array) => findProgramAddress([Buffer.from("head"), subject], programId)[0];
@@ -43,14 +43,24 @@ export const DISCRIMINATORS = {
 const CONFIG_DISCRIMINATOR = anchorDiscriminator("account", "Config");
 const HEAD_DISCRIMINATOR = anchorDiscriminator("account", "Head");
 
+// What a licence provider signs: the domain, then the 32 bytes of the fingerprint, so a signature can't be replayed
+// from anything else the key signs.
+const COSIGN_DOMAIN = Buffer.from("mynt.product_health.cosign.v1\u0000", "utf8");
+export const cosignMessage = (fingerprint: Uint8Array) => Uint8Array.from(Buffer.concat([COSIGN_DOMAIN, Buffer.from(fingerprint)]));
+
+// What goes on chain in place of the partner's key and signature: nothing that links its products to each other.
+const COMMITMENT_DOMAIN = Buffer.from("mynt.product_health.partner_commitment.v1\u0000", "utf8");
+export function partnerCommitment(subject: Uint8Array, key: Uint8Array, signature: Uint8Array): Uint8Array {
+  return Uint8Array.from(createHash("sha256").update(COMMITMENT_DOMAIN).update(subject).update(key).update(signature).digest());
+}
+
 export interface SnapshotEntry {
   sequence: number;
   fingerprint: Uint8Array;
   period_start: number; // unix seconds
   period_end: number;
   source: keyof typeof SOURCE_FLAG;
-  partner_key: Uint8Array | null;
-  partner_signature: Uint8Array | null;
+  partner_commitment: Uint8Array | null;
 }
 export interface MissedEntry {
   sequence: number;
@@ -83,7 +93,7 @@ export const healthIx = {
     ix(
       programId,
       [meta(configAddress(programId), false, false), meta(headAddress(programId, subject), false, true), meta(publisher, true, false)],
-      concat(DISCRIMINATORS.record_snapshot, subject, u64le(e.sequence), e.fingerprint, i64le(e.period_start), i64le(e.period_end), u8(SOURCE_FLAG[e.source]), e.partner_key ?? ZERO_32, e.partner_signature ?? ZERO_64),
+      concat(DISCRIMINATORS.record_snapshot, subject, u64le(e.sequence), e.fingerprint, i64le(e.period_start), i64le(e.period_end), u8(SOURCE_FLAG[e.source]), e.partner_commitment ?? ZERO_32),
     ),
   recordMissed: (programId: string, publisher: string, subject: Uint8Array, e: MissedEntry) =>
     ix(
@@ -102,14 +112,13 @@ export interface HeadAccount {
   kind: number;
   source: number;
   partner_signed: boolean;
-  partner_key: Uint8Array;
-  partner_signature: Uint8Array;
+  partner_commitment: Uint8Array;
   chain: Uint8Array;
   mynt_signer: string;
   bump: number;
 }
 
-export const HEAD_SIZE = 8 + 32 + 8 + 32 + 8 + 8 + 1 + 1 + 1 + 32 + 64 + 32 + 32 + 1;
+export const HEAD_SIZE = 8 + 32 + 8 + 32 + 8 + 8 + 1 + 1 + 1 + 32 + 32 + 32 + 1;
 
 // An on-chain head account, as the program stored it. null: not a head account.
 export function decodeHead(data: Uint8Array): HeadAccount | null {
@@ -128,11 +137,10 @@ export function decodeHead(data: Uint8Array): HeadAccount | null {
   const kind = b[o++];
   const source = b[o++];
   const partner_signed = b[o++] === 1;
-  const partner_key = take(32);
-  const partner_signature = take(64);
+  const partner_commitment = take(32);
   const chain = take(32);
   const mynt_signer = base58Encode(take(32));
-  return { subject, sequence, fingerprint, period_start, period_end, kind, source, partner_signed, partner_key, partner_signature, chain, mynt_signer, bump: b[o] };
+  return { subject, sequence, fingerprint, period_start, period_end, kind, source, partner_signed, partner_commitment, chain, mynt_signer, bump: b[o] };
 }
 
 export function decodeConfigPublisher(data: Uint8Array): string | null {
@@ -140,9 +148,32 @@ export function decodeConfigPublisher(data: Uint8Array): string | null {
   return base58Encode(data.subarray(8, 40));
 }
 
-// The hash chain over every record, as the program computes it.
-export function nextChain(prev: Uint8Array, sequence: number, fingerprint: Uint8Array, kind: number): Uint8Array {
-  return Uint8Array.from(createHash("sha256").update(prev).update(u64le(sequence)).update(fingerprint).update(u8(kind)).digest());
+export interface ChainLink {
+  subject: Uint8Array;
+  sequence: number;
+  fingerprint: Uint8Array;
+  period_start: number;
+  period_end: number;
+  kind: number;
+  source: number;
+  partner_commitment: Uint8Array;
+}
+
+// The hash chain over every record, as the program computes it: everything a record says, so none of it can change.
+export function nextChain(prev: Uint8Array, l: ChainLink): Uint8Array {
+  return Uint8Array.from(
+    createHash("sha256")
+      .update(prev)
+      .update(l.subject)
+      .update(u64le(l.sequence))
+      .update(l.fingerprint)
+      .update(i64le(l.period_start))
+      .update(i64le(l.period_end))
+      .update(u8(l.kind))
+      .update(u8(l.source))
+      .update(l.partner_commitment)
+      .digest(),
+  );
 }
 
 // ---- the publisher key: it signs Mynt's health records and nothing else ----

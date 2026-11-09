@@ -63,7 +63,7 @@ export function registerProductHealthTools(server: McpServer, _store: Store, use
     "submit_partner_signature",
     {
       title: "Co-sign a product-health snapshot",
-      description: `Licence provider: co-sign a snapshot waiting for a signature (status pending_signature in list_product_health, within its window). Sign the 32 bytes of its fingerprint with Ed25519. A live product's snapshot counts as verified only when co-signed; one with no signature by the deadline is published as mynt_only, and says so. Schema: ${SCHEMA}.`,
+      description: `Licence provider: co-sign a snapshot waiting for a signature (status pending_signature in list_product_health, before its window closes), while your firm still sponsors the product. Sign, with Ed25519, the UTF-8 text 'mynt.product_health.cosign.v1', one zero byte, then the 32 bytes of its fingerprint. A live product's snapshot counts as verified only when co-signed; one with no signature by the deadline is published as mynt_only, and says so. Schema: ${SCHEMA}.`,
       inputSchema: {
         product_id: product,
         pool_id: pool,
@@ -72,5 +72,19 @@ export function registerProductHealthTools(server: McpServer, _store: Store, use
       },
     },
     async ({ product_id, pool_id, sequence, signature }) => attempt(() => health.submitSignature(user, product_id, pool_id ?? null, sequence, signature)),
+  );
+
+  if (!roles.includes("admin")) return;
+
+  server.registerTool(
+    "reanchor_product_health",
+    {
+      title: "Start a product's on-chain health record again",
+      description:
+        "Admin: after a chain reset or a move to a new program, start a product's on-chain health record again at sequence 1. Only for a record whose head no longer matches Mynt's (shown as stalled, chain_behind or chain_ahead in list_product_health): it's refused while the chain still matches. Earlier snapshots stay readable but are marked previous_chain, and the re-anchor stays visible as a gap to everyone who monitors the product.",
+      inputSchema: { product_id: product, pool_id: pool, reason: z.string().min(10).describe("What happened to the chain") },
+      annotations: { destructiveHint: true },
+    },
+    async ({ product_id, pool_id, reason }) => attempt(() => health.reanchor(user, product_id, pool_id ?? null, reason)),
   );
 }

@@ -540,9 +540,11 @@ export class SolanaService {
     return this.send(this.rpc("devnet"), publisher, ixs);
   }
 
-  // Devnet only: asks the faucet to keep the publisher able to pay fees and the rent of a new product's record.
-  async fundHealthPublisher(address: string, need: number) {
-    await this.fund(this.rpc("devnet"), "devnet", address, need);
+  // Devnet only: below the low-water mark, asks the faucet for enough to pay fees and new products' rent for a while.
+  async topUpHealthPublisher(address: string, low: number, high: number) {
+    const rpc = this.rpc("devnet");
+    const { value } = await rpc.call<{ value: number }>("getBalance", [address, { commitment: "confirmed" }]);
+    if (value < low) await this.fund(rpc, "devnet", address, high);
   }
 
   // One time, by the operator after deploying: the program's upgrade authority names the publisher.

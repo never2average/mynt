@@ -143,6 +143,19 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     solana.flagged_programs = (await db.query("SELECT id, program_id, db_version, created_at FROM financial_products.solana_program_flags WHERE status = 'open' ORDER BY created_at LIMIT 20")).rows;
   if (await exists("solana_mainnet_reviews"))
     solana.reviews_awaiting_approval = Number((await db.query("SELECT count(*)::int AS n FROM financial_products.solana_mainnet_reviews WHERE status = 'awaiting_approval'")).rows[0]?.n ?? 0);
+  // Product health: records that can't move on, snapshots overdue for the chain, and a worker that isn't running.
+  const productHealth: { stalled: unknown[]; overdue: number; sponsored_products: number; worker_last_ran: string | null } = { stalled: [], overdue: 0, sponsored_products: 0, worker_last_ran: null };
+  if (await exists("product_health_snapshots")) {
+    const s = "financial_products.product_health_snapshots";
+    productHealth.stalled = (await db.query(`SELECT product_id, pool_id, sequence, stalled_reason FROM ${s} WHERE stalled_reason IS NOT NULL ORDER BY created_at LIMIT 20`)).rows;
+    productHealth.overdue = Number(
+      (await db.query(`SELECT count(*)::int AS n FROM ${s} WHERE NOT on_chain AND publish_deadline < now() AND (status = 'ready' OR status = 'missed')`)).rows[0]?.n ?? 0,
+    );
+    if (await exists("sponsorships")) productHealth.sponsored_products = Number((await db.query("SELECT count(DISTINCT product_id)::int AS n FROM financial_products.sponsorships WHERE status = 'approved'")).rows[0]?.n ?? 0);
+    const tick = (await db.query("SELECT last_tick_at FROM financial_products.product_health_worker WHERE id = 'worker'")).rows[0]?.last_tick_at as string | Date | undefined;
+    productHealth.worker_last_ran = tick ? new Date(tick).toISOString() : null;
+  }
+  const workerIdle = productHealth.sponsored_products > 0 && (!productHealth.worker_last_ran || Date.now() - new Date(productHealth.worker_last_ran).getTime() > 60 * 60 * 1000);
   // A provider out of allowance stops everything that needs a machine: say so first, with what to do.
   const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
   const backups = await backupStatus(opts.backupStatusFile);
@@ -161,8 +174,11 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...backups.attention,
     ...(solana.flagged_programs.length ? [`solana: ${solana.flagged_programs.length} mainnet program(s) flagged by the vulnerability database; review with list_program_flags`] : []),
     ...(solana.reviews_awaiting_approval ? [`solana: ${solana.reviews_awaiting_approval} mainnet review(s) awaiting approval (list_mainnet_reviews)`] : []),
+    ...(productHealth.stalled.length ? [`product health: ${productHealth.stalled.length} record(s) stalled against the chain; see list_product_health, and reanchor_product_health after a chain reset`] : []),
+    ...(productHealth.overdue ? [`product health: ${productHealth.overdue} snapshot(s) past their deadline and not on chain; the RPC or the publisher's balance may be the cause`] : []),
+    ...(workerIdle ? [`product health: ${productHealth.sponsored_products} sponsored product(s), but the worker ${productHealth.worker_last_ran ? `last ran ${productHealth.worker_last_ran}` : "has never run"} (it needs PRODUCT_HEALTH_PROGRAM_ID and MYNT_VAULT_KEY)`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors, solana, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors, solana, product_health: productHealth, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

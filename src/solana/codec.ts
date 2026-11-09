@@ -145,6 +145,31 @@ export function isOnCurve(bytes: Uint8Array): boolean {
   return modPow(x2, (P - 1n) / 2n) === 1n;
 }
 
+// Whether 32 bytes encode a point of small order (or aren't a canonical point at all): a public key anyone can make a
+// signature "verify" against, for many messages. Multiplied by the cofactor 8, a small-order point becomes the identity.
+export function isWeakEd25519Key(bytes: Uint8Array): boolean {
+  if (bytes.length !== 32 || !isOnCurve(bytes)) return true;
+  const b = Uint8Array.from(bytes);
+  b[31] &= 0x7f;
+  let y = 0n;
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(b[i]);
+  if (y >= P) return true; // not canonical
+  const y2 = (y * y) % P;
+  const x2 = mod(mod(y2 - 1n) * modInv(mod(D * y2 + 1n)));
+  let x = modPow(x2, (P + 3n) / 8n);
+  if ((x * x) % P !== x2) x = (x * modPow(2n, (P - 1n) / 4n)) % P;
+  for (let i = 0; i < 3; i++) {
+    const xx = (x * x) % P;
+    const yy = (y * y) % P;
+    const dxy = (D * xx * yy) % P;
+    const nx = mod(2n * x * y * modInv(mod(1n + dxy)));
+    const ny = mod((yy + xx) * modInv(mod(1n - dxy)));
+    x = nx;
+    y = ny;
+  }
+  return x === 0n;
+}
+
 export function createProgramAddress(seeds: Uint8Array[], programId: string): string {
   const h = createHash("sha256");
   for (const s of seeds) {

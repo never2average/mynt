@@ -128,7 +128,7 @@ const openServices = async () => {
   const healthConfig = productHealthConfigFromEnv();
   const productHealth = await ProductHealthService.open(db, store, healthConfig, {
     chain: healthConfig.programId ? new SolanaHealthChain(solana, healthConfig.programId) : null,
-    flowsFor: await loadFlowsFor(),
+    flowsFor: await loadFlowsFor(store),
   });
   return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth };
 };

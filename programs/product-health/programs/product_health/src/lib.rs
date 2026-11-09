@@ -5,10 +5,18 @@ use solana_sha256_hasher::hashv;
 // program before it builds, and CI builds this file as it stands. It can never be deployed under this address.
 declare_id!("GLi9SM8q1Q8S1k5SFHWpZ7v9uWK9M5ZDxhd6ESjuSfVz");
 
-/// Mynt's tamper-evident record of each product's financial health. For every product (a `subject`: the sha256 of the
-/// product's id, never its name) one head account holds the newest sequence number, the fingerprint of the snapshot
-/// (a sha256; the numbers themselves never come on chain), its period, where its numbers came from, the licence
-/// provider's co-signature when there is one, and a hash chain over every earlier record. Each record emits an event.
+/// Mynt's tamper-evident record of each product's financial health. For every product (a `subject`: a keyed hash Mynt
+/// computes, so its id can't be guessed from it) one head account holds the newest sequence number, the fingerprint of
+/// the snapshot (a sha256; the numbers themselves never come on chain), its period, where its numbers came from, a
+/// per-product commitment to the licence provider's co-signature, and a hash chain over every earlier record. Each
+/// record emits an event.
+///
+/// The chain makes a change to a past record visible to anyone holding the records. It doesn't stop the program itself
+/// being replaced: whoever holds the upgrade authority can change it until it's frozen or put behind a timelock.
+///
+/// The program can't check the co-signature: `partner_signed` says only that the publisher supplied a non-zero
+/// commitment. Readers verify the signature itself against the licence provider's key and this commitment (Mynt does so
+/// in get_product_health). An on-chain Ed25519 check would have to publish the partner's key and link its products.
 ///
 /// It holds nothing and moves nothing: no token program is ever called, and no account here pays anyone. The publisher
 /// is whoever the program's own upgrade authority installed at initialisation; there's no hard-coded key.
@@ -42,24 +50,18 @@ pub mod product_health {
         period_start: i64,
         period_end: i64,
         source: u8,
-        partner_key: [u8; 32],
-        partner_signature: [u8; 64],
+        partner_commitment: [u8; 32],
     ) -> Result<()> {
         require!(fingerprint != [0u8; 32], HealthError::EmptyFingerprint);
         require!(source <= SOURCE_PARTNER, HealthError::UnknownSource);
-        let partner_signed = partner_signature != [0u8; 64];
-        require!(!partner_signed || partner_key != [0u8; 32], HealthError::SignatureWithoutKey);
         let publisher = ctx.accounts.publisher.key();
-        advance(&mut ctx.accounts.head, Entry { subject, sequence, fingerprint, period_start, period_end, kind: KIND_SNAPSHOT, source, partner_signed, partner_key, partner_signature, reason: 0, publisher })
+        advance(&mut ctx.accounts.head, Entry { subject, sequence, fingerprint, period_start, period_end, kind: KIND_SNAPSHOT, source, partner_commitment, reason: 0, publisher })
     }
 
     /// A period with no snapshot on chain: it takes its sequence number too, so a gap is recorded rather than hidden.
     pub fn record_missed(ctx: Context<Record>, subject: [u8; 32], sequence: u64, period_start: i64, period_end: i64, reason: u8) -> Result<()> {
         let publisher = ctx.accounts.publisher.key();
-        advance(
-            &mut ctx.accounts.head,
-            Entry { subject, sequence, fingerprint: [0u8; 32], period_start, period_end, kind: KIND_MISSED, source: SOURCE_NONE, partner_signed: false, partner_key: [0u8; 32], partner_signature: [0u8; 64], reason, publisher },
-        )
+        advance(&mut ctx.accounts.head, Entry { subject, sequence, fingerprint: [0u8; 32], period_start, period_end, kind: KIND_MISSED, source: SOURCE_NONE, partner_commitment: [0u8; 32], reason, publisher })
     }
 }
 
@@ -68,6 +70,8 @@ pub const SOURCE_SANDBOX: u8 = 1;
 pub const SOURCE_PARTNER: u8 = 2;
 pub const KIND_SNAPSHOT: u8 = 0;
 pub const KIND_MISSED: u8 = 1;
+/// A period may end at most this far (seconds) past the cluster's clock.
+pub const MAX_CLOCK_SKEW: i64 = 300;
 
 struct Entry {
     subject: [u8; 32],
@@ -77,9 +81,7 @@ struct Entry {
     period_end: i64,
     kind: u8,
     source: u8,
-    partner_signed: bool,
-    partner_key: [u8; 32],
-    partner_signature: [u8; 64],
+    partner_commitment: [u8; 32],
     reason: u8,
     publisher: Pubkey,
 }
@@ -87,20 +89,39 @@ struct Entry {
 fn advance(head: &mut Head, e: Entry) -> Result<()> {
     let next = head.sequence.checked_add(1).ok_or(HealthError::SequenceOverflow)?;
     require!(e.sequence == next, HealthError::SequenceNotNext);
+    require!(e.subject == head.subject, HealthError::WrongSubject);
     require!(e.period_end > e.period_start, HealthError::EmptyPeriod);
-    require!(e.period_start >= head.period_end, HealthError::PeriodOverlaps);
+    if head.sequence > 0 {
+        require!(e.period_start == head.period_end, HealthError::PeriodNotContiguous);
+    }
+    let latest = Clock::get()?.unix_timestamp.checked_add(MAX_CLOCK_SKEW).ok_or(HealthError::PeriodInFuture)?;
+    require!(e.period_end <= latest, HealthError::PeriodInFuture);
     let sequence_bytes = e.sequence.to_le_bytes();
+    let start_bytes = e.period_start.to_le_bytes();
+    let end_bytes = e.period_end.to_le_bytes();
     let kind_bytes = [e.kind];
-    let chain = hashv(&[&head.chain[..], &sequence_bytes[..], &e.fingerprint[..], &kind_bytes[..]]).to_bytes();
+    let source_bytes = [e.source];
+    let chain = hashv(&[
+        &head.chain[..],
+        &e.subject[..],
+        &sequence_bytes[..],
+        &e.fingerprint[..],
+        &start_bytes[..],
+        &end_bytes[..],
+        &kind_bytes[..],
+        &source_bytes[..],
+        &e.partner_commitment[..],
+    ])
+    .to_bytes();
+    let partner_signed = e.partner_commitment != [0u8; 32];
     head.sequence = e.sequence;
     head.fingerprint = e.fingerprint;
     head.period_start = e.period_start;
     head.period_end = e.period_end;
     head.kind = e.kind;
     head.source = e.source;
-    head.partner_signed = e.partner_signed;
-    head.partner_key = e.partner_key;
-    head.partner_signature = e.partner_signature;
+    head.partner_signed = partner_signed;
+    head.partner_commitment = e.partner_commitment;
     head.chain = chain;
     head.mynt_signer = e.publisher;
     emit!(SnapshotRecorded {
@@ -111,9 +132,8 @@ fn advance(head: &mut Head, e: Entry) -> Result<()> {
         period_start: e.period_start,
         period_end: e.period_end,
         source: e.source,
-        partner_signed: e.partner_signed,
-        partner_key: e.partner_key,
-        partner_signature: e.partner_signature,
+        partner_signed,
+        partner_commitment: e.partner_commitment,
         reason: e.reason,
         chain,
         publisher: e.publisher,
@@ -175,8 +195,7 @@ pub struct Head {
     pub kind: u8,
     pub source: u8,
     pub partner_signed: bool,
-    pub partner_key: [u8; 32],
-    pub partner_signature: [u8; 64],
+    pub partner_commitment: [u8; 32],
     pub chain: [u8; 32],
     pub mynt_signer: Pubkey,
     pub bump: u8,
@@ -192,8 +211,7 @@ pub struct SnapshotRecorded {
     pub period_end: i64,
     pub source: u8,
     pub partner_signed: bool,
-    pub partner_key: [u8; 32],
-    pub partner_signature: [u8; 64],
+    pub partner_commitment: [u8; 32],
     pub reason: u8,
     pub chain: [u8; 32],
     pub publisher: Pubkey,
@@ -211,14 +229,16 @@ pub enum HealthError {
     SequenceNotNext,
     #[msg("The sequence number can't grow any further")]
     SequenceOverflow,
+    #[msg("That record is for another subject")]
+    WrongSubject,
     #[msg("A period must end after it starts")]
     EmptyPeriod,
-    #[msg("A period can't start before the last one ended")]
-    PeriodOverlaps,
+    #[msg("A period must start exactly where the last one ended")]
+    PeriodNotContiguous,
+    #[msg("A period can't end in the future")]
+    PeriodInFuture,
     #[msg("A snapshot needs a fingerprint")]
     EmptyFingerprint,
     #[msg("Unknown source flag")]
     UnknownSource,
-    #[msg("A partner signature needs the key that made it")]
-    SignatureWithoutKey,
 }
