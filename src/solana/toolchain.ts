@@ -324,7 +324,7 @@ try:
                 cache[os.path.basename(m.name)[: -len(".crate")]] = t.extractfile(m).read()
 except Exception:
     pass
-problems, entries, sources, total = [], [], {}, 0
+problems, entries, sources, total, over = [], [], {}, 0, False
 for p in packages:
     name, version, source, checksum = p.get("name"), p.get("version"), p.get("source"), p.get("checksum")
     e = {"name": name, "version": version, "source": source, "checksum": checksum, "allowlisted": name in allowed}
@@ -336,17 +336,19 @@ for p in packages:
             e["crate_sha256"] = hashlib.sha256(data).hexdigest()
             if checksum and e["crate_sha256"] != checksum:
                 problems.append(f"{name} {version}: the downloaded crate doesn't match Cargo.lock's checksum")
-            if name not in allowed:
+            if name not in allowed and not over:
                 files = {}
                 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as c:
                     for m in c.getmembers():
                         if m.isfile() and (m.name.endswith(".rs") or os.path.basename(m.name) == "Cargo.toml"):
                             total += m.size
                             if total > limit:
-                                problems.append("the source of the crates not on the allowlist is over the capture limit")
+                                over = True
+                                problems.append(f"the source of the crates not on the allowlist is over the capture limit (at {name} {version})")
                                 break
                             files[m.name.split("/", 1)[1] if "/" in m.name else m.name] = c.extractfile(m).read().decode("utf-8", "replace")
-                sources[f"{name}@{version}"] = files
+                if not over:
+                    sources[f"{name}@{version}"] = files
     entries.append(e)
 json.dump({"packages": entries, "sources": sources, "complete": not problems and bool(packages), "problems": problems[:50], "lock": open(lock, encoding="utf-8", errors="replace").read() if os.path.isfile(lock) else None}, open(out, "w"), sort_keys=True)
 PY

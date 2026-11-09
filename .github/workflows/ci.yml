@@ -91,9 +91,9 @@ jobs:
               assert f in files, (f, sorted(files))
           assert not any(f.startswith(("target/", "node_modules/", ".anchor/")) for f in list(files) + list(bundle["binary"])), sorted(files)
           deps = json.load(open(f"{tmp}/out/{prog['deps']}"))
-          assert deps["complete"], deps["problems"]
           off = sorted({p["name"] for p in deps["packages"] if p.get("source") and not p["allowlisted"]})
-          print("crates in the template's Cargo.lock:", len(deps["packages"]), "| off the allowlist:", off)
+          print("crates in the template's Cargo.lock:", len(deps["packages"]), "| off the allowlist:", json.dumps(off))
+          assert deps["complete"], deps["problems"]
           assert not off, f"add the template's crates to schemas/solana-crate-allowlist.json after review: {off}"
           assert all(p.get("crate_sha256") == p.get("checksum") for p in deps["packages"] if p.get("source")), "checksums"
           idl = json.load(open(f"{tmp}/out/{prog['idl']}"))
