@@ -81,7 +81,11 @@ export async function emitEvent(store: Store, appIds: string[], type: WebhookEve
 // it settled after Mynt had ended the run (to handle by hand); ramp_link.requested: to the Mynt Ramp firm, a
 // customer asked to be linked to the ramp partner (link_ramp_partner_customer).
 // program.deployed, program.upgraded, program.event: the firm's Solana programs (src/solana/), deployed or upgraded by
-// Mynt, and each Anchor event they emit. Developer-side data only; customers never see it.
+// Mynt, and each Anchor event they emit. program.upgrade_scheduled, program.upgrade_cancelled: a mainnet upgrade
+// passed the mainnet program gate and is announced before its timelock ends, or was cancelled or rejected.
+// program.review_flagged: a new vulnerability database version refuses a deployed mainnet program (it keeps
+// running; its upgrades wait for an admin's review).
+// Developer-side data only; customers never see it.
 export const FIRM_WEBHOOK_EVENTS = [
   "vendor_action.completed",
   "vendor_action.failed",
@@ -91,6 +95,9 @@ export const FIRM_WEBHOOK_EVENTS = [
   "program.deployed",
   "program.upgraded",
   "program.event",
+  "program.upgrade_scheduled",
+  "program.upgrade_cancelled",
+  "program.review_flagged",
 ] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 

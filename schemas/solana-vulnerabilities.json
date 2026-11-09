@@ -1,0 +1,1286 @@
+{
+  "version": 1,
+  "updated": "2026-11-09",
+  "description": "Mynt's Solana vulnerability database: one entry per vulnerability class. Entries with gate 'block' refuse a program on mainnet when a deterministic detection finds them; 'flag' entries are leads the audit agent must confirm or dismiss. Every detection that Mynt runs itself (source_pattern, idl_shape, bytecode_program_ref, dependency_advisory) is tested against the entry's bad and good fixtures. The audit and red-team agents get the whole database as their checklist. Changes land only by a reviewed pull request; propose_vulnerability_rule stores proposals for that review.",
+  "entries": [
+    {
+      "id": "RUG-TOKEN-CPI",
+      "title": "Value moved through the token programs",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "The program holds or moves tokens: it uses the SPL Token, Token-2022 or Associated Token programs (token accounts, transfers, mints, burns, approvals). Mynt refuses value-moving programs on mainnet for now: a program that controls token accounts can drain them.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(anchor_spl\\s*::\\s*(?:token_interface|token_2022|token|associated_token)|spl_token_2022|spl_token|spl_associated_token_account)\\b",
+          "message": "uses $1: token accounts and token CPIs aren't allowed on mainnet yet"
+        },
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(?:token|token_interface|token_2022)\\s*::\\s*(transfer_checked|transfer|mint_to|burn|approve|set_authority|close_account)\\s*\\(",
+          "message": "calls the token program's $1 (a CPI that moves or controls tokens)"
+        },
+        {
+          "type": "idl_shape",
+          "builtin": "token_program_account"
+        },
+        {
+          "type": "bytecode_program_ref",
+          "program_ids": [
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+          ]
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Move tokens out of a token account the program controls without its owner's signature."
+        }
+      ],
+      "references": [
+        {
+          "title": "SPL Token program",
+          "url": "https://spl.solana.com/token"
+        },
+        {
+          "title": "Token-2022 program",
+          "url": "https://github.com/solana-program/token-2022"
+        },
+        {
+          "title": "Halborn: explained, the Cashio hack (March 2022)",
+          "url": "https://www.halborn.com/blog/post/explained-the-cashio-hack-march-2022"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-programs/token_vault",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "RUG-SYSTEM-TRANSFER",
+      "title": "SOL moved by system-program transfers or assigns",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "The program transfers SOL or reassigns accounts through the System Program, often signing with its own PDAs (invoke_signed / CpiContext::new_with_signer), so it can move lamports out of accounts it controls.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(system_program\\s*::\\s*(?:transfer|assign)\\b|system_instruction\\s*::\\s*(?:transfer_with_seed|transfer_many|transfer|assign_with_seed|assign)\\b|SystemInstruction\\s*::\\s*(?:TransferWithSeed|Transfer|AssignWithSeed|Assign)\\b|system_program\\s*::\\s*(?:Transfer|Assign)\\s*\\{)",
+          "message": "$1: a system-program transfer or assign"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Drain SOL from a PDA the program signs for, or reassign an account's owner."
+        }
+      ],
+      "references": [
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/RUG-SYSTEM-TRANSFER/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "RUG-LAMPORT-DRAIN",
+      "title": "Lamports moved by hand between accounts",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "The program edits account lamports directly (sub_lamports, add_lamports, lamports.borrow_mut()): a hand-written close or drain that can empty accounts it owns.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(\\.\\s*(?:sub_lamports|add_lamports)\\s*\\(|\\.lamports\\s*\\.\\s*borrow_mut\\s*\\(|\\btry_borrow_mut_lamports\\s*\\(|\\bset_lamports\\s*\\()",
+          "message": "$1: moves lamports directly between accounts"
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: closing accounts",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/9-closing-accounts"
+        },
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/RUG-LAMPORT-DRAIN/bad",
+        "good": "test/fixtures/solana-vulns/RUG-LAMPORT-DRAIN/good"
+      }
+    },
+    {
+      "id": "RUG-HARDCODED-ADMIN",
+      "title": "Hard-coded admin key",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "An instruction authorizes against a key written into the program (pubkey!, Pubkey::from_str, a const, an address = constraint), or the IDL pins a signer to a fixed address: a hidden admin that can act on everyone's accounts. Allowed only for Mynt's own mainnet signer, which no program should need.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "hardcoded_admin"
+        },
+        {
+          "type": "idl_shape",
+          "builtin": "pinned_signer"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Act on another user's state with the program's admin path."
+        }
+      ],
+      "references": [
+        {
+          "title": "rekt.news: Raydium (a compromised admin key drained pools)",
+          "url": "https://rekt.news/raydium-rekt/"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-programs/hidden_admin",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "RUG-AUTHORITY-ARBITRARY",
+      "title": "Authority handed to an account that doesn't sign",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "An instruction sets an authority, admin or owner field to an argument or to an account that doesn't sign the instruction: authority can be handed (or taken) without the new holder's consent. This is also a one-step authority transfer: the safe pattern is a pending authority that must sign an accept step.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "authority_to_non_signer"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Take over a victim's state by setting its authority field."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: account data matching",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/1-account-data-matching"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/RUG-AUTHORITY-ARBITRARY/bad",
+        "good": "test/fixtures/solana-vulns/RUG-AUTHORITY-ARBITRARY/good"
+      },
+      "also_covers": [
+        "access_control: one-step authority transfer (no accept step)"
+      ]
+    },
+    {
+      "id": "RUG-CLOSE-NON-SIGNER",
+      "title": "Account close pays a non-signer",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "An Anchor close = target sends the closed account's lamports to an account that doesn't sign the instruction (or to a fixed address).",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "close_to_non_signer"
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: closing accounts",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/9-closing-accounts"
+        },
+        {
+          "title": "Anchor: account constraints",
+          "url": "https://www.anchor-lang.com/docs/references/account-constraints"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-programs/lamport_drain",
+        "good": "test/fixtures/solana-vulns/RUG-LAMPORT-DRAIN/good"
+      }
+    },
+    {
+      "id": "RUG-MINT-FREEZE-AUTHORITY",
+      "title": "Retained mint or freeze authority",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "The program creates or controls a mint whose mint or freeze authority it keeps (or an admin keeps): supply can be inflated or holders' accounts frozen.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(\\bmint\\s*::\\s*(?:authority|freeze_authority)\\s*=|\\bAuthorityType\\s*::\\s*(?:MintTokens|FreezeAccount)\\b|\\bfreeze_account\\s*\\(|\\bmint_to\\s*\\()",
+          "message": "$1: keeps the power to mint or freeze"
+        }
+      ],
+      "references": [
+        {
+          "title": "SPL Token program",
+          "url": "https://spl.solana.com/token"
+        },
+        {
+          "title": "rekt.news: Nirvana Finance",
+          "url": "https://rekt.news/nirvana-rekt/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/RUG-MINT-FREEZE-AUTHORITY/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "RUG-TOKEN2022-EXTENSIONS",
+      "title": "Token-2022 permanent delegate or transfer hook",
+      "severity": "critical",
+      "category": "rug_pull",
+      "gate": "block",
+      "description": "The program sets up or relies on Token-2022's permanent delegate (which can move or burn anyone's tokens of the mint) or a transfer hook (arbitrary code on every transfer).",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(permanent_delegate\\w*|PermanentDelegate|transfer_hook\\w*|TransferHook\\w*)\\b",
+          "message": "$1: a Token-2022 extension that lets one party move others' tokens or run code on every transfer"
+        },
+        {
+          "type": "bytecode_program_ref",
+          "program_ids": [
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+          ]
+        }
+      ],
+      "references": [
+        {
+          "title": "Token-2022: the permanent delegate extension",
+          "url": "https://github.com/solana-program/token-2022/blob/main/program/src/extension/permanent_delegate.rs"
+        },
+        {
+          "title": "Token-2022 program",
+          "url": "https://github.com/solana-program/token-2022"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/RUG-TOKEN2022-EXTENSIONS/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "AC-MISSING-SIGNER",
+      "title": "Authority account that isn't required to sign",
+      "severity": "critical",
+      "category": "access_control",
+      "gate": "flag",
+      "description": "An accounts struct takes an authority, admin or owner as a plain AccountInfo or UncheckedAccount without a signer constraint: anyone can pass the real authority's address without its signature.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "authority_not_signer"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Call an authority-gated instruction passing the victim's authority address without its signature."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: signer authorization",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/0-signer-authorization"
+        },
+        {
+          "title": "building-secure-contracts: signer check",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/signer_check"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AC-MISSING-SIGNER/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "AC-MISSING-OWNER",
+      "title": "Account data read without an owner check",
+      "severity": "high",
+      "category": "access_control",
+      "gate": "flag",
+      "description": "The program deserializes an AccountInfo's data by hand without checking which program owns the account: an attacker passes an account they created with forged data.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(?:try_from_slice|deserialize)\\s*\\(\\s*&(?:mut\\s*&)?\\s*(?:\\*\\s*)?[\\w.]*\\.(?:data\\s*\\.\\s*borrow|try_borrow_data)\\s*\\(",
+          "message": "deserializes an account's data without checking its owner",
+          "unless": "\\.owner\\s*(?:==|!=)|\\bowner\\s*="
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Pass an account with forged data, owned by another program."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: owner checks",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/2-owner-checks"
+        },
+        {
+          "title": "building-secure-contracts: ownership check",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/ownership_check"
+        },
+        {
+          "title": "Halborn: explained, the Crema Finance hack (July 2022)",
+          "url": "https://www.halborn.com/blog/post/explained-the-crema-finance-hack-july-2022"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AC-MISSING-OWNER/bad",
+        "good": "test/fixtures/solana-vulns/AC-MISSING-OWNER/good"
+      }
+    },
+    {
+      "id": "AC-HAS-ONE",
+      "title": "Stored authority not matched to the signer",
+      "severity": "critical",
+      "category": "access_control",
+      "gate": "flag",
+      "description": "An instruction takes a signer and a mutable account whose data records an authority of the same name, but never checks they match (no has_one, constraint or comparison): any signer can act on anyone's account.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "missing_has_one"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Sign with your own key and pass the victim's account."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: account data matching",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/1-account-data-matching"
+        },
+        {
+          "title": "Anchor: account constraints",
+          "url": "https://www.anchor-lang.com/docs/references/account-constraints"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AC-HAS-ONE/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "AC-REMAINING-ACCOUNTS",
+      "title": "remaining_accounts used without checks",
+      "severity": "high",
+      "category": "access_control",
+      "gate": "flag",
+      "description": "The program reads ctx.remaining_accounts, which Anchor never validates, without checking their owners or addresses.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\bremaining_accounts\\b",
+          "message": "uses ctx.remaining_accounts with no owner or address check in the file",
+          "unless": "\\.owner\\s*(?:==|!=)|require_keys_eq|key\\s*\\(\\s*\\)\\s*(?:==|!=)|Account\\s*::\\s*<[^>]*>\\s*::\\s*try_from"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Pass arbitrary accounts as remaining accounts."
+        }
+      ],
+      "references": [
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        },
+        {
+          "title": "Anchor: account constraints",
+          "url": "https://www.anchor-lang.com/docs/references/account-constraints"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AC-REMAINING-ACCOUNTS/bad",
+        "good": "test/fixtures/solana-vulns/AC-REMAINING-ACCOUNTS/good"
+      }
+    },
+    {
+      "id": "AV-TYPE-COSPLAY",
+      "title": "Account type not checked (type cosplay)",
+      "severity": "high",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "The program deserializes account data without checking its discriminator, so an account of one type can be passed as another.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(try_deserialize_unchecked|try_from_unchecked|try_from_slice)\\s*\\(",
+          "message": "$1: deserializes without checking the account's type",
+          "unless": "DISCRIMINATOR|discriminator|account_type"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Pass an account of another type with the same layout."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: type cosplay",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/3-type-cosplay"
+        },
+        {
+          "title": "Halborn: explained, the Cashio hack (March 2022)",
+          "url": "https://www.halborn.com/blog/post/explained-the-cashio-hack-march-2022"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AC-MISSING-OWNER/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "AV-BUMP-CANONICAL",
+      "title": "PDA without the canonical bump",
+      "severity": "high",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "The program derives a PDA with create_program_address and a bump it doesn't derive itself, so several addresses (one per bump) pass for the same seeds.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\bcreate_program_address\\s*\\(",
+          "message": "create_program_address: the bump isn't the canonical one from find_program_address"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Derive the PDA with a non-canonical bump and pass it."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: bump seed canonicalization",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/7-bump-seed-canonicalization"
+        },
+        {
+          "title": "building-secure-contracts: improper PDA validation",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/improper_pda_validation"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AV-BUMP-CANONICAL/bad",
+        "good": "test/fixtures/solana-vulns/AV-BUMP-CANONICAL/good"
+      }
+    },
+    {
+      "id": "AV-SEED-COLLISION",
+      "title": "PDA seeds without a fixed prefix (seed collision, PDA sharing)",
+      "severity": "medium",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "A PDA's seeds are a single caller-chosen value with no fixed prefix, so PDAs of different kinds, or of different users, can collide or be shared.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "seeds\\s*=\\s*\\[\\s*[a-z_][\\w.]*(?:\\s*\\(\\s*\\))?\\s*\\.\\s*(?:as_bytes|as_ref)\\s*\\(\\s*\\)\\s*\\]",
+          "message": "PDA seeds are one caller-chosen value with no fixed prefix"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Create a PDA of one kind whose address another instruction accepts as a different kind."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: PDA sharing",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/8-pda-sharing"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AV-SEED-COLLISION/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "AV-DUPLICATE-MUT",
+      "title": "Duplicate mutable accounts",
+      "severity": "high",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "An instruction takes two mutable accounts of the same type without requiring them to differ, so passing the same account twice can double-count or overwrite state.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "duplicate_mutable"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Pass the same account for both mutable slots."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: duplicate mutable accounts",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/6-duplicate-mutable-accounts"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AV-DUPLICATE-MUT/bad",
+        "good": "test/fixtures/solana-vulns/AV-DUPLICATE-MUT/good"
+      }
+    },
+    {
+      "id": "AV-SYSVAR-UNCHECKED",
+      "title": "Sysvar account address not checked",
+      "severity": "high",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "The program reads a sysvar from an account the caller passes (Clock::from_account_info and the like) without checking its address, so a fake sysvar can be supplied.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(?:Clock|Rent|EpochSchedule|SlotHashes|Instructions|Fees)\\s*::\\s*from_account_info\\s*\\(",
+          "message": "reads a sysvar from a caller-supplied account without checking its address",
+          "unless": "address\\s*=\\s*(?:\\w+\\s*::\\s*)*sysvar|check_id\\s*\\(|Sysvar\\s*<"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Pass a fake sysvar account."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: sysvar address checking",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/10-sysvar-address-checking"
+        },
+        {
+          "title": "building-secure-contracts: sysvar account check",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/sysvar_account_check"
+        },
+        {
+          "title": "Halborn: explained, the Wormhole hack (February 2022)",
+          "url": "https://www.halborn.com/blog/post/explained-the-wormhole-hack-february-2022"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AV-SYSVAR-UNCHECKED/bad",
+        "good": "test/fixtures/solana-vulns/AV-SYSVAR-UNCHECKED/good"
+      }
+    },
+    {
+      "id": "AV-INIT-FRONTRUN",
+      "title": "Re-initialization or front-run initialization (init_if_needed)",
+      "severity": "medium",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "init_if_needed lets an instruction run on an account that already exists, and an initialization anyone can call first lets an attacker set up the account (or a singleton config) before its owner does.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\binit_if_needed\\b",
+          "message": "init_if_needed: the instruction also runs on an existing account; check it can't be re-initialized or initialized by someone else first"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Initialize the victim's account (or the program's config) first, or re-initialize it."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: initialization",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/4-initialization"
+        },
+        {
+          "title": "Anchor: account constraints",
+          "url": "https://www.anchor-lang.com/docs/references/account-constraints"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AV-INIT-FRONTRUN/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      },
+      "also_covers": [
+        "account_validation: uninitialized accounts"
+      ]
+    },
+    {
+      "id": "AV-CLOSE-REVIVE",
+      "title": "Closed account that can be revived",
+      "severity": "high",
+      "category": "account_validation",
+      "gate": "flag",
+      "description": "An account is closed by zeroing its lamports by hand without clearing its data or marking it closed, so it can be refunded within the same transaction and used again.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(lamports\\s*\\.\\s*borrow_mut\\s*\\(\\s*\\)\\s*=\\s*0|\\bset_lamports\\s*\\(\\s*0\\s*\\))",
+          "message": "closes an account by hand without wiping it",
+          "unless": "CLOSED_ACCOUNT_DISCRIMINATOR|fill\\s*\\(\\s*0\\s*\\)"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Close an account and refund it in the same transaction, then use it again."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: closing accounts",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/9-closing-accounts"
+        },
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AV-CLOSE-REVIVE/bad",
+        "good": "test/fixtures/solana-vulns/RUG-LAMPORT-DRAIN/good"
+      }
+    },
+    {
+      "id": "CPI-ARBITRARY",
+      "title": "Arbitrary CPI: the called program isn't checked",
+      "severity": "critical",
+      "category": "cpi",
+      "gate": "flag",
+      "description": "The program invokes a program passed in by the caller (an AccountInfo or UncheckedAccount named as a program) without checking its id, so an attacker substitutes their own program.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "unchecked_program_account"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Substitute your own program for the one the instruction calls."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: arbitrary CPI",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/5-arbitrary-cpi"
+        },
+        {
+          "title": "building-secure-contracts: arbitrary CPI",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/arbitrary_cpi"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/CPI-ARBITRARY/bad",
+        "good": "test/fixtures/solana-vulns/CPI-ARBITRARY/good"
+      }
+    },
+    {
+      "id": "CPI-SIGNER-PRIVILEGE",
+      "title": "Signer privileges passed to an unchecked program",
+      "severity": "critical",
+      "category": "cpi",
+      "gate": "flag",
+      "description": "The program signs a CPI with its PDAs (invoke_signed / new_with_signer) in a file whose instructions take the called program from the caller: the PDA's authority can be handed to an attacker's program.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "signed_cpi_to_unchecked_program"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Make the program sign for its PDA in a call to your program."
+        }
+      ],
+      "references": [
+        {
+          "title": "Sealevel attacks: arbitrary CPI",
+          "url": "https://github.com/coral-xyz/sealevel-attacks/tree/master/programs/5-arbitrary-cpi"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/CPI-SIGNER-PRIVILEGE/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "CPI-STALE-RELOAD",
+      "title": "Account data used after a CPI without reload",
+      "severity": "medium",
+      "category": "cpi",
+      "gate": "flag",
+      "description": "After a CPI that can change an account, the instruction reads the account's deserialized fields without calling reload(), so it acts on stale data.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "no_reload_after_cpi"
+        }
+      ],
+      "references": [
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        },
+        {
+          "title": "Anchor: Account::reload",
+          "url": "https://www.anchor-lang.com/docs/references/account-constraints"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/CPI-STALE-RELOAD/bad",
+        "good": "test/fixtures/solana-vulns/CPI-STALE-RELOAD/good"
+      }
+    },
+    {
+      "id": "SIG-UNCHECKED-SYSVAR-LOAD",
+      "title": "Instructions sysvar read without checking it (Wormhole)",
+      "severity": "critical",
+      "category": "signatures",
+      "gate": "block",
+      "description": "load_instruction_at reads instructions from whatever account is passed as the instructions sysvar; it is deprecated because it doesn't check the account. Wormhole lost $326M to a fake sysvar that 'proved' signatures were verified.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\bload_instruction_at\\s*\\(",
+          "message": "load_instruction_at: reads the instructions sysvar without checking its address (use load_instruction_at_checked)"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Pass a fake instructions sysvar that claims a signature check happened."
+        }
+      ],
+      "references": [
+        {
+          "title": "Halborn: explained, the Wormhole hack (February 2022)",
+          "url": "https://www.halborn.com/blog/post/explained-the-wormhole-hack-february-2022"
+        },
+        {
+          "title": "rekt.news: Wormhole",
+          "url": "https://rekt.news/wormhole-rekt/"
+        },
+        {
+          "title": "solana_program::sysvar::instructions::load_instruction_at (deprecated: doesn't check the sysvar)",
+          "url": "https://docs.rs/solana-program/latest/solana_program/sysvar/instructions/fn.load_instruction_at.html"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/SIG-UNCHECKED-SYSVAR-LOAD/bad",
+        "good": "test/fixtures/solana-vulns/SIG-UNCHECKED-SYSVAR-LOAD/good"
+      }
+    },
+    {
+      "id": "SIG-INTROSPECTION-PROGRAM-ID",
+      "title": "Instruction introspection that checks only the index",
+      "severity": "high",
+      "category": "signatures",
+      "gate": "flag",
+      "description": "The program inspects another instruction in the transaction (load_instruction_at_checked, get_instruction_relative) but never checks that instruction's program id, so any program's instruction at that index passes.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(?:load_instruction_at_checked|get_instruction_relative)\\s*\\(",
+          "message": "introspects an instruction without checking its program id",
+          "unless": "program_id\\s*(?:==|!=)|check_id\\s*\\(|require_keys_eq\\s*!\\s*\\([^;]*program_id"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Put a look-alike instruction from your own program at the index the program inspects."
+        }
+      ],
+      "references": [
+        {
+          "title": "building-secure-contracts: improper instruction introspection",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/improper_instruction_introspection"
+        },
+        {
+          "title": "Halborn: explained, the Wormhole hack (February 2022)",
+          "url": "https://www.halborn.com/blog/post/explained-the-wormhole-hack-february-2022"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/SIG-INTROSPECTION-PROGRAM-ID/bad",
+        "good": "test/fixtures/solana-vulns/SIG-UNCHECKED-SYSVAR-LOAD/good"
+      }
+    },
+    {
+      "id": "SIG-REPLAY-NONCE",
+      "title": "Signed message without a nonce or expiry (signature replay)",
+      "severity": "high",
+      "category": "signatures",
+      "gate": "flag",
+      "description": "The program accepts an Ed25519 or secp256k1 signature checked through the instructions sysvar, but nothing in the file looks like a nonce, an expiry or a record of used signatures, so the same signed message can be replayed.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(ed25519_program|Ed25519SigVerify|secp256k1_program|secp256k1_recover|Secp256k1\\w*)\\b",
+          "message": "$1: a signed message with no nonce, expiry or used-signature record in the file",
+          "unless": "nonce|expir|deadline|valid_until|used_signature|replay",
+          "flags": "i"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Submit the same signed message twice."
+        }
+      ],
+      "references": [
+        {
+          "title": "solana_program::ed25519_program",
+          "url": "https://docs.rs/solana-program/latest/solana_program/ed25519_program/index.html"
+        },
+        {
+          "title": "building-secure-contracts: improper instruction introspection",
+          "url": "https://github.com/crytic/building-secure-contracts/tree/master/not-so-smart-contracts/solana/improper_instruction_introspection"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/SIG-REPLAY-NONCE/bad",
+        "good": "test/fixtures/solana-vulns/SIG-REPLAY-NONCE/good"
+      }
+    },
+    {
+      "id": "SIG-DOMAIN-SEPARATION",
+      "title": "Signed message not bound to this program or cluster (cross-program / cross-cluster replay)",
+      "severity": "high",
+      "category": "signatures",
+      "gate": "flag",
+      "description": "The program verifies an off-chain signed message, but nothing in the file binds the message to this program's id or to a cluster, so a signature made for another program, or for devnet, can be replayed here.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(ed25519_program|Ed25519SigVerify|secp256k1_program|secp256k1_recover|Secp256k1\\w*)\\b",
+          "message": "$1: a signed message with no program id or cluster in it",
+          "unless": "crate\\s*::\\s*ID|program_id\\s*\\.\\s*as_ref|ID\\s*\\.\\s*(?:as_ref|to_bytes)|genesis|domain"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Replay a signature made for another program or another cluster."
+        }
+      ],
+      "references": [
+        {
+          "title": "solana_program::ed25519_program",
+          "url": "https://docs.rs/solana-program/latest/solana_program/ed25519_program/index.html"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/SIG-DOMAIN-SEPARATION/bad",
+        "good": "test/fixtures/solana-vulns/SIG-REPLAY-NONCE/good"
+      },
+      "also_covers": [
+        "signatures: missing replay protection on off-chain signed messages"
+      ]
+    },
+    {
+      "id": "AR-OVERFLOW",
+      "title": "Integer overflow or underflow",
+      "severity": "high",
+      "category": "arithmetic",
+      "gate": "flag",
+      "description": "Release builds wrap on overflow unless overflow-checks is on; wrapping_* / unchecked_* / overflowing_* arithmetic wraps silently either way.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "absent": "overflow-checks\\s*=\\s*true",
+          "files": "(^|/)Cargo\\.toml$",
+          "message": "no Cargo.toml turns overflow-checks on for release builds"
+        },
+        {
+          "type": "source_pattern",
+          "pattern": "\\b((?:wrapping|unchecked|overflowing)_(?:add|sub|mul|pow|neg))\\s*\\(",
+          "message": "$1: arithmetic that wraps silently"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Drive a counter or balance past its bounds."
+        }
+      ],
+      "references": [
+        {
+          "title": "Cargo: profiles (overflow-checks)",
+          "url": "https://doc.rust-lang.org/cargo/reference/profiles.html"
+        },
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AR-OVERFLOW/bad",
+        "good": "test/fixtures/solana-vulns/AR-OVERFLOW/good"
+      }
+    },
+    {
+      "id": "AR-PRECISION",
+      "title": "Precision loss and rounding direction",
+      "severity": "medium",
+      "category": "arithmetic",
+      "gate": "flag",
+      "description": "Floating point, or integer division before multiplication, loses precision; rounding in the user's favour can be repeated to drain value.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(\\bf32\\b|\\bf64\\b|\\b[\\w.]+\\s*/\\s*[\\w.]+\\s*\\)?\\s*\\*\\s*[\\w.(])",
+          "message": "$1: floating point or division before multiplication"
+        }
+      ],
+      "references": [
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        },
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AR-PRECISION/bad",
+        "good": "test/fixtures/solana-vulns/AR-PRECISION/good"
+      }
+    },
+    {
+      "id": "AR-DIV-ZERO",
+      "title": "Division by a value that can be zero",
+      "severity": "medium",
+      "category": "arithmetic",
+      "gate": "flag",
+      "description": "Integer division by a caller-influenced value panics when it is zero, failing the instruction (a denial of service where it matters).",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "([\\w)]\\s*/\\s*[a-z_][\\w.]*)",
+          "message": "$1: division by a variable (checked_div makes the zero case explicit)"
+        }
+      ],
+      "references": [
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AR-DIV-ZERO/bad",
+        "good": "test/fixtures/solana-vulns/AR-DIV-ZERO/good"
+      }
+    },
+    {
+      "id": "AR-CAST-TRUNCATION",
+      "title": "Casting truncation",
+      "severity": "medium",
+      "category": "arithmetic",
+      "gate": "flag",
+      "description": "An `as` cast to a narrower integer silently truncates (and to a signed type can flip sign).",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\bas\\s+(u8|u16|u32|i8|i16|i32)\\b",
+          "message": "as $1: a cast that can truncate (use try_from)"
+        }
+      ],
+      "references": [
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/AR-CAST-TRUNCATION/bad",
+        "good": "test/fixtures/solana-vulns/AR-CAST-TRUNCATION/good"
+      }
+    },
+    {
+      "id": "EC-SLIPPAGE",
+      "title": "Swap or trade without slippage bounds (front-running, sandwich)",
+      "severity": "high",
+      "category": "economic",
+      "gate": "flag",
+      "description": "An instruction named like a swap, trade, buy or sell takes no minimum-out, maximum-in or slippage argument, so a front-runner can sandwich it.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "swap_without_bounds"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Sandwich the instruction: move the price before it and back after."
+        }
+      ],
+      "references": [
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        },
+        {
+          "title": "rekt.news: Mango Markets",
+          "url": "https://rekt.news/mango-markets-rekt/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/EC-SLIPPAGE/bad",
+        "good": "test/fixtures/solana-vulns/EC-SLIPPAGE/good"
+      }
+    },
+    {
+      "id": "EC-ORACLE",
+      "title": "Oracle price used unchecked (stale, low confidence, manipulable)",
+      "severity": "high",
+      "category": "economic",
+      "gate": "flag",
+      "description": "The program reads an oracle price without checking its age or confidence, or uses get_price_unchecked, so a stale or manipulated price drives its logic (Mango Markets lost $114M to price manipulation).",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b(pyth\\w*|switchboard\\w*|PriceUpdateV2|PriceFeed|AggregatorAccountData|get_price_unchecked)\\b",
+          "message": "$1: an oracle price with no staleness or confidence check in the file",
+          "unless": "no_older_than|max_age|staleness|\\bconf\\b|confidence"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Move the oracle's price (or use a stale one) before the instruction runs."
+        }
+      ],
+      "references": [
+        {
+          "title": "Pyth: best practices for price feeds",
+          "url": "https://docs.pyth.network/price-feeds/best-practices"
+        },
+        {
+          "title": "rekt.news: Mango Markets",
+          "url": "https://rekt.news/mango-markets-rekt/"
+        },
+        {
+          "title": "CFTC: charges over the Mango Markets manipulation",
+          "url": "https://www.cftc.gov/PressRoom/PressReleases/8647-23"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/EC-ORACLE/bad",
+        "good": "test/fixtures/solana-vulns/EC-ORACLE/good"
+      }
+    },
+    {
+      "id": "EC-TIMESTAMP",
+      "title": "Timestamp or slot dependence",
+      "severity": "low",
+      "category": "economic",
+      "gate": "flag",
+      "description": "Logic depends on Clock's unix_timestamp or slot, which validators can skew a little: fine for coarse deadlines, unsafe for fine-grained ordering or pricing.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(\\bunix_timestamp\\b|\\bClock\\s*::\\s*get\\s*\\(\\s*\\)\\s*\\?\\s*\\.\\s*slot\\b)",
+          "message": "$1: depends on the cluster's clock"
+        }
+      ],
+      "references": [
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/EC-TIMESTAMP/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "EC-RANDOMNESS",
+      "title": "Insecure randomness",
+      "severity": "high",
+      "category": "economic",
+      "gate": "flag",
+      "description": "The program derives 'random' outcomes from the clock, the slot or recent blockhashes, which validators and callers can predict or influence.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\b((?:unix_timestamp|slot|recent_blockhashes|slot_hashes|SlotHashes|blockhash)\\b[^;]*%)",
+          "message": "$1: randomness from on-chain values anyone can predict"
+        },
+        {
+          "type": "red_team_scenario",
+          "scenario": "Predict the outcome and only send the transaction when it favours you."
+        }
+      ],
+      "references": [
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        },
+        {
+          "title": "Neodyme: Solana smart contracts, common pitfalls and how to avoid them",
+          "url": "https://neodyme.io/en/blog/solana_common_pitfalls/"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/EC-RANDOMNESS/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "DOS-UNBOUNDED",
+      "title": "Unbounded vectors or loops",
+      "severity": "medium",
+      "category": "resource",
+      "gate": "flag",
+      "description": "Account state holds a Vec or String with no declared maximum, or the program loops over all remaining accounts without a bound: growth or input size can exhaust space or compute and lock the account.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "unbounded_account_vec"
+        },
+        {
+          "type": "source_pattern",
+          "pattern": "(for\\s+\\w+\\s+in\\s+[^{]*remaining_accounts)",
+          "message": "loops over every remaining account with no bound",
+          "unless": "remaining_accounts\\s*\\.\\s*len\\s*\\(\\s*\\)\\s*(?:<=|<|>=|>)|\\.take\\s*\\("
+        }
+      ],
+      "references": [
+        {
+          "title": "Helius: a hitchhiker's guide to Solana program security",
+          "url": "https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security"
+        },
+        {
+          "title": "Solana: fees and compute budget",
+          "url": "https://solana.com/docs/core/fees"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/DOS-UNBOUNDED/bad",
+        "good": "test/fixtures/solana-vulns/DOS-UNBOUNDED/good"
+      }
+    },
+    {
+      "id": "DOS-REALLOC",
+      "title": "Account growth or realloc abuse",
+      "severity": "medium",
+      "category": "resource",
+      "gate": "flag",
+      "description": "The program grows accounts (realloc) by caller-influenced amounts: rent can be pushed onto others or accounts grown past what the program can handle.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(\\brealloc\\s*=|\\.realloc\\s*\\(|\\.resize\\s*\\()",
+          "message": "$1: grows an account"
+        }
+      ],
+      "references": [
+        {
+          "title": "Anchor: account constraints",
+          "url": "https://www.anchor-lang.com/docs/references/account-constraints"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/DOS-REALLOC/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "DOS-COMPUTE",
+      "title": "Compute exhaustion",
+      "severity": "low",
+      "category": "resource",
+      "gate": "flag",
+      "description": "Open-ended loops (while, loop) can run past the compute budget for some inputs, failing the instruction for everyone who needs it.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "(\\bwhile\\b|\\bloop\\s*\\{)",
+          "message": "$1: an open-ended loop"
+        }
+      ],
+      "references": [
+        {
+          "title": "Solana: fees and compute budget",
+          "url": "https://solana.com/docs/core/fees"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/DOS-COMPUTE/bad",
+        "good": "test/fixtures/solana-vulns/_good/ledger"
+      }
+    },
+    {
+      "id": "DOS-RENT",
+      "title": "Account created without rent exemption",
+      "severity": "medium",
+      "category": "resource",
+      "gate": "flag",
+      "description": "The program creates accounts by hand with a lamport amount not taken from Rent, so they may not be rent-exempt and can be refused or purged.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "pattern": "\\bcreate_account\\s*\\(",
+          "message": "creates an account by hand with no Rent minimum in the file",
+          "unless": "minimum_balance|Rent\\s*::\\s*get"
+        }
+      ],
+      "references": [
+        {
+          "title": "Solana: accounts and rent",
+          "url": "https://solana.com/docs/core/accounts"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/DOS-RENT/bad",
+        "good": "test/fixtures/solana-vulns/DOS-RENT/good"
+      }
+    },
+    {
+      "id": "DEP-RUSTSEC",
+      "title": "Dependency with a RustSec advisory",
+      "severity": "high",
+      "category": "dependencies",
+      "gate": "block",
+      "description": "A crate in the Cargo.lock the program was built with has a RustSec vulnerability advisory. Checked by cargo-audit in the gate's static analysis; the operator can accept an advisory that can't reach an on-chain program (PROGRAM_GATE_CARGO_AUDIT_IGNORE), shown in every report.",
+      "detection": [
+        {
+          "type": "dependency_advisory",
+          "tool": "cargo-audit",
+          "database": "https://rustsec.org/"
+        }
+      ],
+      "references": [
+        {
+          "title": "RustSec advisory database",
+          "url": "https://rustsec.org/"
+        },
+        {
+          "title": "RustSec: RUSTSEC-2024-0344 (curve25519-dalek)",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2024-0344.html"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/DEP-RUSTSEC/bad",
+        "good": "test/fixtures/solana-vulns/DEP-RUSTSEC/good"
+      }
+    }
+  ]
+}

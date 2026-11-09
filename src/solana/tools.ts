@@ -87,7 +87,7 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
     {
       title: "Deploy a Solana program",
       description:
-        "Developer: deploy a reserved program from a build Mynt verified. Mynt deploys the program it built itself in its clean verify sandbox (Anchor's verifiable build, tested on a local validator), never the coding agent's file, and records its hash. Devnet signs with Mynt's devnet key; mainnet is refused until an admin configures and enables the mainnet signer. Runs in the background: follow it with get_program.",
+        "Developer: deploy a reserved program from a build Mynt verified. Mynt deploys the program it built itself in its clean verify sandbox (Anchor's verifiable build, tested on a local validator), never the coding agent's file, and records its hash. Devnet signs with Mynt's devnet key; mainnet is refused until an admin configures and enables the mainnet signer, and needs an approved mainnet review of exactly this build's program (request_mainnet_review). Runs in the background: follow it with get_program.",
       inputSchema: { program_id: ADDRESS, build_id: z.string().describe("A succeeded build whose verification built this program") },
     },
     async ({ program_id, build_id }) =>
@@ -103,7 +103,7 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
     {
       title: "Upgrade a deployed Solana program",
       description:
-        "Developer: replace a deployed program's code with the program Mynt built from a newer verified build. Same rules as deploy_program; the program keeps its address and its upgrade authority. Runs in the background: follow it with get_program.",
+        "Developer: replace a deployed program's code with the program Mynt built from a newer verified build. Same rules as deploy_program; the program keeps its address and its upgrade authority. On mainnet it needs an approved mainnet review of this build's program whose timelock is over (Mynt starts the upgrade itself when it ends). Runs in the background: follow it with get_program.",
       inputSchema: { program_id: ADDRESS, build_id: z.string() },
     },
     async ({ program_id, build_id }) =>

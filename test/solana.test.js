@@ -372,6 +372,9 @@ async function world({ mainnetUrl = null, mainnetVaultAllowed = false, confirmTi
     { rpc: (cluster) => (rpc ? rpc(cluster, clusters[cluster]) : clusters[cluster]), custody },
   );
   builds.solana = solana;
+  // Mainnet deploys now need the mainnet program gate's approval (test/mainnet-gate.test.js tests the gate itself);
+  // these tests are about the deployer, so their gate approves every build.
+  solana.gate = { check: async () => {}, claim: async () => ({ reviewId: "test", release: async () => {} }) };
   const responses = [];
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -1460,9 +1463,18 @@ test("the Solana build never runs `anchor build` or developer code on the host, 
   const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
   assert.match(build, /docker create /);
   assert.match(build, /docker cp - "\$bcid:\/"/, "the source goes in as a copy");
-  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so"/);
+  assert.match(build, /docker cp -L "\$cid:\/mynt-target\/deploy\/\$name\.so"/);
   assert.match(build, /cargo build-sbf --manifest-path/);
-  assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build), "nothing compiled or run on the host, no mounts");
+  // The IDL is built only inside its own networkless container, started after the programs are out: the one
+  // place `anchor idl build` appears is that container's command.
+  const idlCommand = /IDL_BUILD='[^']*'/.exec(build)[0];
+  assert.match(idlCommand, /anchor idl build/);
+  assert.match(build, /icid=\$\(docker create --network none [^\n]*\n[^\n]*bash -c "\$IDL_BUILD"/);
+  assert.ok(build.indexOf('docker start -a "$icid"') > build.indexOf('docker cp -L "$cid:/mynt-target/deploy/$name.so"'), "the IDL container starts after the programs are out");
+  assert.ok(!/anchor (build|idl)|cargo (test|run)|npm |\s-v\s+["$/~]|--volume|--mount|--privileged/.test(build.replace(idlCommand, "")), "nothing compiled or run on the host, no mounts");
+  // What Mynt keeps is the very archive the build container gets.
+  assert.match(build, /tar -C "\$dir" --exclude=\.\/target --exclude=\.\/node_modules --exclude=\.\/\.anchor [^\n]*-cf "\$srctar" \./);
+  assert.match(build, /docker cp - "\$bcid:\/" < "\$srctar"/);
   assert.ok(build.includes(SOLANA_TOOLCHAIN.anchorImage), "the digest-pinned image");
   const testRun = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
   assert.match(testRun, /anchor idl build -p "\$name"/);
@@ -1529,6 +1541,35 @@ test("a retry with a newer build, after an earlier build landed unrecorded, reco
   assert.equal(executableHash(chain.accounts.get(p.programdata_address).data.subarray(45)), executableHash(code2));
 });
 
+test("on mainnet, a deploy that finds an earlier build on chain records it and stops: the new build needs an upgrade review", async () => {
+  const w = await world({ mainnetUrl: "https://rpc.example.com", mainnetVaultAllowed: true, confirmTimeoutMs: 50 });
+  const claims = [];
+  w.solana.gate = { check: async () => {}, claim: async (p, sha, action) => (claims.push(action), { reviewId: "r", release: async () => {} }) };
+  const ready = await w.ok(w.admin, "configure_solana_signer", { backend: "mainnet-vault", generate_key: true, enabled: true });
+  w.clusters.mainnet.fund(ready.mainnet.authority, 10_000_000_000);
+  const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "mainnet" });
+  const first = await w.build();
+  const code = w.program(1500);
+  await w.solana.recordArtifacts(first, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
+  const chain = w.clusters.mainnet;
+  chain.withhold = (tx) => tx.ixs.some((i) => i.program === UPGRADEABLE_LOADER && i.data.readUInt32LE(0) === 2);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: first });
+  await w.solana.settled(program_id);
+  chain.withhold = () => false;
+  const second = await w.build();
+  const code2 = w.program(1400, 4);
+  await w.solana.recordArtifacts(second, [{ name: "mynt_program", declared_id: program_id, sha256: executableHash(code2), size: code2.length, program: code2, idl: null }]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: second });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  // The earlier build is recorded as what's deployed; the new one never went out under a deploy's approval.
+  assert.equal(p.status, "deployed");
+  assert.deepEqual(p.versions.map((v) => [v.action, v.build_id]), [["deploy", first]]);
+  assert.match(p.error, /already on mainnet; Mynt recorded it as deployed.*request a mainnet review again, which now runs as an upgrade/);
+  assert.equal(executableHash(chain.accounts.get(p.programdata_address).data.subarray(45)), executableHash(code));
+  assert.deepEqual(claims, ["deploy", "deploy"]);
+});
+
 test("only the server process recovers stale operations: another process sharing the database leaves them alone", async () => {
   const w = await world();
   const { program_id, build_id } = await readyToDeploy(w);
@@ -1589,7 +1630,10 @@ test("Mynt reads back only a regular ELF file: a link to a host file, or anythin
 
 test("the build follows links inside the container only, keeps only regular ELF files, and compiles with no network", () => {
   const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
-  assert.match(build, /docker cp -L "\$cid:\/workdir\/docker-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
+  assert.match(build, /docker cp -L "\$cid:\/mynt-target\/deploy\/\$name\.so" "\$OUT\/\$name\.so"/);
+  // The target dir is outside the source, in both containers that compile: nothing shipped can be a "fresh" artifact.
+  assert.equal((build.match(/-e CARGO_TARGET_DIR=\/mynt-target /g) ?? []).length, 2);
+  assert.ok(!/CARGO_TARGET_DIR=\/workdir/.test(build));
   assert.ok(!/docker cp "\$cid:/.test(build), "every copy out follows links in the container");
   assert.match(build, /\[ -L "\$OUT\/\$name\.so" \] \|\| \[ ! -f "\$OUT\/\$name\.so" \] \|\| \[ "\$\(head -c 4 "\$OUT\/\$name\.so" \| od -An -tx1 \| tr -d ' \\n'\)" != 7f454c46 \]/);
   // Network: the crates are fetched in a separate, throwaway container that gets only a skeleton of the source;

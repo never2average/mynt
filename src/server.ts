@@ -52,6 +52,7 @@ import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
+import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
 import { registerOpsTools } from "./ops.js";
 import { registerModuleTools } from "./modules.js";
 
@@ -133,6 +134,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);
+  if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);

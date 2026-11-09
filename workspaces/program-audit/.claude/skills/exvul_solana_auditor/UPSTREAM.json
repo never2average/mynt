@@ -1,0 +1,12 @@
+{
+  "repo": "exvulsec/exvul-solana-skill",
+  "path": "SKILL.md",
+  "commit": "1b44bd10c083c7c33c7994277b7426edf9b60a81",
+  "url": "https://github.com/exvulsec/exvul-solana-skill/blob/1b44bd10c083c7c33c7994277b7426edf9b60a81/SKILL.md",
+  "license": "MIT",
+  "found_by": "HyDE",
+  "draft": "solana-program-audit",
+  "query": "\"solana security audit\" filename:SKILL.md (GitHub code search with the draft's key terms)",
+  "score": null,
+  "modified": "SKILL.md, knowledge/, prompts/ and references/ verbatim. Not vendored: README.md, tests/, .gitignore and agents/openai.yaml (another agent host's config). The report path it names (./exvul_solana_auditor.md) is overridden by workspaces/program-audit/CLAUDE.md, which asks for job/findings.json."
+}

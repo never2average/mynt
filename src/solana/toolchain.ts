@@ -81,6 +81,10 @@ export function toolchainRecord(environment: { source: "snapshot" | "install"; s
 export type ToolchainRecord = ReturnType<typeof toolchainRecord>;
 
 const T = SOLANA_TOOLCHAIN;
+// What Mynt keeps of a build: the workspace exactly as it went into the build container (a build whose source is
+// larger fails, never keeps part of it), and the source of every dependency not on Mynt's crate allowlist.
+export const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+export const MAX_DEPS_SOURCE_BYTES = 16 * 1024 * 1024;
 
 // Idempotent; installs under $MYNT_SOLANA_HOME (default ~/.mynt-solana) and writes an env file to source.
 // About 2 GB once Anchor's first build has fetched the SBF platform tools.
@@ -136,7 +140,7 @@ touch "$READY"
 
 // Mynt's own build and test of every Anchor workspace in a verified source tree. Two runs, with Mynt reading the
 // programs back between them, so no developer code ever runs on the host before Mynt has the bytes:
-//   build <src> <out>: each program crate is compiled with cargo build-sbf inside Anchor's verifiable-build image
+//   build <src> <out> [<crate allowlist>]: each program crate is compiled with cargo build-sbf inside Anchor's verifiable-build image
 //     (pinned by digest), the same command `anchor build --verifiable` runs there. The crates are fetched first, in
 //     a throwaway networked container that gets only the manifests, Cargo.lock and empty stubs (nothing of the
 //     source that could run); the build then runs in a fresh container with no network from creation and no mount
@@ -243,23 +247,94 @@ PY
 }
 
 if [ "$MODE" = build ]; then
+  ALLOW="${"${"}4:-}"
   rm -rf "$OUT"; mkdir -p "$OUT"; echo "[]" > "$OUT/programs.json"; : > "$OUT/checks.jsonl"
   command -v docker >/dev/null || { check "$OUT/checks.jsonl" solana_build fail "docker isn't available for the verifiable build"; exit 0; }
   BUILD_FAIL=""; BUILT=0; NO_LOCK=""
+  cat > "$OUT/.depinfo.py" <<'PY'
+import hashlib, json, sys, tarfile
+mode, out = sys.argv[1], sys.argv[2]
+res, dsize = {"d_files": {}, "hashes": {}}, 0
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as t:
+    for m in t:
+        name = m.name.split("/", 1)[1] if "/" in m.name else ""
+        if not name or not m.isfile():
+            continue
+        if mode == "target":
+            # cargo's and rustc's dep-info, not a build script's own output
+            if name.endswith(".d") and "/out/" not in name:
+                data = t.extractfile(m).read()
+                dsize += len(data)
+                if dsize > 16 * 1024 * 1024:
+                    sys.exit("the dep-info files are over 16 MB")
+                res["d_files"][name] = data.decode("utf-8", "replace")
+            continue
+        res["hashes"][name] = hashlib.sha256(t.extractfile(m).read()).hexdigest()
+json.dump(res, open(out, "w"))
+PY
   # Both cargos fetch: the host toolchain's (it resolves Cargo.lock) and the SBF platform tools' (the one cargo
   # build-sbf compiles with, which keeps its own crate cache), so the offline build finds every crate.
   FETCH='set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; for pc in /root/.cache/solana/*/platform-tools/rust/bin/cargo; do if [ -x "$pc" ]; then "$pc" fetch --manifest-path "$m"; fi; done; done'
   BUILD='set -e; for m in "$@"; do cargo build-sbf --manifest-path "$m"; done'
+  # The IDL, built in a container of its own (no network, a fresh copy of the same source and crates) after the
+  # programs are out: building the IDL runs the workspace's code, which must never touch the built programs.
+  IDL_BUILD='mkdir -p /mynt-idl; for n in "$@"; do anchor idl build -p "$n" -o "/mynt-idl/$n.json" > "/mynt-idl/$n.log" 2>&1 || true; done; true'
   # Mynt's own settings in both containers, never the source's: the image's Rust for cargo itself (a
-  # rust-toolchain.toml can't swap it), and dependencies resolved to versions the platform tools can build.
+  # rust-toolchain.toml can't swap it), and dependencies resolved to versions the platform tools can build. The
+  # target dir is /mynt-target, outside /workdir and empty: nothing from the source can be a "fresh" artifact cargo
+  # would reuse instead of compiling, and the programs, dep-info and IDL Mynt reads come only from there.
   COMMON=(--workdir /workdir -e RUSTUP_TOOLCHAIN=stable -e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
     -e PATH=/root/.local/share/solana/install/active_release/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
   for w in "${"${"}WS[@]}"; do
-    label="${"${"}w:-.}"; dir="$APP/$label"; log="$OUT/$(echo "$label" | tr '/.' '__')"
+    label="${"${"}w:-.}"; dir="$APP/$label"; slug="$(echo "$label" | tr '/.' '__')"; log="$OUT/$slug"
     mapfile -t PROGS < <(programs "$dir" 2> "$log.programs.log")
     if [ "${"${"}#PROGS[@]}" = 0 ]; then BUILD_FAIL+="$label: no program crate found ($(tail -c 300 "$log.programs.log")) "; continue; fi
-    manifests=(); for p in "${"${"}PROGS[@]}"; do manifests+=("$(cut -f1 <<<"$p")"); done
+    manifests=(); names=(); for p in "${"${"}PROGS[@]}"; do manifests+=("$(cut -f1 <<<"$p")"); names+=("$(cut -f2 <<<"$p")"); done
     : > "$log.build.log"
+    # 0. The source, once, as the archive the build container gets: what Mynt captures is exactly what it compiles.
+    srctar="$OUT/$slug.src.tar"
+    tar -C "$dir" --exclude=./target --exclude=./node_modules --exclude=./.anchor --transform 's,^\.$,workdir,;s,^\./,workdir/,' -cf "$srctar" . 2>> "$log.build.log"
+    srcs="$slug.sources.json"
+    if ! python3 - "$srctar" "$OUT/$srcs" ${MAX_SOURCE_BYTES} <<'PY' >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $(tail -c 300 "$log.build.log") "; rm -f "$srctar" "$OUT/$srcs"; continue; fi
+import base64, json, re, sys, tarfile
+src, out, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+files, binary, links, total, refused = {}, {}, {}, 0, []
+with tarfile.open(src) as t:
+    for m in t.getmembers():
+        path = m.name[len("workdir/"):] if m.name.startswith("workdir/") else None
+        if not path:
+            continue
+        # Never anything a build could reuse instead of compiling: no target folders at any depth (the top-level
+        # ones are left out of the archive), no cargo artifacts, fingerprints or dep-info, no prebuilt programs.
+        # Refused, not stripped: what Mynt keeps is what it compiles.
+        parts = path.split("/")
+        if re.search(r"[\x00-\x1f\x7f]", path):
+            refused.append(repr(path) + " (control characters in its name)")
+        elif any(x in ("target", "docker-target", ".anchor", ".fingerprint", "mynt-target", "mynt-idl") for x in parts):
+            refused.append(path)
+        elif not m.isdir() and re.search(r"\.(rlib|rmeta|d|so)$", parts[-1]):
+            refused.append(path)
+        if m.isdir():
+            continue
+        if m.issym() or m.islnk():
+            links[path] = m.linkname
+            continue
+        if not m.isfile():
+            continue
+        total += m.size
+        if total > limit:
+            sys.exit(f"the workspace's source is over {limit // (1024 * 1024)} MB; Mynt keeps everything it compiles, so the build can't go on (move large files out of the Anchor workspace)")
+        data = t.extractfile(m).read()
+        try:
+            files[path] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            binary[path] = base64.b64encode(data).decode()
+if refused:
+    # Kept short: the build failure keeps only the log's last 300 characters, and this line must survive whole.
+    shown = ", ".join(sorted(refused)[:3])
+    sys.exit(("refused: the workspace ships build output (remove it): %d path(s), e.g. " % len(refused) + shown)[:250])
+json.dump({"files": files, "binary": binary, "links": links}, open(out, "w"), sort_keys=True)
+PY
     # 1. Fetch, networked, in a throwaway container that gets only the manifests, Cargo.lock and empty stub
     #    sources: no .cargo/ config, no build script, no rust-toolchain.toml, nothing of the source that could run.
     #    The compiler and every wrapper are pinned by environment, which outranks any config.
@@ -276,55 +351,160 @@ if [ "$MODE" = build ]; then
     fi
     rm -rf "$skel"
     # 2. Build, in a fresh container with no network from the moment it exists, never with a mount of the host.
-    #    It gets the full source as a copy, and the crate caches and Cargo.lock from the fetch container (streamed
-    #    container to container, never unpacked here). The fetch container is gone before the build starts. The
-    #    build is the container's own process: when it ends the container stops, and anything it left running dies.
-    bcid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/workdir/docker-target -e CARGO_NET_OFFLINE=true \
+    #    It gets the source archive above (exactly what Mynt keeps), and the crate caches and Cargo.lock from the
+    #    fetch container (streamed container to container, never unpacked here). The fetch container is gone before
+    #    the build starts. The build is the container's own process: when it ends the container stops, and anything
+    #    it left running dies.
+    bcid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/mynt-target -e CARGO_NET_OFFLINE=true \
       ${T.anchorImage} bash -c "$BUILD" _ "${"${"}manifests[@]}" 2>> "$log.build.log")
     ok=1
     if [ -z "$bcid" ]; then ok=0
     elif [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$bcid")" != none ]; then echo "the build container has a network" >> "$log.build.log"; ok=0
-    elif ! tar -C "$dir" --exclude=./target --exclude=./node_modules --exclude=./.anchor --transform 's,^\.$,workdir,;s,^\./,workdir/,' -cf - . | docker cp - "$bcid:/" >> "$log.build.log" 2>&1 \
+    elif ! docker cp - "$bcid:/" < "$srctar" >> "$log.build.log" 2>&1 \
        || ! docker cp "$fcid:/root/.cargo/registry" - | docker cp - "$bcid:/root/.cargo" >> "$log.build.log" 2>&1 \
        || ! docker cp "$fcid:/workdir/Cargo.lock" - | docker cp - "$bcid:/workdir" >> "$log.build.log" 2>&1; then ok=0
     else
       docker cp "$fcid:/root/.cargo/git" - 2>/dev/null | docker cp - "$bcid:/root/.cargo" >/dev/null 2>&1 || true
     fi
+    # The IDL's container, created and filled the same way now, but started only after the programs are out:
+    # building the IDL runs the workspace's code, which must never touch the built programs.
+    icid=$(docker create --network none "${"${"}COMMON[@]}" -e CARGO_TARGET_DIR=/mynt-target -e CARGO_NET_OFFLINE=true \
+      ${T.anchorImage} bash -c "$IDL_BUILD" _ "${"${"}names[@]}" 2>> "$log.idl.log")
+    if [ -n "$icid" ] && [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$icid")" = none ] && docker cp - "$icid:/" < "$srctar" >> "$log.idl.log" 2>&1 \
+       && docker cp "$fcid:/root/.cargo/registry" - | docker cp - "$icid:/root/.cargo" >> "$log.idl.log" 2>&1 \
+       && docker cp "$fcid:/workdir/Cargo.lock" - | docker cp - "$icid:/workdir" >> "$log.idl.log" 2>&1; then
+      docker cp "$fcid:/root/.cargo/git" - 2>/dev/null | docker cp - "$icid:/root/.cargo" >/dev/null 2>&1 || true
+    else
+      [ -n "$icid" ] && docker rm -f "$icid" >/dev/null 2>&1; icid=""
+    fi
+    # The crates as cargo downloaded them (checksums verified against crates.io's index), before any of the
+    # developer's code has run anywhere: what the dependency capture reads.
+    docker cp "$fcid:/root/.cargo/registry/cache" - > "$OUT/$slug.crates.tar" 2>> "$log.build.log" || : > "$OUT/$slug.crates.tar"
     docker rm -f "$fcid" >/dev/null 2>&1
     if [ "$ok" = 0 ] || ! docker start -a "$bcid" >> "$log.build.log" 2>&1; then
       BUILD_FAIL+="$label: $(tail -c 700 "$log.build.log" | tr -d '\r') "
-      [ -n "$bcid" ] && docker rm -f "$bcid" >/dev/null 2>&1; continue
+      [ -n "$bcid" ] && docker rm -f "$bcid" >/dev/null 2>&1; [ -n "$icid" ] && docker rm -f "$icid" >/dev/null 2>&1; continue
     fi
     cid="$bcid"
     # The Cargo.lock the build actually used (read back from the stopped build container), hashed and kept with
     # each program, so anyone can rebuild exactly these bytes.
-    lock="$OUT/$(echo "$label" | tr '/.' '__').Cargo.lock"; rm -f "$lock"
+    lock="$OUT/$slug.Cargo.lock"; rm -f "$lock"
     lock_sha=""
     if docker cp -L "$cid:/workdir/Cargo.lock" "$lock" >> "$log.build.log" 2>&1 && [ -f "$lock" ] && [ ! -L "$lock" ]; then
       lock_sha=$(sha256sum "$lock" | cut -d' ' -f1)
     fi
     [ "$committed" = 1 ] || NO_LOCK+="$label "
     for p in "${"${"}PROGS[@]}"; do
-      name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
+      name=$(cut -f2 <<<"$p")
       # -L: a link in the container is resolved there, to the container's own file, never copied out as a link
       # that would point at the host. Then only a regular file that is an ELF program counts.
       rm -f "$OUT/$name.so"
-      if ! docker cp -L "$cid:/workdir/docker-target/deploy/$name.so" "$OUT/$name.so" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $name.so wasn't built "; continue; fi
+      if ! docker cp -L "$cid:/mynt-target/deploy/$name.so" "$OUT/$name.so" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $name.so wasn't built "; continue; fi
       if [ -L "$OUT/$name.so" ] || [ ! -f "$OUT/$name.so" ] || [ "$(head -c 4 "$OUT/$name.so" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
         BUILD_FAIL+="$label: $name.so isn't a program (not a regular ELF file) "; rm -f "$OUT/$name.so"; continue
       fi
-      python3 - "$OUT" "$name" "$label" "$declared" "$lock_sha" "$committed" <<'PY'
+    done
+    # What the compiler actually read: every dep-info file cargo wrote, and the workspace and the unpacked crates as
+    # the stopped container holds them (streamed out as tar and hashed, never unpacked here).
+    docker cp -L "$cid:/workdir" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" workdir "$OUT/$slug.depinfo.workdir.json" >> "$log.build.log" 2>&1
+    docker cp -L "$cid:/mynt-target" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" target "$OUT/$slug.depinfo.target.json" >> "$log.build.log" 2>&1
+    docker cp -L "$cid:/root/.cargo/registry/src" - 2>> "$log.build.log" | python3 "$OUT/.depinfo.py" registry "$OUT/$slug.depinfo.registry.json" >> "$log.build.log" 2>&1
+    docker rm -f "$cid" >/dev/null 2>&1
+    # 3. The IDL, in its own container, after the programs are out.
+    if [ -n "$icid" ] && timeout 1800 docker start -a "$icid" >> "$log.idl.log" 2>&1; then
+      for n in "${"${"}names[@]}"; do
+        rm -f "$OUT/$n.build-idl.json"
+        docker cp -L "$icid:/mynt-idl/$n.json" "$OUT/$n.build-idl.json" >> "$log.idl.log" 2>&1 || true
+        docker cp -L "$icid:/mynt-idl/$n.log" "$OUT/$n.build-idl.log" >> "$log.idl.log" 2>&1 || true
+        { [ -L "$OUT/$n.build-idl.json" ] || ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OUT/$n.build-idl.json" 2>/dev/null; } && rm -f "$OUT/$n.build-idl.json"
+      done
+    fi
+    [ -n "$icid" ] && docker rm -f "$icid" >/dev/null 2>&1
+    # 4. The dependencies: every crate of the Cargo.lock the build used, checked against the .crate cargo
+    #    downloaded, and the source of each one not on Mynt's allowlist, for the mainnet program gate.
+    deps="$slug.deps.json"
+    python3 - "$lock" "$OUT/$slug.crates.tar" "$ALLOW" "$OUT/$deps" ${MAX_DEPS_SOURCE_BYTES} <<'PY' >> "$log.build.log" 2>&1 || rm -f "$OUT/$deps"
+import hashlib, io, json, os, re, sys, tarfile, tomllib
+lock, crates_tar, allow, out, limit = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+allowed = set(json.load(open(allow)).get("crates", [])) if allow and os.path.isfile(allow) else set()
+packages = tomllib.load(open(lock, "rb")).get("package", []) if os.path.isfile(lock) else []
+cache = {}
+try:
+    with tarfile.open(crates_tar) as t:
+        for m in t.getmembers():
+            if m.isfile() and m.name.endswith(".crate"):
+                cache[os.path.basename(m.name)[: -len(".crate")]] = t.extractfile(m).read()
+except Exception:
+    pass
+problems, entries, sources, total, over = [], [], {}, 0, False
+for p in packages:
+    name, version, source, checksum = p.get("name"), p.get("version"), p.get("source"), p.get("checksum")
+    e = {"name": name, "version": version, "source": source, "checksum": checksum, "allowlisted": name in allowed}
+    if source and source.startswith(("registry+", "sparse+")):
+        data = cache.get(f"{name}-{version}")
+        if data is None:
+            problems.append(f"{name} {version}: not in the downloaded crates")
+        else:
+            e["crate_sha256"] = hashlib.sha256(data).hexdigest()
+            if checksum and e["crate_sha256"] != checksum:
+                problems.append(f"{name} {version}: the downloaded crate doesn't match Cargo.lock's checksum")
+            if name not in allowed and not over:
+                files = {}
+                with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as c:
+                    for m in c.getmembers():
+                        if m.isfile() and (m.name.endswith(".rs") or os.path.basename(m.name) == "Cargo.toml"):
+                            total += m.size
+                            if total > limit:
+                                over = True
+                                problems.append(f"the source of the crates not on the allowlist is over the capture limit (at {name} {version})")
+                                break
+                            files[m.name.split("/", 1)[1] if "/" in m.name else m.name] = c.extractfile(m).read().decode("utf-8", "replace")
+                if not over:
+                    sources[f"{name}@{version}"] = files
+    entries.append(e)
+json.dump({"packages": entries, "sources": sources, "complete": not problems and bool(packages), "problems": problems[:50], "lock": open(lock, encoding="utf-8", errors="replace").read() if os.path.isfile(lock) else None}, open(out, "w"), sort_keys=True)
+# The dep-info record: what the compiler read, the container's copies' hashes, and every file of each .crate.
+slug = out[: -len(".deps.json")]
+def part(kind):
+    try:
+        return json.load(open(f"{slug}.depinfo.{kind}.json"))
+    except Exception:
+        return None
+w, r, tg = part("workdir"), part("registry"), part("target")
+crate_files = {}
+for key, data in cache.items():
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as c:
+        for m in c.getmembers():
+            if m.isfile() and "/" in m.name:
+                files[m.name.split("/", 1)[1]] = hashlib.sha256(c.extractfile(m).read()).hexdigest()
+    crate_files[key] = files
+depinfo_problems = [] if w and r and tg else ["Mynt couldn't read the build container's dep-info and files back"]
+json.dump({"d_files": (tg or {}).get("d_files", {}), "workdir": (w or {}).get("hashes", {}), "registry": (r or {}).get("hashes", {}), "crate_files": crate_files, "problems": depinfo_problems},
+          open(f"{slug}.depinfo.json", "w"), sort_keys=True)
+PY
+    rm -f "$OUT/$slug.crates.tar" "$srctar" "$OUT/$slug.depinfo.workdir.json" "$OUT/$slug.depinfo.registry.json" "$OUT/$slug.depinfo.target.json"
+    for p in "${"${"}PROGS[@]}"; do
+      name=$(cut -f2 <<<"$p"); declared=$(cut -f3 <<<"$p")
+      [ -f "$OUT/$name.so" ] || continue
+      python3 - "$OUT" "$name" "$label" "$declared" "$lock_sha" "$committed" "$srcs" "$deps" <<'PY'
 import hashlib, json, os, sys
-out, name, ws, declared, lock_sha, committed = sys.argv[1:7]
+out, name, ws, declared, lock_sha, committed, srcs, deps = sys.argv[1:9]
 data = open(os.path.join(out, name + ".so"), "rb").read()
 progs = json.load(open(os.path.join(out, "programs.json")))
+def kept(key, f):
+    path = os.path.join(out, f)
+    if not os.path.isfile(path) or os.path.islink(path):
+        return {}
+    raw = open(path, "rb").read()
+    return {key: f, f"{key}_size": len(raw), f"{key}_sha256": hashlib.sha256(raw).hexdigest()}
 progs.append({"workspace": ws, "name": name, "size": len(data), "sha256": hashlib.sha256(data.rstrip(b"\0")).hexdigest(), "declared_id": declared or None,
-              "cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1"})
+              "cargo_lock_sha256": lock_sha or None, "cargo_lock_committed": committed == "1",
+              **kept("sources", srcs), **kept("deps", deps), **kept("idl", name + ".build-idl.json"), **kept("depinfo", deps[: -len(".deps.json")] + ".depinfo.json")})
 json.dump(progs, open(os.path.join(out, "programs.json"), "w"), indent=2)
 PY
       BUILT=$((BUILT + 1))
     done
-    docker rm -f "$cid" >/dev/null 2>&1
   done
   if [ -n "$BUILD_FAIL" ]; then check "$OUT/checks.jsonl" solana_build fail "$BUILD_FAIL"
   elif [ "$BUILT" = 0 ]; then check "$OUT/checks.jsonl" solana_build fail "an Anchor workspace built no program"

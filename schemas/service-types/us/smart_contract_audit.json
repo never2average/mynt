@@ -1,0 +1,71 @@
+{
+  "region": "US",
+  "key": "smart_contract_audit",
+  "name": "Smart contract audit",
+  "category": "other",
+  "description": "An independent human security audit of a firm's Solana program before or alongside Mynt's mainnet program gate, by a specialist audit firm. The builder engages and pays the auditor directly; Mynt only lists the service. The request names the program, its verifiable-build hash and where the auditor can read the source; the auditor answers with the engagement's status and a link to its published report.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "program_id": {
+        "type": "string",
+        "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+      },
+      "verifiable_hash": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "source_repository": {
+        "type": "string",
+        "pattern": "^https://"
+      },
+      "scope_notes": {
+        "type": "string",
+        "maxLength": 4000
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "engagement_status"
+    ],
+    "properties": {
+      "engagement_status": {
+        "enum": [
+          "quoted",
+          "scheduled",
+          "in_progress",
+          "report_published",
+          "declined"
+        ]
+      },
+      "report_url": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "audited_hash": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "additionalProperties": false
+  },
+  "consent_purpose": "smart_contract_audit",
+  "fills": [],
+  "innovator_licences": [],
+  "vendor_licences": [],
+  "fixtures": [
+    {
+      "program_id": "HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw",
+      "verifiable_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_repository": "https://github.com/example/program",
+      "scope_notes": "The whole program"
+    }
+  ]
+}
