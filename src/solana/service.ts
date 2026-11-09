@@ -4,7 +4,7 @@ import { emitFirmEvent } from "../runtime.js";
 import type { Store, User } from "../store.js";
 import { open, seal, vaultAvailable } from "../vault.js";
 import { anchorDiscriminator, base58Encode, executableHash, findProgramAddress, isAddress, Keypair } from "./codec.js";
-import { CLUSTERS, GenesisCheckedRpc, HttpSolanaRpc, rpcUrlsFromEnv, type Cluster, type SolanaRpc } from "./rpc.js";
+import { CLUSTERS, GenesisCheckedRpc, HttpSolanaRpc, RateLimiter, rpcMaxRetryMsFromEnv, rpcPaceFromEnv, rpcUrlsFromEnv, type Cluster, type SolanaRpc } from "./rpc.js";
 import {
   CustodyServiceSigner,
   MAINNET_NOT_CONFIGURED,
@@ -137,6 +137,11 @@ export interface SolanaConfig {
   mainnetVaultAllowed: boolean;
   confirmTimeoutMs: number;
   pollMs: number;
+  // How many requests a second a deploy's buffer writes go out at, per cluster (SOLANA_RPC_MAX_RPS; by default
+  // what the public devnet endpoint allows, more with a provider's RPC).
+  maxRps?: Record<Cluster, number>;
+  // How long one RPC call keeps retrying a rate limit before it fails (SOLANA_RPC_MAX_RETRY_SECONDS).
+  rpcMaxRetryMs?: number;
 }
 
 export function solanaConfigFromEnv(env = process.env): SolanaConfig {
@@ -145,6 +150,8 @@ export function solanaConfigFromEnv(env = process.env): SolanaConfig {
     mainnetVaultAllowed: env.SOLANA_MAINNET_VAULT_SIGNER === "enabled",
     confirmTimeoutMs: Number(env.SOLANA_CONFIRM_TIMEOUT_MS ?? 90_000),
     pollMs: Number(env.SOLANA_CONFIRM_POLL_MS ?? 1_000),
+    maxRps: rpcPaceFromEnv(env),
+    rpcMaxRetryMs: rpcMaxRetryMsFromEnv(env),
   };
 }
 
@@ -219,6 +226,9 @@ const SIGNATURE_FEE = 5_000; // lamports per signature, Solana's base fee
 const DEPLOY_PAYER = "deploy-payer";
 const BUFFER_KEY = "buffer-authority";
 const BUFFER_ACCOUNT = "buffer"; // the buffer a buffer key is writing, so a crash's leftover can be closed
+const VAULT_BUFFER = "vault-buffer"; // the buffer a vault-signed deploy is writing, so a failure's leftover can be closed
+const WRITE_BATCH = 16; // writes sent on one blockhash, then confirmed together
+const WRITE_ATTEMPTS = 4; // how often a batch's unconfirmed writes are signed again on a fresh blockhash
 const NONCE_KEY = "custody-nonce"; // a program's durable nonce account for its custody-signed transactions
 type Signs = { address: string; sign(m: Uint8Array): Promise<Uint8Array> };
 const signs = (k: Keypair): Signs => ({ address: k.address, sign: async (m) => k.sign(m) });
@@ -230,10 +240,16 @@ const explorer = (cluster: Cluster, kind: "tx" | "address", id: string) =>
   `https://explorer.solana.com/${kind}/${id}${cluster === "devnet" ? "?cluster=devnet" : ""}`;
 
 export class SolanaError extends Error {}
+// A transaction that wasn't confirmed before SOLANA_CONFIRM_TIMEOUT_MS: it may still land, or its blockhash may
+// have expired.
+class Unconfirmed extends SolanaError {}
+// What a cluster answers to a transaction whose blockhash it no longer knows (expired, or the node is behind).
+const BLOCKHASH_GONE = /blockhash not found|BlockhashNotFound|block height exceeded/i;
 
 export class SolanaService {
   private jobs = new Map<string, Promise<void>>();
   private rpcs = new Map<Cluster, SolanaRpc>();
+  private pacers = new Map<Cluster, RateLimiter>();
 
   private constructor(
     private readonly db: Db,
@@ -253,7 +269,8 @@ export class SolanaService {
     await db.exec(TABLES);
     // The custody provider comes from the server's environment (Turnkey's variables) unless one is passed in.
     const custody = opts.custody !== undefined ? opts.custody : turnkeyFromEnv();
-    return new SolanaService(db, store, config, opts.rpc ?? ((_c, url) => new HttpSolanaRpc(url)), custody, opts.multisig ?? null);
+    const rpc = opts.rpc ?? ((_c: Cluster, url: string) => new HttpSolanaRpc(url, {}, { maxRetryMs: config.rpcMaxRetryMs }));
+    return new SolanaService(db, store, config, rpc, custody, opts.multisig ?? null);
   }
 
   // ---- persistence ----
@@ -440,6 +457,13 @@ export class SolanaService {
     // Checked once that it really serves this cluster (its genesis hash), before anything is sent.
     if (!r) this.rpcs.set(cluster, (r = new GenesisCheckedRpc(cluster, this.rpcFactory(cluster, url))));
     return r;
+  }
+
+  // One pace per cluster, shared by every deploy writing to it, so two deploys at once don't double the rate.
+  private pacer(cluster: Cluster) {
+    let l = this.pacers.get(cluster);
+    if (!l) this.pacers.set(cluster, (l = new RateLimiter(this.config.maxRps?.[cluster] ?? 0)));
+    return l;
   }
 
   async status() {
@@ -679,9 +703,10 @@ export class SolanaService {
         await this.finish(userId, p, buildId, artifact.sha256, tx, signer, action, maxDataLen);
         return;
       }
+      await this.closeLeftoverBuffer(rpc, p, signer);
       await this.fund(rpc, p.cluster, signer.address, (await rent(BUFFER_HEADER + len)) + programRent + programDataRent + FEE_MARGIN);
       const open = await opening(signer.address);
-      const buffer = await this.writeBuffer(rpc, signer, artifact.program, () => this.heartbeat(p.id));
+      const buffer = await this.writeBuffer(rpc, p.cluster, signer, artifact.program, () => this.heartbeat(p.id), await this.freshKey(p.cluster, VAULT_BUFFER, p.id));
       try {
         tx = await this.send(rpc, signer, [
           ...open,
@@ -691,6 +716,7 @@ export class SolanaService {
         await this.closeBuffer(rpc, signer, buffer);
         throw e;
       }
+      await this.forgetBuffer(p);
     } else {
       const capacity = chain?.capacity ?? p.max_data_len ?? 0;
       if (len > capacity) throw new SolanaError(`The new program (${len} bytes) is larger than the ${capacity} bytes reserved at first deploy; deploy it as a new program`);
@@ -704,14 +730,16 @@ export class SolanaService {
         await this.finish(userId, p, buildId, artifact.sha256, tx, signer, action, maxDataLen);
         return;
       }
+      await this.closeLeftoverBuffer(rpc, p, signer);
       await this.fund(rpc, p.cluster, signer.address, (await rent(BUFFER_HEADER + len)) + FEE_MARGIN);
-      const buffer = await this.writeBuffer(rpc, signer, artifact.program, () => this.heartbeat(p.id));
+      const buffer = await this.writeBuffer(rpc, p.cluster, signer, artifact.program, () => this.heartbeat(p.id), await this.freshKey(p.cluster, VAULT_BUFFER, p.id));
       try {
         tx = await this.send(rpc, signer, [loader.upgrade({ programData: p.programdata_address!, program: p.program_id, buffer, spill: signer.address, authority: signer.address })]);
       } catch (e) {
         await this.closeBuffer(rpc, signer, buffer);
         throw e;
       }
+      await this.forgetBuffer(p);
     }
     await this.finish(userId, p, buildId, artifact.sha256, tx, signer, action, maxDataLen);
   }
@@ -866,8 +894,8 @@ export class SolanaService {
     const rent = (size: number) => rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
     // The buffer's rent; the buffer key's own rent-exempt minimum, which it keeps until the sweep empties it (an
     // account may not be left holding less than that, only nothing); and its fees: creating the buffer (two
-    // signatures), the writes, the sweep.
-    const bufferNeed = (await rent(BUFFER_HEADER + program.length)) + (await rent(0)) + SIGNATURE_FEE * (Math.ceil(program.length / WRITE_CHUNK) + 3);
+    // signatures), the writes, the sweep, and room for a batch of writes sent again (an expired blockhash).
+    const bufferNeed = (await rent(BUFFER_HEADER + program.length)) + (await rent(0)) + SIGNATURE_FEE * (Math.ceil(program.length / WRITE_CHUNK) + 3 + 2 * WRITE_BATCH);
     const nonceKey = await this.vaultKey(p.cluster, NONCE_KEY, p.id);
     const nonceNeed = nonceKey && (await this.nonceValue(rpc, nonceKey.address, payer.address)) ? 0 : (await rent(NONCE_ACCOUNT_SIZE)) + 2 * SIGNATURE_FEE;
     // The deploy payer's own: the funding transfer, and the invalidation if it fails (two signatures).
@@ -877,7 +905,7 @@ export class SolanaService {
     const bufferKey = await this.freshKey(p.cluster, BUFFER_ACCOUNT, p.id); // its address, kept until it's closed or used
     try {
       await this.send(rpc, signs(payer), [system.transfer(payer.address, temp.address, bufferNeed)]);
-      const buffer = await this.writeBuffer(rpc, signs(temp), program, () => this.heartbeat(p.id), bufferKey);
+      const buffer = await this.writeBuffer(rpc, p.cluster, signs(temp), program, () => this.heartbeat(p.id), bufferKey);
       try {
         const { before, last, extra } = await final(payer.address, buffer);
         return await this.sendCustodySigned(rpc, payer, custody, nonce, [...before, loader.setBufferAuthority(buffer, temp.address, custody.address), last], [temp, ...extra]);
@@ -1015,19 +1043,16 @@ export class SolanaService {
   }
 
   // The program bytes into a fresh buffer account, a Write per chunk, confirmed in batches, each batch on a
-  // fresh blockhash.
-  private async writeBuffer(rpc: SolanaRpc, signer: Signs, program: Uint8Array, alive: () => Promise<void> = async () => undefined, buffer = Keypair.generate()) {
+  // fresh blockhash, the writes paced to what the cluster's RPC allows.
+  private async writeBuffer(rpc: SolanaRpc, cluster: Cluster, signer: Signs, program: Uint8Array, alive: () => Promise<void> = async () => undefined, buffer = Keypair.generate()) {
     const size = BUFFER_HEADER + program.length;
     const lamports = await rpc.call<number>("getMinimumBalanceForRentExemption", [size]);
     await this.send(rpc, signer, [system.createAccount(signer.address, buffer.address, lamports, size, UPGRADEABLE_LOADER), loader.initializeBuffer(buffer.address, signer.address)], [buffer]);
     try {
       const writes: Instruction[] = [];
       for (let offset = 0; offset < program.length; offset += WRITE_CHUNK) writes.push(loader.write(buffer.address, signer.address, offset, program.subarray(offset, offset + WRITE_CHUNK)));
-      for (let i = 0; i < writes.length; i += 16) {
-        const { blockhash } = await this.blockhash(rpc);
-        const sigs = [];
-        for (const w of writes.slice(i, i + 16)) sigs.push(await this.submit(rpc, signer, [w], [], blockhash));
-        await this.confirm(rpc, sigs);
+      for (let i = 0; i < writes.length; i += WRITE_BATCH) {
+        await this.writeBatch(rpc, cluster, signer, writes.slice(i, i + WRITE_BATCH));
         await alive();
       }
     } catch (e) {
@@ -1035,6 +1060,58 @@ export class SolanaService {
       throw e;
     }
     return buffer.address;
+  }
+
+  // One batch of writes on one blockhash, confirmed together. A write that can't land on it (its blockhash expired
+  // while the RPC was rate-limiting us, or it wasn't confirmed in time) is signed again on a fresh blockhash and
+  // sent again. That is safe: a Write puts the same bytes at the same offset, however often it lands.
+  private async writeBatch(rpc: SolanaRpc, cluster: Cluster, signer: Signs, writes: Instruction[]) {
+    let pending = writes;
+    for (let attempt = 1; ; attempt++) {
+      const { blockhash } = await this.blockhash(rpc);
+      const sent: { w: Instruction; sig: string }[] = [];
+      try {
+        for (const w of pending) {
+          await this.pacer(cluster).take();
+          sent.push({ w, sig: await this.submit(rpc, signer, [w], [], blockhash) });
+        }
+        await this.confirm(rpc, sent.map((x) => x.sig));
+        return;
+      } catch (e) {
+        if (attempt >= WRITE_ATTEMPTS || !(e instanceof Unconfirmed || BLOCKHASH_GONE.test((e as Error).message))) throw e;
+        // Only what hasn't landed goes again: what was sent may have landed in the meantime.
+        const landed = new Set<string>();
+        if (sent.length) {
+          const r = await rpc.call<{ value: ({ err: unknown; confirmationStatus?: string } | null)[] }>("getSignatureStatuses", [sent.map((x) => x.sig), { searchTransactionHistory: true }]);
+          sent.forEach((x, i) => {
+            const st = r.value[i];
+            if (st && !st.err && ["confirmed", "finalized"].includes(st.confirmationStatus ?? "")) landed.add(x.sig);
+          });
+        }
+        pending = pending.filter((w) => !sent.some((x) => x.w === w && landed.has(x.sig)));
+        if (!pending.length) return;
+      }
+    }
+  }
+
+  // A buffer an earlier vault-signed deploy or upgrade of this program left behind (its close failed: the RPC was
+  // rate-limiting or down) is closed before a new one is written, so its rent comes back. If it can't be closed
+  // now, nothing starts: the deploy can be started again once the RPC answers.
+  private async closeLeftoverBuffer(rpc: SolanaRpc, p: ProgramRecord, signer: Signs) {
+    const stored = await this.keyRow(p.cluster, VAULT_BUFFER, p.id);
+    if (!stored) return;
+    try {
+      const a = await this.accountData(rpc, stored.public_key);
+      const ours = a && a.owner === UPGRADEABLE_LOADER && a.data.length >= BUFFER_HEADER && a.data.readUInt32LE(0) === 1 && a.data[4] === 1 && base58Encode(a.data.subarray(5, 37)) === signer.address;
+      if (ours) await this.send(rpc, signer, [loader.close(stored.public_key, signer.address, signer.address)]);
+    } catch (e) {
+      throw new SolanaError(`An earlier deploy of this program left a buffer that couldn't be closed yet (${(e as Error).message.slice(0, 300)}). Nothing was started; start the deploy again once the RPC answers`);
+    }
+    await this.forgetBuffer(p);
+  }
+
+  private async forgetBuffer(p: ProgramRecord) {
+    await this.db.query(`DELETE FROM ${T}.solana_keys WHERE cluster = $1 AND role = $2 AND scope = $3`, [p.cluster, VAULT_BUFFER, p.id]);
   }
 
   // Best effort: a buffer left behind holds rent; closing it returns that to the signer.
@@ -1082,7 +1159,7 @@ export class SolanaService {
       });
       pending = still;
       if (!pending.length) break;
-      if (Date.now() > deadline) throw new SolanaError(`Transaction ${pending[0]} wasn't confirmed in time`);
+      if (Date.now() > deadline) throw new Unconfirmed(`Transaction ${pending[0]} wasn't confirmed in time`);
       await new Promise((r) => setTimeout(r, this.config.pollMs));
     }
   }

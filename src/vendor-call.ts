@@ -120,6 +120,7 @@ export interface VendorResult {
   body: unknown;
   error: string | null; // a short code-like reason, never the vendor's text
   latency_ms: number;
+  retry_after?: string; // the Retry-After header, when the answer had one (rate limits, 503s)
 }
 
 // POST <base>/v1/<service_type_key> with the signed JSON body. The credential, when there is one, goes as
@@ -187,6 +188,8 @@ export async function safeRequest(
       },
       (res) => {
         const status = res.statusCode ?? 0;
+        const ra = res.headers["retry-after"];
+        const retryAfter = typeof ra === "string" ? { retry_after: ra.slice(0, 64) } : {};
         if (status >= 300 && status < 400) {
           res.resume();
           return finish({ ok: false, http_status: status, body: null, error: "redirects aren't followed" });
@@ -207,9 +210,9 @@ export async function safeRequest(
           try {
             body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           } catch {
-            if (!opts.anyBody) return finish({ ok: false, http_status: status, body: null, error: "response isn't JSON" });
+            if (!opts.anyBody) return finish({ ok: false, http_status: status, body: null, error: "response isn't JSON", ...retryAfter });
           }
-          finish({ ok: status >= 200 && status < 300, http_status: status, body, error: status >= 200 && status < 300 ? null : `http ${status}` });
+          finish({ ok: status >= 200 && status < 300, http_status: status, body, error: status >= 200 && status < 300 ? null : `http ${status}`, ...retryAfter });
         });
         res.on("error", () => finish({ ok: false, http_status: status, body: null, error: "connection error" }));
       },
