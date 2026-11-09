@@ -85,8 +85,17 @@ import sys
 p = sys.argv[1]; s = open(p).read()
 ${"for a, b in " + JSON.stringify(Object.entries(RD.images)) + ":"}
     s = s.replace("image: " + a, "image: " + b)
+# No host ports: the services talk over compose's own network, and a port the machine already uses (a local
+# Postgres on 5432) would stop the stack from starting.
+import re
+s = re.sub(r"\n    ports:\n(      - [^\n]*\n)+", "\n", s)
 open(p, "w").write(s)
 PY
+  # Radar's script reads its images' labels by their :main tags (and stops when they're missing): the pinned
+  # images, pulled by digest, carry those tags locally.
+  ${Object.entries(RD.images)
+    .map(([tag, pinned]) => `docker pull -q ${pinned} >> "$OUT/radar.log" 2>&1 && docker tag ${pinned} ${tag} >> "$OUT/radar.log" 2>&1`)
+    .join("\n  ")}
   # Mynt's copy of the source, with any radar-disable comment removed.
   rm -rf "$OUT/radar-src"; cp -r "$WS" "$OUT/radar-src"; rm -f "$OUT/radar-src/Cargo.lock"
   find "$OUT/radar-src" -name '*.rs' -exec sed -i 's/radar-disable/mynt-removed/g' {} +

@@ -186,7 +186,7 @@ test("client actions served by the bound vendor: the device gets a status, the i
   const hook = await ok(innovator, "create_firm_webhook", { url: `${firmHook.url}/mynt` });
   assert.match(hook.secret, /^whsec_/);
   // By default a firm webhook gets every firm event, the Mynt Ramp's reversals and late settlements included, and
-  // its Solana programs' deploys, upgrades and events.
+  // its Solana programs' deploys, upgrades and events, and the mainnet program gate's notices.
   assert.deepEqual(hook.events, [
     "vendor_action.completed",
     "vendor_action.failed",
@@ -196,6 +196,9 @@ test("client actions served by the bound vendor: the device gets a status, the i
     "program.deployed",
     "program.upgraded",
     "program.event",
+    "program.upgrade_scheduled",
+    "program.upgrade_cancelled",
+    "program.review_flagged",
   ]);
   assert.ok(!JSON.stringify(await ok(innovator, "list_firm_webhooks")).includes(hook.secret), "the secret is shown once");
 
