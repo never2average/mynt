@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { connectPostgres } from "../dist/db.js";
 import { createMcpHttpServer } from "../dist/http.js";
-import { authorizeMovement, centsOf, flowsFor, recordMovementFailed, recordMovementOutput, recordMovementPending, recordMovementReversed } from "../dist/money-rails.js";
+import { authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, movementShape, recordMovementFailed, recordMovementOutput, recordMovementPending, recordMovementReversed, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
 import { normalizeModel } from "../dist/regulatory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
@@ -52,18 +52,48 @@ const ok = async (client, name, args = {}) => {
   return r.data;
 };
 
+// A verified state money transmitter licence covering `covers`, as the US model has them: it grants
+// us_money_transmission and counts only with a FinCEN registration, which covers nowhere itself.
+async function moneyTransmitter(store, user, covers, { fincen = true, grants = "us_money_transmission" } = {}) {
+  if (!user.entity_id) {
+    const entity = await store.createEntity(user.id, { name: `${user.name} Ltd`, registration_numbers: {}, regions: ["US"] });
+    await store.setUserEntity(user.id, entity.id);
+    user.entity_id = entity.id;
+  }
+  await store.upsertRegulatedProductType("US", { id: grants, name: grants, description: "", type_id: "deposits", actions: ["sale", "servicing"] });
+  const grc = (ids) => ({
+    registers: { obligations: [], reporting_disclosure_filings: [], risks: [], controls: [], inspection_events: [] },
+    repositories: { regulatory_communications: [], enforcement_actions: [], press_releases: [], policies: [], risk_models: [], inspection_history: [] },
+    allowed_product_types: ids.map((id) => ({ id, actions: ["sale", "servicing"] })),
+    allowed_customer_segments: [],
+    mandatory_stakeholders: { internal: [], external: [] },
+  });
+  const scope = { product_types: [{ id: grants, name: grants, description: "", type_id: "deposits", action: ["sale", "servicing"] }], customer_personas: [] };
+  const region = (await store.referenceData(true)).regions.find((r) => r.code === "US");
+  const model = normalizeModel(region.regulatory);
+  await store.setRegulatoryModel("US", {
+    ...model,
+    regulators: [
+      ...model.regulators.filter((r) => !["t_fincen", "t_state"].includes(r.id)),
+      { id: "t_fincen", name: "Test FinCEN", scope, license_types: [{ _id: "t_msb", name: "MSB", scope: "", application_procedure: [], covers: [], grc: grc([grants]) }] },
+      { id: "t_state", name: "Test state", scope, license_types: [{ _id: "t_mt", name: "Money transmitter", scope: "", application_procedure: [], covers, requires: [["t_msb"]], grc: grc([grants]) }] },
+    ],
+  });
+  const hold = async (regulator_id, license_id) => {
+    const h = await store.registerLicense(user.id, { entity_id: user.entity_id, region: "US", regulator_id, license_id, registration_number: `T-${license_id}`, valid_from: null, valid_to: null });
+    await store.reviewLicense(h.id, "verified", user.id, "test");
+    return h;
+  };
+  const registration = fincen ? await hold("t_fincen", "t_msb") : null;
+  return { held: await hold("t_state", "t_mt"), registration };
+}
+
 // A licence provider whose verified US licence covers `covers`, sponsoring one product in `jurisdictions`.
 async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-ny", "us-ca"] } = {}) {
   const tag = randomBytes(4).toString("hex");
   const { user: adminUser } = await store.createUser(`Admin ${tag}`, ["admin"]);
   const { user: lpUser } = await store.createUser(`Lena ${tag}`, ["license_provider"]);
-  const held = await licensed(store, lpUser, { region: "US" });
-  const region = (await store.referenceData(true)).regions.find((r) => r.code === "US");
-  const model = normalizeModel(region.regulatory);
-  await store.setRegulatoryModel("US", {
-    ...model,
-    regulators: model.regulators.map((r) => (r.id === held.regulator_id ? { ...r, license_types: r.license_types.map((l) => ({ ...l, covers })) } : r)),
-  });
+  const { held, registration } = await moneyTransmitter(store, lpUser, covers);
   const { user: builderUser } = await store.createUser(`Neo ${tag}`, ["innovator"]);
   const builderFirm = await store.createEntity(builderUser.id, { name: `Builder ${tag}`, registration_numbers: {}, regions: ["US"] });
   await store.setUserEntity(builderUser.id, builderFirm.id);
@@ -94,7 +124,7 @@ async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-
   });
   const ledger = async (railId) => (await store.db.query("SELECT * FROM financial_products.money_movements WHERE rail_id = $1 AND NOT sandbox ORDER BY created_at", [railId])).rows;
   const audited = async (action) => (await store.db.query("SELECT * FROM financial_products.audit_log WHERE action = $1", [action])).rows;
-  return { store, tag, admin, provider, builder, RAIL, approvedRail, move, ledger, audited, product_id, lpUser, adminUser, held };
+  return { store, tag, admin, provider, builder, RAIL, approvedRail, move, ledger, audited, product_id, lpUser, adminUser, held, registration, builderUser, builderFirm };
 }
 
 test("dollars become integer cents without a float", () => {
@@ -294,6 +324,124 @@ test("approval refuses a state outside the firm's verified licences, and a licen
   assert.equal((await authorizeMovement(store, w.move({ direction: "on_ramp" }))).code, "licence_not_in_force");
 });
 
+test("only a licence granting money transmission counts, with its FinCEN prerequisite, state by state", async () => {
+  const store = await openPglite();
+  // A deposits-only licence, however verified, is no licence to move money.
+  const a = await world(store);
+  const { user: depositsOnly } = await store.createUser("Deposits", ["license_provider"]);
+  await licensed(store, depositsOnly, { region: "US" });
+  const client = await connect(store, depositsOnly);
+  const rail = await ok(client, "propose_rail", a.RAIL);
+  assert.deepEqual(rail.outside_licence_coverage, ["us-ny"]);
+  const refused = await callTool(a.admin, "approve_rail", { rail_id: rail.id });
+  assert.equal(refused.isError, true);
+  assert.deepEqual(refused.data.outside_licence_coverage, ["us-ny"]);
+
+  // The FinCEN registration lapsing takes the state licence with it, at the chokepoint and at approval.
+  const r1 = await a.approvedRail();
+  assert.equal((await authorizeMovement(store, a.move())).allowed, true);
+  await store.reviewLicense(a.registration.id, "rejected", a.adminUser.id, "lapsed");
+  assert.equal((await authorizeMovement(store, a.move())).code, "licence_not_in_force");
+  await ok(a.admin, "suspend_rail", { rail_id: r1.id, reason: "looking into it" });
+  assert.deepEqual((await callTool(a.admin, "approve_rail", { rail_id: r1.id })).data.outside_licence_coverage, ["us-ny"]);
+
+  // A licence claiming the whole country doesn't clear each state: money transmission is licensed state by state.
+  const nationwide = await openPglite();
+  const b = await world(nationwide, { covers: ["us"] });
+  const nw = await ok(b.provider, "propose_rail", b.RAIL);
+  assert.deepEqual((await callTool(b.admin, "approve_rail", { rail_id: nw.id })).data.outside_licence_coverage, ["us-ny"]);
+
+  // Only the licences the sponsorship is under count at the chokepoint, not any other the firm holds.
+  const c = await world(await openPglite());
+  await c.approvedRail();
+  await c.store.db.query("UPDATE financial_products.sponsorships SET licence_ids = '{}' WHERE product_id = $1", [c.product_id]);
+  assert.equal((await authorizeMovement(c.store, c.move())).code, "licence_not_in_force");
+});
+
+test("the sponsor must be the action's own; no component and several sponsors is refused", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  await w.approvedRail();
+  assert.equal((await authorizeMovement(store, w.move({ component_key: "account" }))).allowed, true);
+  // The product has a sponsor, but not of what this action serves.
+  assert.equal((await authorizeMovement(store, w.move({ component_key: "lending" }))).code, "component_not_sponsored");
+
+  const { user: second } = await store.createUser("Second", ["license_provider"]);
+  const { held } = await moneyTransmitter(store, second, ["us-ny", "us-ca"]);
+  const asked = await store.requestSponsorship(w.builderUser.id, { product_id: w.product_id, component_key: "lending", builder_entity_id: w.builderFirm.id, provider_entity_id: second.entity_id, requested_jurisdictions: ["us-ny"], note: null });
+  await store.decideSponsorship(asked.id, { status: "approved", decided_by: second.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
+  assert.equal((await authorizeMovement(store, w.move())).code, "sponsor_ambiguous");
+  assert.equal((await authorizeMovement(store, w.move({ component_key: "account" }))).allowed, true);
+  // The other sponsor has no rail, and the first one's doesn't serve its component.
+  assert.equal((await authorizeMovement(store, w.move({ component_key: "lending" }))).code, "no_approved_rail");
+});
+
+test("whoever proposed a rail, or works for its firm, can't approve it", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const { user: both } = await store.createUser("Both", ["admin", "license_provider"]);
+  await store.setUserEntity(both.id, w.lpUser.entity_id);
+  both.entity_id = w.lpUser.entity_id;
+  const insider = await connect(store, both);
+  const own = await ok(insider, "propose_rail", w.RAIL);
+  assert.match(JSON.stringify((await callTool(insider, "approve_rail", { rail_id: own.id })).data), /another admin must/);
+  await ok(w.admin, "approve_rail", { rail_id: own.id });
+  await ok(w.admin, "suspend_rail", { rail_id: own.id, reason: "check" });
+  // A colleague at the firm, who didn't propose it: still the firm's own.
+  const { user: colleague } = await store.createUser("Colleague", ["admin"]);
+  await store.setUserEntity(colleague.id, w.lpUser.entity_id);
+  colleague.entity_id = w.lpUser.entity_id;
+  assert.match(JSON.stringify((await callTool(await connect(store, colleague), "approve_rail", { rail_id: own.id })).data), /another admin must/);
+});
+
+test("partner refusals: only the allowlist, and no server error, mean nothing moved", () => {
+  for (const c of ["partner_customer_required", "partner_customer_not_ready", "unknown_quote"]) assert.equal(isDefiniteRefusal(c, undefined), true, c);
+  for (const c of ["partner_bad_answer", "partner_internal_server_error", "partner_rate_limited", "partner_error", "partner_unreachable", "whatever"]) assert.equal(isDefiniteRefusal(c, undefined), false, c);
+  assert.equal(isDefiniteRefusal(null, undefined), false);
+  assert.equal(isDefiniteRefusal("partner_customer_not_ready", 400), true);
+  assert.equal(isDefiniteRefusal("partner_customer_not_ready", 503), false);
+});
+
+test("a service that accepts a quote takes its figures from the quote, never from what the device sends", () => {
+  const device = { direction: "on", amount_usd: "1.00" };
+  assert.deepEqual(movementShape({ key: "ramp_transfer", accepts: "ramp_quote" }, device, null), { direction: null, amount_cents: null, expected_total_cents: null });
+  assert.deepEqual(movementShape({ key: "ramp_transfer", accepts: "ramp_quote" }, device, { direction: "off", amount_usd: "90.00", total_usd: "91.00" }), { direction: "off_ramp", amount_cents: 9_000, expected_total_cents: 9_100 });
+  assert.deepEqual(movementShape({ key: "ramp_direct" }, device), { direction: "on_ramp", amount_cents: 100, expected_total_cents: null });
+});
+
+test("the customer's state comes from one place, and what it was is on the movement", async () => {
+  assert.deepEqual(resolveCustomerState({ residence_state: "US-NY" }), { state: "us-ny", source: "customer_attested" });
+  assert.deepEqual(resolveCustomerState({}), { state: null, source: "customer_attested" });
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail();
+  await authorizeMovement(store, w.move({ customer_state: "us-ny", state_source: "customer_attested" }));
+  const [row] = await w.ledger(rail.id);
+  assert.deepEqual([row.state, row.state_source], ["us-ny", "customer_attested"]);
+});
+
+test("what settled is kept, and a difference from the quote is flagged", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail();
+  const rowOf = async (m) => (await w.ledger(rail.id)).find((r) => r.request_id === m.request_id);
+  const same = w.move({ expected_total_cents: 9_950 });
+  await authorizeMovement(store, same);
+  await recordMovementOutput(store, same, { transfer_status: "settled", total_usd: "99.50" });
+  assert.deepEqual([Number((await rowOf(same)).settled_amount_cents), (await rowOf(same)).settled_amount_differs], [9_950, false]);
+  const short = w.move({ expected_total_cents: 9_950 });
+  await authorizeMovement(store, short);
+  await recordMovementOutput(store, short, { transfer_status: "settled", total_usd: "98.00" });
+  assert.deepEqual([Number((await rowOf(short)).settled_amount_cents), (await rowOf(short)).settled_amount_differs], [9_800, true]);
+  assert.ok((await w.audited("money_movement_amount_differs")).length);
+  // A partner that doesn't say: unknown, not zero and not a match.
+  const silent = w.move();
+  await authorizeMovement(store, silent);
+  await recordMovementOutput(store, silent, { transfer_status: "settled" });
+  assert.equal((await rowOf(silent)).settled_amount_cents, null);
+  assert.equal((await rowOf(silent)).settled_amount_differs, null);
+});
+
 test("tools: who can do what", async () => {
   const store = await openPglite();
   const w = await world(store);
@@ -394,7 +542,8 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     if (req.url.endsWith("/v1/ramp_quote"))
       return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: { quote_id: `q_${randomUUID()}`, expires_at: new Date(Date.now() + 60_000).toISOString(), direction: "on", amount_usd: body.params.amount_usd, currency: "USD" } }));
     partner.transfers.push(body);
-    if (partner.answer === "refused") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "partner_refused", message: "no" } }));
+    if (partner.answer === "refused") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "unknown_quote", message: "no" } }));
+    if (partner.answer === "vague") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "try_later", message: "hm" } }));
     res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: { transfer_status: "submitted", settlement_ref: null } }));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -432,15 +581,19 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
       input_schema: inputSchema,
       output_schema: { type: "object", required: ["transfer_status"], properties: { transfer_status: { enum: ["submitted", "settled", "failed", "returned"] }, settlement_ref: { type: ["string", "null"] } }, additionalProperties: false },
       accepts: "ramp_quote",
+      moves_money: true,
       consent_purpose: "fiat_ramp_transfer",
       vendor_licences: ["rbi_pa"],
       client_result: { status: { from: "transfer_status", map: { submitted: "pending", settled: "completed", failed: "failed", returned: "failed" } }, fields: ["transfer_status"], redirect: false },
     },
   });
-  // A service that moves money can't hide in another category.
-  const hidden = await call(admin, "define_service_type", { service_type: { region: "IN", key: "bank_payout", name: "Payouts", category: "other", input_schema: inputSchema, output_schema: { type: "object", properties: {}, additionalProperties: false }, consent_purpose: "x", vendor_licences: [], client_result: { fields: [], redirect: false } } });
-  assert.equal(hidden.isError, true);
-  assert.match(JSON.stringify(hidden.data), /must be category 'ramp'/);
+  // What moves money is declared: not by its category or its name alone, and a quote can't be one.
+  const plain = { region: "IN", name: "Plain", input_schema: inputSchema, output_schema: { type: "object", properties: {}, additionalProperties: false }, consent_purpose: "x", vendor_licences: [], client_result: { fields: [], redirect: false } };
+  assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "bank_payout", name: "Payouts", category: "other" } })).data), /declare moves_money/);
+  assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "ramp_undeclared", category: "ramp" } })).data), /declare moves_money/);
+  const quoteOutput = { type: "object", required: ["quote_id", "expires_at"], properties: { quote_id: { type: "string" }, expires_at: { type: "string" } }, additionalProperties: false };
+  assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "ramp_transfer_quote", category: "ramp", quote: true, output_schema: quoteOutput } })).data), /named as a transfer/);
+  assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "ramp_price", category: "ramp", quote: true, moves_money: true, output_schema: quoteOutput } })).data), /a quote only prices/);
 
   // The ramp firm, with its partner listed as live.
   await must(admin, "invite_user", { email: "ops@rampco.example", roles: ["vendor"] });
@@ -453,10 +606,14 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   await must(admin, "set_mynt_ramp", { entity_id: rampFirm.id });
   const offerings = {};
   const subs = {};
+  // A ramp's test and live endpoints can't be the same one.
+  const clash = await call(rampClient, "create_vendor_offering", { region: "IN", service_type: "ramp_quote", name: "same", price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, live_base_url: `${partnerUrl}/`, licence_ids: [rampLic.id] });
+  assert.match(JSON.stringify(clash.data), /must be different endpoints/);
   for (const key of ["ramp_quote", "ramp_transfer"]) {
     const o = await must(rampClient, "create_vendor_offering", { region: "IN", service_type: key, name: key, price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, licence_ids: [rampLic.id] });
     await store.db.query("UPDATE financial_products.vendor_offerings SET status = 'listed', live_base_url = $2 WHERE id = $1", [o.id, partnerUrl]);
     offerings[key] = o.id;
+    if (key === "ramp_quote") assert.match(JSON.stringify((await call(rampClient, "update_vendor_offering", { offering_id: o.id, test_base_url: partnerUrl })).data), /must be different endpoints/);
     subs[key] = await must(innovator, "subscribe_vendor_service", { offering_id: o.id });
     await store.db.query("UPDATE financial_products.vendor_subscriptions SET live = true WHERE id = $1", [subs[key].subscription_id]);
   }
@@ -518,7 +675,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
 
   // A licence provider sponsors it in New York, covered by its US licence.
   const { user: lpUser } = await store.createUser("Lena", ["license_provider"]);
-  const held = await licensed(store, lpUser, { region: "US" });
+  const { held } = await moneyTransmitter(store, lpUser, ["us-ny"]);
   const asked = await store.requestSponsorship(ctx.user.id, { product_id: P, component_key: "deposit", builder_entity_id: ctx.user.entity_id, provider_entity_id: lpUser.entity_id, requested_jurisdictions: ["us-ny"], note: null });
   await store.decideSponsorship(asked.id, { status: "approved", decided_by: lpUser.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
   const provider = await connectV(lpUser);
@@ -529,7 +686,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal(partner.transfers.length, 0, "the partner never heard of it");
 
   // With an approved rail for this partner's offering, the same quote goes through.
-  const proposed = await must(provider, "propose_rail", { kind: "ramp_adapter", provider: offerings.ramp_transfer, direction: "on_ramp", states: ["us-ny"], per_transfer_limit_cents: 15_000, daily_limit_cents: 30_000 });
+  const proposed = await must(provider, "propose_rail", { kind: "ramp_adapter", provider: offerings.ramp_transfer, direction: "on_ramp", states: ["us-ny"], per_transfer_limit_cents: 15_000, daily_limit_cents: 40_000 });
   const rail = await must(admin, "approve_rail", { rail_id: proposed.id });
   const accepted = await start("transfer", { quote: q1 });
   assert.equal(accepted.status, 201, accepted.text);
@@ -544,6 +701,19 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal(row.direction, "on_ramp");
   assert.equal(row.state, "us-ny");
   assert.equal(row.sponsor_entity_id, lpUser.entity_id);
+  assert.equal(row.state_source, "customer_attested");
+
+  // If the run can't even be started, or fails before the partner is called, nothing moved: the reservation goes.
+  const realQuery = store.db.query;
+  for (const breaks of ["INSERT INTO financial_products.vendor_action_runs", "SELECT signing_secret AS v"]) {
+    const q = await quote("20.00");
+    store.db.query = (s, p) => (s.includes(breaks) ? Promise.reject(new Error("database went away")) : realQuery.call(store.db, s, p));
+    const failed = await start("transfer", { quote: q });
+    store.db.query = realQuery;
+    assert.equal(failed.status, 500, failed.text);
+    assert.deepEqual([(await rowOf(q)).status, (await rowOf(q)).status_detail], ["failed", "internal_before_call"], breaks);
+  }
+  assert.equal(partner.transfers.length, 1, "neither reached the partner");
 
   // Over the per-transfer limit, on the amount the customer was quoted.
   assert.equal((await start("transfer", { quote: await quote("150.01") })).body.error, "over_transfer_limit");
@@ -558,9 +728,16 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const retried = await start("transfer", { quote: q2 });
   assert.equal(retried.status, 201, retried.text);
   assert.equal((await rowOf(q2)).status, "submitted");
-  assert.equal((await store.db.query("SELECT count(*)::int AS n FROM financial_products.money_movements WHERE rail_id = $1", [rail.id])).rows[0].n, 2);
+  assert.equal((await store.db.query("SELECT count(*)::int AS n FROM financial_products.money_movements WHERE rail_id = $1 AND status <> 'failed'", [rail.id])).rows[0].n, 2);
 
-  // The day's limit: 100 + 100 used of 300, so another 100 fits and then nothing does.
+  // An answer that isn't a clear refusal may have moved money: it stays open, and counts against the day.
+  partner.answer = "vague";
+  const q4 = await quote("100.00");
+  assert.equal((await start("transfer", { quote: q4 })).status, 502);
+  assert.deepEqual([(await rowOf(q4)).status, (await rowOf(q4)).status_detail], ["requested", "outcome_unknown:try_later"]);
+  partner.answer = "submitted";
+
+  // The day's limit: 300 used of 400, so another 100 fits and then nothing does.
   assert.equal((await start("transfer", { quote: await quote("100.00") })).status, 201);
   assert.equal((await start("transfer", { quote: await quote("50.00") })).body.error, "over_daily_limit");
 
@@ -580,6 +757,8 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal(flows.measured, true);
   assert.deepEqual(flows.flows.on_ramp.settled, { count: 1, amount_cents: 10_000 });
   assert.deepEqual(flows.flows.on_ramp.submitted, { count: 2, amount_cents: 20_000 });
+  assert.deepEqual(flows.flows.on_ramp.requested, { count: 1, amount_cents: 10_000 });
+  assert.deepEqual(flows.unresolved.on_ramp, { count: 0, amount_cents: 0 });
   assert.deepEqual(flows.flows.on_ramp.reversed, { count: 0, amount_cents: 0 });
   assert.equal(flows.flows.payout, null);
   assert.match(flows.not_measured.payout, /doesn't instruct/);
@@ -593,7 +772,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const seen = partner.transfers.length;
   const q3 = await quote("10.00");
   const suspended = await must(admin, "suspend_rail", { rail_id: rail.id, reason: "partner incident" });
-  assert.equal(suspended.in_flight.length, 2, "submitted and not settled");
+  assert.equal(suspended.in_flight.length, 3, "submitted or unanswered, and not settled");
   const stopped = await start("transfer", { quote: q3 });
   assert.equal(stopped.status, 403, stopped.text);
   assert.equal(stopped.body.error, "rail_suspended");
@@ -602,4 +781,37 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   // Dollars only for the device: a refusal names no rail provider or crypto concept.
   assert.doesNotMatch(stopped.text + noRail.text, /usdc|solana|wallet|chain|bridge/i);
   assert.ok((await store.db.query("SELECT 1 FROM financial_products.audit_log WHERE action = 'money_movement_refused'")).rows.length >= 3);
+
+  // A partner's error after the run is over still reaches the ledger.
+  const q2Row = await rowOf(q2);
+  await store.db.query("UPDATE financial_products.vendor_action_runs SET status = 'expired' WHERE request_id = $1", [q2Row.request_id]);
+  const lateError = JSON.stringify({ request_id: q2Row.request_id, status: "error", output: null, error: { code: "bank_rejected" } });
+  assert.equal((await fetch(`${base}/v1/vendor/callback/${q2Row.subscription_id}`, { method: "POST", headers: { "Content-Type": "application/json", "Mynt-Signature": signBody(secret, lateError) }, body: lateError })).status, 200);
+  assert.deepEqual([(await rowOf(q2)).status, (await rowOf(q2)).status_detail], ["failed", "partner_failed_late"]);
+
+  // Nobody ever answers for the rest: swept, and reported apart from what's in flight or known to have failed.
+  assert.equal(await sweepStaleMovements(store, { now: new Date(Date.now() - 3_600_000) }), 0, "not stale yet");
+  assert.ok((await sweepStaleMovements(store, { now: new Date(Date.now() + 90 * 86_400_000) })) >= 2);
+  const swept = await flowsFor(store, P, await store.getSetting("money_ledger_started_at"), new Date(Date.now() + 60_000));
+  assert.deepEqual(swept.flows.on_ramp.requested, { count: 0, amount_cents: 0 });
+  assert.deepEqual(swept.flows.on_ramp.submitted, { count: 0, amount_cents: 0 });
+  assert.equal(swept.unresolved.on_ramp.count, 2);
+  // ... and if it turns out the money moved, the partner's word still counts.
+  const lastRow = (await store.db.query("SELECT * FROM financial_products.money_movements WHERE status_detail = 'stale_no_answer' AND rail_id = $1 LIMIT 1", [rail.id])).rows[0];
+  const lateOk = JSON.stringify({ request_id: lastRow.request_id, status: "ok", output: { transfer_status: "settled", settlement_ref: "tr_late" } });
+  await fetch(`${base}/v1/vendor/callback/${lastRow.subscription_id}`, { method: "POST", headers: { "Content-Type": "application/json", "Mynt-Signature": signBody(secret, lateOk) }, body: lateOk });
+  const revived = (await store.db.query("SELECT status, status_detail FROM financial_products.money_movements WHERE id = $1", [lastRow.id])).rows[0];
+  assert.deepEqual([revived.status, revived.status_detail], ["settled", "late_settlement"]);
+
+  // Every change to the customer's state is kept, append-only, and erasing it is a change too.
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ny" } })).status, 201);
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ca" } })).status, 201);
+  assert.equal((await api("DELETE", "/v1/client/fields", device)).status, 200);
+  const history = (await store.db.query("SELECT * FROM financial_products.customer_state_history ORDER BY created_at, new_state NULLS LAST")).rows;
+  assert.deepEqual(history.map((h) => [h.old_state, h.new_state]), [[null, "us-ny"], ["us-ny", "us-ca"], ["us-ca", null]], "the same value twice is no change");
+  assert.match(history[0].changed_by, /^session:/);
+  assert.match(history[0].customer_key, /^[0-9a-f]{40}$/);
+  assert.ok(!JSON.stringify(history).includes("cust_rail_1"));
+  await assert.rejects(store.db.query("UPDATE financial_products.customer_state_history SET new_state = 'us-tx'"), /append-only/);
+  await assert.rejects(store.db.query("DELETE FROM financial_products.customer_state_history"), /append-only/);
 });

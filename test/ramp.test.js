@@ -118,6 +118,7 @@ const TRANSFER = {
     additionalProperties: false,
   },
   accepts: "ramp_quote",
+  moves_money: true,
   consent_purpose: "fiat_ramp_transfer",
   vendor_licences: ["rbi_pa"],
   client_result: { status: { from: "transfer_status", map: { submitted: "pending", settled: "completed", failed: "failed", returned: "failed" } }, fields: ["transfer_status"], redirect: false },

@@ -57,6 +57,11 @@ async function fakeBridge() {
     if (req.method === "POST" && req.url === "/v0/transfers") {
       const key = req.headers["idempotency-key"];
       if (!key) return reply(400, { code: "invalid_parameters", message: "Idempotency-Key required" });
+      if (state.nextTransferReply) {
+        const r = state.nextTransferReply;
+        state.nextTransferReply = null;
+        return reply(r.code, r.body);
+      }
       if (state.byIdempotency.has(key)) return reply(201, state.transfers.get(state.byIdempotency.get(key)));
       const b = call.body;
       if (!b.on_behalf_of || !b.source || !b.destination) return reply(400, { code: "invalid_parameters", message: "missing" });
@@ -235,7 +240,7 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.match(JSON.stringify((await call(partner, "set_ramp_adapter", { offering_id: spare.id, adapter: "bridge", config, test_credential: "sk-live-abc" })).data), /looks like a production key/);
   assert.match(JSON.stringify((await call(partner, "set_ramp_adapter", { offering_id: spare.id, adapter: "bridge", config, live_credential: "sk-test-abc" })).data), /sandbox key/);
   // With both credentials set, conformance probes both: a live key the partner refuses fails it.
-  const spare2 = await ok(partner, "create_vendor_offering", { region: "US", service_type: "onramp_quote", name: "spare2", price: { amount: 0, currency: "USD" }, test_base_url: bridge.url, live_base_url: bridge.url, licence_ids: [lic.id] });
+  const spare2 = await ok(partner, "create_vendor_offering", { region: "US", service_type: "onramp_quote", name: "spare2", price: { amount: 0, currency: "USD" }, test_base_url: bridge.url, live_base_url: (await fakeBridge()).url, licence_ids: [lic.id] });
   await ok(partner, "set_ramp_adapter", { offering_id: spare2.id, adapter: "bridge", config, test_credential: API_KEY, live_credential: "sk-live-wrong" });
   const liveRefused = await ok(partner, "run_conformance", { offering_id: spare2.id });
   assert.equal(liveRefused.passed, false);
@@ -521,6 +526,44 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.equal((await hook(offerings.onramp_transfer, tr8)).status, 200);
   assert.equal((await queued()).filter((t) => t === "vendor_action.late_settlement").length, lateBefore + 1, "told once");
   assert.ok((await store.db.query("SELECT late_result_sealed FROM financial_products.vendor_action_runs WHERE id = $1", [t8.body.reference])).rows[0].late_result_sealed);
+
+  // ---- what the partner says about money, in the ledger ----
+  const movement = async (quoteRef) => (await store.db.query("SELECT * FROM financial_products.money_movements WHERE idempotency_key = $1", [`quote:${quoteRef}`])).rows[0];
+  assert.equal((await movement(q8.body.reference)).status, "settled", "a run that ended another way doesn't stop the ledger hearing of the money");
+  assert.equal((await movement(q2.body.reference)).status, "failed", "returned before it settled, by the poller");
+  assert.equal((await movement(q3.body.reference)).status, "failed", "undeliverable, by webhook");
+  const refusedWith = async (amount, reply) => {
+    const q = await start("onramp_quote", { params: { direction: "in", amount_usd: amount } });
+    bridge.state.nextTransferReply = reply;
+    const t = await start("onramp_transfer", { quote: q.body.reference });
+    assert.equal(t.status, 502, t.text);
+    return movement(q.body.reference);
+  };
+  // A 5xx, even with a code, a rate limit and a code Mynt doesn't know: it may have moved, so it stays open and counted.
+  for (const [amount, reply, code] of [
+    ["50.00", { code: 500, body: { code: "internal_server_error" } }, "partner_internal_server_error"],
+    ["51.00", { code: 429, body: { code: "rate_limited" } }, "partner_rate_limited"],
+    ["52.00", { code: 400, body: { code: "something_new" } }, "partner_something_new"],
+  ]) {
+    const m = await refusedWith(amount, reply);
+    assert.equal(m.status, "requested", code);
+    assert.equal(m.status_detail, `outcome_unknown:${code}`);
+  }
+  // A clear refusal from the allowlist means nothing moved, but not if a server error sits behind it.
+  const clearRefusal = await refusedWith("53.00", { code: 400, body: { code: "requires_active_kyc_status" } });
+  assert.equal(clearRefusal.status, "failed");
+  assert.equal(clearRefusal.status_detail, "vendor_error");
+  assert.equal((await refusedWith("54.00", { code: 503, body: { code: "requires_active_kyc_status" } })).status, "requested", "any 5xx is unknown");
+  // A 2xx whose state Mynt can't read, with an id: unknown, and the transfer is kept, so its later webhook lands.
+  const odd = await refusedWith("55.00", { code: 201, body: { id: "tr_odd", state: "brand_new_state" } });
+  assert.equal(odd.status, "requested");
+  assert.equal(odd.status_detail, "outcome_unknown:partner_bad_answer");
+  assert.equal((await store.db.query("SELECT status FROM financial_products.ramp_adapter_transfers WHERE partner_transfer_id = 'tr_odd'")).rows[0].status, "submitted");
+  assert.equal((await hook(offerings.onramp_transfer, { id: "tr_odd", state: "payment_processed", receipt: { final_amount: (Number(odd.expected_total_cents) / 100).toFixed(2) } })).status, 200);
+  const landed = (await store.db.query("SELECT * FROM financial_products.money_movements WHERE id = $1", [odd.id])).rows[0];
+  assert.equal(landed.status, "settled");
+  assert.equal(Number(landed.settled_amount_cents), Number(odd.expected_total_cents), "what the partner reports it moved");
+  assert.equal(landed.settled_amount_differs, false, "it matches what the quote said would arrive");
 
   // ---- dollars only, and the credential nowhere ----
   // The SDK a developer generates for this product: its actions, types and docs carry no crypto concept.

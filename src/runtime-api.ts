@@ -12,7 +12,7 @@ import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 import { requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
-import { CUSTOMER_STATE_FIELD, productMoneyDirections } from "./money-rails.js";
+import { CUSTOMER_STATE_FIELD, productMoneyDirections, recordCustomerStateChange } from "./money-rails.js";
 
 // The runtime REST API under /v1, for developers' shipped apps. Authenticated with a per-app key
 // (Authorization: Bearer mynt_live_… / mynt_test_…), read-only over products, plus hand-offs to
@@ -244,6 +244,11 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       return session.customer_ref;
     };
 
+    // Every change to where the customer lives, before the vault changes (see money-rails.ts).
+    const noteStateChange = async (customer: string, next: string | null, source: string) => {
+      const was = (await store.vaultFields(app.id, customer, session.sandbox)).find((h) => h.field === CUSTOMER_STATE_FIELD);
+      await recordCustomerStateChange(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, old_state: was ? open(was.sealed, session.sandbox).toLowerCase() : null, new_state: next, changed_by: `session:${session.id}`, source });
+    };
     if (path === "/v1/client/fields") {
       allow("GET, POST, DELETE");
       const customer = requireCustomer();
@@ -252,6 +257,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         return send(res, 200, { fields: held.map((h) => ({ field: h.field, source: h.source, value: masked(h.field, open(h.sealed, session.sandbox)), updated_at: h.updated_at })) }, cors);
       }
       if (method === "DELETE") {
+        await noteStateChange(customer, null, "erased");
         const erased = await store.eraseVault(app.id, customer, session.sandbox);
         return send(res, 200, { erased }, cors);
       }
@@ -272,6 +278,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         else if (!f.capture.includes(body.source)) problems.push(`${field} can't be captured by ${body.source}`);
       }
       if (problems.length) throw new ApiError(400, "invalid_fields", problems.join("; "));
+      if (CUSTOMER_STATE_FIELD in body.values) await noteStateChange(customer, String(body.values[CUSTOMER_STATE_FIELD]).trim().toLowerCase(), body.source);
       for (const [field, value] of Object.entries(body.values))
         await store.putVaultField({ app_id: app.id, customer_ref: customer, sandbox: session.sandbox, field, sealed: seal(String(value).trim(), session.sandbox), source: body.source });
       return send(res, 201, { stored: Object.keys(body.values) }, cors);

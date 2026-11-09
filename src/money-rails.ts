@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { licenseInForce, productsAnsweredBy } from "./access.js";
 import { RAMP_ADAPTER_IDS } from "./ramp-adapters/index.js";
-import { coversJurisdiction } from "./regulatory.js";
+import { licenseProducts, normalizeModel } from "./regulatory.js";
 import { whereHeld } from "./sponsorships.js";
 import type { ProductRecord, Store, User } from "./store.js";
 import { getOffering, getSubscription, serviceType } from "./vendors.js";
@@ -89,6 +89,10 @@ const toMovement = (r: Row) => ({
   direction: (r.direction as RailDirection | null) ?? null,
   amount_cents: r.amount_cents == null ? null : Number(r.amount_cents),
   state: (r.state as string | null) ?? null,
+  state_source: (r.state_source as string | null) ?? null,
+  expected_total_cents: r.expected_total_cents == null ? null : Number(r.expected_total_cents),
+  settled_amount_cents: r.settled_amount_cents == null ? null : Number(r.settled_amount_cents),
+  settled_amount_differs: (r.settled_amount_differs as boolean | null) ?? null,
   customer_key: (r.customer_key as string | null) ?? null,
   status: r.status as MovementStatus,
   status_detail: (r.status_detail as string | null) ?? null,
@@ -106,16 +110,16 @@ export type Movement = ReturnType<typeof toMovement>;
 
 // ---- what counts as moving money ----
 
-// Category `ramp` is where money-moving services live (checkServiceType refuses a money-moving name in any other
-// category). A quote only prices; everything else in the category instructs a transfer.
-export const isMoneyMovement = (t: { category: string; quote?: boolean | null }) => t.category === "ramp" && !t.quote;
+// An admin declares it on the service type (moves_money); checkServiceType makes every non-quote `ramp` type declare it.
+export const isMoneyMovement = (t: { moves_money?: boolean | null }) => t.moves_money === true;
 
-// A service type's name that says it moves money: such a type must be category `ramp`, so it can't dodge the chokepoint.
+// A name that says it moves money: such a type must declare moves_money, and a quote can't be named so.
 const MONEY_WORDS = new Set(["transfer", "transfers", "payout", "payouts", "disburse", "disbursement", "disbursements", "withdraw", "withdrawal", "withdrawals", "remit", "remittance", "remittances", "wire", "ach", "rtp", "fednow"]);
 export const namesMoneyMovement = (text: string) => text.toLowerCase().split(/[^a-z0-9]+/).some((w) => MONEY_WORDS.has(w));
 
 const directionOfWord = (v: unknown): RailDirection | null => (v === "in" || v === "on" ? "on_ramp" : v === "out" || v === "off" ? "off_ramp" : null);
-const directionOfKey = (key: string): RailDirection | null => (/(^|_)on_?ramp/.test(key) ? "on_ramp" : /(^|_)off_?ramp/.test(key) ? "off_ramp" : null);
+const directionOfKey = (key: string): RailDirection | null =>
+  /(^|_)on_?ramp/.test(key) ? "on_ramp" : /(^|_)off_?ramp/.test(key) ? "off_ramp" : /(^|_)payouts?($|_)/.test(key) ? "payout" : /(^|_)deposits?($|_)/.test(key) ? "deposit" : null;
 
 // Dollars as text ("100.00") to integer cents, without going through a float. null: not an amount.
 export function centsOf(v: unknown): number | null {
@@ -127,11 +131,13 @@ export function centsOf(v: unknown): number | null {
 
 // Which way and how much a transfer moves: from the service type's key and the quote it accepts, or its params.
 // The rail carries the customer's own amount (amount_usd), not the balance side of it, which differs by the fee.
-export function movementShape(t: { key: string }, params?: Record<string, unknown>, quote?: Record<string, unknown> | null) {
-  const source = quote ?? params ?? {};
+// A service that accepts a quote takes its figures from that quote and nowhere else: what the device sends never counts.
+export function movementShape(t: { key: string; accepts?: string | null }, params?: Record<string, unknown>, quote?: Record<string, unknown> | null) {
+  const source = t.accepts ? (quote ?? {}) : (params ?? {});
   return {
     direction: directionOfKey(t.key) ?? directionOfWord(source.direction),
     amount_cents: centsOf(source.amount_usd ?? source.fiat_amount),
+    expected_total_cents: centsOf(source.total_usd), // the balance side of it, what a partner's settled total is compared with
   };
 }
 
@@ -150,8 +156,31 @@ export async function productMoneyDirections(store: Store, record: ProductRecord
 }
 
 // Mynt's pseudonymous key for one app's customer: the ledger never holds the developer's own reference or a name.
-const customerKey = (appId: string | null, customerRef: string | null) =>
+export const customerKey = (appId: string | null, customerRef: string | null) =>
   customerRef ? createHash("sha256").update(`mynt-ledger:${appId ?? ""}:${customerRef}`).digest("hex").slice(0, 40) : null;
+
+// ---- the customer's state ----
+
+// The one place that decides which US state a customer is in. Today it's what the customer told Mynt (their vault's
+// residence_state). When a partner-verified address exists, this is the function that changes.
+export function resolveCustomerState(held: Record<string, string>): { state: string | null; source: string } {
+  return { state: stateOf(held[CUSTOMER_STATE_FIELD]), source: "customer_attested" };
+}
+
+// Appends one change of a customer's state to its history. Nothing updates or deletes that table.
+export async function recordCustomerStateChange(store: Store, c: { app_id: string; customer_ref: string; sandbox: boolean; old_state: string | null; new_state: string | null; changed_by: string; source: string }): Promise<void> {
+  if (c.old_state === c.new_state) return;
+  await store.db.query(`INSERT INTO ${T}.customer_state_history (id, app_id, customer_key, sandbox, old_state, new_state, changed_by, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+    randomUUID(),
+    c.app_id,
+    customerKey(c.app_id, c.customer_ref),
+    c.sandbox,
+    c.old_state,
+    c.new_state,
+    c.changed_by,
+    c.source,
+  ]);
+}
 
 // ---- the chokepoint ----
 
@@ -160,8 +189,10 @@ export interface MovementRequest {
   sandbox: boolean;
   direction: RailDirection | null;
   amount_cents: number | null;
+  expected_total_cents?: number | null; // what the quote said the balance side would be, to compare with what settles
   channel: { kind: RailKind; provider: string }; // how Mynt would instruct it: the rail must be this one
-  customer_state: unknown; // from the customer's vault; checked here
+  customer_state: unknown; // from resolveCustomerState; checked here
+  state_source?: string | null; // where that state came from, kept on the movement
   customer_ref: string | null; // kept only as a pseudonymous key
   idempotency_key: string; // the same for every attempt at one movement
   app_id?: string | null;
@@ -176,11 +207,26 @@ export type MovementVerdict =
 type Refusal = Extract<MovementVerdict, { allowed: false }>;
 const refusal = (status: number, code: string, message: string): Refusal => ({ allowed: false, status, code, message });
 
-// The states a firm's verified, in-force US licences cover, as of now.
-export async function outsideLicenceCoverage(store: Store, entityId: string, states: string[]): Promise<string[]> {
-  const where: string[] = [];
-  for (const h of await store.licensesOf(entityId)) if (h.region === "US" && licenseInForce(h)) where.push(...(await whereHeld(store, h)));
-  return states.filter((s) => !coversJurisdiction(where, s));
+// The states a firm may NOT transmit money in, as of now. A licence counts only if it's verified and in force, grants
+// money transmission in the regulatory model, names that state (a country-wide or geography-only claim doesn't count:
+// each state licenses it), and has its prerequisites held (the FinCEN registration). `only`: just these licences,
+// e.g. what a sponsorship is under; a prerequisite counts whether or not it's named there.
+export const MONEY_TRANSMISSION_PRODUCT_TYPE = "us_money_transmission";
+export async function outsideLicenceCoverage(store: Store, entityId: string, states: string[], only?: string[]): Promise<string[]> {
+  const held = (await store.licensesOf(entityId)).filter((h) => h.region === "US");
+  const region = (await store.referenceData(true)).regions.find((r) => r.code === "US");
+  const model = normalizeModel(region?.regulatory);
+  const where = new Set<string>();
+  for (const h of held) {
+    if (!licenseInForce(h) || (only && !only.includes(h.id))) continue;
+    const regulator = model.regulators.find((r) => r.id === h.regulator_id);
+    const type = regulator?.license_types.find((l) => l._id === h.license_id);
+    if (!regulator || !type || !licenseProducts(regulator, type).some((p) => p.id === MONEY_TRANSMISSION_PRODUCT_TYPE)) continue;
+    const required = (type.requires ?? []).map((e) => (typeof e === "string" ? [e] : e));
+    if (required.some((ids) => !held.some((p) => ids.includes(p.license_id) && licenseInForce(p)))) continue;
+    for (const j of await whereHeld(store, h)) where.add(j);
+  }
+  return states.filter((s) => !where.has(s));
 }
 
 // Which rails may carry this movement, or why none may. Limits are checked by the reservation (atomically), not here.
@@ -191,10 +237,14 @@ async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string 
   if (!state) return refusal(409, "customer_state_required", `Record the customer's US state first: POST /v1/client/fields with ${CUSTOMER_STATE_FIELD}, e.g. us-ny`);
   let sponsorships = await store.sponsorships({ product_id: m.product_id, status: "approved" });
   if (!sponsorships.length) return refusal(403, "no_sponsor", "Money can't move for this product: no licence provider sponsors it");
-  // The sponsors of the component this action serves, when it has any; otherwise the product's.
-  const ofComponent = sponsorships.filter((s) => s.component_key === m.component_key);
-  if (ofComponent.length) sponsorships = ofComponent;
-  const sponsors = [...new Set(sponsorships.filter((s) => s.jurisdictions.includes(state) || s.jurisdictions.includes("us")).map((s) => s.provider_entity_id))];
+  // The sponsor of the component this action serves, and no other. An action naming no component is only clear when
+  // the product has one sponsor.
+  if (m.component_key) {
+    sponsorships = sponsorships.filter((s) => s.component_key === m.component_key);
+    if (!sponsorships.length) return refusal(403, "component_not_sponsored", "Money can't move for this action: no licence provider sponsors what it serves");
+  } else if (new Set(sponsorships.map((s) => s.provider_entity_id)).size > 1) return refusal(403, "sponsor_ambiguous", "Money can't move for this action: it names no component, and this product has several licence providers");
+  const here = sponsorships.filter((s) => s.jurisdictions.includes(state) || s.jurisdictions.includes("us"));
+  const sponsors = [...new Set(here.map((s) => s.provider_entity_id))];
   if (!sponsors.length) return refusal(403, "state_not_sponsored", `Money can't move for this product in ${state}: its licence provider doesn't sponsor it there`);
   const { rows } = await store.db.query(`SELECT * FROM ${T}.money_rails WHERE entity_id = ANY($1::uuid[]) AND direction = $2 AND kind = $3 AND provider = $4 ORDER BY created_at, id`, [
     sponsors,
@@ -215,8 +265,11 @@ async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string 
       : refusal(403, "no_approved_rail", `No approved money rail serves this product for ${m.direction} in ${state}`);
   }
   const usable: Rail[] = [];
-  for (const r of approved) if (!(await outsideLicenceCoverage(store, r.entity_id, [state])).length) usable.push(r);
-  if (!usable.length) return refusal(403, "licence_not_in_force", `The licence provider's licence no longer covers ${state}, so its money rail can't be used there`);
+  for (const r of approved) {
+    const named = here.filter((s) => s.provider_entity_id === r.entity_id).flatMap((s) => s.licence_ids);
+    if (!(await outsideLicenceCoverage(store, r.entity_id, [state], named)).length) usable.push(r);
+  }
+  if (!usable.length) return refusal(403, "licence_not_in_force", `The licence provider holds no licence in force to transmit money in ${state}, so its money rail can't be used there`);
   return { rails: usable, state };
 }
 
@@ -252,7 +305,7 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
   let last: string | null = null;
   const id = randomUUID();
   for (const rail of eligible.rails) {
-    const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_money_movement($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [
+    const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_money_movement($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`, [
       rail.id,
       id,
       m.idempotency_key,
@@ -266,6 +319,8 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
       customerKey(m.app_id ?? null, m.customer_ref),
       m.subscription_id ?? null,
       m.request_id ?? null,
+      m.expected_total_cents ?? null,
+      m.state_source ?? null,
     ]);
     const r = rows[0] as { o_outcome: string; o_id: string | null; o_status: MovementStatus | null };
     if (r.o_outcome === "reserved") return { allowed: true, movement_id: r.o_id!, status: "requested", replay: false };
@@ -293,8 +348,8 @@ async function recordSandbox(store: Store, m: MovementRequest, existing: Movemen
     return { allowed: true, movement_id: existing.id, status: existing.status, replay: existing.status !== "requested" };
   }
   const { rows } = await store.db.query(
-    `INSERT INTO ${T}.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, customer_key, status, subscription_id, request_id, sandbox, would_refuse)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'requested', $12, $13, true, $14)
+    `INSERT INTO ${T}.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, state_source, customer_key, expected_total_cents, status, subscription_id, request_id, sandbox, would_refuse)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $15, $11, $16, 'requested', $12, $13, true, $14)
      ON CONFLICT (idempotency_key) DO UPDATE SET status = 'requested', status_detail = NULL, failed_at = NULL, request_id = EXCLUDED.request_id, subscription_id = EXCLUDED.subscription_id, updated_at = now()
        WHERE ${T}.money_movements.status = 'failed'
      RETURNING id`,
@@ -313,6 +368,8 @@ async function recordSandbox(store: Store, m: MovementRequest, existing: Movemen
       m.subscription_id ?? null,
       m.request_id ?? null,
       wouldRefuse,
+      m.state_source ?? null,
+      m.expected_total_cents ?? null,
     ],
   );
   if (rows[0]) return { allowed: true, movement_id: rows[0].id as string, status: "requested", replay: false };
@@ -325,28 +382,31 @@ async function recordSandbox(store: Store, m: MovementRequest, existing: Movemen
 type Where = { subscription_id: string; request_id: string };
 const FROM: Record<Exclude<MovementStatus, "requested">, MovementStatus[]> = {
   submitted: ["requested"],
-  settled: ["requested", "submitted"],
+  settled: ["requested", "submitted", "failed"], // money that arrived after Mynt gave up on it still moved
   failed: ["requested", "submitted"],
   reversed: ["settled"],
 };
 
-async function move(store: Store, at: Where, to: Exclude<MovementStatus, "requested">, o: { external_ref?: string | null; detail?: string | null; late?: boolean } = {}): Promise<boolean> {
-  // Money that arrived after Mynt gave up on it still moved.
-  const from = to === "settled" && o.late ? [...FROM.settled, "failed"] : FROM[to];
+async function move(store: Store, at: Where, to: Exclude<MovementStatus, "requested">, o: { external_ref?: string | null; detail?: string | null; settled_cents?: number | null } = {}): Promise<boolean> {
   const { rows } = await store.db.query(
-    `UPDATE ${T}.money_movements SET status = $3, external_ref = COALESCE($4, external_ref), status_detail = $5, ${to}_at = now(), updated_at = now()
-     WHERE subscription_id = $1 AND request_id = $2 AND status = ANY($6::text[]) RETURNING id`,
-    [at.subscription_id, at.request_id, to, o.external_ref ?? null, o.detail ?? null, from],
+    `UPDATE ${T}.money_movements SET status = $3, external_ref = COALESCE($4, external_ref), status_detail = CASE WHEN status = 'failed' AND $3 = 'settled' THEN 'late_settlement' ELSE $5 END, ${to}_at = now(), updated_at = now(),
+       settled_amount_cents = COALESCE($7::bigint, settled_amount_cents),
+       settled_amount_differs = CASE WHEN $7::bigint IS NULL THEN settled_amount_differs ELSE $7::bigint <> COALESCE(expected_total_cents, amount_cents) END
+     WHERE subscription_id = $1 AND request_id = $2 AND status = ANY($6::text[]) RETURNING id, product_id, amount_cents, expected_total_cents, settled_amount_cents, settled_amount_differs`,
+    [at.subscription_id, at.request_id, to, o.external_ref ?? null, o.detail ?? null, FROM[to], o.settled_cents ?? null],
   );
+  const r = rows[0];
+  if (r?.settled_amount_differs && o.settled_cents != null)
+    await store.audit(null, "money_movement_amount_differs", r.id as string, { product_id: r.product_id, amount_cents: Number(r.amount_cents), expected_total_cents: r.expected_total_cents == null ? null : Number(r.expected_total_cents), settled_amount_cents: o.settled_cents });
   return rows.length > 0;
 }
 
 // What a transfer's partner said, by the wire contract's transfer_status. A bank return before settlement is a
 // failure; after settlement, a reversal.
-export async function recordMovementOutput(store: Store, at: Where, output: Record<string, unknown>, o: { late?: boolean } = {}): Promise<void> {
+export async function recordMovementOutput(store: Store, at: Where, output: Record<string, unknown>): Promise<void> {
   const external_ref = typeof output.settlement_ref === "string" ? output.settlement_ref.slice(0, 200) : null;
   const status = output.transfer_status;
-  if (status === "settled") await move(store, at, "settled", { external_ref, late: o.late, detail: o.late ? "late_settlement" : null });
+  if (status === "settled") await move(store, at, "settled", { external_ref, settled_cents: centsOf(output.total_usd) });
   else if (status === "failed") await move(store, at, "failed", { external_ref, detail: "partner_failed" });
   else if (status === "returned") (await move(store, at, "reversed", { external_ref, detail: "returned" })) || (await move(store, at, "failed", { external_ref, detail: "returned" }));
   else await move(store, at, "submitted", { external_ref });
@@ -354,11 +414,47 @@ export async function recordMovementOutput(store: Store, at: Where, output: Reco
 export const recordMovementPending = (store: Store, at: Where) => move(store, at, "submitted");
 export const recordMovementFailed = (store: Store, at: Where, detail: string) => move(store, at, "failed", { detail });
 export const recordMovementReversed = (store: Store, at: Where, detail = "reversed") => move(store, at, "reversed", { detail });
-export const recordMovementLateSettlement = (store: Store, at: Where) => move(store, at, "settled", { late: true, detail: "late_settlement" });
+export const recordMovementLateSettlement = (store: Store, at: Where) => move(store, at, "settled", { detail: "late_settlement" });
 // No clear answer (a timeout, a server error): it may have reached the partner, so it stays requested and keeps
 // counting against the daily limit. A retry with the same idempotency key is the same movement.
 export async function recordMovementUnknown(store: Store, at: Where, detail: string): Promise<void> {
   await store.db.query(`UPDATE ${T}.money_movements SET status_detail = $3, updated_at = now() WHERE subscription_id = $1 AND request_id = $2 AND status = 'requested'`, [at.subscription_id, at.request_id, `outcome_unknown:${detail}`]);
+}
+
+// A clear refusal by the partner means nothing moved, so the movement is `failed` and frees its share of the day.
+// Only these codes say so, and only without a server error behind them: anything else (no answer, a 5xx, a rate
+// limit, an answer Mynt couldn't read, a code Mynt doesn't know) may have reached the partner.
+export const DEFINITE_PARTNER_REFUSALS = new Set([
+  "partner_customer_required",
+  "partner_customer_not_ready",
+  "partner_payout_account_required",
+  "partner_credential_refused",
+  "customer_unknown",
+  "unknown_quote",
+  "quote_expired",
+  "offramp_not_available",
+  "adapter_missing",
+  "partner_credential_missing",
+  "environment_mismatch",
+  "wrong_environment",
+  "vault_not_configured",
+]);
+export const isDefiniteRefusal = (code: string | null, partnerStatus: unknown) => code !== null && DEFINITE_PARTNER_REFUSALS.has(code) && !(typeof partnerStatus === "number" && partnerStatus >= 500);
+
+// Movements nobody ever answered for: no later than this, they stop counting as in flight. They're `failed` with
+// status_detail stale_no_answer, which flowsFor reports apart (`unresolved`), because Mynt doesn't know what happened;
+// a late settlement still moves one to `settled`.
+export const STALE_DETAIL = "stale_no_answer";
+export async function sweepStaleMovements(store: Store, o: { requestedHours?: number; submittedDays?: number; now?: Date } = {}): Promise<number> {
+  const { rows } = await store.db.query(
+    `UPDATE ${T}.money_movements SET status = 'failed', status_detail = $1, failed_at = now(), updated_at = now()
+     WHERE (status = 'requested' AND updated_at < $2::timestamptz - make_interval(hours => $3))
+        OR (status = 'submitted' AND updated_at < $2::timestamptz - make_interval(days => $4))
+     RETURNING id, product_id, amount_cents, sandbox`,
+    [STALE_DETAIL, (o.now ?? new Date()).toISOString(), o.requestedHours ?? 48, o.submittedDays ?? 45],
+  );
+  for (const r of rows) if (!r.sandbox) await store.audit(null, "money_movement_stale", r.id as string, { product_id: r.product_id, amount_cents: r.amount_cents == null ? null : Number(r.amount_cents) });
+  return rows.length;
 }
 
 // ---- reading the ledger ----
@@ -372,6 +468,8 @@ export type Flows = {
   measured: boolean;
   // By direction, then status. A direction Mynt can't measure for this product is null, with the reason in not_measured.
   flows: Record<RailDirection, Record<MovementStatus, Tally> | null>;
+  // Movements swept with no answer: neither in flight nor known to have failed, so in none of the totals above.
+  unresolved: Record<RailDirection, Tally | null>;
   not_measured: Partial<Record<RailDirection, string>>;
 };
 
@@ -388,6 +486,7 @@ export async function flowsFor(store: Store, productId: string, from: string | D
     to: end.toISOString(),
     measured: false,
     flows: { on_ramp: null, off_ramp: null, payout: null, deposit: null },
+    unresolved: { on_ramp: null, off_ramp: null, payout: null, deposit: null },
     not_measured: {},
   };
   const startedAt = await store.getSetting<string>(LEDGER_STARTED_SETTING);
@@ -400,9 +499,9 @@ export async function flowsFor(store: Store, productId: string, from: string | D
     return out;
   }
   const { rows } = await store.db.query(
-    `SELECT direction, status, count(*)::int AS n, sum(amount_cents)::text AS cents FROM ${T}.money_movements
-     WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 GROUP BY direction, status`,
-    [productId, start.toISOString(), end.toISOString()],
+    `SELECT direction, status, COALESCE(status_detail = $4, false) AS stale, count(*)::int AS n, sum(amount_cents)::text AS cents FROM ${T}.money_movements
+     WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 GROUP BY 1, 2, 3`,
+    [productId, start.toISOString(), end.toISOString(), STALE_DETAIL],
   );
   const measured = await productMoneyDirections(store, record!);
   for (const r of rows) measured.add(r.direction as RailDirection);
@@ -412,11 +511,17 @@ export async function flowsFor(store: Store, productId: string, from: string | D
       continue;
     }
     const tally = Object.fromEntries(MOVEMENT_STATUSES.map((s) => [s, { count: 0, amount_cents: 0 } as Tally])) as Record<MovementStatus, Tally>;
+    const unresolved: Tally = { count: 0, amount_cents: 0 };
     for (const r of rows.filter((x) => x.direction === d)) {
-      const cents = Number(r.cents);
-      tally[r.status as MovementStatus] = { count: r.n as number, amount_cents: Number.isSafeInteger(cents) ? cents : null };
+      const cents = r.cents == null ? null : Number(r.cents); // a sum over nothing measurable stays null, never 0
+      const t = { count: r.n as number, amount_cents: cents !== null && Number.isSafeInteger(cents) ? cents : null };
+      if (r.stale) {
+        unresolved.count = t.count;
+        unresolved.amount_cents = t.amount_cents;
+      } else tally[r.status as MovementStatus] = t;
     }
     out.flows[d] = tally;
+    out.unresolved[d] = unresolved;
   }
   out.measured = RAIL_DIRECTIONS.some((d) => out.flows[d] !== null);
   return out;
@@ -519,17 +624,22 @@ export function registerMoneyRailTools(server: McpServer, store: Store, user: Us
       "approve_rail",
       {
         title: "Approve a money rail",
-        description: "Admin: approve a proposed rail, or put a suspended one back. Every state must be within the firm's verified, in-force US licences, or it's refused naming the states outside. Audited, with who approved it and when.",
+        description: "Admin: approve a proposed rail, or put a suspended one back. Every state must be covered by a verified, in-force licence of the firm that grants money transmission there, with its prerequisites held (the FinCEN registration), or it's refused naming the states outside. Whoever proposed the rail, or belongs to its firm, can't approve it. Audited, with who approved it and when.",
         inputSchema: { rail_id: z.string().uuid(), note: z.string().max(2000).optional() },
       },
       async ({ rail_id, note }) => {
         const rail = await getRail(rail_id);
         if (!rail) return fail(`No money rail '${rail_id}'`);
         if (rail.status !== "proposed" && rail.status !== "suspended") return fail(`The rail is ${rail.status}; only a proposed or suspended rail can be approved`);
+        // Four eyes: whoever proposed a rail, or works for the firm it belongs to, doesn't approve it.
+        if (rail.proposed_by === user.id || (await myFirm()) === rail.entity_id) {
+          await audit("approve_rail_refused", rail.id, { reason: "own_rail" });
+          return fail("You can't approve a rail you proposed or one belonging to your own firm: another admin must");
+        }
         const outside = await outsideLicenceCoverage(store, rail.entity_id, rail.states);
         if (outside.length) {
           await audit("approve_rail_refused", rail.id, { outside_licence_coverage: outside });
-          return fail("The rail can't be approved: some of its states are outside the firm's verified licences", { outside_licence_coverage: outside });
+          return fail("The rail can't be approved: the firm holds no verified licence granting money transmission in some of its states", { outside_licence_coverage: outside });
         }
         const done = await setStatus(rail, "approved", note ?? null, true);
         if (!done) return fail("The rail was changed by another call just now; look at it again");

@@ -21,6 +21,7 @@ import { GitHubApp } from "./github.js";
 import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
+import { sweepStaleMovements } from "./money-rails.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
@@ -175,6 +176,7 @@ if (values.help) {
   const vendorRuns = setInterval(() => {
     sweepVendorActionRuns(store).catch((e) => console.error("vendor action sweep:", (e as Error).message));
     pollRampAdapterTransfers(store).catch((e) => console.error("ramp adapter poll:", (e as Error).message));
+    sweepStaleMovements(store).catch((e) => console.error("money movement sweep:", (e as Error).message));
   }, 60 * 1000);
   vendorRuns.unref();
   // Deployed Solana programs' new events go to their firms' webhooks.

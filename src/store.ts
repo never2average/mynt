@@ -1187,6 +1187,10 @@ const TABLES = `
   ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS params_fixture jsonb;
   ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS quote boolean NOT NULL DEFAULT false;
   ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS accepts text;
+  -- An admin's explicit declaration that a service moves money, so it goes through approved money rails (see
+  -- money-rails.ts). NULL only until this backfill, for types defined before it existed.
+  ALTER TABLE financial_products.service_types ADD COLUMN IF NOT EXISTS moves_money boolean;
+  UPDATE financial_products.service_types SET moves_money = (category = 'ramp' AND NOT quote) WHERE moves_money IS NULL;
   -- Client actions served by a product's bound vendor service: one row per call, the full result sealed (the
   -- device only ever gets client_outcome, which the service type's client_result allows).
   CREATE TABLE IF NOT EXISTS financial_products.vendor_action_runs (
@@ -1355,7 +1359,11 @@ const TABLES = `
     direction text CHECK (direction IN ('on_ramp', 'off_ramp', 'payout', 'deposit')),
     amount_cents bigint CHECK (amount_cents > 0),
     state text,
+    state_source text,
     customer_key text,
+    expected_total_cents bigint,
+    settled_amount_cents bigint,
+    settled_amount_differs boolean,
     status text NOT NULL CHECK (status IN ('requested', 'submitted', 'settled', 'failed', 'reversed')),
     status_detail text,
     external_ref text,
@@ -1375,13 +1383,34 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS money_movements_daily_idx ON financial_products.money_movements (rail_id, limit_day) WHERE NOT sandbox AND status <> 'failed';
   CREATE INDEX IF NOT EXISTS money_movements_product_idx ON financial_products.money_movements (product_id, created_at);
   CREATE INDEX IF NOT EXISTS money_movements_answer_idx ON financial_products.money_movements (subscription_id, request_id);
+  CREATE INDEX IF NOT EXISTS money_movements_open_idx ON financial_products.money_movements (updated_at) WHERE status IN ('requested', 'submitted');
   INSERT INTO financial_products.settings (key, value) VALUES ('money_ledger_started_at', to_jsonb(now())) ON CONFLICT (key) DO NOTHING;
+  -- Every change to a customer's state of residence, append-only: which rails may serve them turns on it.
+  CREATE TABLE IF NOT EXISTS financial_products.customer_state_history (
+    id uuid PRIMARY KEY,
+    app_id uuid NOT NULL,
+    customer_key text NOT NULL,
+    sandbox boolean NOT NULL,
+    old_state text,
+    new_state text,
+    changed_by text NOT NULL,
+    source text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS customer_state_history_idx ON financial_products.customer_state_history (app_id, customer_key, created_at);
+  CREATE OR REPLACE FUNCTION financial_products.customer_state_history_is_append_only() RETURNS trigger LANGUAGE plpgsql AS $fn$
+  BEGIN
+    RAISE EXCEPTION 'customer_state_history is append-only';
+  END $fn$;
+  DROP TRIGGER IF EXISTS customer_state_history_append_only ON financial_products.customer_state_history;
+  CREATE TRIGGER customer_state_history_append_only BEFORE UPDATE OR DELETE ON financial_products.customer_state_history
+    FOR EACH ROW EXECUTE FUNCTION financial_products.customer_state_history_is_append_only();
   -- One live movement's reservation against its rail, in one transaction. The lock on the rail serialises every
   -- reservation and status change on that rail, and each statement here sees what the one before it committed, so
   -- the day's total can't be read stale and a rail suspended a moment ago can't be used.
   CREATE OR REPLACE FUNCTION financial_products.reserve_money_movement(
     p_rail uuid, p_id uuid, p_key text, p_product text, p_app uuid, p_action text, p_sponsor uuid, p_direction text,
-    p_amount bigint, p_state text, p_customer text, p_subscription uuid, p_request uuid
+    p_amount bigint, p_state text, p_customer text, p_subscription uuid, p_request uuid, p_expected bigint, p_state_source text
   ) RETURNS TABLE (o_outcome text, o_id uuid, o_status text) LANGUAGE plpgsql AS $fn$
   DECLARE
     r financial_products.money_rails%ROWTYPE;
@@ -1420,12 +1449,12 @@ const TABLES = `
     END IF;
     IF seen THEN
       UPDATE financial_products.money_movements SET status = 'requested', status_detail = NULL, failed_at = NULL, rail_id = p_rail, sponsor_entity_id = p_sponsor,
-        state = p_state, limit_day = today, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
+        state = p_state, state_source = p_state_source, expected_total_cents = p_expected, limit_day = today, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
       RETURN QUERY SELECT 'reserved'::text, m.id, 'requested'::text;
       RETURN;
     END IF;
-    INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, customer_key, status, subscription_id, request_id, limit_day)
-      VALUES (p_id, p_key, p_product, p_app, p_action, p_sponsor, p_rail, p_direction, p_amount, p_state, p_customer, 'requested', p_subscription, p_request, today)
+    INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, state_source, customer_key, expected_total_cents, status, subscription_id, request_id, limit_day)
+      VALUES (p_id, p_key, p_product, p_app, p_action, p_sponsor, p_rail, p_direction, p_amount, p_state, p_state_source, p_customer, p_expected, 'requested', p_subscription, p_request, today)
       ON CONFLICT (idempotency_key) DO NOTHING RETURNING id INTO new_id;
     IF new_id IS NULL THEN
       SELECT * INTO m FROM financial_products.money_movements WHERE idempotency_key = p_key;
