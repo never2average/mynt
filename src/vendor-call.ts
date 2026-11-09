@@ -15,6 +15,7 @@ export interface VendorCallOptions {
   allowInsecureLoopback?: boolean; // tests only: http:// to 127.0.0.0/8 or ::1
   anyPort?: boolean; // webhooks: https on any port (vendors serve on 443 only)
   anyBody?: boolean; // webhooks: the receiver's answer needn't be JSON
+  rawBody?: boolean; // public registers' files: the answer comes back as text, not parsed
   timeoutMs?: number; // default 10 s
   maxResponseBytes?: number; // default 256 KiB
 }
@@ -206,6 +207,8 @@ export async function safeRequest(
           chunks.push(c);
         });
         res.on("end", () => {
+          const good = status >= 200 && status < 300;
+          if (opts.rawBody) return finish({ ok: good, http_status: status, body: Buffer.concat(chunks).toString("utf8"), error: good ? null : `http ${status}`, ...retryAfter });
           let body: unknown = null;
           try {
             body = JSON.parse(Buffer.concat(chunks).toString("utf8"));

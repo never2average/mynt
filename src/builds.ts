@@ -14,8 +14,9 @@ import type { RepoAccess } from "./github.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
-import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } from "./solana/toolchain.js";
+import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolchainRecord, type ToolchainRecord } from "./solana/toolchain.js";
 import { loadCrateAllowlist } from "./solana/vuln-db.js";
+import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
 import type { Store, User } from "./store.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
@@ -70,6 +71,9 @@ export interface BuildConfig {
   // `mode`: "none" ships on Mynt's own checks (tests, types, secrets, static scan, dependencies, SBOM,
   // disclosures); "maxwell" adds the agent-run Maxwell audit as a further gate.
   audit: { mode: "none" | "maxwell"; model: string; capUsd: number; minutes: number; workflows: string[] };
+  // Boot Solana sandboxes from a pre-built, hash-checked snapshot where the host can take one (build-env.ts).
+  solanaSnapshot?: boolean;
+  solanaSnapshotMaxAgeDays?: number; // rebuilt once older (SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS, default 7)
 }
 
 export function buildConfigFromEnv(env = process.env): BuildConfig {
@@ -89,6 +93,8 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
       minutes: Number(env.BUILD_AUDIT_MINUTES ?? 20),
       workflows: (env.BUILD_AUDIT_WORKFLOWS ?? "execute-scr,probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean),
     },
+    solanaSnapshot: env.SOLANA_BUILD_SNAPSHOT !== "off",
+    solanaSnapshotMaxAgeDays: Number(env.SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS ?? 7),
   };
 }
 
@@ -125,6 +131,9 @@ export interface Build {
   box_until: string | null;
   solana: boolean; // the sandbox gets the Solana toolchain, and the app may hold Anchor programs
   solana_check: unknown; // Mynt's own solana_build check, recorded when its Solana build ended
+  // The pre-built environment each of the build's sandboxes booted from, if any (build-env.ts).
+  solana_env: { build?: SolanaEnvSnapshot; verify?: SolanaEnvSnapshot } | null;
+  solana_toolchain: ToolchainRecord | null; // the exact toolchain Mynt's verification built the programs with
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -172,6 +181,8 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_started_at timestamptz;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana boolean NOT NULL DEFAULT false;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_check jsonb;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_env jsonb;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -203,6 +214,8 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   box_until: iso(r.box_until),
   audit_started_at: iso(r.audit_started_at),
   solana: !!r.solana,
+  solana_env: (r.solana_env as Build["solana_env"]) ?? null,
+  solana_toolchain: (r.solana_toolchain as ToolchainRecord | null) ?? null,
 });
 
 // What builds need of Mynt's Solana programs (src/solana/): the addresses reserved for an app, so the agent
@@ -226,6 +239,7 @@ export interface BuildSolanaHooks {
       deps?: { sha256: string; data: unknown } | null;
       depinfo?: { sha256: string; data: unknown } | null;
       idl_source?: "build" | null;
+      toolchain?: ToolchainRecord;
     }[],
   ): Promise<string[]>;
   artifacts(buildId: string): Promise<{ name: string; sha256: string }[]>;
@@ -250,7 +264,7 @@ type AuditRun = { result: string | null; exit_code: number | null; error: string
 
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 const OUT = "/home/user/mynt-out";
-const SOLANA_INSTALLER = "/home/user/mynt-solana-toolchain.sh";
+const SOLANA_INSTALLER = ENV_FILES.installer;
 
 export class BuildService {
   private timer: NodeJS.Timeout | null = null;
@@ -262,11 +276,13 @@ export class BuildService {
     readonly boat: BoatClient | null,
     readonly repos: RepoAccess | null,
     readonly config: BuildConfig,
+    readonly solanaEnv: SolanaBuildEnv,
   ) {}
 
   static async open(db: Db, store: Store, boat: BoatClient | null, repos: RepoAccess | null, config: BuildConfig) {
     await db.exec(TABLES);
-    return new BuildService(db, store, boat, repos, config);
+    const solanaEnv = await SolanaBuildEnv.open(db, boat, { enabled: config.solanaSnapshot ?? true, sandboxType: config.sandboxType, maxAgeDays: config.solanaSnapshotMaxAgeDays });
+    return new BuildService(db, store, boat, repos, config, solanaEnv);
   }
 
   get enabled() {
@@ -318,10 +334,34 @@ export class BuildService {
   }
 
   // The pinned Solana toolchain, installed in the background (a few minutes, about 2 GB); the agents wait for
-  // ~/.mynt-solana/env before they use it.
-  private async installSolana(sandbox: string) {
+  // ~/.mynt-solana/env before they use it. A sandbox booted from the pre-built environment checks it against the
+  // hash Mynt kept first (holding the env file back until it passes); the installer then finds it complete, or
+  // (when the check wiped it, or ended any other way and Mynt's wipe ran) installs it afresh.
+  private async installSolana(sandbox: string, env?: SolanaEnvSnapshot) {
     await this.boat!.writeFile(sandbox, SOLANA_INSTALLER, SOLANA_TOOLCHAIN_SCRIPT);
-    await this.boat!.exec(sandbox, `bash ${SOLANA_INSTALLER} > /home/user/.mynt-solana-install.log 2>&1`, { detached: true });
+    let check = "";
+    if (env) {
+      await this.solanaEnv.writeCheck(sandbox);
+      check = this.solanaEnv.backgroundCheck(env);
+    }
+    await this.boat!.exec(sandbox, `${check}bash ${SOLANA_INSTALLER} > /home/user/.mynt-solana-install.log 2>&1`, { detached: true });
+  }
+
+  // A Solana sandbox: booted from the pre-built environment when there is one (a snapshot that won't boot is
+  // dropped, and the sandbox starts plain; a transient host error is retried by the worker instead), else plain.
+  // Returns the environment it booted from.
+  private async solanaSandbox(opts: Parameters<BoatClient["createSandbox"]>[0], solana: boolean) {
+    const env = solana ? await this.solanaEnv.ready().catch(() => null) : null;
+    if (env) {
+      try {
+        const sandbox = await this.boat!.createSandbox({ ...opts, snapshot: env.snapshot_id });
+        await this.solanaEnv.used(env);
+        return { sandbox, env };
+      } catch (e) {
+        await this.solanaEnv.bootFailed(env, e);
+      }
+    }
+    return { sandbox: await this.boat!.createSandbox(opts), env: undefined };
   }
 
   // ---- persistence ----
@@ -365,7 +405,9 @@ export class BuildService {
     const keys = Object.keys(fields) as (keyof Build)[];
     if (keys.length === 0) return;
     const sets = keys.map((k, i) => `${k} = $${i + 2}`);
-    const values = keys.map((k) => (k === "maxwell" || k === "readiness" || k === "agent_report" || k === "solana_check" ? JSON.stringify(fields[k]) : fields[k]));
+    const values = keys.map((k) =>
+      k === "maxwell" || k === "readiness" || k === "agent_report" || k === "solana_check" || k === "solana_env" || k === "solana_toolchain" ? JSON.stringify(fields[k]) : fields[k],
+    );
     const terminal = fields.status && TERMINAL.includes(fields.status);
     await this.db.query(
       `UPDATE financial_products.build_runs SET ${sets.join(", ")}, updated_at = now()${terminal ? ", finished_at = now()" : ""} WHERE id = $1`,
@@ -590,6 +632,7 @@ export class BuildService {
 
   async tick() {
     if (!this.boat) return;
+    await this.solanaEnv.tick().catch((e) => console.error(`Solana build environment: ${(e as Error).message}`));
     const active = (await this.db.query(`SELECT * FROM financial_products.build_runs WHERE status <> ALL($1) ORDER BY created_at`, [TERMINAL])).rows as Row[];
     for (const r of active) {
       const build = toBuild(r);
@@ -633,15 +676,18 @@ export class BuildService {
         const { token } = await this.repos.tokenFor(b.repository, installation!);
         Object.assign(env, { GITHUB_REPOSITORY: b.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/build-${b.id.slice(0, 8)}` });
       }
-      const sandbox = await boat.createSandbox({
-        name: `mynt-build-${b.id}`,
-        type: this.config.sandboxType,
-        ttlSeconds: this.config.ttlSeconds,
-        labels: { mynt_build: b.id },
-        env,
+      const { sandbox, env: base } = await this.solanaSandbox(
+        { name: `mynt-build-${b.id}`, type: this.config.sandboxType, ttlSeconds: this.config.ttlSeconds, labels: { mynt_build: b.id }, env },
+        b.solana,
+      );
+      await this.update(b.id, {
+        status: "provisioning",
+        sandbox_id: sandbox.id,
+        sandbox_key_id: sandboxKeyId,
+        branch: env.MYNT_BRANCH ?? null,
+        ...(base ? { solana_env: { ...b.solana_env, build: base } } : {}),
       });
-      await this.update(b.id, { status: "provisioning", sandbox_id: sandbox.id, sandbox_key_id: sandboxKeyId, branch: env.MYNT_BRANCH ?? null });
-      await this.event(b.id, "provisioning", "Sandbox requested", { sandbox_id: sandbox.id });
+      await this.event(b.id, "provisioning", "Sandbox requested", { sandbox_id: sandbox.id, ...(base ? { solana_environment: base.key } : {}) });
       return;
     }
 
@@ -651,7 +697,7 @@ export class BuildService {
       if (!["ready", "idle", "running"].includes(s.state)) return;
       const jobFiles: Record<string, string> = { "job/build.json": JSON.stringify(await this.spec(b), null, 2) };
       for (const file of await this.sdkFiles(b)) jobFiles[`job/sdk/${file.path}`] = file.content;
-      if (b.solana) await this.installSolana(b.sandbox_id!);
+      if (b.solana) await this.installSolana(b.sandbox_id!, b.solana_env?.build);
       const processId = await this.startAgent(b, b.sandbox_id!, {
         prompt: "Carry out the build in job/build.json, start to finish, following CLAUDE.md and its skills.",
         budgetUsd: b.cap_usd - b.cost_usd,
@@ -702,14 +748,12 @@ export class BuildService {
     const url = await boat.downloadUrl(b.sandbox_id!, `${OUT}/app.tgz`, 3600);
     if (!/^https:\/\/[^\s'"`$\\]+$/.test(url)) throw new Error("Unexpected source URL from the sandbox host");
     // No secrets: the verifier needs none.
-    const v = await boat.createSandbox({
-      name: `mynt-verify-${b.id}`,
-      type: this.config.sandboxType,
-      ttlSeconds: 2 * 3600,
-      labels: { mynt_build: b.id, mynt_role: "verify" },
-      env: {},
-    });
+    const { sandbox: v, env: base } = await this.solanaSandbox(
+      { name: `mynt-verify-${b.id}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_build: b.id, mynt_role: "verify" }, env: {} },
+      b.solana,
+    );
     await this.update(b.id, {
+      ...(base ? { solana_env: { ...b.solana_env, verify: base } } : {}),
       status: "verifying",
       verify_step: "provisioning",
       verify_sandbox_id: v.id,
@@ -739,6 +783,38 @@ export class BuildService {
       const state = (await boat.getSandbox(vid)).state;
       if (state === "error" || state === "cancelled") throw new Error(`Verification sandbox ${state}`);
       if (!["ready", "idle", "running"].includes(state)) return;
+      // Booted from the pre-built environment: checked against the hash Mynt kept before anything else runs. It is
+      // used only on exit 0 (matched). Exit 3 means the check wiped it; anything else (a timeout, no status) is
+      // wiped by Mynt's own command, confirmed, or the sandbox is replaced by a plain one. The Solana run then
+      // installs the toolchain and pulls the image as it would without a snapshot.
+      let base = b.solana_env?.verify;
+      if (base) {
+        await this.solanaEnv.writeCheck(vid);
+        const started = Date.now();
+        const c = await boat.exec(vid, this.solanaEnv.checkCommand(base), { timeoutSeconds: 300 }).catch((e) => ({ exitCode: null, stdout: "", stderr: (e as Error).message }));
+        const ok = c.exitCode === 0;
+        let wiped = c.exitCode === 3;
+        if (!ok && !wiped) {
+          const w = await boat.exec(vid, SOLANA_ENV_WIPE_COMMAND, { timeoutSeconds: 120 }).catch(() => null);
+          wiped = w?.exitCode === 0 && /^wiped$/m.test(w.stdout);
+        }
+        const data = { solana_environment: base.key, verified: ok, check_exit: c.exitCode, check_seconds: Math.round((Date.now() - started) / 1000) };
+        if (!ok) await this.solanaEnv.invalidate(base, `a sandbox booted from it failed its check (exit ${c.exitCode ?? "none"})`);
+        if (!ok && !wiped) {
+          // Neither matched nor confirmed wiped: this machine isn't used. A plain one replaces it.
+          await boat.stop(vid).catch(() => undefined);
+          const fresh = await boat.createSandbox({ name: `mynt-verify-${b.id}-plain`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_build: b.id, mynt_role: "verify" }, env: {} });
+          await this.update(b.id, { verify_sandbox_id: fresh.id, solana_env: { ...b.solana_env, verify: undefined } });
+          await this.event(b.id, "verifying", "The pre-built Solana environment couldn't be checked or wiped; verifying in a plain sandbox instead", { ...data, verify_sandbox_id: fresh.id });
+          return;
+        }
+        await this.event(b.id, "verifying", ok ? "The pre-built Solana environment matched Mynt's record" : "The pre-built Solana environment didn't match Mynt's record; installing the toolchain afresh", data);
+        if (!ok) base = undefined;
+      }
+      // The toolchain this verification builds and tests with, kept with the programs it builds.
+      const solana_toolchain = toolchainRecord(base ? { source: "snapshot", snapshot_id: base.snapshot_id } : { source: "install" });
+      await this.update(b.id, { solana_toolchain });
+      b = { ...b, solana_toolchain };
       await this.writeVerifier(b, vid);
       // Mynt fetches the source in the clean sandbox and reads, itself, whether the hash-verified archive has an
       // Anchor workspace. If it does, Mynt's Solana build runs first, on its own, so the programs are read back
@@ -924,6 +1000,7 @@ export class BuildService {
         sha256: p.sha256,
         reported_sha256: p.sha256,
         cargo_lock_sha256: p.cargo_lock_sha256 ?? null,
+        toolchain: b.solana_toolchain ?? toolchainRecord(),
         size: p.size,
         program: new Uint8Array(program),
         idl: idl?.json ?? null,
@@ -1051,7 +1128,14 @@ export class BuildService {
         ? {
             solana: {
               programs: app && this.solana ? await this.solana.programsForApp(app.id) : [],
-              toolchain: { agave: SOLANA_TOOLCHAIN.agave.version, anchor: SOLANA_TOOLCHAIN.anchor.version, rust: SOLANA_TOOLCHAIN.rust.version, env: "~/.mynt-solana/env" },
+              toolchain: {
+                agave: SOLANA_TOOLCHAIN.agave.version,
+                anchor: SOLANA_TOOLCHAIN.anchor.version,
+                anchor_ts: SOLANA_TOOLCHAIN.anchorTs.version,
+                rust: SOLANA_TOOLCHAIN.rust.version,
+                env: "~/.mynt-solana/env",
+                docs: "docs/solana/README.md",
+              },
             },
           }
         : {}),
@@ -1150,6 +1234,7 @@ export function developerBuild(b: Build) {
     error: b.error,
     sandbox_open_until: b.box_sandbox_id && b.box_until ? b.box_until : null,
     solana: b.solana,
+    ...(b.solana && b.solana_toolchain ? { solana_toolchain: b.solana_toolchain } : {}),
     created_at: b.created_at,
     updated_at: b.updated_at,
     finished_at: b.finished_at,
@@ -1395,6 +1480,35 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
     async ({ status }) => {
       const all = await builds.listFor(null, status);
       return json({ builds: all.map(({ source_url, agent_report, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
+    },
+  );
+
+  server.registerTool(
+    "solana_build_environment",
+    {
+      title: "Pre-built Solana build environment",
+      description:
+        "Admin: the snapshot Solana build and verify sandboxes boot from (the pinned toolchain installed and checked, Anchor's image pulled by digest), keyed by the toolchain pins. 'status' shows it; 'prepare' builds it now instead of on the first Solana build; 'rebuild' replaces it. Each sandbox booted from it re-hashes it against Mynt's record before use, and installs from the pinned, checksum-verified downloads on any mismatch.",
+      inputSchema: { action: z.enum(["status", "prepare", "rebuild"]).default("status") },
+    },
+    async ({ action }) => {
+      try {
+        const env = builds.solanaEnv;
+        if (action !== "status") await env.prepare(action === "rebuild");
+        const all = await env.list();
+        const current = all.find((r) => r.key === env.key) ?? null;
+        return json({
+          supported: env.supported,
+          key: env.key,
+          toolchain: toolchainRecord(),
+          current,
+          // What a sandbox booted from it skips: the builder's own measured install and image pull.
+          saves_seconds_per_sandbox: current?.status === "ready" ? current.install_seconds : null,
+          earlier: all.filter((r) => r.key !== env.key).map(({ key, status, snapshot_id, uses, error, ready_at }) => ({ key, status, snapshot_id, uses, error, ready_at })),
+        });
+      } catch (e) {
+        return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+      }
     },
   );
 }

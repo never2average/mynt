@@ -8,5 +8,17 @@
   "draft": "solana-program",
   "query": "Anchor program PDA \"anchor test\" security filename:SKILL.md (GitHub code search with the draft's key terms)",
   "score": null,
-  "modified": "SKILL.md verbatim. Only the references a program engineer needs are vendored (references/programs/anchor.md, programs/design-patterns.md, anchor/migrating-v0.32-to-v1.md, compatibility-matrix.md, concepts.md, testing.md, security.md, common-errors.md); links to the others are left as they were upstream."
+  "modified": "SKILL.md verbatim. Only the references a program engineer needs are vendored (references/programs/anchor.md, programs/design-patterns.md, anchor/migrating-v0.32-to-v1.md, compatibility-matrix.md, concepts.md, testing.md, security.md, common-errors.md); links to the others are left as they were upstream.",
+  "files": [
+    "SKILL.md",
+    "references/anchor/migrating-v0.32-to-v1.md",
+    "references/common-errors.md",
+    "references/compatibility-matrix.md",
+    "references/concepts.md",
+    "references/programs/anchor.md",
+    "references/programs/design-patterns.md",
+    "references/security.md",
+    "references/testing.md"
+  ],
+  "refreshed_by": "scripts/solana-toolchain-watch.mjs brings these files to the upstream's latest commit in its weekly pull request."
 }
