@@ -140,7 +140,7 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
       inputSchema: { program_id: ADDRESS, instruction },
       annotations: { readOnlyHint: true },
     },
-    async ({ program_id, instruction }) => withProgram(program_id, (p) => solana.simulate(p, instruction as CallInput)),
+    async ({ program_id, instruction }) => withProgram(program_id, (p) => solana.simulate(user, p, instruction as CallInput)),
   );
 
   server.registerTool(
