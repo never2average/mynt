@@ -57,7 +57,7 @@ jobs:
           s=$(date +%s); docker pull -q "$image"; echo "::notice title=Image pull::$(( $(date +%s) - s ))s"
           s=$(date +%s); state=$(bash "$RUNNER_TEMP/mynt/env-state.sh"); echo "::notice title=State hash::$(( $(date +%s) - s ))s"
           [ "$(bash "$RUNNER_TEMP/mynt/env-state.sh")" = "$state" ] || { echo "the state hash isn't stable"; exit 1; }
-          s=$(date +%s); bash "$RUNNER_TEMP/mynt/env-check.sh" "$state"; echo "::notice title=Snapshot check::$(( $(date +%s) - s ))s"
+          s=$(date +%s); bash "$RUNNER_TEMP/mynt/env-check.sh" "$state" "$(openssl rand -hex 32)"; echo "::notice title=Snapshot check::$(( $(date +%s) - s ))s"
           du -sh ~/.mynt-solana
       - name: Scaffold the template program, as a coding agent would
         run: python3 workspaces/coding-build/scripts/scaffold_program.py "$RUNNER_TEMP/app/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw

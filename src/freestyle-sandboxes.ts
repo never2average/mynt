@@ -2,7 +2,7 @@
 // backed by a Freestyle VM per sandbox. Everything runs as a `user` account (home /home/user, the paths agents
 // expect), with the sandbox's env loaded from a 0600 file. Previews and downloads are served at unguessable
 // style.dev names, so a URL is its own credential, like boat's token-gated links.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { HttpBoatClient, type BoatClient, type SandboxState } from "./boat.js";
 import { shellQuote } from "./boxes.js";
 import { FreestyleProvider } from "./freestyle.js";
@@ -60,6 +60,8 @@ const STATES: Record<string, SandboxState> = {
 };
 
 export class FreestyleSandboxes implements BoatClient {
+  // What every machine's first boot installs: part of the key of any snapshot taken of one.
+  readonly setupFingerprint = createHash("sha256").update([SETUP, NODE_VERSION, SOPS_VERSION].join("\n\0")).digest("hex");
   constructor(
     private readonly fs: FreestyleProvider,
     private readonly opts: { usdPerHour?: number; setupTimeoutMs?: number } = {},

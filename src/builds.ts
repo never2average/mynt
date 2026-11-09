@@ -15,7 +15,7 @@ import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
 import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolchainRecord, type ToolchainRecord } from "./solana/toolchain.js";
-import { ENV_FILES, SolanaBuildEnv, type SolanaEnvSnapshot } from "./build-env.js";
+import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
 import type { Store, User } from "./store.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
@@ -72,6 +72,7 @@ export interface BuildConfig {
   audit: { mode: "none" | "maxwell"; model: string; capUsd: number; minutes: number; workflows: string[] };
   // Boot Solana sandboxes from a pre-built, hash-checked snapshot where the host can take one (build-env.ts).
   solanaSnapshot?: boolean;
+  solanaSnapshotMaxAgeDays?: number; // rebuilt once older (SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS, default 7)
 }
 
 export function buildConfigFromEnv(env = process.env): BuildConfig {
@@ -92,6 +93,7 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
       workflows: (env.BUILD_AUDIT_WORKFLOWS ?? "execute-scr,probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean),
     },
     solanaSnapshot: env.SOLANA_BUILD_SNAPSHOT !== "off",
+    solanaSnapshotMaxAgeDays: Number(env.SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS ?? 7),
   };
 }
 
@@ -259,7 +261,7 @@ export class BuildService {
 
   static async open(db: Db, store: Store, boat: BoatClient | null, repos: RepoAccess | null, config: BuildConfig) {
     await db.exec(TABLES);
-    const solanaEnv = await SolanaBuildEnv.open(db, boat, { enabled: config.solanaSnapshot ?? true, sandboxType: config.sandboxType });
+    const solanaEnv = await SolanaBuildEnv.open(db, boat, { enabled: config.solanaSnapshot ?? true, sandboxType: config.sandboxType, maxAgeDays: config.solanaSnapshotMaxAgeDays });
     return new BuildService(db, store, boat, repos, config, solanaEnv);
   }
 
@@ -313,19 +315,21 @@ export class BuildService {
 
   // The pinned Solana toolchain, installed in the background (a few minutes, about 2 GB); the agents wait for
   // ~/.mynt-solana/env before they use it. A sandbox booted from the pre-built environment checks it against the
-  // hash Mynt kept first; the installer then finds it complete, or (when the check wiped it) installs it afresh.
+  // hash Mynt kept first (holding the env file back until it passes); the installer then finds it complete, or
+  // (when the check wiped it, or ended any other way and Mynt's wipe ran) installs it afresh.
   private async installSolana(sandbox: string, env?: SolanaEnvSnapshot) {
     await this.boat!.writeFile(sandbox, SOLANA_INSTALLER, SOLANA_TOOLCHAIN_SCRIPT);
     let check = "";
     if (env) {
       await this.solanaEnv.writeCheck(sandbox);
-      check = `${this.solanaEnv.checkCommand(env)} > ${ENV_FILES.checkLog} 2>&1; `;
+      check = this.solanaEnv.backgroundCheck(env);
     }
     await this.boat!.exec(sandbox, `${check}bash ${SOLANA_INSTALLER} > /home/user/.mynt-solana-install.log 2>&1`, { detached: true });
   }
 
   // A Solana sandbox: booted from the pre-built environment when there is one (a snapshot that won't boot is
-  // dropped, and the sandbox starts plain), else plain. Returns the environment it booted from.
+  // dropped, and the sandbox starts plain; a transient host error is retried by the worker instead), else plain.
+  // Returns the environment it booted from.
   private async solanaSandbox(opts: Parameters<BoatClient["createSandbox"]>[0], solana: boolean) {
     const env = solana ? await this.solanaEnv.ready().catch(() => null) : null;
     if (env) {
@@ -334,7 +338,7 @@ export class BuildService {
         await this.solanaEnv.used(env);
         return { sandbox, env };
       } catch (e) {
-        await this.solanaEnv.invalidate(env, `a sandbox wouldn't boot from it: ${(e as Error).message}`);
+        await this.solanaEnv.bootFailed(env, e);
       }
     }
     return { sandbox: await this.boat!.createSandbox(opts), env: undefined };
@@ -759,19 +763,32 @@ export class BuildService {
       const state = (await boat.getSandbox(vid)).state;
       if (state === "error" || state === "cancelled") throw new Error(`Verification sandbox ${state}`);
       if (!["ready", "idle", "running"].includes(state)) return;
-      // Booted from the pre-built environment: checked against the hash Mynt kept before anything else runs. On a
-      // mismatch it is wiped, and the Solana run installs the toolchain and pulls the image as it would without it.
+      // Booted from the pre-built environment: checked against the hash Mynt kept before anything else runs. It is
+      // used only on exit 0 (matched). Exit 3 means the check wiped it; anything else (a timeout, no status) is
+      // wiped by Mynt's own command, confirmed, or the sandbox is replaced by a plain one. The Solana run then
+      // installs the toolchain and pulls the image as it would without a snapshot.
       let base = b.solana_env?.verify;
       if (base) {
         await this.solanaEnv.writeCheck(vid);
         const started = Date.now();
-        const c = await boat.exec(vid, this.solanaEnv.checkCommand(base), { timeoutSeconds: 300 });
+        const c = await boat.exec(vid, this.solanaEnv.checkCommand(base), { timeoutSeconds: 300 }).catch((e) => ({ exitCode: null, stdout: "", stderr: (e as Error).message }));
         const ok = c.exitCode === 0;
-        await this.event(b.id, "verifying", ok ? "The pre-built Solana environment matched Mynt's record" : "The pre-built Solana environment didn't match Mynt's record; installing the toolchain afresh", {
-          solana_environment: base.key,
-          verified: ok,
-          check_seconds: Math.round((Date.now() - started) / 1000),
-        });
+        let wiped = c.exitCode === 3;
+        if (!ok && !wiped) {
+          const w = await boat.exec(vid, SOLANA_ENV_WIPE_COMMAND, { timeoutSeconds: 120 }).catch(() => null);
+          wiped = w?.exitCode === 0 && /^wiped$/m.test(w.stdout);
+        }
+        const data = { solana_environment: base.key, verified: ok, check_exit: c.exitCode, check_seconds: Math.round((Date.now() - started) / 1000) };
+        if (!ok) await this.solanaEnv.invalidate(base, `a sandbox booted from it failed its check (exit ${c.exitCode ?? "none"})`);
+        if (!ok && !wiped) {
+          // Neither matched nor confirmed wiped: this machine isn't used. A plain one replaces it.
+          await boat.stop(vid).catch(() => undefined);
+          const fresh = await boat.createSandbox({ name: `mynt-verify-${b.id}-plain`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_build: b.id, mynt_role: "verify" }, env: {} });
+          await this.update(b.id, { verify_sandbox_id: fresh.id, solana_env: { ...b.solana_env, verify: undefined } });
+          await this.event(b.id, "verifying", "The pre-built Solana environment couldn't be checked or wiped; verifying in a plain sandbox instead", { ...data, verify_sandbox_id: fresh.id });
+          return;
+        }
+        await this.event(b.id, "verifying", ok ? "The pre-built Solana environment matched Mynt's record" : "The pre-built Solana environment didn't match Mynt's record; installing the toolchain afresh", data);
         if (!ok) base = undefined;
       }
       // The toolchain this verification builds and tests with, kept with the programs it builds.

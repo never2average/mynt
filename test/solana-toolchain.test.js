@@ -79,7 +79,8 @@ test("versions: only stable releases count, lines and breaking moves are told ap
 
 // The outside world, as the watcher sees it: GitHub releases, raw files, registries, npm, Rust's channel and the
 // advisory databases.
-function fakeNet({ anchorTags, agaveTags, images, advisoriesByRepo = {}, osv = {}, npmVersions = ["0.32.0", "0.32.1"], skillCommit = "e".repeat(40), files = {} }) {
+const OLD = "2026-01-01T00:00:00Z";
+function fakeNet({ anchorTags, agaveTags, images, advisoriesByRepo = {}, osv = {}, npmVersions = ["0.32.0", "0.32.1"], published = {}, rustDate = "2026-01-01", skillRelease = { tag_name: "v1.4.0", published_at: OLD }, files = {} }) {
   const calls = [];
   const res = (status, body = "") => ({ ok: status < 300, status, text: async () => body, json: async () => JSON.parse(body), body: [Buffer.from(body)], headers: new Map() });
   const net = {
@@ -87,8 +88,14 @@ function fakeNet({ anchorTags, agaveTags, images, advisoriesByRepo = {}, osv = {
     async gh(path) {
       calls.push(`gh ${path}`);
       let m;
-      if ((m = /^repos\/([^/]+\/[^/]+)\/releases\?/.exec(path))) return (m[1].endsWith("anchor") ? anchorTags : agaveTags).map((t) => ({ tag_name: t, draft: false, prerelease: /-/.test(t) }));
-      if ((m = /^repos\/([^/]+\/[^/]+)\/commits\/(.+)$/.exec(path))) return { sha: createSha(`${m[1]}@${m[2]}`) };
+      if (/\/releases\/latest$/.test(path)) {
+        if (!skillRelease) throw new Error("404");
+        return skillRelease;
+      }
+      if ((m = /^repos\/([^/]+\/[^/]+)\/releases\?/.exec(path)))
+        return (m[1].endsWith("anchor") ? anchorTags : agaveTags).map((t) => ({ tag_name: t, draft: false, prerelease: /-/.test(t), published_at: published[t] ?? OLD }));
+      if ((m = /^repos\/([^/]+\/[^/]+)\/commits\?(.+)$/.exec(path))) return [{ sha: createSha(`${m[1]}?${decodeURIComponent(m[2]).split("&until=")[0]}`) }];
+      if ((m = /^repos\/([^/]+\/[^/]+)\/commits\/(.+)$/.exec(path))) return { sha: createSha(`${m[1]}@${m[2]}`), commit: { committer: { date: published[m[2]] ?? OLD } } };
       if ((m = /^repos\/([^/]+\/[^/]+)\/security-advisories/.exec(path))) return advisoriesByRepo[m[1]] ?? [];
       if (path.startsWith("advisories?")) return [];
       if (/^repos\/[^/]+\/[^/]+\/license$/.test(path)) return { license: { spdx_id: "MIT" } };
@@ -102,7 +109,7 @@ function fakeNet({ anchorTags, agaveTags, images, advisoriesByRepo = {}, osv = {
         const v = /anchor\/v([^/]+)\//.exec(url)[1];
         return v.startsWith("1.") ? "ANCHOR_CLI=v1.2.0\nSOLANA_CLI=v4.1.2\nVERSIONED_IMG_NAME=quay.io/ottersec/anchor:$(ANCHOR_CLI)\n" : "ANCHOR_CLI=v0.32.1\nSOLANA_CLI=v2.3.0\nVERSIONED_IMG_NAME=solanafoundation/anchor:$(ANCHOR_CLI)\n";
       }
-      if (url.endsWith("channel-rust-stable.toml")) return '[pkg.rust]\nversion = "1.99.1 (58cf8f9c3 2026-10-13)"\n';
+      if (url.endsWith("channel-rust-stable.toml")) return `manifest-version = "2"\ndate = "${rustDate}"\n[pkg.rust]\nversion = "1.99.1 (58cf8f9c3 2026-10-13)"\n`;
       if (url.endsWith("release-stable.toml")) return "schema-version = '1'\nversion = '1.29.3'\n";
       if (url.endsWith("rustup-init.sha256")) return `${H("9")}  rustup-init\n`;
       if (files.raw && url.startsWith("https://raw.githubusercontent.com/")) return files.raw(url);
@@ -110,7 +117,7 @@ function fakeNet({ anchorTags, agaveTags, images, advisoriesByRepo = {}, osv = {
     },
     async json(url) {
       calls.push(`json ${url}`);
-      if (url.startsWith("https://registry.npmjs.org/")) return { versions: Object.fromEntries(npmVersions.map((v) => [v, {}])) };
+      if (url.startsWith("https://registry.npmjs.org/")) return { versions: Object.fromEntries(npmVersions.map((v) => [v, {}])), time: Object.fromEntries(npmVersions.map((v) => [v, published[`npm:${v}`] ?? OLD])) };
       if (url.startsWith("https://api.osv.dev/")) return { results: osv.results ?? [] };
       throw new Error(`unexpected json ${url}`);
     },
@@ -295,4 +302,55 @@ test("a dry run writes the pull request's title and body and changes no file", a
   assert.match(readFileSync(body, "utf8"), /## Changes/);
   assert.match(readFileSync(branch, "utf8"), /^solana-toolchain\/[0-9a-f]{12}$/);
   assert.equal(r.urgentWithoutFix, false);
+});
+
+test("supply chain: releases younger than the minimum age wait, the Solana Foundation's image is preferred, and the PR says a person must review it", async () => {
+  const now = Date.parse("2026-11-09T12:00:00Z");
+  const young = "2026-11-08T00:00:00Z";
+  const world = {
+    ...WORLD,
+    images: { ...WORLD.images, "solanafoundation/anchor:v1.2.2": `sha256:${H("d")}` },
+    published: { "v2.3.14": young, "1.29.3": young, "v1.2.2": "2026-11-01T00:00:00Z" },
+    rustDate: "2026-11-08",
+  };
+  const p = await plan(fakeNet(world), PINS, { anchorLine: "latest", now, minAge: 3 * 86_400_000 });
+  assert.equal(p.next.anchorImage, `solanafoundation/anchor:v1.2.2@sha256:${H("d")}`, "the Solana Foundation's registry first, though the Makefile names quay.io");
+  const q = await plan(fakeNet(world), PINS, { anchorLine: "patch", now, minAge: 3 * 86_400_000 });
+  assert.equal(q.next.agave.version, PINS.agave.version, "Agave 2.3.14 is a day old");
+  assert.equal(q.next.rust.version, PINS.rust.version, "Rust 1.99.1's channel is a day old");
+  assert.equal(q.next.rust.rustup, PINS.rust.rustup, "rustup 1.29.3's tag is a day old");
+  for (const re of [/Agave 2\.3\.14 is less than 3 days old/, /Rust 1\.99\.1 is less than 3 days old/, /rustup 1\.29\.3 is less than 3 days old/]) assert.ok(q.notes.some((n) => re.test(n)), String(re));
+  // With no minimum, they'd be adopted: the age is what held them back.
+  const r = await plan(fakeNet(world), PINS, { anchorLine: "patch", now, minAge: 0 });
+  assert.equal(r.next.agave.version, "2.3.14");
+  const pr = renderPr(q);
+  assert.match(pr.body, /A person must review this pull request before it is merged/);
+  assert.match(pr.body, /excluded from any standing instruction to merge green pull requests/);
+  // The docs tell agents who deploys.
+  assert.match(docsIndex(PINS, { agave: { repo: "anza-xyz/agave", tag: "v1", commit: "c".repeat(40), license: "Apache-2.0" }, anchor: { repo: "solana-foundation/anchor", tag: "v1", commit: "c".repeat(40), license: "Apache-2.0" } }), /Mynt deploys; never run `anchor deploy`, `solana program deploy` or `curl \| sh` installers/);
+});
+
+test("the solana-dev skill moves only to a tagged release, or to a commit at least the minimum age old, with a link to the upstream diff", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mynt-watch-skill-"));
+  const skillDir = join(root, PATHS.skill);
+  mkdirSync(skillDir, { recursive: true });
+  const upstream = JSON.parse(readFileSync(join(ROOT, PATHS.skill, "UPSTREAM.json"), "utf8"));
+  writeFileSync(join(skillDir, "UPSTREAM.json"), JSON.stringify({ ...upstream, files: ["SKILL.md"] }));
+  const files = { raw: (url) => (url.endsWith("/LICENSE") ? "MIT License".padEnd(200, ".") : "skill text") };
+  // A tagged release: that tag's commit.
+  let net = fakeNet({ ...WORLD, files });
+  let s = await refreshSkill(net, root, 3 * 86_400_000);
+  assert.equal(s.ref, "v1.4.0");
+  assert.ok(net.calls.includes("gh repos/solana-foundation/solana-dev-skill/commits/v1.4.0"));
+  assert.equal(s.compare, `https://github.com/solana-foundation/solana-dev-skill/compare/${upstream.commit}...${s.commit}`);
+  assert.match(renderPr({ changes: [], notes: [], skill: s }).body, new RegExp(`v1\\.4\\.0 .*Upstream diff: ${s.compare.replace(/[.?]/g, "\\$&")}`));
+  // No release (or a too-new one): the newest commit older than the minimum age, never the branch's head.
+  writeFileSync(join(skillDir, "UPSTREAM.json"), JSON.stringify({ ...upstream, files: ["SKILL.md"] }));
+  net = fakeNet({ ...WORLD, files, skillRelease: { tag_name: "v9", published_at: new Date().toISOString() } });
+  s = await refreshSkill(net, root, 3 * 86_400_000);
+  assert.equal(s.ref, null);
+  const asked = net.calls.find((c) => c.startsWith("gh repos/solana-foundation/solana-dev-skill/commits?sha=main&until="));
+  assert.ok(asked, net.calls.join("\n"));
+  const until = Date.parse(decodeURIComponent(/until=([^&]+)/.exec(asked)[1]));
+  assert.ok(Date.now() - until >= 3 * 86_400_000 - 60_000, "at least three days back");
 });

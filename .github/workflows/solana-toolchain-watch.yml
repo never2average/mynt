@@ -1,7 +1,14 @@
 # Every Monday: new stable releases of the pinned Solana toolchain (Agave, Anchor and its verifiable-build image,
-# Rust, rustup, @coral-xyz/anchor), their checksums and digest computed here, advisories checked, the
-# version-matched docs and the solana-dev skill refreshed. Any change goes to a pull request whose CI builds and
-# tests the template program with the new pins. Nothing here merges.
+# Rust, rustup, @coral-xyz/anchor), at least TOOLCHAIN_MIN_RELEASE_AGE_DAYS old, their checksums and digest computed
+# here, advisories checked, the version-matched docs and the solana-dev skill refreshed. Any change goes to a pull
+# request whose CI builds and tests the template program with the new pins. Nothing here merges, and a person
+# reviews every such pull request before it is merged.
+#
+# Two jobs: `compute` runs the watcher (which talks to the network) with read-only access and hands over a patch;
+# `propose` only applies that patch, commits and opens the pull request. The repository must allow it: Settings,
+# Actions, General, "Allow GitHub Actions to create and approve pull requests". Alternatively, store a GitHub App
+# installation token scoped to this repository (contents, pull requests, actions, issues) as the secret
+# TOOLCHAIN_WATCH_TOKEN; with it, pushes also start CI by themselves.
 name: Solana toolchain watch
 on:
   schedule:
@@ -17,19 +24,24 @@ on:
         default: stable
         type: choice
         options: [stable, pinned]
-permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+permissions: {}
 concurrency:
   group: solana-toolchain-watch
   cancel-in-progress: false
+env:
+  PATHS: schemas/solana-toolchain.json workspaces/coding-build/templates/solana-program workspaces/coding-build/docs/solana workspaces/coding-build/.claude/skills/solana-dev
 jobs:
-  watch:
+  compute:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -39,26 +51,75 @@ jobs:
           ANCHOR_LINE: ${{ inputs.anchor_line || 'patch' }}
           RUST_TRACK: ${{ inputs.rust || 'stable' }}
         run: |
+          mkdir -p "$RUNNER_TEMP/out"
           node scripts/solana-toolchain-watch.mjs --apply --anchor-line "$ANCHOR_LINE" --rust "$RUST_TRACK" \
-            --title "$RUNNER_TEMP/title.txt" --body "$RUNNER_TEMP/body.md" --branch-file "$RUNNER_TEMP/branch.txt"
-      - name: Open a pull request (never merged here)
-        env:
-          GH_TOKEN: ${{ github.token }}
+            --title "$RUNNER_TEMP/out/title.txt" --body "$RUNNER_TEMP/out/body.md" --branch-file "$RUNNER_TEMP/out/branch.txt"
+      - name: The change, as a patch
+        id: diff
         run: |
-          paths="schemas/solana-toolchain.json workspaces/coding-build/templates/solana-program workspaces/coding-build/docs/solana workspaces/coding-build/.claude/skills/solana-dev"
-          git add -A -- $paths
-          if git diff --cached --quiet; then echo "Nothing to update."; exit 0; fi
-          branch=$(cat "$RUNNER_TEMP/branch.txt")
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then echo "A pull request for these pins is already open ($branch)."; exit 0; fi
+          git add -A -- $PATHS
+          if git diff --cached --quiet; then echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Nothing to update."; exit 0; fi
+          git diff --cached --binary --no-renames > "$RUNNER_TEMP/out/changes.patch"
+          git diff --cached --stat --no-renames > "$RUNNER_TEMP/out/diffstat.txt"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: toolchain-change
+          path: ${{ runner.temp }}/out/
+          retention-days: 7
+
+  propose:
+    needs: compute
+    if: needs.compute.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.TOOLCHAIN_WATCH_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: toolchain-change
+          path: ${{ runner.temp }}/in
+      - name: Apply the patch (only the toolchain's own paths)
+        run: |
+          in="$RUNNER_TEMP/in"
+          git apply --numstat "$in/changes.patch" | cut -f3- > "$RUNNER_TEMP/touched.txt"
+          while IFS= read -r f; do
+            ok=0; for p in $PATHS; do case "$f" in "$p"|"$p"/*) ok=1;; esac; done
+            [ "$ok" = 1 ] || { echo "::error::The patch touches $f, outside the toolchain's paths"; exit 1; }
+          done < "$RUNNER_TEMP/touched.txt"
+          git apply --index "$in/changes.patch"
+      - name: Commit and open a pull request (never merged here)
+        run: |
+          in="$RUNNER_TEMP/in"
+          branch=$(cat "$in/branch.txt")
+          title=$(cat "$in/title.txt")
+          open=$(gh pr list --head "$branch" --state open --json number --jq 'length')
+          if [ "$open" != 0 ]; then echo "A pull request for these pins is already open ($branch)."; exit 0; fi
+          # A branch left behind without an open pull request is never overwritten: this run gets its own.
+          if git ls-remote --exit-code --heads "https://github.com/$GITHUB_REPOSITORY.git" "$branch" >/dev/null 2>&1; then branch="$branch-run$GITHUB_RUN_ID"; fi
+          gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git commit -q -F "$RUNNER_TEMP/title.txt"
-          git diff --stat HEAD~1 > "$RUNNER_TEMP/diffstat.txt"
-          # The body, with the diff's summary (the full diff is the pull request's own).
-          { cat "$RUNNER_TEMP/body.md"; printf '\n## Diff\n\n```\n'; cat "$RUNNER_TEMP/diffstat.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr.md"
+          git commit -q -m "$title"
+          { cat "$in/body.md"; printf '\n## Diff\n\n```\n'; cat "$in/diffstat.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr.md"
           git push -q origin "$branch"
-          gh pr create --base main --head "$branch" --title "$(cat "$RUNNER_TEMP/title.txt")" --body-file "$RUNNER_TEMP/pr.md"
-          # Pushes made with the workflow's token don't start other workflows; run CI on the branch so the pull
-          # request gets its checks (the solana-program job builds and tests the template with these pins).
+          if ! gh pr create --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr.md"; then
+            echo "::error::Couldn't open the pull request for $branch. Allow GitHub Actions to create pull requests (Settings, Actions, General) or set TOOLCHAIN_WATCH_TOKEN."
+            gh issue create --title "Solana toolchain watch couldn't open its pull request" \
+              --body "The branch \`$branch\` holds: $title. Opening the pull request failed in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Allow GitHub Actions to create pull requests (Settings, Actions, General) or set the TOOLCHAIN_WATCH_TOKEN secret, then re-run." || true
+            exit 1
+          fi
+          # Pushes made with the workflow's own token start no workflows; run CI on the branch so the pull request
+          # gets its checks (the solana-program job builds and tests the template with these pins).
           gh workflow run ci.yml --ref "$branch"

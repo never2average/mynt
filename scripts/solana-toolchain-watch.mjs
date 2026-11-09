@@ -177,15 +177,21 @@ export function httpClient({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch
   return { get, gh, text, json, sha256, exists, imageDigest };
 }
 
-const tagsOf = async (net, repo) => {
+// Published releases, with when each was published.
+const releasesOf = async (net, repo) => {
   const out = [];
   for (let page = 1; page <= 3; page++) {
     const rs = await net.gh(`repos/${repo}/releases?per_page=100&page=${page}`);
-    out.push(...rs.filter((r) => !r.draft && !r.prerelease).map((r) => r.tag_name));
+    out.push(...rs.filter((r) => !r.draft && !r.prerelease).map((r) => ({ tag: r.tag_name, at: r.published_at ?? null })));
     if (rs.length < 100) break;
   }
   return out;
 };
+
+// A release is adopted only once it has been public this long (TOOLCHAIN_MIN_RELEASE_AGE_DAYS, default 3): time for
+// a bad or hijacked release to be noticed and pulled. An unknown date counts as too new.
+export const minAgeMs = (days = process.env.TOOLCHAIN_MIN_RELEASE_AGE_DAYS) => (Number.isFinite(Number(days)) && days !== undefined && days !== "" ? Number(days) : 3) * 86_400_000;
+export const oldEnough = (at, minMs, now = Date.now()) => !!at && Number.isFinite(Date.parse(at)) && now - Date.parse(at) >= minMs;
 
 // ---- advisories (RustSec through OSV, and GitHub's advisory database) ----
 
@@ -237,11 +243,22 @@ export async function advisories(net, p) {
 
 // ---- the plan ----
 
-export async function plan(net, current, { anchorLine = "patch", rust = "stable", hash = true } = {}) {
+export async function plan(net, current, { anchorLine = "patch", rust = "stable", hash = true, minAge = minAgeMs(), now = Date.now() } = {}) {
   const notes = [];
   const next = structuredClone(pinsOf(current));
+  const days = Math.round(minAge / 86_400_000);
+  const aged = (releases, tool) =>
+    releases
+      .filter((r) => {
+        if (oldEnough(r.at, minAge, now)) return true;
+        const v = parseVersion(r.tag);
+        if (v && !v.pre && compare(v.text, tool === "Anchor" ? current.anchor.version : current.agave.version) > 0)
+          notes.push(`${tool} ${v.text} is less than ${days} days old; it will be considered once it is.`);
+        return false;
+      })
+      .map((r) => r.tag);
   // Anchor: the newest candidate with a Linux binary and a verifiable-build image.
-  const anchorTags = await tagsOf(net, REPOS.anchor);
+  const anchorTags = aged(await releasesOf(net, REPOS.anchor), "Anchor");
   const newestAnchor = newest(anchorTags.filter(isStable).map((t) => parseVersion(t).text));
   let anchor = null;
   for (const v of anchorCandidates(anchorTags, current.anchor.version, anchorLine)) {
@@ -255,8 +272,9 @@ export async function plan(net, current, { anchorLine = "patch", rust = "stable"
       notes.push(`Anchor ${v} is released but has no x86_64 Linux binary; not adopted.`);
       continue;
     }
-    // The image the release's own Makefile names, else the registries Anchor has published to.
-    const images = [...new Set([make.image, "quay.io/ottersec/anchor", "solanafoundation/anchor"].filter(Boolean))];
+    // The Solana Foundation's registry first, then the one the release's own Makefile names, then the other one
+    // Anchor has published to.
+    const images = [...new Set(["solanafoundation/anchor", make.image, "quay.io/ottersec/anchor"].filter(Boolean))];
     let image = null;
     for (const name of images) {
       const digest = await net.imageDigest(name, `v${v}`);
@@ -291,7 +309,7 @@ export async function plan(net, current, { anchorLine = "patch", rust = "stable"
     );
 
   // Agave: the line the chosen Anchor's image is built with.
-  const agaveTags = await tagsOf(net, REPOS.agave);
+  const agaveTags = aged(await releasesOf(net, REPOS.agave), "Agave");
   let target = anchor?.solana ?? null;
   if (!target) {
     const make = parseAnchorMakefile(await net.text(`https://raw.githubusercontent.com/${REPOS.anchor}/v${next.anchor.version}/docker/Makefile`).catch(() => ""));
@@ -311,10 +329,22 @@ export async function plan(net, current, { anchorLine = "patch", rust = "stable"
 
   // Rust and rustup.
   if (rust === "stable") {
-    const version = rustStable(await net.text("https://static.rust-lang.org/dist/channel-rust-stable.toml"));
-    if (version && compare(version, current.rust.version) > 0) next.rust.version = version;
+    const channel = await net.text("https://static.rust-lang.org/dist/channel-rust-stable.toml");
+    const version = rustStable(channel);
+    const date = /^date = "(\d{4}-\d{2}-\d{2})"/m.exec(channel)?.[1] ?? null;
+    if (version && compare(version, current.rust.version) > 0) {
+      if (oldEnough(date && `${date}T00:00:00Z`, minAge, now)) next.rust.version = version;
+      else notes.push(`Rust ${version} is less than ${days} days old; it will be considered once it is.`);
+    }
   }
-  const rustup = rustupStable(await net.text("https://static.rust-lang.org/rustup/release-stable.toml"));
+  let rustup = rustupStable(await net.text("https://static.rust-lang.org/rustup/release-stable.toml"));
+  if (rustup && compare(rustup, current.rust.rustup) > 0) {
+    const tagged = await net.gh(`repos/${REPOS.rustup}/commits/${rustup}`).catch(() => null);
+    if (!oldEnough(tagged?.commit?.committer?.date, minAge, now)) {
+      notes.push(`rustup ${rustup} is less than ${days} days old (or its tag's date is unknown); it will be considered once it is.`);
+      rustup = null;
+    }
+  }
   if (rustup && compare(rustup, current.rust.rustup) > 0) {
     const url = `https://static.rust-lang.org/rustup/archive/${rustup}/x86_64-unknown-linux-gnu/rustup-init`;
     const sha = hash ? await net.sha256(url) : current.rust.rustupSha256;
@@ -326,7 +356,9 @@ export async function plan(net, current, { anchorLine = "patch", rust = "stable"
 
   // The TypeScript client of the chosen Anchor line.
   const npm = await net.json(`https://registry.npmjs.org/${current.anchorTs.package.replace("/", "%2f")}`);
-  const client = newest(Object.keys(npm.versions ?? {}).filter((v) => isStable(v) && sameLine(v, next.anchor.version) && compare(v, next.anchor.version) <= 0));
+  const client = newest(
+    Object.keys(npm.versions ?? {}).filter((v) => isStable(v) && sameLine(v, next.anchor.version) && compare(v, next.anchor.version) <= 0 && (v === current.anchorTs.version || oldEnough(npm.time?.[v], minAge, now))),
+  );
   if (client) next.anchorTs.version = client;
   else if (!sameLine(next.anchorTs.version, next.anchor.version))
     notes.push(`${current.anchorTs.package} has no release for Anchor ${next.anchor.version}'s line; the template's client must be migrated by hand.`);
@@ -465,12 +497,26 @@ export async function vendorDocs(net, root, name, pins) {
 
 // The vendored solana-dev skill, brought to its upstream's latest commit: the same files as before (a file
 // upstream removed is dropped and named), verbatim, with the licence.
-export async function refreshSkill(net, root) {
+export async function refreshSkill(net, root, minAge = minAgeMs()) {
   const dir = join(root, PATHS.skill);
   const upstream = JSON.parse(readFileSync(join(dir, "UPSTREAM.json"), "utf8"));
-  const repo = await net.gh(`repos/${upstream.repo}`);
-  const commit = (await net.gh(`repos/${upstream.repo}/commits/${repo.default_branch}`)).sha;
+  // Its latest tagged release; without one, the newest commit at least the minimum age old.
+  const latest = await net.gh(`repos/${upstream.repo}/releases/latest`).catch(() => null);
+  let commit;
+  let ref;
+  if (latest?.tag_name && oldEnough(latest.published_at, minAge)) {
+    commit = (await net.gh(`repos/${upstream.repo}/commits/${encodeURIComponent(latest.tag_name)}`)).sha;
+    ref = latest.tag_name;
+  } else {
+    const repo = await net.gh(`repos/${upstream.repo}`);
+    const until = new Date(Date.now() - minAge).toISOString();
+    const [c] = await net.gh(`repos/${upstream.repo}/commits?sha=${encodeURIComponent(repo.default_branch)}&until=${until}&per_page=1`);
+    if (!c?.sha) return { changed: false, commit: upstream.commit, dropped: [] };
+    commit = c.sha;
+    ref = null;
+  }
   if (commit === upstream.commit) return { changed: false, commit, dropped: [] };
+  const from = upstream.commit;
   const base = dirname(upstream.path);
   const dropped = [];
   const kept = [];
@@ -489,7 +535,7 @@ export async function refreshSkill(net, root) {
   const license = (await net.gh(`repos/${upstream.repo}/license`).catch(() => null))?.license?.spdx_id;
   Object.assign(upstream, { commit, url: `https://github.com/${upstream.repo}/blob/${commit}/${upstream.path}`, files: kept, ...(license && license !== "NOASSERTION" ? { license } : {}) });
   writeFileSync(join(dir, "UPSTREAM.json"), `${JSON.stringify(upstream, null, 2)}\n`);
-  return { changed: true, commit, dropped };
+  return { changed: true, commit, ref, dropped, compare: `https://github.com/${upstream.repo}/compare/${from}...${commit}` };
 }
 
 // The index agents read first: which versions are pinned and where their docs are.
@@ -505,6 +551,9 @@ Generated by \`scripts/solana-toolchain-watch.mjs\` from \`schemas/solana-toolch
 
 Mynt builds and tests Solana programs with exactly these versions. Read these docs, not newer ones on the web:
 APIs and defaults differ between releases.
+
+Mynt deploys; never run \`anchor deploy\`, \`solana program deploy\` or \`curl | sh\` installers. The toolchain is
+already installed (\`. ~/.mynt-solana/env\`).
 
 | Tool | Pinned |
 |---|---|
@@ -530,7 +579,12 @@ export function renderPr({ changes, notes, advisoriesBefore = [], advisoriesAfte
   const urgent = advisoriesBefore.length > 0;
   const summary = changes.filter((c) => c.tool !== "anchorImage").map((c) => `${c.tool === "anchorTs" ? "@coral-xyz/anchor" : c.tool} ${c.to}`);
   const title = `${urgent ? "URGENT (security advisory): " : ""}${breaking.length ? "BREAKING: " : ""}Solana toolchain: ${summary.join(", ") || "docs and skill refresh"}`;
-  const lines = ["Weekly Solana toolchain update, opened by `scripts/solana-toolchain-watch.mjs`. It is never merged automatically: CI's `solana-program` job builds and tests the template program with these pins, and a person merges it once that is green.", ""];
+  const lines = [
+    "Weekly Solana toolchain update, opened by `scripts/solana-toolchain-watch.mjs`. It is never merged automatically: CI's `solana-program` job builds and tests the template program with these pins.",
+    "",
+    "**A person must review this pull request before it is merged.** Toolchain-watch pull requests change what every Solana build compiles with and what agents read; they are excluded from any standing instruction to merge green pull requests.",
+    "",
+  ];
   if (urgent) {
     lines.push("## Security advisories affecting the pinned toolchain", "");
     for (const a of advisoriesBefore) lines.push(`- **${a.id}** (${a.package} ${a.version}${a.severity ? `, ${a.severity}` : ""}): ${a.summary ?? ""} ${a.url}${fixed.includes(a) ? " (fixed by this update)" : " (**still affects the proposed versions**)"}`);
@@ -555,7 +609,10 @@ export function renderPr({ changes, notes, advisoriesBefore = [], advisoriesAfte
   if (docs.length || skill?.changed) {
     lines.push("## Docs and skill", "");
     for (const d of docs) lines.push(`- \`docs/solana/${d.name}\`: ${d.repo} at \`${d.tag}\` (${d.files} files, ${d.license}).`);
-    if (skill?.changed) lines.push(`- \`solana-dev\` skill: solana-foundation/solana-dev-skill at ${skill.commit.slice(0, 12)}${skill.dropped.length ? `; upstream removed ${skill.dropped.join(", ")}` : ""}.`);
+    if (skill?.changed)
+      lines.push(
+        `- \`solana-dev\` skill: solana-foundation/solana-dev-skill at ${skill.ref ? `${skill.ref} (${skill.commit.slice(0, 12)})` : `${skill.commit.slice(0, 12)} (untagged, at least the minimum age old)`}${skill.dropped.length ? `; upstream removed ${skill.dropped.join(", ")}` : ""}. Upstream diff: ${skill.compare}`,
+      );
     lines.push("");
   }
   if (diffstat) lines.push("## Diff", "", "```", diffstat.trim(), "```", "");
