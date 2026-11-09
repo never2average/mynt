@@ -56,6 +56,8 @@ const INNOVATOR_TOOLS = [
   "create_firm_webhook", "delete_firm_webhook", "list_firm_webhooks",
   // licence providers' sponsorship of its products
   "list_my_sponsorships", "request_sponsorship",
+  // the ledger of money its products moved
+  "list_money_movements",
 ];
 
 async function connect(store, user = null) {

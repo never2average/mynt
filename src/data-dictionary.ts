@@ -24,6 +24,7 @@ export const DATA_DICTIONARY: Record<string, DataField> = {
   mobile_number: { label: "Mobile number", type: "string", pattern: "^\\+?[0-9]{10,15}$", sensitivity: "personal", capture: ["typed"] },
   email: { label: "Email", type: "string", pattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", sensitivity: "personal", capture: ["typed"] },
   address: { label: "Address", type: "string", sensitivity: "personal", capture: ["typed", "ckyc", "digilocker"] },
+  residence_state: { label: "US state of residence", type: "string", pattern: "^[Uu][Ss]-[A-Za-z]{2}$", sensitivity: "personal", capture: ["typed"], countries: ["us"] },
   pin_code: { label: "PIN code", type: "string", pattern: "^[1-9][0-9]{5}$", sensitivity: "personal", capture: ["typed", "ckyc"], countries: ["in"] },
   pan: { label: "PAN", type: "string", pattern: "^[A-Z]{5}[0-9]{4}[A-Z]$", sensitivity: "sensitive", capture: ["secure_field", "digilocker", "ckyc"], countries: ["in"] },
   aadhaar_reference: { label: "Aadhaar (reference or masked)", type: "string", sensitivity: "sensitive", capture: ["digilocker", "ckyc"], countries: ["in"] },

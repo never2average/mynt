@@ -12,6 +12,7 @@ import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 import { requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
+import { CUSTOMER_STATE_FIELD, productMoneyDirections } from "./money-rails.js";
 
 // The runtime REST API under /v1, for developers' shipped apps. Authenticated with a per-app key
 // (Authorization: Bearer mynt_live_… / mynt_test_…), read-only over products, plus hand-offs to
@@ -257,6 +258,8 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       const body = parse(FieldsBody, await readJson(req, maxBody));
       const record = await inSession(body.product_id);
       const needed = neededFields(record.pins.contract);
+      // A product that moves money needs the customer's state, whatever its contract was published with.
+      if ((await productMoneyDirections(store, record)).size) needed.add(CUSTOMER_STATE_FIELD);
       const consents = await activeConsents(record);
       const problems: string[] = [];
       for (const [field, value] of Object.entries(body.values)) {
@@ -372,6 +375,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
             },
             params: body.params,
             quote: body.quote,
+            component: a.component ?? null,
           },
           opts.vendors,
         );

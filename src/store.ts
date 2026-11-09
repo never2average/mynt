@@ -1318,6 +1318,122 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS sponsorships_provider_idx ON financial_products.sponsorships (provider_entity_id, status);
   -- One pending request per component and provider at a time; approved ones may add up (more jurisdictions).
   CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_one_pending_idx ON financial_products.sponsorships (product_id, component_key, provider_entity_id) WHERE status = 'pending';
+  -- Approved money rails: how a licence-provider firm's sponsored products may move money, approved by an admin
+  -- (see money-rails.ts). Limits are integer US cents; the daily limit runs per UTC day.
+  CREATE TABLE IF NOT EXISTS financial_products.money_rails (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    kind text NOT NULL CHECK (kind IN ('ramp_adapter', 'ach', 'wire', 'rtp', 'fednow', 'push_to_card')),
+    provider text NOT NULL,
+    direction text NOT NULL CHECK (direction IN ('on_ramp', 'off_ramp', 'payout', 'deposit')),
+    states text[] NOT NULL CHECK (cardinality(states) > 0),
+    per_transfer_limit_cents bigint NOT NULL CHECK (per_transfer_limit_cents > 0),
+    daily_limit_cents bigint NOT NULL CHECK (daily_limit_cents >= per_transfer_limit_cents),
+    status text NOT NULL CHECK (status IN ('proposed', 'approved', 'suspended', 'revoked')),
+    status_reason text,
+    note text,
+    proposed_by uuid REFERENCES financial_products.users(id),
+    approved_by uuid REFERENCES financial_products.users(id),
+    approved_at timestamptz,
+    status_changed_by uuid REFERENCES financial_products.users(id),
+    status_changed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS money_rails_one_live_idx ON financial_products.money_rails (entity_id, kind, provider, direction) WHERE status <> 'revoked';
+  CREATE INDEX IF NOT EXISTS money_rails_entity_idx ON financial_products.money_rails (entity_id, status);
+  -- The money ledger: every movement Mynt instructed, in integer US cents. A customer appears only as a pseudonymous
+  -- key. Live rows always name their rail and amount; sandbox rows may not, and never count against a limit.
+  CREATE TABLE IF NOT EXISTS financial_products.money_movements (
+    id uuid PRIMARY KEY,
+    idempotency_key text NOT NULL UNIQUE,
+    product_id text NOT NULL,
+    app_id uuid,
+    action text,
+    sponsor_entity_id uuid REFERENCES financial_products.entities(id),
+    rail_id uuid REFERENCES financial_products.money_rails(id),
+    direction text CHECK (direction IN ('on_ramp', 'off_ramp', 'payout', 'deposit')),
+    amount_cents bigint CHECK (amount_cents > 0),
+    state text,
+    customer_key text,
+    status text NOT NULL CHECK (status IN ('requested', 'submitted', 'settled', 'failed', 'reversed')),
+    status_detail text,
+    external_ref text,
+    subscription_id uuid,
+    request_id uuid,
+    sandbox boolean NOT NULL DEFAULT false,
+    would_refuse text,
+    limit_day date NOT NULL DEFAULT ((now() AT TIME ZONE 'UTC')::date),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    submitted_at timestamptz,
+    settled_at timestamptz,
+    failed_at timestamptz,
+    reversed_at timestamptz,
+    CHECK (sandbox OR (rail_id IS NOT NULL AND sponsor_entity_id IS NOT NULL AND direction IS NOT NULL AND amount_cents IS NOT NULL))
+  );
+  CREATE INDEX IF NOT EXISTS money_movements_daily_idx ON financial_products.money_movements (rail_id, limit_day) WHERE NOT sandbox AND status <> 'failed';
+  CREATE INDEX IF NOT EXISTS money_movements_product_idx ON financial_products.money_movements (product_id, created_at);
+  CREATE INDEX IF NOT EXISTS money_movements_answer_idx ON financial_products.money_movements (subscription_id, request_id);
+  INSERT INTO financial_products.settings (key, value) VALUES ('money_ledger_started_at', to_jsonb(now())) ON CONFLICT (key) DO NOTHING;
+  -- One live movement's reservation against its rail, in one transaction. The lock on the rail serialises every
+  -- reservation and status change on that rail, and each statement here sees what the one before it committed, so
+  -- the day's total can't be read stale and a rail suspended a moment ago can't be used.
+  CREATE OR REPLACE FUNCTION financial_products.reserve_money_movement(
+    p_rail uuid, p_id uuid, p_key text, p_product text, p_app uuid, p_action text, p_sponsor uuid, p_direction text,
+    p_amount bigint, p_state text, p_customer text, p_subscription uuid, p_request uuid
+  ) RETURNS TABLE (o_outcome text, o_id uuid, o_status text) LANGUAGE plpgsql AS $fn$
+  DECLARE
+    r financial_products.money_rails%ROWTYPE;
+    m financial_products.money_movements%ROWTYPE;
+    seen boolean;
+    used bigint;
+    today date := (clock_timestamp() AT TIME ZONE 'UTC')::date;
+    new_id uuid;
+  BEGIN
+    SELECT * INTO r FROM financial_products.money_rails WHERE id = p_rail FOR UPDATE;
+    IF NOT FOUND OR r.status <> 'approved' THEN
+      RETURN QUERY SELECT 'rail_not_approved'::text, NULL::uuid, NULL::text;
+      RETURN;
+    END IF;
+    IF p_amount > r.per_transfer_limit_cents THEN
+      RETURN QUERY SELECT 'over_transfer_limit'::text, NULL::uuid, NULL::text;
+      RETURN;
+    END IF;
+    SELECT * INTO m FROM financial_products.money_movements WHERE idempotency_key = p_key FOR UPDATE;
+    seen := FOUND;
+    IF seen THEN
+      IF m.amount_cents IS DISTINCT FROM p_amount OR m.direction IS DISTINCT FROM p_direction OR m.product_id <> p_product THEN
+        RETURN QUERY SELECT 'idempotency_conflict'::text, m.id, m.status;
+        RETURN;
+      END IF;
+      IF m.status <> 'failed' THEN
+        RETURN QUERY SELECT 'duplicate'::text, m.id, m.status;
+        RETURN;
+      END IF;
+    END IF;
+    SELECT COALESCE(sum(amount_cents), 0) INTO used FROM financial_products.money_movements
+      WHERE rail_id = p_rail AND limit_day = today AND NOT sandbox AND status <> 'failed';
+    IF used + p_amount > r.daily_limit_cents THEN
+      RETURN QUERY SELECT 'over_daily_limit'::text, NULL::uuid, NULL::text;
+      RETURN;
+    END IF;
+    IF seen THEN
+      UPDATE financial_products.money_movements SET status = 'requested', status_detail = NULL, failed_at = NULL, rail_id = p_rail, sponsor_entity_id = p_sponsor,
+        state = p_state, limit_day = today, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
+      RETURN QUERY SELECT 'reserved'::text, m.id, 'requested'::text;
+      RETURN;
+    END IF;
+    INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, customer_key, status, subscription_id, request_id, limit_day)
+      VALUES (p_id, p_key, p_product, p_app, p_action, p_sponsor, p_rail, p_direction, p_amount, p_state, p_customer, 'requested', p_subscription, p_request, today)
+      ON CONFLICT (idempotency_key) DO NOTHING RETURNING id INTO new_id;
+    IF new_id IS NULL THEN
+      SELECT * INTO m FROM financial_products.money_movements WHERE idempotency_key = p_key;
+      RETURN QUERY SELECT 'duplicate'::text, m.id, m.status;
+      RETURN;
+    END IF;
+    RETURN QUERY SELECT 'reserved'::text, new_id, 'requested'::text;
+  END $fn$;
   -- Public checks that a firm is a real, legitimate company (GLEIF's LEI record, FinCEN's MSB registrant list),
   -- run by Mynt itself and kept as history: a licence provider sponsors only once they pass (see firm-checks.ts).
   CREATE TABLE IF NOT EXISTS financial_products.firm_checks (

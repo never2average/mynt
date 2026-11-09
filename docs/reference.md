@@ -792,6 +792,46 @@ node scripts/apply-sponsored-product.mjs --url <the server's MCP URL> --fixture 
 
 A product already live under the placeholder gets a new version sponsored by the partner (its definition changes, so it's saved as the draft version, sponsored, tested and published). The placeholder firm's own sponsorship is then left over: revoke it (`revoke_sponsorship`, as the placeholder's licence provider) and suspend its licences (`review_license`) so nothing can rest on it again.
 
+## Approved money rails
+
+Money moves off-chain only, through rails an admin has approved. Solana programs never move money, and Mynt never holds customer funds: it instructs the licence provider's rail. Rails, the chokepoint and the ledger are in `src/money-rails.ts`.
+
+**A rail** belongs to a licence-provider firm and has a `kind` (`ramp_adapter`, `ach`, `wire`, `rtp`, `fednow`, `push_to_card`), a `provider`, a `direction` (`on_ramp`, `off_ramp`, `payout`, `deposit`), the US states it may be used in (ISO 3166-2, e.g. `us-ny`), a per-transfer and a daily limit in integer US cents (the day is the UTC day), a `status` (`proposed`, `approved`, `suspended`, `revoked`), and who approved it and when. For a `ramp_adapter` rail the `provider` is a ramp adapter id (`bridge`), or, for a partner speaking Mynt's wire contract itself, the id of its transfer offering. No current path instructs `ach`, `wire`, `rtp`, `fednow` or `push_to_card` directly, so those can be proposed and approved but don't yet carry a transfer.
+
+| Tool | Who | What |
+|---|---|---|
+| `propose_rail` | Licence provider | Proposes a rail for its firm. One live rail per firm, kind, provider and direction; to change one, revoke it and propose again. The result lists any `outside_licence_coverage`. |
+| `list_rails` | Licence provider, admin | Its own firm's; an admin sees all. |
+| `approve_rail` | Admin | Approves a proposed rail, or puts a suspended one back. Refused, naming the states, if any state is outside the firm's verified, in-force US licences. |
+| `suspend_rail`, `revoke_rail` | Admin | Stop new movements at once. Movements in flight aren't cancelled: the result lists them as `in_flight`. |
+| `list_money_movements` | Admin, licence provider, builder | The ledger, scoped: an admin all, a licence provider what it sponsors, a builder its firm's products. |
+
+Every rail change, and every refused approval, is in the audit log.
+
+**The chokepoint.** Every money movement goes through `authorizeMovement`. Today that means every service of category `ramp` that isn't a quote (`onramp_transfer`, `offramp_transfer`), whether its partner runs through an adapter or the wire contract. `define_service_type` refuses a service in any other category whose key or name says it moves money. In live, a movement is refused unless all of these hold:
+
+1. The customer's US state is on file (`residence_state` in the vault, through `POST /v1/client/fields`, e.g. `us-ny`). A product that moves money accepts that field whatever its contract was published with. It's what the customer says: Mynt has no verified address to check it against.
+2. A licence provider has an approved sponsorship covering that state (of the component the action serves, when that component has sponsors).
+3. An approved rail of that sponsor fits the direction, the kind, the provider and the state, and the firm's licences still cover the state today.
+4. The amount is within the rail's per-transfer limit and what's left of its daily limit.
+
+| Refusal (`error` in the API's answer) | Status | Means |
+|---|---|---|
+| `customer_state_required` | 409 | No `residence_state` on file, or not a US state. |
+| `no_sponsor`, `state_not_sponsored` | 403 | Nobody sponsors the product, or not in that state. |
+| `no_approved_rail`, `state_not_on_rail` | 403 | No approved rail fits, or none for that state. |
+| `rail_suspended`, `rail_revoked` | 403 | The rail stopped taking new transfers. |
+| `licence_not_in_force` | 403 | The firm's licences no longer cover the state. |
+| `over_transfer_limit`, `over_daily_limit` | 403 | Over a limit. The daily limit is checked atomically: a Postgres function locks the rail and adds up the day's ledger inside one transaction. |
+| `amount_unknown`, `movement_unknown` | 403 | Mynt can't tell how much it moves, or which way. |
+| `idempotency_conflict` | 409 | The key was used for a different movement. |
+
+Each refusal is audited (`money_movement_refused`) and its quote stays usable. **Sandbox** movements never move real money, so they go through the same check but aren't refused and use no limit: they're in the ledger with `sandbox: true` and `would_refuse` naming what live would have said.
+
+**The ledger** (`money_movements`) has a row for every movement: product, sponsor, rail, direction, `amount_cents`, state, a pseudonymous customer key (never the developer's reference or a name), `status`, `external_ref`, timestamps and an idempotency key (one quote is one movement). Statuses only move forward: `requested` → `submitted` → `settled` → `reversed`, or `failed`. `failed` frees the amount for the day; everything else keeps it. A retry of a failed movement is the same row. A partner that gave no clear answer leaves it `requested` with `status_detail: outcome_unknown:…`, still counted, because the money may have moved. A settlement arriving after Mynt gave up moves `failed` on to `settled`, flagged `late_settlement`.
+
+**Reading it.** `flowsFor(productId, from, to)` returns, for live movements requested in `[from, to)`, `flows[direction][status] = { count, amount_cents }`. A figure that can't be measured is `null`, never 0, with the reason in `not_measured`: a period starting before the ledger did, an unknown product, or a direction Mynt doesn't instruct for that product (money in an innovator's own hosted flow is invisible to Mynt).
+
 ## Product lines, actions and primitives
 
 Product lines group products by **economic function**, not asset class: what a product does for the person or firm using it. Every product has one `product_line`:
