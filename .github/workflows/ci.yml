@@ -146,6 +146,35 @@ jobs:
           bash "$RUNNER_TEMP/mynt/program-analysis.sh" "$RUNNER_TEMP/captured" "$RUNNER_TEMP/analysis"
           cat "$RUNNER_TEMP/analysis/static.json"
           node -e 'import("./dist/solana/mainnet-gate.js").then((m) => { const r = m.assessStatic(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))); console.log(JSON.stringify(r.reasons)); if (!r.passed) process.exit(1); })' "$RUNNER_TEMP/analysis/static.json"
+      # Mynt's own program, built exactly as a build's program is, must pass Mynt's own mainnet gate hard rules, and
+      # Mynt's encoders must work against the real program. Nothing is deployed anywhere but this job's local validator.
+      - name: The product-health program builds, passes the mainnet gate's hard rules, and works on a local validator
+        run: |
+          PROGRAM_ID=GLi9SM8q1Q8S1k5SFHWpZ7v9uWK9M5ZDxhd6ESjuSfVz
+          out="$RUNNER_TEMP/health-out"
+          mkdir -p "$RUNNER_TEMP/health"
+          cp -r programs/product-health "$RUNNER_TEMP/health/solana"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/health" "$out" "$PWD/schemas/solana-crate-allowlist.json"
+          cat "$out/checks.jsonl"
+          grep -q '"name": "solana_build", "status": "pass"' "$out/checks.jsonl" || { tail -n 80 "$out"/*.log; exit 1; }
+          node scripts/program-rules.mjs --sources "$out/solana.sources.json" --program-id "$PROGRAM_ID" --so "$out/product_health.so" --idl "$out/product_health.build-idl.json" \
+            --deps "$out/solana.deps.json" --depinfo "$out/solana.depinfo.json" > "$out/rules.json" || { cat "$out/rules.json"; exit 1; }
+          python3 - "$out/rules.json" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          assert r["passed"] and all(r["rules"]["signals"].values()), r
+          assert r["rules"]["findings"] == [], r["rules"]["findings"]
+          assert r["idl"]["verified"], r["idl"]
+          assert r["dependencies"]["refusals"] == [] and r["dependencies"]["off_allowlist"] == [], r["dependencies"]
+          PY
+          . "$HOME/.mynt-solana/env"
+          solana-keygen new --no-bip39-passphrase --silent --outfile "$RUNNER_TEMP/health-authority.json"
+          solana-test-validator --reset --quiet --ledger "$RUNNER_TEMP/health-ledger" --rpc-port 8990 --faucet-port 9990 \
+            --upgradeable-program "$PROGRAM_ID" "$out/product_health.so" "$(solana-keygen pubkey "$RUNNER_TEMP/health-authority.json")" &
+          validator=$!
+          for i in $(seq 1 60); do solana --url http://127.0.0.1:8990 cluster-version >/dev/null 2>&1 && break; sleep 2; done
+          node scripts/product-health-localnet.mjs --rpc http://127.0.0.1:8990 --program-id "$PROGRAM_ID" --authority "$RUNNER_TEMP/health-authority.json"
+          kill "$validator"
       - name: A module whose file is picked by cfg_attr is read as rustc reads it (dep-info), and refused
         run: |
           python3 workspaces/coding-build/scripts/scaffold_program.py "$RUNNER_TEMP/app5/solana" --name ci_ledger --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw

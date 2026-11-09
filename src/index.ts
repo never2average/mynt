@@ -23,6 +23,8 @@ import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
+import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
+import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
 import { CLUSTERS, type Cluster } from "./solana/rpc.js";
 import { readFileSync } from "node:fs";
@@ -40,6 +42,8 @@ const USAGE = `Usage:
   mynt hosting egress-allowlist        Hosts tenant VMs may reach through the gateway
   mynt hosting routes                  Caddy sites for hosted apps (<app>.<HOSTING_APPS_DOMAIN> to the tenant tunnel)
   mynt solana import-key --cluster mainnet --file <keypair.json>   Seal an existing Solana keypair as that cluster's deploy authority
+  mynt product-health publisher --program-id <address>      The devnet publisher key's address (created in the vault if new)
+  mynt product-health init --program-id <address> --file <upgrade-authority-keypair.json>   Once, after deploying: name the publisher on chain
 
 Environment:
   DATABASE_URL              Postgres connection string, e.g. your Supabase database (required)
@@ -61,6 +65,7 @@ Environment:
   SOLANA_RPC_URL_DEVNET     Solana programs: devnet RPC (default the public devnet endpoint); keys sealed with MYNT_VAULT_KEY
   SOLANA_RPC_URL_MAINNET    Mainnet RPC (no default). Mainnet also needs an admin's configure_solana_signer, and for
                             the mainnet-vault backend SOLANA_MAINNET_VAULT_SIGNER=enabled
+  PRODUCT_HEALTH_PROGRAM_ID The deployed product-health program (devnet); unset, the worker doesn't run. PRODUCT_HEALTH_INTERVAL_MINUTES (default 60)
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
                             (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)`;
 
@@ -74,6 +79,7 @@ const { positionals, values } = parseArgs({
     host: { type: "string", default: process.env.HOST ?? "127.0.0.1" },
     help: { type: "boolean", short: "h" },
     cluster: { type: "string" },
+    "program-id": { type: "string" },
     file: { type: "string" },
   },
 });
@@ -118,7 +124,13 @@ const openServices = async () => {
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate };
+  // Each product's financial health: encrypted to its licence provider and liquidity providers, fingerprinted on chain.
+  const healthConfig = productHealthConfigFromEnv();
+  const productHealth = await ProductHealthService.open(db, store, healthConfig, {
+    chain: healthConfig.programId ? new SolanaHealthChain(solana, healthConfig.programId) : null,
+    flowsFor: await loadFlowsFor(),
+  });
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth };
 };
 
 const parseRoles = (): Role[] => {
@@ -141,13 +153,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -156,9 +168,10 @@ if (values.help) {
   explore.startWorker();
   review.startWorker();
   gate.startWorker();
+  productHealth.startWorker();
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Sends queued webhook deliveries (events from any process sharing the database).
@@ -192,6 +205,7 @@ if (values.help) {
     explore.stopWorker();
     review.stopWorker();
     gate.stopWorker();
+    productHealth.stopWorker();
     http.close(() => process.exit(0));
   });
 } else if (command === "users" && sub === "invite") {
@@ -246,6 +260,28 @@ if (values.help) {
   const solana = await SolanaService.open(db, store);
   const address = await solana.importAuthority(cluster, readFileSync(values.file!, "utf8")).catch((e) => die((e as Error).message));
   console.log(`Sealed the ${cluster} deploy authority ${address} in the vault`);
+  await store.close();
+} else if (command === "product-health" && (sub === "publisher" || sub === "init")) {
+  const programId = values["program-id"] ?? process.env.PRODUCT_HEALTH_PROGRAM_ID ?? die("--program-id <address> is required");
+  if (sub === "init" && !values.file) die("Usage: mynt product-health init --program-id <address> --file <upgrade-authority-keypair.json>");
+  const db = openDb();
+  const store = await Store.open(db);
+  const solana = await SolanaService.open(db, store);
+  if (sub === "publisher") {
+    // Only the address, ever: the key stays sealed.
+    console.log((await solana.healthPublisher(programId)).address);
+  } else {
+    // The upgrade authority's keypair is read here and never printed.
+    const secret = (() => {
+      try {
+        return Uint8Array.from(JSON.parse(readFileSync(values.file!, "utf8")) as number[]);
+      } catch {
+        return die("That file isn't a Solana keypair");
+      }
+    })();
+    const signature = await initializeHealthProgram(solana, programId, Keypair.fromSecret(secret)).catch((e) => die((e as Error).message));
+    console.log(`Initialised the product-health program ${programId} (transaction ${signature})`);
+  }
   await store.close();
 } else if (command === "clerk" && sub === "setup") {
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");

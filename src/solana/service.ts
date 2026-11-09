@@ -3,7 +3,8 @@ import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
 import type { Store, User } from "../store.js";
 import { open, seal, vaultAvailable } from "../vault.js";
-import { anchorDiscriminator, base58Encode, executableHash, findProgramAddress, isAddress, Keypair } from "./codec.js";
+import { anchorDiscriminator, base58Encode, executableHash, findProgramAddress, isAddress, Keypair, pubkeyBytes } from "./codec.js";
+import { HealthPublisher, healthIx } from "./product-health-chain.js";
 import { CLUSTERS, GenesisCheckedRpc, HttpSolanaRpc, RateLimiter, rpcMaxRetryMsFromEnv, rpcPaceFromEnv, rpcUrlsFromEnv, type Cluster, type SolanaRpc } from "./rpc.js";
 import {
   CustodyServiceSigner,
@@ -282,6 +283,7 @@ const FEE_MARGIN = 20_000_000; // 0.02 SOL for the transactions' fees
 const SIGNATURE_FEE = 5_000; // lamports per signature, Solana's base fee
 // Custody deploys: Mynt's deploy payer (SOL only, no program) and each deploy's temporary buffer key.
 const DEPLOY_PAYER = "deploy-payer";
+const HEALTH_PUBLISHER_ROLE = "health_publisher";
 const BUFFER_KEY = "buffer-authority";
 const BUFFER_ACCOUNT = "buffer"; // the buffer a buffer key is writing, so a crash's leftover can be closed
 const VAULT_BUFFER = "vault-buffer"; // the buffer a vault-signed deploy is writing, so a failure's leftover can be closed
@@ -522,6 +524,32 @@ export class SolanaService {
     if (settings.backend === "mainnet-vault") return new VaultSigner("mainnet-vault", "mainnet", (await this.vaultKey("mainnet", "authority", ""))!);
     if (settings.backend === "custody-service") return new CustodyServiceSigner(settings.custody!.address, this.custody);
     return new MultisigSigner(settings.multisig!.vault, this.multisig);
+  }
+
+  // The devnet key that publishes product-health records: sealed in the vault under its own role, separate from the
+  // deploy authority and every developer's keys, and handed out only inside HealthPublisher, which refuses to sign
+  // anything but the product-health program's own instructions.
+  async healthPublisher(programId: string): Promise<HealthPublisher> {
+    if (!vaultAvailable(false)) throw new SignerNotConfigured("The product-health publisher needs MYNT_VAULT_KEY set on the server");
+    const key = (await this.vaultKey("devnet", HEALTH_PUBLISHER_ROLE, "")) ?? (await this.createKey("devnet", HEALTH_PUBLISHER_ROLE, ""));
+    return new HealthPublisher(key, programId);
+  }
+
+  // Sends a publisher-signed transaction on devnet, through the RPC client's retries and backoff.
+  async sendAsHealthPublisher(publisher: HealthPublisher, ixs: Instruction[]) {
+    return this.send(this.rpc("devnet"), publisher, ixs);
+  }
+
+  // Devnet only: asks the faucet to keep the publisher able to pay fees and the rent of a new product's record.
+  async fundHealthPublisher(address: string, need: number) {
+    await this.fund(this.rpc("devnet"), "devnet", address, need);
+  }
+
+  // One time, by the operator after deploying: the program's upgrade authority names the publisher.
+  async initializeHealthProgram(publisher: HealthPublisher, authority: Keypair) {
+    await this.fund(this.rpc("devnet"), "devnet", publisher.address, 20_000_000);
+    const [programData] = findProgramAddress([pubkeyBytes(publisher.programId)], UPGRADEABLE_LOADER);
+    return this.send(this.rpc("devnet"), publisher, [healthIx.initialize(publisher.programId, publisher.address, authority.address, programData)], [authority]);
   }
 
   // A developer's keys for program calls on a cluster: a fee payer, which pays every call's fees and is never
