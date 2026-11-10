@@ -40,12 +40,51 @@ export const LIQUIDITY_TABLES = `
     CHECK (min_commitment_cents <= max_commitment_cents)
   );
   CREATE INDEX IF NOT EXISTS liquidity_pools_product_idx ON ${T}.liquidity_pools (product_id);
+  -- What needs a person, until a person has dealt with it: not a note that ages out. negative_balance: a settlement or
+  -- return took a firm below zero. double_claim: a settlement refused because the amount was re-paid another way.
+  -- link_conflict: a ledger row exists that its claim can't be tied to.
+  CREATE TABLE IF NOT EXISTS ${T}.pool_flags (
+    id uuid PRIMARY KEY,
+    pool_id uuid NOT NULL REFERENCES ${T}.liquidity_pools(id),
+    lp_entity_id uuid REFERENCES ${T}.entities(id),
+    movement_id uuid REFERENCES ${T}.money_movements(id),
+    kind text NOT NULL CHECK (kind IN ('negative_balance', 'double_claim', 'link_conflict')),
+    amount_cents bigint,
+    settled_amount_cents bigint,
+    external_ref text,
+    sandbox boolean NOT NULL,
+    detail text,
+    status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+    resolution text,
+    resolved_by uuid,
+    resolved_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS pool_flags_open_idx ON ${T}.pool_flags (COALESCE(movement_id, '00000000-0000-0000-0000-000000000000'::uuid), lp_entity_id, kind) WHERE status = 'open';
+  -- Who said what about a firm's state. A sponsor's correction waits for the firm; an admin's applies at once and the
+  -- firm can dispute it, which puts the old state back.
+  CREATE TABLE IF NOT EXISTS ${T}.pool_state_corrections (
+    id uuid PRIMARY KEY,
+    pool_id uuid NOT NULL REFERENCES ${T}.liquidity_pools(id),
+    lp_entity_id uuid NOT NULL REFERENCES ${T}.entities(id),
+    from_state text NOT NULL,
+    to_state text NOT NULL,
+    source text NOT NULL CHECK (source IN ('sponsor_corrected', 'admin_corrected')),
+    status text NOT NULL CHECK (status IN ('pending', 'applied', 'confirmed', 'disputed', 'superseded')),
+    reason text,
+    proposed_by uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    decided_by uuid,
+    decided_at timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS pool_state_corrections_idx ON ${T}.pool_state_corrections (pool_id, lp_entity_id, status);
   -- A firm's standing in one pool. The money itself is only ever in the movement ledger; exited_at is set by
   -- refresh_pool_withdrawals when nothing of the firm's is left in the pool, and cleared when it comes back.
   CREATE TABLE IF NOT EXISTS ${T}.pool_commitments (
     pool_id uuid NOT NULL REFERENCES ${T}.liquidity_pools(id),
     lp_entity_id uuid NOT NULL REFERENCES ${T}.entities(id),
-    state text NOT NULL, -- the US state its capital moves from, as the firm stated it; what the rail must serve
+    state text NOT NULL, -- the US state its capital moves from; what the rail must serve
+    state_source text NOT NULL DEFAULT 'liquidity_provider_stated', -- who set it: the firm, or a correction (sponsor_corrected, admin_corrected)
     committed_by uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     exited_at timestamptz,
@@ -62,7 +101,8 @@ export const LIQUIDITY_TABLES = `
     amount_cents bigint NOT NULL CHECK (amount_cents > 0),
     status text NOT NULL CHECK (status IN ('queued', 'paying', 'paid', 'paid_short', 'returned', 'cancelled', 'no_balance', 'parked')),
     status_reason text, -- why it was parked
-    parked_at timestamptz, -- parked keeps its place: the worker tries it again, or it's lifted when the cause is fixed
+    parked_at timestamptz, -- parked keeps its place: the worker checks it again, or it's lifted when the cause is fixed
+    park_checks integer NOT NULL DEFAULT 0, -- how often it's been checked while parked, for the backoff
     requested_by uuid,
     requested_at timestamptz NOT NULL,
     eligible_at timestamptz NOT NULL,
@@ -364,10 +404,11 @@ export const LIQUIDITY_TABLES = `
         AND COALESCE((SELECT contributed_cents - withdrawn_cents FROM ${T}.pool_positions s WHERE s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id), 0) > 0;
   END $fn$;
 
-  -- A sponsor's report that a withdrawal settled. Under the pool's lock, so it can't race a claim on the same amount.
-  -- Refused if the money was written off and its amount since paid again, or if it would take the firm's position below
-  -- zero, counting what's on its way out or unresolved: then it would pay more than the firm holds.
-  CREATE OR REPLACE FUNCTION ${T}.settle_pool_withdrawal(p_movement uuid, p_ref text, p_settled bigint)
+  -- A sponsor's report that a withdrawal settled: a fact about money that moved, so it's recorded, even if it takes the
+  -- firm below zero (the caller flags that). The one case refused is a double claim: this movement was written off for
+  -- certain and its amount has since gone out another way, so recording it would count one payment twice. An admin can
+  -- override that (p_force) once they've checked. Under the pool's lock, so it can't race a claim on the same amount.
+  CREATE OR REPLACE FUNCTION ${T}.settle_pool_withdrawal(p_movement uuid, p_ref text, p_settled bigint, p_force boolean DEFAULT false)
   RETURNS TABLE (o_outcome text) LANGUAGE plpgsql AS $fn$
   DECLARE
     pm ${T}.pool_movements%ROWTYPE;
@@ -390,24 +431,16 @@ export const LIQUIDITY_TABLES = `
       RETURN QUERY SELECT 'no_change'::text;
       RETURN;
     END IF;
-    SELECT * INTO w FROM ${T}.pool_withdrawals WHERE id = pm.withdrawal_id;
-    IF st = 'failed' THEN
+    IF st = 'failed' AND COALESCE(detail, '') NOT IN ('stale_no_answer', 'mynt_gave_up') AND NOT p_force THEN
+      SELECT * INTO w FROM ${T}.pool_withdrawals WHERE id = pm.withdrawal_id;
       SELECT COALESCE(sum(amount_cents), 0) INTO others FROM ${T}.pool_movement_states WHERE withdrawal_id = pm.withdrawal_id AND id <> pm.id AND ledger_state <> 'released';
-      IF others + pm.amount_cents > w.amount_cents THEN
-        RETURN QUERY SELECT 'reclaimed'::text;
+      amt := LEAST(COALESCE(p_settled, pm.amount_cents), pm.amount_cents);
+      SELECT COALESCE(sum(contributed_cents - withdrawn_cents), 0), COALESCE(sum(pending_out_cents + unresolved_out_cents), 0) INTO held, out_flight
+        FROM ${T}.pool_positions WHERE pool_id = pm.pool_id AND lp_entity_id = pm.lp_entity_id;
+      IF others + pm.amount_cents > w.amount_cents OR held - out_flight - amt < 0 THEN
+        RETURN QUERY SELECT 'double_claim'::text;
         RETURN;
       END IF;
-    END IF;
-    amt := LEAST(COALESCE(p_settled, pm.amount_cents), pm.amount_cents);
-    SELECT COALESCE(sum(contributed_cents - withdrawn_cents), 0), COALESCE(sum(pending_out_cents + unresolved_out_cents), 0) INTO held, out_flight
-      FROM ${T}.pool_positions WHERE pool_id = pm.pool_id AND lp_entity_id = pm.lp_entity_id;
-    -- This movement's own amount is already in out_flight unless it was written off for certain.
-    IF st <> 'failed' OR detail IN ('stale_no_answer', 'mynt_gave_up') THEN
-      out_flight := out_flight - pm.amount_cents;
-    END IF;
-    IF held - out_flight - amt < 0 THEN
-      RETURN QUERY SELECT 'overdrawn'::text;
-      RETURN;
     END IF;
     UPDATE ${T}.money_movements SET status = 'settled', status_detail = CASE WHEN status = 'failed' THEN 'late_settlement' ELSE NULL END, settled_at = now(), updated_at = now(), external_ref = COALESCE(p_ref, external_ref),
       settled_amount_cents = COALESCE(p_settled, settled_amount_cents),

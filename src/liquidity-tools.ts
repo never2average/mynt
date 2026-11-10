@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { productsAnsweredBy } from "./access.js";
-import { getPool, liquidityConfigFromEnv, evaluatePool, minimumReserve, OFFERING_NOT_CLEARED, POOL_STATUSES, refreshPool, reportPoolMovement, toPool, toWithdrawal, WITHDRAWAL_STATUSES, authorizePoolMovement, type Pool } from "./liquidity.js";
+import { flagNegativePosition, getPool, liquidityConfigFromEnv, evaluatePool, withdrawalRefusal, minimumReserve, OFFERING_NOT_CLEARED, POOL_STATUSES, refreshPool, reportPoolMovement, toPool, toWithdrawal, WITHDRAWAL_STATUSES, authorizePoolMovement, type Pool } from "./liquidity.js";
 import { US_STATES } from "./money-rails.js";
 import type { ProductHealthService } from "./product-health.js";
 import { effectiveRoles, type Store, type User } from "./store.js";
@@ -45,7 +45,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
 
   const positionsOf = async (firm: string, poolId?: string) => {
     const { rows } = await store.db.query(
-      `SELECT c.pool_id, c.state, c.created_at, c.exited_at, p.name, p.product_id, p.sandbox, p.status AS pool_status,
+      `SELECT c.pool_id, c.state, c.state_source, c.created_at, c.exited_at, p.name, p.product_id, p.sandbox, p.status AS pool_status,
          COALESCE(s.contributed_cents, 0) AS contributed_cents, COALESCE(s.withdrawn_cents, 0) AS withdrawn_cents,
          COALESCE(s.pending_in_cents, 0) AS pending_in_cents, COALESCE(s.pending_out_cents, 0) AS pending_out_cents,
          COALESCE(s.unresolved_in_cents, 0) AS unresolved_in_cents, COALESCE(s.unresolved_out_cents, 0) AS unresolved_out_cents,
@@ -56,6 +56,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
        WHERE c.lp_entity_id = $1 AND ($2::uuid IS NULL OR c.pool_id = $2) ORDER BY c.created_at, c.pool_id`,
       [firm, poolId ?? null],
     );
+    const { rows: corrections } = await store.db.query(`SELECT id, pool_id, from_state, to_state, source, status, reason, created_at FROM ${T}.pool_state_corrections WHERE lp_entity_id = $1 AND status IN ('pending', 'applied') ORDER BY created_at`, [firm]);
     return rows.map((r) => {
       const n = (k: string) => Number(r[k]);
       const balance = n("contributed_cents") - n("withdrawn_cents");
@@ -67,6 +68,8 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         pool_status: r.pool_status as string,
         sandbox: r.sandbox as boolean, // true: test money, none of it real
         state: r.state as string,
+        state_source: r.state_source as string,
+        state_corrections_to_answer: corrections.filter((c) => c.pool_id === r.pool_id).map((c) => ({ id: c.id as string, from_state: c.from_state as string, to_state: c.to_state as string, source: c.source as string, status: c.status as string, reason: (c.reason as string | null) ?? null, answer_with: "respond_to_state_correction" })),
         exited: r.exited_at != null,
         exited_at: r.exited_at == null ? null : new Date(r.exited_at as string).toISOString(),
         contributed_cents: n("contributed_cents"),
@@ -225,7 +228,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           }
           if (out.refused === "external_ref_required") return fail("A live settlement needs external_ref: the partner's reference for the money that moved", { code: out.refused, sandbox: out.sandbox });
           await audit("pool_late_settlement_refused", movement_id, { pool_id: out.pool_id, amount_cents: out.amount_cents, external_ref: external_ref ?? null, code: out.refused, sandbox: out.sandbox });
-          return fail(out.refused === "overdrawn" ? "Settling that would take the firm's position below zero, counting what's on its way out, so it's refused and Mynt's admins have been flagged" : "That withdrawal was written off and its amount has since been paid again, so this settlement would pay it twice. It's refused and Mynt's admins have been flagged", { code: out.refused, sandbox: out.sandbox });
+          return fail("That withdrawal was written off and its amount has since gone out another way, so recording this would count one payment twice. It's refused and open for an admin to decide (list_pool_flags, resolve_pool_flag)", { code: out.refused, sandbox: out.sandbox });
         }
         await audit("report_pool_movement", movement_id, { outcome, external_ref: external_ref ?? null, settled_amount_cents: settled_amount_cents ?? null, status: out.status, sandbox: out.sandbox });
         return json(out);
@@ -255,6 +258,60 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         const { rows } = await store.db.query(`UPDATE ${T}.liquidity_pools SET offering_cleared = $2, offering_cleared_by = $3, offering_cleared_at = now(), offering_legal_basis = $4, updated_at = now() WHERE id = $1 RETURNING *`, [pool_id, cleared, user.id, legal_basis]);
         await audit("set_pool_offering_cleared", pool_id, { cleared, legal_basis });
         return json(toPool(rows[0]));
+      },
+    );
+
+  const applyStateCorrection = async (poolId: string, lpEntityId: string, state: string, source: string) => {
+    await store.db.query(`UPDATE ${T}.pool_commitments SET state = $3, state_source = $4 WHERE pool_id = $1 AND lp_entity_id = $2`, [poolId, lpEntityId, state, source]);
+    const { rows } = await store.db.query(`UPDATE ${T}.pool_withdrawals SET status = 'queued', status_reason = NULL, parked_at = NULL, park_checks = 0 WHERE pool_id = $1 AND lp_entity_id = $2 AND status = 'parked' RETURNING id`, [poolId, lpEntityId]);
+    return rows.map((r) => r.id as string);
+  };
+
+  // ---- flags that stay until someone deals with them ----
+
+  if (roles.admin || roles.licenceProvider)
+    server.registerTool(
+      "list_pool_flags",
+      {
+        title: "Pool items needing a person",
+        description: "Admin, or a pool's sponsor: what's open on a pool until someone deals with it: a firm taken below zero (negative_balance), a settlement refused as a double claim (double_claim) or a ledger movement no claim can be tied to (link_conflict). status: open by default. Audited.",
+        inputSchema: { pool_id: z.string().uuid().optional(), status: z.enum(["open", "resolved"]).default("open") },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ pool_id, status }) => {
+        const firm = await myFirm();
+        const { rows } = await store.db.query(`SELECT f.*, p.sponsor_entity_id FROM ${T}.pool_flags f JOIN ${T}.liquidity_pools p ON p.id = f.pool_id WHERE ($1::uuid IS NULL OR f.pool_id = $1) AND f.status = $2 ORDER BY f.created_at, f.id`, [pool_id ?? null, status]);
+        const shown = rows.filter((f) => roles.admin || f.sponsor_entity_id === firm).map(({ sponsor_entity_id: _s, ...f }) => f);
+        await audit("list_pool_flags", pool_id ?? "all", { returned: shown.length });
+        return json(shown);
+      },
+    );
+
+  if (roles.admin)
+    server.registerTool(
+      "resolve_pool_flag",
+      {
+        title: "Resolve an open pool item",
+        description: "Admin: close an open pool item, saying why. For a double_claim, accept_settlement records the settlement anyway, once you've confirmed the money really moved twice; reject_settlement leaves the movement as it is. For anything else, acknowledge. Whoever belongs to the pool's sponsor firm can't do this. Audited.",
+        inputSchema: { flag_id: z.string().uuid(), resolution: z.enum(["accept_settlement", "reject_settlement", "acknowledge"]), reason: z.string().min(5).max(2000) },
+      },
+      async ({ flag_id, resolution, reason }) => {
+        const { rows } = await store.db.query(`SELECT f.*, p.sponsor_entity_id, p.sandbox AS pool_sandbox FROM ${T}.pool_flags f JOIN ${T}.liquidity_pools p ON p.id = f.pool_id WHERE f.id = $1`, [flag_id]);
+        const f = rows[0];
+        if (!f) return fail(`No flag '${flag_id}'`);
+        if (f.status !== "open") return fail("That flag is already resolved");
+        if ((await myFirm()) === f.sponsor_entity_id) return fail("You can't resolve a flag on a pool your own firm sponsors: another admin must");
+        if (f.kind === "double_claim" && resolution === "acknowledge") return fail("A double claim needs accept_settlement or reject_settlement");
+        if (f.kind !== "double_claim" && resolution !== "acknowledge") return fail("Only a double claim can be accepted or rejected; use acknowledge");
+        if (resolution === "accept_settlement") {
+          const { rows: done } = await store.db.query(`SELECT * FROM ${T}.settle_pool_withdrawal($1, $2, $3, true)`, [f.movement_id, f.external_ref, f.settled_amount_cents]);
+          if (done[0].o_outcome !== "settled") return fail(`That movement can't be settled now (${done[0].o_outcome})`);
+          await refreshPool(store, f.pool_id as string, now());
+          await flagNegativePosition(store, f.pool_id as string, f.lp_entity_id as string, f.movement_id as string, f.external_ref as string | null, f.pool_sandbox as boolean);
+        }
+        await store.db.query(`UPDATE ${T}.pool_flags SET status = 'resolved', resolution = $2, resolved_by = $3, resolved_at = now() WHERE id = $1 AND status = 'open'`, [flag_id, `${resolution}: ${reason}`, user.id]);
+        await audit("resolve_pool_flag", flag_id, { kind: f.kind, resolution, reason, movement_id: f.movement_id });
+        return json({ flag_id, status: "resolved", resolution });
       },
     );
 
@@ -295,20 +352,26 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       "set_pool_firm_state",
       {
         title: "Correct a firm's state in a pool",
-        description: "Admin, or the pool's sponsor: correct the US state a firm's capital moves from in this pool, when it's wrong or its rails no longer serve it. Its parked withdrawal requests go back to their place in the queue. The new state must be one the pool's withdrawal rail serves. Audited, with the old and new state.",
+        description: "Admin, or the pool's sponsor: correct the US state a firm's capital moves from in this pool, when it's wrong or its rails no longer serve it. The new state must pass the money rails' own checks: a rail of this pool's, an approved sponsorship and a licence in force there. A sponsor's correction changes nothing until the firm accepts it (respond_to_state_correction). An admin's applies at once and the firm can dispute it, which puts the old state back. Either way the firm's parked requests go back to their place once it applies. Audited, with the old and new state.",
         inputSchema: { pool_id: z.string().uuid(), lp_entity_id: z.string().uuid(), state: StateCode, reason: z.string().min(3).max(1000) },
       },
       async ({ pool_id, lp_entity_id, state, reason }) => {
         const pool = await getPool(store, pool_id);
         if (!pool || !(await canControl(pool))) return fail(`No pool '${pool_id}' you can control`);
-        const { rows: rail } = await store.db.query(`SELECT states FROM ${T}.money_rails WHERE id = $1`, [pool.withdrawal_rail_id]);
-        if (!rail[0] || !(rail[0].states as string[]).includes(state)) return fail(`The pool's withdrawal rail doesn't serve ${state}`);
         const { rows: old } = await store.db.query(`SELECT state FROM ${T}.pool_commitments WHERE pool_id = $1 AND lp_entity_id = $2`, [pool_id, lp_entity_id]);
         if (!old[0]) return fail("That firm has no commitment in this pool");
-        await store.db.query(`UPDATE ${T}.pool_commitments SET state = $3 WHERE pool_id = $1 AND lp_entity_id = $2`, [pool_id, lp_entity_id, state]);
-        const { rows: lifted } = await store.db.query(`UPDATE ${T}.pool_withdrawals SET status = 'queued', status_reason = NULL, parked_at = NULL WHERE pool_id = $1 AND lp_entity_id = $2 AND status = 'parked' RETURNING id`, [pool_id, lp_entity_id]);
-        await audit("set_pool_firm_state", pool_id, { lp_entity_id, was: old[0].state, state, reason, unparked: lifted.length });
-        return json({ pool_id, lp_entity_id, state, sandbox: pool.sandbox, unparked: lifted.map((r) => r.id as string) });
+        const refused = await withdrawalRefusal(store, pool, lp_entity_id, state);
+        if (refused) {
+          await audit("set_pool_firm_state_refused", pool_id, { lp_entity_id, state, code: refused.code });
+          return fail(`A correction to ${state} can't be made: ${refused.message}`, { code: refused.code });
+        }
+        const id = randomUUID();
+        const asAdmin = roles.admin && (await myFirm()) !== pool.sponsor_entity_id;
+        await store.db.query(`UPDATE ${T}.pool_state_corrections SET status = 'superseded', decided_at = now() WHERE pool_id = $1 AND lp_entity_id = $2 AND status = 'pending'`, [pool_id, lp_entity_id]);
+        await store.db.query(`INSERT INTO ${T}.pool_state_corrections (id, pool_id, lp_entity_id, from_state, to_state, source, status, reason, proposed_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [id, pool_id, lp_entity_id, old[0].state, state, asAdmin ? "admin_corrected" : "sponsor_corrected", asAdmin ? "applied" : "pending", reason, user.id]);
+        const unparked = asAdmin ? await applyStateCorrection(pool_id, lp_entity_id, state, "admin_corrected") : [];
+        await audit("set_pool_firm_state", pool_id, { correction_id: id, lp_entity_id, was: old[0].state, state, reason, source: asAdmin ? "admin_corrected" : "sponsor_corrected", status: asAdmin ? "applied" : "pending", unparked: unparked.length });
+        return json({ correction_id: id, pool_id, lp_entity_id, state, status: asAdmin ? "applied" : "pending", sandbox: pool.sandbox, unparked, note: asAdmin ? "Applied. The firm can dispute it." : "Nothing changes until the firm accepts it (respond_to_state_correction)." });
       },
     );
     server.registerTool(
@@ -512,6 +575,30 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       await audit("cancel_withdrawal", withdrawal_id, {});
       const { rows: owner } = await store.db.query(`SELECT p.sandbox FROM ${T}.pool_withdrawals w JOIN ${T}.liquidity_pools p ON p.id = w.pool_id WHERE w.id = $1`, [withdrawal_id]);
       return json({ withdrawal_id, status: "cancelled", sandbox: owner[0].sandbox as boolean });
+    },
+  );
+
+  server.registerTool(
+    "respond_to_state_correction",
+    {
+      title: "Accept or dispute a correction to your state",
+      description: "Liquidity provider: answer a correction to the US state your capital moves from in a pool (shown in list_my_positions). Accepting a sponsor's correction applies it, and your parked requests go back to their place. Disputing a sponsor's leaves everything as it was; disputing an admin's puts the old state back. Audited.",
+      inputSchema: { correction_id: z.string().uuid(), accept: z.boolean(), reason: z.string().max(1000).optional() },
+    },
+    async ({ correction_id, accept, reason }) => {
+      const standing = await activeFirm();
+      if ("error" in standing) return fail(standing.error!);
+      const { rows } = await store.db.query(`SELECT * FROM ${T}.pool_state_corrections WHERE id = $1 AND lp_entity_id = $2 AND status IN ('pending', 'applied')`, [correction_id, standing.firm]);
+      const c = rows[0];
+      if (!c) return fail(`No correction '${correction_id}' waiting for your firm's answer`);
+      const status = accept ? "confirmed" : "disputed";
+      const { rows: done } = await store.db.query(`UPDATE ${T}.pool_state_corrections SET status = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND status = $4 RETURNING id`, [correction_id, status, user.id, c.status]);
+      if (!done[0]) return fail("That correction was changed by another call just now");
+      let unparked: string[] = [];
+      if (accept && c.status === "pending") unparked = await applyStateCorrection(c.pool_id as string, c.lp_entity_id as string, c.to_state as string, c.source as string);
+      if (!accept && c.status === "applied") await store.db.query(`UPDATE ${T}.pool_commitments SET state = $3, state_source = 'liquidity_provider_stated' WHERE pool_id = $1 AND lp_entity_id = $2`, [c.pool_id, c.lp_entity_id, c.from_state]);
+      await audit("respond_to_state_correction", correction_id, { pool_id: c.pool_id, accept, reason: reason ?? null, source: c.source });
+      return json({ correction_id, status, unparked });
     },
   );
 

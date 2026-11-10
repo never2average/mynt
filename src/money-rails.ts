@@ -265,7 +265,7 @@ export async function outsideLicenceCoverage(store: Store, entityId: string, sta
 }
 
 // Which rails may carry this movement, or why none may. Limits are checked by the reservation (atomically), not here.
-async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string | null): Promise<{ rails: Rail[]; state: string } | Refusal> {
+export async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string | null): Promise<{ rails: Rail[]; state: string } | Refusal> {
   if (!m.direction) return refusal(403, "movement_unknown", "Mynt can't tell which way this transfer moves money, so it isn't allowed");
   if (m.amount_cents === null) return refusal(403, "amount_unknown", "Mynt can't tell how much this transfer moves, so it isn't allowed");
   const state = stateOf(m.customer_state);

@@ -196,10 +196,13 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   // A stored service type named as if it moves money, declared as not: it runs outside the money rails.
   const { rows: undeclared } = await db.query<{ region: string; key: string; name: string }>("SELECT region, key, name FROM financial_products.service_types WHERE moves_money = false AND NOT quote");
   const moneyNameMismatches = undeclared.filter((t) => namesMoneyMovement(t.key) || namesMoneyMovement(t.name)).map((t) => `${t.region}/${t.key}`);
-  // A sponsor reported more than was asked, or settled a withdrawal already paid another way: a person should look.
+  // A sponsor reported more than was asked. Open pool flags below are the ones that stay until someone deals with them.
   const poolFlags = (await exists("audit_log"))
-    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action IN ('pool_movement_over_settlement', 'pool_late_settlement_refused') AND COALESCE(details->>'sandbox', 'false') <> 'true' AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
+    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'pool_movement_over_settlement' AND COALESCE(details->>'sandbox', 'false') <> 'true' AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
     : 0;
+  const openPoolFlags = (await exists("pool_flags"))
+    ? ((await db.query(`SELECT kind, count(*)::int AS n FROM financial_products.pool_flags WHERE status = 'open' AND NOT sandbox GROUP BY kind ORDER BY kind`)).rows as unknown as { kind: string; n: number }[])
+    : [];
   const attention = [
     ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
     ...Object.entries(agents).flatMap(([name, a]) => {
@@ -213,7 +216,8 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...vendors.erroring_subscriptions.map((v) => `vendors: subscription ${v.subscription_id} erred on ${v.errors} of ${v.calls} calls`),
     ...(moneyNameMismatches.length ? [`vendors: service type(s) named as moving money but declared moves_money: false: ${moneyNameMismatches.join(", ")}`] : []),
     ...backups.attention,
-    ...(poolFlags ? [`liquidity pools: ${poolFlags} movement report(s) refused in the last ${hours}h as over-settled or already re-paid; see audit_log (pool_movement_over_settlement, pool_late_settlement_refused)`] : []),
+    ...(poolFlags ? [`liquidity pools: ${poolFlags} settlement report(s) in the last ${hours}h refused for reporting more than was asked; see audit_log (pool_movement_over_settlement)`] : []),
+    ...openPoolFlags.map((f) => `liquidity pools: ${f.n} open ${f.kind} flag(s) on real money: list_pool_flags, then resolve_pool_flag`),
     ...(solana.flagged_programs.length ? [`solana: ${solana.flagged_programs.length} mainnet program(s) flagged by the vulnerability database; review with list_program_flags`] : []),
     ...(solana.reviews_awaiting_approval ? [`solana: ${solana.reviews_awaiting_approval} mainnet review(s) awaiting approval (list_mainnet_reviews)`] : []),
     ...(productHealth.stalled.length ? [`product health: ${productHealth.stalled.length} record(s) stalled against the chain; see list_product_health, and reanchor_product_health after a chain reset`] : []),
