@@ -24,7 +24,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "npm run build && node --test test/*.test.js",
-    "prepare": "tsc"
+    "prepare": "tsc",
+    "demo:partner": "node scripts/demo/partner-walkthrough.mjs"
   },
   "dependencies": {
     "@clerk/backend": "^3.26.4",
