@@ -74,6 +74,7 @@ export const TABLES = `
     prev_verdict text,
     prev_head_sequence integer,
     prev_head_chain text,
+    mac text NOT NULL, -- under a key derived from the vault: someone who can only write the database can't rewrite this
     PRIMARY KEY (subject, epoch)
   );
   -- When the worker last ran, for ops_status.
@@ -517,7 +518,8 @@ export interface HealthChain {
   readonly programId: string;
   readonly publisher: string;
   head(subject: Uint8Array, programId?: string): Promise<HeadAccount | null>; // of another program, to read one retired
-  latestRecordTx?(subject: Uint8Array): Promise<string | null>; // the newest successful transaction on a subject's head
+  latestRecordTx?(subject: Uint8Array, expected: Uint8Array): Promise<string | null>; // the newest successful transaction on a subject's head that carries these bytes
+  hasHeadHistory(subject: Uint8Array): Promise<boolean>; // whether a subject's head has ever had a transaction
   publishSnapshot(subject: Uint8Array, entry: SnapshotEntry, opening: boolean): Promise<string>;
   publishMissed(subject: Uint8Array, entry: MissedEntry, opening: boolean): Promise<string>;
 }
@@ -547,6 +549,8 @@ export interface Anchor {
   prev_verdict: string | null; // matches, mismatch, or gone (the old chain couldn't be read to compare)
   prev_head_sequence: number | null;
   prev_head_chain: string | null;
+  mac: string;
+  valid: boolean; // the row's MAC checks out: Mynt wrote this
 }
 
 interface Subject {
@@ -670,6 +674,16 @@ export class ProductHealthService {
     return out;
   }
 
+  private anchorMac(a: Pick<Anchor, "subject" | "epoch" | "reason" | "program_id" | "prev_verdict" | "prev_head_sequence" | "prev_head_chain">): string {
+    const key = derivedKey("product-health-anchors");
+    if (!key) throw new HealthError("Product health needs MYNT_VAULT_KEY set on the server");
+    return createHmac("sha256", key)
+      .update(canonicalJson({ subject: a.subject, epoch: a.epoch, reason: a.reason, program_id: a.program_id, prev_verdict: a.prev_verdict, prev_head_sequence: a.prev_head_sequence, prev_head_chain: a.prev_head_chain }))
+      .digest("hex");
+  }
+
+  // The newest record. A row with a bad MAC still counts here, so it shows as a mismatch and a gap rather than quietly
+  // moving the record back to an earlier epoch.
   private async currentEpoch(subject: string): Promise<number> {
     const { rows } = await this.db.query(`SELECT COALESCE(MAX(epoch), 0)::int AS epoch FROM ${T}.product_health_anchors WHERE subject = $1`, [subject]);
     return (rows[0] as { epoch: number }).epoch;
@@ -681,9 +695,11 @@ export class ProductHealthService {
   }
 
   private async insertMissed(s: Subject, epoch: number, start: Date, end: Date, reason: string, sequence: number) {
+    // The epoch is read again where the row is written: a re-anchor in between makes this a no-op, and the next tick retries.
     await this.db.query(
       `INSERT INTO ${T}.product_health_snapshots (id, subject, epoch, product_id, pool_id, sequence, period_start, period_end, status, source, partner_entity_id, missed_reason, publish_deadline)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'missed', 'unavailable', $9, $10, $11) ON CONFLICT DO NOTHING`,
+       SELECT $1::uuid, $2::text, $3::int, $4::text, $5::text, $6::int, $7::timestamptz, $8::timestamptz, 'missed', 'unavailable', $9::uuid, $10::text, $11::timestamptz
+       WHERE $3::int = (SELECT COALESCE(MAX(epoch), 0) FROM ${T}.product_health_anchors WHERE subject = $2::text) ON CONFLICT DO NOTHING`,
       [randomUUID(), s.subject, epoch, s.productId, s.poolId ?? "", sequence, start, end, s.partner, reason, end],
     );
   }
@@ -745,7 +761,12 @@ export class ProductHealthService {
     const last = await this.lastRow(s.subject);
     if (last && new Date(last.period_end).getTime() >= lastEnd.getTime()) return;
     // The first record names the program it's on, so a later change of program can be told from anything else.
-    await this.db.query(`INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, program_id) VALUES ($1, 0, 'first record', $2) ON CONFLICT DO NOTHING`, [s.subject, this.chain?.programId ?? this.config.programId]);
+    const programId = this.chain?.programId ?? this.config.programId;
+    await this.db.query(`INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, program_id, mac) VALUES ($1, 0, 'first record', $2, $3) ON CONFLICT DO NOTHING`, [
+      s.subject,
+      programId,
+      this.anchorMac({ subject: s.subject, epoch: 0, reason: "first record", program_id: programId, prev_verdict: null, prev_head_sequence: null, prev_head_chain: null }),
+    ]);
     const epoch = await this.currentEpoch(s.subject);
     let sequence = last && last.epoch === epoch ? last.sequence + 1 : 1;
     if (last) {
@@ -768,7 +789,8 @@ export class ProductHealthService {
     await this.db.query(
       `INSERT INTO ${T}.product_health_snapshots
         (id, subject, epoch, product_id, pool_id, sequence, period_start, period_end, status, source, live, partner_entity_id, fingerprint, report_sealed, attestation, sign_deadline, publish_deadline)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'mynt_only', $15, $16) ON CONFLICT DO NOTHING`,
+       SELECT $1::uuid, $2::text, $3::int, $4::text, $5::text, $6::int, $7::timestamptz, $8::timestamptz, $9::text, $10::text, $11::boolean, $12::uuid, $13::text, $14::text, 'mynt_only', $15::timestamptz, $16::timestamptz
+       WHERE $3::int = (SELECT COALESCE(MAX(epoch), 0) FROM ${T}.product_health_anchors WHERE subject = $2::text) ON CONFLICT DO NOTHING`,
       [randomUUID(), s.subject, epoch, s.productId, s.poolId ?? "", sequence, periodStart, lastEnd, key ? "pending_signature" : "ready", result.report.source, result.report.live, s.partner, result.fingerprint, result.sealed, signDeadline, publishDeadline],
     );
   }
@@ -859,7 +881,14 @@ export class ProductHealthService {
       const at = head?.sequence ?? 0;
       if (at >= r.sequence) {
         // Already there (a confirmation Mynt never saw): adopted, whatever its deadline said, with its transaction.
-        const landedTx = async () => (chain.latestRecordTx ? await chain.latestRecordTx(subject).catch(() => null) : null);
+        const landedTx = async () => {
+          if (!chain.latestRecordTx) return null;
+          // Only a transaction that really is this record: the instruction's subject, sequence and (for a snapshot) fingerprint, in order.
+          const seq = Buffer.alloc(8);
+          seq.writeBigUInt64LE(BigInt(r.sequence));
+          const expected = Uint8Array.from(Buffer.concat([Buffer.from(subject), seq, ...(head?.kind === KIND_SNAPSHOT ? [Buffer.from(head.fingerprint)] : [])]));
+          return chain.latestRecordTx(subject, expected).catch(() => null);
+        };
         if (at === r.sequence && head && r.fingerprint && head.kind === KIND_SNAPSHOT && same(head.fingerprint, hexToBytes(r.fingerprint))) {
           await this.markLanded(r, true, await landedTx(), now);
           return true;
@@ -1014,6 +1043,7 @@ export class ProductHealthService {
   // What an earlier record's rows say now, against what was saved when it ended: a record that didn't match then, or
   // has been changed since, doesn't read as if it did.
   private previousVerdict(rows: SnapshotRow[], a: Anchor | undefined): string {
+    if (a && !a.valid) return "previous_chain_mismatch";
     if (!a || a.prev_verdict === "gone" || !a.prev_head_chain || a.prev_head_sequence === null) return "previous_chain_unverifiable";
     if (a.prev_verdict !== "matches") return "previous_chain_mismatch";
     return hexOf(this.replayTo(rows, a.prev_head_sequence)) === a.prev_head_chain ? "previous_chain_matched" : "previous_chain_mismatch";
@@ -1057,7 +1087,7 @@ export class ProductHealthService {
     const landing = !!head && !ok && continuous && head.sequence === (lastOurs?.sequence ?? 0) + 1 && !!next && same(nextChain(chain, this.linkOf(next)), head.chain);
     for (const r of ours) verdict.set(r.id, (ok || landing) && r.sequence <= upto ? "matches" : "mismatch");
     if (landing) verdict.set(next!.id, "pending");
-    return { verdict, ok: ok || landing };
+    return { verdict, ok: ok || landing, landing };
   }
 
   // What Mynt can establish about each stored snapshot, from what's authenticated rather than from stored flags.
@@ -1097,13 +1127,15 @@ export class ProductHealthService {
   }
 
   private async anchors(subject: string): Promise<Anchor[]> {
-    return (await this.db.query(`SELECT * FROM ${T}.product_health_anchors WHERE subject = $1 ORDER BY epoch`, [subject])).rows as unknown as Anchor[];
+    const rows = (await this.db.query(`SELECT * FROM ${T}.product_health_anchors WHERE subject = $1 ORDER BY epoch`, [subject])).rows as unknown as Anchor[];
+    return rows.map((a) => ({ ...a, valid: a.mac === this.anchorMac(a) }));
   }
 
   private async gapsOf(all: SnapshotRow[], anchors: Anchor[], epoch: number, head: HeadAccount | null, error: string | null): Promise<Gap[]> {
     const gaps: Gap[] = anchors
       .filter((a) => a.epoch > 0)
       .map((a) => ({ kind: "re_anchored", from: iso(a.anchored_at), detail: `An admin started this product's on-chain record again (epoch ${a.epoch}): ${a.reason}. The record before it: ${a.prev_verdict ?? "unknown"}${a.prev_head_sequence === null ? "" : `, head at sequence ${a.prev_head_sequence}`}` }));
+    for (const a of anchors.filter((x) => !x.valid)) gaps.push({ kind: "stalled", detail: `The stored record of epoch ${a.epoch}'s anchor failed its integrity check: it was changed outside Mynt` });
     // Holes in earlier records stay visible; only the current one is compared with the chain or can be overdue.
     for (const e of new Set(all.filter((r) => r.epoch !== epoch).map((r) => r.epoch))) gaps.push(...findGaps(all.filter((r) => r.epoch === e), null, this.now(), this.config.intervalMs, false).filter((g) => g.kind !== "overdue"));
     gaps.push(...findGaps(all.filter((r) => r.epoch === epoch), head, this.now(), this.config.intervalMs, !error));
@@ -1221,9 +1253,18 @@ export class ProductHealthService {
     const { head, error } = await this.headOf(subjectBytes);
     if (error) return refuse(`The chain can't be read, so a reset can't be confirmed: ${error}`);
     if (head) return refuse(`The chain still holds this product's record, at sequence ${head.sequence}, so it can't be re-anchored. If it disagrees with Mynt's record, that needs investigating`);
+    // A head that's gone but has history wasn't wiped by a reset, and if the history can't be read that can't be ruled out.
+    let hadHistory: boolean;
+    try {
+      hadHistory = await chain.hasHeadHistory(subjectBytes);
+    } catch (e) {
+      return refuse(`The chain's history can't be read, so a reset can't be confirmed: ${(e as Error).message.slice(0, ERROR_LIMIT)}`);
+    }
+    if (hadHistory) return refuse("The chain has no head for this product but does have its transaction history, so it wasn't reset: this needs investigating");
+    const anchors = await this.anchors(subject);
+    if (anchors.some((a) => !a.valid)) return refuse("A stored anchor for this product failed its integrity check, so it can't be re-anchored: this needs investigating");
     const epoch = await this.currentEpoch(subject);
     const current = all.filter((r) => r.epoch === epoch);
-    const anchors = await this.anchors(subject);
     const previousProgram = anchors.find((a) => a.epoch === epoch)?.program_id ?? null;
     const programChanged = !!previousProgram && previousProgram !== chain.programId;
     if (!programChanged && !current.some((r) => r.on_chain)) return refuse("Nothing of this product's record has reached the chain, so there's nothing to re-anchor");
@@ -1236,14 +1277,20 @@ export class ProductHealthService {
         return refuse(`The previous program can't be read, so its record can't be saved: ${(e as Error).message.slice(0, ERROR_LIMIT)}`);
       }
     }
-    const verdict = oldHead ? (this.verifyAgainstChain(current, oldHead, null, epoch).ok ? "matches" : "mismatch") : "gone";
+    const check = oldHead ? this.verifyAgainstChain(current, oldHead, null, epoch) : null;
+    const verdict = check ? (check.ok ? "matches" : "mismatch") : "gone";
+    // A head one ahead (a landing Mynt hadn't recorded): saved as of the last record Mynt holds, or that row reads as tampered later.
+    const lastHeld = check?.landing ? (oldHead!.sequence - 1) : null;
+    const savedSequence = lastHeld ?? oldHead?.sequence ?? null;
+    const savedChain = lastHeld !== null ? hexOf(this.replayTo(current, lastHeld)) : oldHead ? hexOf(oldHead.chain) : null;
+    const saved = { subject, epoch: epoch + 1, reason, program_id: chain.programId, prev_verdict: verdict, prev_head_sequence: savedSequence, prev_head_chain: savedChain };
     // One statement, so one transaction: the epoch is read again where it's written, and the old record's rows change
     // with it or not at all.
     const { rows } = await this.db.query(
       `WITH cur AS (SELECT COALESCE(MAX(epoch), 0)::int AS e FROM ${T}.product_health_anchors WHERE subject = $1),
        ins AS (
-         INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, anchored_by, program_id, prev_verdict, prev_head_sequence, prev_head_chain)
-         SELECT $1, e + 1, $2, $3::uuid, $4, $5, $6::int, $7 FROM cur WHERE e = $8::int RETURNING epoch
+         INSERT INTO ${T}.product_health_anchors (subject, epoch, reason, anchored_by, program_id, prev_verdict, prev_head_sequence, prev_head_chain, mac)
+         SELECT $1, e + 1, $2, $3::uuid, $4, $5, $6::int, $7, $10 FROM cur WHERE e = $8::int RETURNING epoch
        ),
        upd AS (
          UPDATE ${T}.product_health_snapshots
@@ -1253,7 +1300,7 @@ export class ProductHealthService {
           WHERE subject = $1 AND epoch = $8::int AND EXISTS (SELECT 1 FROM ins) RETURNING 1
        )
        SELECT epoch FROM ins`,
-      [subject, reason, me.id, chain.programId, verdict, oldHead?.sequence ?? null, oldHead ? hexOf(oldHead.chain) : null, epoch, `Not published: the record was re-anchored (${reason})`.slice(0, ERROR_LIMIT)],
+      [subject, reason, me.id, chain.programId, verdict, savedSequence, savedChain, epoch, `Not published: the record was re-anchored (${reason})`.slice(0, ERROR_LIMIT), this.anchorMac(saved)],
     );
     const next = (rows[0] as { epoch: number } | undefined)?.epoch;
     if (next === undefined) return refuse("Someone else re-anchored this record first");
@@ -1285,9 +1332,23 @@ export class SolanaHealthChain implements HealthChain {
     return this.publisherKey;
   }
 
-  async latestRecordTx(subject: Uint8Array): Promise<string | null> {
-    const list = await this.solana.rpc("devnet").call<{ signature: string; err: unknown }[]>("getSignaturesForAddress", [headAddress(this.programId, subject), { limit: 10, commitment: "confirmed" }]);
-    return list.find((s) => s.err === null)?.signature ?? null;
+  private signatures(subject: Uint8Array, limit: number) {
+    return this.solana.rpc("devnet").call<{ signature: string; err: unknown }[]>("getSignaturesForAddress", [headAddress(this.programId, subject), { limit, commitment: "confirmed" }]);
+  }
+
+  async hasHeadHistory(subject: Uint8Array): Promise<boolean> {
+    return (await this.signatures(subject, 1)).length > 0;
+  }
+
+  // Never just the newest transaction: only one that carries this record's own bytes.
+  async latestRecordTx(subject: Uint8Array, expected: Uint8Array): Promise<string | null> {
+    const wanted = Buffer.from(expected);
+    for (const s of await this.signatures(subject, 10)) {
+      if (s.err !== null) continue;
+      const tx = await this.solana.rpc("devnet").call<{ transaction: [string, string]; meta: { err: unknown } | null } | null>("getTransaction", [s.signature, { encoding: "base64", commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
+      if (tx && tx.meta?.err === null && Buffer.from(tx.transaction[0], "base64").includes(wanted)) return s.signature;
+    }
+    return null;
   }
 
   async head(subject: Uint8Array, programId: string = this.programId): Promise<HeadAccount | null> {

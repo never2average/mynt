@@ -21,7 +21,7 @@ const { Store } = await import("../dist/store.js");
 const { opsStatus } = await import("../dist/ops.js");
 const { adaptRailFlows, ProductHealthService, buildFigures, canonicalJson, findGaps, fingerprintOf, loadFlowsFor, openReport, productHealthConfigFromEnv, sealReport, snapshotStatus, SolanaHealthChain } = await import("../dist/product-health.js");
 const chainLib = await import("../dist/solana/product-health-chain.js");
-const { compileMessage } = await import("../dist/solana/tx.js");
+const { compileMessage, serializeTransaction } = await import("../dist/solana/tx.js");
 const { Keypair, base58Encode, anchorDiscriminator, findProgramAddress, isWeakEd25519Key } = await import("../dist/solana/codec.js");
 const { checkProgramRules } = await import("../dist/solana/program-rules.js");
 const { SolanaService } = await import("../dist/solana/service.js");
@@ -43,8 +43,14 @@ class FakeChain {
     if (this.failing) throw new Error("the RPC was unreachable");
     return this.heads.get(`${programId}:${Buffer.from(subject).toString("hex")}`) ?? null;
   }
+  historyExists = false;
+  historyFails = false;
   async latestRecordTx() {
     return "recovered-transaction";
+  }
+  async hasHeadHistory() {
+    if (this.historyFails) throw new Error("the RPC was unreachable");
+    return this.historyExists;
   }
   apply(subject, kind, e, opening) {
     if (this.failing) throw new Error("the RPC was unreachable");
@@ -121,6 +127,11 @@ const edKeyPair = () => {
 };
 
 const liveLedger = { id: "fake-live", name: "A fake live ledger", kind: "live", read: async (c) => ({ reserves_held_cents: 150_00, customer_obligations_cents: 100_00, as_of: c.period_end }) };
+const firstHistoryWithTwo = async (health, user, productId) => {
+  const out = await health.get(user, productId, null, 5);
+  assert.equal(out.history.length, 2);
+  return out;
+};
 const firstSnapshot = async (health, user, productId) => (await health.listFor(user, productId, 50))[0].snapshots.at(-1);
 const tally = (amount_cents, count = 1) => ({ count, amount_cents });
 const railDirection = (o = {}) => ({ requested: tally(0, 0), submitted: tally(0, 0), settled: tally(0, 0), failed: tally(0, 0), reversed: tally(0, 0), ...o });
@@ -629,44 +640,121 @@ test("an entitled reader can verify a snapshot with the standalone script, and a
   const snap = await firstSnapshot(health, provider.user, productId);
   await health.submitSignature(provider.user, productId, null, 1, key.sign(snap.fingerprint));
   await tickAt(T0 + 6 * 60_000);
-  const answer = await health.get(provider.user, productId, null, 5);
-  const h = chain.log[0];
-  // A head account as the program stores it, served by a stand-in RPC.
-  const data = Buffer.alloc(chainLib.HEAD_SIZE);
-  Buffer.from(anchorDiscriminator("account", "Head")).copy(data, 0);
-  Buffer.from(h.subject).copy(data, 8);
-  data.writeBigUInt64LE(1n, 40);
-  Buffer.from(h.fingerprint).copy(data, 48);
-  Buffer.from(h.partner_commitment).copy(data, 99);
+  const first = await health.get(provider.user, productId, null, 5);
+  await tickAt(T0 + HOUR + 5 * 60_000); // a second record, so the first is an older one
+  await tickAt(T0 + HOUR + 20 * 60_000); // past its co-signing window, so it's on chain
+  const later = await firstHistoryWithTwo(health, provider.user, productId);
+  const headOf = (h) => {
+    const data = Buffer.alloc(chainLib.HEAD_SIZE);
+    Buffer.from(anchorDiscriminator("account", "Head")).copy(data, 0);
+    Buffer.from(h.subject).copy(data, 8);
+    data.writeBigUInt64LE(BigInt(h.sequence), 40);
+    Buffer.from(h.fingerprint).copy(data, 48);
+    data.writeBigInt64LE(BigInt(h.period_start), 80);
+    data.writeBigInt64LE(BigInt(h.period_end), 88);
+    data[96] = h.kind;
+    data[97] = h.source;
+    data[98] = h.partner_signed ? 1 : 0;
+    Buffer.from(h.partner_commitment).copy(data, 99);
+    return data;
+  };
+  const SOURCE = Object.fromEntries(Object.entries(chainLib.SOURCE_FLAG).map(([k, v]) => [v, k]));
+  const wireOf = (ixs) => {
+    const payer = Keypair.generate();
+    const message = compileMessage(payer.address, ixs(payer.address), base58Encode(randomBytes(32)));
+    return Buffer.from(serializeTransaction(message, new Map())).toString("base64");
+  };
+  const record = (h) => (payer) => [chainLib.healthIx.recordSnapshot(PROGRAM_ID, payer, h.subject, { sequence: h.sequence, fingerprint: h.fingerprint, period_start: h.period_start, period_end: h.period_end, source: SOURCE[h.source], partner_commitment: h.partner_signed ? h.partner_commitment : null })];
+  // A stand-in RPC serving whatever the case needs.
+  const world = { head: chain.log[0], owner: PROGRAM_ID, account: null, tx: null };
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      const { method, id } = JSON.parse(body);
-      assert.equal(method, "getAccountInfo");
-      res.end(JSON.stringify({ jsonrpc: "2.0", id, result: { value: { owner: PROGRAM_ID, data: [data.toString("base64"), "base64"] } } }));
+      const { method, id, params } = JSON.parse(body);
+      let result;
+      if (method === "getAccountInfo") {
+        const expected = chainLib.headAddress(PROGRAM_ID, world.head.subject);
+        const data = world.account ?? headOf(world.head);
+        result = { value: params[0] === expected ? { owner: world.owner, data: [data.toString("base64"), "base64"] } : null };
+      } else if (method === "getTransaction") result = { meta: { err: null }, transaction: [world.tx, "base64"] };
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const dir = mkdtempSync(join(tmpdir(), "health-verify-"));
-  const run = async (doc) => {
+  const run = async (doc, flags) => {
     const file = join(dir, "answer.json");
     writeFileSync(file, JSON.stringify(doc, null, 2));
     const script = new URL("../scripts/product-health-verify.mjs", import.meta.url).pathname;
-    return new Promise((resolve) => execFile(process.execPath, [script, "--file", file, "--rpc", `http://127.0.0.1:${server.address().port}`], (error, stdout) => resolve({ code: error ? error.code : 0, stdout })));
+    return new Promise((resolve) => execFile(process.execPath, [script, "--file", file, "--rpc", `http://127.0.0.1:${server.address().port}`, ...flags], (error, stdout) => resolve({ code: error ? error.code : 0, stdout })));
   };
+  const full = ["--program-id", PROGRAM_ID, "--partner-key", key.address];
   try {
-    const good = await run(answer);
+    const good = await run(first, full);
     assert.equal(good.code, 0, good.stdout);
-    assert.match(good.stdout, /PASS {2}report hashes/);
-    assert.match(good.stdout, /PASS {2}partner signature/);
-    assert.match(good.stdout, /PASS {2}fingerprint matches/);
-    assert.match(good.stdout, /PASS {2}partner commitment/);
-    const forged = JSON.parse(JSON.stringify(answer));
+    assert.match(good.stdout, /OVERALL PASS/);
+    for (const line of [/PASS {2}report hashes/, /PASS {2}partner signature/, /PASS {2}fingerprint matches/, /PASS {2}partner commitment/, /PASS {2}it's a Head account/]) assert.match(good.stdout, line);
+
+    // The program id has to come from outside the file.
+    assert.equal((await run(first, [])).code, 2);
+
+    const forged = JSON.parse(JSON.stringify(first));
     forged.latest.report.figures.reserves_cents.value += 1;
-    const bad = await run(forged);
+    const bad = await run(forged, full);
     assert.equal(bad.code, 1);
     assert.match(bad.stdout, /FAIL {2}report hashes/);
+
+    // Without the reader's own key nothing counts as a pass.
+    const noKey = await run(first, ["--program-id", PROGRAM_ID]);
+    assert.equal(noKey.code, 3, noKey.stdout);
+    assert.match(noKey.stdout, /NOT independently checked/);
+    assert.doesNotMatch(noKey.stdout, /OVERALL PASS/);
+
+    const wrongKey = await run(first, ["--program-id", PROGRAM_ID, "--partner-key", edKeyPair().address]);
+    assert.equal(wrongKey.code, 1);
+    assert.match(wrongKey.stdout, /FAIL {2}the signature is under the key you named/);
+
+    // A made-up program: the file agrees with itself, the reader's program id doesn't agree with the chain.
+    const fabricated = JSON.parse(JSON.stringify(first));
+    fabricated.chain.program_id = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+    world.owner = fabricated.chain.program_id;
+    const madeUp = await run(fabricated, full);
+    assert.equal(madeUp.code, 1);
+    assert.match(madeUp.stdout, /FAIL {2}head account is owned by the program/);
+    world.owner = PROGRAM_ID;
+
+    const pointedElsewhere = JSON.parse(JSON.stringify(first));
+    pointedElsewhere.chain.head_address = PROGRAM_ID;
+    assert.equal((await run(pointedElsewhere, full)).code, 1);
+
+    world.account = Buffer.from(headOf(world.head));
+    world.account[0] ^= 1;
+    const notAHead = await run(first, full);
+    assert.equal(notAHead.code, 1);
+    assert.match(notAHead.stdout, /FAIL {2}it's a Head account/);
+    world.account = null;
+
+    // An older record, looked up by its transaction.
+    world.head = chain.log[1];
+    world.tx = wireOf(record(chain.log[0]));
+    const older = await run(later, [...full, "--sequence", "1"]);
+    assert.equal(older.code, 0, older.stdout);
+    assert.match(older.stdout, /PASS {2}it's this fingerprint/);
+
+    // A memo carrying the fingerprint's bytes isn't a record of it.
+    world.tx = wireOf(() => [{ programId: "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", keys: [], data: chain.log[0].fingerprint }]);
+    const memo = await run(later, [...full, "--sequence", "1"]);
+    assert.equal(memo.code, 1);
+    assert.match(memo.stdout, /FAIL {2}the transaction has a record_snapshot/);
+
+    // A record_snapshot of another record, or a head other than this one, doesn't count either.
+    world.tx = wireOf(record(chain.log[1]));
+    const another = await run(later, [...full, "--sequence", "1"]);
+    assert.equal(another.code, 1);
+    assert.match(another.stdout, /FAIL {2}it's this sequence/);
+
+    assert.equal((await run(later, [...full, "--sequence", "1", "--epoch", "9"])).code, 2, "an epoch this file doesn't hold");
   } finally {
     server.close();
   }
@@ -852,6 +940,64 @@ test("a tampered record can't be re-anchored away, and a disagreeing head isn't 
   assert.ok(store);
 });
 
+test("a missing head with transaction history wasn't a reset, and a history that can't be read refuses too", async () => {
+  const { health, productId, admin, chain, raw, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.heads.clear();
+  chain.historyExists = true;
+  await assert.rejects(health.reanchor(admin, productId, null, "claims a chain reset"), /wasn't reset/);
+  chain.historyExists = false;
+  chain.historyFails = true;
+  await assert.rejects(health.reanchor(admin, productId, null, "claims a chain reset"), /history can't be read/);
+  chain.historyFails = false;
+  assert.equal((await raw("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'reanchor_product_health_refused'"))[0].n, 2);
+  await health.reanchor(admin, productId, null, "devnet was reset");
+});
+
+test("a row added under a stale epoch is refused, so a re-anchor can't be raced", async () => {
+  const { health, productId, admin, chain, raw, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.heads.clear();
+  await health.reanchor(admin, productId, null, "devnet was reset");
+  // The worker read the epoch just before the re-anchor.
+  health.currentEpoch = async () => 0;
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  assert.equal((await raw(`SELECT count(*)::int AS n FROM ${SNAPSHOTS}`))[0].n, 1, "nothing was written under the old epoch");
+  assert.ok(productId);
+});
+
+test("an anchor changed outside Mynt reads as a mismatch, is shown, and blocks re-anchoring", async () => {
+  const { health, productId, provider, admin, chain, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.programId = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  await health.reanchor(admin, productId, null, "moved to a new program");
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  await pg.query("UPDATE financial_products.product_health_anchors SET prev_verdict = 'gone' WHERE epoch = 1");
+  const out = await health.get(provider.user, productId, null, 5);
+  const old = out.history.find((h) => h.epoch === 0 && h.sequence === 1);
+  assert.equal(old.verification.on_chain, "previous_chain_mismatch");
+  assert.ok(out.gaps.some((g) => g.kind === "stalled" && /integrity check/.test(g.detail)));
+  chain.heads.clear();
+  await assert.rejects(health.reanchor(admin, productId, null, "another try"), /integrity check/);
+});
+
+test("a head one ahead when the old program is retired is saved as of Mynt's last record, not as tampering", async () => {
+  const { health, productId, provider, admin, chain, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  const original = chain.publishSnapshot.bind(chain);
+  chain.publishSnapshot = async (...a) => {
+    await original(...a); // lands, unseen
+    throw new Error("Transaction wasn't confirmed in time");
+  };
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  chain.publishSnapshot = original;
+  chain.programId = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  assert.equal((await health.reanchor(admin, productId, null, "moved to a new program")).previous_record, "matches");
+  await tickAt(T0 + 2 * HOUR + 5 * 60_000);
+  const out = await health.get(provider.user, productId, null, 10);
+  assert.equal(out.history.find((h) => h.epoch === 0 && h.sequence === 1).verification.on_chain, "previous_chain_matched");
+});
+
 test("moving to a new program keeps the old record's verdict, and tampering with it afterwards shows", async () => {
   const { health, productId, provider, admin, chain, raw, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
   await tickAt(T0 + 5 * 60_000);
@@ -984,6 +1130,8 @@ test("the faucet is asked only below the low-water mark, and then for enough to 
         return "sig";
       }
       if (method === "getSignatureStatuses") return { value: [{ err: null, confirmationStatus: "confirmed" }] };
+      if (method === "getSignaturesForAddress") return [{ signature: "failed", err: { x: 1 } }, { signature: "someone-elses", err: null }, { signature: "ours", err: null }];
+      if (method === "getTransaction") return { meta: { err: null }, transaction: [Buffer.from(params[0] === "ours" ? "...record-bytes..." : "something else").toString("base64"), "base64"] };
       throw new Error(`unexpected ${method}`);
     },
   };
@@ -993,7 +1141,11 @@ test("the faucet is asked only below the low-water mark, and then for enough to 
   balance = 1_000_000;
   await solana.topUpHealthPublisher(anySigner.address, 5_000_000, 20_000_000);
   assert.deepEqual(airdrops, [19_000_000]);
-  assert.ok(new SolanaHealthChain(solana, PROGRAM_ID));
+  // A recovered transaction must carry this record's own bytes, not just be the newest on the head.
+  const chain = new SolanaHealthChain(solana, PROGRAM_ID);
+  assert.equal(await chain.latestRecordTx(new Uint8Array(32), Buffer.from("record-bytes")), "ours");
+  assert.equal(await chain.latestRecordTx(new Uint8Array(32), Buffer.from("not there")), null);
+  assert.equal(await chain.hasHeadHistory(new Uint8Array(32)), true);
 });
 
 // ---- what's public ----

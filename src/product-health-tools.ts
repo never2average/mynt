@@ -5,7 +5,8 @@ import { SCHEMA, type ProductHealthService } from "./product-health.js";
 
 // Tools for each product's financial health. Numbers go only to the product's licence provider and liquidity
 // providers. An admin account sees status and fingerprints (list_product_health) and is refused the numbers, even if it
-// also holds the licence-provider role or belongs to the firm, so a Mynt admin account can't open a product's books.
+// also holds the licence-provider role or belongs to the firm. An admin can still add a separate non-admin account to a
+// firm; that's audited, so it leaves a trail rather than being impossible.
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
