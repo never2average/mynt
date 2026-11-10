@@ -215,6 +215,7 @@ export interface MovementRequest {
   subscription_id?: string | null; // with request_id, how a partner's later answer finds this movement
   request_id?: string | null;
   sponsor_entity_id?: string | null; // only this sponsor's rails may carry it (a liquidity pool's own sponsor)
+  rail_id?: string | null; // only this rail may carry it: a pool doesn't follow a replacement for the rail it was approved with
 }
 export type MovementVerdict =
   | { allowed: true; movement_id: string; status: MovementStatus; replay: boolean }
@@ -333,7 +334,7 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
     await store.audit(null, "money_movement_refused", m.product_id, { code: "too_many_attempts", idempotency_key: m.idempotency_key, attempts: existing.earlier_request_ids.length + 1, sandbox: m.sandbox });
     return refusal(409, "too_many_attempts", `This transfer has been tried ${MAX_MOVEMENT_ATTEMPTS} times, so it can't be tried again; get a new quote once it has settled or failed`);
   }
-  const eligible = await eligibleRails(store, m, !m.sandbox && existing?.status === "requested" ? existing.rail_id : null);
+  const eligible = await eligibleRails(store, m, m.rail_id ?? (!m.sandbox && existing?.status === "requested" ? existing.rail_id : null));
   if (m.sandbox) return recordSandbox(store, m, existing, eligible);
   if (existing && existing.status !== "failed" && existing.status !== "requested") return { allowed: true, movement_id: existing.id, status: existing.status, replay: true };
   const refuse = async (r: Refusal): Promise<Refusal> => {
@@ -539,7 +540,8 @@ export type Flows = {
   not_measured: Partial<Record<RailDirection, string>>;
 };
 
-// Live money movements of a product requested in [from, to), totalled by direction and status. Null, never 0, for
+// Live customer money movements of a product requested in [from, to), totalled by direction and status; liquidity pools'
+// capital isn't what a product's customers did, and isn't counted. Null, never 0, for
 // what can't be measured: a period that starts before the ledger did, or a direction Mynt doesn't instruct for this
 // product (its money, if any, moves in the provider's own flow).
 export async function flowsFor(store: Store, productId: string, from: string | Date, to: string | Date): Promise<Flows> {
@@ -566,7 +568,7 @@ export async function flowsFor(store: Store, productId: string, from: string | D
   }
   const { rows } = await store.db.query(
     `SELECT direction, status, COALESCE(status_detail = ANY($4::text[]), false) AS stale, count(*)::int AS n, sum(amount_cents)::text AS cents FROM ${T}.money_movements
-     WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 GROUP BY 1, 2, 3`,
+     WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 AND COALESCE(action, '') NOT IN ('pool_deposit', 'pool_withdrawal') GROUP BY 1, 2, 3`,
     [productId, start.toISOString(), end.toISOString(), [STALE_DETAIL, GAVE_UP_DETAIL]],
   );
   const measured = await productMoneyDirections(store, record!);

@@ -22,7 +22,7 @@ import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
 import { sweepStaleMovements } from "./money-rails.js";
-import { exitedLiquidityProvider, liquidityConfigFromEnv, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolsOf } from "./liquidity.js";
+import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf } from "./liquidity.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
@@ -133,7 +133,9 @@ const openServices = async () => {
     flowsFor: await loadFlowsFor(store),
     liquidityProvidersOf: (productId) => liquidityProvidersOf(store, productId),
     exitedLiquidityProvider: (productId, entityId) => exitedLiquidityProvider(store, productId, entityId),
+    liquidityProviderBooks: (productId, entityId) => liquidityProviderBooks(store, productId, entityId),
     poolsOf: (productId) => poolsOf(store, productId),
+    poolSponsorOf: (poolId) => poolSponsorOf(store, poolId),
     openWithdrawalRequests: (productId, poolId) => openWithdrawalRequests(store, productId, poolId),
   });
   // Pays liquidity pools' withdrawal queues, as far as each pool's latest verified health allows.

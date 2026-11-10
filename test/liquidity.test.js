@@ -16,8 +16,8 @@ const { createServer } = await import("../dist/server.js");
 const { normalizeModel } = await import("../dist/regulatory.js");
 const { Store } = await import("../dist/store.js");
 const { ProductHealthService } = await import("../dist/product-health.js");
-const { exitedLiquidityProvider, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolsOf, reserveGate, minimumReserve } = await import("../dist/liquidity.js");
-const { sweepStaleMovements } = await import("../dist/money-rails.js");
+const { exitedLiquidityProvider, liquidityProviderBooks, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf, reserveGate, minimumReserve } = await import("../dist/liquidity.js");
+const { authorizeMovement, flowsFor, sweepStaleMovements } = await import("../dist/money-rails.js");
 const chainLib = await import("../dist/solana/product-health-chain.js");
 const { base58Encode } = await import("../dist/solana/codec.js");
 const { CATALOG } = await import("./helpers.js");
@@ -127,7 +127,7 @@ async function world({ db, sandbox = false, notice = 0, clear = true, minBps = 1
   const chain = new FakeChain();
   const ledger = { id: "fake-live", name: "Fake live ledger", kind: "live", figures: {}, failing: false, async read(c) {
     if (this.failing) return { error: { code: "down", message: "The partner's ledger is down" } };
-    return { reserves_held_cents: this.figures.reserves, customer_obligations_cents: this.figures.obligations, as_of: c.period_end, reason: this.figures.reason };
+    return { reserves_held_cents: this.figures.reserves, customer_obligations_cents: this.figures.obligations, as_of: new Date(new Date(c.period_end).getTime() - (this.figures.staleBy ?? 0)).toISOString(), reason: this.figures.reason };
   } };
   const health = await ProductHealthService.open(db, store, { intervalMs: DAY, cosignWindowMs: 10 * 60_000, pollMs: 60_000, programId: PROGRAM_ID }, {
     chain,
@@ -135,7 +135,9 @@ async function world({ db, sandbox = false, notice = 0, clear = true, minBps = 1
     now: () => new Date(clock),
     liquidityProvidersOf: (id) => liquidityProvidersOf(store, id),
     exitedLiquidityProvider: (id, firm) => exitedLiquidityProvider(store, id, firm),
+    liquidityProviderBooks: (id, firm) => liquidityProviderBooks(store, id, firm),
     poolsOf: (id) => poolsOf(store, id),
+    poolSponsorOf: (id) => poolSponsorOf(store, id),
     openWithdrawalRequests: (id, pool) => openWithdrawalRequests(store, id, pool),
   });
   const worker = new LiquidityWorker(store, healthStub ?? health, { maxHealthAgeMs: 30 * 3_600_000, pollMs: 60_000 }, { now: () => new Date(clock) });
@@ -184,16 +186,16 @@ async function world({ db, sandbox = false, notice = 0, clear = true, minBps = 1
   if (makePool) pool = await createPool();
 
   // Publish a snapshot of `poolId`: a new period each time, co-signed and on chain unless asked otherwise.
-  const snapshot = async ({ reserves, obligations, reason, unsigned = false, ledgerKind = "live" } = {}) => {
+  const snapshot = async ({ reserves, obligations, reason, staleBy, unsigned = false, ledgerKind = "live" } = {}) => {
     const boundary = Math.floor(clock / DAY) * DAY;
     if (boundary <= lastBoundary) clock += DAY;
     lastBoundary = Math.floor(clock / DAY) * DAY;
     ledger.kind = ledgerKind;
-    ledger.figures = { reserves, obligations, reason };
+    ledger.figures = { reserves, obligations, reason, staleBy };
     await health.tick();
     if (!unsigned) {
       for (const view of await health.listFor(provider.user, productId, 200)) {
-        for (const snap of view.snapshots.filter((x) => x.status === "pending_signature")) await health.submitSignature(provider.user, productId, view.pool_id, snap.sequence, key.sign(snap.fingerprint));
+        for (const snap of view.snapshots.filter((x) => x.status === "pending_signature")) await health.submitSignature(provider.user, productId, view.pool_id, snap.sequence, key.sign(snap.fingerprint)).catch((e) => assert.match(e.message, /Only the licence provider/));
       }
     }
     // A later moment inside the same period: a co-signed snapshot goes on chain, an unsigned one when its window closes.
@@ -202,7 +204,7 @@ async function world({ db, sandbox = false, notice = 0, clear = true, minBps = 1
   };
 
   const commit = (who, amount, poolId = pool.id) => ok(who.client, "commit_to_pool", { pool_id: poolId, amount_cents: amount, state: "us-ny", idempotency_key: `commit-${randomUUID()}` });
-  const settle = (movementId, extra = {}) => ok(provider.client, "report_pool_movement", { movement_id: movementId, outcome: "settled", ...extra });
+  const settle = (movementId, extra = {}) => ok(provider.client, "report_pool_movement", { movement_id: movementId, outcome: "settled", external_ref: `ref-${randomUUID()}`, ...extra });
   const position = async (who, poolId = pool.id) => (await ok(who.client, "list_my_positions", { pool_id: poolId, include_entries: true }))[0];
   const withdrawals = async (who, poolId = pool.id) => ok(who.client ?? who, "list_withdrawals", { pool_id: poolId });
   const claims = async () => (await db.query("SELECT s.* FROM financial_products.pool_movement_states s JOIN financial_products.pool_withdrawals w ON w.id = s.withdrawal_id WHERE s.kind = 'withdrawal' ORDER BY w.seq, s.claimed_at, s.id")).rows;
@@ -364,7 +366,7 @@ test("the reserve check blocks payment, pays partially what keeps the reserve, a
 // One failure at a time: a real snapshot record (or none) must stop payment, naming why.
 const FAIL_CLOSED = {
   "there's no snapshot at all": { nosnapshot: true, reason: /No finished health snapshot/ },
-  "the snapshot is stale": { args: { reserves: 2_000_000, obligations: 1_000_000 }, after: (s) => s.advance(2 * DAY), reason: /stale/ },
+  "the snapshot is stale": { args: { reserves: 2_000_000, obligations: 1_000_000, staleBy: 3 * DAY }, reason: /stale/ },
   "a figure needed is null": { args: { reserves: null, obligations: 1_000_000, reason: "the partner's reserves report is late" }, reason: /reserves can't be measured.*late/ },
   "obligations are null": { args: { reserves: 2_000_000, obligations: null, reason: "not reported" }, reason: /obligations can't be measured/ },
   "the snapshot is unverified": { args: { reserves: 2_000_000, obligations: 1_000_000, unsigned: true }, reason: /isn't verified/ },
@@ -377,7 +379,6 @@ for (const [label, want] of Object.entries(FAIL_CLOSED))
     await s.funded(s.fundA, 10_000);
     await s.requestOut(s.fundA, 5_000);
     if (!want.nosnapshot) await s.snapshot(want.args);
-    want.after?.(s);
     await s.tick();
     const pool = await s.poolRow();
     assert.equal(pool.status, "paused");
@@ -387,9 +388,11 @@ for (const [label, want] of Object.entries(FAIL_CLOSED))
     const [w] = await s.withdrawals(s.fundA);
     assert.equal(w.status, "queued");
     assert.match(w.waiting_reason, want.reason, "the reason is shown");
-    // New capital is still welcome: it's how a pool gets back above its reserve.
+    // With no snapshot Mynt can trust showing a shortfall, there's no telling what it could pay back: no new capital.
     const again = await callTool(s.fundB.client, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 1000, state: "us-ny", idempotency_key: "commit-while-paused" });
-    assert.equal(again.isError, false, JSON.stringify(again.data));
+    assert.equal(again.isError, true);
+    assert.equal(again.data.code, "health_unconfirmed");
+    assert.match(again.data.error, want.reason);
   });
 
 test("a missed snapshot is no snapshot, and a sandbox pool pays on sandbox figures", async () => {
@@ -627,12 +630,14 @@ test("a pool's committed liquidity providers can read its product's health; an a
   await s.tick();
   const exited = await s.health.entitlement(s.fundA.user, s.productId);
   assert.ok(exited.until instanceof Date, "only what it could already read");
+  await s.tick();
   const sequencesAtExit = (await ok(s.fundA.client, "get_product_health", { product_id: s.productId, pool_id: other.id })).history.map((h) => h.sequence);
   await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
   await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
   const after = await ok(s.fundA.client, "get_product_health", { product_id: s.productId, pool_id: other.id });
   assert.deepEqual(after.history.map((h) => h.sequence), sequencesAtExit, "no new snapshots");
   assert.ok(after.access_ended_at);
+  for (const view of await s.health.listFor(s.fundA.user, s.productId, 50)) assert.equal(view.gaps.some((g) => g.kind === "chain_ahead"), false, "a filtered view is never compared with the chain");
 
   // Coming back restores it.
   await s.funded(s.fundA, 1_000, other.id);
@@ -692,6 +697,291 @@ test("real commitments are refused until an admin records the offering was clear
   assert.equal((await ok(s.fundA.client, "list_pools")).length, 2);
   const audit = (await s.db.query("SELECT details FROM financial_products.audit_log WHERE action = 'set_pool_offering_cleared'")).rows;
   assert.ok(audit[0].details.legal_basis);
+});
+
+test("every pool of a product shares one headroom, less the product's other outflows and deposits reversed since", async () => {
+  const s = await world();
+  const second = await s.createPool({ name: "Second" });
+  await s.funded(s.fundA, 40_000);
+  await s.funded(s.fundB, 40_000, second.id);
+  await s.requestOut(s.fundA, 30_000);
+  await s.requestOut(s.fundB, 30_000, second.id);
+  await s.snapshot({ reserves: 130_000, obligations: 100_000 }); // 30,000 of room across the product
+  await s.tick();
+  const claims = (await s.claims()).filter((c) => c.ledger_state !== "released");
+  assert.equal(claims.reduce((n, c) => n + Number(c.amount_cents), 0), 30_000, "two pools can't spend the same reserves");
+
+  const t = await world();
+  await t.funded(t.fundA, 80_000);
+  const reversed = await t.commit(t.fundB, 10_000);
+  await t.settle(reversed.movement_id);
+  await t.db.query("UPDATE financial_products.money_movements SET settled_at = $2 WHERE id = $1", [reversed.movement_id, new Date(t.getClock() - 2 * DAY).toISOString()]);
+  await t.requestOut(t.fundA, 50_000);
+  await t.snapshot({ reserves: 150_000, obligations: 100_000 }); // 50,000 of room
+  await ok(t.provider.client, "report_pool_movement", { movement_id: reversed.movement_id, outcome: "returned" });
+  await t.db.query(
+    `INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, status) VALUES ($1, $2, $3, 'customer_payout', $4, $5, 'payout', 20000, 'us-ny', 'requested')`,
+    [randomUUID(), `customer-${randomUUID()}`, t.productId, t.provider.entity.id, t.payoutRail.id],
+  );
+  await t.tick();
+  const [claim] = await t.claims();
+  assert.equal(Number(claim.amount_cents), 20_000, "50,000 less 20,000 of customers' payouts and a 10,000 deposit reversed after the snapshot");
+});
+
+test("only an admin clears an admin's pause, and approving never reopens a closed pool", async () => {
+  const s = await world();
+  await ok(s.admin, "pause_pool", { pool_id: s.pool.id, reason: "regulator asked" });
+  for (const args of [{ reason: "my own pause" }, { reason: "closing it", close: true }]) {
+    const r = await callTool(s.provider.client, "pause_pool", { pool_id: s.pool.id, ...args });
+    assert.equal(r.isError, true);
+    assert.match(r.data.error, /admin must resume/);
+  }
+  const pool = await s.poolRow();
+  assert.equal(pool.status, "paused");
+  assert.equal(pool.paused_by_admin, true);
+  await ok(s.admin, "resume_pool", { pool_id: s.pool.id });
+  assert.equal((await s.poolRow()).paused_by_admin, false);
+
+  const pending = await ok(s.builder.client, "create_pool", { product_id: s.productId, component_key: "account", name: "Never opened", sandbox: false, min_reserve_bps: 100, min_reserve_floor_cents: 0, notice_period_days: 0, max_commitment_cents: 1000 });
+  await ok(s.provider.client, "pause_pool", { pool_id: pending.id, reason: "not going ahead", close: true });
+  const refused = await callTool(s.provider.client, "approve_pool", { pool_id: pending.id, deposit_rail_id: s.depositRail.id, withdrawal_rail_id: s.payoutRail.id });
+  assert.equal(refused.isError, true);
+  assert.equal((await s.poolRow(pending.id)).status, "closed");
+});
+
+test("a claim with a ledger row is tied to it and never released", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  const w = await s.requestOut(s.fundA, 5_000);
+  // The worker reached the chokepoint and died before tying the claim to the row it made.
+  const id = randomUUID();
+  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", customer_ref: "lp", idempotency_key: `pool-withdrawal:${id}`, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
+  assert.equal(verdict.allowed, true);
+  await s.db.query(`INSERT INTO financial_products.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, withdrawal_id, amount_cents, state, claimed_at) VALUES ($1, $2, $3, $4, 'withdrawal', $5, 5000, 'claimed', now() - interval '1 hour')`, [id, `pool-withdrawal:${id}`, s.pool.id, s.fundA.entity.id, w.id]);
+  await s.db.query("UPDATE financial_products.pool_withdrawals SET status = 'paying' WHERE id = $1", [w.id]);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  // The rail's now suspended, so the chokepoint would refuse a fresh attempt.
+  await ok(s.admin, "suspend_rail", { rail_id: s.payoutRail.id, reason: "partner incident" });
+  s.advance(10 * 60_000);
+  await s.tick();
+  const [claim] = await s.claims();
+  assert.equal(claim.movement_id, verdict.movement_id);
+  assert.equal(claim.state, "authorized");
+  assert.equal(claim.ledger_state, "in_flight", "the ledger row stands");
+});
+
+test("a settlement can't report more than was asked, a live one needs its reference, and a short one shows what settled", async () => {
+  const s = await world();
+  const c = await s.commit(s.fundA, 10_000);
+  const over = await callTool(s.provider.client, "report_pool_movement", { movement_id: c.movement_id, outcome: "settled", external_ref: "ref-1", settled_amount_cents: 10_001 });
+  assert.equal(over.isError, true);
+  assert.equal(over.data.code, "over_settlement");
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'pool_movement_over_settlement'")).rows[0].n, 1);
+  assert.equal((await s.position(s.fundA)).contributed_cents, 0);
+  const noRef = await callTool(s.provider.client, "report_pool_movement", { movement_id: c.movement_id, outcome: "settled" });
+  assert.equal(noRef.data.code, "external_ref_required");
+  await s.settle(c.movement_id);
+
+  await s.requestOut(s.fundA, 10_000);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.tick();
+  const [claim] = await s.claims();
+  await s.settle(claim.movement_id, { settled_amount_cents: 9_000 });
+  await s.tick();
+  const [w] = await s.withdrawals(s.fundA);
+  assert.equal(w.status, "paid_short");
+  assert.equal(w.settled_cents, 9_000);
+  assert.equal((await s.position(s.fundA)).withdrawn_cents, 9_000);
+});
+
+test("one firm can't freeze the queue: its state is locked, and a persistent refusal parks only its request", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  await s.funded(s.fundB, 10_000);
+  const locked = await callTool(s.fundA.client, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 100, state: "us-ca", idempotency_key: "commit-new-state" });
+  assert.equal(locked.data.code, "state_locked");
+  assert.equal((await s.position(s.fundA)).state, "us-ny");
+
+  // Something changed under the firm: its state no longer gets served. Three tries, then it's parked; the next is paid.
+  await s.requestOut(s.fundA, 5_000);
+  await s.requestOut(s.fundB, 5_000);
+  await s.db.query("UPDATE financial_products.pool_commitments SET state = 'us-tx' WHERE lp_entity_id = $1", [s.fundA.entity.id]);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.tick();
+  await s.tick();
+  let [a, b] = await s.withdrawals(s.admin);
+  assert.equal(a.status, "queued");
+  assert.equal(b.status, "queued", "held for a tick or two: it could be a blip");
+  await s.tick();
+  [a, b] = await s.withdrawals(s.admin);
+  assert.equal(a.status, "parked");
+  assert.match(a.status_reason, /state_not_sponsored/);
+  assert.equal(b.status, "paying", "the firm behind it is paid");
+
+  // A deposit rail serving states the withdrawal rail doesn't can't be approved.
+  const narrow = await ok(s.provider.client, "propose_rail", { kind: "wire", provider: "bridge", direction: "payout", states: ["us-ny"], per_transfer_limit_cents: 10_000, daily_limit_cents: 10_000 });
+  await ok(s.admin, "approve_rail", { rail_id: narrow.id });
+  const pending = await ok(s.builder.client, "create_pool", { product_id: s.productId, component_key: "account", name: "Narrow", sandbox: false, min_reserve_bps: 100, min_reserve_floor_cents: 0, notice_period_days: 0, max_commitment_cents: 1000 });
+  const refused = await callTool(s.provider.client, "approve_pool", { pool_id: pending.id, deposit_rail_id: s.depositRail.id, withdrawal_rail_id: narrow.id });
+  assert.match(refused.data.error, /us-ca/);
+});
+
+test("crash recovery waits for the gate, and a recovered deposit is held to the offering flag", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  const k = "commit-crashed";
+  const key = `pool-deposit:${s.pool.id}:${s.fundA.entity.id}:${k}`;
+  const id = randomUUID();
+  const pm = "financial_products.pool_movements";
+  await s.db.query(`INSERT INTO ${pm} (id, idempotency_key, pool_id, lp_entity_id, kind, amount_cents, customer_state, state, claimed_at) VALUES ($1, $2, $3, $4, 'deposit', 500, 'us-ny', 'claimed', now() - interval '1 hour')`, [id, key, s.pool.id, s.fundA.entity.id]);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  s.advance(10 * 60_000);
+  await ok(s.provider.client, "pause_pool", { pool_id: s.pool.id, reason: "looking" });
+  await s.tick();
+  assert.equal((await s.db.query(`SELECT state FROM ${pm} WHERE id = $1`, [id])).rows[0].state, "claimed", "nothing happens under a pause");
+  await ok(s.provider.client, "resume_pool", { pool_id: s.pool.id });
+  await ok(s.admin, "set_pool_offering_cleared", { pool_id: s.pool.id, cleared: false, legal_basis: "Counsel withdrew the opinion" });
+  // A replay of that commitment is held to the flag too.
+  const replay = await callTool(s.fundA.client, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 500, state: "us-ny", idempotency_key: k });
+  assert.equal(replay.data.code, "offering_not_cleared");
+  await s.tick();
+  const [row] = (await s.db.query(`SELECT state, refusal, movement_id FROM ${pm} WHERE id = $1`, [id])).rows;
+  assert.equal(row.state, "refused");
+  assert.equal(row.refusal, "offering_not_cleared");
+  assert.equal(row.movement_id, null);
+});
+
+test("sandbox money is marked as such wherever it appears", async () => {
+  const s = await world({ sandbox: true });
+  const c = await s.commit(s.fundA, 10_000);
+  assert.equal(c.sandbox, true);
+  const report = await s.settle(c.movement_id);
+  assert.equal(report.sandbox, true);
+  const p = await s.position(s.fundA);
+  assert.equal(p.sandbox, true);
+  assert.ok(p.entries.every((e) => e.sandbox === true));
+  const w = await s.requestOut(s.fundA, 2_000);
+  assert.equal(w.sandbox, true);
+  const [listed] = await s.withdrawals(s.fundA);
+  assert.equal(listed.sandbox, true);
+  assert.equal((await ok(s.fundA.client, "cancel_withdrawal", { withdrawal_id: w.id })).sandbox, true);
+});
+
+test("a deposit under a health pause needs a trusted shortfall, and a second sponsor's pool reads its own books", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 1_000);
+  await s.snapshot({ reserves: 500_000, obligations: 1_000_000 });
+  await s.tick();
+  assert.equal((await s.poolRow()).pause_kind, "health");
+  const allowed = await callTool(s.fundB.client, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 1000, state: "us-ny", idempotency_key: "commit-into-shortfall" });
+  assert.equal(allowed.isError, false, JSON.stringify(allowed.data));
+
+  // A second sponsor of another component, with its own pool.
+  const bank = await s.firm("Bank Two", ["license_provider"]);
+  const held = await moneyTransmitter(s.store, bank.user, ["us-ny"]);
+  const asked = await s.store.requestSponsorship(s.builder.user.id, { product_id: s.productId, component_key: "second", builder_entity_id: s.builder.entity.id, provider_entity_id: bank.entity.id, requested_jurisdictions: ["us-ny"], note: null });
+  await s.store.decideSponsorship(asked.id, { status: "approved", decided_by: bank.user.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
+  const makeRail = async (direction) => {
+    const r = await ok(bank.client, "propose_rail", { kind: "ramp_adapter", provider: "bridge", direction, states: ["us-ny"], per_transfer_limit_cents: 100_000, daily_limit_cents: 1_000_000 });
+    return ok(s.admin, "approve_rail", { rail_id: r.id });
+  };
+  const [dep, pay] = [await makeRail("deposit"), await makeRail("payout")];
+  const second = await ok(s.builder.client, "create_pool", { product_id: s.productId, component_key: "second", name: "Bank Two pool", sandbox: false, min_reserve_bps: 100, min_reserve_floor_cents: 0, notice_period_days: 0, max_commitment_cents: 100_000 });
+  await ok(bank.client, "approve_pool", { pool_id: second.id, deposit_rail_id: dep.id, withdrawal_rail_id: pay.id });
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000, unsigned: true });
+  const { rows } = await s.db.query("SELECT DISTINCT partner_entity_id FROM financial_products.product_health_snapshots WHERE pool_id = $1", [second.id]);
+  assert.deepEqual(rows.map((r) => r.partner_entity_id), [bank.entity.id]);
+
+  // Fund A holds money only in the first sponsor's pool: it doesn't read the second's books.
+  assert.equal((await s.health.get(s.fundA.user, s.productId, second.id, 5)).history.length, 0);
+  assert.deepEqual(await liquidityProviderBooks(s.store, s.productId, s.fundA.entity.id), [s.provider.entity.id]);
+  // And only a member with the liquidity_provider role reads for the firm.
+  const { user: colleague } = await s.store.createUser("Fund A analyst", ["innovator"]);
+  await s.store.setUserEntity(colleague.id, s.fundA.entity.id);
+  colleague.entity_id = s.fundA.entity.id;
+  assert.equal(await s.health.entitlement(colleague, s.productId), null);
+});
+
+test("health access needs a settled position, and pool money stays out of the product's own figures", async () => {
+  const s = await world();
+  const c = await s.commit(s.fundA, 1);
+  assert.equal(await s.health.entitlement(s.fundA.user, s.productId), null, "an unsettled commitment opens nothing");
+  await s.settle(c.movement_id);
+  assert.equal((await s.health.entitlement(s.fundA.user, s.productId)).as, "liquidity_provider");
+
+  const started = await s.store.getSetting("money_ledger_started_at");
+  const flows = await flowsFor(s.store, s.productId, started, new Date(Date.now() + 60_000));
+  assert.equal(flows.flows.deposit, null, "a pool's capital isn't a customer flow, and null stays null");
+  assert.ok(flows.not_measured.deposit);
+
+  const sandbox = await s.createPool({ sandbox: true });
+  await s.funded(s.fundB, 1_000, sandbox.id);
+  await s.requestOut(s.fundB, 500, sandbox.id);
+  assert.equal(await openWithdrawalRequests(s.store, s.productId, null), 0, "sandbox pools aren't in the product's figures");
+  assert.equal(await openWithdrawalRequests(s.store, s.productId, sandbox.id), 1);
+});
+
+test("a settlement that would pay a re-paid withdrawal twice is refused and flagged", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  await s.requestOut(s.fundA, 10_000);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.tick();
+  const [first] = await s.claims();
+  await ok(s.provider.client, "report_pool_movement", { movement_id: first.movement_id, outcome: "failed" });
+  await s.tick();
+  const claims = await s.claims();
+  assert.equal(claims.filter((c) => c.ledger_state === "in_flight").length, 1, "the amount was claimed again");
+  const late = await callTool(s.provider.client, "report_pool_movement", { movement_id: first.movement_id, outcome: "settled", external_ref: "ref-late" });
+  assert.equal(late.isError, true);
+  assert.equal(late.data.code, "reclaimed");
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'pool_late_settlement_refused'")).rows[0].n, 1);
+  assert.equal((await s.position(s.fundA)).balance_cents, 10_000, "no negative balance");
+});
+
+test("a suspended firm isn't paid and doesn't hold up the firm behind it, and the sponsor sees a pool's hold", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  await s.funded(s.fundB, 10_000);
+  await s.requestOut(s.fundA, 5_000);
+  await s.requestOut(s.fundB, 5_000);
+  await s.store.setEntityStatus(s.fundA.entity.id, "suspended");
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.tick();
+  const [a, b] = await s.withdrawals(s.admin);
+  assert.equal(a.status, "queued");
+  assert.equal(b.status, "paying");
+
+  await ok(s.admin, "pause_pool", { pool_id: s.pool.id, reason: "regulator asked" });
+  const [, held] = await s.withdrawals(s.provider.client);
+  assert.equal(held.movements[0].movement_status, "requested");
+  assert.match(held.movements[0].pool_hold, /regulator asked/);
+});
+
+test("a pool doesn't follow a replacement rail, a firm can't fund its own pool, and a replay says what really happened", async () => {
+  const s = await world();
+  const c = await s.commit(s.fundA, 10_000);
+  await s.settle(c.movement_id);
+  const replay = await ok(s.fundA.client, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 10_000, state: "us-ny", idempotency_key: "commit-replayed" });
+  await s.settle(replay.movement_id);
+  const again = await ok(s.fundA.client, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 10_000, state: "us-ny", idempotency_key: "commit-replayed" });
+  assert.equal(again.replay, true);
+  assert.equal(again.movement_status, "settled");
+
+  await s.requestOut(s.fundA, 1_000);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await ok(s.admin, "revoke_rail", { rail_id: s.payoutRail.id, reason: "agreement ended" });
+  const replacement = await ok(s.provider.client, "propose_rail", { kind: "ramp_adapter", provider: "bridge", direction: "payout", states: ["us-ny", "us-ca"], per_transfer_limit_cents: 100_000_000, daily_limit_cents: 900_000_000 });
+  await ok(s.admin, "approve_rail", { rail_id: replacement.id });
+  await s.tick();
+  assert.match((await s.poolRow()).hold_reason, /rail_revoked/);
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.money_movements WHERE rail_id = $1", [replacement.id])).rows[0].n, 0);
+
+  const { user: insider } = await s.store.createUser("Builder's fund desk", ["liquidity_provider"]);
+  await s.store.setUserEntity(insider.id, s.builder.entity.id);
+  const insiderClient = await s.connect({ ...insider, entity_id: s.builder.entity.id });
+  const refused = await callTool(insiderClient, "commit_to_pool", { pool_id: s.pool.id, amount_cents: 100, state: "us-ny", idempotency_key: "commit-own-pool" });
+  assert.equal(refused.data.code, "own_pool");
 });
 
 test("pool actions are audited", async () => {

@@ -544,6 +544,8 @@ export interface ProductHealthDeps {
   poolsOf?: (productId: string) => Promise<string[]>; // none until pools exist
   openWithdrawalRequests?: (productId: string, poolId: string | null) => Promise<number>; // the queue's size, for the report
   exitedLiquidityProvider?: (productId: string, entityId: string) => Promise<Date | null>; // when a firm left its last pool of this product
+  liquidityProviderBooks?: (productId: string, entityId: string) => Promise<string[]>; // the sponsors whose books a firm may read: those of its own pools
+  poolSponsorOf?: (poolId: string) => Promise<string | null>; // whose books a pool's snapshots read
   now?: () => Date;
 }
 
@@ -653,15 +655,17 @@ export class ProductHealthService {
   // A named licence-provider role is needed, and an admin account is refused even if it also holds one: Mynt's own
   // staff don't open a firm's books, or sign or replace keys in its name.
   // A liquidity provider that has fully exited keeps what it could already read: snapshots up to `until`, none after.
-  async entitlement(user: User, productId: string): Promise<{ entity_id: string; as: string; until?: Date } | null> {
+  async entitlement(user: User, productId: string): Promise<{ entity_id: string; as: string; until?: Date; books?: string[] } | null> {
     const me = (await this.store.getUser(user.id)) ?? user;
     if (!me.entity_id || me.roles.includes("admin")) return null;
     const firms = await this.entitledFirms(productId);
     const hit = firms.find((f) => f.entity_id === me.entity_id);
+    const books = this.deps.liquidityProviderBooks ? await this.deps.liquidityProviderBooks(productId, me.entity_id) : undefined;
     if (!hit) {
       const until = (await this.deps.exitedLiquidityProvider?.(productId, me.entity_id)) ?? null;
-      return until && (await this.isActive(me.entity_id)) ? { entity_id: me.entity_id, as: "liquidity_provider", until } : null;
+      return until && me.roles.includes("liquidity_provider") && (await this.isActive(me.entity_id)) ? { entity_id: me.entity_id, as: "liquidity_provider", until, books } : null;
     }
+    if (hit.as === "liquidity_provider") return me.roles.includes("liquidity_provider") ? { ...hit, books } : null;
     if (hit.as === "licence_provider" && !me.roles.includes("license_provider")) return null;
     return hit;
   }
@@ -687,7 +691,12 @@ export class ProductHealthService {
       }
       if (!partner) continue;
       const pools = this.deps.poolsOf ? await this.deps.poolsOf(productId) : [];
-      for (const poolId of [null, ...pools]) out.push({ productId, poolId, subject: hexOf(this.subjectOf(productId, poolId)), partner, live: record.status === "published" });
+      for (const poolId of [null, ...pools]) {
+        // A pool reads its own sponsor's books, when that sponsor is still in good standing on this product.
+        const own = poolId && this.deps.poolSponsorOf ? await this.deps.poolSponsorOf(poolId) : null;
+        const books = own && list.some((s) => s.provider_entity_id === own) && (await this.isActive(own)) ? own : partner;
+        out.push({ productId, poolId, subject: hexOf(this.subjectOf(productId, poolId)), partner: books, live: record.status === "published" });
+      }
     }
     return out;
   }
@@ -1174,27 +1183,30 @@ export class ProductHealthService {
     for (const row of known.values()) {
       if (productId && row.product_id !== productId) continue;
       let until: Date | undefined;
+      let books: string[] | undefined;
       if (!admin) {
         const record = await this.store.getProduct(row.product_id);
         const own = !!me.entity_id && record?.entity_id === me.entity_id;
         const firm = own ? null : await this.entitlement(user, row.product_id);
         if (!own && !firm) continue;
         until = firm?.until;
+        books = firm?.as === "liquidity_provider" ? firm.books : undefined;
       }
-      const stored = await this.rows(row.subject);
-      const all = until ? stored.filter((r) => new Date(r.period_end) <= until) : stored;
+      const all = await this.rows(row.subject);
+      // The chain is compared against everything; what a firm that left, or a firm in another sponsor's pool, is shown isn't.
+      const shown = all.filter((r) => (!until || new Date(r.period_end) <= until) && (!books || (!!r.partner_entity_id && books.includes(r.partner_entity_id))));
       const { head, error } = await this.headOf(hexToBytes(row.subject));
       const epoch = await this.currentEpoch(row.subject);
       const anchors = await this.anchors(row.subject);
       const { verdict } = this.verifyAgainstChain(all, head, error, epoch, anchors);
-      const assessed = await this.assess(all.slice(-limit), row.subject, verdict);
-      const gaps = await this.gapsOf(all, anchors, epoch, head, error);
+      const assessed = await this.assess(shown.slice(-limit), row.subject, verdict);
+      const gaps = until ? [] : await this.gapsOf(all, anchors, epoch, head, error);
       out.push({
         product_id: row.product_id,
         pool_id: row.pool_id || null,
         chain: error ? { status: "unavailable", detail: error } : head ? { status: "ok", head_sequence: head.sequence } : { status: "no_record_yet" },
         gaps,
-        snapshots: all.slice(-limit).reverse().map((r) => snapshotStatus(r, assessed.get(r.id)!)),
+        snapshots: shown.slice(-limit).reverse().map((r) => snapshotStatus(r, assessed.get(r.id)!)),
       });
     }
     return out;
@@ -1214,7 +1226,7 @@ export class ProductHealthService {
     const anchors = await this.anchors(subject);
     const { verdict } = this.verifyAgainstChain(all, head, error, epoch, anchors);
     // A sponsor's numbers are its own books: another sponsor of the product doesn't read them.
-    const visible = all.filter((r) => (firm.as !== "licence_provider" || r.partner_entity_id === firm.entity_id) && (!firm.until || new Date(r.period_end) <= firm.until));
+    const visible = all.filter((r) => (firm.as !== "licence_provider" || r.partner_entity_id === firm.entity_id) && (firm.as !== "liquidity_provider" || !firm.books || (!!r.partner_entity_id && firm.books.includes(r.partner_entity_id))) && (!firm.until || new Date(r.period_end) <= firm.until));
     const slice = visible.slice(-limit);
     const assessed = await this.assess(slice, subject, verdict);
     const history = slice.reverse().map((r) => {
