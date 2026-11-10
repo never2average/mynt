@@ -925,3 +925,131 @@ test("snapshot_missed_for doesn't count a failed ledger read or a report that ca
   await u.covenants.tick();
   assert.equal((await breaches(u))[0]?.rule_type, "snapshot_missed_for", "a report that can't be opened isn't a snapshot");
 });
+
+// ---- follow-ups after #124 ----
+
+const setStatus = (t, status) => t.pg.query("UPDATE financial_products.products SET status = $2 WHERE id = $1", [t.productId, status]);
+
+test("unpublishing at alternate ticks can't stop the unverified_for clock: a blip counts as live", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "unverified_for", threshold: 3 * 3600, action: "alert" }));
+  await t.tickHour(0);
+  for (let step = 1; step <= 14; step++) {
+    await setStatus(t, step % 2 ? "unpublished" : "published");
+    t.setClock(T0 + 5 * 60_000 + step * 30 * 60_000);
+    await t.covenants.tick();
+  }
+  await setStatus(t, "published");
+  await t.covenants.tick();
+  assert.equal((await breaches(t))[0]?.rule_type, "unverified_for");
+});
+
+test("snapshots too old to act on leave a trace: an audit entry, and a historical breach that pauses nothing", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  assert.equal((await covenantsOf(t))[0].status, "pass");
+  t.health.afterAdvance = null; // the evaluator isn't watching while the record moves on
+  t.state.books = { reserves: 80_00, owed: 100_00 };
+  for (const h of [1, 2, 3]) await t.tickHour(h);
+  t.state.books = { reserves: 150_00, owed: 100_00 };
+  for (const h of [4, 5, 6]) await t.tickHour(h);
+  await t.covenants.tick();
+  const [b] = await breaches(t);
+  assert.equal(b.kind, "historical");
+  assert.equal(b.status, "resolved");
+  assert.equal(b.action_taken, "historical_not_acted_on");
+  assert.equal(b.pause, null);
+  assert.equal(b.observed, 8_000);
+  assert.equal(await drift(t), null, "too old to pause anything");
+  const [audit] = await t.raw("SELECT details FROM financial_products.audit_log WHERE action = 'covenant_rows_unjudged'");
+  assert.equal(audit.details.count, 4);
+  assert.equal(audit.details.from_sequence, 2);
+  assert.equal(audit.details.to_sequence, 5);
+  assert.equal((await covenantsOf(t))[0].status, "pass", "the recent snapshots were judged as usual");
+  await t.covenants.tick();
+  assert.equal((await breaches(t)).length, 1, "and it's recorded once");
+});
+
+test("a delivery held back at send marks the breach's first alert as undelivered", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.listen();
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
+  await t.tickHour(0);
+  assert.equal((await breaches(t))[0].alerted, true);
+  await t.pg.query("UPDATE financial_products.users SET roles = '{admin,license_provider}' WHERE id = $1", [t.provider.user.id]);
+  await deliverDueWebhooks(t.store, { now: new Date(Date.now() + 3600_000) });
+  await t.pg.query("UPDATE financial_products.users SET roles = '{license_provider}' WHERE id = $1", [t.provider.user.id]);
+  const [b] = await breaches(t);
+  assert.equal(b.alerted, false, "the record no longer says it was sent");
+  const ev = b.events.find((e) => e.event === "alert_undelivered");
+  assert.equal(ev.details.first, true);
+  assert.match(ev.reason, /Held back/);
+  const [d] = await t.raw("SELECT last_error FROM financial_products.webhook_deliveries WHERE type = 'covenant.breached'");
+  assert.match(d.last_error, /Held back/);
+});
+
+test("unverified_for reads unknown when the latest real snapshot isn't this sponsor's books, even with older ones of its own", async () => {
+  const t = await setup();
+  const other = await t.sponsor(t.stranger);
+  assert.ok(other.id);
+  await t.ok(t.set(t.provider.user, { rule_type: "unverified_for", threshold: 3 * 3600, action: "pause" }));
+  await t.tickHour(0);
+  await t.tickHour(1);
+  await t.pg.query("UPDATE financial_products.product_health_snapshots SET partner_entity_id = $1 WHERE sequence = (SELECT max(sequence) FROM financial_products.product_health_snapshots)", [t.stranger.entity.id]);
+  await t.covenants.tick();
+  const [c] = await covenantsOf(t);
+  assert.equal(c.status, "unknown");
+  assert.match(c.status_reason, /latest snapshot/);
+  assert.equal(await drift(t), null);
+});
+
+test("a relaunch doesn't fire snapshot_missed_for at once, and a real outage after it still does", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "snapshot_missed_for", threshold: 3 * 3600, action: "pause" }));
+  await t.tickHour(0);
+  await setStatus(t, "unpublished");
+  await t.covenants.tick();
+  t.setClock(T0 + 30 * 24 * HOUR);
+  await t.covenants.tick();
+  await setStatus(t, "published");
+  await t.covenants.tick();
+  assert.equal((await covenantsOf(t))[0].status, "pass", "time off sale doesn't count");
+  assert.deepEqual(await breaches(t), []);
+  assert.equal(await drift(t), null);
+  t.setClock(T0 + 30 * 24 * HOUR + 4 * HOUR);
+  await t.covenants.tick();
+  assert.equal((await breaches(t))[0]?.rule_type, "snapshot_missed_for", "four hours after the relaunch is a real outage");
+});
+
+test("a relaunch doesn't fire consecutive_gaps, and gaps after it count", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "consecutive_gaps", threshold: 3, action: "pause" }));
+  await t.tickHour(0);
+  await setStatus(t, "unpublished");
+  await t.covenants.tick();
+  t.setClock(T0 + 30 * 24 * HOUR);
+  await t.covenants.tick();
+  await setStatus(t, "published");
+  await t.covenants.tick();
+  assert.equal((await covenantsOf(t))[0].status, "pass");
+  assert.deepEqual(await breaches(t), []);
+  t.setClock(T0 + 30 * 24 * HOUR + 5 * HOUR);
+  await t.covenants.tick();
+  assert.equal((await breaches(t))[0]?.rule_type, "consecutive_gaps");
+});
+
+test("an alert nothing could receive starts no cooldown, and ops_status raises it", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
+  await t.tickHour(0);
+  assert.equal((await breaches(t))[0].action_taken, "alert_undelivered");
+  const s = await opsStatus(t.db, { backupStatusFile: "/nonexistent" });
+  assert.equal(s.covenants.open_breaches_alert_undelivered, 1);
+  assert.match(s.attention.join("\n"), /reached no webhook/);
+  await t.listen();
+  await t.tickHour(1);
+  const hooks = await t.webhooks("covenant.breached");
+  assert.equal(hooks.length, 1, "goes out as soon as there's a webhook, inside the default cooldown");
+  assert.equal(hooks[0].payload.data.reminder, true);
+});

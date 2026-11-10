@@ -217,6 +217,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.paused_products ? [`covenants: ${covenants.paused_products} product(s) paused by a licence provider's rule; only that provider can release them (list_covenant_breaches)`] : []),
     ...(covenants.open_breaches ? [`covenants: ${covenants.open_breaches} open breach(es) on live figures (list_covenant_breaches)`] : []),
     ...(covenants.unknown_too_long ? [`covenants: ${covenants.unknown_too_long} rule(s) unknown past their limit: the figures behind them can't be measured`] : []),
+    ...(covenants.open_breaches_alert_undelivered ? [`covenants: ${covenants.open_breaches_alert_undelivered} open breach(es) whose alert reached no webhook (list_covenant_breaches, list_firm_webhooks)`] : []),
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];

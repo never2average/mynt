@@ -97,6 +97,7 @@ interface Covenant {
   status_since: string | null;
   status_sandbox: boolean;
   live_tick_at: string | null;
+  relaunched_at: string | null;
   last_evaluated_at: string | null;
   last_epoch: number | null;
   last_sequence: number | null;
@@ -113,7 +114,7 @@ interface Breach {
   product_id: string;
   provider_entity_id: string;
   rule_type: RuleType;
-  kind: "breach" | "unknown_limit";
+  kind: "breach" | "unknown_limit" | "historical";
   severity: CovenantSeverity;
   action: CovenantAction;
   action_taken: string;
@@ -219,18 +220,31 @@ export class CovenantService {
   }
 
   async evaluateProduct(productId: string) {
+    const record = await this.store.getProduct(productId);
+    if (!record) return;
+    const now = this.now();
+    const interval = this.health.config.intervalMs / 1000;
+    // A product that isn't live raises no alarms, and time not live doesn't count against it. A blip of up to about one
+    // snapshot interval counts as live, so taking a product down between ticks can't stop the clocks.
+    if (record.status !== "published") {
+      await this.db.query(
+        `UPDATE ${T}.covenants SET off_sale_since = COALESCE(off_sale_since, $2::timestamptz),
+           live_tick_at = CASE WHEN COALESCE(off_sale_since, $2::timestamptz) <= $2::timestamptz - make_interval(secs => $3::double precision) THEN NULL ELSE live_tick_at END
+         WHERE product_id = $1`,
+        [productId, now, interval],
+      );
+      return;
+    }
+    await this.db.query(
+      `UPDATE ${T}.covenants SET relaunched_at = CASE WHEN off_sale_since <= $2::timestamptz - make_interval(secs => $3::double precision) THEN $2::timestamptz ELSE relaunched_at END, off_sale_since = NULL
+       WHERE product_id = $1 AND off_sale_since IS NOT NULL`,
+      [productId, now, interval],
+    );
     const { rows } = await this.db.query(
       `SELECT c.* FROM ${T}.covenants c JOIN ${T}.sponsorships s ON s.id = c.sponsorship_id WHERE c.product_id = $1 AND c.deleted_at IS NULL AND s.status = 'approved' ORDER BY c.created_at, c.id`,
       [productId],
     );
     if (!rows.length) return;
-    const record = await this.store.getProduct(productId);
-    if (!record) return;
-    // A product that isn't live raises no alarms, and time not live doesn't count against it.
-    if (record.status !== "published") {
-      await this.db.query(`UPDATE ${T}.covenants SET live_tick_at = NULL WHERE product_id = $1`, [productId]);
-      return;
-    }
     const history = await this.health.covenantRows(productId);
     for (const row of rows as Record<string, unknown>[]) await this.evaluateCovenant(covenantOf(row), record, history).catch((e) => console.error("covenants:", row.id, (e as Error).message));
     // A hold whose pause didn't take (a failure partway): the record is put right here rather than left to chance.
@@ -253,12 +267,38 @@ export class CovenantService {
         // A rule that's new or just changed starts from the latest snapshot; otherwise every snapshot since it last
         // looked, leaving out any too old to speak for now.
         const fresh = c.last_version !== c.version || c.last_epoch === null || c.last_sequence === null;
-        const pending = fresh ? [latest] : current.filter((r) => (r.epoch > c.last_epoch! || r.sequence > c.last_sequence!) && !this.isStale(r)).slice(-MAX_REPLAY);
+        const unseen = fresh ? [] : current.filter((r) => r.epoch > c.last_epoch! || r.sequence > c.last_sequence!);
+        await this.recordUnjudged(c, sponsorship, unseen.filter((r) => this.isStale(r)));
+        const pending = fresh ? [latest] : unseen.filter((r) => !this.isStale(r)).slice(-MAX_REPLAY);
         for (const r of pending) c = await this.applyResult(c, record, await this.judgeSnapshot(c, sponsorship, r));
       }
     } else c = await this.applyResult(c, record, await this.judgeTiming(c, sponsorship, record, history));
     c = await this.repairHold(c, record);
     return this.checkUnknownLimit(c, record, sponsorship);
+  }
+
+  // Snapshots too old to act on still leave a trace: how many went unjudged and their range, and if any of them would
+  // have breached, a breach labelled historical that pauses nothing and is closed from the start.
+  private async recordUnjudged(c: Covenant, s: Sponsorship, skipped: SnapshotRow[]) {
+    if (!skipped.length) return;
+    const now = this.now();
+    const range = { count: skipped.length, from_sequence: skipped[0].sequence, to_sequence: skipped[skipped.length - 1].sequence, from: new Date(skipped[0].period_start).toISOString(), to: new Date(skipped[skipped.length - 1].period_end).toISOString() };
+    await this.store.audit(null, "covenant_rows_unjudged", c.product_id, { covenant_id: c.id, sponsorship_id: c.sponsorship_id, rule_type: c.rule_type, ...range });
+    const failing: { row: SnapshotRow; result: RuleResult }[] = [];
+    for (const row of skipped.slice(-MAX_REPLAY)) {
+      const result = await this.judgeSnapshot(c, s, row);
+      if (result.status === "fail") failing.push({ row, result });
+    }
+    if (!failing.length) return;
+    const { result: r } = failing[failing.length - 1];
+    const id = randomUUID();
+    await this.db.query(
+      `INSERT INTO ${T}.covenant_breaches (id, covenant_id, sponsorship_id, product_id, provider_entity_id, rule_type, kind, severity, action, action_taken, alerted, sandbox, threshold, unit, observed_value, observed_sealed, snapshot_epoch, snapshot_sequence, snapshot_fingerprint, reason, opened_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'historical', $7, $8, 'historical_not_acted_on', false, $9, $10, $11, NULL, $12, $13, $14, $15, $16, $17)`,
+      [id, c.id, c.sponsorship_id, c.product_id, c.provider_entity_id, c.rule_type, c.severity, c.action, r.sandbox, c.threshold, unitOf(c.rule_type), r.observed !== null ? seal(JSON.stringify({ value: r.observed }), r.sandbox, true) : null, r.snapshot?.epoch ?? null, r.snapshot?.sequence ?? null, r.snapshot?.fingerprint ?? null, "This snapshot would have breached the rule, but it was too old to act on when Mynt reached it", now],
+    );
+    await this.event(id, "resolved", null, "Too old to act on: recorded, not acted on", { ...range, failing_sequences: failing.map((f) => f.row.sequence) }, now);
+    await this.store.audit(null, "covenant_breached", c.product_id, { breach_id: id, covenant_id: c.id, sponsorship_id: c.sponsorship_id, rule_type: c.rule_type, kind: "historical", action_taken: "historical_not_acted_on", sandbox: r.sandbox, sequence: r.snapshot?.sequence ?? null, fingerprint: r.snapshot?.fingerprint ?? null });
   }
 
   private isStale(r: SnapshotRow) {
@@ -278,8 +318,7 @@ export class CovenantService {
     if (!b || b.sandbox || b.kind !== "breach" || !this.canPause(record) || (await this.holdFor(b.id))) return c;
     const now = this.now();
     await this.hold(c, b, record, now, true);
-    await this.alertOrRecord(c, b, "covenant.breached", { paused: true }, now);
-    return this.recordAlert(c, now);
+    return (await this.alertOrRecord(c, b, "covenant.breached", { paused: true }, now)) ? this.recordAlert(c, now) : c;
   }
 
   private sandboxOnly(s: Sponsorship) {
@@ -307,30 +346,36 @@ export class CovenantService {
     const seconds = (from: Date) => Math.max(0, Math.floor((now.getTime() - from.getTime()) / 1000));
     const earliest = new Date(Math.max(new Date(c.created_at).getTime(), s.decided_at ? new Date(s.decided_at).getTime() : 0));
     const result = (status: Judged["status"], observed: number | null, reason: string | null): RuleResult => ({ status, observed, reason, sealed: false, snapshot, sandbox });
+    const relaunched = c.relaunched_at ? new Date(c.relaunched_at).getTime() : Number.NEGATIVE_INFINITY;
     if (c.rule_type === "snapshot_missed_for") {
       const real = await this.lastRealSnapshot(history.rows);
       if (real === undefined) return result("unknown", null, "Mynt can't authenticate this record's snapshots (the vault key isn't available)");
-      const elapsed = seconds(real ? new Date(real.period_end) : earliest);
+      // Time off sale doesn't count: after a relaunch the clock runs from the relaunch or the last snapshot, whichever is later.
+      const elapsed = seconds(new Date(Math.max(real ? new Date(real.period_end).getTime() : earliest.getTime(), relaunched)));
       return elapsed > c.threshold ? result("fail", elapsed, real ? "No snapshot has arrived for longer than the limit" : "No snapshot has ever arrived, for longer than the limit") : result("pass", elapsed, null);
     }
     if (c.rule_type === "consecutive_gaps") {
       if (!last) return result("unknown", null, "No snapshot has been recorded yet, so there's no record to count gaps in");
       const interval = this.health.config.intervalMs;
-      const periods = (r: SnapshotRow) => Math.max(1, Math.round((new Date(r.period_end).getTime() - new Date(r.period_start).getTime()) / interval));
+      const periods = (r: SnapshotRow) => Math.max(1, Math.round((new Date(r.period_end).getTime() - Math.max(new Date(r.period_start).getTime(), relaunched)) / interval));
       let gaps = 0;
       for (const r of [...current].reverse()) {
-        if (r.status !== "missed") break;
+        if (r.status !== "missed" || new Date(r.period_end).getTime() <= relaunched) break;
         gaps += periods(r);
       }
       // Whole periods since the record stopped moving at all, when the worker isn't running to write them down.
-      gaps += Math.max(0, Math.floor((now.getTime() - new Date(last.period_end).getTime()) / interval) - 1);
+      gaps += Math.max(0, Math.floor((now.getTime() - Math.max(new Date(last.period_end).getTime(), relaunched)) / interval) - 1);
       return gaps >= c.threshold ? result("fail", gaps, "The latest periods have no snapshot") : result("pass", gaps, null);
     }
     // unverified_for: a live product's snapshots carrying no partner signature.
     if (record.status !== "published") return result("unknown", null, NOT_LIVE_REASON);
-    // Only the firm whose books they are can sign a snapshot, so a sponsor with no snapshots of its own has nothing to be held to.
+    // Only the firm whose books they are can sign a snapshot, so a sponsor whose books aren't the latest has nothing to be held to.
     const own = history.rows.filter((r) => r.partner_entity_id === s.provider_entity_id);
-    if (!own.length) return result("unknown", null, "None of this product's snapshots come from your firm's books, so there's nothing your firm could sign");
+    const latestReal = [...history.rows].reverse().find((r) => r.status !== "missed");
+    if (latestReal?.partner_entity_id !== s.provider_entity_id) {
+      await this.db.query(`UPDATE ${T}.covenants SET live_tick_at = $2 WHERE id = $1`, [c.id, now]); // time it couldn't have signed doesn't count
+      return result("unknown", null, "The latest snapshot doesn't come from your firm's books, so there's nothing your firm could sign");
+    }
     const signed = await this.health.lastPartnerSignedAt(own);
     if (signed === undefined) return result("unknown", null, "Mynt can't check the signatures on this record (the vault key isn't available)");
     const elapsed = await this.unsignedLiveSeconds(c, signed, now);
@@ -456,8 +501,8 @@ export class CovenantService {
     if (pausing) await this.hold(next, breach, record, now, false);
     if (pauseFailed) await this.event(id, "pause_failed", null, "The product has no pinned state, so drift can't hold it: it wasn't paused", {}, now);
     if (alerting) {
-      await this.alertOrRecord(next, breach, "covenant.breached", { }, now, true);
-      next = await this.recordAlert(next, now);
+      // Nothing queued starts no cooldown, so an alert goes out as soon as there's a webhook to take it.
+      if (await this.alertOrRecord(next, breach, "covenant.breached", {}, now, true)) next = await this.recordAlert(next, now);
     }
     return next;
   }

@@ -2539,6 +2539,15 @@ export class Store {
     return rows.length;
   }
 
+  // A covenant alert held back at send time: the breach's record says so. `first`: it was the breach's first alert.
+  async recordCovenantAlertUndelivered(breachId: string, type: string, first: boolean, reason: string): Promise<void> {
+    await this.db.query(
+      `INSERT INTO financial_products.covenant_breach_events (id, breach_id, event, reason, details, at)
+       SELECT $1::uuid, b.id, 'alert_undelivered', $3, $4::jsonb, now() FROM financial_products.covenant_breaches b WHERE b.id = $2::uuid`,
+      [randomUUID(), breachId, reason, JSON.stringify({ type, first, at_send: true })],
+    );
+  }
+
   // How many of a firm's webhooks would receive this event now.
   async reachableFirmWebhooks(entityId: string, type: string): Promise<number> {
     const rows = await this.all(

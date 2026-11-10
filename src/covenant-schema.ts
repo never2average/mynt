@@ -30,6 +30,8 @@ export const COVENANT_TABLES = `
     live_tick_at timestamptz, -- the last evaluation that saw the product live; cleared while it isn't
     unsigned_anchor timestamptz, -- the signed period the unsigned clock counts from
     unsigned_live_seconds bigint NOT NULL DEFAULT 0, -- time live since then
+    off_sale_since timestamptz, -- since when the evaluator has seen the product not live
+    relaunched_at timestamptz, -- back on sale after being off it longer than a snapshot interval
     last_evaluated_at timestamptz,
     last_epoch integer,
     last_sequence integer,
@@ -38,6 +40,8 @@ export const COVENANT_TABLES = `
     open_breach_id uuid,
     open_unknown_breach_id uuid
   );
+  ALTER TABLE financial_products.covenants ADD COLUMN IF NOT EXISTS off_sale_since timestamptz;
+  ALTER TABLE financial_products.covenants ADD COLUMN IF NOT EXISTS relaunched_at timestamptz;
   CREATE INDEX IF NOT EXISTS covenants_sponsorship_idx ON financial_products.covenants (sponsorship_id) WHERE deleted_at IS NULL;
   CREATE INDEX IF NOT EXISTS covenants_product_idx ON financial_products.covenants (product_id) WHERE deleted_at IS NULL;
   -- Every breach as it was when it happened. Never changed: what happens next is a row in covenant_breach_events.
@@ -48,7 +52,7 @@ export const COVENANT_TABLES = `
     product_id text NOT NULL,
     provider_entity_id uuid NOT NULL,
     rule_type text NOT NULL,
-    kind text NOT NULL CHECK (kind IN ('breach', 'unknown_limit')),
+    kind text NOT NULL CHECK (kind IN ('breach', 'unknown_limit', 'historical')),
     severity text NOT NULL,
     action text NOT NULL,
     action_taken text NOT NULL,
@@ -65,6 +69,8 @@ export const COVENANT_TABLES = `
     in_flight jsonb, -- what was in flight when a pause took effect: reported, never cancelled
     opened_at timestamptz NOT NULL
   );
+  ALTER TABLE financial_products.covenant_breaches DROP CONSTRAINT IF EXISTS covenant_breaches_kind_check;
+  ALTER TABLE financial_products.covenant_breaches ADD CONSTRAINT covenant_breaches_kind_check CHECK (kind IN ('breach', 'unknown_limit', 'historical'));
   CREATE INDEX IF NOT EXISTS covenant_breaches_product_idx ON financial_products.covenant_breaches (product_id, opened_at DESC);
   CREATE INDEX IF NOT EXISTS covenant_breaches_provider_idx ON financial_products.covenant_breaches (provider_entity_id, opened_at DESC);
   CREATE TABLE IF NOT EXISTS financial_products.covenant_breach_events (
