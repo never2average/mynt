@@ -13,7 +13,7 @@ import { serialLoop } from "./worker.js";
 // (product-health.ts). A rule either alerts the sponsor or pauses the product, as the sponsor chose per rule.
 //
 //   - a null figure is `unknown`, with its reason: never a pass, never a breach; unknown too long is itself an alert;
-//   - a figure from sandbox books never pauses anything: on a published product it's unknown, otherwise labelled sandbox;
+//   - a figure from sandbox books is labelled sandbox and never pauses anything;
 //   - each new snapshot is evaluated, and a timer evaluates too, so a rule about missing snapshots fires with no snapshot;
 //   - the breach record is append-only; the sealed figures in it are opened for the sponsor's own people only;
 //   - a pause holds the product through the drift mechanism (kind `covenant`) until the sponsor releases it; it stops new
@@ -322,12 +322,13 @@ export class CovenantService {
     return (await this.alertOrRecord(c, b, "covenant.breached", { paused: true }, now)) ? this.recordAlert(c, now) : c;
   }
 
-  // Whether a result is sandbox-only, so it labels rather than acts. A published product is never sandbox here: its
-  // sponsor's ledger being the sandbox makes its figures unknown, not harmless. Otherwise a snapshot is judged by its
-  // own source, and without one by the ledger the firm is on now; a ledger Mynt can't tell is unknown, never sandbox.
+  // Whether a result is sandbox-only, so it labels rather than acts. A snapshot is judged by its own source. Without
+  // one (no record yet, a missed period, timing rules), a published product reads unknown rather than sandbox, whatever
+  // ledger its sponsor is on, so not knowing is never excused as test data; an unpublished one goes by the ledger the
+  // firm is on now, and a ledger Mynt can't tell is unknown, never sandbox.
   private async sandboxOnly(s: Sponsorship, published: boolean, r?: SnapshotRow) {
-    if (published) return false;
     if (r && r.status !== "missed" && r.source) return r.source === "sandbox";
+    if (published) return false;
     return (await this.health.ledgerState(s.provider_entity_id)) === "sandbox";
   }
 
@@ -339,8 +340,6 @@ export class CovenantService {
     const assessed = await this.health.assessOne(r);
     if (!assessed || !assessed.report) return { status: "unknown", observed: null, reason: assessed ? "The snapshot's report can't be authenticated" : "Mynt can't open the snapshot's report", sealed: false, snapshot, sandbox: false };
     if (assessed.source === "unavailable") return { status: "unknown", observed: null, reason: "The partner's ledger couldn't be read for this period", sealed: false, snapshot, sandbox: false };
-    // Test figures say nothing about a live product: unknown (which starts the unknown clock), neither a pass nor a fail.
-    if (assessed.source === "sandbox" && published) return { status: "unknown", observed: null, reason: "The sponsor's ledger is still the sandbox: test figures can't speak for a live product (connect it with the partner kit)", sealed: false, snapshot, sandbox: false };
     const figure = assessed.report.figures[FIGURE_RULES[c.rule_type]!.figure];
     return { ...judgeFigure(c.rule_type, c.threshold, figure), sealed: true, snapshot, sandbox: assessed.source === "sandbox" };
   }
