@@ -230,8 +230,8 @@ export interface ProgramRecord {
   entity_id: string | null;
   app_id: string | null;
   product_id: string | null;
-  status: "reserved" | "deploying" | "deployed" | "failed";
-  operation: "deploy" | "upgrade" | null;
+  status: "reserved" | "deploying" | "deployed" | "failed" | "closed";
+  operation: "deploy" | "upgrade" | "close" | null;
   version: number;
   build_id: string | null;
   verifiable_hash: string | null;
@@ -835,6 +835,51 @@ export class SolanaService {
     );
   }
 
+  // ---- closing (devnet only) ----
+
+  // Closes a deployed devnet program for good: the upgradeable loader's Close on its program data, signed by Mynt's
+  // devnet deploy authority (its upgrade authority), with the program data's lamports going back to that authority.
+  // The record stays, marked closed (remove_app deletes it afterwards). Mainnet programs are never closed here.
+  async closeProgram(p: ProgramRecord) {
+    if (p.cluster !== "devnet") throw new SolanaError("Only devnet programs can be closed; Mynt never closes a mainnet program");
+    if (p.status === "closed") throw new SolanaError("The program is already closed");
+    if (p.status !== "deployed") throw new SolanaError(`Only a deployed program can be closed (it is ${p.status}); a reserved program has nothing on chain`);
+    if (p.operation || this.jobs.has(p.id)) throw new SolanaError(`A ${p.operation ?? "deploy"} of this program is running; wait for it to finish`);
+    const signer = await this.authority("devnet");
+    const rpc = this.rpc("devnet");
+    const chain = await this.onChain(rpc, p);
+    if (!chain) throw new SolanaError(`There's no deployed program at ${p.program_id} on devnet (its program data ${p.programdata_address} isn't there)`);
+    if (chain.authority !== signer.address)
+      throw new SolanaError(`The program's upgrade authority on chain is ${chain.authority ?? "none (immutable)"}, not Mynt's devnet deploy authority ${signer.address}, so Mynt can't close it`);
+    const held = (await this.accountInfo(rpc, p.programdata_address!))?.lamports ?? 0;
+    // Claimed like a deploy, so no deploy or upgrade can start while it closes.
+    const claimed = await this.db.query(
+      `UPDATE ${T}.solana_programs SET operation = 'close', operation_started_at = now(), updated_at = now() WHERE id = $1 AND operation IS NULL AND status = 'deployed' RETURNING id`,
+      [p.id],
+    );
+    if (!claimed.rows.length) throw new SolanaError("A deploy or upgrade of this program just started");
+    let signature: string;
+    try {
+      signature = await this.send(rpc, signer, [
+        loader.closeProgram({ programData: p.programdata_address!, recipient: signer.address, authority: signer.address, program: p.program_id }),
+      ]);
+    } catch (e) {
+      await this.db.query(`UPDATE ${T}.solana_programs SET operation = NULL, operation_started_at = NULL, updated_at = now() WHERE id = $1`, [p.id]);
+      throw new SolanaError(`Closing ${p.program_id} on devnet failed: ${(e as Error).message.slice(0, 300)}`);
+    }
+    // A buffer an earlier deploy left behind goes too (best effort: its rent also comes back).
+    await this.closeLeftoverBuffer(rpc, p, signer).catch(() => undefined);
+    await this.update(p.id, { status: "closed", operation: null, operation_started_at: null, error: null });
+    return {
+      program_id: p.program_id,
+      programdata_address: p.programdata_address,
+      signature,
+      recipient: signer.address,
+      lamports_returned: held,
+      explorer_url: explorer("devnet", "tx", signature),
+    };
+  }
+
   // Resolves once a background deploy or upgrade of `programId` has finished (tests; graceful shutdown).
   async settled(programId?: string) {
     const p = programId ? await this.get(programId) : undefined;
@@ -851,6 +896,13 @@ export class SolanaService {
       const p = toProgram(r);
       if (this.jobs.has(p.id)) continue;
       const action = p.operation!;
+      if (action === "close") {
+        // A close cut short: closed if the program data is gone from the chain, otherwise still deployed.
+        const gone = await this.onChain(this.rpc(p.cluster), p).then((c) => !c).catch(() => false);
+        await this.db.query(`UPDATE ${T}.solana_programs SET operation = NULL, operation_started_at = NULL, status = $2, updated_at = now() WHERE id = $1`, [p.id, gone ? "closed" : p.status]);
+        recovered++;
+        continue;
+      }
       const buildId = r.pending_build_id as string | null;
       try {
         const artifact = buildId ? await this.storedArtifact(p, buildId) : null;

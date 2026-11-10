@@ -193,6 +193,16 @@ export const loader = {
   close(account: string, recipient: string, authority: string): Instruction {
     return { programId: UPGRADEABLE_LOADER, keys: [meta(account, false, true), meta(recipient, false, true), meta(authority, true, false)], data: Uint8Array.from(u32(5)) };
   },
+  // Close (tag 5) on a deployed program's program data: signed by its upgrade authority, its lamports go to the
+  // recipient, and the loader also needs the program account itself, writable. The program can never run again,
+  // and its address can't be deployed to again.
+  closeProgram(o: { programData: string; recipient: string; authority: string; program: string }): Instruction {
+    return {
+      programId: UPGRADEABLE_LOADER,
+      keys: [meta(o.programData, false, true), meta(o.recipient, false, true), meta(o.authority, true, false), meta(o.program, false, true)],
+      data: Uint8Array.from(u32(5)),
+    };
+  },
 };
 
 // The most program bytes one Write can carry: one signature (the authority pays), three accounts (authority,

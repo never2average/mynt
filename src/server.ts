@@ -59,6 +59,7 @@ import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
 import { registerOpsTools } from "./ops.js";
+import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
 
 // The name MCP clients show for this server.
@@ -172,6 +173,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
     if (ctx.solana) registerSolanaAdminTools(server, store, user!, ctx.solana);
+    registerAppRemovalTools(server, store, user!, ctx.solana ?? null);
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);
     registerOpsTools(server, store.db);

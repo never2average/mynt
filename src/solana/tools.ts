@@ -204,6 +204,25 @@ export function registerSolanaAdminTools(server: McpServer, store: Store, user: 
   );
 
   server.registerTool(
+    "close_program",
+    {
+      title: "Close a devnet program",
+      description:
+        "Admin: close a deployed devnet program for good, with the upgradeable loader's Close on its program data, signed by Mynt's devnet deploy authority; the program data's lamports go back to that authority. The program can never run or be deployed again, and its record is marked closed. Refused on mainnet: Mynt never closes a mainnet program.",
+      inputSchema: { program_id: ADDRESS, reason: z.string().max(500).optional().describe("Why, for the audit log") },
+      annotations: { destructiveHint: true },
+    },
+    async ({ program_id, reason }) =>
+      attempt(async () => {
+        const p = await solana.get(program_id);
+        if (!p) throw new Error(`No program with id '${program_id}'`);
+        const r = await solana.closeProgram(p);
+        await store.audit(user.id, "close_program", p.program_id, { cluster: p.cluster, app_id: p.app_id, ...r, reason: reason ?? null });
+        return { ...r, status: "closed" };
+      }),
+  );
+
+  server.registerTool(
     "list_all_programs",
     {
       title: "Every Solana program",
