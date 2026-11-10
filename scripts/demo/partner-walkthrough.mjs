@@ -352,7 +352,7 @@ export async function runPartnerWalkthrough({ devnet = null, keep = false, say =
   for (const s of summary) say(`${s.ok ? "PASS" : "FAIL"}  ${String(s.step).padEnd(2)} ${s.what.padEnd(width)}  ${s.outcome}`);
   say("\n== Cleaned up ==");
   for (const c of cleanup.done) say(`- ${c}`);
-  for (const c of cleanup.left) say(`- NOT cleaned up: ${c}`);
+  for (const c of cleanup.left) say(c.startsWith("kept ") ? `- ${c}` : `- NOT cleaned up: ${c}`);
   if (failure) {
     failure.summary = summary;
     failure.cleaned = cleanup.done;
