@@ -15,7 +15,7 @@ import { checkProgramRules, upgradeAuthorityRule, type RuleFinding } from "./pro
 import type { MainnetGateCheck, MainnetGateClaim, ProgramRecord, SolanaService } from "./service.js";
 import { SOLANA_TOOLCHAIN_SCRIPT } from "./toolchain.js";
 import { agentChecklist, entryProblems, loadCrateAllowlist, loadVulnDb, VULN_CATEGORIES, type CrateAllowlist, type VulnDb } from "./vuln-db.js";
-import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, stripIdlDocs, verifyIdl, workspaceExceptions, type DepInfoCapture, type Exception } from "./crate-tree.js";
+import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, stripIdlDocs, uncompiledHitExceptions, verifyIdl, workspaceExceptions, type DepInfoCapture, type Exception } from "./crate-tree.js";
 import { runDetections } from "./program-rules.js";
 
 // The mainnet program gate. Every mainnet deploy and every mainnet upgrade must pass, in order:
@@ -44,6 +44,7 @@ export interface GateConfig extends AgentHostConfig {
   monthlyCapUsd: number;
   timelockHours: number;
   approvalTtlDays: number;
+  sourceRetentionDays: number;
   cargoAuditIgnore: string[];
 }
 
@@ -64,6 +65,7 @@ export function gateConfigFromEnv(host: AgentHostConfig, env = process.env): Gat
     monthlyCapUsd: num("PROGRAM_GATE_MONTHLY_CAP_USD", 100),
     timelockHours: num("MAINNET_UPGRADE_TIMELOCK_HOURS", 48),
     approvalTtlDays: num("MAINNET_APPROVAL_TTL_DAYS", 14),
+    sourceRetentionDays: num("PROGRAM_SOURCE_RETENTION_DAYS", 30),
     cargoAuditIgnore: (env.PROGRAM_GATE_CARGO_AUDIT_IGNORE ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -467,9 +469,11 @@ export class MainnetGateService implements MainnetGateCheck {
     if (m.idl && !idlCheck.verified) refusals.push(`The IDL doesn't match the program: ${idlCheck.problems.slice(0, 3).join("; ")}`);
     const idl = m.idl && idlCheck.verified ? m.idl : null;
     const result = checkProgramRules(
-      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null, compiled_files: compiled.rulesFiles },
+      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: signer?.address ?? null, compiled_files: compiled.rulesFiles, listed_files: compiled.listedFiles },
       this.vulnDb,
     );
+    // A blocking hit in a file dep-info doesn't list (read because build-time code ran): an exception, not a refusal.
+    exceptions.push(...uncompiledHitExceptions(result.uncompiled_hits));
     const authority = upgradeAuthorityRule({ action, signer, recorded_authority: p.upgrade_authority });
     const findings: RuleFinding[] = [...result.findings, ...depFindings, authority];
     const passed = result.passed && !authority.blocks && !depFindings.length && !refusals.length;
@@ -689,13 +693,16 @@ export class MainnetGateService implements MainnetGateCheck {
     const compiled = this.compiledFiles(m);
     if (compiled.problems.length) throw new GateError(`What the compiler read no longer checks out: ${compiled.problems.slice(0, 3).join("; ")}`);
     const now = checkProgramRules(
-      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null, compiled_files: compiled.rulesFiles },
+      { name: m.name, program_id: p.program_id, program: m.program, idl, sources: m.sources, mynt_signer: (await this.solana.mainnetSigner())?.address ?? null, compiled_files: compiled.rulesFiles, listed_files: compiled.listedFiles },
       this.vulnDb,
     );
-    if (!now.passed)
+    // An uncompiled hit passes only if the approving admin allowed it by name.
+    const allowed = new Set((r.allowed_exceptions as string[] | null) ?? []);
+    const unallowed = now.findings.filter((f) => f.uncompiled && !allowed.has(`uncompiled-hit:${f.file}`));
+    if (!now.passed || unallowed.length)
       throw new GateError(
         `The vulnerability database's current rules (v${now.db_version}) refuse this program: ${now.findings
-          .filter((f) => f.blocks)
+          .filter((f) => f.blocks || unallowed.includes(f))
           .map((f) => `${f.rule}: ${f.detail}`)
           .join("; ")
           .slice(0, 600)}; request a new review`,
@@ -753,6 +760,38 @@ export class MainnetGateService implements MainnetGateCheck {
     await this.recheckDeployed();
     await this.runDueUpgrades();
     await this.markExecuted();
+    if (Date.now() - this.prunedAt >= 3_600_000) {
+      this.prunedAt = Date.now();
+      await this.pruneCapturedSources().catch((e) => console.error("program source retention:", (e as Error).message));
+    }
+  }
+
+  private prunedAt = 0;
+
+  // Retention for what builds capture for this gate (source, dependencies, dep-info): kept for any build a mainnet
+  // review names or a program version was deployed from, and for every build newer than PROGRAM_SOURCE_RETENTION_DAYS
+  // (30 by default); the rest, devnet builds nobody took further, goes. The rows are shared by hash, so a row is
+  // deleted only when no kept build still points at it.
+  async pruneCapturedSources() {
+    const cutoff = new Date(Date.now() - this.config.sourceRetentionDays * 86_400_000).toISOString();
+    const kept = `SELECT a.sources_sha256, a.deps_sha256, a.depinfo_sha256 FROM ${T}.solana_program_artifacts a
+      WHERE a.created_at >= $1
+         OR a.build_id IN (SELECT build_id FROM ${T}.solana_mainnet_reviews WHERE build_id IS NOT NULL)
+         OR a.build_id IN (SELECT build_id FROM ${T}.solana_program_versions)
+         OR a.build_id IN (SELECT build_id FROM ${T}.solana_programs WHERE build_id IS NOT NULL AND status = 'deployed')`;
+    const deleted: Record<string, number> = {};
+    for (const [table, column] of [
+      ["solana_program_sources", "sources_sha256"],
+      ["solana_program_deps", "deps_sha256"],
+      ["solana_program_depinfo", "depinfo_sha256"],
+    ] as const) {
+      const { rows } = await this.db.query(
+        `DELETE FROM ${T}.${table} WHERE created_at < $1 AND sha256 NOT IN (SELECT k.${column} FROM (${kept}) k WHERE k.${column} IS NOT NULL) RETURNING sha256`,
+        [cutoff],
+      );
+      deleted[table] = rows.length;
+    }
+    return deleted;
   }
 
   private async stopSandboxes(r: Row) {
@@ -808,7 +847,10 @@ export class MainnetGateService implements MainnetGateCheck {
       compiled.generated.length > 0 ||
       Object.values(m.depinfo?.crate_files ?? {}).some((files) => files["build.rs"] !== undefined);
     const rulesFiles = buildTimeCode ? [...new Set([...compiled.workspace, ...Object.keys(m.sources ?? {}).filter((f) => f.endsWith(".rs"))])].sort() : compiled.workspace;
-    return { ...compiled, rulesFiles, buildTimeCode };
+    // What dep-info lists: a blocking hit outside it (in a file read only because build-time code ran, such as an
+    // integration test the compiler never compiled) is an admin-named exception, uncompiled-hit:<file>.
+    const listedFiles = buildTimeCode && !compiled.problems.length ? compiled.workspace : null;
+    return { ...compiled, rulesFiles, buildTimeCode, listedFiles };
   }
 
   // The IDL the agents and the PoC re-run get: only one Mynt checked against the bytes, without doc strings.
@@ -1124,6 +1166,7 @@ export class MainnetGateService implements MainnetGateCheck {
             sources: m.sources,
             mynt_signer: (await this.solana.mainnetSigner())?.address ?? null,
             compiled_files: compiled.problems.length ? null : compiled.rulesFiles,
+            listed_files: compiled.listedFiles,
           },
           this.vulnDb,
         );

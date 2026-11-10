@@ -357,7 +357,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       "set_pool_firm_state",
       {
         title: "Correct a firm's state in a pool",
-        description: "Admin, or the pool's sponsor: correct the US state a firm's capital moves from in this pool, when it's wrong or its rails no longer serve it. The new state must pass the money rails' own checks: a rail of this pool's, an approved sponsorship and a licence in force there. A sponsor's correction changes nothing until the firm accepts it (respond_to_state_correction). An admin's applies at once and the firm can dispute it for POOL_CORRECTION_DISPUTE_DAYS days (14 by default), which puts the old state back. A new correction replaces any earlier one the firm hasn't answered. Either way the firm's parked requests go back to their place once it applies. An admin at the firm itself or the product's firm can't do this. Audited, with the old and new state.",
+        description: "Admin, or the pool's sponsor: correct the US state a firm's capital moves from in this pool, when it's wrong or its rails no longer serve it. The new state must pass the money rails' own checks: a rail of this pool's, an approved sponsorship and a licence in force there. A sponsor's correction changes nothing until the firm accepts it (respond_to_state_correction). An admin's applies at once and the firm can dispute it for POOL_CORRECTION_DISPUTE_DAYS days (14 by default), which puts the old state back. A new correction replaces any earlier pending one; only a new admin's correction replaces an applied one, so a sponsor's proposal never takes away the firm's right to dispute an admin's. Either way the firm's parked requests go back to their place once it applies. An admin at the firm itself or the product's firm can't do this. Audited, with the old and new state.",
         inputSchema: { pool_id: z.string().uuid(), lp_entity_id: z.string().uuid(), state: StateCode, reason: z.string().min(3).max(1000) },
       },
       async ({ pool_id, lp_entity_id, state, reason }) => {
@@ -380,7 +380,9 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         }
         const id = randomUUID();
         const asAdmin = roles.admin && (await myFirm()) !== pool.sponsor_entity_id;
-        await store.db.query(`UPDATE ${T}.pool_state_corrections SET status = 'superseded', decided_at = now() WHERE pool_id = $1 AND lp_entity_id = $2 AND status IN ('pending', 'applied')`, [pool_id, lp_entity_id]);
+        // A pending (sponsor's) correction replaces only pending ones: an applied admin correction stays open to dispute
+        // until a newer applied correction replaces it or the firm accepts a pending one (respond_to_state_correction).
+        await store.db.query(`UPDATE ${T}.pool_state_corrections SET status = 'superseded', decided_at = now() WHERE pool_id = $1 AND lp_entity_id = $2 AND status = ANY($3::text[])`, [pool_id, lp_entity_id, asAdmin ? ["pending", "applied"] : ["pending"]]);
         await store.db.query(`INSERT INTO ${T}.pool_state_corrections (id, pool_id, lp_entity_id, from_state, from_state_source, to_state, source, status, reason, proposed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [id, pool_id, lp_entity_id, old[0].state, old[0].state_source, state, asAdmin ? "admin_corrected" : "sponsor_corrected", asAdmin ? "applied" : "pending", reason, user.id, now().toISOString()]);
         const unparked = asAdmin ? await applyStateCorrection(pool_id, lp_entity_id, state, "admin_corrected") : [];
         await audit("set_pool_firm_state", pool_id, { correction_id: id, lp_entity_id, was: old[0].state, state, reason, source: asAdmin ? "admin_corrected" : "sponsor_corrected", status: asAdmin ? "applied" : "pending", unparked: unparked.length });
@@ -595,7 +597,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     "respond_to_state_correction",
     {
       title: "Accept or dispute a correction to your state",
-      description: "Liquidity provider: answer a correction to the US state your capital moves from in a pool (shown in list_my_positions). Accepting a sponsor's correction applies it, and your parked requests go back to their place. Disputing a sponsor's leaves everything as it was; disputing an admin's puts the old state back, within POOL_CORRECTION_DISPUTE_DAYS days (14 by default). Only the latest correction can be answered. Audited.",
+      description: "Liquidity provider: answer a correction to the US state your capital moves from in a pool (shown in list_my_positions). Accepting a sponsor's correction applies it, and your parked requests go back to their place. Disputing a sponsor's leaves everything as it was; disputing an admin's puts the old state back, within POOL_CORRECTION_DISPUTE_DAYS days (14 by default). Only the latest pending correction and the latest applied one can be answered; accepting a pending one replaces an applied one. Audited.",
       inputSchema: { correction_id: z.string().uuid(), accept: z.boolean(), reason: z.string().max(1000).optional() },
     },
     async ({ correction_id, accept, reason }) => {
@@ -612,6 +614,8 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       const { rows: done } = await store.db.query(`UPDATE ${T}.pool_state_corrections SET status = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND status = $4 RETURNING id`, [correction_id, status, user.id, c.status]);
       if (!done[0]) return fail("That correction was changed by another call just now");
       let unparked: string[] = [];
+      // Accepting a pending correction moves the firm off whatever an applied one had set: that one is replaced.
+      if (accept && c.status === "pending") await store.db.query(`UPDATE ${T}.pool_state_corrections SET status = 'superseded', decided_at = now() WHERE pool_id = $1 AND lp_entity_id = $2 AND status = 'applied' AND id <> $3`, [c.pool_id, c.lp_entity_id, correction_id]);
       if (accept && c.status === "pending") unparked = await applyStateCorrection(c.pool_id as string, c.lp_entity_id as string, c.to_state as string, c.source as string);
       if (!accept && c.status === "applied") await store.db.query(`UPDATE ${T}.pool_commitments SET state = $3, state_source = COALESCE($4, 'liquidity_provider_stated') WHERE pool_id = $1 AND lp_entity_id = $2`, [c.pool_id, c.lp_entity_id, c.from_state, c.from_state_source]);
       await audit("respond_to_state_correction", correction_id, { pool_id: c.pool_id, accept, reason: reason ?? null, source: c.source });

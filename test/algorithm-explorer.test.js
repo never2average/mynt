@@ -402,6 +402,27 @@ async function setup() {
   return { db, store, desk, explore, boat, repos, connect, call, innovator, ready };
 }
 
+// A fixed dataset secret for the exploration test. On its holdout the knockout at 650 is within every constraint
+// (realised loss about 1.8% against the 3.25% ceiling), approving everyone goes over the loss ceiling (about 3.4%),
+// and the knockout earns well above it; "the scenario holds on the pinned holdout" checks this, so a generator change
+// that breaks it fails there, saying why, instead of making the exploration test flaky.
+const PINNED_SECRET = createHash("sha256").update("mynt algorithm-explorer test: a fixed holdout").digest("hex");
+
+test("the scenario holds on the pinned holdout: the knockout is eligible and beats approving everyone; pricing over the cap isn't", () => {
+  const { params, economics } = datasetInputs({ product: loan, definition }, { apr_pct: 18, apr_cap_pct: 24, expected_pd_pct: 5, lgd_pct: 65, cost_of_funds_pct: 9, opex_pct: 3 });
+  const spec = { objective: { maximise: "net_margin" }, economics, constraints: { max_loss_rate_pct: 3.25, apr_cap_pct: 24, min_adverse_impact_ratio: 0.8 } };
+  const h = generateDataset(params, splitKeys(PINNED_SECRET).holdout, "h");
+  const score = (decide) => scoreWithStability(h.applicants, h.truth, h.applicants.map((a) => ({ id: a.id, ...decide(a) })), spec);
+  const knockout = (a) => ((a.bureau_score ?? 0) >= 650 ? { approve: true, grade: "A", reason_codes: [] } : { approve: false, reason_codes: ["LOW_BUREAU_SCORE"] });
+  const k = score(knockout);
+  const base = score(() => ({ approve: true, apr_pct: 18, reason_codes: [] }));
+  const pricey = score((a) => ({ ...knockout(a), ...((a.bureau_score ?? 0) >= 650 ? { apr_pct: 30 } : {}) }));
+  assert.ok(k.eligible, JSON.stringify(k.checks));
+  assert.ok(k.objective.value > base.objective.value);
+  assert.equal(pricey.eligible, false);
+  assert.ok(pricey.objective.value > k.objective.value);
+});
+
 const variants = async (explore, id) => (await explore.get(id)).variants;
 const sandboxOf = async (db, id, k, column = "sandbox_id") => (await db.query(`SELECT ${column} FROM financial_products.explore_variants WHERE job_id = $1 AND k = $2`, [id, k])).rows[0][column];
 
@@ -423,6 +444,12 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw" })).data.error, /already running/);
 
   assert.equal(job.base_sha, BASE, "the pinned version, resolved to a commit at the start");
+
+  // Each job's dataset secret is random on purpose (no two jobs share a holdout: tested above), so on a random holdout
+  // the scenario below doesn't always hold: on some draws approving everyone stays under the loss ceiling and earns
+  // more than the knockout, on others the knockout itself goes over it. Pin this job's secret (before the first tick
+  // makes the dev set) to one where the scenario holds, so what's asserted is the ranking, not the luck of the draw.
+  await db.query("UPDATE financial_products.explore_jobs SET dataset = jsonb_set(dataset, '{secret}', to_jsonb($2::text)) WHERE id = $1", [job.id, PINNED_SECRET]);
 
   // Explorer sandboxes: each with the firm's repo and its own hard-to-guess branch; no token in the environment.
   await explore.tick();
@@ -532,9 +559,8 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   const done = await explore.get(job.id);
   assert.equal(done.status, "finished", done.error);
   const board = done.leaderboard;
-  // The holdout is random per job, so whether approving everyone (the baseline) stays under the loss ceiling varies.
-  // What must always hold: every eligible variant ranks above every ineligible one, each group by objective, and
-  // what Mynt couldn't run comes last, unranked.
+  // Every eligible variant ranks above every ineligible one, each group by objective, and what Mynt couldn't run
+  // comes last, unranked.
   const why = JSON.stringify(board.map((e) => [e.k, e.objective, e.constraints]));
   const scoredRows = board.filter((e) => e.scored);
   assert.deepEqual(scoredRows.map((e) => e.rank), [1, 2, 3], why);

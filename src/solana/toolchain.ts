@@ -300,17 +300,28 @@ import base64, json, re, sys, tarfile
 src, out, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 files, binary, links, total, refused = {}, {}, {}, 0, []
 with tarfile.open(src) as t:
-    for m in t.getmembers():
+    members = t.getmembers()
+    # A folder named target is cargo's only when cargo marked it (.rustc_info.json or CACHEDIR.TAG at its top): a
+    # module folder that happens to be called target is source like any other.
+    cargo_targets = set()
+    for m in members:
+        p = m.name[len("workdir/"):] if m.name.startswith("workdir/") else ""
+        q = p.split("/")
+        if len(q) >= 2 and q[-2] == "target" and q[-1] in (".rustc_info.json", "CACHEDIR.TAG"):
+            cargo_targets.add("/".join(q[:-1]))
+    for m in members:
         path = m.name[len("workdir/"):] if m.name.startswith("workdir/") else None
         if not path:
             continue
-        # Never anything a build could reuse instead of compiling: no target folders at any depth (the top-level
-        # ones are left out of the archive), no cargo artifacts, fingerprints or dep-info, no prebuilt programs.
-        # Refused, not stripped: what Mynt keeps is what it compiles.
+        # Never anything a build could reuse instead of compiling: no cargo target folders at any depth (the
+        # top-level ones are left out of the archive), no cargo artifacts, fingerprints or dep-info, no prebuilt
+        # programs, wherever they are. Refused, not stripped: what Mynt keeps is what it compiles.
         parts = path.split("/")
         if re.search(r"[\x00-\x1f\x7f]", path):
             refused.append(repr(path) + " (control characters in its name)")
-        elif any(x in ("target", "docker-target", ".anchor", ".fingerprint", "mynt-target", "mynt-idl") for x in parts):
+        elif any(x in ("docker-target", ".anchor", ".fingerprint", "mynt-target", "mynt-idl") for x in parts):
+            refused.append(path)
+        elif any(parts[i] == "target" and "/".join(parts[: i + 1]) in cargo_targets for i in range(len(parts))):
             refused.append(path)
         elif not m.isdir() and re.search(r"\.(rlib|rmeta|d|so)$", parts[-1]):
             refused.append(path)
