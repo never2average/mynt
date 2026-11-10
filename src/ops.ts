@@ -1,6 +1,7 @@
 // What admins check first: is anything failing, stuck or costing more than it should, across the agents (builds,
 // the product desk and its algorithm explorers, governance review, the connector), developers' hosting and the
 // server's backups. Read-only.
+import { COVENANT_HOOK_ELIGIBLE } from "./covenant-schema.js";
 import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -161,6 +162,32 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     const tick = (await db.query("SELECT last_tick_at FROM financial_products.product_health_worker WHERE id = 'worker'")).rows[0]?.last_tick_at as string | Date | undefined;
     productHealth.worker_last_ran = tick ? new Date(tick).toISOString() : null;
   }
+  // Licence providers' covenants: products paused, breaches open (sandbox ones are counted apart), and the timer.
+  const covenants: { paused_products: number; open_breaches: number; open_sandbox_breaches: number; unknown_too_long: number; active_rules: number; blocked_webhooks: number; open_breaches_alert_undelivered: number; timer_last_ran: string | null } = { paused_products: 0, open_breaches: 0, open_sandbox_breaches: 0, unknown_too_long: 0, active_rules: 0, blocked_webhooks: 0, open_breaches_alert_undelivered: 0, timer_last_ran: null };
+  if (await exists("covenants")) {
+    const f = "financial_products";
+    const c = (await db.query(
+      `SELECT (SELECT count(DISTINCT h.product_id)::int FROM ${f}.covenant_holds h JOIN ${f}.sponsorships s ON s.id = h.sponsorship_id WHERE h.released_at IS NULL AND s.status = 'approved') AS paused,
+              (SELECT count(*)::int FROM ${f}.covenants WHERE deleted_at IS NULL) AS active,
+              (SELECT count(*)::int FROM ${f}.covenants c JOIN ${f}.covenant_breaches b ON b.id = c.open_breach_id WHERE NOT b.sandbox) AS open_live,
+              (SELECT count(*)::int FROM ${f}.covenants c JOIN ${f}.covenant_breaches b ON b.id = c.open_breach_id WHERE b.sandbox) AS open_sandbox,
+              (SELECT count(*)::int FROM ${f}.covenants c JOIN ${f}.covenant_breaches b ON b.id = c.open_unknown_breach_id WHERE NOT b.sandbox) AS unknown,
+              (SELECT count(*)::int FROM ${f}.webhooks w WHERE w.entity_id IS NOT NULL AND EXISTS (SELECT 1 FROM unnest(w.events) e WHERE e LIKE 'covenant.%') AND NOT ${COVENANT_HOOK_ELIGIBLE}) AS blocked,
+              (SELECT count(DISTINCT c.id)::int FROM ${f}.covenants c JOIN ${f}.covenant_breach_events e ON e.breach_id = c.open_breach_id WHERE e.event = 'alert_undelivered') AS undelivered`,
+    )).rows[0] as { paused: number; active: number; open_live: number; open_sandbox: number; unknown: number; blocked: number; undelivered: number };
+    covenants.paused_products = Number(c.paused ?? 0);
+    covenants.active_rules = Number(c.active ?? 0);
+    covenants.open_breaches = Number(c.open_live ?? 0);
+    covenants.open_sandbox_breaches = Number(c.open_sandbox ?? 0);
+    covenants.unknown_too_long = Number(c.unknown ?? 0);
+    covenants.blocked_webhooks = Number(c.blocked ?? 0);
+    covenants.open_breaches_alert_undelivered = Number(c.undelivered ?? 0);
+    if (await exists("product_health_worker")) {
+      const tick = (await db.query("SELECT last_tick_at FROM financial_products.product_health_worker WHERE id = 'covenants'")).rows[0]?.last_tick_at as string | Date | undefined;
+      covenants.timer_last_ran = tick ? new Date(tick).toISOString() : null;
+    }
+  }
+  const covenantTimerIdle = covenants.active_rules > 0 && (!covenants.timer_last_ran || Date.now() - new Date(covenants.timer_last_ran).getTime() > 15 * 60 * 1000);
   const workerIdle = productHealth.sponsored_products > 0 && (!productHealth.worker_last_ran || Date.now() - new Date(productHealth.worker_last_ran).getTime() > 60 * 60 * 1000);
   // A provider out of allowance stops everything that needs a machine: say so first, with what to do.
   const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
@@ -192,8 +219,14 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(productHealth.stalled.length ? [`product health: ${productHealth.stalled.length} record(s) stalled against the chain; see list_product_health, and reanchor_product_health after a chain reset`] : []),
     ...(productHealth.overdue ? [`product health: ${productHealth.overdue} snapshot(s) past their deadline and not on chain; the RPC or the publisher's balance may be the cause`] : []),
     ...(workerIdle ? [`product health: ${productHealth.sponsored_products} sponsored product(s), but the worker ${productHealth.worker_last_ran ? `last ran ${productHealth.worker_last_ran}` : "has never run"} (it needs PRODUCT_HEALTH_PROGRAM_ID and MYNT_VAULT_KEY)`] : []),
+    ...(covenants.paused_products ? [`covenants: ${covenants.paused_products} product(s) paused by a licence provider's rule; only that provider can release them (list_covenant_breaches)`] : []),
+    ...(covenants.open_breaches ? [`covenants: ${covenants.open_breaches} open breach(es) on live figures (list_covenant_breaches)`] : []),
+    ...(covenants.unknown_too_long ? [`covenants: ${covenants.unknown_too_long} rule(s) unknown past their limit: the figures behind them can't be measured`] : []),
+    ...(covenants.open_breaches_alert_undelivered ? [`covenants: ${covenants.open_breaches_alert_undelivered} open breach(es) whose alert reached no webhook (list_covenant_breaches, list_firm_webhooks)`] : []),
+    ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
+    ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

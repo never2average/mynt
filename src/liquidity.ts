@@ -214,7 +214,9 @@ export function minimumReserve(pool: Pick<Pool, "min_reserve_bps" | "min_reserve
 export async function evaluatePool(store: Store, service: ProductHealthService | null, pool: Pool, now: Date, maxAgeMs: number): Promise<Gate> {
   const record = await store.getProduct(pool.product_id);
   if (!record) return { ok: false, kind: "governance", reason: "The product no longer exists" };
-  if (record.drift) return { ok: false, kind: "governance", reason: "The product has drifted from what was published: new money movements stop until a new version is published" };
+  // A covenant's pause stops new sign-ups and never money movements, so on its own it doesn't stop a pool.
+  const covenantOnly = !!record.drift?.changes?.length && record.drift.changes.every((c) => c.kind === "covenant");
+  if (record.drift && !covenantOnly) return { ok: false, kind: "governance", reason: "The product has drifted from what was published: new money movements stop until a new version is published" };
   const sponsored = (await store.sponsorships({ product_id: pool.product_id, provider_entity_id: pool.sponsor_entity_id, status: "approved" })).some((s) => s.component_key === pool.component_key);
   if (!sponsored) return { ok: false, kind: "governance", reason: "The pool's sponsorship is no longer approved" };
   if ((await store.getEntity(pool.sponsor_entity_id))?.status !== "active") return { ok: false, kind: "governance", reason: "The pool's sponsor isn't active on Mynt" };

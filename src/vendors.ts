@@ -2051,23 +2051,38 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     },
   );
 
-  // ---- the firm's own webhooks: results of client actions its vendor services answered ----
+  registerFirmWebhookTools(server, store, user);
+}
+
+// ---- the firm's own webhooks: results of client actions its vendor services answered, and a licence provider's alerts ----
+
+export function registerFirmWebhookTools(server: McpServer, store: Store, user: User) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
+  // covenant.* carries a sponsor's figures: only its own named licence-provider members, and no admin account, handle those hooks.
+  const isCovenantEvent = (e: string) => e.startsWith("covenant.");
+  const handlesCovenants = async () => {
+    const me = (await store.getUser(user.id)) ?? user;
+    return me.roles.includes("license_provider") && !me.roles.includes("admin");
+  };
 
   server.registerTool(
     "create_firm_webhook",
     {
       title: "Receive your vendor services' results",
       description:
-        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. It also gets your Solana programs' deploys, upgrades and events (program.deployed, program.upgraded, program.event). Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
-      inputSchema: { url: z.string().url(), events: z.array(z.enum(FIRM_WEBHOOK_EVENTS)).min(1).default([...FIRM_WEBHOOK_EVENTS]) },
+        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. It also gets your Solana programs' deploys, upgrades and events (program.deployed, program.upgraded, program.event), and, for a licence provider, its covenants' alerts on the products it sponsors (covenant.breached, covenant.cleared). Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
+      inputSchema: { url: z.string().url(), events: z.array(z.enum(FIRM_WEBHOOK_EVENTS)).min(1).optional().describe("Every event your role may receive, by default") },
     },
     async ({ url, events }) => {
       const entityId = await entityOf(store, user);
       if (!entityId) return fail("Register your firm first (create_entity)");
+      const mayCovenants = await handlesCovenants();
+      const chosen = events ?? FIRM_WEBHOOK_EVENTS.filter((e) => mayCovenants || !isCovenantEvent(e));
+      if (!mayCovenants && chosen.some(isCovenantEvent)) return fail("covenant.* events go only to a licence provider firm's own named members, and not to an admin account");
       const problem = await checkWebhookUrl(url);
       if (problem) return fail(problem);
       if ((await store.firmWebhooks(entityId)).length >= 5) return fail("A firm can have at most 5 webhooks");
-      const { webhook, secret } = await store.createFirmWebhook(user.id, { entity_id: entityId, url, events: [...new Set(events)] });
+      const { webhook, secret } = await store.createFirmWebhook(user.id, { entity_id: entityId, url, events: [...new Set(chosen)] });
       await audit("create_firm_webhook", webhook.id, { entity_id: entityId, url, events: webhook.events });
       return json({ id: webhook.id, url: webhook.url, events: webhook.events, created_at: webhook.created_at, secret, note: "Save the signing secret now; it can't be shown again." });
     },
@@ -2092,6 +2107,9 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
             url: h.url,
             events: h.events,
             created_at: h.created_at,
+            ...(h.events.some(isCovenantEvent) && (await store.covenantWebhookBlocked(h.id))
+              ? { blocked: true, blocked_reason: "This webhook's creator is no longer a named licence-provider member of the firm, so covenant alerts aren't sent to it: a member with that role should create it again" }
+              : {}),
             deliveries: (await store.webhookDeliveries(h.id, 20)).map((d) => ({ type: d.type, status: d.status, attempts: d.attempts, last_response_code: d.last_response_code, sandbox: d.sandbox, created_at: d.created_at })),
           })),
         ),
@@ -2111,6 +2129,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       const entityId = await entityOf(store, user);
       const hook = entityId ? (await store.firmWebhooks(entityId)).find((h) => h.id === webhook_id) : undefined;
       if (!hook) return fail(`No webhook '${webhook_id}' of your firm`);
+      if (hook.events.some(isCovenantEvent) && !(await handlesCovenants())) return fail("That webhook receives a sponsor's covenant alerts: only the firm's named licence-provider members, and not an admin account, can delete it");
       await store.deleteWebhook(hook.id);
       await audit("delete_firm_webhook", hook.id, { entity_id: entityId, url: hook.url });
       return json({ deleted: hook.id });

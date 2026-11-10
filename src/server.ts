@@ -44,8 +44,9 @@ import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
+import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
-import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
+import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { registerTakeRateAdminTools, registerTakeRateTools } from "./take-rates.js";
@@ -124,6 +125,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerSponsorshipBuilderTools(server, store, user!);
   }
   if (has("vendor") || has("innovator")) registerServiceTypeCatalog(server, store);
+  // A licence provider's own alerts arrive on its firm's webhooks; builders get these tools with their vendor tools.
+  if (has("license_provider") && !has("innovator")) registerFirmWebhookTools(server, store, user!);
   // A vendor's or licence provider's firm (an admin registers it): its record and licences, once.
   if ((has("vendor") || has("license_provider") || has("liquidity_provider")) && !has("innovator")) registerFirmTools(server, store, user!);
   if (has("license_provider")) {
@@ -138,6 +141,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   if (user && hasLiquidityRole(rolesFrom(user))) registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null);
   if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
+  if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
@@ -191,7 +195,7 @@ function registerCatalogTools(server: McpServer, store: Store, user: User | null
       const insider = Boolean(record && (record.owner_id === user?.id || user?.roles.includes("admin")));
       if (!record || (record.status !== "published" && !insider)) return fail(`No product '${product_id}'`);
       const live = record.status === "published" && !(working && insider);
-      return json({ ...(await productRegime(store, record, { live })), drift: record.drift, sales_paused: Boolean(record.drift) });
+      return json({ ...(await productRegime(store, record, { live })), drift: driftFor(record, user), sales_paused: Boolean(record.drift) });
     },
   );
 
@@ -451,7 +455,7 @@ function registerCatalogTools(server: McpServer, store: Store, user: User | null
     },
     async ({ id }) => {
       const record = await store.getProduct(id);
-      if (record?.status === "published") return json(record.drift ? { ...record.product, sales_paused: true, drift: record.drift } : record.product);
+      if (record?.status === "published") return json(record.drift ? { ...record.product, sales_paused: true, drift: driftFor(record, user) } : record.product);
       if (record && user && record.owner_id === user.id) return json({ ...record.product, status: record.status, last_test: record.last_test });
       return fail(`No product with id '${id}'`);
     },
@@ -1121,6 +1125,8 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
         await store.setPins(id, pins);
       }
       else await store.setPins(id, null);
+      // A covenant's pause outlasts a new version: only the sponsor lifts it.
+      await reassertCovenantPause(store, id);
       // Its coverage and take rate as published (never stops the publish; a failure is stored as a note).
       await rederiveProduct(store, id);
       await emitProductEvent(store, id, "product.version_published", { version: live.version });

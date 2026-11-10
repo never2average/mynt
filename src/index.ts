@@ -25,6 +25,7 @@ import { sweepStaleMovements } from "./money-rails.js";
 import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf } from "./liquidity.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
+import { CovenantService } from "./covenants.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
 import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
@@ -140,7 +141,9 @@ const openServices = async () => {
   });
   // Pays liquidity pools' withdrawal queues, as far as each pool's latest verified health allows.
   const liquidity = new LiquidityWorker(store, productHealth, liquidityConfigFromEnv(process.env, healthConfig.intervalMs));
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity };
+  // Licence providers' rules on those records: evaluated on each snapshot and on their own timer.
+  const covenants = await CovenantService.open(db, store, productHealth);
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants };
 };
 
 const parseRoles = (): Role[] => {
@@ -163,13 +166,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -180,9 +183,10 @@ if (values.help) {
   gate.startWorker();
   productHealth.startWorker();
   liquidity.startWorker();
+  covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Sends queued webhook deliveries (events from any process sharing the database).
@@ -219,6 +223,7 @@ if (values.help) {
     gate.stopWorker();
     productHealth.stopWorker();
     liquidity.stopWorker();
+    covenants.stopWorker();
     http.close(() => process.exit(0));
   });
 } else if (command === "users" && sub === "invite") {

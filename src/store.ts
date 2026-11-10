@@ -1,3 +1,4 @@
+import { COVENANT_HOOK_ELIGIBLE, COVENANT_TABLES } from "./covenant-schema.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { currentLine, lineForTreasuryCategory, PRODUCT_LINES, UNDERLYINGS, WRAPPERS, type FinancialProduct } from "./catalog.js";
 import type { DeveloperContract } from "./contract.js";
@@ -281,7 +282,7 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship" | "legitimacy"; id: string; was: string; now: string; jurisdictions?: string[] };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship" | "legitimacy" | "covenant"; id: string; was: string; now: string; jurisdictions?: string[]; rule_type?: string };
 
 // One public check that a firm is a real, legitimate company (see firm-checks.ts).
 export const FIRM_CHECK_STATUSES = ["match", "mismatch", "not_found", "unavailable"] as const;
@@ -1869,6 +1870,7 @@ export class Store {
     const { rows } = await db.query("SELECT 1 FROM pg_namespace WHERE nspname = 'financial_products'");
     if (rows.length === 0) await db.exec("CREATE SCHEMA financial_products");
     await db.exec(TABLES);
+    await db.exec(COVENANT_TABLES);
     await db.query(
       `INSERT INTO financial_products.products (id, owner_id, status, data, published_at)
        SELECT p->>'id', NULL, 'published', p, now() FROM jsonb_array_elements($1::jsonb) AS p
@@ -2534,10 +2536,35 @@ export class Store {
       `INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status, next_attempt_at)
        SELECT gen_random_uuid(), w.id, $2::uuid, $3, $4::jsonb, $5, 'pending', now()
        FROM financial_products.webhooks w WHERE w.entity_id::text = $1 AND $3 = ANY(w.events)
+         AND ($3 NOT LIKE 'covenant.%' OR ${COVENANT_HOOK_ELIGIBLE})
        RETURNING id`,
       [entityId, payload.id, payload.type, JSON.stringify(payload), sandbox],
     );
     return rows.length;
+  }
+
+  // A covenant alert held back at send time: the breach's record says so. `first`: it was the breach's first alert.
+  async recordCovenantAlertUndelivered(breachId: string, type: string, first: boolean, reason: string): Promise<void> {
+    await this.db.query(
+      `INSERT INTO financial_products.covenant_breach_events (id, breach_id, event, reason, details, at)
+       SELECT $1::uuid, b.id, 'alert_undelivered', $3, $4::jsonb, now() FROM financial_products.covenant_breaches b WHERE b.id = $2::uuid`,
+      [randomUUID(), breachId, reason, JSON.stringify({ type, first, at_send: true })],
+    );
+  }
+
+  // How many of a firm's webhooks would receive this event now.
+  async reachableFirmWebhooks(entityId: string, type: string): Promise<number> {
+    const rows = await this.all(
+      `SELECT count(*)::int AS n FROM financial_products.webhooks w WHERE w.entity_id::text = $1 AND $2 = ANY(w.events) AND ($2 NOT LIKE 'covenant.%' OR ${COVENANT_HOOK_ELIGIBLE})`,
+      [entityId, type],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  // A hook subscribed to covenant.* whose creator can no longer receive them: its alerts are held back.
+  async covenantWebhookBlocked(webhookId: string): Promise<boolean> {
+    const rows = await this.all(`SELECT ${COVENANT_HOOK_ELIGIBLE} AS ok FROM financial_products.webhooks w WHERE w.id = $1`, [webhookId]);
+    return rows[0]?.ok !== true;
   }
 
   // Claims due deliveries with their webhook's url and secret, leasing them for `leaseSeconds` so

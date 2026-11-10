@@ -1103,6 +1103,35 @@ test("a crashed claim with a ledger row is tied to it under any pause, and sandb
   assert.equal((await opsStatus(s.db)).attention.some((a) => /liquidity pools/.test(a)), false);
 });
 
+test("a covenant pause stops neither deposits nor withdrawals, and pool money isn't in a covenant's figures", async () => {
+  const { CovenantService } = await import("../dist/covenants.js");
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  await s.requestOut(s.fundA, 2_000);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.store.setDrift(s.productId, { detected_at: new Date().toISOString(), changes: [{ kind: "covenant", id: randomUUID(), was: "clear", now: "paused", rule_type: "coverage_below" }] });
+  await s.tick();
+  const pool = await s.poolRow();
+  assert.equal(pool.status, "open", "a covenant pause is about new sign-ups");
+  assert.equal(pool.pause_kind, null);
+  assert.equal((await s.claims()).length, 1, "the withdrawal is paid");
+  const c = await s.commit(s.fundB, 1_000);
+  assert.equal(c.movement_status, "requested", "a deposit goes through");
+
+  const covenants = await CovenantService.open(s.db, s.store, s.health);
+  assert.equal((await covenants.moneyInFlight(s.productId)).movements, 0, "pool money isn't in what a covenant reports in flight");
+
+  // With a real drift alongside, the pool stops as before, and a covenant pause never lifts a failing health gate.
+  await s.store.setDrift(s.productId, { detected_at: new Date().toISOString(), changes: [{ kind: "covenant", id: randomUUID(), was: "clear", now: "paused", rule_type: "coverage_below" }, { kind: "licence", id: "x", was: "verified", now: "lapsed" }] });
+  await s.tick();
+  assert.equal((await s.poolRow()).pause_kind, "governance");
+  await s.store.setDrift(s.productId, null);
+  await s.snapshot({ reserves: 500_000, obligations: 1_000_000 });
+  await s.store.setDrift(s.productId, { detected_at: new Date().toISOString(), changes: [{ kind: "covenant", id: randomUUID(), was: "clear", now: "paused", rule_type: "coverage_below" }] });
+  await s.tick();
+  assert.equal((await s.poolRow()).pause_kind, "health");
+});
+
 test("pool actions are audited", async () => {
   const s = await world();
   await s.funded(s.fundA, 5_000);
