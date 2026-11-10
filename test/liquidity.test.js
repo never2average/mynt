@@ -10,6 +10,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 // (it enforces what the program does); the race runs on a real Postgres with a connection pool when CI gives one.
 
 process.env.MYNT_VAULT_KEY ??= randomBytes(32).toString("base64");
+// These tests' licence-provider accounts are minutes old: the partner kit's member cool-off (tested on its own in
+// partner-kit.test.js) is off here, so they can register keys straight away.
+process.env.PARTNER_MEMBER_COOLOFF_HOURS ??= "0";
 
 const { connectPostgres } = await import("../dist/db.js");
 const { createServer } = await import("../dist/server.js");

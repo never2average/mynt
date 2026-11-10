@@ -13,7 +13,8 @@ import { serialLoop } from "./worker.js";
 // (product-health.ts). A rule either alerts the sponsor or pauses the product, as the sponsor chose per rule.
 //
 //   - a null figure is `unknown`, with its reason: never a pass, never a breach; unknown too long is itself an alert;
-//   - a figure from sandbox books is labelled sandbox and never pauses anything;
+//   - a figure from sandbox books is labelled sandbox and never pauses anything; on a published product it isn't a figure
+//     at all: unknown ("the sponsor's ledger isn't live"), and past the rule's unknown limit a pause rule pauses;
 //   - each new snapshot is evaluated, and a timer evaluates too, so a rule about missing snapshots fires with no snapshot;
 //   - the breach record is append-only; the sealed figures in it are opened for the sponsor's own people only;
 //   - a pause holds the product through the drift mechanism (kind `covenant`) until the sponsor releases it; it stops new
@@ -45,6 +46,8 @@ const FIGURE_RULES: Partial<Record<RuleType, FigureRule>> = {
 const unitOf = (rule: RuleType) => FIGURE_RULES[rule]?.unit ?? (rule === "consecutive_gaps" ? "periods" : "seconds");
 const SECONDS_RULES: RuleType[] = ["snapshot_missed_for", "unverified_for"];
 const NOT_LIVE_REASON = "The product isn't live, so there's no partner signature to expect";
+// A published product judged on test figures: unknown, not sandbox, so a pause rule's unknown limit can hold it.
+export const LEDGER_NOT_LIVE_REASON = "The sponsor's ledger isn't live: test figures can't speak for a live product (connect it with the partner kit)";
 
 export interface Judged {
   status: "pass" | "fail" | "unknown";
@@ -322,13 +325,12 @@ export class CovenantService {
     return (await this.alertOrRecord(c, b, "covenant.breached", { paused: true }, now)) ? this.recordAlert(c, now) : c;
   }
 
-  // Whether a result is sandbox-only, so it labels rather than acts. A snapshot is judged by its own source. Without
-  // one (no record yet, a missed period, timing rules), a published product reads unknown rather than sandbox, whatever
-  // ledger its sponsor is on, so not knowing is never excused as test data; an unpublished one goes by the ledger the
-  // firm is on now, and a ledger Mynt can't tell is unknown, never sandbox.
+  // Whether a result is sandbox-only, so it labels rather than acts. A published product's never is: test figures on it
+  // are unknown (judgeSnapshot), and not knowing is never excused as test data. Otherwise a snapshot is judged by its own
+  // source, and without one by the ledger the firm is on now; a ledger Mynt can't tell is unknown, never sandbox.
   private async sandboxOnly(s: Sponsorship, published: boolean, r?: SnapshotRow) {
-    if (r && r.status !== "missed" && r.source) return r.source === "sandbox";
     if (published) return false;
+    if (r && r.status !== "missed" && r.source) return r.source === "sandbox";
     return (await this.health.ledgerState(s.provider_entity_id)) === "sandbox";
   }
 
@@ -340,6 +342,7 @@ export class CovenantService {
     const assessed = await this.health.assessOne(r);
     if (!assessed || !assessed.report) return { status: "unknown", observed: null, reason: assessed ? "The snapshot's report can't be authenticated" : "Mynt can't open the snapshot's report", sealed: false, snapshot, sandbox: false };
     if (assessed.source === "unavailable") return { status: "unknown", observed: null, reason: "The partner's ledger couldn't be read for this period", sealed: false, snapshot, sandbox: false };
+    if (assessed.source === "sandbox" && published) return { status: "unknown", observed: null, reason: LEDGER_NOT_LIVE_REASON, sealed: false, snapshot, sandbox: false };
     const figure = assessed.report.figures[FIGURE_RULES[c.rule_type]!.figure];
     return { ...judgeFigure(c.rule_type, c.threshold, figure), sealed: true, snapshot, sandbox: assessed.source === "sandbox" };
   }
@@ -476,7 +479,10 @@ export class CovenantService {
   private async openBreach(c: Covenant, record: ProductRecord, r: RuleResult, kind: Breach["kind"]): Promise<Covenant> {
     const now = this.now();
     const col = kind === "breach" ? "open_breach_id" : "open_unknown_breach_id";
-    const wantsPause = kind === "breach" && c.action === "pause" && !r.sandbox;
+    // Not knowing never pauses, with one exception: a published product left on test figures past the rule's unknown
+    // limit, which only its sponsor can end (by connecting its books), pauses under a pause rule.
+    const ledgerNotLive = kind === "unknown_limit" && r.reason === LEDGER_NOT_LIVE_REASON;
+    const wantsPause = (kind === "breach" || ledgerNotLive) && c.action === "pause" && !r.sandbox;
     const pausing = wantsPause && this.canPause(record);
     const pauseFailed = wantsPause && record.status === "published" && !pausing;
     // A pause is always told to the sponsor, cooldown or not.
@@ -485,7 +491,7 @@ export class CovenantService {
     const told = alerting ? (reachable ? "alerted" : "alert_undelivered") : "alert_suppressed_by_cooldown";
     const inFlight = pausing ? await this.moneyInFlight(record.product.id) : null;
     let actionTaken: string;
-    if (kind === "unknown_limit") actionTaken = told;
+    if (kind === "unknown_limit" && !ledgerNotLive) actionTaken = told;
     else if (r.sandbox) actionTaken = "sandbox_labelled";
     else if (c.action === "pause") actionTaken = pausing ? (reachable ? "paused" : "paused_alert_undelivered") : pauseFailed ? "pause_failed_no_pins" : "pause_pending_publication";
     else actionTaken = told;
@@ -609,7 +615,8 @@ export class CovenantService {
     }
   }
 
-  // Unknown past the rule's named limit is itself alertable. It alerts only: not knowing never pauses a product.
+  // Unknown past the rule's named limit is itself alertable. It alerts only (not knowing never pauses a product), except
+  // a published product on a ledger that isn't live, under a pause rule (openBreach).
   private async checkUnknownLimit(c: Covenant, record: ProductRecord, s: Sponsorship): Promise<Covenant> {
     if (c.status !== "unknown" || !c.status_since || record.status !== "published") return c;
     const now = this.now();

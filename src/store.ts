@@ -861,6 +861,8 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES financial_products.entities(id);
+  -- When the account became a member of its current firm: the partner kit's member cool-off counts from it.
+  ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS entity_joined_at timestamptz;
   CREATE TABLE IF NOT EXISTS financial_products.held_licenses (
     id uuid PRIMARY KEY,
     entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
@@ -1365,6 +1367,8 @@ const TABLES = `
     pending_live_url text,
     pending_by uuid REFERENCES financial_products.users(id),
     pending_at timestamptz,
+    expiry_warned_run_id uuid, -- the run whose coming expiry the firm was warned of
+    expired_notified_run_id uuid, -- the run whose expiry the firm was told sent it back to the sandbox
     active_source text NOT NULL DEFAULT 'sandbox' CHECK (active_source IN ('sandbox', 'http', 'file')),
     active_run_id uuid,
     activated_by uuid REFERENCES financial_products.users(id),
@@ -1373,6 +1377,39 @@ const TABLES = `
   );
   -- A firm's separate key for signing its test statements: a test signature never counts for live, nor a live one
   -- for test. MACed under a key derived from the vault, so a key written straight into the table doesn't count.
+  -- Every test key a firm has registered, MACed: a key once used for test is never accepted as a live key.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_test_signing_key_history (
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    public_key text NOT NULL,
+    registered_by uuid REFERENCES financial_products.users(id),
+    registered_at timestamptz NOT NULL DEFAULT now(),
+    mac text NOT NULL,
+    PRIMARY KEY (entity_id, public_key)
+  );
+  -- A second, long-standing member's approval of a live key change or a switch to live (partner-kit.ts).
+  CREATE TABLE IF NOT EXISTS financial_products.partner_kit_approvals (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    action text NOT NULL CHECK (action IN ('live_key', 'source')),
+    payload jsonb NOT NULL,
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'declined')),
+    requested_by uuid NOT NULL REFERENCES financial_products.users(id),
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    decided_by uuid REFERENCES financial_products.users(id),
+    decided_at timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS partner_kit_approvals_idx ON financial_products.partner_kit_approvals (entity_id, status, requested_at DESC);
+  -- Notices to each member of a firm, so a change made by one member (or an admin) is seen by the others.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_notices (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    user_id uuid NOT NULL REFERENCES financial_products.users(id),
+    type text NOT NULL,
+    data jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    read_at timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS firm_notices_user_idx ON financial_products.firm_notices (user_id, created_at DESC);
   CREATE TABLE IF NOT EXISTS financial_products.partner_test_signing_keys (
     entity_id uuid PRIMARY KEY REFERENCES financial_products.entities(id),
     public_key text NOT NULL,
@@ -3414,7 +3451,7 @@ export class Store {
   }
 
   async setUserEntity(userId: string, entityId: string | null): Promise<void> {
-    await this.db.query("UPDATE financial_products.users SET entity_id = $2 WHERE id = $1", [userId, entityId]);
+    await this.db.query("UPDATE financial_products.users SET entity_id = $2, entity_joined_at = CASE WHEN entity_id IS DISTINCT FROM $2 THEN now() ELSE entity_joined_at END WHERE id = $1", [userId, entityId]);
   }
 
   async userByEmail(email: string): Promise<User | undefined> {

@@ -12,6 +12,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 // The partner here is a server on 127.0.0.1 that speaks the contract in docs/partners.md.
 
 process.env.MYNT_VAULT_KEY ??= randomBytes(32).toString("base64");
+// These tests' licence-provider accounts are minutes old: the partner kit's member cool-off (tested on its own in
+// partner-kit.test.js) is off here, so they can register keys straight away.
+process.env.PARTNER_MEMBER_COOLOFF_HOURS ??= "0";
 
 const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
@@ -206,14 +209,17 @@ test("contract happy path: conformance passes, and switching from sandbox to liv
   const run = await w.conformance("http");
   assert.equal(run.ledger.passed, true, JSON.stringify(run.ledger.cases));
   assert.equal(run.can_go_live, true);
-  for (const c of ["setup", "answer", "schema", "identity", "signature", "clock", "null_handling", "coverage", "unknown_product_null", "bad_signature_refused", "stale_request_refused", "malformed_request_refused", "wrong_environment_refused", "wrong_audience_refused"])
+  for (const c of ["setup", "answer", "schema", "identity", "signature", "clock", "null_handling", "coverage", "unknown_product_null", "bad_signature_refused", "stale_request_refused", "malformed_request_refused", "wrong_environment_refused", "wrong_audience_refused", "live_wrong_audience_refused"])
     assert.equal(w.caseOf(run, c)?.passed, true, c);
   // (b) and (c) are reported: this firm accepts no identity provider and has no rail yet.
   assert.equal(run.identity.passed, false);
   assert.match(run.identity.problems[0], /accept no identity provider/);
   assert.equal(run.rails.passed, false);
   assert.equal(run.passed, false);
-  assert.ok(w.partner.state.seen.every((s) => s.env === "test"), "conformance calls the test endpoint only");
+  // Conformance reads the test endpoint; the live endpoint gets only the audience probe, which asks for no figures.
+  const liveCalls = w.partner.state.seen.filter((s) => s.env === "live");
+  assert.equal(liveCalls.length, 1);
+  assert.equal(liveCalls[0].audience, `${w.partner.url}/test/v1/ledger`);
 
   const switched = await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
   assert.equal(switched.live, true);
@@ -505,7 +511,11 @@ test("a relayed request is refused by the partner, and an admin's endpoint chang
   await w.connectHttp();
   // A partner that doesn't check the audience fails conformance.
   w.partner.state.mode = "ignore_audience";
-  assert.equal(w.caseOf(await w.conformance(), "wrong_audience_refused").passed, false);
+  const careless = await w.conformance();
+  assert.equal(w.caseOf(careless, "wrong_audience_refused").passed, false);
+  // The live endpoint is probed too, with a made-up product only, so no live figure is asked for.
+  assert.equal(w.caseOf(careless, "live_wrong_audience_refused").passed, false);
+  assert.ok(w.partner.state.seen.some((x) => x.env === "live" && x.audience === `${w.partner.url}/test/v1/ledger`));
   w.partner.state.mode = "ok";
   await w.conformance();
   await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
@@ -541,12 +551,14 @@ test("a relayed request is refused by the partner, and an admin's endpoint chang
   assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), false);
   await w.conformance();
   await w.refused(w.provider, "set_partner_ledger_source", { source: "http" }, /http_400/);
-  assert.equal(relayed.length, 1);
+  // Two requests reached the relay: conformance's live audience probe, and the switch's live read. Both refused.
+  assert.equal(relayed.length, 2);
   assert.equal(w.partner.state.seen.at(-1).audience, `${relayUrl}/v1/ledger`);
 
   // An admin sending the firm back to sandbox tells the firm.
   await w.ok(w.admin, "set_partner_ledger_source", { source: "sandbox", entity_id: w.lp.entity.id });
-  assert.equal((await delivered("partner_ledger.source_changed")).length, 1);
+  const changes = (await delivered("partner_ledger.source_changed")).map((d) => (typeof d.payload === "string" ? JSON.parse(d.payload) : d.payload).data);
+  assert.equal(changes.filter((d) => d.by === "admin").length, 1);
 });
 
 test("a daily file counts only under the firm's current live key", async () => {
@@ -607,4 +619,130 @@ test("a ledger Mynt can't tell is unknown, never sandbox", async () => {
   });
   assert.equal(await health.ledgerState(randomUUID()), "unknown");
   assert.equal(await health.ledgerIsLive(randomUUID()), false);
+});
+
+// ---- puppet members: the cool-off, notices, and a second member's approval ----
+
+const backdate = (w, userId, days = 10) => w.pg.query("UPDATE financial_products.users SET created_at = now() - make_interval(days => $2), entity_joined_at = now() - make_interval(days => $2) WHERE id = $1", [userId, days]);
+const withCoolOff = async (hours, f) => {
+  const was = process.env.PARTNER_MEMBER_COOLOFF_HOURS;
+  process.env.PARTNER_MEMBER_COOLOFF_HOURS = String(hours);
+  try {
+    return await f();
+  } finally {
+    process.env.PARTNER_MEMBER_COOLOFF_HOURS = was;
+  }
+};
+const noticesOf = async (w, client) => w.ok(client, "list_firm_notices", {});
+
+test("a member who just joined can't change what Mynt reads as the firm's books, and the firm is told who joined", async () => {
+  const w = await world();
+  await w.connectHttp();
+  await w.conformance();
+  await w.ok(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` });
+  await w.ok(w.provider, "upload_partner_ledger_file", { statement: w.statement({ environment: "test" }, w.testKey) });
+  await backdate(w, w.lp.user.id);
+  // An admin adds a new account to the firm: the existing member is told, on the webhooks and as a notice.
+  const puppetUser = await w.store.upsertClerkUser("puppet", "puppet@example.com", "Puppet", ["license_provider"]);
+  const added = await w.ok(w.admin, "add_entity_member", { email: "puppet@example.com", entity_id: w.lp.entity.id });
+  assert.equal(added.firm_told.members, 1);
+  assert.ok((await noticesOf(w, w.provider)).some((n) => n.type === "firm.member_added" && n.data.member_email === "puppet@example.com"));
+  puppetUser.entity_id = w.lp.entity.id;
+  const puppet = await w.connect(puppetUser);
+  await withCoolOff(72, async () => {
+    await w.refused(puppet, "register_partner_signing_key", { public_key: edKey().address }, /joined this firm too recently/);
+    await w.refused(puppet, "register_partner_test_signing_key", { public_key: edKey().address }, /joined this firm too recently/);
+    await w.refused(puppet, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` }, /joined this firm too recently/);
+    await w.refused(puppet, "upload_partner_ledger_file", { statement: w.statement() }, /joined this firm too recently/);
+    await w.refused(puppet, "set_partner_ledger_source", { source: "http" }, /joined this firm too recently/);
+    // A test file is fine: it never reads as live.
+    await w.ok(puppet, "upload_partner_ledger_file", { statement: w.statement({ environment: "test", as_of: new Date(w.clock() + 1000).toISOString() }, w.testKey) });
+    // A long-standing member isn't held back.
+    await w.ok(w.provider, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` });
+  });
+  assert.ok((await noticesOf(w, puppet)).some((n) => n.type === "partner_ledger.endpoints_confirmed"));
+});
+
+test("with a second long-standing member, a live key change and a switch to live need that member's approval", async () => {
+  const w = await world();
+  await w.connectHttp();
+  await backdate(w, w.lp.user.id);
+  const otherUser = await w.store.upsertClerkUser("second", "second@example.com", "Second member", ["license_provider"]);
+  await w.ok(w.admin, "add_entity_member", { email: "second@example.com", entity_id: w.lp.entity.id });
+  otherUser.entity_id = w.lp.entity.id;
+  await backdate(w, otherUser.id);
+  const other = await w.connect(otherUser);
+
+  await withCoolOff(72, async () => {
+    // A live key change waits for the other member.
+    const replacement = edKey();
+    const asked = await w.ok(w.provider, "register_partner_signing_key", { public_key: replacement.address });
+    assert.equal(asked.status, "pending_approval");
+    assert.equal(await w.health.signingKey(w.lp.entity.id), w.key.address, "nothing changes until it's approved");
+    assert.ok((await noticesOf(w, other)).some((n) => n.type === "partner_ledger.approval_requested" && n.data.approval_id === asked.approval_id));
+    await w.refused(w.provider, "approve_partner_kit_change", { approval_id: asked.approval_id }, /another long-standing member/);
+    await w.ok(other, "approve_partner_kit_change", { approval_id: asked.approval_id, approve: false });
+    assert.equal(await w.health.signingKey(w.lp.entity.id), w.key.address);
+    const again = await w.ok(w.provider, "register_partner_signing_key", { public_key: replacement.address });
+    const approved = await w.ok(other, "approve_partner_kit_change", { approval_id: again.approval_id });
+    assert.equal(approved.status, "approved");
+    assert.equal(await w.health.signingKey(w.lp.entity.id), replacement.address);
+    assert.ok((await noticesOf(w, w.provider)).some((n) => n.type === "partner_ledger.key_changed" && n.data.public_key === replacement.address));
+    w.partner.state.mode = "ok";
+    // The partner signs live statements with its new key from now on.
+    w.key.privateKey = replacement.privateKey;
+    w.key.address = replacement.address;
+
+    // A switch to live waits too, and runs every check when approved.
+    await w.conformance();
+    const switching = await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+    assert.equal(switching.status, "pending_approval");
+    assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), false);
+    const live = await w.ok(other, "approve_partner_kit_change", { approval_id: switching.approval_id });
+    assert.equal(live.result.live, true);
+    assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), true);
+    assert.ok((await noticesOf(w, other)).some((n) => n.type === "partner_ledger.source_changed" && n.data.source === "http"));
+  });
+});
+
+test("a key once used for test is never accepted as live, nor a live key for test", async () => {
+  const w = await world();
+  const oldTest = w.testKey.address;
+  await w.ok(w.provider, "register_partner_test_signing_key", { public_key: edKey().address });
+  await w.refused(w.provider, "register_partner_signing_key", { public_key: oldTest }, /registered as a test signing key/);
+  const oldLive = w.key.address;
+  await w.ok(w.provider, "register_partner_signing_key", { public_key: edKey().address });
+  await w.refused(w.provider, "register_partner_test_signing_key", { public_key: oldLive }, /registered as a live signing key/);
+});
+
+test("a pass running out is warned of ahead, and the firm is told when it sends it back to the sandbox", async () => {
+  const w = await world();
+  await w.connectHttp();
+  await w.conformance();
+  await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+  const notices = async () => (await w.pg.query("SELECT type, data FROM financial_products.firm_notices WHERE user_id = $1 ORDER BY created_at", [w.lp.user.id])).rows;
+  // 25 days on: inside the warning window.
+  await w.pg.query("UPDATE financial_products.partner_conformance_runs SET created_at = now() - interval '25 days'");
+  await w.tick();
+  await w.tick();
+  assert.equal((await notices()).filter((n) => n.type === "partner_ledger.conformance_expiring").length, 1, "warned once");
+  // 31 days on: run out, back to the sandbox, told once.
+  await w.pg.query("UPDATE financial_products.partner_conformance_runs SET created_at = now() - interval '31 days'");
+  await w.tick();
+  await w.tick();
+  const expired = (await notices()).filter((n) => n.type === "partner_ledger.source_changed" && n.data.reason === "conformance_expired");
+  assert.equal(expired.length, 1);
+  assert.equal((await w.latest(w.products[0])).source, "sandbox");
+});
+
+test("confirming checks the very proposal it read: a newer one isn't confirmed by an older call", async () => {
+  const w = await world();
+  await w.propose(`${w.partner.url}/test`, `${w.partner.url}/live`);
+  // The admin proposes again before the firm confirms: the firm's call names the first URLs and is refused.
+  await w.propose(`${w.partner.url}/test`, `${w.partner.url}/live/other`);
+  await w.refused(w.provider, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live` }, /aren't the URLs proposed/);
+  const done = await w.confirm(`${w.partner.url}/test`, `${w.partner.url}/live/other`);
+  assert.equal(done.live_url, `${w.partner.url}/live/other`);
+  // Nothing is left to confirm twice.
+  await w.refused(w.provider, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/other` }, /No endpoint change/);
 });

@@ -145,7 +145,19 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   // The partner kit: a licence provider connects its ledger and sees pass or fail; admins set endpoints, never see figures.
   if (user && (has("license_provider") || has("admin"))) {
     const health = ctx.productHealth ?? null;
-    registerPartnerKitTools(server, store, user, { signingKeyOf: async (id) => (health ? health.signingKey(id) : null), opts: ctx.vendors, admin: has("admin"), licenceProvider: has("license_provider") });
+    registerPartnerKitTools(server, store, user, {
+      signingKeyOf: async (id) => (health ? health.signingKey(id) : null),
+      opts: ctx.vendors,
+      admin: has("admin"),
+      licenceProvider: has("license_provider"),
+      // A live key change a second member approved: the requester's own checks again, then recorded.
+      registerLiveKey: health
+        ? async (requester, publicKey, approvedBy) => {
+            const entityId = await health.checkSigningKey(requester, publicKey);
+            return health.registerSigningKeyFor(entityId, publicKey, requester.id, approvedBy);
+          }
+        : undefined,
+    });
   }
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);

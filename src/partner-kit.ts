@@ -3,9 +3,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { checkStatement, failedCases, ledgerUrl, requestLedger, signBody, type CheckCase, type Statement } from "./partner-ledger/contract.js";
 import { isLedgerError, ledgerError, sandboxPartnerLedger, type LedgerError, type PartnerLedger, type PartnerLedgerContext, type PartnerLedgerReading } from "./partner-ledger/index.js";
-import { emitFirmEvent } from "./runtime.js";
+import { firmNotices, noticeFirm } from "./firm-notices.js";
 import { base58Decode, isAddress, isWeakEd25519Key } from "./solana/codec.js";
 import type { Store, User } from "./store.js";
+import type { FirmWebhookEvent } from "./runtime.js";
 import { OutboundRefused, resolveVendorUrl, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
 import { derivedKey, open, seal, vaultAvailable } from "./vault.js";
 import { probeIdentityOffering } from "./vendors.js";
@@ -27,6 +28,12 @@ import { probeIdentityOffering } from "./vendors.js";
 // endpoint); admins propose endpoints but only the firm's own member makes them take effect, so an admin can't send
 // Mynt's live request somewhere it can read the answer; admins see pass or fail, never the figures (uploads are
 // sealed, and no case or problem carries a number); anything unsure is null with a reason.
+//
+// Against a puppet member (an account an admin or anyone else just added to the firm): a member cool-off, during which
+// a new member can't register keys, confirm endpoints, upload a live file or switch to live; notices to every existing
+// member and the firm's webhooks on each of those; and, when the firm has another long-standing member, that member's
+// approval of a live key change or a switch to live. What's left is an insider who has been a member past the cool-off
+// in a firm with no other member to object: docs/reference.md says so plainly.
 
 const T = "financial_products";
 const HOUR = 3_600_000;
@@ -38,6 +45,16 @@ export const conformanceMaxAgeMs = () => (Number(process.env.PARTNER_CONFORMANCE
 // One request per firm per snapshot round, with this time limit: a slow partner holds up only itself.
 export const ledgerTimeoutMs = () => Number(process.env.PARTNER_LEDGER_TIMEOUT_MS) || 10_000;
 const BATCH_REUSE_MS = 5 * 60_000;
+// A member who joined the firm (or whose account was made) less than this ago can't change what Mynt reads as the
+// firm's books. 0 turns it off (local demos only).
+export const memberCoolOffMs = () => {
+  const raw = process.env.PARTNER_MEMBER_COOLOFF_HOURS;
+  const n = raw === undefined || raw.trim() === "" ? 72 : Number(raw);
+  return (Number.isFinite(n) && n >= 0 ? n : 72) * HOUR;
+};
+// How long before a conformance pass runs out the firm is warned, and how long a request for approval stays open.
+export const conformanceWarnMs = () => (Number(process.env.PARTNER_CONFORMANCE_WARN_DAYS) || 7) * DAY;
+const APPROVAL_TTL_MS = 7 * DAY;
 export const LEDGER_SOURCES = ["sandbox", "http", "file"] as const;
 export type LedgerSource = (typeof LEDGER_SOURCES)[number];
 
@@ -102,6 +119,59 @@ export async function sponsoredProducts(store: Store, entityId: string): Promise
 const secretOf = (row: SourceRow | null) => (row?.signing_secret ? open(row.signing_secret, false) : null);
 const firmActive = async (store: Store, entityId: string) => (await store.getEntity(entityId))?.status === "active";
 
+// ---- the member cool-off and a second member's approval ----
+
+// When an account counts as a member of its firm from: the later of its creation and its joining the firm.
+async function memberSince(store: Store, userId: string): Promise<Date | null> {
+  const { rows } = await store.db.query(`SELECT created_at, entity_joined_at FROM ${T}.users WHERE id = $1`, [userId]);
+  if (!rows[0]) return null;
+  const created = new Date(rows[0].created_at as string).getTime();
+  const joined = rows[0].entity_joined_at ? new Date(rows[0].entity_joined_at as string).getTime() : created;
+  return new Date(Math.max(created, joined));
+}
+// The cool-off left for this member, in ms (0 when it's over).
+export async function coolOffLeftMs(store: Store, userId: string, now: Date): Promise<number> {
+  const since = await memberSince(store, userId);
+  if (!since) return memberCoolOffMs();
+  return Math.max(0, since.getTime() + memberCoolOffMs() - now.getTime());
+}
+export async function coolOffRefusal(store: Store, userId: string, now: Date, what: string): Promise<string | null> {
+  const left = await coolOffLeftMs(store, userId, now);
+  return left > 0
+    ? `You joined this firm too recently to ${what}: a member waits ${Math.round(memberCoolOffMs() / HOUR)} hours from joining (PARTNER_MEMBER_COOLOFF_HOURS), so a newly added account can't change what Mynt reads as your books. About ${Math.ceil(left / HOUR)} hour(s) to go.`
+    : null;
+}
+// The firm's other licence-provider members past the cool-off, who can approve a live change.
+async function seasonedOthers(store: Store, entityId: string, exceptUserId: string, now: Date): Promise<string[]> {
+  const { rows } = await store.db.query(`SELECT id, roles FROM ${T}.users WHERE entity_id = $1 AND id <> $2`, [entityId, exceptUserId]);
+  const out: string[] = [];
+  for (const r of rows) {
+    const roles = (r.roles as string[]) ?? [];
+    if (!roles.includes("license_provider") || roles.includes("admin")) continue;
+    if ((await coolOffLeftMs(store, r.id as string, now)) === 0) out.push(r.id as string);
+  }
+  return out;
+}
+// A live change that needs a second member: asked for, the firm told, and nothing done until one approves.
+async function requestApproval(store: Store, entityId: string, action: "live_key" | "source", payload: Record<string, unknown>, requestedBy: string) {
+  const id = randomUUID();
+  await store.db.query(`INSERT INTO ${T}.partner_kit_approvals (id, entity_id, action, payload, requested_by) VALUES ($1, $2, $3, $4, $5)`, [id, entityId, action, JSON.stringify(payload), requestedBy]);
+  await store.audit(requestedBy, "partner_kit_approval_requested", entityId, { approval_id: id, action, ...payload });
+  await noticeFirm(store, entityId, "partner_ledger.approval_requested", { approval_id: id, action, ...payload, approve_with: "approve_partner_kit_change" });
+  return { status: "pending_approval", approval_id: id, action, note: "Your firm has another long-standing member: one of them approves this with approve_partner_kit_change before it takes effect. They've been told." };
+}
+
+// The partner kit's gate on a live key change (register_partner_signing_key): the cool-off, then a second member's
+// approval when there is one. Returns null when the change may go ahead now.
+export async function gateLiveKeyChange(store: Store, user: User, entityId: string, publicKey: string, now = new Date()) {
+  const refused = await coolOffRefusal(store, user.id, now, "register or replace your firm's live signing key");
+  if (refused) return { refused };
+  if ((await seasonedOthers(store, entityId, user.id, now)).length) return { pending: await requestApproval(store, entityId, "live_key", { public_key: publicKey }, user.id) };
+  return null;
+}
+export const announceKeyChange = (store: Store, entityId: string, environment: "live" | "test", publicKey: string, by: string, approvedBy: string | null = null) =>
+  noticeFirm(store, entityId, "partner_ledger.key_changed", { environment, public_key: publicKey, by, ...(approvedBy ? { approved_by: approvedBy } : {}), at: new Date().toISOString() });
+
 // ---- the test signing key ----
 
 const testKeyMac = (entityId: string, publicKey: string) => {
@@ -109,6 +179,15 @@ const testKeyMac = (entityId: string, publicKey: string) => {
   if (!key) throw new Error("The partner kit needs MYNT_VAULT_KEY set on the server");
   return createHmac("sha256", key).update(`${entityId}\u0000${publicKey}`).digest("hex");
 };
+// The firm's live key's registration time: part of the cached batch's key, so a key change is read afresh at once.
+async function liveKeyRegisteredAt(store: Store, entityId: string): Promise<string> {
+  try {
+    const { rows } = await store.db.query(`SELECT registered_at FROM ${T}.product_health_signing_keys WHERE entity_id = $1`, [entityId]);
+    return rows[0] ? new Date(rows[0].registered_at as string).toISOString() : "none";
+  } catch {
+    return "none";
+  }
+}
 // The firm's test key, only if Mynt really recorded it: a key written straight into the table doesn't count.
 export async function testSigningKey(store: Store, entityId: string): Promise<string | null> {
   const { rows } = await store.db.query(`SELECT public_key, mac FROM ${T}.partner_test_signing_keys WHERE entity_id = $1`, [entityId]);
@@ -179,7 +258,7 @@ export function httpPartnerLedger(store: Store, entityId: string, deps: PartnerK
       const row = await sourceRow(store, entityId);
       if (!row) return ledgerError("not_configured", "The partner's live endpoint isn't configured");
       const now = ctx.now();
-      const key = `${ctx.period_end}|${row.config_version}`;
+      const key = `${ctx.period_end}|${row.config_version}|${await liveKeyRegisteredAt(store, entityId)}`;
       let entry = batches.get(entityId);
       if (!entry || entry.key !== key || now.getTime() - entry.at > BATCH_REUSE_MS || !entry.batch.products.includes(ctx.product_id)) {
         const products = [...new Set([...(await sponsoredProducts(store, entityId)), ctx.product_id])].sort();
@@ -232,9 +311,64 @@ export function partnerLedgerFor(store: Store, deps: PartnerKitDeps): (entityId:
   return async (entityId) => {
     const row = await sourceRow(store, entityId);
     if (!row || row.active_source === "sandbox") return sandboxPartnerLedger;
-    if (!runQualifies(row, await runById(store, row.active_run_id), deps.now?.() ?? new Date())) return sandboxPartnerLedger;
+    const now = deps.now?.() ?? new Date();
+    const run = await runById(store, row.active_run_id);
+    if (!runQualifies(row, run, now)) {
+      await noteExpired(store, row, run, now);
+      return sandboxPartnerLedger;
+    }
+    await warnExpiring(store, row, run!, now);
     return row.active_source === "http" ? httpPartnerLedger(store, entityId, deps, batches) : filePartnerLedger(store, entityId, deps);
   };
+}
+
+const runExpiresAt = (run: RunRow) => new Date(new Date(run.created_at).getTime() + conformanceMaxAgeMs());
+
+// A pass that ran out sends the firm back to the sandbox: it's told once, on its webhooks and as a notice to each member.
+async function noteExpired(store: Store, row: SourceRow, run: RunRow | null, now: Date) {
+  if (!run || run.source !== row.active_source || runExpiresAt(run).getTime() > now.getTime()) return;
+  const { rows } = await store.db.query(
+    `UPDATE ${T}.partner_ledger_sources SET expired_notified_run_id = $2 WHERE entity_id = $1 AND expired_notified_run_id IS DISTINCT FROM $2 RETURNING entity_id`,
+    [row.entity_id, run.id],
+  );
+  if (!rows.length) return;
+  await store.audit(null, "partner_ledger_conformance_expired", row.entity_id, { run_id: run.id, source: row.active_source });
+  await noticeFirm(store, row.entity_id, "partner_ledger.source_changed", { source: "sandbox", was: row.active_source, reason: "conformance_expired", run_id: run.id, expired_at: runExpiresAt(run).toISOString(), next: "run_partner_conformance, then set_partner_ledger_source" });
+}
+// Ahead of that, a warning once per run, PARTNER_CONFORMANCE_WARN_DAYS before it runs out.
+async function warnExpiring(store: Store, row: SourceRow, run: RunRow, now: Date) {
+  if (runExpiresAt(run).getTime() - now.getTime() > conformanceWarnMs()) return;
+  const { rows } = await store.db.query(
+    `UPDATE ${T}.partner_ledger_sources SET expiry_warned_run_id = $2 WHERE entity_id = $1 AND expiry_warned_run_id IS DISTINCT FROM $2 RETURNING entity_id`,
+    [row.entity_id, run.id],
+  );
+  if (!rows.length) return;
+  await noticeFirm(store, row.entity_id, "partner_ledger.conformance_expiring", { source: row.active_source, run_id: run.id, live_until: runExpiresAt(run).toISOString(), next: "run_partner_conformance before then, or your snapshots go back to the sandbox" });
+}
+
+// Switching a firm's ledger to a live source, once every check passes (and, when it needed one, a second member approved).
+async function switchToLive(store: Store, deps: PartnerKitDeps, firm: string, source: "http" | "file", actor: string, approvedBy: string | null, now: Date): Promise<{ error: string } | Record<string, unknown>> {
+  const run = await latestRun(store, firm, source);
+  const row = await sourceRow(store, firm);
+  if (!run || !run.ledger_passed) return { error: `Your latest ${source} conformance hasn't passed its ledger part: run_partner_conformance { source: "${source}" } until it does` };
+  if (now.getTime() - new Date(run.created_at).getTime() > conformanceMaxAgeMs()) return { error: "Your latest conformance pass has run out: run it again" };
+  if (source === "http") {
+    if (!row?.live_url || run.config_version !== row.config_version) return { error: "Your endpoints changed after your last conformance run: run it again" };
+    // One read of the live endpoint, checked like any other (live key only); the figures are thrown away.
+    const s = await readLive(store, firm, row, await sponsoredProducts(store, firm), now.toISOString(), now, deps);
+    if (isLedgerError(s)) return { error: `Your live endpoint's statement didn't pass Mynt's checks (${s.error.code})` };
+  } else {
+    const u = await latestUpload(store, firm, "live");
+    if (!u || now.getTime() - new Date(u.as_of as string).getTime() > fileMaxAgeMs()) return { error: "Upload today's live daily file first (upload_partner_ledger_file with environment live)" };
+  }
+  await store.db.query(
+    `INSERT INTO ${T}.partner_ledger_sources (entity_id, active_source, active_run_id, activated_by, activated_at) VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (entity_id) DO UPDATE SET active_source = EXCLUDED.active_source, active_run_id = EXCLUDED.active_run_id, activated_by = EXCLUDED.activated_by, activated_at = now(), updated_at = now()`,
+    [firm, source, run.id, actor],
+  );
+  await store.audit(actor, "set_partner_ledger_source", firm, { source, run_id: run.id, ...(approvedBy ? { approved_by: approvedBy } : {}) });
+  await noticeFirm(store, firm, "partner_ledger.source_changed", { source, by: "member", ...(approvedBy ? { approved: true } : {}), live_until: runExpiresAt(run).toISOString(), at: now.toISOString() });
+  return { entity_id: firm, ledger_source: source, live: true, conformance_run_id: run.id, conformance_at: iso(run.created_at), live_until: runExpiresAt(run).toISOString(), note: "Your next product-health snapshots read this source" };
 }
 
 // ---- conformance ----
@@ -295,6 +429,11 @@ async function httpLedgerCases(store: Store, entityId: string, products: string[
   cases.push(refusedCase("wrong_environment_refused", (await requestLedger({ ...base, product_ids: products, environment_claim: "live" }, opts)).result, REFUSALS, "a correctly signed request for the live environment, sent to your test endpoint"));
   // A request meant for another URL may have been relayed: it must be refused.
   cases.push(refusedCase("wrong_audience_refused", (await requestLedger({ ...base, product_ids: products, audience: ledgerUrl(row!.live_url!) }, opts)).result, REFUSALS, "a correctly signed request whose audience is another URL (your live endpoint's)"));
+  // The live endpoint, probed without asking for any figures: a live request whose audience is another URL (the test
+  // endpoint's), naming only a product Mynt made up. It must be refused before anything is read. Its answer's body is
+  // dropped unread, whatever it holds.
+  const probe = (await requestLedger({ ...base, base_url: row!.live_url!, environment: "live", product_ids: [`mynt_conformance_audience_probe_${randomBytes(4).toString("hex")}`], audience: ledgerUrl(row!.test_url!) }, opts)).result;
+  cases.push(refusedCase("live_wrong_audience_refused", { ...probe, body: probe.body && typeof probe.body === "object" && "error" in (probe.body as object) ? { error: (probe.body as { error: unknown }).error } : null }, REFUSALS, "a correctly signed live request whose audience is your test endpoint's URL, sent to your live endpoint"));
   return { cases, config_version };
 }
 
@@ -426,6 +565,7 @@ export async function partnerKitSummary(store: Store, entityId: string, o: { run
   const row = await sourceRow(store, entityId);
   const { rows: runs } = await store.db.query(`SELECT * FROM ${T}.partner_conformance_runs WHERE entity_id = $1 ORDER BY created_at DESC LIMIT $2`, [entityId, o.runs ?? 10]);
   const { rows: uploads } = await store.db.query(`SELECT id, environment, as_of, products, uploaded_at FROM ${T}.partner_ledger_uploads WHERE entity_id = $1 ORDER BY uploaded_at DESC LIMIT 10`, [entityId]);
+  const { rows: approvals } = await store.db.query(`SELECT id, action, payload, requested_by, requested_at FROM ${T}.partner_kit_approvals WHERE entity_id = $1 AND status = 'pending' ORDER BY requested_at DESC LIMIT 20`, [entityId]);
   const active = row?.active_source ?? "sandbox";
   const activeRun = row ? await runById(store, row.active_run_id) : null;
   const live = !!row && active !== "sandbox" && runQualifies(row, activeRun, now);
@@ -443,12 +583,13 @@ export async function partnerKitSummary(store: Store, entityId: string, o: { run
     pending_endpoint_change: row?.pending_at
       ? { test_url: row.pending_test_url, live_url: row.pending_live_url, proposed_at: iso(row.pending_at), note: "Proposed by a Mynt admin. It doesn't take effect until your firm's own licence provider checks both URLs are yours and confirms with confirm_partner_ledger_endpoints." }
       : null,
+    pending_approvals: approvals.map((a) => ({ approval_id: a.id, action: a.action, ...(a.payload as object), requested_by: a.requested_by, requested_at: iso(a.requested_at), approve_with: "approve_partner_kit_change" })),
     request_secret: { issued: !!row?.signing_secret, taken: !!row?.secret_shown_at },
     test_signing_key: await testSigningKey(store, entityId),
     last_conformance: { http: await last("http"), file: await last("file") },
     conformance_runs: (runs as unknown as RunRow[]).map(runView),
     daily_files: uploads.map((u) => ({ upload_id: u.id, environment: u.environment, as_of: iso(u.as_of), products: u.products, uploaded_at: iso(u.uploaded_at) })),
-    limits: { http_max_age_hours: httpMaxAgeMs() / HOUR, file_max_age_hours: fileMaxAgeMs() / HOUR, conformance_max_age_days: conformanceMaxAgeMs() / DAY, request_timeout_ms: ledgerTimeoutMs(), clock_skew_seconds: 300 },
+    limits: { member_cool_off_hours: memberCoolOffMs() / HOUR, http_max_age_hours: httpMaxAgeMs() / HOUR, file_max_age_hours: fileMaxAgeMs() / HOUR, conformance_max_age_days: conformanceMaxAgeMs() / DAY, request_timeout_ms: ledgerTimeoutMs(), clock_skew_seconds: 300 },
     guide: "docs/partners.md",
   };
 }
@@ -457,13 +598,14 @@ export async function partnerKitSummary(store: Store, entityId: string, o: { run
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string, extra: Record<string, unknown> = {}) => ({ ...json({ error, ...extra }), isError: true });
-const notify = (store: Store, entityId: string, type: "partner_ledger.endpoint_change_pending" | "partner_ledger.source_changed", data: Record<string, unknown>) =>
-  emitFirmEvent(store, entityId, type, data, false).catch((e) => {
-    console.error("partner kit: webhook not queued:", (e as Error).message);
-    return 0;
-  });
+const tell = async (store: Store, entityId: string, type: FirmWebhookEvent, data: Record<string, unknown>) => (await noticeFirm(store, entityId, type, data)).webhooks;
 
-export function registerPartnerKitTools(server: McpServer, store: Store, user: User, o: PartnerKitDeps & { admin: boolean; licenceProvider: boolean }) {
+export function registerPartnerKitTools(
+  server: McpServer,
+  store: Store,
+  user: User,
+  o: PartnerKitDeps & { admin: boolean; licenceProvider: boolean; registerLiveKey?: (requester: User, publicKey: string, approvedBy: string) => Promise<Record<string, unknown>> },
+) {
   const deps: PartnerKitDeps = { signingKeyOf: o.signingKeyOf, opts: o.opts, now: o.now };
   const now = () => o.now?.() ?? new Date();
   const myFirm = async () => ((await store.getUser(user.id)) ?? user).entity_id ?? null;
@@ -549,7 +691,7 @@ export function registerPartnerKitTools(server: McpServer, store: Store, user: U
           [entity_id, normUrl(test_url), normUrl(live_url), user.id],
         );
         await store.audit(user.id, "configure_partner_ledger", entity_id, { test_url: normUrl(test_url), live_url: normUrl(live_url), status: "pending_confirmation" });
-        const notified = await notify(store, entity_id, "partner_ledger.endpoint_change_pending", { test_url: normUrl(test_url), live_url: normUrl(live_url), proposed_at: now().toISOString(), confirm_with: "confirm_partner_ledger_endpoints" });
+        const notified = await tell(store, entity_id, "partner_ledger.endpoint_change_pending", { test_url: normUrl(test_url), live_url: normUrl(live_url), proposed_at: now().toISOString(), confirm_with: "confirm_partner_ledger_endpoints" });
         return json({ entity_id, test_url: normUrl(test_url), live_url: normUrl(live_url), status: "pending_confirmation", firm_notified_webhooks: notified, note: "Nothing changes until the firm's own licence provider confirms these with confirm_partner_ledger_endpoints" });
       },
     );
@@ -568,42 +710,96 @@ export function registerPartnerKitTools(server: McpServer, store: Store, user: U
         if (o.admin && source !== "sandbox") return fail("Only the firm's own licence provider can switch it to a live source; an admin can only send it back to sandbox");
         const firm = await firmFor(entity_id, source !== "sandbox");
         if (typeof firm !== "string") return fail(firm.error);
-        const set = async (runId: string | null) => {
-          await store.db.query(
-            `INSERT INTO ${T}.partner_ledger_sources (entity_id, active_source, active_run_id, activated_by, activated_at) VALUES ($1, $2, $3, $4, now())
-             ON CONFLICT (entity_id) DO UPDATE SET active_source = EXCLUDED.active_source, active_run_id = EXCLUDED.active_run_id, activated_by = EXCLUDED.activated_by, activated_at = now(), updated_at = now()`,
-            [firm, source, runId, user.id],
-          );
-          await store.audit(user.id, o.admin ? "admin_set_partner_ledger_source" : "set_partner_ledger_source", firm, { source, run_id: runId });
-        };
         if (source === "sandbox") {
-          await set(null);
-          const notified = o.admin ? await notify(store, firm, "partner_ledger.source_changed", { source: "sandbox", by: "admin", at: now().toISOString() }) : 0;
-          return json({ entity_id: firm, ledger_source: "sandbox", live: false, ...(o.admin ? { firm_notified_webhooks: notified } : {}) });
+          await store.db.query(
+            `INSERT INTO ${T}.partner_ledger_sources (entity_id, active_source, active_run_id, activated_by, activated_at) VALUES ($1, 'sandbox', NULL, $2, now())
+             ON CONFLICT (entity_id) DO UPDATE SET active_source = 'sandbox', active_run_id = NULL, activated_by = EXCLUDED.activated_by, activated_at = now(), updated_at = now()`,
+            [firm, user.id],
+          );
+          await store.audit(user.id, o.admin ? "admin_set_partner_ledger_source" : "set_partner_ledger_source", firm, { source });
+          const notified = await tell(store, firm, "partner_ledger.source_changed", { source: "sandbox", by: o.admin ? "admin" : "member", at: now().toISOString() });
+          return json({ entity_id: firm, ledger_source: "sandbox", live: false, firm_notified_webhooks: notified });
         }
-        const run = await latestRun(store, firm, source);
-        const row = await sourceRow(store, firm);
-        const refuse = async (reason: string, extra: Record<string, unknown> = {}) => {
+        const refuse = async (reason: string) => {
           await store.audit(user.id, "set_partner_ledger_source_refused", firm, { source, reason });
-          return fail(reason, extra);
+          return fail(reason);
         };
-        if (!run || !run.ledger_passed) return refuse(`Your latest ${source} conformance hasn't passed its ledger part: run_partner_conformance { source: "${source}" } until it does`);
-        if (now().getTime() - new Date(run.created_at).getTime() > conformanceMaxAgeMs()) return refuse("Your latest conformance pass has run out: run it again");
-        if (source === "http") {
-          if (!row?.live_url || run.config_version !== row.config_version) return refuse("Your endpoints changed after your last conformance run: run it again");
-          // One read of the live endpoint, checked like any other (live key only); the figures are thrown away.
-          const s = await readLive(store, firm, row, await sponsoredProducts(store, firm), now().toISOString(), now(), deps);
-          if (isLedgerError(s)) return refuse(`Your live endpoint's statement didn't pass Mynt's checks (${s.error.code})`);
-        } else {
-          const u = await latestUpload(store, firm, "live");
-          if (!u || now().getTime() - new Date(u.as_of as string).getTime() > fileMaxAgeMs()) return refuse("Upload today's live daily file first (upload_partner_ledger_file with environment live)");
+        const cooling = await coolOffRefusal(store, user.id, now(), "switch your firm's ledger to a live source");
+        if (cooling) return refuse(cooling);
+        if ((await seasonedOthers(store, firm, user.id, now())).length) {
+          // Checked now so a request that can't pass isn't put to the other member; checked again when approved.
+          const dry = await latestRun(store, firm, source);
+          if (!dry || !dry.ledger_passed) return refuse(`Your latest ${source} conformance hasn't passed its ledger part: run_partner_conformance { source: "${source}" } until it does`);
+          return json(await requestApproval(store, firm, "source", { source }, user.id));
         }
-        await set(run.id);
-        return json({ entity_id: firm, ledger_source: source, live: true, conformance_run_id: run.id, conformance_at: iso(run.created_at), live_until: new Date(new Date(run.created_at).getTime() + conformanceMaxAgeMs()).toISOString(), note: "Your next product-health snapshots read this source" });
+        const done = await switchToLive(store, deps, firm, source, user.id, null, now());
+        return "error" in done ? refuse(done.error as string) : json(done);
       },
     );
 
   if (!member) return;
+
+  server.registerTool(
+    "list_firm_notices",
+    {
+      title: "Notices to you about your firm",
+      description:
+        "Licence provider: what's changed at your firm that you should know about, newest first: members added (by an admin), signing keys registered or replaced, endpoints proposed and confirmed, the ledger source switched (including by an admin, or because a conformance pass ran out), passes about to run out, and changes waiting for your approval. The same go to your firm's webhooks. Reading them marks them read.",
+      inputSchema: { limit: z.number().int().min(1).max(200).default(50) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ limit }) => json(await firmNotices(store, user.id, limit)),
+  );
+
+  server.registerTool(
+    "approve_partner_kit_change",
+    {
+      title: "Approve (or decline) a live change another member asked for",
+      description:
+        "Licence provider: when your firm has more than one long-standing member, a live signing key change or a switch to a live ledger source needs a second member's approval. Approve or decline a pending request (its id is in get_partner_kit's pending_approvals and in your notices). You can't approve your own request, and you must be past the member cool-off yourself. Approving runs the change with every check again. Audited.",
+      inputSchema: { approval_id: z.string().uuid(), approve: z.boolean().default(true) },
+    },
+    async ({ approval_id, approve }) => {
+      const firm = await firmFor(undefined);
+      if (typeof firm !== "string") return fail(firm.error);
+      const { rows } = await store.db.query(`SELECT * FROM ${T}.partner_kit_approvals WHERE id = $1 AND entity_id = $2`, [approval_id, firm]);
+      const a = rows[0] as { id: string; action: "live_key" | "source"; payload: Record<string, string>; status: string; requested_by: string; requested_at: string } | undefined;
+      if (!a) return fail("No such request at your firm");
+      if (a.status !== "pending") return fail(`That request is already ${a.status}`);
+      if (a.requested_by === user.id) return fail("You asked for this change: another long-standing member approves it");
+      if (now().getTime() - new Date(a.requested_at).getTime() > APPROVAL_TTL_MS) return fail("That request is more than 7 days old: ask again");
+      const cooling = await coolOffRefusal(store, user.id, now(), "approve live changes");
+      if (cooling) return fail(cooling);
+      const requester = await store.getUser(a.requested_by);
+      if (!requester || requester.entity_id !== firm) return fail("Whoever asked for this is no longer a member of your firm");
+      const decide = async (status: "approved" | "declined") => {
+        const { rows: done } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, status, user.id]);
+        if (!done.length) return false;
+        await store.audit(user.id, `partner_kit_change_${status}`, firm, { approval_id: a.id, action: a.action, ...a.payload });
+        return true;
+      };
+      if (!approve) return (await decide("declined")) ? json({ approval_id: a.id, status: "declined" }) : fail("Someone else decided it first");
+      let result: Record<string, unknown>;
+      if (a.action === "live_key") {
+        if (!o.registerLiveKey) return fail("Signing keys can't be registered on this server (product health isn't running)");
+        try {
+          result = await o.registerLiveKey(requester, a.payload.public_key, user.id);
+        } catch (e) {
+          return fail((e as Error).message);
+        }
+        if (!(await decide("approved"))) return fail("Someone else decided it first");
+        await announceKeyChange(store, firm, "live", a.payload.public_key, "member", user.id);
+      } else {
+        const cool = await coolOffRefusal(store, requester.id, now(), "switch your firm's ledger to a live source");
+        if (cool) return fail(cool);
+        const done = await switchToLive(store, deps, firm, a.payload.source as "http" | "file", requester.id, user.id, now());
+        if ("error" in done) return fail(done.error as string);
+        if (!(await decide("approved"))) return fail("Someone else decided it first");
+        result = done;
+      }
+      return json({ approval_id: a.id, status: "approved", result });
+    },
+  );
 
   server.registerTool(
     "confirm_partner_ledger_endpoints",
@@ -618,23 +814,33 @@ export function registerPartnerKitTools(server: McpServer, store: Store, user: U
       if (typeof firm !== "string") return fail(firm.error);
       const row = await sourceRow(store, firm);
       if (!row?.pending_at) return fail("No endpoint change is waiting for your firm");
-      if (normUrl(test_url) !== row.pending_test_url || normUrl(live_url) !== row.pending_live_url) return fail("Those aren't the URLs proposed: read pending_endpoint_change in get_partner_kit and pass them back exactly");
+      const testUrl = normUrl(test_url);
+      const liveUrl = normUrl(live_url);
+      if (testUrl !== row.pending_test_url || liveUrl !== row.pending_live_url) return fail("Those aren't the URLs proposed: read pending_endpoint_change in get_partner_kit and pass them back exactly");
+      // Only the very proposal that was checked: a newer one made meanwhile isn't confirmed or declined by this call.
+      const same = `entity_id = $1 AND pending_test_url = $2 AND pending_live_url = $3 AND pending_at = $4`;
+      const checked = [firm, testUrl, liveUrl, row.pending_at];
       if (!accept) {
-        await store.db.query(`UPDATE ${T}.partner_ledger_sources SET pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL, updated_at = now() WHERE entity_id = $1`, [firm]);
-        await store.audit(user.id, "decline_partner_ledger_endpoints", firm, { test_url: row.pending_test_url, live_url: row.pending_live_url });
+        const { rows } = await store.db.query(`UPDATE ${T}.partner_ledger_sources SET pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL, updated_at = now() WHERE ${same} RETURNING entity_id`, checked);
+        if (!rows.length) return fail("The proposal changed while you were looking: read get_partner_kit again");
+        await store.audit(user.id, "decline_partner_ledger_endpoints", firm, { test_url: testUrl, live_url: liveUrl });
         return json({ entity_id: firm, status: "declined" });
       }
-      const changed = row.test_url !== row.pending_test_url || row.live_url !== row.pending_live_url;
+      const cooling = await coolOffRefusal(store, user.id, now(), "confirm your firm's ledger endpoints");
+      if (cooling) return fail(cooling);
+      const changed = row.test_url !== testUrl || row.live_url !== liveUrl;
       const backToSandbox = changed && row.active_source === "http";
-      await store.db.query(
-        `UPDATE ${T}.partner_ledger_sources SET test_url = pending_test_url, live_url = pending_live_url, pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL,
-           signing_secret = COALESCE(signing_secret, $2), config_version = config_version + CASE WHEN $3 THEN 1 ELSE 0 END,
-           active_source = CASE WHEN $4 THEN 'sandbox' ELSE active_source END, active_run_id = CASE WHEN $4 THEN NULL ELSE active_run_id END,
-           configured_by = $5, configured_at = now(), updated_at = now()
-         WHERE entity_id = $1`,
-        [firm, seal(newSecret(), false), changed, backToSandbox, user.id],
+      const { rows: done } = await store.db.query(
+        `UPDATE ${T}.partner_ledger_sources SET test_url = $2, live_url = $3, pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL,
+           signing_secret = COALESCE(signing_secret, $5), config_version = config_version + CASE WHEN $6 THEN 1 ELSE 0 END,
+           active_source = CASE WHEN $7 THEN 'sandbox' ELSE active_source END, active_run_id = CASE WHEN $7 THEN NULL ELSE active_run_id END,
+           configured_by = $8, configured_at = now(), updated_at = now()
+         WHERE ${same} RETURNING entity_id`,
+        [...checked, seal(newSecret(), false), changed, backToSandbox, user.id],
       );
-      await store.audit(user.id, "confirm_partner_ledger_endpoints", firm, { test_url: row.pending_test_url, live_url: row.pending_live_url, changed, back_to_sandbox: backToSandbox });
+      if (!done.length) return fail("The proposal changed while you were looking: read get_partner_kit again");
+      await store.audit(user.id, "confirm_partner_ledger_endpoints", firm, { test_url: testUrl, live_url: liveUrl, changed, back_to_sandbox: backToSandbox });
+      await tell(store, firm, "partner_ledger.endpoints_confirmed", { test_url: testUrl, live_url: liveUrl, changed, back_to_sandbox: backToSandbox, at: now().toISOString() });
       const cur = (await sourceRow(store, firm))!;
       return json({
         entity_id: firm,
@@ -662,13 +868,21 @@ export function registerPartnerKitTools(server: McpServer, store: Store, user: U
       if (typeof firm !== "string") return fail(firm.error);
       if (!vaultAvailable(false)) return fail("The partner kit needs MYNT_VAULT_KEY set on the server");
       if (!isAddress(public_key) || isWeakEd25519Key(base58Decode(public_key))) return fail("public_key must be a usable Ed25519 public key, base58 (a Solana-style address)");
-      if ((await o.signingKeyOf(firm)) === public_key || (await everLiveKey(store, firm, public_key))) return fail("That's a live signing key of your firm: the test key must be a different key");
+      const cooling = await coolOffRefusal(store, user.id, now(), "register or replace your firm's test signing key");
+      if (cooling) return fail(cooling);
+      if ((await o.signingKeyOf(firm)) === public_key || (await everLiveKey(store, public_key))) return fail("That key has been registered as a live signing key: the test key must be a different key");
       await store.db.query(
         `INSERT INTO ${T}.partner_test_signing_keys (entity_id, public_key, registered_by, mac) VALUES ($1, $2, $3, $4)
          ON CONFLICT (entity_id) DO UPDATE SET public_key = EXCLUDED.public_key, registered_by = EXCLUDED.registered_by, registered_at = now(), mac = EXCLUDED.mac`,
         [firm, public_key, user.id, testKeyMac(firm, public_key)],
       );
+      // Every test key is kept, MACed: one once used for test is never accepted as a live key.
+      await store.db.query(
+        `INSERT INTO ${T}.partner_test_signing_key_history (entity_id, public_key, registered_by, mac) VALUES ($1, $2, $3, $4) ON CONFLICT (entity_id, public_key) DO UPDATE SET mac = EXCLUDED.mac`,
+        [firm, public_key, user.id, testKeyMac(firm, public_key)],
+      );
       await store.audit(user.id, "register_partner_test_signing_key", firm, { public_key });
+      await announceKeyChange(store, firm, "test", public_key, "member");
       return json({ entity_id: firm, public_key, environment: "test", note: "Sign test statements with this key only; live statements with your live key." });
     },
   );
@@ -727,6 +941,10 @@ export function registerPartnerKitTools(server: McpServer, store: Store, user: U
       if (!vaultAvailable(false)) return fail("The partner kit needs MYNT_VAULT_KEY set on the server");
       const products = await sponsoredProducts(store, firm);
       const environment = statement.environment === "test" ? "test" : "live";
+      if (environment === "live") {
+        const cooling = await coolOffRefusal(store, user.id, now(), "upload a live daily file");
+        if (cooling) return fail(cooling);
+      }
       const check = checkStatement(statement, { entity_id: firm, environment, request_id: null, ...(await keysFor(store, firm, deps, environment)), now: now(), max_age_ms: fileMaxAgeMs(), product_ids: products });
       if (!check.ok) {
         await store.audit(user.id, "upload_partner_ledger_file_refused", firm, { failed: failedCases(check) });
@@ -760,10 +978,10 @@ export function registerPartnerKitTools(server: McpServer, store: Store, user: U
   );
 }
 
-// Whether a key was ever the firm's live key (product-health's history table, when it exists).
-async function everLiveKey(store: Store, entityId: string, publicKey: string): Promise<boolean> {
+// Whether a key was ever registered as a live key, by any firm (product-health's history table, when it exists).
+async function everLiveKey(store: Store, publicKey: string): Promise<boolean> {
   try {
-    const { rows } = await store.db.query(`SELECT 1 FROM ${T}.product_health_signing_key_history WHERE entity_id = $1 AND public_key = $2`, [entityId, publicKey]);
+    const { rows } = await store.db.query(`SELECT 1 FROM ${T}.product_health_signing_key_history WHERE public_key = $1`, [publicKey]);
     return rows.length > 0;
   } catch {
     return false;

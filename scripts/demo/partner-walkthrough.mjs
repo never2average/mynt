@@ -384,7 +384,12 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   const { createMcpHttpServer } = await imp("dist/http.js");
   const { Store } = await imp("dist/store.js");
   const { setFirmCheckSourcesForTests } = await imp("dist/firm-checks.js");
-  const { ProductHealthService } = await imp("dist/product-health.js");
+  const { ProductHealthService, canonicalJson } = await imp("dist/product-health.js");
+  const { partnerLedgerFor } = await imp("dist/partner-kit.js");
+  // Every account in this walkthrough was made a minute ago. On a real server a new member of a licence provider waits
+  // PARTNER_MEMBER_COOLOFF_HOURS (72 by default) before it can register keys or connect the firm's books; the demo
+  // turns that wait off, and says so in step 6.
+  process.env.PARTNER_MEMBER_COOLOFF_HOURS ??= "0";
   const { CovenantService } = await imp("dist/covenants.js");
   const { LiquidityWorker, exitedLiquidityProvider, liquidityProviderBooks, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf } = await imp("dist/liquidity.js");
   const { flowsFor } = await imp("dist/money-rails.js");
@@ -423,9 +428,13 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   let clock = Math.floor(Date.now() / HOUR) * HOUR - 6 * HOUR + 5 * 60_000;
   const now = () => new Date(clock);
 
-  // The partner's books as a sandbox ledger: test figures the script sets as the story goes, never real money.
+  // The partner's books. Until step 6 they're a sandbox ledger: test figures the script sets as the story goes. In step 6
+  // the provider connects its own books through the partner kit (a signed daily file), and from then on Mynt reads those.
   const books = { reserves: 150_000_00, owed: 100_000_00 };
   const ledger = { id: "demo-sandbox", name: "Demo sandbox ledger (test figures, not real money)", kind: "sandbox", read: async (c) => ({ reserves_held_cents: books.reserves, customer_obligations_cents: books.owed, as_of: c.period_end }) };
+
+  let health = null;
+  const kitLedger = partnerLedgerFor(store, { signingKeyOf: (id) => health.signingKey(id), now });
 
   let chain;
   let rpcUrl;
@@ -438,9 +447,13 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
     chain = makeFakeChain(lib, "GLi9SM8q1Q8S1k5SFHWpZ7v9uWK9M5ZDxhd6ESjuSfVz");
     rpcUrl = (await serve("stand-in chain RPC", chainRpcStandIn(lib, codec, chain))).url;
   }
-  const health = await ProductHealthService.open(db, store, { intervalMs: HOUR, cosignWindowMs: 10 * 60_000, pollMs: 60_000, programId: chain.programId }, {
+  health = await ProductHealthService.open(db, store, { intervalMs: HOUR, cosignWindowMs: 10 * 60_000, pollMs: 60_000, programId: chain.programId }, {
     chain,
-    ledgerFor: () => ledger,
+    // The provider's own books once it has passed the partner kit's conformance and switched to them; the sandbox before.
+    ledgerFor: async (id) => {
+      const own = await kitLedger(id);
+      return own.kind === "live" ? own : ledger;
+    },
     flowsFor: (productId, from, to) => flowsFor(store, productId, from, to),
     now,
     liquidityProvidersOf: (id) => liquidityProvidersOf(store, id),
@@ -655,6 +668,16 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   const partnerKey = generateKeyPairSync("ed25519");
   const partnerAddress = codec.base58Encode(Buffer.from(partnerKey.publicKey.export({ format: "jwk" }).x, "base64url"));
   const cosign = (fingerprint) => edSign(null, Buffer.from(lib.cosignMessage(Buffer.from(fingerprint, "hex"))), partnerKey.privateKey).toString("hex");
+  // The provider's daily ledger file (docs/partners.md): its books per sponsored product, as of now on the workers'
+  // clock, signed with the key for that environment over the text, a zero byte, and the statement's canonical JSON.
+  let lastAsOf = 0;
+  let providerFirmId = null;
+  const dailyFile = (environment, key, address) => {
+    lastAsOf = Math.max(clock, lastAsOf + 1000);
+    const unsigned = { schema: "mynt.partner_ledger.v1", provider_entity_id: providerFirmId, environment, request_id: null, as_of: new Date(lastAsOf).toISOString(), products: [{ product_id: PRODUCT, reserves_held_cents: books.reserves, customer_obligations_cents: books.owed, reason: null }] };
+    const message = Buffer.concat([Buffer.from("mynt.partner_ledger.v1"), Buffer.from([0]), Buffer.from(canonicalJson(unsigned))]);
+    return { ...unsigned, signature: { public_key: address, value: edSign(null, message, key.privateKey).toString("hex") } };
+  };
   await must(provider, "register_partner_signing_key", { public_key: partnerAddress });
   note(`The provider registered its own Ed25519 signing key ${partnerAddress} (its private half never reaches Mynt).`);
   const signPending = async () => {
@@ -697,7 +720,21 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   hookSecret = hook.secret;
   const rule = await must(provider, "set_covenant", { sponsorship_id: sponsorship.id, rule_type: "coverage_below", threshold: 10_000, action: "alert" });
   note(`The provider set: alert when coverage (reserves / owed) is below ${pct(rule.threshold)}; its webhook is the local receiver.`);
+  // A covenant on a live product judges real books only: sandbox figures there read unknown. So the provider connects
+  // its own books first, with the partner kit's fallback for a firm without an API: a signed daily file.
+  note("A rule on a live product is judged on the provider's own books, never on sandbox figures, so first the provider connects them.");
+  note("(Demo only: the provider's account is a minute old; on a real server a new member waits 72 hours before it can do this.)");
+  providerFirmId = (await store.getUser(lpUser.id)).entity_id;
+  const testKey = generateKeyPairSync("ed25519");
+  const testAddress = codec.base58Encode(Buffer.from(testKey.publicKey.export({ format: "jwk" }).x, "base64url"));
+  await must(provider, "register_partner_test_signing_key", { public_key: testAddress });
+  await must(provider, "upload_partner_ledger_file", { statement: dailyFile("test", testKey, testAddress) });
+  const fileRun = await must(provider, "run_partner_conformance", { source: "file" });
+  note(`Its test file passed the ledger checks: ${fileRun.ledger.passed ? "yes" : "no"} (${fileRun.ledger.cases.filter((c) => c.passed).length}/${fileRun.ledger.cases.length} cases).`);
   books.reserves = 95_000_00;
+  await must(provider, "upload_partner_ledger_file", { statement: dailyFile("live", partnerKey, partnerAddress) });
+  const connected = await must(provider, "set_partner_ledger_source", { source: "file" });
+  note(`It uploaded today's live file, signed with its live key, and switched: Mynt now reads its books (${connected.ledger_source}, live ${connected.live}).`);
   note(`Next period the partner's books say reserves ${usd(books.reserves)} against ${usd(books.owed)} owed (95%).`);
   await period();
   const [breach] = await must(provider, "list_covenant_breaches", {});
@@ -710,6 +747,7 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   // ---- 7 ----
   step(7, "A liquidity provider funds a pool, is paid within the reserve rule, and a withdrawal that would breach it waits");
   books.reserves = 120_000_00;
+  await must(provider, "upload_partner_ledger_file", { statement: dailyFile("live", partnerKey, partnerAddress) });
   const poolRails = {};
   for (const direction of ["deposit", "payout"]) {
     const proposed = await must(provider, "propose_rail", { kind: "ach", provider: "demo-bank-placeholder", direction, states: ["us-ny", "us-ca"], per_transfer_limit_cents: 10_000_000, daily_limit_cents: 50_000_000, note: "Demo pool rail" });
@@ -727,7 +765,7 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   const commit = await must(fund, "commit_to_pool", { pool_id: pool.id, amount_cents: 5_000_000, state: "us-ny", idempotency_key: `demo-commit-${randomUUID()}` });
   await must(provider, "report_pool_movement", { movement_id: commit.movement_id, outcome: "settled", external_ref: "demo-ach-in-1" });
   note(`'${FUND_NAME}' committed ${usd(5_000_000)}; the provider reported it settled.`);
-  note(`This period the books say reserves ${usd(books.reserves)} against ${usd(books.owed)} owed: ${usd(books.reserves - books.owed)} of headroom over the reserve.`);
+  note(`This period the provider's daily file says reserves ${usd(books.reserves)} against ${usd(books.owed)} owed: ${usd(books.reserves - books.owed)} of headroom over the reserve.`);
   await period();
   const w1 = await must(fund, "request_withdrawal", { pool_id: pool.id, amount_cents: 2_000_000, idempotency_key: `demo-out-${randomUUID()}` });
   await pools.tick();

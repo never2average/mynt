@@ -29,6 +29,8 @@ You need a Mynt account with the licence-provider role at your firm (an admin at
 3. **Your endpoints** (for the HTTPS feed). Tell your Mynt contact your test and live URLs, for example `https://ledger-test.partner.example` and `https://ledger.partner.example`. Each must be an origin and a path only (no query string, no fragment), HTTPS on port 443, on a public address, and different from the other. An admin proposes them with `configure_partner_ledger`, and **nothing changes until you confirm**: you get a `partner_ledger.endpoint_change_pending` event on your firm's webhooks, `get_partner_kit` shows the proposal under `pending_endpoint_change`, and you check that both URLs are your own deployments before passing them back with `confirm_partner_ledger_endpoints` (or `accept: false` to decline). Confirming a change puts your firm back on the sandbox until you pass conformance again.
 4. **Mynt's request secret.** Once your endpoints are confirmed, take the secret Mynt signs its requests with: `reveal_partner_ledger_secret`. It's shown once, to your firm's own people only (admins never see it). Keep it in your secrets store. `rotate_partner_ledger_secret` replaces it.
 
+**Changes to your books' connection wait, and are told.** A member who joined your firm in the last 72 hours can't register or replace keys, confirm endpoints, upload a live file or switch your ledger to live, so an account added to your firm can't quietly take over what Mynt reads as your books. Every one of those changes, and every member an admin adds, goes to your firm's webhooks and to each of your members (`list_firm_notices`). With two or more long-standing members, a live key change or a switch to live waits for a second member's `approve_partner_kit_change`. Act on these notices: they're how you'd see someone else changing your connection.
+
 ## (a) The ledger feed over HTTPS
 
 Mynt is the client. It calls your endpoint when it records a product's health (hourly by default) and during conformance. Your test endpoint gets only test requests; your live endpoint only live ones.
@@ -223,12 +225,13 @@ Propose your rails with `propose_rail`; an admin approves them against your lice
 | `malformed_request_refused` | A correctly signed request with no `product_ids` gets `400` (or `422`) and an error body |
 | `wrong_environment_refused` | A correctly signed request for `"live"`, sent to your test endpoint, gets a `4xx` and an error body |
 | `wrong_audience_refused` | A correctly signed request whose `audience` is another URL (your live endpoint's) gets a `4xx` and an error body |
+| `live_wrong_audience_refused` | Your **live** endpoint refuses a correctly signed live request whose `audience` is your test endpoint's URL (it names only a product Mynt made up, so no live figure is asked for, and anything that comes back is dropped unread) |
 
 For the file source, the cases are `setup` and the statement checks above, run on your latest upload. The run also reports (b) as `identity` and (c) as `rails`, each with its own `passed`.
 
 **Going live.** When the ledger part passes (`can_go_live: true`), switch with `set_partner_ledger_source { "source": "http" }`. Mynt then reads your live endpoint once and checks the statement, which must be signed with your live key (the figures are discarded); if that passes, your next snapshots read your live books and are marked `source: partner_ledger`. For the file source, upload a live file first, then `set_partner_ledger_source { "source": "file" }`. `set_partner_ledger_source { "source": "sandbox" }` goes back. An admin can also send your firm back to the sandbox, never switch it to live, and you're told with a `partner_ledger.source_changed` event on your webhooks.
 
-**A pass runs out.** Each run has an `expires_at`, 30 days after it ran. A pass that has run out neither lets you switch nor keeps you live: your snapshots go back to the sandbox until you run conformance again, so run it on a schedule. `get_partner_kit` shows `live_until`.
+**A pass runs out.** Each run has an `expires_at`, 30 days after it ran; you're warned a week before (`partner_ledger.conformance_expiring`) and told when it happens (`partner_ledger.source_changed`). A pass that has run out neither lets you switch nor keeps you live: your snapshots go back to the sandbox until you run conformance again, so run it on a schedule. `get_partner_kit` shows `live_until`.
 
 (b) and (c) don't hold up the ledger switch: they're checked on every money movement already, and conformance shows you where you stand.
 

@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { noticeFirm } from "./firm-notices.js";
 import { z } from "zod";
 import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import type { ClerkAdmin } from "./auth.js";
@@ -420,7 +421,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "add_entity_member",
     {
       title: "Add someone to a firm",
-      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles).",
+      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). The firm's existing members are told, on its webhooks (firm.member_added) and as a notice each.",
       inputSchema: { email: z.string().email(), entity_id: z.string() },
     },
     async ({ email, entity_id }) => {
@@ -428,9 +429,13 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (!member) return fail(`${email} hasn't signed in to Mynt yet`);
       const entity = await store.getEntity(entity_id);
       if (!entity) return fail(`No firm '${entity_id}'`);
+      // The firm's existing members are told before the new one joins, on its webhooks and as a notice each: an admin
+      // adding someone to a firm is never silent (firm-notices.ts).
+      const already = member.entity_id === entity.id;
+      const told = already ? null : await noticeFirm(store, entity.id, "firm.member_added", { member_email: member.email, member_roles: member.roles, added_at: new Date().toISOString(), by: "admin" });
       await store.setUserEntity(member.id, entity.id);
       await audit("add_entity_member", entity.id, { email: member.email });
-      return json({ entity_id: entity.id, entity: entity.name, member: member.email });
+      return json({ entity_id: entity.id, entity: entity.name, member: member.email, ...(told ? { firm_told: told } : {}) });
     },
   );
 

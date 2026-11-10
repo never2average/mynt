@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { effectiveRoles, type Store, type User } from "./store.js";
 import { SCHEMA, type ProductHealthService } from "./product-health.js";
+import { announceKeyChange, gateLiveKeyChange } from "./partner-kit.js";
 
 // Tools for each product's financial health. Numbers go only to the product's licence provider and liquidity
 // providers. An admin account sees status and fingerprints (list_product_health) and is refused the numbers, even if it
@@ -56,10 +57,19 @@ export function registerProductHealthTools(server: McpServer, _store: Store, use
     {
       title: "Register your firm's snapshot signing key",
       description:
-        "Licence provider: register your firm's Ed25519 public key (base58) for co-signing product-health snapshots. Your firm signs the fingerprint of each snapshot with its private key (which never reaches Mynt) and sends it with submit_partner_signature. Registering again replaces the key.",
+        "Licence provider: register your firm's live Ed25519 public key (base58), for co-signing product-health snapshots and signing your live ledger statements. Your firm signs with its private key (which never reaches Mynt). Registering again replaces the key. A member who joined less than the cool-off ago can't (PARTNER_MEMBER_COOLOFF_HOURS); when your firm has another long-standing member, that member approves the change (approve_partner_kit_change). Every member and your firm's webhooks are told (partner_ledger.key_changed).",
       inputSchema: { public_key: z.string().min(32).max(64).describe("Your firm's Ed25519 public key, base58") },
     },
-    async ({ public_key }) => attempt(() => health.registerSigningKey(user, public_key)),
+    async ({ public_key }) =>
+      attempt(async () => {
+        const entityId = await health.checkSigningKey(user, public_key);
+        const gate = await gateLiveKeyChange(_store, user, entityId, public_key, new Date());
+        if (gate && "refused" in gate) throw new Error(gate.refused);
+        if (gate) return gate.pending;
+        const done = await health.registerSigningKeyFor(entityId, public_key, user.id);
+        await announceKeyChange(_store, entityId, "live", public_key, "member");
+        return done;
+      }),
   );
 
   server.registerTool(

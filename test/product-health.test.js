@@ -15,6 +15,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 // what the program enforces; CI runs the real program on a local validator.
 
 process.env.MYNT_VAULT_KEY = randomBytes(32).toString("base64");
+// These tests' licence-provider accounts are minutes old: the partner kit's member cool-off (tested on its own in
+// partner-kit.test.js) is off here, so they can register keys straight away.
+process.env.PARTNER_MEMBER_COOLOFF_HOURS ??= "0";
 
 const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");

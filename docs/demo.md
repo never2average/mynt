@@ -55,10 +55,15 @@ the summary should say PASS.
    against what's owed to customers), encrypts it so only the provider can read it, waits for the provider to
    co-sign it with its own key, and records its fingerprint on a blockchain. Then a separate, standalone checker
    (`scripts/product-health-verify.mjs`, which uses nothing from Mynt) confirms the record: "OVERALL PASS".
-6. **A covenant.** The provider sets a rule: tell us when reserves fall below 100% of what's owed. The next period's
-   books show 95%, the rule trips, and the alert arrives at the provider's own webhook, signed so it can tell it
-   came from Mynt. (Sandbox figures can raise an alert, but never pause a live product.)
-7. **A liquidity pool.** A liquidity provider puts $50,000 into a pool backing the product. An admin records that the
+6. **A covenant.** The provider sets a rule: tell us when reserves fall below 100% of what's owed. A rule on a live
+   product is judged on the provider's own books, never on sandbox figures, so the provider first connects them with
+   the [partner kit](partners.md)'s fallback for a firm without an API: it registers a test key, uploads a signed test
+   file, passes conformance, uploads today's live file signed with its live key, and switches its ledger to it. The
+   next period's books show 95%, the rule trips on those real (stand-in) books, and the alert arrives at the
+   provider's own webhook, signed so it can tell it came from Mynt. (On a real server a new member of a licence
+   provider waits 72 hours before it can connect the firm's books; the demo's accounts are a minute old, so it turns
+   that wait off and says so.)
+7. **A liquidity pool.** The provider uploads the day's new file. A liquidity provider puts $50,000 into a pool backing the product. An admin records that the
    offering was cleared. The provider asks for $20,000 back and is paid, because the reserve stays above its minimum.
    A second request for $10,000 would take the reserve below its minimum, so it waits in the queue for a healthier
    snapshot instead of being paid.

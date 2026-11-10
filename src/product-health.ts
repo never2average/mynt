@@ -1022,27 +1022,46 @@ export class ProductHealthService {
 
   // ---- co-signing ----
 
-  async registerSigningKey(user: User, publicKey: string) {
+  // Who may register a firm's live key, and whether the key may be one: refused for anyone but the firm's own active,
+  // non-admin licence-provider member, for a weak key, and for any key ever registered as a test key (partner-kit.ts).
+  // The partner kit's tool adds its own gates (the member cool-off, a second member's approval) before registering.
+  async checkSigningKey(user: User, publicKey: string): Promise<string> {
     const me = (await this.store.getUser(user.id)) ?? user;
     if (!me.entity_id) throw new HealthError("You don't belong to a firm yet");
     if (!me.roles.includes("license_provider") || me.roles.includes("admin")) throw new HealthError("Only a licence provider firm's own member registers a signing key");
     if (!(await this.isActive(me.entity_id))) throw new HealthError("Your firm isn't active");
     if (!isAddress(publicKey) || isWeakEd25519Key(base58Decode(publicKey))) throw new HealthError("public_key must be a usable Ed25519 public key, base58 (a Solana-style address)");
-    // The firm's test key (partner-kit.ts) signs test books only: it can never also be the live key.
-    const { rows: testKey } = await this.db.query(`SELECT 1 FROM ${T}.partner_test_signing_keys WHERE entity_id = $1 AND public_key = $2`, [me.entity_id, publicKey]);
-    if (testKey.length) throw new HealthError("That's your firm's test signing key: the live key must be a different key");
+    // A key ever used to sign test books, by any firm, is never a live key.
+    const { rows: testKey } = await this.db.query(`SELECT 1 FROM ${T}.partner_test_signing_key_history WHERE public_key = $1 UNION SELECT 1 FROM ${T}.partner_test_signing_keys WHERE public_key = $1`, [publicKey]);
+    if (testKey.length) throw new HealthError("That key has been registered as a test signing key: the live key must be a different key");
+    return me.entity_id;
+  }
+
+  async registerSigningKey(user: User, publicKey: string) {
+    const entityId = await this.checkSigningKey(user, publicKey);
+    return this.registerSigningKeyFor(entityId, publicKey, user.id);
+  }
+
+  // Records the firm's live key (after the checks above, and any approval the partner kit needed).
+  async registerSigningKeyFor(entityId: string, publicKey: string, registeredBy: string, approvedBy: string | null = null) {
     await this.db.query(
       `INSERT INTO ${T}.product_health_signing_keys (entity_id, public_key, registered_by) VALUES ($1, $2, $3)
        ON CONFLICT (entity_id) DO UPDATE SET public_key = EXCLUDED.public_key, registered_by = EXCLUDED.registered_by, registered_at = now()`,
-      [me.entity_id, publicKey, me.id],
+      [entityId, publicKey, registeredBy],
     );
     // Earlier snapshots stay checkable against the key that signed them.
     await this.db.query(
       `INSERT INTO ${T}.product_health_signing_key_history (entity_id, public_key, registered_by, mac) VALUES ($1, $2, $3, $4) ON CONFLICT (entity_id, public_key) DO UPDATE SET mac = EXCLUDED.mac`,
-      [me.entity_id, publicKey, me.id, this.keyMac(me.entity_id, publicKey)],
+      [entityId, publicKey, registeredBy, this.keyMac(entityId, publicKey)],
     );
-    await this.store.audit(user.id, "register_partner_signing_key", me.entity_id, { public_key: publicKey });
-    return { entity_id: me.entity_id, public_key: publicKey, sign: "with Ed25519, the UTF-8 text 'mynt.product_health.cosign.v1', one zero byte, then the 32 bytes of the snapshot's fingerprint (sha256, hex in list_product_health)" };
+    await this.store.audit(registeredBy, "register_partner_signing_key", entityId, { public_key: publicKey, ...(approvedBy ? { approved_by: approvedBy } : {}) });
+    return { entity_id: entityId, public_key: publicKey, sign: "with Ed25519, the UTF-8 text 'mynt.product_health.cosign.v1', one zero byte, then the 32 bytes of the snapshot's fingerprint (sha256, hex in list_product_health)" };
+  }
+
+  // When the firm's current live key was registered (the partner kit keys its cached reads by it), or null.
+  async signingKeyRegisteredAt(entityId: string): Promise<string | null> {
+    const { rows } = await this.db.query(`SELECT registered_at FROM ${T}.product_health_signing_keys WHERE entity_id = $1`, [entityId]);
+    return rows[0] ? new Date(rows[0].registered_at as string).toISOString() : null;
   }
 
   // A partner's co-signature over one snapshot. Refused unless the firm still sponsors the product, the window is

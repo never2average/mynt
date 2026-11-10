@@ -103,7 +103,12 @@ export const FIRM_WEBHOOK_EVENTS = [
   "covenant.breached",
   "covenant.cleared",
   "partner_ledger.endpoint_change_pending",
+  "partner_ledger.endpoints_confirmed",
   "partner_ledger.source_changed",
+  "partner_ledger.key_changed",
+  "partner_ledger.approval_requested",
+  "partner_ledger.conformance_expiring",
+  "firm.member_added",
 ] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 
