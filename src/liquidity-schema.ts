@@ -60,8 +60,9 @@ export const LIQUIDITY_TABLES = `
     pool_id uuid NOT NULL REFERENCES ${T}.liquidity_pools(id),
     lp_entity_id uuid NOT NULL REFERENCES ${T}.entities(id),
     amount_cents bigint NOT NULL CHECK (amount_cents > 0),
-    status text NOT NULL CHECK (status IN ('queued', 'paying', 'paid', 'paid_short', 'cancelled', 'no_balance', 'parked')),
+    status text NOT NULL CHECK (status IN ('queued', 'paying', 'paid', 'paid_short', 'returned', 'cancelled', 'no_balance', 'parked')),
     status_reason text, -- why it was parked
+    parked_at timestamptz, -- parked keeps its place: the worker tries it again, or it's lifted when the cause is fixed
     requested_by uuid,
     requested_at timestamptz NOT NULL,
     eligible_at timestamptz NOT NULL,
@@ -126,7 +127,6 @@ export const LIQUIDITY_TABLES = `
     prior ${T}.pool_movements%ROWTYPE;
     seen boolean;
     held text;
-    out_at timestamptz;
     x bigint;
   BEGIN
     SELECT * INTO p FROM ${T}.liquidity_pools WHERE id = p_pool FOR UPDATE;
@@ -161,8 +161,11 @@ export const LIQUIDITY_TABLES = `
       RETURN;
     END IF;
     -- The state a firm's capital moves from can't change under a live position: every withdrawal depends on it.
-    SELECT c.state, c.exited_at INTO held, out_at FROM ${T}.pool_commitments c WHERE c.pool_id = p_pool AND c.lp_entity_id = p_lp;
-    IF FOUND AND out_at IS NULL AND held <> p_state THEN
+    SELECT c.state INTO held FROM ${T}.pool_commitments c WHERE c.pool_id = p_pool AND c.lp_entity_id = p_lp;
+    IF FOUND AND held <> p_state AND (
+      EXISTS (SELECT 1 FROM ${T}.pool_positions s WHERE s.pool_id = p_pool AND s.lp_entity_id = p_lp AND (s.contributed_cents - s.withdrawn_cents > 0 OR s.pending_in_cents > 0 OR s.pending_out_cents > 0 OR s.unresolved_in_cents > 0 OR s.unresolved_out_cents > 0))
+      OR EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w WHERE w.pool_id = p_pool AND w.lp_entity_id = p_lp AND w.status IN ('queued', 'paying', 'parked'))
+    ) THEN
       RETURN QUERY SELECT 'state_locked'::text, NULL::uuid, held, NULL::bigint;
       RETURN;
     END IF;
@@ -180,7 +183,7 @@ export const LIQUIDITY_TABLES = `
       VALUES (p_id, p_key, p_pool, p_lp, 'deposit', p_amount, p_state, 'claimed', p_now);
     -- The state itself only changes once this deposit is authorised (authorizePoolMovement).
     INSERT INTO ${T}.pool_commitments (pool_id, lp_entity_id, state, committed_by) VALUES (p_pool, p_lp, p_state, p_by)
-      ON CONFLICT (pool_id, lp_entity_id) DO UPDATE SET committed_by = EXCLUDED.committed_by, exited_at = NULL;
+      ON CONFLICT (pool_id, lp_entity_id) DO UPDATE SET committed_by = EXCLUDED.committed_by; -- exited_at clears once money settles
     RETURN QUERY SELECT 'reserved'::text, p_id, 'claimed'::text, x + p_amount;
   END $fn$;
 
@@ -213,7 +216,7 @@ export const LIQUIDITY_TABLES = `
     SELECT COALESCE(sum(w.amount_cents - COALESCE(c.consumed, 0)), 0) INTO open_requests
       FROM ${T}.pool_withdrawals w
       LEFT JOIN LATERAL (SELECT sum(amount_cents) AS consumed FROM ${T}.pool_movement_states s WHERE s.withdrawal_id = w.id AND s.ledger_state <> 'released') c ON true
-      WHERE w.pool_id = p_pool AND w.lp_entity_id = p_lp AND w.status = 'queued';
+      WHERE w.pool_id = p_pool AND w.lp_entity_id = p_lp AND w.status IN ('queued', 'parked');
     available := balance - open_requests;
     IF p_amount > available THEN
       RETURN QUERY SELECT 'insufficient'::text, NULL::uuid, GREATEST(available, 0);
@@ -237,7 +240,7 @@ export const LIQUIDITY_TABLES = `
     END IF;
     PERFORM 1 FROM ${T}.liquidity_pools WHERE id = w.pool_id FOR UPDATE;
     SELECT * INTO w FROM ${T}.pool_withdrawals WHERE id = p_id;
-    IF w.status <> 'queued' THEN
+    IF w.status NOT IN ('queued', 'parked') THEN
       RETURN QUERY SELECT 'not_queued'::text, w.status;
       RETURN;
     END IF;
@@ -246,11 +249,12 @@ export const LIQUIDITY_TABLES = `
   END $fn$;
 
   -- The head of the queue and how much of it may be paid now, in one locked step: the amount is taken from the request
-  -- here, before the chokepoint is asked, so two workers can never both have it. Reserves are the product's, so every
-  -- pool of the product is locked (in id order: no deadlocks) and shares one headroom: what the snapshot allowed, less
-  -- what may have left since that snapshot's reading and it can't have seen. That's every withdrawal of the product's
-  -- pools, its other outflows, and any deposit reversed since. A firm that's suspended, or whose own payment is still
-  -- unknown, is passed over: it doesn't stop the firms behind it.
+  -- here, before the chokepoint is asked, so two workers can never both have it. A sponsor's reserves for a product are
+  -- one figure (see partner-ledger/types.ts), so every pool of the product is locked (in id order: no deadlocks) and a
+  -- sponsor's pools share one headroom: what the snapshot allowed, less what may have left since that snapshot's reading
+  -- and it can't have seen. That's every withdrawal of that sponsor's pools, its other outflows on the product, and any
+  -- deposit reversed since. A firm that's suspended, has a request parked, or whose own payment is still unknown is
+  -- passed over: it doesn't stop the firms behind it.
   CREATE OR REPLACE FUNCTION ${T}.claim_pool_withdrawal(p_claim uuid, p_pool uuid, p_headroom bigint, p_as_of timestamptz, p_max_transfer bigint, p_now timestamptz)
   RETURNS TABLE (o_outcome text, o_withdrawal uuid, o_lp uuid, o_amount bigint) LANGUAGE plpgsql AS $fn$
   DECLARE
@@ -282,12 +286,13 @@ export const LIQUIDITY_TABLES = `
         UPDATE ${T}.pool_withdrawals SET status = 'paying' WHERE id = w.id;
         CONTINUE;
       END IF;
+      IF (SELECT status FROM ${T}.entities WHERE id = w.lp_entity_id) IS DISTINCT FROM 'active'
+        OR EXISTS (SELECT 1 FROM ${T}.pool_withdrawals x WHERE x.pool_id = p_pool AND x.lp_entity_id = w.lp_entity_id AND x.status = 'parked') THEN
+        CONTINUE;
+      END IF;
       IF w.eligible_at > p_now THEN
         RETURN QUERY SELECT 'not_yet'::text, w.id, w.lp_entity_id, NULL::bigint;
         RETURN;
-      END IF;
-      IF (SELECT status FROM ${T}.entities WHERE id = w.lp_entity_id) IS DISTINCT FROM 'active' THEN
-        CONTINUE;
       END IF;
       SELECT COALESCE(sum(contributed_cents - withdrawn_cents), 0), COALESCE(sum(pending_out_cents + unresolved_out_cents), 0) INTO held, out_flight
         FROM ${T}.pool_positions WHERE pool_id = p_pool AND lp_entity_id = w.lp_entity_id;
@@ -299,12 +304,12 @@ export const LIQUIDITY_TABLES = `
         CONTINUE;
       END IF;
       SELECT COALESCE(sum(s.amount_settled_cents), 0) INTO spent FROM ${T}.pool_movement_states s JOIN ${T}.liquidity_pools q ON q.id = s.pool_id
-        WHERE q.product_id = p.product_id AND q.sandbox = p.sandbox AND s.kind = 'withdrawal' AND (s.ledger_state IN ('in_flight', 'unresolved') OR (s.ledger_state = 'settled' AND s.settled_at > p_as_of));
+        WHERE q.product_id = p.product_id AND q.sponsor_entity_id = p.sponsor_entity_id AND q.sandbox = p.sandbox AND s.kind = 'withdrawal' AND (s.ledger_state IN ('in_flight', 'unresolved') OR (s.ledger_state = 'settled' AND s.settled_at > p_as_of));
       SELECT COALESCE(sum(COALESCE(m.settled_amount_cents, m.amount_cents, 0)), 0) INTO other FROM ${T}.money_movements m
-        WHERE m.product_id = p.product_id AND m.sandbox = p.sandbox AND m.direction IN ('off_ramp', 'payout') AND COALESCE(m.action, '') NOT IN ('pool_deposit', 'pool_withdrawal')
+        WHERE m.product_id = p.product_id AND m.sponsor_entity_id = p.sponsor_entity_id AND m.sandbox = p.sandbox AND m.direction IN ('off_ramp', 'payout') AND COALESCE(m.action, '') NOT IN ('pool_deposit', 'pool_withdrawal')
           AND (m.status IN ('requested', 'submitted') OR (m.status = 'failed' AND m.status_detail IN ('stale_no_answer', 'mynt_gave_up')) OR (m.status = 'settled' AND m.settled_at > p_as_of));
       SELECT COALESCE(sum(s.amount_cents), 0) INTO undone FROM ${T}.pool_movement_states s JOIN ${T}.liquidity_pools q ON q.id = s.pool_id
-        WHERE q.product_id = p.product_id AND q.sandbox = p.sandbox AND s.kind = 'deposit' AND s.ledger_state = 'reversed' AND s.reversed_at > p_as_of AND s.settled_at <= p_as_of;
+        WHERE q.product_id = p.product_id AND q.sponsor_entity_id = p.sponsor_entity_id AND q.sandbox = p.sandbox AND s.kind = 'deposit' AND s.ledger_state = 'reversed' AND s.reversed_at > p_as_of AND s.settled_at <= p_as_of;
       pay := LEAST(remaining, held - out_flight, p_headroom - spent - other - undone, p_max_transfer);
       IF pay <= 0 THEN
         RETURN QUERY SELECT 'no_headroom'::text, w.id, w.lp_entity_id, NULL::bigint;
@@ -322,7 +327,8 @@ export const LIQUIDITY_TABLES = `
   END $fn$;
 
   -- Brings a pool's requests and commitments in line with what the ledger now says. A payment that failed for certain
-  -- puts its amount back at the same place in the queue; one that came back after settling isn't paid again by itself.
+  -- puts its amount back at the same place in the queue; one that came back after settling isn't paid again by itself
+  -- (a request whose whole amount came back is 'returned').
   CREATE OR REPLACE FUNCTION ${T}.refresh_pool_withdrawals(p_pool uuid, p_now timestamptz) RETURNS void LANGUAGE plpgsql AS $fn$
   DECLARE
     w ${T}.pool_withdrawals%ROWTYPE;
@@ -331,12 +337,12 @@ export const LIQUIDITY_TABLES = `
     actual bigint;
   BEGIN
     PERFORM 1 FROM ${T}.liquidity_pools WHERE id = p_pool FOR UPDATE;
-    FOR w IN SELECT * FROM ${T}.pool_withdrawals WHERE pool_id = p_pool AND status IN ('queued', 'paying') ORDER BY seq LOOP
+    FOR w IN SELECT * FROM ${T}.pool_withdrawals x WHERE x.pool_id = p_pool AND (x.status IN ('queued', 'paying') OR (x.status IN ('paid', 'paid_short') AND EXISTS (SELECT 1 FROM ${T}.pool_movement_states s WHERE s.withdrawal_id = x.id AND s.ledger_state = 'reversed'))) ORDER BY x.seq LOOP
       SELECT COALESCE(sum(amount_cents) FILTER (WHERE ledger_state <> 'released'), 0), COALESCE(sum(amount_cents) FILTER (WHERE ledger_state IN ('settled', 'reversed')), 0),
-             COALESCE(sum(amount_settled_cents) FILTER (WHERE ledger_state = 'settled'), 0) + COALESCE(sum(amount_cents) FILTER (WHERE ledger_state = 'reversed'), 0) INTO consumed, done, actual
+             COALESCE(sum(amount_settled_cents) FILTER (WHERE ledger_state = 'settled'), 0) INTO consumed, done, actual
         FROM ${T}.pool_movement_states WHERE withdrawal_id = w.id;
       IF done >= w.amount_cents THEN
-        UPDATE ${T}.pool_withdrawals SET status = CASE WHEN actual < w.amount_cents THEN 'paid_short' ELSE 'paid' END, closed_at = p_now WHERE id = w.id;
+        UPDATE ${T}.pool_withdrawals SET status = CASE WHEN actual = 0 THEN 'returned' WHEN actual < w.amount_cents THEN 'paid_short' ELSE 'paid' END, closed_at = COALESCE(closed_at, p_now) WHERE id = w.id;
       ELSIF consumed >= w.amount_cents AND w.status <> 'paying' THEN
         UPDATE ${T}.pool_withdrawals SET status = 'paying' WHERE id = w.id;
       ELSIF consumed < w.amount_cents AND w.status <> 'queued' THEN
@@ -352,20 +358,26 @@ export const LIQUIDITY_TABLES = `
       WHERE c.pool_id = p_pool AND c.exited_at IS NULL
         AND COALESCE((SELECT contributed_cents - withdrawn_cents FROM ${T}.pool_positions s WHERE s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id), 0) <= 0
         AND NOT EXISTS (SELECT 1 FROM ${T}.pool_movement_states s WHERE s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id AND s.ledger_state IN ('in_flight', 'unresolved'))
-        AND NOT EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w2 WHERE w2.pool_id = c.pool_id AND w2.lp_entity_id = c.lp_entity_id AND w2.status IN ('queued', 'paying'));
+        AND NOT EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w2 WHERE w2.pool_id = c.pool_id AND w2.lp_entity_id = c.lp_entity_id AND w2.status IN ('queued', 'paying', 'parked'));
     UPDATE ${T}.pool_commitments c SET exited_at = NULL
       WHERE c.pool_id = p_pool AND c.exited_at IS NOT NULL
         AND COALESCE((SELECT contributed_cents - withdrawn_cents FROM ${T}.pool_positions s WHERE s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id), 0) > 0;
   END $fn$;
 
-  -- A settlement arriving for a withdrawal Mynt had written off. Under the pool's lock, so it can't race a new claim on
-  -- the same amount: if the request has since been paid another way, this money would pay it twice, so it's refused.
-  CREATE OR REPLACE FUNCTION ${T}.settle_late_pool_withdrawal(p_movement uuid, p_ref text, p_settled bigint)
+  -- A sponsor's report that a withdrawal settled. Under the pool's lock, so it can't race a claim on the same amount.
+  -- Refused if the money was written off and its amount since paid again, or if it would take the firm's position below
+  -- zero, counting what's on its way out or unresolved: then it would pay more than the firm holds.
+  CREATE OR REPLACE FUNCTION ${T}.settle_pool_withdrawal(p_movement uuid, p_ref text, p_settled bigint)
   RETURNS TABLE (o_outcome text) LANGUAGE plpgsql AS $fn$
   DECLARE
     pm ${T}.pool_movements%ROWTYPE;
     w ${T}.pool_withdrawals%ROWTYPE;
+    st text;
+    detail text;
     others bigint;
+    held bigint;
+    out_flight bigint;
+    amt bigint;
   BEGIN
     SELECT * INTO pm FROM ${T}.pool_movements WHERE movement_id = p_movement;
     IF NOT FOUND OR pm.kind <> 'withdrawal' THEN
@@ -373,16 +385,34 @@ export const LIQUIDITY_TABLES = `
       RETURN;
     END IF;
     PERFORM 1 FROM ${T}.liquidity_pools WHERE id = pm.pool_id FOR UPDATE;
-    SELECT * INTO w FROM ${T}.pool_withdrawals WHERE id = pm.withdrawal_id;
-    SELECT COALESCE(sum(amount_cents), 0) INTO others FROM ${T}.pool_movement_states WHERE withdrawal_id = pm.withdrawal_id AND id <> pm.id AND ledger_state <> 'released';
-    IF others + pm.amount_cents > w.amount_cents THEN
-      RETURN QUERY SELECT 'reclaimed'::text;
+    SELECT status, status_detail INTO st, detail FROM ${T}.money_movements WHERE id = p_movement;
+    IF st NOT IN ('requested', 'submitted', 'failed') THEN
+      RETURN QUERY SELECT 'no_change'::text;
       RETURN;
     END IF;
-    UPDATE ${T}.money_movements SET status = 'settled', status_detail = 'late_settlement', settled_at = now(), updated_at = now(), external_ref = COALESCE(p_ref, external_ref),
+    SELECT * INTO w FROM ${T}.pool_withdrawals WHERE id = pm.withdrawal_id;
+    IF st = 'failed' THEN
+      SELECT COALESCE(sum(amount_cents), 0) INTO others FROM ${T}.pool_movement_states WHERE withdrawal_id = pm.withdrawal_id AND id <> pm.id AND ledger_state <> 'released';
+      IF others + pm.amount_cents > w.amount_cents THEN
+        RETURN QUERY SELECT 'reclaimed'::text;
+        RETURN;
+      END IF;
+    END IF;
+    amt := LEAST(COALESCE(p_settled, pm.amount_cents), pm.amount_cents);
+    SELECT COALESCE(sum(contributed_cents - withdrawn_cents), 0), COALESCE(sum(pending_out_cents + unresolved_out_cents), 0) INTO held, out_flight
+      FROM ${T}.pool_positions WHERE pool_id = pm.pool_id AND lp_entity_id = pm.lp_entity_id;
+    -- This movement's own amount is already in out_flight unless it was written off for certain.
+    IF st <> 'failed' OR detail IN ('stale_no_answer', 'mynt_gave_up') THEN
+      out_flight := out_flight - pm.amount_cents;
+    END IF;
+    IF held - out_flight - amt < 0 THEN
+      RETURN QUERY SELECT 'overdrawn'::text;
+      RETURN;
+    END IF;
+    UPDATE ${T}.money_movements SET status = 'settled', status_detail = CASE WHEN status = 'failed' THEN 'late_settlement' ELSE NULL END, settled_at = now(), updated_at = now(), external_ref = COALESCE(p_ref, external_ref),
       settled_amount_cents = COALESCE(p_settled, settled_amount_cents),
       settled_amount_differs = CASE WHEN p_settled IS NULL THEN settled_amount_differs ELSE p_settled <> amount_cents END
-    WHERE id = p_movement AND status = 'failed';
-    RETURN QUERY SELECT CASE WHEN FOUND THEN 'settled'::text ELSE 'not_failed'::text END;
+    WHERE id = p_movement AND status = st;
+    RETURN QUERY SELECT 'settled'::text;
   END $fn$;
 `;

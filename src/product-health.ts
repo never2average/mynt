@@ -597,6 +597,10 @@ export class ProductHealthService {
   private now() {
     return this.deps.now ? this.deps.now() : new Date();
   }
+  // The clock health figures are judged by, for what's compared against them.
+  clock() {
+    return this.now();
+  }
 
   // ---- keys ----
 

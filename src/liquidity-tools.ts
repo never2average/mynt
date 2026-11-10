@@ -29,7 +29,7 @@ export interface LiquidityRoles {
 export const hasLiquidityRole = (roles: LiquidityRoles) => roles.admin || roles.licenceProvider || roles.builder || roles.liquidityProvider;
 
 export function registerLiquidityTools(server: McpServer, store: Store, user: User, roles: LiquidityRoles, health: ProductHealthService | null) {
-  const now = () => new Date();
+  const now = () => (health ? health.clock() : new Date());
   const healthAgeMs = () => liquidityConfigFromEnv(process.env, health?.config.intervalMs ?? 3_600_000).maxHealthAgeMs;
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
   const me = async () => (await store.getUser(user.id)) ?? user;
@@ -51,7 +51,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
          COALESCE(s.unresolved_in_cents, 0) AS unresolved_in_cents, COALESCE(s.unresolved_out_cents, 0) AS unresolved_out_cents,
          COALESCE(s.reversed_in_cents, 0) AS reversed_in_cents, COALESCE(s.reversed_out_cents, 0) AS reversed_out_cents,
          (SELECT COALESCE(sum(w.amount_cents - COALESCE((SELECT sum(m.amount_cents) FROM ${T}.pool_movement_states m WHERE m.withdrawal_id = w.id AND m.ledger_state <> 'released'), 0)), 0)
-            FROM ${T}.pool_withdrawals w WHERE w.pool_id = c.pool_id AND w.lp_entity_id = c.lp_entity_id AND w.status = 'queued') AS queued_cents
+            FROM ${T}.pool_withdrawals w WHERE w.pool_id = c.pool_id AND w.lp_entity_id = c.lp_entity_id AND w.status IN ('queued', 'parked')) AS queued_cents
        FROM ${T}.pool_commitments c JOIN ${T}.liquidity_pools p ON p.id = c.pool_id LEFT JOIN ${T}.pool_positions s ON s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id
        WHERE c.lp_entity_id = $1 AND ($2::uuid IS NULL OR c.pool_id = $2) ORDER BY c.created_at, c.pool_id`,
       [firm, poolId ?? null],
@@ -186,7 +186,8 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           return fail(bad);
         }
         const { rows } = await store.db.query(
-          `UPDATE ${T}.liquidity_pools SET status = 'open', pause_kind = NULL, pause_reason = NULL, deposit_rail_id = $2, withdrawal_rail_id = $3, approved_by = $4, approved_at = now(), updated_at = now()
+          // A live pool stays paused until the worker has looked at its health once; a sandbox pool has nothing to protect.
+          `UPDATE ${T}.liquidity_pools SET status = CASE WHEN sandbox THEN 'open' ELSE 'paused' END, pause_kind = CASE WHEN sandbox THEN NULL ELSE 'health' END, pause_reason = CASE WHEN sandbox THEN NULL ELSE 'Approved; waiting for the worker to check its health for the first time' END, deposit_rail_id = $2, withdrawal_rail_id = $3, approved_by = $4, approved_at = now(), updated_at = now()
            WHERE id = $1 AND approved_at IS NULL AND status = 'paused' AND pause_kind = 'awaiting_approval' RETURNING *`,
           [pool_id, deposit_rail_id, withdrawal_rail_id, user.id],
         );
@@ -219,12 +220,12 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         if (!out.found) return fail(`No pool movement '${movement_id}'`);
         if ("refused" in out) {
           if (out.refused === "over_settlement") {
-            await audit("pool_movement_over_settlement", movement_id, { pool_id: out.pool_id, amount_cents: out.amount_cents, settled_amount_cents, external_ref: external_ref ?? null });
+            await audit("pool_movement_over_settlement", movement_id, { pool_id: out.pool_id, amount_cents: out.amount_cents, settled_amount_cents, external_ref: external_ref ?? null, sandbox: out.sandbox });
             return fail(`That settlement (${settled_amount_cents} cents) is more than the ${out.amount_cents} cents asked for, so it's refused and Mynt's admins have been flagged`, { code: out.refused, sandbox: out.sandbox });
           }
           if (out.refused === "external_ref_required") return fail("A live settlement needs external_ref: the partner's reference for the money that moved", { code: out.refused, sandbox: out.sandbox });
-          await audit("pool_late_settlement_refused", movement_id, { pool_id: out.pool_id, amount_cents: out.amount_cents, external_ref: external_ref ?? null });
-          return fail("That withdrawal was written off and its amount has since been paid again, so this settlement would pay it twice. It's refused and Mynt's admins have been flagged", { code: out.refused, sandbox: out.sandbox });
+          await audit("pool_late_settlement_refused", movement_id, { pool_id: out.pool_id, amount_cents: out.amount_cents, external_ref: external_ref ?? null, code: out.refused, sandbox: out.sandbox });
+          return fail(out.refused === "overdrawn" ? "Settling that would take the firm's position below zero, counting what's on its way out, so it's refused and Mynt's admins have been flagged" : "That withdrawal was written off and its amount has since been paid again, so this settlement would pay it twice. It's refused and Mynt's admins have been flagged", { code: out.refused, sandbox: out.sandbox });
         }
         await audit("report_pool_movement", movement_id, { outcome, external_ref: external_ref ?? null, settled_amount_cents: settled_amount_cents ?? null, status: out.status, sandbox: out.sandbox });
         return json(out);
@@ -291,6 +292,26 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       },
     );
     server.registerTool(
+      "set_pool_firm_state",
+      {
+        title: "Correct a firm's state in a pool",
+        description: "Admin, or the pool's sponsor: correct the US state a firm's capital moves from in this pool, when it's wrong or its rails no longer serve it. Its parked withdrawal requests go back to their place in the queue. The new state must be one the pool's withdrawal rail serves. Audited, with the old and new state.",
+        inputSchema: { pool_id: z.string().uuid(), lp_entity_id: z.string().uuid(), state: StateCode, reason: z.string().min(3).max(1000) },
+      },
+      async ({ pool_id, lp_entity_id, state, reason }) => {
+        const pool = await getPool(store, pool_id);
+        if (!pool || !(await canControl(pool))) return fail(`No pool '${pool_id}' you can control`);
+        const { rows: rail } = await store.db.query(`SELECT states FROM ${T}.money_rails WHERE id = $1`, [pool.withdrawal_rail_id]);
+        if (!rail[0] || !(rail[0].states as string[]).includes(state)) return fail(`The pool's withdrawal rail doesn't serve ${state}`);
+        const { rows: old } = await store.db.query(`SELECT state FROM ${T}.pool_commitments WHERE pool_id = $1 AND lp_entity_id = $2`, [pool_id, lp_entity_id]);
+        if (!old[0]) return fail("That firm has no commitment in this pool");
+        await store.db.query(`UPDATE ${T}.pool_commitments SET state = $3 WHERE pool_id = $1 AND lp_entity_id = $2`, [pool_id, lp_entity_id, state]);
+        const { rows: lifted } = await store.db.query(`UPDATE ${T}.pool_withdrawals SET status = 'queued', status_reason = NULL, parked_at = NULL WHERE pool_id = $1 AND lp_entity_id = $2 AND status = 'parked' RETURNING id`, [pool_id, lp_entity_id]);
+        await audit("set_pool_firm_state", pool_id, { lp_entity_id, was: old[0].state, state, reason, unparked: lifted.length });
+        return json({ pool_id, lp_entity_id, state, sandbox: pool.sandbox, unparked: lifted.map((r) => r.id as string) });
+      },
+    );
+    server.registerTool(
       "resume_pool",
       {
         title: "Resume a paused liquidity pool",
@@ -339,7 +360,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       {
         title: "Withdrawal requests",
         description:
-          "Withdrawal requests in queue order, each with its status (queued, paying, paid, paid_short, cancelled, no_balance, parked), what's actually settled and what's on its way, why it's waiting, whether it's test money (sandbox), and each ledger movement with the pool's hold state: a sponsor sees there if the pool is held before it moves money on a requested row. An admin sees all; a licence provider its pools'; a builder its products'; a liquidity provider its own.",
+          "Withdrawal requests in queue order, each with its status (queued, paying, paid, paid_short, returned, cancelled, no_balance, parked), what's actually settled and what's on its way, why it's waiting, whether it's test money (sandbox), and each ledger movement with the pool's hold state: a sponsor sees there if the pool is held before it moves money on a requested row. An admin sees all; a licence provider its pools'; a builder its products'; a liquidity provider its own.",
         inputSchema: { pool_id: z.string().uuid().optional(), status: z.enum(WITHDRAWAL_STATUSES).optional() },
         annotations: { readOnlyHint: true },
       },
@@ -362,8 +383,8 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
             const sum = (states: string[]) => mine.filter((c) => states.includes(c.ledger_state as string)).reduce((n, c) => n + Number(c.amount_cents), 0);
             const settledCents = mine.filter((c) => c.ledger_state === "settled").reduce((n, c) => n + Number(c.amount_settled_cents), 0);
             const poolHold = (w.pool_status === "paused" ? (w.pause_reason as string | null) : null) ?? (w.hold_reason as string | null) ?? null;
-            const paying = w.status === "queued" || w.status === "paying";
-            const waiting = paying && new Date(w.eligible_at as string) > now() ? `Waiting out the notice period until ${new Date(w.eligible_at as string).toISOString()}` : paying ? ((w.pool_status === "paused" ? (w.pause_reason as string | null) : null) ?? (w.hold_reason as string | null) ?? null) : null;
+            const paying = w.status === "queued" || w.status === "paying" || w.status === "parked";
+            const waiting = w.status === "parked" ? (w.status_reason as string) : paying && new Date(w.eligible_at as string) > now() ? `Waiting out the notice period until ${new Date(w.eligible_at as string).toISOString()}` : paying ? ((w.pool_status === "paused" ? (w.pause_reason as string | null) : null) ?? (w.hold_reason as string | null) ?? null) : null;
             return {
               ...toWithdrawal(w),
               pool_name: w.pool_name as string,
@@ -417,9 +438,10 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           return json({ pool_id, amount_cents, sandbox: pool.sandbox, movement_id: earlier[0].movement_id, movement_status: earlier[0].movement_status, replay: true, position: (await positionsOf(firm, pool_id))[0] });
         }
       }
-      // A health pause lets capital in only when a snapshot Mynt trusts says the pool is short: otherwise there's no
-      // telling what it could pay back.
-      if (pool.status === "paused" && pool.pause_kind === "health") {
+      // Real capital comes in only when a snapshot Mynt trusts says the pool is healthy or short of its reserve: otherwise
+      // there's no telling what it could pay back.
+      if (!pool.sandbox && !pool.offering_cleared) return refuse(OFFERING_NOT_CLEARED, "offering_not_cleared");
+      if (!pool.sandbox && (pool.status === "open" || (pool.status === "paused" && pool.pause_kind === "health"))) {
         const gate = await evaluatePool(store, health, pool, now(), healthAgeMs());
         if (!gate.ok && !gate.shortfall) return refuse(`This pool isn't taking commitments right now: ${gate.reason}`, "health_unconfirmed");
       }
@@ -477,7 +499,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     "cancel_withdrawal",
     {
       title: "Cancel a withdrawal request",
-      description: "Liquidity provider: leave the queue with one of your requests. Anything already on its way carries on; only the rest is cancelled. A fully-claimed request (paying) can't be cancelled.",
+      description: "Liquidity provider: leave the queue with one of your requests. Anything already on its way carries on; only the rest is cancelled. A fully-claimed request (paying) can't be cancelled; a parked one can.",
       inputSchema: { withdrawal_id: z.string().uuid() },
     },
     async ({ withdrawal_id }) => {

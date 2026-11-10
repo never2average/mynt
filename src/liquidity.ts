@@ -18,7 +18,7 @@ const T = "financial_products";
 
 export const POOL_STATUSES = ["open", "paused", "closed"] as const;
 export type PoolStatus = (typeof POOL_STATUSES)[number];
-export const WITHDRAWAL_STATUSES = ["queued", "paying", "paid", "paid_short", "cancelled", "no_balance", "parked"] as const;
+export const WITHDRAWAL_STATUSES = ["queued", "paying", "paid", "paid_short", "returned", "cancelled", "no_balance", "parked"] as const;
 export type WithdrawalStatus = (typeof WITHDRAWAL_STATUSES)[number];
 export type PauseKind = "awaiting_approval" | "manual" | "governance" | "health";
 
@@ -34,8 +34,10 @@ export const CLAIM_RECOVERY_MS = 5 * 60_000;
 // After the chokepoint refuses a payment, how long before asking again: a rail's daily limit or suspension doesn't clear
 // in one poll, and each retry leaves a row.
 export const REFUSAL_BACKOFF_MS = 15 * 60_000;
-// Refusals about one firm rather than the rail: after this many in a row its request is parked, so it can't freeze the queue.
+// Refusals about one firm rather than the rail: after this many its request is parked, so it can't freeze the queue.
+// Parked keeps its place: it's tried again this often, in case what was wrong has cleared.
 export const PARK_AFTER_REFUSALS = 3;
+export const PARKED_RETRY_MS = 15 * 60_000;
 export const FIRM_SPECIFIC_REFUSALS = ["customer_state_required", "state_not_on_rail", "state_not_sponsored"];
 // A tick pays at most this many slices of one pool, so one busy pool can't hold up the rest.
 const MAX_CLAIMS_PER_TICK = 50;
@@ -122,7 +124,11 @@ export async function liquidityProvidersOf(store: Store, productId: string): Pro
 
 // Whose books a firm may read: the sponsors of the real pools it's put money in, and no others.
 export async function liquidityProviderBooks(store: Store, productId: string, entityId: string): Promise<string[]> {
-  const { rows } = await store.db.query(`SELECT DISTINCT p.sponsor_entity_id FROM ${T}.pool_commitments c JOIN ${T}.liquidity_pools p ON p.id = c.pool_id WHERE p.product_id = $1 AND c.lp_entity_id = $2 AND NOT p.sandbox`, [productId, entityId]);
+  const { rows } = await store.db.query(
+    `SELECT DISTINCT p.sponsor_entity_id FROM ${T}.pool_commitments c JOIN ${T}.liquidity_pools p ON p.id = c.pool_id JOIN ${T}.pool_positions s ON s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id
+     WHERE p.product_id = $1 AND c.lp_entity_id = $2 AND NOT p.sandbox AND s.contributed_cents > 0`,
+    [productId, entityId],
+  );
   return rows.map((r) => r.sponsor_entity_id as string);
 }
 
@@ -147,7 +153,7 @@ export async function exitedLiquidityProvider(store: Store, productId: string, e
 export async function poolsOf(store: Store, productId: string): Promise<string[]> {
   const { rows } = await store.db.query(
     `SELECT p.id FROM ${T}.liquidity_pools p WHERE p.product_id = $1 AND p.approved_at IS NOT NULL
-       AND (p.status <> 'closed' OR EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w WHERE w.pool_id = p.id AND w.status IN ('queued', 'paying')))`,
+       AND (p.status <> 'closed' OR EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w WHERE w.pool_id = p.id AND w.status IN ('queued', 'paying', 'parked')))`,
     [productId],
   );
   return rows.map((r) => r.id as string);
@@ -157,7 +163,7 @@ export async function poolsOf(store: Store, productId: string): Promise<string[]
 export async function openWithdrawalRequests(store: Store, productId: string, poolId: string | null): Promise<number> {
   const { rows } = await store.db.query(
     `SELECT count(*)::int AS n FROM ${T}.pool_withdrawals w JOIN ${T}.liquidity_pools p ON p.id = w.pool_id
-     WHERE p.product_id = $1 AND (p.id = $2 OR ($2::uuid IS NULL AND NOT p.sandbox)) AND w.status IN ('queued', 'paying')`,
+     WHERE p.product_id = $1 AND (p.id = $2 OR ($2::uuid IS NULL AND NOT p.sandbox)) AND w.status IN ('queued', 'paying', 'parked')`,
     [productId, poolId],
   );
   return num(rows[0].n);
@@ -247,6 +253,9 @@ export async function refusePoolMovement(store: Store, row: PoolMovementRow, cod
 // One attempt at the chokepoint, on the pool's named rail of its sponsor. Repeating it (a crash, a retry) is the same
 // movement: the attempt's idempotency key never changes.
 export async function authorizePoolMovement(store: Store, pool: Pool, row: PoolMovementRow): Promise<MovementVerdict> {
+  // As it stands now: a claim recovered and released while this one was running is over.
+  const { rows: current } = await store.db.query(`SELECT state FROM ${T}.pool_movements WHERE id = $1`, [row.id]);
+  if (current[0]?.state === "refused") return { allowed: false, status: 409, code: "claim_released", message: "This attempt was released" };
   const railId = row.kind === "deposit" ? pool.deposit_rail_id : pool.withdrawal_rail_id;
   const refuse = (code: string, message: string) => refusePoolMovement(store, row, code, message);
   if (!railId) return refuse("no_approved_rail", "This pool has no approved rail for that movement");
@@ -290,13 +299,13 @@ export async function reportPoolMovement(store: Store, movementId: string, outco
   const row = rows[0] as { pool_id: string; kind: string; amount_cents: unknown; sandbox: boolean; subscription_id: string; request_id: string; status: string; status_detail: string | null } | undefined;
   if (!row) return { found: false as const };
   const asked = num(row.amount_cents);
-  const refused = (code: "over_settlement" | "external_ref_required" | "reclaimed") => ({ found: true as const, refused: code, pool_id: row.pool_id, sandbox: row.sandbox, amount_cents: asked });
+  const refused = (code: "over_settlement" | "external_ref_required" | "reclaimed" | "overdrawn") => ({ found: true as const, refused: code, pool_id: row.pool_id, sandbox: row.sandbox, amount_cents: asked });
   if (outcome === "settled") {
     if (o.settled_amount_cents != null && o.settled_amount_cents > asked) return refused("over_settlement");
     if (!row.sandbox && !o.external_ref) return refused("external_ref_required");
-    if (row.kind === "withdrawal" && row.status === "failed") {
-      const { rows: late } = await store.db.query(`SELECT * FROM ${T}.settle_late_pool_withdrawal($1, $2, $3)`, [movementId, o.external_ref ?? null, o.settled_amount_cents ?? null]);
-      if (late[0].o_outcome === "reclaimed") return refused("reclaimed");
+    if (row.kind === "withdrawal") {
+      const { rows: settled } = await store.db.query(`SELECT * FROM ${T}.settle_pool_withdrawal($1, $2, $3)`, [movementId, o.external_ref ?? null, o.settled_amount_cents ?? null]);
+      if (settled[0].o_outcome === "reclaimed" || settled[0].o_outcome === "overdrawn") return refused(settled[0].o_outcome as "reclaimed" | "overdrawn");
       await refreshPool(store, row.pool_id, now);
       const { rows: done } = await store.db.query(`SELECT status, status_detail FROM ${T}.money_movements WHERE id = $1`, [movementId]);
       return { found: true as const, pool_id: row.pool_id, sandbox: row.sandbox, status: done[0].status as string, status_detail: (done[0].status_detail as string | null) ?? null };
@@ -361,10 +370,26 @@ export class LiquidityWorker {
     const cutoff = new Date(this.now().getTime() - CLAIM_RECOVERY_MS).toISOString();
     const { rows } = await this.store.db.query(`SELECT * FROM ${T}.pool_movements WHERE pool_id = $1 AND state = 'claimed' AND claimed_at < $2`, [pool.id, cutoff]);
     for (const row of rows as unknown as PoolMovementRow[]) {
-      if (row.kind === "deposit" && !pool.sandbox && !pool.offering_cleared) await refusePoolMovement(this.store, row, "offering_not_cleared", OFFERING_NOT_CLEARED);
-      else if (row.kind === "deposit" && pool.status !== "open") await refusePoolMovement(this.store, row, "pool_not_open", "This pool isn't taking commitments");
+      // A withdrawal goes back to the queue, to be claimed against headroom as it is now, not as it was when it crashed.
+      if (row.kind === "withdrawal") await refusePoolMovement(this.store, row, "claim_recovered", "Released after a crash");
+      else if (!pool.sandbox && !pool.offering_cleared) await refusePoolMovement(this.store, row, "offering_not_cleared", OFFERING_NOT_CLEARED);
+      else if (pool.status !== "open") await refusePoolMovement(this.store, row, "pool_not_open", "This pool isn't taking commitments");
       else await authorizePoolMovement(this.store, pool, row);
     }
+    await refreshPool(this.store, pool.id, this.now());
+  }
+
+  // Ties crashed claims to the ledger rows they made. Moves no money, so it happens under any pause.
+  private async linkCrashRows(pool: Pool) {
+    const cutoff = new Date(this.now().getTime() - CLAIM_RECOVERY_MS).toISOString();
+    const { rows } = await this.store.db.query(`SELECT pm.*, m.id AS ledger_id FROM ${T}.pool_movements pm JOIN ${T}.money_movements m ON m.idempotency_key = pm.idempotency_key WHERE pm.pool_id = $1 AND pm.state = 'claimed' AND pm.claimed_at < $2`, [pool.id, cutoff]);
+    for (const row of rows as unknown as (PoolMovementRow & { ledger_id: string })[]) await linkMovement(this.store, row, row.ledger_id);
+  }
+
+  // Parked requests get another try now and then, keeping their place: a sponsorship or rail change may have cleared it.
+  private async unparkDue(pool: Pool) {
+    const cutoff = new Date(this.now().getTime() - PARKED_RETRY_MS).toISOString();
+    await this.store.db.query(`UPDATE ${T}.pool_withdrawals SET status = 'queued', status_reason = NULL, parked_at = NULL WHERE pool_id = $1 AND status = 'parked' AND parked_at < $2`, [pool.id, cutoff]);
   }
 
   private async payQueue(pool: Pool, gate: Extract<Gate, { ok: true }>) {
@@ -394,13 +419,13 @@ export class LiquidityWorker {
     }
   }
 
-  // A refusal that's about one firm, repeated: its request stops holding up the firms behind it. Terminal: the firm asks
-  // again once what's wrong is fixed.
+  // A refusal that's about one firm, repeated: its request stops holding up the firms behind it, keeps its place and
+  // comes back when what's wrong is fixed.
   private async parkIfPersistent(pool: Pool, withdrawalId: string, code: string): Promise<boolean> {
     const { rows } = await this.store.db.query(`SELECT count(*)::int AS n FROM ${T}.pool_movements WHERE withdrawal_id = $1 AND state = 'refused' AND refusal = ANY($2::text[])`, [withdrawalId, FIRM_SPECIFIC_REFUSALS]);
     if (num(rows[0].n) < PARK_AFTER_REFUSALS) return false;
-    const reason = `Refused ${PARK_AFTER_REFUSALS} times for a reason about this firm (${code}): fix it and ask again`;
-    const { rows: parked } = await this.store.db.query(`UPDATE ${T}.pool_withdrawals SET status = 'parked', status_reason = $2, closed_at = $3 WHERE id = $1 AND status = 'queued' RETURNING id`, [withdrawalId, reason, this.now().toISOString()]);
+    const reason = `Refused ${PARK_AFTER_REFUSALS} times for a reason about this firm (${code}). It keeps its place and is tried again; the pool's sponsor or an admin can correct the firm's state (set_pool_firm_state)`;
+    const { rows: parked } = await this.store.db.query(`UPDATE ${T}.pool_withdrawals SET status = 'parked', status_reason = $2, parked_at = $3 WHERE id = $1 AND status = 'queued' RETURNING id`, [withdrawalId, reason, this.now().toISOString()]);
     if (parked.length) await this.store.audit(null, "pool_withdrawal_parked", pool.id, { withdrawal_id: withdrawalId, code });
     return true;
   }
@@ -408,6 +433,7 @@ export class LiquidityWorker {
   // One pool: bring it in line with the ledger, decide whether it may pay, then pay in queue order.
   async processPool(pool: Pool) {
     const now = this.now();
+    await this.linkCrashRows(pool);
     await refreshPool(this.store, pool.id, now);
     const gate = await this.evaluate(pool);
     if (!gate.ok) return this.autoPause(pool, gate.kind, gate.reason);
@@ -415,6 +441,7 @@ export class LiquidityWorker {
     const current = await getPool(this.store, pool.id);
     if (current && (current.status === "open" || current.status === "closed")) {
       await this.recoverClaims(current);
+      await this.unparkDue(current);
       await this.payQueue(current, gate);
     }
     await refreshPool(this.store, pool.id, now);
@@ -422,7 +449,7 @@ export class LiquidityWorker {
 
   // Safe to run at any time, and in several processes at once: everything that matters happens under a pool's lock.
   async tick() {
-    const { rows } = await this.store.db.query(`SELECT * FROM ${T}.liquidity_pools WHERE approved_at IS NOT NULL AND (status <> 'closed' OR EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w WHERE w.pool_id = liquidity_pools.id AND w.status IN ('queued', 'paying')))`);
+    const { rows } = await this.store.db.query(`SELECT * FROM ${T}.liquidity_pools WHERE approved_at IS NOT NULL AND (status <> 'closed' OR EXISTS (SELECT 1 FROM ${T}.pool_withdrawals w WHERE w.pool_id = liquidity_pools.id AND w.status IN ('queued', 'paying', 'parked')))`);
     for (const r of rows) await this.processPool(toPool(r)).catch((e) => console.error("liquidity:", r.id, (e as Error).message));
   }
 

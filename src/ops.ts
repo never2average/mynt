@@ -171,7 +171,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const moneyNameMismatches = undeclared.filter((t) => namesMoneyMovement(t.key) || namesMoneyMovement(t.name)).map((t) => `${t.region}/${t.key}`);
   // A sponsor reported more than was asked, or settled a withdrawal already paid another way: a person should look.
   const poolFlags = (await exists("audit_log"))
-    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action IN ('pool_movement_over_settlement', 'pool_late_settlement_refused') AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
+    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action IN ('pool_movement_over_settlement', 'pool_late_settlement_refused') AND COALESCE(details->>'sandbox', 'false') <> 'true' AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
     : 0;
   const attention = [
     ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
