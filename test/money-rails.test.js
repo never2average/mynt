@@ -7,7 +7,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { connectPostgres } from "../dist/db.js";
 import { createMcpHttpServer } from "../dist/http.js";
-import { ANY_ATTEMPT, authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, MAX_MOVEMENT_ATTEMPTS, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementGaveUp, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { ANY_ATTEMPT, authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, MAX_MOVEMENT_ATTEMPTS, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementGaveUp, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, identityDigest, recordVerifiedCustomerState, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { eraseCustomerVerification, RAMP_ADAPTERS, rampCustomerKey, refreshVerifiedCustomerState } from "../dist/ramp-adapters/index.js";
+import { bridgeAdapter } from "../dist/ramp-adapters/bridge.js";
+import { rampError } from "../dist/ramp-adapters/types.js";
+import { seal } from "../dist/vault.js";
+import { getOffering } from "../dist/vendors.js";
 import { opsStatus } from "../dist/ops.js";
 import { normalizeModel } from "../dist/regulatory.js";
 import { createServer } from "../dist/server.js";
@@ -120,13 +125,17 @@ async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-
     customer_ref: "cust_1",
     idempotency_key: randomUUID(),
     component_key: "account",
+    state_source: "partner_verified",
+    state_verified_by: "test_partner",
+    state_verified_at: new Date().toISOString(),
+    state_sponsors: [lpUser.entity_id],
     subscription_id: randomUUID(),
     request_id: randomUUID(),
     ...over,
   });
   const ledger = async (railId) => (await store.db.query("SELECT * FROM financial_products.money_movements WHERE rail_id = $1 AND NOT sandbox ORDER BY created_at", [railId])).rows;
   const audited = async (action) => (await store.db.query("SELECT * FROM financial_products.audit_log WHERE action = $1", [action])).rows;
-  return { store, tag, admin, provider, builder, RAIL, approvedRail, move, ledger, audited, product_id, lpUser, adminUser, held, registration, builderUser, builderFirm };
+  return { store, tag, admin, provider, builder, RAIL, approvedRail, move, ledger, audited, product_id, lpUser, adminUser, held, registration, builderUser, builderFirm, sponsorship: asked };
 }
 
 test("dollars become integer cents without a float", () => {
@@ -176,9 +185,9 @@ test("the customer's state must be on the rail and sponsored", async () => {
   assert.equal((await authorizeMovement(store, w.move({ customer_state: "us-tx" }))).code, "state_not_sponsored");
   // No state on file: asked for, in the customer's terms.
   const none = await authorizeMovement(store, w.move({ customer_state: undefined }));
-  assert.equal(none.code, "customer_state_required");
-  assert.equal(none.status, 409);
-  assert.equal((await authorizeMovement(store, w.move({ customer_state: "california" }))).code, "customer_state_required");
+  assert.equal(none.code, "state_unverified");
+  assert.equal(none.status, 403);
+  assert.equal((await authorizeMovement(store, w.move({ customer_state: "california" }))).code, "state_unverified");
 });
 
 test("over the per-transfer limit is refused and counts for nothing", async () => {
@@ -386,7 +395,7 @@ test("the sponsor must be the action's own, and an action must say what it serve
   await store.decideSponsorship(asked.id, { status: "approved", decided_by: second.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
   assert.equal((await authorizeMovement(store, w.move({ component_key: "account" }))).allowed, true);
   // The other sponsor has no rail, and the first one's doesn't serve its component.
-  assert.equal((await authorizeMovement(store, w.move({ component_key: "lending" }))).code, "no_approved_rail");
+  assert.equal((await authorizeMovement(store, w.move({ component_key: "lending", state_sponsors: [second.entity_id] }))).code, "no_approved_rail");
 });
 
 test("whoever proposed a rail, or works for its firm, can't approve it", async () => {
@@ -543,15 +552,389 @@ test("a service that accepts a quote takes its figures from the quote, never fro
   assert.deepEqual(movementShape({ key: "ramp_direct" }, device), { direction: "on_ramp", amount_cents: 100, expected_total_cents: null });
 });
 
+// A customer's verification, by the sponsor itself unless told otherwise.
+const HELD = { residence_state: "us-tx", full_name: "Avery Stone", date_of_birth: "1990-01-02" };
+const FIELDS = ["full_name", "date_of_birth"];
+const verifyAt = (store, w, c, over = {}) =>
+  recordVerifiedCustomerState(store, { ...c, offering_id: c.offering_id ?? "00000000-0000-4000-8000-00000000000a", state: "us-ny", source: "identity_service", verified_by_entity: w.lpUser.entity_id, verified_by: "identity_verification", verified_at: new Date(), identity_fields: FIELDS, identity_digest: identityDigest(HELD, FIELDS), started_at: new Date(), ...over });
+const resolverFor = (store, w, c) => (o = {}) => resolveCustomerState(store, { sandbox: false, ...c, held: async () => HELD, product_id: w.product_id, component_key: "account", ...o });
+const usedBy = (r) => ({ customer_state: r.state, state_source: r.source, state_verified_by: r.verified_by, state_verified_at: r.verified_at, state_verified_offering: r.offering_id, state_sponsors: r.sponsors, state_problem: r.problem });
+// An identity offering by another firm, as a row.
+async function identityOffering(store, entity, key = "idv") {
+  await store.db.query("INSERT INTO financial_products.service_types (region, key, name, category, input_schema, output_schema, consent_purpose, moves_money) VALUES ('US', $1, 'Identity', 'identity', '{}', '{}', 'x', false) ON CONFLICT DO NOTHING", [key]);
+  const id = randomUUID();
+  await store.db.query("INSERT INTO financial_products.vendor_offerings (id, entity_id, region, service_type, name, test_base_url, price, licence_ids, conformance_secret, status) VALUES ($1, $2, 'US', $3, 'o', 'https://t.example', '{\"amount\":0,\"currency\":\"USD\"}', '{}', $4, 'listed')", [id, entity, key, seal("c", false)]);
+  return id;
+}
+
 test("the customer's state comes from one place, and what it was is on the movement", async () => {
-  assert.deepEqual(resolveCustomerState({ residence_state: "US-NY" }), { state: "us-ny", source: "customer_attested" });
-  assert.deepEqual(resolveCustomerState({}), { state: null, source: "customer_attested" });
   const store = await openPglite();
   const w = await world(store);
   const rail = await w.approvedRail();
-  await authorizeMovement(store, w.move({ customer_state: "us-ny", state_source: "customer_attested" }));
+  const c = { app_id: randomUUID(), customer_ref: "cust_verified" };
+  const resolve = resolverFor(store, w, c);
+
+  // Sandbox goes by what the customer typed, and says so.
+  const typed = await resolve({ sandbox: true, held: async () => ({ residence_state: "US-NY" }) });
+  assert.deepEqual([typed.state, typed.source], ["us-ny", "self_reported"]);
+
+  // Live never does: no verification, no state, whatever is in the vault.
+  const none = await resolve();
+  assert.deepEqual([none.state, none.source], [null, "none"]);
+  assert.match(none.problem, /hasn't verified/);
+  const refused = await authorizeMovement(store, w.move(usedBy(none)));
+  assert.equal(refused.code, "state_unverified");
+  assert.match(refused.message, /hasn't verified/);
+  // Even handed a valid state, the chokepoint refuses anything self-reported.
+  for (const state_source of ["self_reported", "customer_attested", undefined, null]) assert.equal((await authorizeMovement(store, w.move({ customer_state: "us-ny", state_source }))).code, "state_unverified", String(state_source));
+  assert.equal((await w.ledger(rail.id)).length, 0);
+  // A sandbox movement isn't refused, and is marked for what it is.
+  const sandbox = await authorizeMovement(store, w.move({ sandbox: true, customer_state: "us-ny", state_source: "self_reported" }));
+  assert.equal(sandbox.allowed, true);
+  assert.equal((await store.db.query("SELECT state_source FROM financial_products.money_movements WHERE id = $1", [sandbox.movement_id])).rows[0].state_source, "self_reported");
+
+  // Verified: used, and recorded with who and when.
+  const at = new Date(Date.now() - 86_400_000);
+  assert.equal(await verifyAt(store, w, c, { state: "US-NY", verified_at: at }), true);
+  const found = await resolve();
+  assert.deepEqual([found.state, found.source, found.verified_by, found.verified_at, found.sponsors], ["us-ny", "partner_verified", "identity_verification", at.toISOString(), [w.lpUser.entity_id]]);
+  const first = w.move(usedBy(found));
+  assert.equal((await authorizeMovement(store, first)).allowed, true);
   const [row] = await w.ledger(rail.id);
-  assert.deepEqual([row.state, row.state_source], ["us-ny", "customer_attested"]);
+  assert.deepEqual([row.state, row.state_source, row.state_verified_by, new Date(row.state_verified_at).toISOString()], ["us-ny", "partner_verified", "identity_verification", at.toISOString()]);
+
+  // Not a US state, or older than what's on file: nothing changes.
+  assert.equal(await verifyAt(store, w, c, { state: "ontario" }), false);
+  assert.equal(await verifyAt(store, w, c, { state: "us-tx", verified_at: new Date(at.getTime() - 1000) }), false);
+  assert.equal((await resolve()).state, "us-ny");
+
+  // Re-verified in California: a new movement goes by it (this rail is New York's only); the one in flight keeps its state.
+  await verifyAt(store, w, c, { state: "us-ca" });
+  const now = await resolve();
+  assert.equal(now.state, "us-ca");
+  assert.equal((await authorizeMovement(store, w.move(usedBy(now)))).code, "state_not_on_rail");
+  await recordMovementUnknown(store, first, "try_later");
+  assert.equal((await authorizeMovement(store, { ...first, ...usedBy(now), request_id: randomUUID() })).allowed, true, "a retry of the one in flight");
+  assert.equal((await w.ledger(rail.id))[0].state, "us-ny");
+
+  // Partner-verified changes are in the history, with old, new and source.
+  const history = (await store.db.query("SELECT old_state, new_state, source, changed_by FROM financial_products.customer_state_history WHERE app_id = $1 ORDER BY created_at", [c.app_id])).rows;
+  assert.deepEqual(history.map((h) => [h.old_state, h.new_state, h.source]), [[null, "us-ny", "partner_verified:identity_verification"], ["us-ny", "us-ca", "partner_verified:identity_verification"]]);
+  assert.equal(history[0].changed_by, `partner:${w.lpUser.entity_id}`);
+
+  // Erased: no state, so live is refused, and that's in the history too. A retry in flight is refused as well.
+  await eraseCustomerVerification(store, { ...c, sandbox: false, changed_by: "session:s1" });
+  const gone = await resolve();
+  assert.deepEqual([gone.state, gone.source], [null, "none"]);
+  assert.equal((await authorizeMovement(store, { ...first, ...usedBy(gone), request_id: randomUUID() })).code, "state_unverified");
+  const last = (await store.db.query("SELECT old_state, new_state, source FROM financial_products.customer_state_history WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1", [c.app_id])).rows[0];
+  assert.deepEqual(last, { old_state: "us-ca", new_state: null, source: "partner_verified:erased" });
+});
+
+test("only an identity provider the sponsor accepts counts, for that sponsor", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const c = { app_id: randomUUID(), customer_ref: "cust_providers" };
+  const resolve = resolverFor(store, w, c);
+  const { user: vendor } = await store.createUser("Vendor", ["vendor"]);
+  const vendorFirm = await store.createEntity(vendor.id, { name: "Vendor Co", registration_numbers: {}, regions: ["US"] });
+  const offering = await identityOffering(store, vendorFirm.id);
+  const other = await identityOffering(store, (await store.createEntity(vendor.id, { name: "Other Co", registration_numbers: {}, regions: ["US"] })).id);
+  const asVendor = { offering_id: offering, verified_by_entity: vendorFirm.id, verified_by: "idv" };
+
+  // Any listed vendor's word isn't enough, until the sponsor accepts it.
+  await verifyAt(store, w, c, asVendor);
+  const unapproved = await resolve();
+  assert.equal(unapproved.state, null);
+  assert.match(unapproved.problem, /licence provider accepts/);
+  await ok(w.provider, "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering });
+  // Approval looks forward: the check made before it doesn't count, one made after does.
+  assert.equal((await resolve()).state, null);
+  await new Promise((r) => setTimeout(r, 5));
+  await verifyAt(store, w, c, asVendor);
+  assert.equal((await resolve()).state, "us-ny");
+  assert.deepEqual((await resolve()).sponsors, [w.lpUser.entity_id]);
+  assert.ok((await w.audited("approve_identity_provider")).length);
+  assert.equal((await ok(w.provider, "list_identity_providers", { sponsorship_id: w.sponsorship.id })).length, 1);
+
+  // A later unapproved vendor doesn't overwrite it, however new.
+  await verifyAt(store, w, c, { offering_id: other, verified_by_entity: "11111111-1111-4111-8111-111111111111", verified_by: "other", state: "us-ca" });
+  assert.equal((await resolve()).state, "us-ny");
+  // Accepted for a different component's sponsor, or none: no use here.
+  assert.equal((await resolve({ component_key: "lending" })).state, null);
+
+  // Revoked: it stops counting at once, and what's in flight on its word is named, not cancelled.
+  const onItsWord = w.move(usedBy(await resolve()));
+  const rail = await w.approvedRail();
+  const flying = await authorizeMovement(store, onItsWord);
+  assert.equal(flying.allowed, true);
+  const revoked = await ok(w.provider, "revoke_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering, reason: "contract ended" });
+  assert.deepEqual(revoked.in_flight.map((m) => m.id), [flying.movement_id]);
+  assert.equal((await w.ledger(rail.id))[0].status, "requested");
+  assert.equal((await resolve()).state, null);
+  assert.equal((await w.audited("revoke_identity_provider"))[0].details.in_flight, 1);
+
+  // A builder's own firm can never be approved for its own product, and doesn't count even if listed.
+  const own = await identityOffering(store, w.builderFirm.id);
+  assert.match(JSON.stringify((await callTool(w.admin, "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: own })).data), /builder's own firm/);
+  await store.db.query("INSERT INTO financial_products.sponsorship_identity_providers (sponsorship_id, offering_id) VALUES ($1, $2)", [w.sponsorship.id, own]);
+  await verifyAt(store, w, c, { offering_id: own, verified_by_entity: w.builderFirm.id, verified_by: "own" });
+  assert.equal((await resolve()).state, null);
+
+  // Four eyes: not from the approver's own firm, or for its own firm's product, even for an admin.
+  const adminAt = async (entity) => {
+    const { user } = await store.createUser(`Admin at ${entity.slice(0, 4)}`, ["admin"]);
+    await store.setUserEntity(user.id, entity);
+    return connect(store, { ...user, entity_id: entity });
+  };
+  assert.match(JSON.stringify((await callTool(await adminAt(vendorFirm.id), "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).data), /another admin must/);
+  assert.match(JSON.stringify((await callTool(await adminAt(w.builderFirm.id), "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).data), /another admin must/);
+
+  // The person who owns the product working for the vendor: refused at approval, and not counted if listed anyway.
+  await store.setUserEntity(vendor.id, vendorFirm.id);
+  const realProduct = store.getProduct.bind(store);
+  store.getProduct = async (id) => (id === w.product_id ? { owner_id: vendor.id } : realProduct(id));
+  assert.match(JSON.stringify((await callTool(w.admin, "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).data), /owns the product/);
+  await store.db.query("UPDATE financial_products.sponsorship_identity_providers SET revoked_at = NULL, approved_at = now() - interval '1 day' WHERE offering_id = $1", [offering]);
+  await verifyAt(store, w, { ...c, customer_ref: "cust_owner" }, asVendor);
+  assert.equal((await resolve({ customer_ref: "cust_owner" })).state, null);
+  store.getProduct = realProduct;
+  await store.db.query("UPDATE financial_products.sponsorship_identity_providers SET revoked_at = now() WHERE offering_id = $1", [offering]);
+
+  // Someone else's sponsorship isn't yours to change.
+  const elsewhere = await world(store);
+  assert.equal((await callTool(elsewhere.provider, "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).isError, true);
+
+  // A state one sponsor accepts doesn't open another sponsor's rail on the same component.
+  const { user: second } = await store.createUser("Second", ["license_provider"]);
+  const { held } = await moneyTransmitter(store, second, ["us-ny", "us-ca"]);
+  const asked = await store.requestSponsorship(w.builderUser.id, { product_id: w.product_id, component_key: "account", builder_entity_id: w.builderFirm.id, provider_entity_id: second.entity_id, requested_jurisdictions: ["us-ny"], note: null });
+  await store.decideSponsorship(asked.id, { status: "approved", decided_by: second.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
+  const secondRail = await ok(await connect(store, second), "propose_rail", w.RAIL);
+  await ok(w.admin, "approve_rail", { rail_id: secondRail.id });
+  await verifyAt(store, w, c, { verified_by_entity: w.lpUser.entity_id });
+  const firstOnly = await resolve();
+  assert.deepEqual(firstOnly.sponsors, [w.lpUser.entity_id]);
+  // The first sponsor's own rail carries it; the second's is never used, though it fits.
+  assert.equal((await authorizeMovement(store, w.move(usedBy(firstOnly)))).allowed, true);
+  assert.equal((await w.ledger(secondRail.id)).length, 0, "the second sponsor's rail isn't available to it");
+  assert.equal((await authorizeMovement(store, w.move({ ...usedBy(firstOnly), state_sponsors: [] }))).code, "state_unverified");
+});
+
+test("a verified state is tied to the person, ages out, and can be taken away", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const c = { app_id: randomUUID(), customer_ref: "cust_tied" };
+  const resolve = resolverFor(store, w, c);
+  await verifyAt(store, w, c);
+  assert.equal((await resolve()).state, "us-ny");
+
+  // The vault no longer matches what was checked, in any field; small differences of form don't count.
+  for (const held of [{ ...HELD, full_name: "Somebody Else" }, { ...HELD, date_of_birth: "1991-01-02" }, { residence_state: "us-ny" }]) {
+    const r = await resolve({ held: async () => held });
+    assert.equal(r.state, null);
+    assert.match(r.problem, /details have changed/);
+  }
+  assert.equal((await resolve({ held: async () => ({ ...HELD, full_name: "  AVERY   stone " }) })).state, "us-ny");
+  // A vault that can't be opened can't match.
+  assert.equal((await resolve({ held: async () => { throw new Error("rotated"); } })).state, null);
+  // No hash, no verification: a check with nothing to tie it to doesn't count.
+  assert.equal(await verifyAt(store, w, { ...c, customer_ref: "cust_unbound" }, { identity_digest: null }), false);
+
+  // A check that doesn't pass takes it away, until one does.
+  for (const result of ["no_match", "deceased"]) {
+    await recordVerifiedCustomerState(store, { ...c, offering_id: "00000000-0000-4000-8000-00000000000a", status: "suspended", reason: result, source: "identity_service", verified_by_entity: w.lpUser.entity_id, verified_by: "identity_verification", verified_at: new Date(), started_at: new Date() });
+    const r = await resolve();
+    assert.equal(r.state, null, result);
+    assert.match(r.problem, /latest identity check didn't pass/);
+    await verifyAt(store, w, c);
+    assert.equal((await resolve()).state, "us-ny");
+  }
+  // From an accepted provider, it takes away another accepted provider's older result too.
+  const second = "00000000-0000-4000-8000-00000000000b";
+  await verifyAt(store, w, c, { offering_id: second });
+  await recordVerifiedCustomerState(store, { ...c, offering_id: "00000000-0000-4000-8000-00000000000a", status: "suspended", reason: "no_match", source: "identity_service", verified_by_entity: w.lpUser.entity_id, verified_by: "identity_verification", verified_at: new Date(Date.now() + 1000), started_at: new Date() });
+  assert.equal((await resolve()).state, null);
+  await verifyAt(store, w, c, { verified_at: new Date(Date.now() + 2000) });
+
+  // Too old: refused until verified again, on the named setting.
+  const later = (days) => new Date(Date.now() + days * 86_400_000);
+  assert.equal((await resolve({ now: later(364) })).state, "us-ny");
+  const stale = await resolve({ now: later(366) });
+  assert.equal(stale.state, null);
+  assert.match(stale.problem, /too long ago/);
+  process.env.VERIFIED_STATE_MAX_AGE_DAYS = "30";
+  try {
+    assert.equal((await resolve({ now: later(31) })).state, null);
+    assert.equal((await resolve({ now: later(29) })).state, "us-ny");
+  } finally {
+    delete process.env.VERIFIED_STATE_MAX_AGE_DAYS;
+  }
+
+  // A date in the future isn't a verification.
+  assert.equal(await verifyAt(store, w, c, { state: "us-ca", verified_at: later(1) }), false);
+  assert.equal(await verifyAt(store, w, c, { state: "us-ca", verified_at: "not a date" }), false);
+  assert.equal((await resolve()).state, "us-ny");
+  // With no time of its own, a refresh can't jump a verification the provider dated later.
+  await store.db.query("UPDATE financial_products.customer_verified_states SET verified_at = now() + interval '1 hour', state = 'us-tx' WHERE app_id = $1", [c.app_id]);
+  assert.equal(await verifyAt(store, w, c, { state: "us-ca", verified_at: null }), false);
+  assert.equal((await store.db.query("SELECT DISTINCT state FROM financial_products.customer_verified_states WHERE app_id = $1 AND status = 'verified' AND offering_id = '00000000-0000-4000-8000-00000000000a'", [c.app_id])).rows[0].state, "us-tx");
+});
+
+test("a check that began before an erasure can't write the state back", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const c = { app_id: randomUUID(), customer_ref: "cust_erased" };
+  const resolve = resolverFor(store, w, c);
+  const began = new Date();
+  await verifyAt(store, w, c);
+  await new Promise((r) => setTimeout(r, 5));
+  await eraseCustomerVerification(store, { ...c, sandbox: false, changed_by: "session:s" });
+  assert.equal(await verifyAt(store, w, c, { started_at: began }), false);
+  assert.equal((await resolve()).state, null);
+  // Failures are held to the same rule, and leave nothing behind.
+  assert.equal(await recordVerifiedCustomerState(store, { ...c, offering_id: "00000000-0000-4000-8000-00000000000a", status: "suspended", reason: "no_match", source: "identity_service", verified_by_entity: null, verified_by: "x", started_at: began }), false);
+  assert.equal((await store.db.query("SELECT 1 FROM financial_products.customer_verified_states WHERE app_id = $1", [c.app_id])).rows.length, 0);
+  // Racing, whichever gets there first: nothing is left that began before the erasure finished.
+  await Promise.all([verifyAt(store, w, c, { started_at: began }), eraseCustomerVerification(store, { ...c, sandbox: false, changed_by: "session:s" })]);
+  assert.equal((await resolve()).state, null);
+  // A check the customer starts afterwards is a new verification. The erasure itself keeps no customer reference.
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(await verifyAt(store, w, c, { started_at: new Date() }), true);
+  assert.equal((await resolve()).state, "us-ny");
+  assert.ok(!JSON.stringify((await store.db.query("SELECT * FROM financial_products.customer_state_erasures")).rows).includes(c.customer_ref));
+});
+
+test("a pool's firm state counts only for pool movements, and a customer's movement can never claim it", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail();
+  const pool = (over = {}) => w.move({ action: "pool_withdrawal", customer_ref: "lp:firm-1", state_source: "liquidity_provider_stated", state_verified_by: null, state_verified_at: null, ...over });
+
+  // Each firm source, on each pool action, through the same reservation as any other movement.
+  for (const action of ["pool_deposit", "pool_withdrawal"])
+    for (const state_source of ["liquidity_provider_stated", "sponsor_corrected", "admin_corrected"]) {
+      const m = pool({ action, state_source, amount_cents: 1_000 });
+      assert.equal((await authorizeMovement(store, m)).allowed, true, `${action} ${state_source}`);
+      const row = (await w.ledger(rail.id)).find((r) => r.request_id === m.request_id);
+      assert.deepEqual([row.state, row.state_source, row.state_verified_by, row.action], ["us-ny", state_source, null, action]);
+    }
+  // A firm with no state is that firm's problem, not a verification failure: the pool parks it on this code.
+  assert.equal((await authorizeMovement(store, pool({ customer_state: undefined }))).code, "customer_state_required");
+
+  // A pool movement goes by the firm's state: no other source counts.
+  for (const state_source of ["partner_verified", "self_reported", "none", undefined]) assert.equal((await authorizeMovement(store, pool({ state_source }))).code, "state_unverified", String(state_source));
+
+  // A customer's movement can't claim a firm's source, with a real state or with the pool's action.
+  for (const state_source of ["liquidity_provider_stated", "sponsor_corrected", "admin_corrected"]) {
+    assert.equal((await authorizeMovement(store, w.move({ state_source }))).code, "state_unverified", `customer, ${state_source}`);
+    assert.equal((await authorizeMovement(store, w.move({ action: "pool_withdrawal", state_source }))).code, "state_unverified", `pool action, customer reference, ${state_source}`);
+    assert.equal((await authorizeMovement(store, w.move({ action: "transfer", customer_ref: "lp:firm-1", state_source }))).code, "state_unverified", `firm reference, customer action, ${state_source}`);
+  }
+  // Nor can a handoff named like a pool's get a customer through on a verified state.
+  assert.equal((await authorizeMovement(store, w.move({ action: "pool_deposit" }))).code, "state_unverified");
+  // A customer's reference can't take that form at all, and an ordinary verified movement is untouched.
+  assert.equal((await authorizeMovement(store, w.move({ action: "transfer" }))).allowed, true);
+});
+
+test("an adapter that knows the verified state: re-read before each transfer, gone with the link on erasure; Bridge can't say", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const app_id = randomUUID();
+  await store.db.query("INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status) VALUES ($1, $2, 'a', 'a', 'a', '{}', 'published')", [app_id, w.lpUser.id]);
+  const customer_ref = "cust_adapter";
+  const hold = (ref, fields = { full_name: "A", date_of_birth: "1990-01-01" }) => Promise.all(Object.entries(fields).map(([field, value]) => store.putVaultField({ app_id, customer_ref: ref, sandbox: false, field, sealed: seal(value, false), source: "typed" })));
+  await hold(customer_ref);
+  const partner = { state: "us-ny", name: "A", reads: 0, fails: false };
+  RAMP_ADAPTERS.verifying = {
+    ...bridgeAdapter,
+    id: "verifying",
+    environmentProblems: () => [],
+    customerIdentity: async () => {
+      partner.reads++;
+      return partner.fails ? rampError("partner_unreachable", "no") : { full_name: partner.name, date_of_birth: "1990-01-01", residential_state: partner.state };
+    },
+  };
+  const firm = w.lpUser.entity_id;
+  await store.db.query("INSERT INTO financial_products.service_types (region, key, name, category, input_schema, output_schema, consent_purpose, moves_money) VALUES ('US', 'onramp_transfer', 'o', 'ramp', '{}', '{}', 'x', true)");
+  const offeringId = randomUUID();
+  const keyId = randomUUID();
+  await store.db.query("INSERT INTO financial_products.key_vault (id, entity_id, type, label, sealed, created_by) VALUES ($1, $2, 'ramp_partner_live_credential', 'k', $3, $4)", [keyId, firm, seal("sk-live", false), w.lpUser.id]);
+  await store.db.query(
+    `INSERT INTO financial_products.vendor_offerings (id, entity_id, region, service_type, name, test_base_url, live_base_url, price, licence_ids, conformance_secret, adapter, adapter_config, adapter_live_key_id, status)
+     VALUES ($1, $2, 'US', 'onramp_transfer', 'o', 'https://t.example', 'https://l.example', '{"amount":0,"currency":"USD"}', '{}', $3, 'verifying', '{}', $4, 'listed')`,
+    [offeringId, firm, seal("c", false), keyId],
+  );
+  const offering = await getOffering(store.db, offeringId);
+  const HELD_A = { full_name: "A", date_of_birth: "1990-01-01" };
+  const resolve = (ref = customer_ref) => resolveCustomerState(store, { sandbox: false, app_id, customer_ref: ref, held: async () => HELD_A, product_id: w.product_id, component_key: "account" });
+  const refresh = () => refreshVerifiedCustomerState(store, offering, { app_id, customer_ref }, {});
+
+  // Nobody linked: nothing to read.
+  await refresh();
+  assert.equal(partner.reads, 0);
+  assert.equal((await resolve()).state, null);
+  await store.db.query("INSERT INTO financial_products.ramp_partner_links (entity_id, environment, customer_key, partner_customer_id, identity_verified_at) VALUES ($1, 'live', $2, 'cust_p', now())", [firm, rampCustomerKey(app_id, customer_ref)]);
+
+  await refresh();
+  const first = await resolve();
+  assert.deepEqual([first.state, first.source, first.verified_by], ["us-ny", "partner_verified", "verifying"]);
+  // Whichever of the firm's adapter offerings served it, it's the one record, under the one key.
+  const laterId = randomUUID();
+  await store.db.query(
+    `INSERT INTO financial_products.vendor_offerings (id, entity_id, region, service_type, name, test_base_url, live_base_url, price, licence_ids, conformance_secret, adapter, adapter_config, adapter_live_key_id, status, created_at)
+     VALUES ($1, $2, 'US', 'onramp_transfer', 'later', 'https://t2.example', 'https://l2.example', '{"amount":0,"currency":"USD"}', '{}', $3, 'verifying', '{}', $4, 'listed', now() + interval '1 hour')`,
+    [laterId, firm, seal("c", false), keyId],
+  );
+  await refreshVerifiedCustomerState(store, await getOffering(store.db, laterId), { app_id, customer_ref }, {});
+  const records = (await store.db.query("SELECT offering_id FROM financial_products.customer_verified_states WHERE app_id = $1 AND customer_ref = $2", [app_id, customer_ref])).rows;
+  assert.deepEqual(records, [{ offering_id: offeringId }]);
+  // The same answer again isn't a new verification.
+  await refresh();
+  assert.equal((await resolve()).verified_at, first.verified_at);
+  assert.equal(partner.reads, 3);
+  // The partner re-verified them.
+  partner.state = "us-ca";
+  await refresh();
+  assert.equal((await resolve()).state, "us-ca");
+  // The partner can't be read, or doesn't say: what it last verified stands. Nothing else takes its place.
+  partner.fails = true;
+  await refresh();
+  partner.fails = false;
+  partner.state = null;
+  await refresh();
+  assert.equal((await resolve()).state, "us-ca");
+  // The partner's record is no longer this customer's: suspended, until it is again.
+  partner.name = "Someone Else";
+  await refresh();
+  assert.equal((await resolve()).state, null);
+  assert.match((await resolve()).problem, /latest identity check didn't pass/);
+  partner.name = "A";
+  partner.state = "us-ny";
+  await new Promise((r) => setTimeout(r, 5));
+  await refresh();
+  assert.equal((await resolve()).state, "us-ny");
+
+  // Erased: the state and the link go, so the partner's record can't bring it back.
+  await eraseCustomerVerification(store, { app_id, customer_ref, sandbox: false, changed_by: "session:s" });
+  const reads = partner.reads;
+  await refresh();
+  assert.equal(partner.reads, reads);
+  assert.equal((await resolve()).state, null);
+
+  // Linking a customer in live takes the state from the partner's record of them.
+  await hold("cust_linked");
+  await store.setSetting("mynt_ramp", { entity_id: firm }, null);
+  const linkId = randomUUID();
+  await store.db.query("INSERT INTO financial_products.ramp_link_requests (id, entity_id, app_id, customer_ref, sandbox, session_id, product_id, consent_purpose) VALUES ($1, $2, $3, 'cust_linked', false, $4, 'p', 'x')", [linkId, firm, app_id, randomUUID()]);
+  await ok(w.admin, "link_ramp_partner_customer", { link_reference: linkId, partner_customer_id: "cust_p2" });
+  const linked = await resolve("cust_linked");
+  assert.deepEqual([linked.state, linked.source, linked.verified_by], ["us-ny", "partner_verified", "verifying"]);
+  delete RAMP_ADAPTERS.verifying;
+
+  // Bridge's documented customer response has no address, even if a response happens to carry something.
+  const identity = await bridgeAdapter.customerIdentity({ http: async () => ({ status: 200, body: { first_name: "A", last_name: "B", birth_date: "1990-01-01", residential_address: { subdivision: "NY" } }, error: null }) }, "c1");
+  assert.equal(identity.residential_state, null);
 });
 
 test("what settled is kept, and a difference from the quote is flagged", async () => {
@@ -667,7 +1050,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const innovator = await connectV(ctx.user);
 
   // The ramp partner: it quotes, and takes transfers; how it answers is set per test.
-  const partner = { transfers: [], answer: "submitted" };
+  const partner = { transfers: [], answer: "submitted", identity: { result: "no_match" }, identityBodies: [] };
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
@@ -675,6 +1058,8 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     res.writeHead(200, { "Content-Type": "application/json" });
     if (req.url.endsWith("/v1/ramp_quote"))
       return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: { quote_id: `q_${randomUUID()}`, expires_at: new Date(Date.now() + 60_000).toISOString(), direction: "on", amount_usd: body.params.amount_usd, currency: "USD" } }));
+    if (req.url.endsWith("/v1/identity_check")) partner.identityBodies.push(body);
+    if (req.url.endsWith("/v1/identity_check")) return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: partner.identity }));
     partner.transfers.push(body);
     if (partner.answer === "refused") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "unknown_quote", message: "no" } }));
     if (partner.answer === "vague") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "try_later", message: "hm" } }));
@@ -722,6 +1107,20 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
       client_result: { status: { from: "transfer_status", map: { submitted: "pending", settled: "completed", failed: "failed", returned: "failed" } }, fields: ["transfer_status"], redirect: false },
     },
   });
+  await must(admin, "define_service_type", {
+    service_type: {
+      region: "IN",
+      key: "identity_check",
+      name: "Identity check",
+      category: "identity",
+      moves_money: false,
+      input_schema: inputSchema,
+      output_schema: { type: "object", required: ["result"], properties: { result: { enum: ["match", "no_match", "deceased"] }, residential_state: { type: "string" } }, additionalProperties: false },
+      consent_purpose: "fiat_ramp_transfer",
+      vendor_licences: [],
+      client_result: { status: { from: "result", map: { match: "verified", no_match: "not_verified", deceased: "not_verified" } }, fields: [], redirect: false },
+    },
+  });
   // What moves money is declared: not by its category or its name alone, and a quote can't be one.
   const plain = { region: "IN", name: "Plain", moves_money: false, input_schema: inputSchema, output_schema: { type: "object", properties: {}, additionalProperties: false }, consent_purpose: "x", vendor_licences: [], client_result: { fields: [], redirect: false } };
   assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "bank_payout", name: "Payouts", category: "other" } })).data), /declare moves_money/);
@@ -753,7 +1152,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const sameUrl = new URL(partnerUrl);
   const clashCase = await call(rampClient, "create_vendor_offering", { region: "IN", service_type: "ramp_quote", name: "same", price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, live_base_url: `HTTP://${sameUrl.hostname}:${sameUrl.port}/`, licence_ids: [rampLic.id] });
   assert.match(JSON.stringify(clashCase.data), /must be different endpoints/, "the same endpoint however it's written");
-  for (const key of ["ramp_quote", "ramp_transfer"]) {
+  for (const key of ["ramp_quote", "ramp_transfer", "identity_check"]) {
     const o = await must(rampClient, "create_vendor_offering", { region: "IN", service_type: key, name: key, price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, licence_ids: [rampLic.id] });
     await store.db.query("UPDATE financial_products.vendor_offerings SET status = 'listed', live_base_url = $2 WHERE id = $1", [o.id, partnerUrl]);
     offerings[key] = o.id;
@@ -763,7 +1162,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   }
   await publishDefined(ctx, (d) => {
     d.descriptions.documents = { kfs: "https://bank.example.com/kfs.pdf" };
-    for (const [id, key] of [["get_quote", "ramp_quote"], ["transfer", "ramp_transfer"]]) {
+    for (const [id, key] of [["get_quote", "ramp_quote"], ["transfer", "ramp_transfer"], ["verify_identity", "identity_check"]]) {
       d.partner_handoffs.push({ _id: id, name: id, trigger: "account_opened", sends: { type: "object", required: ["full_name"] }, returns: { type: "object", required: ["status"] } });
       d.connections.push(
         { _id: `h_${id}`, type: "handoff_to_party", from: { kind: "partner_handoff", id }, to: { kind: "party", id: subs[key].vendor_party_id }, attributes: { sla: "PT1M", consent_purpose: "fiat_ramp_transfer", channel: "api", vendor_subscription_id: subs[key].subscription_id, service_type: key } },
@@ -790,8 +1189,8 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     const text = await res.text();
     return { status: res.status, body: JSON.parse(text), text };
   };
-  const session = (customer_ref) => api("POST", "/v1/client_sessions", key, { product_ids: [P], scopes: ["get_quote", "transfer"], customer_ref }).then((r) => r.body.client_secret);
-  const device = await session("cust_rail_1");
+  const session = (customer_ref) => api("POST", "/v1/client_sessions", key, { product_ids: [P], scopes: ["get_quote", "transfer", "verify_identity"], customer_ref }).then((r) => r.body.client_secret);
+  let device = await session("cust_rail_1");
   assert.equal((await api("POST", "/v1/client/evidence", device, { product_id: P, type: "consent_given", subject: "fiat_ramp_transfer" })).status, 201);
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: "Avery Stone" } })).status, 201);
   const start = (action, extra) => api("POST", `/v1/client/actions/${action}`, device, { product_id: P, ...extra });
@@ -801,17 +1200,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     return q.body.reference;
   };
 
-  // No state on file yet: the transfer asks for it, the partner hears nothing, and the quote stays usable.
   const q1 = await quote();
-  const noState = await start("transfer", { quote: q1 });
-  assert.equal(noState.status, 409, noState.text);
-  assert.equal(noState.body.error, "customer_state_required");
-  assert.equal(partner.transfers.length, 0);
-
-  // The customer's state is accepted, because this product moves money.
-  const stateSet = await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ny" } });
-  assert.equal(stateSet.status, 201, stateSet.text);
-
   // Nobody sponsors it: refused before anything is instructed.
   const noSponsor = await start("transfer", { quote: q1 });
   assert.equal(noSponsor.status, 403, noSponsor.text);
@@ -823,6 +1212,52 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const asked = await store.requestSponsorship(ctx.user.id, { product_id: P, component_key: "deposit", builder_entity_id: ctx.user.entity_id, provider_entity_id: lpUser.entity_id, requested_jurisdictions: ["us-ny"], note: null });
   await store.decideSponsorship(asked.id, { status: "approved", decided_by: lpUser.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
   const provider = await connectV(lpUser);
+
+  // No verified state yet: refused, the partner hears nothing, and the quote stays usable.
+  const noState = await start("transfer", { quote: q1 });
+  assert.equal(noState.status, 403, noState.text);
+  assert.equal(noState.body.error, "state_unverified");
+  assert.equal(partner.transfers.length, 0);
+
+  // The customer's state is accepted, because this product moves money.
+  const stateSet = await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ny" } });
+  assert.equal(stateSet.status, 201, stateSet.text);
+  // ... for forms and sandbox. It doesn't move money live, however valid it is.
+  assert.equal((await start("transfer", { quote: q1 })).body.error, "state_unverified");
+  // A failed identity check says nothing about where they live, even if it names a state.
+  partner.identity = { result: "no_match", residential_state: "us-ny" };
+  assert.equal((await start("verify_identity", {})).body.status, "not_verified");
+  assert.equal((await start("transfer", { quote: q1 })).body.error, "state_unverified");
+  // A passed check with no address doesn't either.
+  partner.identity = { result: "match" };
+  assert.equal((await start("verify_identity", {})).body.status, "verified");
+  assert.equal((await start("transfer", { quote: q1 })).body.error, "state_unverified");
+  // A passed check that verified the address does.
+  partner.identity = { result: "match", residential_state: "us-ny" };
+  assert.equal((await start("verify_identity", {})).body.status, "verified");
+  assert.equal(partner.transfers.length, 0);
+  // ... from a provider the sponsor accepts: until it does, this is just any vendor's word.
+  const notAccepted = await start("transfer", { quote: q1 });
+  assert.equal(notAccepted.body.error, "state_unverified", notAccepted.text);
+  assert.match(notAccepted.body.message, /licence provider accepts/);
+  await must(provider, "approve_identity_provider", { sponsorship_id: asked.id, offering_id: offerings.identity_check });
+  // Approval looks forward, so the check is run again.
+
+  // The details can change at any moment: what's hashed is exactly what the partner was sent, from one read of the vault.
+  const realVaultFields = store.vaultFields.bind(store);
+  let vaultReads = 0;
+  store.vaultFields = async (...args) => {
+    const rows = await realVaultFields(...args);
+    return ++vaultReads % 2 ? rows : rows.map((h) => (h.field === "full_name" ? { ...h, sealed: seal("Swapped In", false) } : h));
+  };
+  const swapped = await start("verify_identity", {});
+  store.vaultFields = realVaultFields;
+  assert.equal(swapped.body.status, "verified", swapped.text);
+  assert.equal(vaultReads, 1, "one read");
+  const sent = partner.identityBodies.at(-1).input.full_name;
+  const stored = (await store.db.query("SELECT identity_digest FROM financial_products.vendor_action_runs WHERE id = $1", [swapped.body.reference])).rows[0];
+  assert.equal(stored.identity_digest, identityDigest({ full_name: sent }, ["full_name"]));
+
 
   const noRail = await start("transfer", { quote: q1 });
   assert.equal(noRail.status, 403, noRail.text);
@@ -845,7 +1280,37 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal(row.direction, "on_ramp");
   assert.equal(row.state, "us-ny");
   assert.equal(row.sponsor_entity_id, lpUser.entity_id);
-  assert.equal(row.state_source, "customer_attested");
+  assert.equal(row.state_source, "partner_verified");
+  assert.equal(row.state_verified_by, "identity_check");
+  assert.ok(row.state_verified_at);
+
+  // Re-verified elsewhere: new movements go by it, and this one keeps the state it was reserved under.
+  partner.identity = { result: "match", residential_state: "us-ca" };
+  await start("verify_identity", {});
+  assert.equal((await start("transfer", { quote: await quote("10.00") })).body.error, "state_not_sponsored");
+  assert.equal((await rowOf(q1)).state, "us-ny");
+  partner.identity = { result: "match", residential_state: "us-ny" };
+  await start("verify_identity", {});
+
+  // A session of its own: the first has used up its allowance of requests by now on a fast machine.
+  device = await session("cust_rail_1");
+  assert.equal((await api("POST", "/v1/client/evidence", device, { product_id: P, type: "consent_given", subject: "fiat_ramp_transfer" })).status, 201);
+  // The vault no longer matches who was checked: refused, until it does again.
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: "Someone Else" } })).status, 201);
+  const changed = await start("transfer", { quote: await quote("10.00") });
+  assert.equal(changed.body.error, "state_unverified", changed.text);
+  assert.match(changed.body.message, /details have changed/);
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: "Avery Stone" } })).status, 201);
+  // A later check that doesn't pass takes it away, deceased included, until one passes.
+  for (const result of ["no_match", "deceased"]) {
+    partner.identity = { result };
+    assert.equal((await start("verify_identity", {})).body.status, "not_verified");
+    const failed = await start("transfer", { quote: await quote("10.00") });
+    assert.equal(failed.body.error, "state_unverified", failed.text);
+    assert.match(failed.body.message, /latest identity check didn't pass/);
+    partner.identity = { result: "match", residential_state: "us-ny" };
+    assert.equal((await start("verify_identity", {})).body.status, "verified");
+  }
 
   // If the run can't even be started, or fails before the partner is called, nothing moved: the reservation goes.
   const realQuery = store.db.query;
@@ -965,7 +1430,19 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ny" } })).status, 201);
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ca" } })).status, 201);
   assert.equal((await api("DELETE", "/v1/client/fields", device)).status, 200);
-  const history = (await store.db.query("SELECT * FROM financial_products.customer_state_history ORDER BY created_at, new_state NULLS LAST")).rows;
+  const allHistory = (await store.db.query("SELECT * FROM financial_products.customer_state_history ORDER BY created_at, new_state NULLS LAST")).rows;
+  const history = allHistory.filter((h) => h.source.startsWith("self_reported"));
+  assert.deepEqual(allHistory.filter((h) => h.source.startsWith("partner_verified")).map((h) => [h.old_state, h.new_state, h.source]), [
+    [null, "us-ny", "partner_verified:identity_check"],
+    ["us-ny", "us-ca", "partner_verified:identity_check"],
+    ["us-ca", "us-ny", "partner_verified:identity_check"],
+    ["us-ny", null, "partner_verified:suspended:identity_check"],
+    [null, "us-ny", "partner_verified:identity_check"],
+    ["us-ny", null, "partner_verified:suspended:identity_check"],
+    [null, "us-ny", "partner_verified:identity_check"],
+    ["us-ny", null, "partner_verified:erased"],
+  ]);
+  assert.equal((await resolveCustomerState(store, { sandbox: false, app_id: app.id, customer_ref: "cust_rail_1", held: async () => ({ residence_state: "us-ny", full_name: "Avery Stone" }), product_id: P, component_key: "deposit" })).state, null, "erased: no state for live");
   assert.deepEqual(history.map((h) => [h.old_state, h.new_state]), [[null, "us-ny"], ["us-ny", "us-ca"], ["us-ca", null]], "the same value twice is no change");
   assert.match(history[0].changed_by, /^session:/);
   assert.match(history[0].customer_key, /^[0-9a-f]{40}$/);

@@ -300,7 +300,7 @@ export async function withdrawalRefusal(store: Store, pool: Pool, lpEntityId: st
   if (!pool.withdrawal_rail_id) return { code: "no_approved_rail", message: "This pool has no withdrawal rail" };
   const { rows } = await store.db.query(`SELECT kind, provider, direction FROM ${T}.money_rails WHERE id = $1`, [pool.withdrawal_rail_id]);
   if (!rows[0]) return { code: "no_approved_rail", message: "This pool's rail no longer exists" };
-  const out = await eligibleRails(store, poolMovementRequest(pool, rows[0] as never, { amount_cents: 1, state, state_source: "check", lp_entity_id: lpEntityId, idempotency_key: "check", kind: "withdrawal", request_id: randomUUID() }, pool.withdrawal_rail_id), pool.withdrawal_rail_id);
+  const out = await eligibleRails(store, poolMovementRequest(pool, rows[0] as never, { amount_cents: 1, state, state_source: "liquidity_provider_stated", lp_entity_id: lpEntityId, idempotency_key: "check", kind: "withdrawal", request_id: randomUUID() }, pool.withdrawal_rail_id), pool.withdrawal_rail_id);
   return "allowed" in out ? { code: out.code, message: out.message } : null;
 }
 

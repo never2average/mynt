@@ -785,7 +785,7 @@ test("a claim with a ledger row is tied to it and never released", async () => {
   const w = await s.requestOut(s.fundA, 5_000);
   // The worker reached the chokepoint and died before tying the claim to the row it made.
   const id = randomUUID();
-  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", customer_ref: "lp", idempotency_key: `pool-withdrawal:${id}`, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
+  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", state_source: "liquidity_provider_stated", customer_ref: `lp:${s.fundA.entity.id}`, idempotency_key: `pool-withdrawal:${id}`, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
   assert.equal(verdict.allowed, true);
   await s.db.query(`INSERT INTO financial_products.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, withdrawal_id, amount_cents, state, claimed_at) VALUES ($1, $2, $3, $4, 'withdrawal', $5, 5000, 'claimed', now() - interval '1 hour')`, [id, `pool-withdrawal:${id}`, s.pool.id, s.fundA.entity.id, w.id]);
   await s.db.query("UPDATE financial_products.pool_withdrawals SET status = 'paying' WHERE id = $1", [w.id]);
@@ -1109,7 +1109,7 @@ test("a crashed claim with a ledger row is tied to it under any pause, and sandb
   await s.funded(s.fundA, 10_000);
   const w = await s.requestOut(s.fundA, 5_000);
   const id = randomUUID();
-  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", customer_ref: "lp", idempotency_key: `pool-withdrawal:${id}`, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
+  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", state_source: "liquidity_provider_stated", customer_ref: `lp:${s.fundA.entity.id}`, idempotency_key: `pool-withdrawal:${id}`, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
   await s.db.query(`INSERT INTO financial_products.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, withdrawal_id, amount_cents, state, claimed_at) VALUES ($1, $2, $3, $4, 'withdrawal', $5, 5000, 'claimed', now() - interval '1 hour')`, [id, `pool-withdrawal:${id}`, s.pool.id, s.fundA.entity.id, w.id]);
   await ok(s.admin, "pause_pool", { pool_id: s.pool.id, reason: "looking" });
   s.advance(10 * 60_000);
@@ -1288,7 +1288,7 @@ async function linkConflict(s) {
   // The worker ended this claim and then the rail call came back: a ledger payout with no claim behind it.
   const id = randomUUID();
   const key = `pool-withdrawal:${id}`;
-  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", customer_ref: "lp", idempotency_key: key, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
+  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", state_source: "liquidity_provider_stated", customer_ref: "lp:fund", idempotency_key: key, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
   await s.db.query(`INSERT INTO financial_products.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, withdrawal_id, amount_cents, state, claimed_at) VALUES ($1, $2, $3, $4, 'withdrawal', $5, 5000, 'refused', now())`, [id, key, s.pool.id, s.fundA.entity.id, w.id]);
   assert.equal(await linkMovement(s.store, { id, idempotency_key: key, pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id, kind: "withdrawal", amount_cents: 5_000, state: "refused", movement_id: null }, verdict.movement_id), false);
   const flag = (await ok(s.admin, "list_pool_flags")).find((f) => f.kind === "link_conflict");

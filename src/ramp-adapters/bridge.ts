@@ -242,7 +242,8 @@ export const bridgeAdapter: RampAdapter = {
     const c = (r.body ?? {}) as { first_name?: unknown; last_name?: unknown; full_name?: unknown; birth_date?: unknown };
     const name = str(c.full_name) ?? ([str(c.first_name), str(c.last_name)].filter(Boolean).join(" ") || null);
     const dob = str(c.birth_date);
-    return { full_name: name, date_of_birth: dob && /^\d{4}-\d{2}-\d{2}/.test(dob) ? dob.slice(0, 10) : null };
+    // Bridge's documented customer response has no address (it's request-only), so it can't say where the customer lives.
+    return { full_name: name, date_of_birth: dob && /^\d{4}-\d{2}-\d{2}/.test(dob) ? dob.slice(0, 10) : null, residential_state: null };
   },
 
   // GET /v0/customers/{customerID}/external_accounts/{externalAccountID}: the payout account is this customer's.

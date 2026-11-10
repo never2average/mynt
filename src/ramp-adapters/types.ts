@@ -84,6 +84,10 @@ export interface RampTransferUpdate {
 export interface RampPartnerIdentity {
   full_name: string | null;
   date_of_birth: string | null; // YYYY-MM-DD
+  // The US state of the residential address the partner verified (ISO 3166-2, e.g. us-ny), and when, if it says.
+  // null: this partner doesn't tell Mynt. Never assumed, and never taken from anything but the partner's own record.
+  residential_state: string | null;
+  verified_at?: string | null;
 }
 
 export interface RampWebhookEvent {

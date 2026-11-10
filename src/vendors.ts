@@ -15,11 +15,14 @@ import { checkWebhookUrl, emitFirmEvent, emitEvent, FIRM_WEBHOOK_EVENTS } from "
 import type { Db } from "./db.js";
 import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
 import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
-import { rampCustomerKey, serveRampAdapter } from "./ramp-adapters/index.js";
+import { rampCustomerKey, refreshVerifiedCustomerState, serveRampAdapter } from "./ramp-adapters/index.js";
 import {
   authorizeMovement,
   CUSTOMER_STATE_FIELD,
+  identityDigest,
+  identityFieldsOf,
   isDefiniteRefusal,
+  isIdentityCheck,
   isMoneyMovement,
   movementShape,
   namesMoneyMovement,
@@ -29,6 +32,7 @@ import {
   recordMovementPending,
   recordMovementReversed,
   recordMovementUnknown,
+  recordVerifiedCustomerState,
   resolveCustomerState,
 } from "./money-rails.js";
 import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
@@ -824,6 +828,7 @@ async function callBoundVendor(
     customer_key?: string; // Mynt's pseudonymous key for the customer, for a ramp adapter (never sent over the wire)
     movement_id?: string; // a transfer's authorisation from the rail chokepoint (see money-rails.ts)
     reached?: { partner: boolean }; // set just before the partner is called: until then, nothing can have moved
+    onIdentity?: (fields: string[], digest: string | null) => Promise<void>; // given the hash of exactly what's about to be sent
   },
   opts: VendorCallOptions,
 ): Promise<VendorAnswer> {
@@ -864,6 +869,12 @@ async function callBoundVendor(
     ...(a.quote_id ? { quote: { quote_id: a.quote_id } } : {}),
     consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at },
   };
+  // Hashed from the same read of the vault as the input above, so what's hashed is what the partner checks; and kept
+  // before the call, so an answer that comes back first still finds it.
+  if (a.onIdentity) {
+    const fields = identityFieldsOf(t.input_schema);
+    await a.onIdentity(fields, identityDigest(held, fields));
+  }
   if (a.reached) a.reached.partner = true;
   const r = await callOffering(
     store,
@@ -968,6 +979,9 @@ type RunRow = {
   sandbox: boolean;
   status: RunStatus;
   client_outcome: Record<string, unknown>;
+  identity_fields?: string[] | null;
+  identity_digest?: string | null;
+  created_at?: string | Date;
 };
 const outcomeOf = (r: RunRow): ClientOutcome & { sandbox: boolean } => ({
   ...r.client_outcome,
@@ -1016,6 +1030,16 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType | null, end: 
       if (f === CUSTOMER_STATE_FIELD || v == null || validateValue(f, v)) continue; // a stored type can't set where they live
       await store.putVaultField({ app_id: run.app_id, customer_ref: run.customer_ref, sandbox: run.sandbox, field: f, sealed: seal(String(v).trim(), run.sandbox), source: PREFILL_SOURCE[t.category] ?? "vendor" });
     }
+  // A live identity check: one that passed and says where the customer lives is a verified state, for the sponsors
+  // that accept this provider (see resolveCustomerState); one that didn't pass suspends what this provider said.
+  if (status === "completed" && output && t && !run.sandbox && run.customer_ref && isIdentityCheck(t) && (shown === "not_verified" || (shown === "verified" && output.residential_state))) {
+    const sub = await getSubscription(store.db, run.subscription_id);
+    const vendor = sub && (await getOffering(store.db, sub.offering_id));
+    if (vendor) {
+      const base = { app_id: run.app_id, customer_ref: run.customer_ref, offering_id: vendor.id, source: "identity_service" as const, verified_by_entity: vendor.entity_id, verified_by: t.key, verified_at: new Date(), started_at: done.created_at ?? new Date() };
+      await recordVerifiedCustomerState(store, shown === "not_verified" ? { ...base, status: "suspended", reason: String(output.result ?? "not_verified") } : { ...base, state: output.residential_state, identity_fields: done.identity_fields ?? [], identity_digest: done.identity_digest ?? null });
+    }
+  }
   await store.recordClientEvidence({
     app_id: run.app_id,
     session_id: run.session_id,
@@ -1158,7 +1182,8 @@ export async function vendorAction(
   const at = { subscription_id: sub.id, request_id: run.request_id };
   let movementId: string | undefined;
   if (isMoneyMovement(t)) {
-    const customerState = resolveCustomerState(await a.held());
+    if (!a.sandbox && bound.o.adapter) await refreshVerifiedCustomerState(store, bound.o, { app_id: a.app_id, customer_ref: a.customer_ref }, opts);
+    const customerState = await resolveCustomerState(store, { sandbox: a.sandbox, app_id: a.app_id, customer_ref: a.customer_ref, held: a.held, product_id: a.record.product.id, component_key: a.component ?? null });
     const verdict = await authorizeMovement(store, {
       product_id: a.record.product.id,
       sandbox: a.sandbox,
@@ -1166,6 +1191,11 @@ export async function vendorAction(
       channel: { kind: "ramp_adapter", provider: bound.o.adapter ?? bound.o.id },
       customer_state: customerState.state,
       state_source: customerState.source,
+      state_verified_by: customerState.verified_by,
+      state_verified_at: customerState.verified_at,
+      state_verified_offering: customerState.offering_id,
+      state_sponsors: customerState.sponsors,
+      state_problem: customerState.problem,
       customer_ref: a.customer_ref,
       // One quote is one movement, however many times it's accepted after a failure.
       idempotency_key: a.quote ? `quote:${a.quote}` : `run:${run.id}`,
@@ -1184,9 +1214,9 @@ export async function vendorAction(
   }
   try {
     await store.db.query(
-      `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
-      [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
+      `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status, identity_fields, identity_digest)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling', $13, $14)`,
+      [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox, run.identity_fields ?? null, run.identity_digest ?? null],
     );
   } catch (e) {
     // Nothing was sent: the reservation goes, so the day's limit and the quote aren't held by a call that never happened.
@@ -1200,13 +1230,17 @@ export async function vendorAction(
     await store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
     await releaseQuote();
   };
+  // A live identity check: what it was run on, as a keyed hash, so a verification stays tied to this person.
+  const keepIdentity = async (fields: string[], digest: string | null) => {
+    await store.db.query(`UPDATE ${T}.vendor_action_runs SET identity_fields = $2, identity_digest = $3 WHERE id = $1`, [run.id, fields, digest]);
+  };
   let answer: VendorAnswer;
   const reached = { partner: false };
   try {
     answer = await callBoundVendor(
       store,
       bound,
-      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref), movement_id: movementId, reached },
+      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref), movement_id: movementId, reached, onIdentity: !a.sandbox && isIdentityCheck(t) ? keepIdentity : undefined },
       opts,
     );
   } catch (e) {

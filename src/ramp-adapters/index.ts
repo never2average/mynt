@@ -7,9 +7,9 @@ import { derivedKey, open, seal, vaultAvailable } from "../vault.js";
 import { safeRequest, signBody, type VendorCallOptions, type VendorResult } from "../vendor-call.js";
 import { emitFirmEvent } from "../runtime.js";
 import { getOffering, lateVendorSettlement, myntRampEntity, reverseVendorRun, serviceType, vendorCallback, type Offering } from "../vendors.js";
-import { recordMovementGaveUp, recordMovementOutput } from "../money-rails.js";
+import { eraseVerifiedCustomerState, identityDigest, rampIdentityOffering, recordMovementGaveUp, recordMovementOutput, recordVerifiedCustomerState } from "../money-rails.js";
 import { bridgeAdapter } from "./bridge.js";
-import { isRampError, type PartnerHttp, type RampAdapter, type RampAdapterContext, type RampDirection, type RampPrice, type RampTransferStatus, type RampTransferUpdate } from "./types.js";
+import { isRampError, type PartnerHttp, type RampAdapter, type RampAdapterContext, type RampPartnerIdentity, type RampDirection, type RampPrice, type RampTransferStatus, type RampTransferUpdate } from "./types.js";
 
 // Mynt's side of a ramp adapter (see ./types.ts): it answers Mynt's own signed wire-contract requests for an
 // offering that names an adapter, exactly as a partner speaking the contract would (the same signature and replay
@@ -492,6 +492,41 @@ export function identityProblem(held: { full_name?: string; date_of_birth?: stri
   return null;
 }
 
+const LINK_IDENTITY_FIELDS = ["full_name", "date_of_birth"]; // what a link compares with the partner's record
+
+// Reads the partner's record again before a live transfer, so a re-verified state is used at once. A partner that
+// can't be read, or doesn't say, leaves what's on file: the partner-verified state from the last time it did.
+export async function refreshVerifiedCustomerState(store: Store, o: Offering, a: { app_id: string; customer_ref: string }, opts: VendorCallOptions = {}): Promise<void> {
+  const started = new Date();
+  try {
+    const row = await adapterRow(store, o.id);
+    if (!row) return;
+    const { rows } = await store.db.query(`SELECT partner_customer_id FROM ${T}.ramp_partner_links WHERE entity_id = $1 AND environment = 'live' AND customer_key = $2 AND identity_verified_at IS NOT NULL`, [o.entity_id, rampCustomerKey(a.app_id, a.customer_ref)]);
+    if (!rows[0]) return;
+    const c = await contextFor(store, o, row, "live", opts);
+    if ("error" in c) return;
+    const got = await c.adapter.customerIdentity(c.ctx, rows[0].partner_customer_id as string);
+    if (isRampError(got)) return;
+    const base = { app_id: a.app_id, customer_ref: a.customer_ref, offering_id: await rampIdentityOffering(store, o.entity_id), source: "ramp_link" as const, verified_by_entity: o.entity_id, verified_by: c.adapter.id, started_at: started };
+    // The partner's record must still be this customer's, as at linking.
+    const held = Object.fromEntries((await store.vaultFields(a.app_id, a.customer_ref, false)).filter((h) => LINK_IDENTITY_FIELDS.includes(h.field)).map((h) => [h.field, open(h.sealed, false)]));
+    if (identityProblem(held, got, "live")) {
+      await recordVerifiedCustomerState(store, { ...base, status: "suspended", reason: "identity_changed" });
+      return;
+    }
+    if (!got.residential_state) return;
+    await recordVerifiedCustomerState(store, { ...base, state: got.residential_state, verified_at: got.verified_at ?? null, identity_fields: LINK_IDENTITY_FIELDS, identity_digest: identityDigest(held, LINK_IDENTITY_FIELDS) });
+  } catch (e) {
+    console.error("verified customer state:", (e as Error).message);
+  }
+}
+
+// A customer erasing their data: their verified state, and the link that would bring it back.
+export async function eraseCustomerVerification(store: Store, c: { app_id: string; customer_ref: string; sandbox: boolean; changed_by: string }): Promise<void> {
+  await store.db.query(`DELETE FROM ${T}.ramp_partner_links WHERE environment = $1 AND customer_key = $2`, [c.sandbox ? "test" : "live", rampCustomerKey(c.app_id, c.customer_ref)]);
+  if (!c.sandbox) await eraseVerifiedCustomerState(store, c);
+}
+
 // How many link requests a session, and a customer, may make; and how long a request waits for the ramp firm.
 const LINKS_PER_SESSION_HOUR = 5;
 const LINKS_PER_CUSTOMER_DAY = 10;
@@ -657,7 +692,9 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
       const environment = req.sandbox ? "test" : "live";
       // Any of the ramp firm's adapter offerings reaches the partner for this environment.
       const { rows: offs } = await store.db.query(`SELECT id FROM ${T}.vendor_offerings WHERE entity_id = $1 AND adapter IS NOT NULL AND status <> 'suspended' ORDER BY created_at`, [firm]);
-      let identity: { full_name: string | null; date_of_birth: string | null } | null = null;
+      let identity: RampPartnerIdentity | null = null;
+      let adapterId: string | null = null;
+      let adapterOffering: string | null = null;
       let payoutOk: boolean | null = partner_payout_account_id ? false : null;
       for (const { id } of offs) {
         const o = await getOffering(store.db, id as string);
@@ -668,6 +705,8 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
         const got = await c.adapter.customerIdentity(c.ctx, partner_customer_id);
         if (isRampError(got)) return fail(`The ramp partner couldn't confirm that customer (${got.error.code})`);
         identity = got;
+        adapterId = c.adapter.id;
+        adapterOffering = o.id;
         // The payout account must be this partner customer's own.
         if (partner_payout_account_id) {
           const owns = await c.adapter.payoutAccountOf(c.ctx, partner_customer_id, partner_payout_account_id);
@@ -711,7 +750,11 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
         await store.db.query(`UPDATE ${T}.ramp_link_requests SET status = 'refused', refusal = 'partner_customer_already_linked' WHERE id = $1`, [req.id]);
         return fail("That partner customer is already linked to another customer", { refusal: "partner_customer_already_linked" });
       }
-      await audit("link_ramp_partner_customer", req.id, { environment, linked: true, payout_account: !!partner_payout_account_id });
+      // The partner's own record of where the customer lives, when it gives one: what a live movement goes by.
+      const stateVerified = environment === "live" && adapterId && adapterOffering
+        ? await recordVerifiedCustomerState(store, { app_id: req.app_id, customer_ref: req.customer_ref, offering_id: await rampIdentityOffering(store, firm), state: identity.residential_state, source: "ramp_link", verified_by_entity: firm, verified_by: adapterId, verified_at: identity.verified_at ?? new Date(), identity_fields: LINK_IDENTITY_FIELDS, identity_digest: identityDigest(held, LINK_IDENTITY_FIELDS), started_at: req.created_at })
+        : false;
+      await audit("link_ramp_partner_customer", req.id, { environment, linked: true, state_verified: stateVerified, payout_account: !!partner_payout_account_id });
       return json({ link_reference: req.id, environment, linked: true, identity: "verified", payout_account: !!partner_payout_account_id });
     },
   );
