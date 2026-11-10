@@ -153,9 +153,9 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
       licenceProvider: has("license_provider"),
       // A live key change a second member approved: the requester's own checks again, then recorded.
       registerLiveKey: health
-        ? async (requester, publicKey, approvedBy) => {
+        ? async (requester, publicKey, approvedBy, tx) => {
             const entityId = await health.checkSigningKey(requester, publicKey);
-            return health.registerSigningKeyFor(entityId, publicKey, requester.id, approvedBy);
+            return health.registerSigningKeyFor(entityId, publicKey, requester.id, approvedBy, tx);
           }
         : undefined,
     });

@@ -623,7 +623,12 @@ test("a ledger Mynt can't tell is unknown, never sandbox", async () => {
 
 // ---- puppet members: the cool-off, notices, and a second member's approval ----
 
-const backdate = (w, userId, days = 10) => w.pg.query("UPDATE financial_products.users SET created_at = now() - make_interval(days => $2), entity_joined_at = now() - make_interval(days => $2) WHERE id = $1", [userId, days]);
+// Moves an account's creation, joining and (when it has it) licence-provider standing back by `days`.
+const backdate = (w, userId, days = 10) =>
+  w.pg.query(
+    "UPDATE financial_products.users SET created_at = now() - make_interval(days => $2), entity_joined_at = now() - make_interval(days => $2), lp_since = CASE WHEN lp_since IS NOT NULL THEN now() - make_interval(days => $2) END WHERE id = $1",
+    [userId, days],
+  );
 const withCoolOff = async (hours, f) => {
   const was = process.env.PARTNER_MEMBER_COOLOFF_HOURS;
   process.env.PARTNER_MEMBER_COOLOFF_HOURS = String(hours);
@@ -745,7 +750,7 @@ test("only a member who joined before the requester approves a live change; clai
   const a = await addMember(w, "twin_a");
   const b = await addMember(w, "twin_b");
   const joined = new Date(Date.now() - 4 * 24 * 3_600_000).toISOString();
-  await w.pg.query("UPDATE financial_products.users SET created_at = $2, entity_joined_at = $2 WHERE id = ANY($1::uuid[])", [[a.user.id, b.user.id], joined]);
+  await w.pg.query("UPDATE financial_products.users SET created_at = $2, entity_joined_at = $2, lp_since = $2 WHERE id = ANY($1::uuid[])", [[a.user.id, b.user.id], joined]);
   await withCoolOff(72, async () => {
     const asked = await w.ok(a.client, "register_partner_signing_key", { public_key: edKey().address });
     assert.equal(asked.status, "pending_approval", "earlier members exist, so it waits");
@@ -802,4 +807,86 @@ test("a confirmation matches the proposal by its id, whatever precision its time
   await w.pg.query("UPDATE financial_products.partner_ledger_sources SET pending_at = '2026-11-10 12:00:00.123456+00' WHERE entity_id = $1", [w.lp.entity.id]);
   const done = await w.confirm(`${w.partner.url}/test`, `${w.partner.url}/live`);
   assert.equal(done.status, "confirmed");
+});
+
+// ---- the fourth review: standing goes with the role ----
+
+const lpSince = async (w, userId) => (await w.pg.query("SELECT lp_since FROM financial_products.users WHERE id = $1", [userId])).rows[0].lp_since;
+
+test("the reviewer's sequence: members added as consumers who later gain the licence-provider role get no standing until accepted", async () => {
+  const w = await world();
+  await w.connectHttp();
+  await backdate(w, w.lp.user.id);
+  const puppets = [];
+  for (const h of ["puppet1", "puppet2"]) {
+    // Added to the licence provider as consumers: no acceptance asked, since they aren't licence providers.
+    const u = await w.store.upsertClerkUser(h, `${h}@example.com`, h, ["consumer"]);
+    const added = await w.ok(w.admin, "add_entity_member", { email: `${h}@example.com`, entity_id: w.lp.entity.id });
+    assert.equal(added.status, undefined, "a consumer joins directly");
+    // An admin invites them as licence providers, and they sign in again: the invite's roles are copied over.
+    await w.ok(w.admin, "invite_user", { email: `${h}@example.com`, roles: ["license_provider"] });
+    const signedIn = await w.store.upsertClerkUser(h, `${h}@example.com`, h, ["license_provider"]);
+    assert.deepEqual(signedIn.roles, ["license_provider"]);
+    assert.equal(await lpSince(w, u.id), null, "the role alone grants no standing");
+    puppets.push({ user: signedIn, client: await w.connect(signedIn) });
+  }
+  const requests = (await w.ok(w.provider, "get_partner_kit")).pending_members;
+  assert.deepEqual(requests.map((r) => r.member_email).sort(), ["puppet1@example.com", "puppet2@example.com"]);
+  assert.ok((await noticesOf(w, w.provider)).filter((n) => n.type === "firm.member_pending").length >= 2);
+  // 72 hours (and more) on: still no standing, so nothing they do counts.
+  for (const p of puppets) await w.pg.query("UPDATE financial_products.users SET created_at = now() - interval '4 days', entity_joined_at = now() - interval '4 days' WHERE id = $1", [p.user.id]);
+  await withCoolOff(72, async () => {
+    const [p1, p2] = puppets;
+    await w.refused(p2.client, "register_partner_signing_key", { public_key: edKey().address }, /no licence-provider standing/);
+    await w.refused(p1.client, "get_partner_kit", {}, /no licence-provider standing/);
+    await w.refused(p1.client, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet2@example.com").request_id, accept: true }, /before this request was made/);
+    // The firm's own licence provider accepts one: its standing, and its cool-off, start now.
+    await w.ok(w.provider, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet1@example.com").request_id, accept: true });
+    assert.ok(await lpSince(w, p1.user.id));
+    await w.refused(p1.client, "register_partner_signing_key", { public_key: edKey().address }, /too recently/);
+    // Accepted after puppet2's request was made, it can't decide that one.
+    await w.refused(p1.client, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet2@example.com").request_id, accept: true }, /before this request was made/);
+  });
+});
+
+test("deciding who joins: the decider must be past the cool-off, and an account that joined another firm can't be accepted", async () => {
+  const w = await world();
+  const u = await w.store.upsertClerkUser("mover", "mover@example.com", "Mover", ["license_provider"]);
+  const added = await w.ok(w.admin, "add_entity_member", { email: "mover@example.com", entity_id: w.lp.entity.id });
+  assert.equal(added.status, "pending_acceptance");
+  await withCoolOff(72, async () => {
+    // The firm's only licence provider became one minutes ago: too recently to decide who joins.
+    await w.refused(w.provider, "decide_firm_member", { request_id: added.request_id, accept: true }, /too recently to decide/);
+  });
+  // Meanwhile the account is added to an empty firm, directly.
+  const other = await w.ok(w.admin, "register_firm", { name: "Other licence provider", regions: ["US"], legal_form: "company_private", incorporation: { country: "us", subdivision: "us-ny" } });
+  await w.ok(w.admin, "add_entity_member", { email: "mover@example.com", entity_id: other.id });
+  await w.refused(w.provider, "decide_firm_member", { request_id: added.request_id, accept: true }, /joined another firm/);
+  assert.equal((await w.store.getUser(u.id)).entity_id, other.id);
+});
+
+test("an approval stuck mid-way is put right from what's actually there", async () => {
+  const w = await world();
+  const current = w.key.address;
+  const insert = (key) =>
+    w.pg.query(
+      "INSERT INTO financial_products.partner_kit_approvals (id, entity_id, action, payload, status, requested_by, approving_at) VALUES ($1, $2, 'live_key', $3, 'approving', $4, now() - interval '20 minutes') RETURNING id",
+      [randomUUID(), w.lp.entity.id, JSON.stringify({ public_key: key }), w.lp.user.id],
+    );
+  const done = (await insert(current)).rows[0].id;
+  const notDone = (await insert(edKey().address)).rows[0].id;
+  const fresh = (await w.pg.query("INSERT INTO financial_products.partner_kit_approvals (id, entity_id, action, payload, status, requested_by, approving_at) VALUES ($1, $2, 'source', '{\"source\":\"http\"}', 'approving', $3, now()) RETURNING id", [randomUUID(), w.lp.entity.id, w.lp.user.id])).rows[0].id;
+  await w.ok(w.provider, "get_partner_kit");
+  const status = async (id) => (await w.pg.query("SELECT status FROM financial_products.partner_kit_approvals WHERE id = $1", [id])).rows[0].status;
+  assert.equal(await status(done), "approved", "the key it asked for is in place");
+  assert.equal(await status(notDone), "pending", "the change never happened: it waits again");
+  assert.equal(await status(fresh), "approving", "a claim minutes old is left alone");
+});
+
+test("accounts that were licence providers before standing existed keep it, from when they joined", async () => {
+  const w = await world();
+  await w.pg.query("UPDATE financial_products.users SET lp_since = NULL, lp_since_backfilled = false, entity_joined_at = now() - interval '9 days', created_at = now() - interval '9 days' WHERE id = $1", [w.lp.user.id]);
+  await Store.open({ query: (s, p) => w.pg.query(s, p), exec: (s) => w.pg.exec(s), close: () => {} }, CATALOG);
+  const since = await lpSince(w, w.lp.user.id);
+  assert.ok(since && Date.now() - new Date(since).getTime() > 8 * 24 * 3_600_000);
 });

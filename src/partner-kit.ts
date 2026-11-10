@@ -3,7 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { checkStatement, failedCases, ledgerUrl, requestLedger, signBody, type CheckCase, type Statement } from "./partner-ledger/contract.js";
 import { isLedgerError, ledgerError, sandboxPartnerLedger, type LedgerError, type PartnerLedger, type PartnerLedgerContext, type PartnerLedgerReading } from "./partner-ledger/index.js";
-import { decideMembership, firmNotices, noticeFirm, pendingMembers } from "./firm-notices.js";
+import { decideMembership, firmNotices, memberCoolOffMs, noticeFirm, pendingMembers, standingSince } from "./firm-notices.js";
+import { inTransaction } from "./db.js";
 import { base58Decode, isAddress, isWeakEd25519Key } from "./solana/codec.js";
 import type { Store, User } from "./store.js";
 import type { FirmWebhookEvent } from "./runtime.js";
@@ -45,13 +46,9 @@ export const conformanceMaxAgeMs = () => (Number(process.env.PARTNER_CONFORMANCE
 // One request per firm per snapshot round, with this time limit: a slow partner holds up only itself.
 export const ledgerTimeoutMs = () => Number(process.env.PARTNER_LEDGER_TIMEOUT_MS) || 10_000;
 const BATCH_REUSE_MS = 5 * 60_000;
-// A member who joined the firm (or whose account was made) less than this ago can't change what Mynt reads as the
-// firm's books. 0 turns it off (local demos only).
-export const memberCoolOffMs = () => {
-  const raw = process.env.PARTNER_MEMBER_COOLOFF_HOURS;
-  const n = raw === undefined || raw.trim() === "" ? 72 : Number(raw);
-  return (Number.isFinite(n) && n >= 0 ? n : 72) * HOUR;
-};
+export { memberCoolOffMs };
+// An approval claimed this long ago whose change never happened (a crash partway) goes back to waiting.
+const STUCK_APPROVING_MS = 10 * 60_000;
 // How long before a conformance pass runs out the firm is warned, and how long a request for approval stays open.
 export const conformanceWarnMs = () => (Number(process.env.PARTNER_CONFORMANCE_WARN_DAYS) || 7) * DAY;
 const APPROVAL_TTL_MS = 7 * DAY;
@@ -122,24 +119,20 @@ const firmActive = async (store: Store, entityId: string) => (await store.getEnt
 
 // ---- the member cool-off and a second member's approval ----
 
-// When an account counts as a member of its firm from: the later of its creation and its joining the firm.
-async function memberSince(store: Store, userId: string): Promise<Date | null> {
-  const { rows } = await store.db.query(`SELECT created_at, entity_joined_at FROM ${T}.users WHERE id = $1`, [userId]);
-  if (!rows[0]) return null;
-  const created = new Date(rows[0].created_at as string).getTime();
-  const joined = rows[0].entity_joined_at ? new Date(rows[0].entity_joined_at as string).getTime() : created;
-  return new Date(Math.max(created, joined));
-}
-// The cool-off left for this member, in ms (0 when it's over).
-export async function coolOffLeftMs(store: Store, userId: string, now: Date): Promise<number> {
-  const since = await memberSince(store, userId);
-  if (!since) return memberCoolOffMs();
+// The cool-off counts from the account's licence-provider standing at its firm (firm-notices.ts, standingSince): the
+// latest of its creation, its joining and its gaining the role there (acceptance, once accepted). No standing: no gate.
+const NO_STANDING = "You have no licence-provider standing at this firm yet: one of its existing licence providers accepts you first (decide_firm_member)";
+// The cool-off left for this member, in ms (0 when it's over); null without standing.
+export async function coolOffLeftMs(store: Store, userId: string, now: Date): Promise<number | null> {
+  const since = await standingSince(store, userId);
+  if (!since) return null;
   return Math.max(0, since.getTime() + memberCoolOffMs() - now.getTime());
 }
 export async function coolOffRefusal(store: Store, userId: string, now: Date, what: string): Promise<string | null> {
   const left = await coolOffLeftMs(store, userId, now);
+  if (left === null) return NO_STANDING;
   return left > 0
-    ? `You joined this firm too recently to ${what}: a member waits ${Math.round(memberCoolOffMs() / HOUR)} hours from joining (PARTNER_MEMBER_COOLOFF_HOURS), so a newly added account can't change what Mynt reads as your books. About ${Math.ceil(left / HOUR)} hour(s) to go.`
+    ? `You joined this firm too recently to ${what}: a member waits ${Math.round(memberCoolOffMs() / HOUR)} hours from becoming a licence provider there (PARTNER_MEMBER_COOLOFF_HOURS), so a newly added account can't change what Mynt reads as your books. About ${Math.ceil(left / HOUR)} hour(s) to go.`
     : null;
 }
 // Who may approve a live change the requester asked for: the firm's other licence-provider members past the cool-off
@@ -147,14 +140,14 @@ export async function coolOffRefusal(store: Store, userId: string, now: Date, wh
 // accounts added together can't approve each other, and the firm's longest-standing member needs nobody's approval:
 // with a firm's new members accepted by its existing ones (firm-notices.ts), nobody can be put above them.
 async function approversFor(store: Store, entityId: string, requesterId: string, now: Date): Promise<string[]> {
-  const requesterSince = await memberSince(store, requesterId);
+  const requesterSince = await standingSince(store, requesterId);
   if (!requesterSince) return [];
   const { rows } = await store.db.query(`SELECT id, roles FROM ${T}.users WHERE entity_id = $1 AND id <> $2`, [entityId, requesterId]);
   const out: string[] = [];
   for (const r of rows) {
     const roles = (r.roles as string[]) ?? [];
     if (!roles.includes("license_provider") || roles.includes("admin")) continue;
-    const since = await memberSince(store, r.id as string);
+    const since = await standingSince(store, r.id as string);
     if (!since || since.getTime() >= requesterSince.getTime()) continue;
     if ((await coolOffLeftMs(store, r.id as string, now)) === 0) out.push(r.id as string);
   }
@@ -609,6 +602,25 @@ export async function partnerKitSummary(store: Store, entityId: string, o: { run
   };
 }
 
+// An approval left 'approving' for more than a few minutes (a crash between the claim and the end) is put right from
+// what's actually there: if the change it asked for is in place, it's approved; otherwise it waits again.
+export async function recoverStuckApprovals(store: Store, entityId: string, signingKeyOf: (entityId: string) => Promise<string | null>, now: Date) {
+  const { rows } = await store.db.query(
+    `SELECT id, action, payload FROM ${T}.partner_kit_approvals WHERE entity_id = $1 AND status = 'approving' AND approving_at < $2`,
+    [entityId, new Date(now.getTime() - STUCK_APPROVING_MS)],
+  );
+  for (const r of rows as { id: string; action: string; payload: Record<string, string> }[]) {
+    const happened = r.action === "live_key" ? (await signingKeyOf(entityId)) === r.payload.public_key : (await sourceRow(store, entityId))?.active_source === r.payload.source;
+    await store.db.query(
+      happened
+        ? `UPDATE ${T}.partner_kit_approvals SET status = 'approved', decided_at = now() WHERE id = $1 AND status = 'approving'`
+        : `UPDATE ${T}.partner_kit_approvals SET status = 'pending', decided_by = NULL, approving_at = NULL WHERE id = $1 AND status = 'approving'`,
+      [r.id],
+    );
+    await store.audit(null, "partner_kit_approval_recovered", entityId, { approval_id: r.id, now: happened ? "approved" : "pending" });
+  }
+}
+
 // ---- tools ----
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -619,7 +631,7 @@ export function registerPartnerKitTools(
   server: McpServer,
   store: Store,
   user: User,
-  o: PartnerKitDeps & { admin: boolean; licenceProvider: boolean; registerLiveKey?: (requester: User, publicKey: string, approvedBy: string) => Promise<Record<string, unknown>> },
+  o: PartnerKitDeps & { admin: boolean; licenceProvider: boolean; registerLiveKey?: (requester: User, publicKey: string, approvedBy: string, tx: Pick<Store["db"], "query">) => Promise<Record<string, unknown>> },
 ) {
   const deps: PartnerKitDeps = { signingKeyOf: o.signingKeyOf, opts: o.opts, now: o.now };
   const now = () => o.now?.() ?? new Date();
@@ -637,6 +649,8 @@ export function registerPartnerKitTools(
       const mine = await myFirm();
       if (!mine) return { error: "You don't belong to a firm yet" };
       if (entityId && entityId !== mine) return { error: "Only your own firm's" };
+      // The role alone isn't enough: an account counts for no gate until it has standing at its firm.
+      if (!(await standingSince(store, user.id))) return { error: NO_STANDING };
       firm = mine;
     }
     if (needActive && !(await firmActive(store, firm))) return { error: "The firm isn't active" };
@@ -655,6 +669,7 @@ export function registerPartnerKitTools(
     async ({ entity_id }) => {
       const firm = await firmFor(entity_id, false);
       if (typeof firm !== "string") return fail(firm.error);
+      await recoverStuckApprovals(store, firm, o.signingKeyOf, now());
       return json({ entity_id: firm, ...(await partnerKitSummary(store, firm, { now: now() })) });
     },
   );
@@ -777,7 +792,7 @@ export function registerPartnerKitTools(
       inputSchema: { request_id: z.string().uuid(), accept: z.boolean() },
     },
     async ({ request_id, accept }) => {
-      const out = await decideMembership(store, request_id, user, accept);
+      const out = await decideMembership(store, request_id, user, accept, now());
       return "error" in out ? fail(out.error as string) : json(out);
     },
   );
@@ -793,6 +808,7 @@ export function registerPartnerKitTools(
     async ({ approval_id, approve }) => {
       const firm = await firmFor(undefined);
       if (typeof firm !== "string") return fail(firm.error);
+      await recoverStuckApprovals(store, firm, o.signingKeyOf, now());
       const { rows } = await store.db.query(`SELECT * FROM ${T}.partner_kit_approvals WHERE id = $1 AND entity_id = $2`, [approval_id, firm]);
       const a = rows[0] as { id: string; action: "live_key" | "source"; payload: Record<string, string>; status: string; requested_by: string; requested_at: string } | undefined;
       if (!a) return fail("No such request at your firm");
@@ -811,16 +827,33 @@ export function registerPartnerKitTools(
         await store.audit(user.id, "partner_kit_change_declined", firm, { approval_id: a.id, action: a.action, ...a.payload });
         return json({ approval_id: a.id, status: "declined" });
       }
-      // Claimed first, so a decline can't land while the change is being made; put back if the change fails.
-      const { rows: claimed } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approving', decided_by = $2 WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id]);
-      if (!claimed.length) return fail("That request isn't waiting any more: read get_partner_kit again");
-      const release = () => store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'pending', decided_by = NULL WHERE id = $1 AND status = 'approving'`, [a.id]);
       let result: Record<string, unknown>;
+      if (a.action === "live_key") {
+        // The claim, the key change and the approval in one transaction: a crash leaves the request waiting, never half done.
+        if (!o.registerLiveKey) return fail("Signing keys can't be registered on this server (product health isn't running)");
+        try {
+          result = await inTransaction(store.db, async (tx) => {
+            const { rows: claimed } = await tx.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approving', approving_at = now(), decided_by = $2 WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id]);
+            if (!claimed.length) throw new Error("That request isn't waiting any more: read get_partner_kit again");
+            const done = await o.registerLiveKey!(requester, a.payload.public_key, user.id, tx);
+            await tx.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approved', decided_at = now() WHERE id = $1`, [a.id]);
+            return done;
+          });
+        } catch (e) {
+          return fail((e as Error).message);
+        }
+        await store.audit(requester.id, "register_partner_signing_key", firm, { public_key: a.payload.public_key, approved_by: user.id });
+        await store.audit(user.id, "partner_kit_change_approved", firm, { approval_id: a.id, action: a.action, ...a.payload });
+        await announceKeyChange(store, firm, "live", a.payload.public_key, "member", user.id);
+        return json({ approval_id: a.id, status: "approved", result });
+      }
+      // A switch reads the partner's live endpoint, so it can't sit in a transaction: claimed first (so a decline can't
+      // land while it's made), put back if it fails, and put right later if a crash leaves it claimed (recoverStuck).
+      const { rows: claimed } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approving', approving_at = now(), decided_by = $2 WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id]);
+      if (!claimed.length) return fail("That request isn't waiting any more: read get_partner_kit again");
+      const release = () => store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'pending', decided_by = NULL, approving_at = NULL WHERE id = $1 AND status = 'approving'`, [a.id]);
       try {
-        if (a.action === "live_key") {
-          if (!o.registerLiveKey) throw new Error("Signing keys can't be registered on this server (product health isn't running)");
-          result = await o.registerLiveKey(requester, a.payload.public_key, user.id);
-        } else {
+        {
           const cool = await coolOffRefusal(store, requester.id, now(), "switch your firm's ledger to a live source");
           if (cool) throw new Error(cool);
           const done = await switchToLive(store, deps, firm, a.payload.source as "http" | "file", requester.id, user.id, now());
@@ -833,7 +866,6 @@ export function registerPartnerKitTools(
       }
       await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approved', decided_at = now() WHERE id = $1`, [a.id]);
       await store.audit(user.id, "partner_kit_change_approved", firm, { approval_id: a.id, action: a.action, ...a.payload });
-      if (a.action === "live_key") await announceKeyChange(store, firm, "live", a.payload.public_key, "member", user.id);
       return json({ approval_id: a.id, status: "approved", result });
     },
   );

@@ -863,6 +863,15 @@ const TABLES = `
   ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES financial_products.entities(id);
   -- When the account became a member of its current firm: the partner kit's member cool-off counts from it.
   ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS entity_joined_at timestamptz;
+  -- When the account gained licence-provider standing at its firm: when it joined as the firm's first licence provider,
+  -- or when an existing member accepted it (firm-notices.ts). Null: no standing, so it counts for no partner-kit gate,
+  -- whatever its roles say. Accounts that were licence providers at a firm before this column existed are backfilled
+  -- once from when they joined (lp_since_backfilled marks rows the backfill has seen; new rows start seen).
+  ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS lp_since timestamptz;
+  ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS lp_since_backfilled boolean NOT NULL DEFAULT false;
+  ALTER TABLE financial_products.users ALTER COLUMN lp_since_backfilled SET DEFAULT true;
+  UPDATE financial_products.users SET lp_since = CASE WHEN entity_id IS NOT NULL AND 'license_provider' = ANY(roles) THEN GREATEST(created_at, entity_joined_at) ELSE lp_since END, lp_since_backfilled = true
+    WHERE NOT lp_since_backfilled;
   CREATE TABLE IF NOT EXISTS financial_products.held_licenses (
     id uuid PRIMARY KEY,
     entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
@@ -1397,7 +1406,8 @@ const TABLES = `
     requested_by uuid NOT NULL REFERENCES financial_products.users(id),
     requested_at timestamptz NOT NULL DEFAULT now(),
     decided_by uuid REFERENCES financial_products.users(id),
-    decided_at timestamptz
+    decided_at timestamptz,
+    approving_at timestamptz -- when an approval claimed it: one stuck here past a few minutes is checked and put right
   );
   CREATE INDEX IF NOT EXISTS partner_kit_approvals_idx ON financial_products.partner_kit_approvals (entity_id, status, requested_at DESC);
   -- An account an admin added to a licence provider that already has members: not a member of anything until one of
@@ -2893,6 +2903,10 @@ export class Store {
   // relinks the existing user, so they keep what they own.
   async upsertClerkUser(clerkUserId: string, email: string, name: string, roles: Role[]): Promise<User> {
     const lower = email.toLowerCase();
+    const before = await this.one(
+      "SELECT id, roles FROM financial_products.users WHERE clerk_user_id = $1 OR email = $2 ORDER BY (clerk_user_id = $1) DESC NULLS LAST LIMIT 1",
+      [clerkUserId, lower],
+    );
     const updated = await this.one(
       `UPDATE financial_products.users SET clerk_user_id = $1, email = $2, roles = $3
        WHERE id = (SELECT id FROM financial_products.users WHERE clerk_user_id = $1 OR email = $2
@@ -2900,12 +2914,47 @@ export class Store {
        RETURNING *`,
       [clerkUserId, lower, roles],
     );
-    if (updated) return toUser(updated);
+    if (updated) {
+      await this.licenceProviderRoleChanged(updated.id as string, ((before?.roles as string[] | undefined) ?? []).includes("license_provider"), roles.includes("license_provider"));
+      return toUser((await this.one("SELECT * FROM financial_products.users WHERE id = $1", [updated.id]))!);
+    }
     const r = await this.one(
       "INSERT INTO financial_products.users (id, name, roles, clerk_user_id, email) VALUES ($1, $2, $3, $4, $5) RETURNING *",
       [randomUUID(), name, roles, clerkUserId, lower],
     );
     return toUser(r!);
+  }
+
+  // A member whose roles gain license_provider (an admin's invite, applied when they sign in again) doesn't gain
+  // standing at their firm by it when the firm already has a licence provider with standing: that's a request one of
+  // them accepts (firm_member_requests), told to them on their webhooks and as notices. A firm with none grants it now.
+  // Losing the role ends the standing.
+  private async licenceProviderRoleChanged(userId: string, had: boolean, has: boolean): Promise<void> {
+    if (had === has) return;
+    if (!has) {
+      await this.db.query("UPDATE financial_products.users SET lp_since = NULL WHERE id = $1", [userId]);
+      return;
+    }
+    const u = await this.one("SELECT entity_id, email, roles FROM financial_products.users WHERE id = $1", [userId]);
+    const entityId = (u?.entity_id as string | null) ?? null;
+    if (!entityId) return; // standing comes when they join a firm
+    const others = await this.all(
+      "SELECT id FROM financial_products.users WHERE entity_id = $1 AND id <> $2 AND lp_since IS NOT NULL AND 'license_provider' = ANY(roles) AND NOT ('admin' = ANY(roles))",
+      [entityId, userId],
+    );
+    if (!others.length) {
+      await this.db.query("UPDATE financial_products.users SET lp_since = now() WHERE id = $1", [userId]);
+      return;
+    }
+    const pending = await this.one("SELECT id FROM financial_products.firm_member_requests WHERE entity_id = $1 AND user_id = $2 AND status = 'pending'", [entityId, userId]);
+    if (pending) return;
+    const requestId = randomUUID();
+    await this.db.query("INSERT INTO financial_products.firm_member_requests (id, entity_id, user_id, requested_by) VALUES ($1, $2, $3, NULL)", [requestId, entityId, userId]);
+    const data = { request_id: requestId, member_email: u?.email ?? null, member_roles: u?.roles ?? [], reason: "role_gained", requested_at: new Date().toISOString(), decide_with: "decide_firm_member { request_id, accept: true | false }" };
+    const members = await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1 AND id <> $2", [entityId, userId]);
+    for (const m of members) await this.db.query("INSERT INTO financial_products.firm_notices (id, entity_id, user_id, type, data) VALUES ($1, $2, $3, 'firm.member_pending', $4)", [randomUUID(), entityId, m.id, JSON.stringify(data)]);
+    await this.enqueueFirmEvent(entityId, { id: randomUUID(), type: "firm.member_pending", created_at: new Date().toISOString(), data } as never, false);
+    await this.audit(null, "licence_provider_standing_requested", entityId, { request_id: requestId, user_id: userId });
   }
 
   // Whitelist
@@ -3465,7 +3514,15 @@ export class Store {
   }
 
   async setUserEntity(userId: string, entityId: string | null): Promise<void> {
-    await this.db.query("UPDATE financial_products.users SET entity_id = $2, entity_joined_at = CASE WHEN entity_id IS DISTINCT FROM $2 THEN now() ELSE entity_joined_at END WHERE id = $1", [userId, entityId]);
+    // Joining a firm as a licence provider grants standing there from now; leaving it, or moving, ends the old standing.
+    // (add_entity_member asks the firm's members first when it already has a licence provider: firm-notices.ts.)
+    await this.db.query(
+      `UPDATE financial_products.users SET entity_id = $2,
+         lp_since = CASE WHEN entity_id IS DISTINCT FROM $2 THEN (CASE WHEN $2::uuid IS NOT NULL AND 'license_provider' = ANY(roles) THEN now() END) ELSE lp_since END,
+         entity_joined_at = CASE WHEN entity_id IS DISTINCT FROM $2 THEN now() ELSE entity_joined_at END
+       WHERE id = $1`,
+      [userId, entityId],
+    );
   }
 
   async userByEmail(email: string): Promise<User | undefined> {

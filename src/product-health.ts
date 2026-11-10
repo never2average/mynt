@@ -1030,6 +1030,9 @@ export class ProductHealthService {
     if (!me.entity_id) throw new HealthError("You don't belong to a firm yet");
     if (!me.roles.includes("license_provider") || me.roles.includes("admin")) throw new HealthError("Only a licence provider firm's own member registers a signing key");
     if (!(await this.isActive(me.entity_id))) throw new HealthError("Your firm isn't active");
+    // The role alone isn't enough: the account needs licence-provider standing at its firm (firm-notices.ts).
+    const { rows: standing } = await this.db.query(`SELECT lp_since FROM ${T}.users WHERE id = $1`, [me.id]);
+    if (!standing[0]?.lp_since) throw new HealthError("You have no licence-provider standing at this firm yet: one of its existing licence providers accepts you first (decide_firm_member)");
     if (!isAddress(publicKey) || isWeakEd25519Key(base58Decode(publicKey))) throw new HealthError("public_key must be a usable Ed25519 public key, base58 (a Solana-style address)");
     // A key ever used to sign test books, by any firm, is never a live key.
     const { rows: testKey } = await this.db.query(`SELECT 1 FROM ${T}.partner_test_signing_key_history WHERE public_key = $1 UNION SELECT 1 FROM ${T}.partner_test_signing_keys WHERE public_key = $1`, [publicKey]);
@@ -1043,18 +1046,19 @@ export class ProductHealthService {
   }
 
   // Records the firm's live key (after the checks above, and any approval the partner kit needed).
-  async registerSigningKeyFor(entityId: string, publicKey: string, registeredBy: string, approvedBy: string | null = null) {
-    await this.db.query(
+  async registerSigningKeyFor(entityId: string, publicKey: string, registeredBy: string, approvedBy: string | null = null, tx: Pick<Db, "query"> = this.db) {
+    await tx.query(
       `INSERT INTO ${T}.product_health_signing_keys (entity_id, public_key, registered_by) VALUES ($1, $2, $3)
        ON CONFLICT (entity_id) DO UPDATE SET public_key = EXCLUDED.public_key, registered_by = EXCLUDED.registered_by, registered_at = now()`,
       [entityId, publicKey, registeredBy],
     );
     // Earlier snapshots stay checkable against the key that signed them.
-    await this.db.query(
+    await tx.query(
       `INSERT INTO ${T}.product_health_signing_key_history (entity_id, public_key, registered_by, mac) VALUES ($1, $2, $3, $4) ON CONFLICT (entity_id, public_key) DO UPDATE SET mac = EXCLUDED.mac`,
       [entityId, publicKey, registeredBy, this.keyMac(entityId, publicKey)],
     );
-    await this.store.audit(registeredBy, "register_partner_signing_key", entityId, { public_key: publicKey, ...(approvedBy ? { approved_by: approvedBy } : {}) });
+    // Audited on its own connection only outside a caller's transaction (which audits once it commits).
+    if (tx === this.db) await this.store.audit(registeredBy, "register_partner_signing_key", entityId, { public_key: publicKey, ...(approvedBy ? { approved_by: approvedBy } : {}) });
     return { entity_id: entityId, public_key: publicKey, sign: "with Ed25519, the UTF-8 text 'mynt.product_health.cosign.v1', one zero byte, then the 32 bytes of the snapshot's fingerprint (sha256, hex in list_product_health)" };
   }
 
