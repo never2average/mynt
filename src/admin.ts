@@ -505,7 +505,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     {
       title: "Whitelist someone",
       description:
-        "Admin: allow an email to sign in with the given roles, or change the roles of someone already whitelisted. Roles nest: admin > builder > consumer, where innovator and developer are two names for the builder role (each gets the other's tools); vendor (firms offering standard services) and license_provider (firms holding the licences that sponsor builders' products) are peers of builders with their own tools only.",
+        "Admin: allow an email to sign in with the given roles, or change the roles of someone already whitelisted. Roles nest: admin > builder > consumer, where innovator and developer are two names for the builder role (each gets the other's tools); vendor (firms offering standard services), license_provider (firms holding the licences that sponsor builders' products) and liquidity_provider (firms putting capital into products' pools) are peers of builders with their own tools only.",
       inputSchema: {
         email: z.string().email(),
         roles: z.array(z.enum(ROLES)).min(1),

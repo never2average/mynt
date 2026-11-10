@@ -27,7 +27,7 @@ export function registerProductHealthTools(server: McpServer, _store: Store, use
     {
       title: "Product health: fingerprints and status",
       description:
-        "Every snapshot of a product's financial health that you may see: its sequence, period, fingerprint (the sha256 that goes on chain), status (pending_signature, ready, published, missed), source (sandbox, partner_ledger, unavailable), attestation and whether it's verified, plus any gaps a monitor should know about. Status only: the numbers come from get_product_health, and only for the product's licence provider and liquidity providers. Licence providers, the product's own firm, and admins.",
+        "Every snapshot of a product's financial health that you may see: its sequence, period, fingerprint (the sha256 that goes on chain), status (pending_signature, ready, published, missed), source (sandbox, partner_ledger, unavailable), attestation and whether it's verified, plus any gaps a monitor should know about. Status only: the numbers come from get_product_health, and only for the product's licence provider and liquidity providers. Licence providers, liquidity providers committed to the product, the product's own firm, and admins.",
       inputSchema: { product_id: product.optional(), limit: z.number().int().min(1).max(200).default(24) },
       annotations: { readOnlyHint: true },
     },
@@ -35,19 +35,21 @@ export function registerProductHealthTools(server: McpServer, _store: Store, use
   );
 
   const roles = effectiveRoles(user.roles);
-  if (!roles.includes("license_provider")) return;
+  if (!roles.includes("license_provider") && !roles.includes("liquidity_provider")) return;
 
   server.registerTool(
     "get_product_health",
     {
       title: "Product health: the numbers",
       description:
-        "Licence provider (or a product's liquidity provider): the decrypted financial-health report of a product you're entitled to: reserves, customer obligations, coverage, flows, pending settlements, reversal and failure rates, in integer cents and basis points. A figure Mynt can't measure is null with its reason, never 0. With each snapshot, whether its report still matches its fingerprint and whether the fingerprint matches what's on chain, and the gaps in the record. Admins go through the same entitlement.",
+        "Licence provider, or a liquidity provider committed to one of the product's pools: the decrypted financial-health report of a product you're entitled to: reserves, customer obligations, coverage, flows, pending settlements, reversal and failure rates, in integer cents and basis points. A figure Mynt can't measure is null with its reason, never 0. With each snapshot, whether its report still matches its fingerprint and whether the fingerprint matches what's on chain, and the gaps in the record. Admins go through the same entitlement.",
       inputSchema: { product_id: product, pool_id: pool, limit: z.number().int().min(1).max(200).default(24) },
       annotations: { readOnlyHint: true },
     },
     async ({ product_id, pool_id, limit }) => attempt(() => health.get(user, product_id, pool_id ?? null, limit)),
   );
+
+  if (!roles.includes("license_provider")) return;
 
   server.registerTool(
     "register_partner_signing_key",

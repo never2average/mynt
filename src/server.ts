@@ -43,6 +43,7 @@ import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from ".
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
+import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
 import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
@@ -98,7 +99,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     return server;
   }
   // A vendor or licence provider (no consumer role) gets the public catalogue, its firm and its own tools.
-  const peerOnly = (has("vendor") || has("license_provider")) && !has("consumer");
+  const peerOnly = (has("vendor") || has("license_provider") || has("liquidity_provider")) && !has("consumer");
   if (user && ctx.bd && !peerOnly) registerConnectTools(server, ctx.bd, user);
   if (user && !peerOnly) registerProductRequestTools(server, store, user);
   if (has("consumer")) registerConsumerTools(server, store, user!);
@@ -127,7 +128,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   // A licence provider's own alerts arrive on its firm's webhooks; builders get these tools with their vendor tools.
   if (has("license_provider") && !has("innovator")) registerFirmWebhookTools(server, store, user!);
   // A vendor's or licence provider's firm (an admin registers it): its record and licences, once.
-  if ((has("vendor") || has("license_provider")) && !has("innovator")) registerFirmTools(server, store, user!);
+  if ((has("vendor") || has("license_provider") || has("liquidity_provider")) && !has("innovator")) registerFirmTools(server, store, user!);
   if (has("license_provider")) {
     // Its roster fills the stakeholders its licences mandate, which products it sponsors rest on.
     if (!has("innovator")) registerRosterTools(server, store, user!);
@@ -138,7 +139,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
-  if (ctx.productHealth && user && (has("license_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
+  if (user && hasLiquidityRole(rolesFrom(user))) registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null);
+  if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);

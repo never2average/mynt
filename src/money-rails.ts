@@ -214,6 +214,8 @@ export interface MovementRequest {
   component_key?: string | null; // the component the action serves, when the contract says
   subscription_id?: string | null; // with request_id, how a partner's later answer finds this movement
   request_id?: string | null;
+  sponsor_entity_id?: string | null; // only this sponsor's rails may carry it (a liquidity pool's own sponsor)
+  rail_id?: string | null; // only this rail may carry it: a pool doesn't follow a replacement for the rail it was approved with
 }
 export type MovementVerdict =
   | { allowed: true; movement_id: string; status: MovementStatus; replay: boolean }
@@ -263,7 +265,7 @@ export async function outsideLicenceCoverage(store: Store, entityId: string, sta
 }
 
 // Which rails may carry this movement, or why none may. Limits are checked by the reservation (atomically), not here.
-async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string | null): Promise<{ rails: Rail[]; state: string } | Refusal> {
+export async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string | null): Promise<{ rails: Rail[]; state: string } | Refusal> {
   if (!m.direction) return refusal(403, "movement_unknown", "Mynt can't tell which way this transfer moves money, so it isn't allowed");
   if (m.amount_cents === null) return refusal(403, "amount_unknown", "Mynt can't tell how much this transfer moves, so it isn't allowed");
   const state = stateOf(m.customer_state);
@@ -274,6 +276,10 @@ async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string 
   if (!m.component_key) return refusal(403, "component_required", "Money can't move for this action: it doesn't say which part of the product it serves");
   sponsorships = sponsorships.filter((s) => s.component_key === m.component_key);
   if (!sponsorships.length) return refusal(403, "component_not_sponsored", "Money can't move for this action: no licence provider sponsors what it serves");
+  if (m.sponsor_entity_id) {
+    sponsorships = sponsorships.filter((s) => s.provider_entity_id === m.sponsor_entity_id);
+    if (!sponsorships.length) return refusal(403, "no_sponsor", "Money can't move for this pool: its sponsor no longer sponsors it");
+  }
   const here = sponsorships.filter((s) => s.jurisdictions.includes(state) || s.jurisdictions.includes("us"));
   const sponsors = [...new Set(here.map((s) => s.provider_entity_id))];
   if (!sponsors.length) return refusal(403, "state_not_sponsored", `Money can't move for this product in ${state}: its licence provider doesn't sponsor it there`);
@@ -328,7 +334,7 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
     await store.audit(null, "money_movement_refused", m.product_id, { code: "too_many_attempts", idempotency_key: m.idempotency_key, attempts: existing.earlier_request_ids.length + 1, sandbox: m.sandbox });
     return refusal(409, "too_many_attempts", `This transfer has been tried ${MAX_MOVEMENT_ATTEMPTS} times, so it can't be tried again; get a new quote once it has settled or failed`);
   }
-  const eligible = await eligibleRails(store, m, !m.sandbox && existing?.status === "requested" ? existing.rail_id : null);
+  const eligible = await eligibleRails(store, m, m.rail_id ?? (!m.sandbox && existing?.status === "requested" ? existing.rail_id : null));
   if (m.sandbox) return recordSandbox(store, m, existing, eligible);
   if (existing && existing.status !== "failed" && existing.status !== "requested") return { allowed: true, movement_id: existing.id, status: existing.status, replay: true };
   const refuse = async (r: Refusal): Promise<Refusal> => {
@@ -472,6 +478,10 @@ export const GAVE_UP_DETAIL = "mynt_gave_up";
 export const recordMovementGaveUp = (store: Store, at: Where) => move(store, at, "failed", { detail: GAVE_UP_DETAIL, partner_confirmed: true });
 export const recordMovementReversed = (store: Store, at: Where, detail = "reversed") => move(store, at, "reversed", { detail });
 export const recordMovementLateSettlement = (store: Store, at: Where) => move(store, at, "settled", { detail: "late_settlement" });
+// A partner settling on what Mynt had given up on: nothing moved, so the attempt no longer counts as unresolved.
+export async function resolveUnresolvedMovement(store: Store, at: Where, detail: string): Promise<void> {
+  await store.db.query(`UPDATE ${T}.money_movements SET status_detail = $3, updated_at = now() WHERE ${ANY_ATTEMPT} AND status = 'failed' AND status_detail = ANY($4::text[])`, [at.subscription_id, at.request_id, detail, [STALE_DETAIL, GAVE_UP_DETAIL]]);
+}
 // No clear answer (a timeout, a server error): it may have reached the partner, so it stays requested and keeps
 // counting against the daily limit. A retry with the same idempotency key is the same movement.
 export async function recordMovementUnknown(store: Store, at: Where, detail: string): Promise<void> {
@@ -530,7 +540,8 @@ export type Flows = {
   not_measured: Partial<Record<RailDirection, string>>;
 };
 
-// Live money movements of a product requested in [from, to), totalled by direction and status. Null, never 0, for
+// Live customer money movements of a product requested in [from, to), totalled by direction and status; liquidity pools'
+// capital isn't what a product's customers did, and isn't counted. Null, never 0, for
 // what can't be measured: a period that starts before the ledger did, or a direction Mynt doesn't instruct for this
 // product (its money, if any, moves in the provider's own flow).
 export async function flowsFor(store: Store, productId: string, from: string | Date, to: string | Date): Promise<Flows> {
@@ -557,7 +568,7 @@ export async function flowsFor(store: Store, productId: string, from: string | D
   }
   const { rows } = await store.db.query(
     `SELECT direction, status, COALESCE(status_detail = ANY($4::text[]), false) AS stale, count(*)::int AS n, sum(amount_cents)::text AS cents FROM ${T}.money_movements
-     WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 GROUP BY 1, 2, 3`,
+     WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 AND COALESCE(action, '') NOT IN ('pool_deposit', 'pool_withdrawal') GROUP BY 1, 2, 3`,
     [productId, start.toISOString(), end.toISOString(), [STALE_DETAIL, GAVE_UP_DETAIL]],
   );
   const measured = await productMoneyDirections(store, record!);

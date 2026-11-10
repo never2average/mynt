@@ -30,6 +30,7 @@ export const ROLE_SUMMARY: Record<Role, string> = {
   innovator: "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
   vendor: "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
   license_provider: "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
+  liquidity_provider: "a firm or fund, added by an admin, that puts capital into products' pools and takes it out, watching each product's health to decide where capital goes. Mynt never holds its funds. A peer of builders.",
   admin: "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
 };
 
@@ -69,6 +70,13 @@ export const GET_STARTED: Record<Role, { tool: string; why: string }[]> = {
     { tool: "create_vendor_offering", why: "offer one from your test endpoint" },
     { tool: "run_conformance", why: "let Mynt test your endpoint against the contract" },
     { tool: "list_my_subscribers", why: "innovators subscribed to your offerings" },
+  ],
+  liquidity_provider: [
+    { tool: "get_my_entity", why: "your firm, as an admin registered it" },
+    { tool: "list_pools", why: "pools open to you, with their reserve terms and notice periods" },
+    { tool: "commit_to_pool", why: "put capital in, on the pool's approved rail" },
+    { tool: "list_pools_with_health", why: "compare your pools' health side by side" },
+    { tool: "request_withdrawal", why: "join a pool's first-in-first-out withdrawal queue" },
   ],
   admin: [
     { tool: "define_region", why: "add a region and its regulators" },
