@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { licenseInForce, productsAnsweredBy } from "./access.js";
+import { builderCovenantPauses, closeCovenantsOnRevocation, revocationBreachProblem } from "./covenants.js";
 import { rederiveProduct } from "./derived.js";
 import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import { driftSweep } from "./pins.js";
@@ -214,15 +215,21 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
       title: "Stop sponsoring a product",
       description:
         "Licence provider: withdraw an approved sponsorship. The component loses your licences' coverage, so a published product resting on it drifts (new sales pause, naming the jurisdictions it covered) until its builder finds cover and publishes a new version.",
-      inputSchema: { sponsorship_id: z.string(), reason: z.string().min(3) },
+      inputSchema: { sponsorship_id: z.string(), reason: z.string().min(3), breach_id: z.string().uuid().optional().describe("The covenant breach this revocation answers (list_covenant_breaches); the breach record keeps it") },
       annotations: { destructiveHint: true },
     },
-    async ({ sponsorship_id, reason }) => {
+    async ({ sponsorship_id, reason, breach_id }) => {
       const s = await mine(sponsorship_id);
       if (!s) return fail(`No sponsorship '${sponsorship_id}' by your firm`);
       if (s.status !== "approved") return fail(`The sponsorship is ${s.status}, not approved`);
+      if (((await store.getUser(user.id)) ?? user).roles.includes("admin")) return fail("Revoking is the licence provider's own decision: an admin account can't do it, even one that belongs to the firm");
+      if (breach_id) {
+        const problem = await revocationBreachProblem(store, user, s, breach_id);
+        if (problem) return fail(problem);
+      }
       const revoked = await store.decideSponsorship(s.id, { status: "revoked", decided_by: user.id, note: reason });
-      await audit("revoke_sponsorship", s.id, { product_id: s.product_id, component: s.component_key, reason });
+      await closeCovenantsOnRevocation(store, s, user.id, reason, breach_id);
+      await audit("revoke_sponsorship", s.id, { product_id: s.product_id, component: s.component_key, reason, ...(breach_id ? { breach_id } : {}) });
       const drifted = await driftSweep(store, s.provider_entity_id);
       await rederiveProduct(store, s.product_id);
       return json({ ...(await describe(store, revoked)), drifted_products: drifted });
@@ -293,14 +300,14 @@ export function registerSponsorshipBuilderTools(server: McpServer, store: Store,
     "list_my_sponsorships",
     {
       title: "Your sponsorship requests",
-      description: "Your firm's requests to licence providers to sponsor its products' components, with each one's status (pending, approved, declined, revoked), the licences and the jurisdictions approved.",
+      description: "Your firm's requests to licence providers to sponsor its products' components, with each one's status (pending, approved, declined, revoked), the licences and the jurisdictions approved. covenant_pauses says when the licence provider's covenant has paused new sales: the rule type and since when, and nothing about its thresholds or the figures.",
       inputSchema: { product_id: z.string().optional() },
       annotations: { readOnlyHint: true },
     },
     async ({ product_id }) => {
       const { entity_id } = await me();
       if (!entity_id) return fail("You don't belong to an entity yet; create one with create_entity");
-      return json(await Promise.all((await store.sponsorships({ builder_entity_id: entity_id, product_id })).map((s) => describe(store, s))));
+      return json(await Promise.all((await store.sponsorships({ builder_entity_id: entity_id, product_id })).map(async (s) => ({ ...(await describe(store, s)), covenant_pauses: await builderCovenantPauses(store, s.id) }))));
     },
   );
 }

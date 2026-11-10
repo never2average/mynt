@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { licenseInForce } from "./access.js";
+import { appVisibleChanges, covenantChanges } from "./covenants.js";
 import { legitimacyState } from "./firm-checks.js";
 import { partyActive } from "./parties.js";
 import type { productRegime } from "./regime.js";
@@ -153,7 +154,8 @@ export async function pinChanges(store: Store, pins: Pins, depth = 0): Promise<D
 // A product another is built on, as that one pins it: whether it's live, where it's offered, and whether it
 // has drifted (with the states its drift touches).
 async function baseState(store: Store, base: ProductRecord, depth = 0): Promise<{ state: string; jurisdictions: string[] }> {
-  const changes = base.status === "published" && base.pins && depth < 5 ? await pinChanges(store, base.pins, depth + 1) : [];
+  // A covenant's pause counts too: what's built on a paused product shouldn't go on selling it.
+  const changes = base.status === "published" && base.pins && depth < 5 ? [...(await pinChanges(store, base.pins, depth + 1)), ...(await covenantChanges(store, base.product.id))] : [];
   const offered = [...new Set((base.pins?.components ?? base.components).flatMap((c) => c.offered_in ?? []))].sort();
   return {
     state: hash({ published: base.status === "published", offered, drifted: changes.length > 0 }),
@@ -171,7 +173,8 @@ export async function driftDependents(store: Store, productId: string) {
 // Re-checks one product: records drift (pausing new sales) or clears it once the pinned state is back.
 export async function checkDrift(store: Store, record: ProductRecord) {
   if (!record.pins || record.status !== "published") return null;
-  const changes = await pinChanges(store, record.pins);
+  // A licence provider's covenant holding the product: the sponsor releases it, so it stays until then (see covenants.ts).
+  const changes = [...(await pinChanges(store, record.pins)), ...(await covenantChanges(store, record.product.id))];
   const key = (c: DriftChange[]) => JSON.stringify(c.map((x) => [x.kind, x.id, x.now]));
   if (changes.length) {
     if (record.drift && key(record.drift.changes) === key(changes)) return record.drift;
@@ -188,7 +191,7 @@ export async function checkDrift(store: Store, record: ProductRecord) {
     await store.setDrift(record.product.id, drift);
     if (!record.drift) {
       await store.audit(null, "product_drifted", record.product.id, { changes });
-      await emitProductEvent(store, record.product.id, "product.drifted", { changes });
+      await emitProductEvent(store, record.product.id, "product.drifted", { changes: appVisibleChanges(changes) });
     }
     return drift;
   }
