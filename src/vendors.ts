@@ -828,6 +828,7 @@ async function callBoundVendor(
     customer_key?: string; // Mynt's pseudonymous key for the customer, for a ramp adapter (never sent over the wire)
     movement_id?: string; // a transfer's authorisation from the rail chokepoint (see money-rails.ts)
     reached?: { partner: boolean }; // set just before the partner is called: until then, nothing can have moved
+    onIdentity?: (fields: string[], digest: string | null) => Promise<void>; // given the hash of exactly what's about to be sent
   },
   opts: VendorCallOptions,
 ): Promise<VendorAnswer> {
@@ -868,6 +869,12 @@ async function callBoundVendor(
     ...(a.quote_id ? { quote: { quote_id: a.quote_id } } : {}),
     consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at },
   };
+  // Hashed from the same read of the vault as the input above, so what's hashed is what the partner checks; and kept
+  // before the call, so an answer that comes back first still finds it.
+  if (a.onIdentity) {
+    const fields = identityFieldsOf(t.input_schema);
+    await a.onIdentity(fields, identityDigest(held, fields));
+  }
   if (a.reached) a.reached.partner = true;
   const r = await callOffering(
     store,
@@ -1171,11 +1178,6 @@ export async function vendorAction(
     status: "calling",
     client_outcome: {},
   };
-  // A live identity check: what it was run on, as a keyed hash, so a verification stays tied to this person.
-  if (!a.sandbox && isIdentityCheck(t)) {
-    run.identity_fields = identityFieldsOf(t.input_schema);
-    run.identity_digest = identityDigest(await a.held(), run.identity_fields);
-  }
   // A transfer asks the rail chokepoint before anything is instructed (see money-rails.ts); a quote only prices.
   const at = { subscription_id: sub.id, request_id: run.request_id };
   let movementId: string | undefined;
@@ -1191,6 +1193,7 @@ export async function vendorAction(
       state_source: customerState.source,
       state_verified_by: customerState.verified_by,
       state_verified_at: customerState.verified_at,
+      state_verified_offering: customerState.offering_id,
       state_sponsors: customerState.sponsors,
       state_problem: customerState.problem,
       customer_ref: a.customer_ref,
@@ -1227,13 +1230,17 @@ export async function vendorAction(
     await store.db.query(`DELETE FROM ${T}.vendor_action_runs WHERE id = $1 AND status = 'calling'`, [run.id]);
     await releaseQuote();
   };
+  // A live identity check: what it was run on, as a keyed hash, so a verification stays tied to this person.
+  const keepIdentity = async (fields: string[], digest: string | null) => {
+    await store.db.query(`UPDATE ${T}.vendor_action_runs SET identity_fields = $2, identity_digest = $3 WHERE id = $1`, [run.id, fields, digest]);
+  };
   let answer: VendorAnswer;
   const reached = { partner: false };
   try {
     answer = await callBoundVendor(
       store,
       bound,
-      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref), movement_id: movementId, reached },
+      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref), movement_id: movementId, reached, onIdentity: !a.sandbox && isIdentityCheck(t) ? keepIdentity : undefined },
       opts,
     );
   } catch (e) {

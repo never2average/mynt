@@ -7,7 +7,7 @@ import { derivedKey, open, seal, vaultAvailable } from "../vault.js";
 import { safeRequest, signBody, type VendorCallOptions, type VendorResult } from "../vendor-call.js";
 import { emitFirmEvent } from "../runtime.js";
 import { getOffering, lateVendorSettlement, myntRampEntity, reverseVendorRun, serviceType, vendorCallback, type Offering } from "../vendors.js";
-import { eraseVerifiedCustomerState, identityDigest, recordMovementGaveUp, recordMovementOutput, recordVerifiedCustomerState } from "../money-rails.js";
+import { eraseVerifiedCustomerState, identityDigest, rampIdentityOffering, recordMovementGaveUp, recordMovementOutput, recordVerifiedCustomerState } from "../money-rails.js";
 import { bridgeAdapter } from "./bridge.js";
 import { isRampError, type PartnerHttp, type RampAdapter, type RampAdapterContext, type RampPartnerIdentity, type RampDirection, type RampPrice, type RampTransferStatus, type RampTransferUpdate } from "./types.js";
 
@@ -507,7 +507,7 @@ export async function refreshVerifiedCustomerState(store: Store, o: Offering, a:
     if ("error" in c) return;
     const got = await c.adapter.customerIdentity(c.ctx, rows[0].partner_customer_id as string);
     if (isRampError(got)) return;
-    const base = { app_id: a.app_id, customer_ref: a.customer_ref, offering_id: o.id, source: "ramp_link" as const, verified_by_entity: o.entity_id, verified_by: c.adapter.id, started_at: started };
+    const base = { app_id: a.app_id, customer_ref: a.customer_ref, offering_id: await rampIdentityOffering(store, o.entity_id), source: "ramp_link" as const, verified_by_entity: o.entity_id, verified_by: c.adapter.id, started_at: started };
     // The partner's record must still be this customer's, as at linking.
     const held = Object.fromEntries((await store.vaultFields(a.app_id, a.customer_ref, false)).filter((h) => LINK_IDENTITY_FIELDS.includes(h.field)).map((h) => [h.field, open(h.sealed, false)]));
     if (identityProblem(held, got, "live")) {
@@ -752,7 +752,7 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
       }
       // The partner's own record of where the customer lives, when it gives one: what a live movement goes by.
       const stateVerified = environment === "live" && adapterId && adapterOffering
-        ? await recordVerifiedCustomerState(store, { app_id: req.app_id, customer_ref: req.customer_ref, offering_id: adapterOffering, state: identity.residential_state, source: "ramp_link", verified_by_entity: firm, verified_by: adapterId, verified_at: identity.verified_at ?? new Date(), identity_fields: LINK_IDENTITY_FIELDS, identity_digest: identityDigest(held, LINK_IDENTITY_FIELDS), started_at: req.created_at })
+        ? await recordVerifiedCustomerState(store, { app_id: req.app_id, customer_ref: req.customer_ref, offering_id: await rampIdentityOffering(store, firm), state: identity.residential_state, source: "ramp_link", verified_by_entity: firm, verified_by: adapterId, verified_at: identity.verified_at ?? new Date(), identity_fields: LINK_IDENTITY_FIELDS, identity_digest: identityDigest(held, LINK_IDENTITY_FIELDS), started_at: req.created_at })
         : false;
       await audit("link_ramp_partner_customer", req.id, { environment, linked: true, state_verified: stateVerified, payout_account: !!partner_payout_account_id });
       return json({ link_reference: req.id, environment, linked: true, identity: "verified", payout_account: !!partner_payout_account_id });

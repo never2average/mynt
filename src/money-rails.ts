@@ -94,6 +94,7 @@ const toMovement = (r: Row) => ({
   state: (r.state as string | null) ?? null,
   state_source: (r.state_source as string | null) ?? null,
   state_verified_by: (r.state_verified_by as string | null) ?? null,
+  state_verified_offering: (r.state_verified_offering as string | null) ?? null,
   state_verified_at: iso(r.state_verified_at),
   expected_total_cents: r.expected_total_cents == null ? null : Number(r.expected_total_cents),
   settled_amount_cents: r.settled_amount_cents == null ? null : Number(r.settled_amount_cents),
@@ -186,15 +187,16 @@ export interface ResolvedCustomerState {
   source: typeof PARTNER_VERIFIED | typeof SELF_REPORTED | "none";
   verified_by: string | null;
   verified_at: string | null;
+  offering_id: string | null; // the provider's offering
   sponsors: string[]; // the sponsoring firms that accept the provider behind this state
   problem: string | null; // why there's no state, in words a customer's app can show
 }
 
-// What an identity check was run on: a keyed hash, so the check is tied to the person and the values aren't kept.
-export const IDENTITY_FIELDS = ["full_name", "date_of_birth", "ssn"];
+// What an identity check was run on: a keyed hash of everything its service type requires, so the check is tied to
+// the person and the values aren't kept.
 export const isIdentityCheck = (t: { category: string }) => t.category === "identity" || t.category === "kyc";
-export const identityFieldsOf = (schema: Record<string, unknown>) => IDENTITY_FIELDS.filter((f) => f in ((schema.properties ?? {}) as Record<string, unknown>));
-const normIdentity = (field: string, v: string) => (field === "full_name" ? normName(v) : field === "ssn" ? v.replace(/\D/g, "") : v.trim().slice(0, 10));
+export const identityFieldsOf = (schema: Record<string, unknown>) => (Array.isArray(schema.required) ? schema.required.filter((f): f is string => typeof f === "string") : []);
+const normIdentity = (field: string, v: string) => (field === "full_name" ? normName(v) : field === "ssn" ? v.replace(/\D/g, "") : field === "date_of_birth" ? v.trim().slice(0, 10) : v.trim());
 export function identityDigest(held: Record<string, string>, fields: string[]): string | null {
   const key = derivedKey("identity-digest");
   const values = [...fields].sort().map((f) => (held[f] ? normIdentity(f, held[f]) : ""));
@@ -206,16 +208,22 @@ export function identityDigest(held: Record<string, string>, fields: string[]): 
 export const verifiedStateMaxAgeDays = () => Number(process.env.VERIFIED_STATE_MAX_AGE_DAYS) || 365;
 
 export async function resolveCustomerState(store: Store, c: { sandbox: boolean; app_id: string; customer_ref: string; held: () => Promise<Record<string, string>>; product_id: string; component_key: string | null; now?: Date }): Promise<ResolvedCustomerState> {
-  const none = (problem: string): ResolvedCustomerState => ({ state: null, source: "none", verified_by: null, verified_at: null, sponsors: [], problem: `Money can't move for this customer: ${problem}` });
-  if (c.sandbox) return { state: stateOf((await c.held())[CUSTOMER_STATE_FIELD]), source: SELF_REPORTED, verified_by: null, verified_at: null, sponsors: [], problem: null };
+  const none = (problem: string): ResolvedCustomerState => ({ state: null, source: "none", verified_by: null, verified_at: null, offering_id: null, sponsors: [], problem: `Money can't move for this customer: ${problem}` });
+  if (c.sandbox) return { state: stateOf((await c.held())[CUSTOMER_STATE_FIELD]), source: SELF_REPORTED, verified_by: null, verified_at: null, offering_id: null, sponsors: [], problem: null };
   const { rows } = await store.db.query(`SELECT * FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2`, [c.app_id, c.customer_ref]);
   if (!rows.length) return none("a licensed partner hasn't verified their home state in an identity check");
   // Only a provider the sponsor of this action's component accepts: the sponsor itself, or one it approved for this
-  // sponsorship. The builder's own firm never counts for its own product.
+  // sponsorship, and only for checks made since. The builder's own firm, or the firm of the person who owns the
+  // product, never counts for it.
   const sponsorships = (await store.sponsorships({ product_id: c.product_id, status: "approved" })).filter((s) => s.component_key === c.component_key);
-  const { rows: list } = await store.db.query(`SELECT sponsorship_id, offering_id FROM ${T}.sponsorship_identity_providers WHERE sponsorship_id = ANY($1::uuid[]) AND revoked_at IS NULL`, [sponsorships.map((s) => s.id)]);
-  const approved = new Set(list.map((l) => `${l.sponsorship_id}:${l.offering_id}`));
-  const acceptedBy = (r: Row) => sponsorships.filter((s) => r.verified_by_entity !== s.builder_entity_id && (r.verified_by_entity === s.provider_entity_id || approved.has(`${s.id}:${r.offering_id}`)));
+  const ownerFirm = await productOwnerFirm(store, c.product_id);
+  const { rows: list } = await store.db.query(`SELECT sponsorship_id, offering_id, approved_at FROM ${T}.sponsorship_identity_providers WHERE sponsorship_id = ANY($1::uuid[]) AND revoked_at IS NULL`, [sponsorships.map((s) => s.id)]);
+  const approved = new Map(list.map((l) => [`${l.sponsorship_id}:${l.offering_id}`, new Date(l.approved_at as string)]));
+  const approvedFor = (s: { id: string }, r: Row) => {
+    const since = approved.get(`${s.id}:${r.offering_id}`);
+    return since !== undefined && new Date(r.verified_at as string) >= since;
+  };
+  const acceptedBy = (r: Row) => sponsorships.filter((s) => r.verified_by_entity !== s.builder_entity_id && r.verified_by_entity !== ownerFirm && (r.verified_by_entity === s.provider_entity_id || approvedFor(s, r)));
   const latest = rows.filter((r) => acceptedBy(r).length).sort((a, b) => new Date(b.verified_at as string).getTime() - new Date(a.verified_at as string).getTime())[0];
   if (!latest) return none("no identity provider its licence provider accepts has verified their home state");
   if (latest.status !== "verified") return none("their latest identity check didn't pass");
@@ -230,8 +238,20 @@ export async function resolveCustomerState(store: Store, c: { sandbox: boolean; 
   if (identityDigest(held, latest.identity_fields as string[]) !== latest.identity_digest) return none("their details have changed since their home state was verified, so it needs verifying again");
   const state = stateOf(latest.state);
   if (!state) return none("a licensed partner hasn't verified their home state in an identity check");
-  return { state, source: PARTNER_VERIFIED, verified_by: latest.verified_by as string, verified_at: verifiedAt.toISOString(), sponsors: [...new Set(acceptedBy(latest).map((s) => s.provider_entity_id))], problem: null };
+  return { state, source: PARTNER_VERIFIED, verified_by: latest.verified_by as string, verified_at: verifiedAt.toISOString(), offering_id: latest.offering_id as string, sponsors: [...new Set(acceptedBy(latest).map((s) => s.provider_entity_id))], problem: null };
 }
+
+// The one offering a ramp firm's verifications are kept and approved under, whichever of its adapter offerings served
+// the link or the transfer: its earliest.
+export async function rampIdentityOffering(store: Store, entityId: string): Promise<string> {
+  const { rows } = await store.db.query(`SELECT id FROM ${T}.vendor_offerings WHERE entity_id = $1 AND adapter IS NOT NULL ORDER BY created_at, id LIMIT 1`, [entityId]);
+  return rows[0].id as string;
+}
+
+const productOwnerFirm = async (store: Store, productId: string) => {
+  const record = await store.getProduct(productId);
+  return record?.owner_id ? ((await store.getUser(record.owner_id))?.entity_id ?? null) : null;
+};
 
 // What one identity provider said about a customer. Latest wins, per provider. verified_at: when the partner says it
 // verified them; left out, it's now for a new or changed state, and an unchanged state keeps the time it had, so
@@ -319,6 +339,7 @@ export interface MovementRequest {
   customer_state: unknown; // from resolveCustomerState; checked here
   state_source?: string | null; // where that state came from, kept on the movement. Live needs partner_verified, or a firm's source on a pool movement.
   state_verified_by?: string | null; // the partner that verified it
+  state_verified_offering?: string | null; // its offering, so revoking a provider can name what's in flight on its word
   state_verified_at?: string | null; // and when
   state_sponsors?: string[]; // live customer movements: the sponsors that accept the provider behind the state
   state_problem?: string | null; // why resolveCustomerState found none, for the refusal
@@ -491,7 +512,7 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
   let last: string | null = null;
   const id = randomUUID();
   for (const rail of eligible.rails) {
-    const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_money_movement($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`, [
+    const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_money_movement($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`, [
       rail.id,
       id,
       m.idempotency_key,
@@ -509,6 +530,7 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
       m.state_source ?? null,
       m.state_verified_by ?? null,
       m.state_verified_at ?? null,
+      m.state_verified_offering ?? null,
     ]);
     const r = rows[0] as { o_outcome: string; o_id: string | null; o_status: MovementStatus | null };
     if (r.o_outcome === "reserved") return { allowed: true, movement_id: r.o_id!, status: "requested", replay: false };
@@ -910,24 +932,32 @@ export function registerMoneyRailTools(server: McpServer, store: Store, user: Us
         const t = o && (await serviceType(store.db, o.region, o.service_type));
         if (!o || !t) return fail(`No offering '${offering_id}'`);
         if (!isIdentityCheck(t) && t.category !== "ramp") return fail(`'${o.name}' isn't an identity service (it's ${t.category})`);
-        if (o.entity_id === s.builder_entity_id) {
+        if (o.entity_id === s.builder_entity_id || o.entity_id === (await productOwnerFirm(store, s.product_id))) {
           await audit("approve_identity_provider_refused", s.id, { offering_id: o.id, reason: "builder_own_firm" });
-          return fail("A builder's own firm can't be approved to verify customers for its own product");
+          return fail("A builder's own firm, or the firm of the person who owns the product, can't be approved to verify customers for it");
         }
+        // Four eyes: nobody approves a provider from a firm with a stake in the answer.
+        const approverFirm = await myFirm();
+        if (approverFirm && (approverFirm === o.entity_id || approverFirm === s.builder_entity_id)) {
+          await audit("approve_identity_provider_refused", s.id, { offering_id: o.id, reason: "own_firm" });
+          return fail("You can't approve an identity provider from your own firm, or for your own firm's product: another admin must");
+        }
+        // A ramp's verifications are kept under one offering of its firm, whichever of its adapter offerings is named.
+        const provider = o.adapter ? await rampIdentityOffering(store, o.entity_id) : o.id;
         await store.db.query(
           `INSERT INTO ${T}.sponsorship_identity_providers (sponsorship_id, offering_id, note, approved_by) VALUES ($1, $2, $3, $4)
            ON CONFLICT (sponsorship_id, offering_id) DO UPDATE SET note = EXCLUDED.note, approved_by = EXCLUDED.approved_by, approved_at = now(), revoked_by = NULL, revoked_at = NULL`,
-          [s.id, o.id, note ?? null, user.id],
+          [s.id, provider, note ?? null, user.id],
         );
-        await audit("approve_identity_provider", s.id, { offering_id: o.id, vendor_entity_id: o.entity_id, note: note ?? null });
-        return json({ sponsorship_id: s.id, offering_id: o.id, status: "approved" });
+        await audit("approve_identity_provider", s.id, { offering_id: provider, vendor_entity_id: o.entity_id, note: note ?? null });
+        return json({ sponsorship_id: s.id, offering_id: provider, status: "approved", verifications_counted_from: "now: checks made before this approval don't count" });
       },
     );
     server.registerTool(
       "revoke_identity_provider",
       {
         title: "Stop accepting an identity provider",
-        description: "Licence provider (for a sponsorship of yours) or admin: stop accepting an identity provider for a sponsorship. Home states it verified stop counting for new movements at once. Audited.",
+        description: "Licence provider (for a sponsorship of yours) or admin: stop accepting an identity provider for a sponsorship. Home states it verified stop counting for new movements at once; movements already in flight on its word aren't cancelled, and are listed in the result (in_flight). Audited.",
         inputSchema: { sponsorship_id: z.string().uuid(), offering_id: z.string().uuid(), reason: z.string().min(3).max(2000) },
         annotations: { destructiveHint: true },
       },
@@ -936,8 +966,10 @@ export function registerMoneyRailTools(server: McpServer, store: Store, user: Us
         if (!s) return fail(`No sponsorship '${sponsorship_id}' of yours`);
         const { rows } = await store.db.query(`UPDATE ${T}.sponsorship_identity_providers SET revoked_by = $3, revoked_at = now() WHERE sponsorship_id = $1 AND offering_id = $2 AND revoked_at IS NULL RETURNING offering_id`, [s.id, offering_id, user.id]);
         if (!rows.length) return fail("That identity provider isn't approved for this sponsorship");
-        await audit("revoke_identity_provider", s.id, { offering_id, reason });
-        return json({ sponsorship_id: s.id, offering_id, status: "revoked" });
+        const { rows: open } = await store.db.query(`SELECT * FROM ${T}.money_movements WHERE product_id = $1 AND sponsor_entity_id = $2 AND state_verified_offering = $3 AND status IN ('requested', 'submitted') AND NOT sandbox ORDER BY created_at`, [s.product_id, s.provider_entity_id, offering_id]);
+        const in_flight = open.map(toMovement);
+        await audit("revoke_identity_provider", s.id, { offering_id, reason, in_flight: in_flight.length });
+        return json({ sponsorship_id: s.id, offering_id, status: "revoked", in_flight });
       },
     );
     server.registerTool(

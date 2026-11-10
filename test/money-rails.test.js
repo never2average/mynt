@@ -558,7 +558,7 @@ const FIELDS = ["full_name", "date_of_birth"];
 const verifyAt = (store, w, c, over = {}) =>
   recordVerifiedCustomerState(store, { ...c, offering_id: c.offering_id ?? "00000000-0000-4000-8000-00000000000a", state: "us-ny", source: "identity_service", verified_by_entity: w.lpUser.entity_id, verified_by: "identity_verification", verified_at: new Date(), identity_fields: FIELDS, identity_digest: identityDigest(HELD, FIELDS), started_at: new Date(), ...over });
 const resolverFor = (store, w, c) => (o = {}) => resolveCustomerState(store, { sandbox: false, ...c, held: async () => HELD, product_id: w.product_id, component_key: "account", ...o });
-const usedBy = (r) => ({ customer_state: r.state, state_source: r.source, state_verified_by: r.verified_by, state_verified_at: r.verified_at, state_sponsors: r.sponsors, state_problem: r.problem });
+const usedBy = (r) => ({ customer_state: r.state, state_source: r.source, state_verified_by: r.verified_by, state_verified_at: r.verified_at, state_verified_offering: r.offering_id, state_sponsors: r.sponsors, state_problem: r.problem });
 // An identity offering by another firm, as a row.
 async function identityOffering(store, entity, key = "idv") {
   await store.db.query("INSERT INTO financial_products.service_types (region, key, name, category, input_schema, output_schema, consent_purpose, moves_money) VALUES ('US', $1, 'Identity', 'identity', '{}', '{}', 'x', false) ON CONFLICT DO NOTHING", [key]);
@@ -648,6 +648,10 @@ test("only an identity provider the sponsor accepts counts, for that sponsor", a
   assert.equal(unapproved.state, null);
   assert.match(unapproved.problem, /licence provider accepts/);
   await ok(w.provider, "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering });
+  // Approval looks forward: the check made before it doesn't count, one made after does.
+  assert.equal((await resolve()).state, null);
+  await new Promise((r) => setTimeout(r, 5));
+  await verifyAt(store, w, c, asVendor);
   assert.equal((await resolve()).state, "us-ny");
   assert.deepEqual((await resolve()).sponsors, [w.lpUser.entity_id]);
   assert.ok((await w.audited("approve_identity_provider")).length);
@@ -659,9 +663,16 @@ test("only an identity provider the sponsor accepts counts, for that sponsor", a
   // Accepted for a different component's sponsor, or none: no use here.
   assert.equal((await resolve({ component_key: "lending" })).state, null);
 
-  // Revoked: it stops counting at once.
-  await ok(w.provider, "revoke_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering, reason: "contract ended" });
+  // Revoked: it stops counting at once, and what's in flight on its word is named, not cancelled.
+  const onItsWord = w.move(usedBy(await resolve()));
+  const rail = await w.approvedRail();
+  const flying = await authorizeMovement(store, onItsWord);
+  assert.equal(flying.allowed, true);
+  const revoked = await ok(w.provider, "revoke_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering, reason: "contract ended" });
+  assert.deepEqual(revoked.in_flight.map((m) => m.id), [flying.movement_id]);
+  assert.equal((await w.ledger(rail.id))[0].status, "requested");
   assert.equal((await resolve()).state, null);
+  assert.equal((await w.audited("revoke_identity_provider"))[0].details.in_flight, 1);
 
   // A builder's own firm can never be approved for its own product, and doesn't count even if listed.
   const own = await identityOffering(store, w.builderFirm.id);
@@ -669,6 +680,26 @@ test("only an identity provider the sponsor accepts counts, for that sponsor", a
   await store.db.query("INSERT INTO financial_products.sponsorship_identity_providers (sponsorship_id, offering_id) VALUES ($1, $2)", [w.sponsorship.id, own]);
   await verifyAt(store, w, c, { offering_id: own, verified_by_entity: w.builderFirm.id, verified_by: "own" });
   assert.equal((await resolve()).state, null);
+
+  // Four eyes: not from the approver's own firm, or for its own firm's product, even for an admin.
+  const adminAt = async (entity) => {
+    const { user } = await store.createUser(`Admin at ${entity.slice(0, 4)}`, ["admin"]);
+    await store.setUserEntity(user.id, entity);
+    return connect(store, { ...user, entity_id: entity });
+  };
+  assert.match(JSON.stringify((await callTool(await adminAt(vendorFirm.id), "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).data), /another admin must/);
+  assert.match(JSON.stringify((await callTool(await adminAt(w.builderFirm.id), "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).data), /another admin must/);
+
+  // The person who owns the product working for the vendor: refused at approval, and not counted if listed anyway.
+  await store.setUserEntity(vendor.id, vendorFirm.id);
+  const realProduct = store.getProduct.bind(store);
+  store.getProduct = async (id) => (id === w.product_id ? { owner_id: vendor.id } : realProduct(id));
+  assert.match(JSON.stringify((await callTool(w.admin, "approve_identity_provider", { sponsorship_id: w.sponsorship.id, offering_id: offering })).data), /owns the product/);
+  await store.db.query("UPDATE financial_products.sponsorship_identity_providers SET revoked_at = NULL, approved_at = now() - interval '1 day' WHERE offering_id = $1", [offering]);
+  await verifyAt(store, w, { ...c, customer_ref: "cust_owner" }, asVendor);
+  assert.equal((await resolve({ customer_ref: "cust_owner" })).state, null);
+  store.getProduct = realProduct;
+  await store.db.query("UPDATE financial_products.sponsorship_identity_providers SET revoked_at = now() WHERE offering_id = $1", [offering]);
 
   // Someone else's sponsorship isn't yours to change.
   const elsewhere = await world(store);
@@ -684,7 +715,9 @@ test("only an identity provider the sponsor accepts counts, for that sponsor", a
   await verifyAt(store, w, c, { verified_by_entity: w.lpUser.entity_id });
   const firstOnly = await resolve();
   assert.deepEqual(firstOnly.sponsors, [w.lpUser.entity_id]);
-  assert.equal((await authorizeMovement(store, w.move(usedBy(firstOnly)))).code, "no_approved_rail", "the second sponsor's rail isn't available to it");
+  // The first sponsor's own rail carries it; the second's is never used, though it fits.
+  assert.equal((await authorizeMovement(store, w.move(usedBy(firstOnly)))).allowed, true);
+  assert.equal((await w.ledger(secondRail.id)).length, 0, "the second sponsor's rail isn't available to it");
   assert.equal((await authorizeMovement(store, w.move({ ...usedBy(firstOnly), state_sponsors: [] }))).code, "state_unverified");
 });
 
@@ -846,10 +879,20 @@ test("an adapter that knows the verified state: re-read before each transfer, go
   await refresh();
   const first = await resolve();
   assert.deepEqual([first.state, first.source, first.verified_by], ["us-ny", "partner_verified", "verifying"]);
+  // Whichever of the firm's adapter offerings served it, it's the one record, under the one key.
+  const laterId = randomUUID();
+  await store.db.query(
+    `INSERT INTO financial_products.vendor_offerings (id, entity_id, region, service_type, name, test_base_url, live_base_url, price, licence_ids, conformance_secret, adapter, adapter_config, adapter_live_key_id, status, created_at)
+     VALUES ($1, $2, 'US', 'onramp_transfer', 'later', 'https://t2.example', 'https://l2.example', '{"amount":0,"currency":"USD"}', '{}', $3, 'verifying', '{}', $4, 'listed', now() + interval '1 hour')`,
+    [laterId, firm, seal("c", false), keyId],
+  );
+  await refreshVerifiedCustomerState(store, await getOffering(store.db, laterId), { app_id, customer_ref }, {});
+  const records = (await store.db.query("SELECT offering_id FROM financial_products.customer_verified_states WHERE app_id = $1 AND customer_ref = $2", [app_id, customer_ref])).rows;
+  assert.deepEqual(records, [{ offering_id: offeringId }]);
   // The same answer again isn't a new verification.
   await refresh();
   assert.equal((await resolve()).verified_at, first.verified_at);
-  assert.equal(partner.reads, 2);
+  assert.equal(partner.reads, 3);
   // The partner re-verified them.
   partner.state = "us-ca";
   await refresh();
@@ -1007,7 +1050,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const innovator = await connectV(ctx.user);
 
   // The ramp partner: it quotes, and takes transfers; how it answers is set per test.
-  const partner = { transfers: [], answer: "submitted", identity: { result: "no_match" } };
+  const partner = { transfers: [], answer: "submitted", identity: { result: "no_match" }, identityBodies: [] };
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
@@ -1015,6 +1058,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     res.writeHead(200, { "Content-Type": "application/json" });
     if (req.url.endsWith("/v1/ramp_quote"))
       return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: { quote_id: `q_${randomUUID()}`, expires_at: new Date(Date.now() + 60_000).toISOString(), direction: "on", amount_usd: body.params.amount_usd, currency: "USD" } }));
+    if (req.url.endsWith("/v1/identity_check")) partner.identityBodies.push(body);
     if (req.url.endsWith("/v1/identity_check")) return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: partner.identity }));
     partner.transfers.push(body);
     if (partner.answer === "refused") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "unknown_quote", message: "no" } }));
@@ -1197,6 +1241,22 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal(notAccepted.body.error, "state_unverified", notAccepted.text);
   assert.match(notAccepted.body.message, /licence provider accepts/);
   await must(provider, "approve_identity_provider", { sponsorship_id: asked.id, offering_id: offerings.identity_check });
+  // Approval looks forward, so the check is run again.
+
+  // The details can change at any moment: what's hashed is exactly what the partner was sent, from one read of the vault.
+  const realVaultFields = store.vaultFields.bind(store);
+  let vaultReads = 0;
+  store.vaultFields = async (...args) => {
+    const rows = await realVaultFields(...args);
+    return ++vaultReads % 2 ? rows : rows.map((h) => (h.field === "full_name" ? { ...h, sealed: seal("Swapped In", false) } : h));
+  };
+  const swapped = await start("verify_identity", {});
+  store.vaultFields = realVaultFields;
+  assert.equal(swapped.body.status, "verified", swapped.text);
+  assert.equal(vaultReads, 1, "one read");
+  const sent = partner.identityBodies.at(-1).input.full_name;
+  const stored = (await store.db.query("SELECT identity_digest FROM financial_products.vendor_action_runs WHERE id = $1", [swapped.body.reference])).rows[0];
+  assert.equal(stored.identity_digest, identityDigest({ full_name: sent }, ["full_name"]));
 
 
   const noRail = await start("transfer", { quote: q1 });
