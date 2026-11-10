@@ -40,6 +40,12 @@ export const PARK_AFTER_REFUSALS = 3;
 export const PARKED_RETRY_MS = 15 * 60_000;
 // A parked request's checks back off to at most this far apart.
 export const PARKED_RETRY_MAX_MS = 6 * 3_600_000;
+// How long a firm has to dispute a correction an admin applied to its state; POOL_CORRECTION_DISPUTE_DAYS overrides it.
+export const POOL_CORRECTION_DISPUTE_DAYS = 14;
+export function correctionDisputeMs(env: NodeJS.ProcessEnv = process.env): number {
+  const days = Number(env.POOL_CORRECTION_DISPUTE_DAYS);
+  return (env.POOL_CORRECTION_DISPUTE_DAYS && days >= 1 ? Math.floor(days) : POOL_CORRECTION_DISPUTE_DAYS) * 86_400_000;
+}
 export const FIRM_SPECIFIC_REFUSALS = ["customer_state_required", "state_not_on_rail", "state_not_sponsored"];
 // A tick pays at most this many slices of one pool, so one busy pool can't hold up the rest.
 const MAX_CLAIMS_PER_TICK = 50;
