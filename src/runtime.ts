@@ -218,7 +218,10 @@ export async function deliverDueWebhooks(store: Store, opts: WebhookWorkerOption
         let error: string | null = null;
         // A covenant alert carries sealed figures, so whoever created the hook is checked again at the moment it goes.
         if (d.type.startsWith("covenant.") && (await store.covenantWebhookBlocked(d.webhook_id))) {
-          await store.recordDeliveryAttempt(d.id, { ok: false, code: null, error: "Held back: this webhook's creator is no longer a named licence-provider member of the firm", next_attempt_at: null });
+          const reason = "Held back: this webhook's creator is no longer a named licence-provider member of the firm";
+          await store.recordDeliveryAttempt(d.id, { ok: false, code: null, error: reason, next_attempt_at: null });
+          const alert = (d.payload as { data?: { breach_id?: string; reminder?: boolean; paused?: boolean } }).data;
+          if (alert?.breach_id) await store.recordCovenantAlertUndelivered(alert.breach_id, d.type, d.type === "covenant.breached" && !alert.reminder && !alert.paused, reason);
           result.attempted++;
           result.failed++;
           return;
