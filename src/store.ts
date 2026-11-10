@@ -2977,7 +2977,8 @@ export class Store {
     const entityId = (u?.entity_id as string | null) ?? null;
     if (!entityId) return; // standing comes when they join a firm
     if (!has) {
-      if (u?.lp_since) await this.loseStanding(userId, entityId, "role_removed");
+      // The roles come from the whitelist entry an admin set (invite_user), applied at this sign-in.
+      if (u?.lp_since) await this.loseStanding(userId, entityId, "role_removed_by_invite");
       return;
     }
     await this.grantOrRequestStanding(userId, entityId, null, "role_gained");
@@ -3599,11 +3600,19 @@ export class Store {
 
   // Membership of a firm. Leaving or moving ends standing at the old firm (told to it). Joining as a licence provider
   // has standing at once only as a firm's first ever licence provider; otherwise it's a request the firm settles.
-  async setUserEntity(userId: string, entityId: string | null): Promise<{ standing: "none" | "granted" | "requested"; request_id?: string }> {
+  // `cause`: why standing at the old firm ends, kept in its history (an admin's move locks recovery there: firm-notices.ts).
+  async setUserEntity(userId: string, entityId: string | null, cause = "left_firm"): Promise<{ standing: "none" | "granted" | "requested"; request_id?: string; left_standing_at?: string }> {
     const before = await this.one("SELECT entity_id, lp_since, roles FROM financial_products.users WHERE id = $1", [userId]);
     if (!before) return { standing: "none" };
     if (before.entity_id === entityId) return { standing: before.lp_since ? "granted" : "none" };
-    if (before.entity_id && before.lp_since) await this.loseStanding(userId, before.entity_id as string, "left_firm");
+    const leftStandingAt = before.entity_id && before.lp_since ? (before.entity_id as string) : undefined;
+    if (leftStandingAt) await this.loseStanding(userId, leftStandingAt, cause);
+    const joinedOut = await this.joinFirm(userId, entityId, before.roles as string[]);
+    return leftStandingAt ? { ...joinedOut, left_standing_at: leftStandingAt } : joinedOut;
+  }
+
+  private async joinFirm(userId: string, entityId: string | null, roles: string[]): Promise<{ standing: "none" | "granted" | "requested"; request_id?: string }> {
+    const before = { roles };
     await this.db.query("UPDATE financial_products.users SET entity_id = $2, entity_joined_at = now(), lp_since = NULL WHERE id = $1", [userId, entityId]);
     if (!entityId || !((before.roles as string[]) ?? []).includes("license_provider")) return { standing: "none" };
     return this.grantOrRequestStanding(userId, entityId, null, "joined");

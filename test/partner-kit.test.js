@@ -986,7 +986,10 @@ test("REPRO5: demoting the only licence provider doesn't let a puppet in as the 
   assert.equal(done.status, "accepted");
   assert.ok(await lpSince(w, realUser.id));
 
-  // A recovery of the puppet is blocked by a past licence provider: here the real member, through its own session.
+  // A recovery of the puppet is locked for 30 days: the real member lost standing through an admin's invite rewrite.
+  await w.refused(w.admin, "recover_firm_member", { request_id: puppetRequest, reason: "Trying to recover the puppet as well" }, /locked until/);
+  // Later, it can start, and a past licence provider blocks it: here the real member, through its own session.
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '31 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
   await w.ok(w.admin, "recover_firm_member", { request_id: puppetRequest, reason: "Trying to recover the puppet as well" });
   const real = await w.connect(await w.store.getUser(realUser.id));
   const blocked = await w.ok(real, "block_firm_recovery", { request_id: puppetRequest, reason: "We don't know this account" });
@@ -1000,6 +1003,8 @@ test("REPRO5: demoting the only licence provider doesn't let a puppet in as the 
 test("a demoted licence provider can block a recovery even without the role, and two firsts can't race in", async () => {
   const w = await world();
   const firm = await w.ok(w.admin, "register_firm", { name: "Race bank", regions: ["US"], legal_form: "company_private", incorporation: { country: "us", subdivision: "us-ny" } });
+  await w.store.upsertInvite("racer_a@example.com", ["license_provider"]);
+  await w.store.upsertInvite("racer_b@example.com", ["license_provider"]);
   const a = await w.store.upsertClerkUser("racer_a", "racer_a@example.com", "A", ["license_provider"]);
   const b = await w.store.upsertClerkUser("racer_b", "racer_b@example.com", "B", ["license_provider"]);
   // Two joins at once: the firm's row is locked, so only one is its first licence provider.
@@ -1010,8 +1015,83 @@ test("a demoted licence provider can block a recovery even without the role, and
   const firstEmail = firstId === a.id ? "racer_a@example.com" : "racer_b@example.com";
   await w.store.upsertClerkUser(firstId === a.id ? "racer_a" : "racer_b", firstEmail, "First", ["consumer"]);
   const request = (await w.pg.query("SELECT id FROM financial_products.firm_member_requests WHERE user_id = $1 AND status = 'pending'", [secondId])).rows[0].id;
+  // (The demotion was an admin's invite rewrite: recovery there waits 30 days first.)
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '31 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
   await w.ok(w.admin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept this" });
   // The demoted one has no licence-provider role now, and still blocks it.
   const demoted = await w.connect(await w.store.getUser(firstId));
   assert.equal((await w.ok(demoted, "block_firm_recovery", { request_id: request, reason: "Not without us" })).status, "blocked");
+});
+
+// ---- the sixth review: recovery rests on past licence providers being able to object ----
+
+// A fresh firm whose first licence provider signed in through an invite, a puppet waiting on a request, and a decoy firm.
+const repro6World = async () => {
+  const w = await world();
+  const firm = await w.ok(w.admin, "register_firm", { name: "Repro six bank", regions: ["US"], legal_form: "company_private", incorporation: { country: "us", subdivision: "us-ny" } });
+  const decoy = await w.ok(w.admin, "register_firm", { name: "Decoy firm", regions: ["US"], legal_form: "company_private", incorporation: { country: "us", subdivision: "us-ny" } });
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["license_provider"] });
+  const real = await w.store.upsertClerkUser("real6", "real6@example.com", "Real", ["license_provider"]);
+  await w.ok(w.admin, "add_entity_member", { email: "real6@example.com", entity_id: firm.id });
+  await backdate(w, real.id);
+  const puppet = await w.store.upsertClerkUser("puppet6", "puppet6@example.com", "Puppet", ["license_provider"]);
+  const added = await w.ok(w.admin, "add_entity_member", { email: "puppet6@example.com", entity_id: firm.id });
+  return { w, firm, decoy, real, puppet, request: added.request_id };
+};
+
+test("REPRO6: an admin who moves the real licence provider away and revokes it can't recover the puppet, then or later", async () => {
+  const { w, firm, decoy, real, request } = await repro6World();
+  // The admin moves the real member to a decoy firm: its standing ends, the old firm is told, and the result says recovery is locked.
+  const moved = await w.ok(w.admin, "add_entity_member", { email: "real6@example.com", entity_id: decoy.id });
+  assert.match(moved.recovery_locked, /locked for 30 days/);
+  assert.ok((await w.pg.query("SELECT 1 FROM financial_products.firm_notices WHERE entity_id = $1 AND type = 'firm.member_standing_lost'", [firm.id])).rows.length);
+  assert.equal((await w.pg.query("SELECT reason FROM financial_products.firm_standing_history WHERE entity_id = $1 AND user_id = $2 AND event = 'lost'", [firm.id, real.id])).rows[0].reason, "moved_by_admin");
+  // Then revokes it, so it can't sign in to object.
+  await w.ok(w.admin, "revoke_user", { email: "real6@example.com" });
+  const refusedStart = await w.refused(w.admin, "recover_firm_member", { request_id: request, reason: "Recovering the firm's only licence provider" }, /can't sign in/);
+  assert.doesNotMatch(JSON.stringify(refusedStart), /real6@example\.com/, "the refusal names no one");
+  // Even with the 30 days gone and a recovery somehow begun 8 days ago, completion is refused while it's locked out.
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '40 days' WHERE entity_id = $1", [firm.id]);
+  await w.pg.query("UPDATE financial_products.firm_member_requests SET recovery_started_at = now() - interval '8 days', recovery_reason = 'x' WHERE id = $1", [request]);
+  await w.refused(w.admin, "recover_firm_member", { request_id: request, reason: "Completing after the wait" }, /can't sign in/);
+  assert.equal((await w.pg.query("SELECT status FROM financial_products.firm_member_requests WHERE id = $1", [request])).rows[0].status, "pending");
+  // Within the 30 days of the move, the lock holds even once the member can sign in again.
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '2 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["license_provider"] });
+  await w.refused(w.admin, "recover_firm_member", { request_id: request, reason: "Completing after the wait" }, /locked until/);
+});
+
+test("a past licence provider whose access is restored can block a recovery again", async () => {
+  const { w, firm, real, request } = await repro6World();
+  // The real member left long ago (its demotion is past the 30 days), so a recovery of the puppet can start.
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["consumer"] });
+  await w.store.upsertClerkUser("real6", "real6@example.com", "Real", ["consumer"]);
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '31 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
+  await w.ok(w.admin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept the new account" });
+  // Revoked during the wait: completion is refused.
+  await w.ok(w.admin, "revoke_user", { email: "real6@example.com" });
+  await w.pg.query("UPDATE financial_products.firm_member_requests SET recovery_started_at = now() - interval '8 days' WHERE id = $1", [request]);
+  await w.refused(w.admin, "recover_firm_member", { request_id: request, reason: "Completing after the wait" }, /can't sign in/);
+  // Its access restored, it signs in and blocks the recovery.
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["consumer"] });
+  const back = await w.connect(await w.store.upsertClerkUser("real6", "real6@example.com", "Real", ["consumer"]));
+  assert.equal((await w.ok(back, "block_firm_recovery", { request_id: request, reason: "We don't know this account" })).status, "blocked");
+  assert.equal((await w.pg.query("SELECT status FROM financial_products.firm_member_requests WHERE id = $1", [request])).rows[0].status, "declined");
+  assert.equal(real.email, "real6@example.com");
+});
+
+test("completing a recovery is refused when someone at the firm can decide by then", async () => {
+  const { w, firm, request } = await repro6World();
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["consumer"] });
+  await w.store.upsertClerkUser("real6", "real6@example.com", "Real", ["consumer"]);
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '31 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
+  await w.ok(w.admin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept the new account" });
+  // During the wait, a licence provider with standing from before the request (and past the cool-off) is there again.
+  const { user: decider } = await w.store.createUser("Decider", ["license_provider"]);
+  await w.pg.query("UPDATE financial_products.users SET entity_id = $2, lp_since = now() - interval '20 days', entity_joined_at = now() - interval '20 days', created_at = now() - interval '20 days' WHERE id = $1", [decider.id, firm.id]);
+  await w.pg.query("UPDATE financial_products.firm_member_requests SET recovery_started_at = now() - interval '8 days' WHERE id = $1", [request]);
+  await withCoolOff(72, async () => {
+    await w.refused(w.admin, "recover_firm_member", { request_id: request, reason: "Completing after the wait" }, /it's theirs to accept or decline/);
+  });
+  assert.equal((await w.pg.query("SELECT status FROM financial_products.firm_member_requests WHERE id = $1", [request])).rows[0].status, "pending");
 });

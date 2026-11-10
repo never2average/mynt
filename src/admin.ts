@@ -434,8 +434,8 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       // is never silent. A licence provider joins with standing only as the firm's first ever one; otherwise it's a
       // request one of the firm's licence providers settles (store.ts, grantOrRequestStanding; firm-notices.ts).
       const told = await noticeFirm(store, entity.id, "firm.member_added", { member_email: member.email, member_roles: member.held_roles ?? member.roles, added_at: new Date().toISOString(), by: "admin" });
-      const joined = await store.setUserEntity(member.id, entity.id);
-      await audit("add_entity_member", entity.id, { email: member.email, standing: joined.standing, ...(joined.request_id ? { request_id: joined.request_id } : {}) });
+      const joined = await store.setUserEntity(member.id, entity.id, "moved_by_admin");
+      await audit("add_entity_member", entity.id, { email: member.email, standing: joined.standing, ...(joined.request_id ? { request_id: joined.request_id } : {}), ...(joined.left_standing_at ? { left_standing_at: joined.left_standing_at } : {}) });
       return json({
         entity_id: entity.id,
         entity: entity.name,
@@ -443,6 +443,9 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
         firm_told: told,
         ...(joined.standing === "requested"
           ? { status: "pending_acceptance", request_id: joined.request_id, note: "The firm has had a licence provider: one of its licence providers accepts this account (decide_firm_member) before it has any licence-provider powers there" }
+          : {}),
+        ...(joined.left_standing_at
+          ? { left_standing_at: joined.left_standing_at, recovery_locked: `This account had licence-provider standing at its old firm (${joined.left_standing_at}); moving it ended that, the firm was told (firm.member_standing_lost), and recover_firm_member at that firm is locked for 30 days` }
           : {}),
       });
     },
@@ -578,6 +581,10 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       const admins = await adminInvites();
       if (admins.length === 1 && admins[0] === lower) return fail("That is the last admin; make someone else an admin first");
       if (!(await store.deleteInvite(lower))) return fail(`${lower} is not on the whitelist`);
+      // Revoking a licence provider ends its standing at its firm, as an admin action: recovery there locks for 30 days.
+      const revoked = await store.userByEmail(lower);
+      const revokedRow = revoked ? (await store.db.query("SELECT entity_id, lp_since FROM financial_products.users WHERE id = $1", [revoked.id])).rows[0] : null;
+      if (revoked && revokedRow?.entity_id && revokedRow.lp_since) await store.loseStanding(revoked.id, revokedRow.entity_id as string, "revoked_by_admin");
       // Public sign-up mustn't let them straight back in as a consumer.
       await store.blockSignup(lower, user.id);
       await ctx.clerkAdmin?.disallow(lower);

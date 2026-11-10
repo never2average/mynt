@@ -150,16 +150,47 @@ const everyone = async (store: Store, entityId: string) => {
   return [...new Set([...current, ...(await store.pastLicenceProviders(entityId))])];
 };
 
+// Standing lost by an admin's hand, which locks recovery at the firm for RECOVERY_LOCK_MS.
+export const ADMIN_LOSS_CAUSES = ["moved_by_admin", "role_removed_by_invite", "revoked_by_admin"];
+export const RECOVERY_LOCK_MS = 30 * 24 * HOUR;
+
+// Why an admin's recovery at this firm can't go ahead now, if it can't. Recovery rests on the firm's past licence
+// providers being able to object, so it's locked while any of them can't sign in, and for 30 days after any of them lost
+// standing there through an admin's action. The account the request is for isn't counted (it's the one being restored).
+// The reasons name no one: they say what's wrong, and an admin sees who in its own tools.
+export async function recoveryLock(store: Store, entityId: string, subjectId: string, now: Date): Promise<string | null> {
+  const past = (await store.pastLicenceProviders(entityId)).filter((id) => id !== subjectId);
+  let lockedOut = 0;
+  for (const id of past) {
+    const email = ((await store.db.query(`SELECT email FROM ${T}.users WHERE id = $1`, [id])).rows[0]?.email as string | null) ?? null;
+    if (!email) continue; // a token account: nothing an admin can revoke from it here
+    if (!(await store.getInvite(email)) || (await store.isSignupBlocked(email))) lockedOut++;
+  }
+  if (lockedOut) return `Recovery is locked: ${lockedOut} past licence provider(s) of this firm can't sign in (revoked, blocked or not on the whitelist), so they couldn't object. Restore their access first.`;
+  const { rows } = await store.db.query(
+    `SELECT max(at) AS at FROM ${T}.firm_standing_history WHERE entity_id = $1 AND event = 'lost' AND reason = ANY($2::text[]) AND user_id <> $3 AND at > $4`,
+    [entityId, ADMIN_LOSS_CAUSES, subjectId, new Date(now.getTime() - RECOVERY_LOCK_MS)],
+  );
+  if (rows[0]?.at) return `Recovery is locked until ${new Date(new Date(rows[0].at as string).getTime() + RECOVERY_LOCK_MS).toISOString()}: a past licence provider of this firm lost standing here through an admin's action (moved to another firm, roles rewritten, or revoked) within the last 30 days.`;
+  return null;
+}
+
 // First call: starts it (only when nobody at the firm can decide), told to every current and past licence provider.
 // A call after RECOVERY_DELAY with no block completes it. One admin is enough: production has one (docs/reference.md).
+// Both calls are refused while the firm's recovery is locked (recoveryLock) or someone at the firm can decide.
 export async function recoverMembership(store: Store, requestId: string, admin: User, reason: string, now = new Date()): Promise<{ error: string } | Record<string, unknown>> {
   const r = await requestById(store, requestId);
   if (!r) return { error: `No request '${requestId}'` };
   if (r.status !== "pending") return { error: `That request is already ${r.status}` };
   const member = await store.getUser(r.user_id);
+  const locked = await recoveryLock(store, r.entity_id, r.user_id, now);
+  if (locked) {
+    await store.audit(admin.id, "recover_firm_member_refused", r.entity_id, { request_id: r.id, reason: locked });
+    return { error: locked };
+  }
+  if ((await eligibleDeciders(store, r.entity_id, new Date(r.requested_at), now, r.user_id)).length)
+    return { error: "The firm has a licence provider who can decide this: it's theirs to accept or decline (decide_firm_member), not an admin's" };
   if (!r.recovery_started_at) {
-    if ((await eligibleDeciders(store, r.entity_id, new Date(r.requested_at), now, r.user_id)).length)
-      return { error: "The firm has a licence provider who can decide this: it's theirs to accept or decline (decide_firm_member), not an admin's" };
     await store.db.query(`UPDATE ${T}.firm_member_requests SET recovery_reason = $2, recovery_started_by = $3, recovery_started_at = $4 WHERE id = $1`, [r.id, reason, admin.id, now]);
     const completes = new Date(now.getTime() + RECOVERY_DELAY_MS).toISOString();
     const told = await store.noticeAccounts(r.entity_id, "firm.recovery_pending", { request_id: r.id, member_email: member?.email ?? null, reason, started_at: now.toISOString(), completes_after: completes, block_with: "block_firm_recovery { request_id, reason }" }, await everyone(store, r.entity_id));
