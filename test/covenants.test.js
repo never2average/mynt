@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -33,8 +33,8 @@ async function setup({ kind = "live", books = { reserves: 150_00, owed: 100_00 }
   const store = await Store.open(db, CATALOG);
   let clock = T0 + 5 * 60_000;
   const now = () => new Date(clock);
-  const state = { books, flows };
-  const ledger = { id: "fake", name: "A fake ledger", kind, read: async (c) => (state.books ? { reserves_held_cents: state.books.reserves, customer_obligations_cents: state.books.owed, as_of: c.period_end } : { error: { code: "down", message: "down" } }) };
+  const state = { books, flows, kind };
+  const ledger = { id: "fake", name: "A fake ledger", get kind() { return state.kind; }, read: async (c) => (state.books ? { reserves_held_cents: state.books.reserves, customer_obligations_cents: state.books.owed, as_of: c.period_end } : { error: { code: "down", message: "down" } }) };
   const health = await ProductHealthService.open(db, store, { intervalMs: HOUR, cosignWindowMs: 10 * 60_000, pollMs: 60_000, programId: null, ...config }, { chain: null, ledgerFor: () => ledger, flowsFor: state.flows === undefined ? null : async () => state.flows, now });
   const covenants = await CovenantService.open(db, store, health, { pollMs: 1000 }, { now });
   const [published] = await store.publishedProducts();
@@ -395,8 +395,9 @@ test("a pause rule pauses inside its cooldown", async () => {
   assert.equal(await drift(t), null);
   t.state.books = { reserves: 80_00, owed: 100_00 };
   await t.tickHour(2);
-  assert.ok(await drift(t), "paused again though the alert is suppressed");
-  assert.equal((await breaches(t))[0].alerted, false);
+  assert.ok(await drift(t), "paused again inside the cooldown");
+  assert.equal((await breaches(t))[0].alerted, true, "a pause is always told to the sponsor");
+  assert.equal((await t.webhooks("covenant.breached")).length, 2);
 });
 
 test("authorisation: only the sponsoring firm's explicit licence-provider members change rules; admins are refused", async () => {
@@ -580,4 +581,230 @@ test("ops_status: paused products, open breaches, and a covenant timer that isn'
   assert.match(lines, /covenants: 1 product\(s\) paused/);
   assert.match(lines, /covenants: 1 open breach/);
   assert.match(lines, /covenant timer last ran/, "the clock in this test is days old, so the timer reads as stale");
+});
+
+// ---- what the review of #124 asked for ----
+
+const HOOK_URL = "http://127.0.0.1:9/hook";
+const memberOf = async (t, firm, roles, name) => {
+  const { user } = await t.store.createUser(name, roles);
+  await t.store.setUserEntity(user.id, firm.id);
+  user.entity_id = firm.id;
+  return user;
+};
+
+test("covenant webhooks: only a named licence-provider member creates or deletes them, and each delivery checks its creator now", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  const innovator = await memberOf(t, t.provider.entity, ["innovator"], "Member");
+  const admin = await memberOf(t, t.provider.entity, ["admin"], "Firm admin");
+  for (const who of [innovator, admin]) {
+    const refused = await t.tool(who, "create_firm_webhook", { url: HOOK_URL, events: ["covenant.breached"] });
+    assert.equal(refused.isError, true);
+    assert.match(refused.data.error, /covenant/);
+  }
+  const defaulted = await t.ok(t.tool(innovator, "create_firm_webhook", { url: HOOK_URL }));
+  assert.ok(!defaulted.events.some((e) => e.startsWith("covenant.")), "someone else's default doesn't include them");
+  const hook = await t.ok(t.tool(t.provider.user, "create_firm_webhook", { url: HOOK_URL }));
+  assert.ok(hook.events.includes("covenant.breached"), "the sponsor's default does");
+  for (const who of [innovator, admin]) assert.equal((await t.tool(who, "delete_firm_webhook", { webhook_id: hook.id })).isError, true);
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert", cooldown_seconds: 3600 }));
+  await t.tickHour(0);
+  assert.equal((await t.webhooks("covenant.breached")).length, 1);
+  // The creator stops being entitled: the next delivery isn't queued.
+  await t.pg.query("UPDATE financial_products.users SET roles = '{admin,license_provider}' WHERE id = $1", [t.provider.user.id]);
+  await t.tickHour(2);
+  assert.equal((await t.webhooks("covenant.breached")).length, 1, "a later role change takes effect");
+  await t.pg.query("UPDATE financial_products.users SET roles = '{license_provider}' WHERE id = $1", [t.provider.user.id]);
+  t.provider.user.roles = ["license_provider"];
+  await t.ok(t.tool(t.provider.user, "delete_firm_webhook", { webhook_id: hook.id }));
+});
+
+test("a sandbox pass neither closes a live breach nor permits a release", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  const [b] = await breaches(t);
+  t.state.kind = "sandbox";
+  t.state.books = { reserves: 150_00, owed: 100_00 };
+  await t.tickHour(1);
+  const [c] = await covenantsOf(t);
+  assert.equal(c.status, "pass");
+  assert.equal(c.status_sandbox, true);
+  assert.equal((await breaches(t))[0].status, "open", "sandbox figures don't close what live ones opened");
+  const refused = await t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /sandbox/);
+  assert.ok(await drift(t));
+});
+
+test("a stale figure reads unknown on the timer alone, starts the unknown clock, and can't be released on", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause", unknown_limit_seconds: 3600 }));
+  await t.tickHour(0);
+  const [b] = await breaches(t);
+  t.state.books = { reserves: 150_00, owed: 100_00 };
+  await t.tickHour(1);
+  assert.equal((await covenantsOf(t))[0].status, "pass");
+  t.setClock(T0 + 4 * HOUR); // no health tick: the worker has stopped
+  await t.covenants.tick();
+  let [c] = await covenantsOf(t);
+  assert.equal(c.status, "unknown");
+  assert.match(c.status_reason, /two intervals/);
+  const refused = await t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /can't be evaluated/);
+  t.setClock(T0 + 6 * HOUR);
+  await t.covenants.tick();
+  const unknown = (await breaches(t)).find((x) => x.kind === "unknown_limit");
+  assert.ok(unknown, "unknown past its limit alerts");
+});
+
+test("unverified_for: publishing again doesn't restart the clock, and a product that isn't live reads unknown", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "unverified_for", threshold: 3 * 3600, action: "alert" }));
+  await t.tickHour(0);
+  await t.pg.query("UPDATE financial_products.products SET published_at = $2 WHERE id = $1", [t.productId, new Date(T0 + 4 * HOUR)]);
+  await t.tickHour(5);
+  assert.equal((await breaches(t))[0]?.rule_type, "unverified_for", "the new published_at doesn't reset it");
+  await t.pg.query("UPDATE financial_products.products SET status = 'draft' WHERE id = $1", [t.productId]);
+  await t.covenants.tick();
+  const [c] = await covenantsOf(t);
+  assert.equal(c.status, "unknown");
+  assert.match(c.status_reason, /isn't live/);
+});
+
+test("a hold drifts what's built on the product, and a release clears it", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  const other = (await t.store.publishedProducts()).find((p) => p.id !== t.productId);
+  const was = "sha256:" + createHash("sha256").update(JSON.stringify({ published: true, offered: [], drifted: false })).digest("hex").slice(0, 32);
+  await t.store.setPins(other.id, { version: 1, pinned_at: new Date().toISOString(), components: [], parties: [], entity_ids: [], state: { entities: {}, licences: {}, parties: {}, products: { [t.productId]: was } } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  assert.equal((await t.store.getProduct(other.id)).drift.changes[0].kind, "product");
+  const [b] = await breaches(t);
+  await t.ok(t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id, override_reason: "cured off-platform, confirmed by us" }));
+  assert.equal((await t.store.getProduct(other.id)).drift, null);
+});
+
+test("unverified_for counts only this sponsor's own signature", async () => {
+  const t = await setup();
+  const second = await t.sponsor(t.stranger);
+  await t.ok(t.tool(t.stranger.user, "set_covenant", { sponsorship_id: second.id, rule_type: "unverified_for", threshold: 3 * 3600, action: "alert" }));
+  await t.tickHour(0);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  await t.health.registerSigningKey(t.provider.user, base58Encode(Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url")));
+  await t.tickHour(5);
+  const [row] = await t.raw("SELECT sequence, fingerprint FROM financial_products.product_health_snapshots ORDER BY sequence DESC LIMIT 1");
+  await t.health.submitSignature(t.provider.user, t.productId, null, row.sequence, edSign(null, Buffer.from(chainLib.cosignMessage(Buffer.from(row.fingerprint, "hex"))), privateKey).toString("hex"));
+  await t.covenants.tick();
+  const list = await t.ok(t.tool(t.stranger.user, "list_covenant_breaches", {}));
+  assert.equal(list[0]?.rule_type, "unverified_for", "the first sponsor's signature isn't the second's");
+});
+
+test("admins see that a rule tripped, not its settings or the sponsor's reasons, in breaches and the audit log", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  const rule = await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  await t.ok(t.set(t.provider.user, { covenant_id: rule.id, rule_type: "coverage_below", threshold: 12_345, action: "pause" }));
+  const [b] = await breaches(t);
+  await t.ok(t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id, override_reason: "secret commercial reasoning here" }));
+  await t.ok(t.tool(t.provider.user, "revoke_sponsorship", { sponsorship_id: t.sponsorship.id, reason: "secret revocation grounds", breach_id: b.id }));
+  const [seen] = await t.ok(t.tool(t.admin, "list_covenant_breaches", {}));
+  assert.equal(seen.threshold, undefined);
+  assert.equal(seen.unit, undefined);
+  assert.ok(seen.rule_config_withheld);
+  assert.equal(seen.pause.release_reason, null);
+  assert.equal(seen.revocation.reason, null);
+  assert.equal(seen.resolved_reason, null);
+  const log = JSON.stringify(await t.ok(t.tool(t.admin, "audit_log", { limit: 500 })));
+  assert.match(log, /"set_covenant"/);
+  assert.doesNotMatch(log, /12345|"threshold"|secret commercial/);
+});
+
+test("figures are withheld once the firm isn't active or the sponsorship has ended", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  assert.equal((await breaches(t))[0].observed, 8_000);
+  await t.pg.query("UPDATE financial_products.entities SET status = 'suspended' WHERE id = $1", [t.provider.entity.id]);
+  let [b] = await breaches(t);
+  assert.equal(b.observed, null);
+  assert.equal(b.in_flight_when_paused, null);
+  assert.ok(b.observed_withheld);
+  await t.pg.query("UPDATE financial_products.entities SET status = 'active' WHERE id = $1", [t.provider.entity.id]);
+  assert.equal((await breaches(t))[0].observed, 8_000);
+  await t.ok(t.tool(t.provider.user, "revoke_sponsorship", { sponsorship_id: t.sponsorship.id, reason: "ended" }));
+  [b] = await breaches(t);
+  assert.equal(b.observed, null);
+  assert.equal(b.in_flight_when_paused, null);
+});
+
+test("an admin account can't revoke, with or without a breach id", async () => {
+  const t = await setup();
+  const both = await memberOf(t, t.provider.entity, ["admin", "license_provider"], "Both");
+  const refused = await t.tool(both, "revoke_sponsorship", { sponsorship_id: t.sponsorship.id, reason: "an admin's decision" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /admin/);
+  assert.equal((await t.store.getSponsorship(t.sponsorship.id)).status, "approved");
+});
+
+test("two evaluators claim one reminder", async () => {
+  const t = await setup();
+  await t.listen();
+  await t.ok(t.set(t.provider.user, { rule_type: "snapshot_missed_for", threshold: 3 * 3600, action: "alert", cooldown_seconds: 3600 }));
+  t.setClock(T0 + 5 * HOUR);
+  await t.covenants.tick();
+  assert.equal((await t.webhooks("covenant.breached")).length, 1);
+  t.setClock(T0 + 7 * HOUR);
+  await Promise.all([t.covenants.tick(), t.covenants.tick()]);
+  const hooks = await t.webhooks("covenant.breached");
+  assert.equal(hooks.length, 2, "one reminder, whoever got there first");
+  assert.equal(hooks[1].payload.data.reminder, true);
+});
+
+test("a live product with no pinned state records a failed pause rather than claiming it paused", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.listen();
+  await t.store.setPins(t.productId, null);
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  const [b] = await breaches(t);
+  assert.equal(b.action_taken, "pause_failed_no_pins");
+  assert.ok(b.events.some((e) => e.event === "pause_failed"));
+  assert.equal(b.pause, null);
+  assert.equal((await t.webhooks("covenant.breached")).length, 1, "the sponsor is told");
+});
+
+test("a missing hold is repaired for a pause rule with an open breach", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  await t.pg.query("DELETE FROM financial_products.covenant_holds");
+  await t.store.setDrift(t.productId, null);
+  await t.covenants.tick();
+  assert.equal((await t.raw("SELECT count(*)::int AS n FROM financial_products.covenant_holds"))[0].n, 1);
+  assert.ok(await drift(t));
+});
+
+test("a firm can't hold covenants over a product it owns", async () => {
+  const t = await setup();
+  await t.pg.query("UPDATE financial_products.products SET entity_id = $1 WHERE id = $2", [t.provider.entity.id, t.productId]);
+  const refused = await t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /own product/);
+});
+
+test("snapshot_missed_for doesn't count a failed ledger read or a report that can't be authenticated", async () => {
+  const t = await setup({ books: null });
+  await t.ok(t.set(t.provider.user, { rule_type: "snapshot_missed_for", threshold: 3 * 3600, action: "alert" }));
+  await t.tickHour(1);
+  await t.tickHour(5);
+  assert.equal((await breaches(t))[0]?.rule_type, "snapshot_missed_for", "ledger-down rows aren't snapshots");
+  const u = await setup();
+  await u.ok(u.set(u.provider.user, { rule_type: "snapshot_missed_for", threshold: 3 * 3600, action: "alert" }));
+  await u.tickHour(1);
+  await u.pg.query("UPDATE financial_products.product_health_snapshots SET report_sealed = 'v1:AAAA:AAAA:AAAA'");
+  await u.setClock(T0 + 5 * HOUR);
+  await u.covenants.tick();
+  assert.equal((await breaches(u))[0]?.rule_type, "snapshot_missed_for", "a report that can't be opened isn't a snapshot");
 });

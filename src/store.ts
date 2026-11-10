@@ -2532,6 +2532,8 @@ export class Store {
       `INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status, next_attempt_at)
        SELECT gen_random_uuid(), w.id, $2::uuid, $3, $4::jsonb, $5, 'pending', now()
        FROM financial_products.webhooks w WHERE w.entity_id::text = $1 AND $3 = ANY(w.events)
+         -- A covenant's alert goes only to a hook whose creator is, right now, a named licence-provider member and no admin.
+         AND ($3 NOT LIKE 'covenant.%' OR EXISTS (SELECT 1 FROM financial_products.users u WHERE u.id = w.created_by AND u.entity_id::text = w.entity_id::text AND 'license_provider' = ANY(u.roles) AND NOT 'admin' = ANY(u.roles)))
        RETURNING id`,
       [entityId, payload.id, payload.type, JSON.stringify(payload), sandbox],
     );

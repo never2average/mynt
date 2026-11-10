@@ -1062,8 +1062,8 @@ export class ProductHealthService {
     for (const e of new Set(rows.filter((r) => r.epoch !== epoch).map((r) => r.epoch))) {
       const old = rows.filter((r) => r.epoch === e);
       const anchor = anchors.find((a) => a.epoch === e + 1);
-      // A record that was replaced always has the anchor that replaced it. None, among other anchors, means it was removed.
-      const v = !anchor && anchors.length ? "previous_chain_mismatch" : this.previousVerdict(old, anchor);
+      // A record that was replaced always has the anchor that replaced it. None means it was removed.
+      const v = !anchor ? "previous_chain_mismatch" : this.previousVerdict(old, anchor);
       for (const r of old) if (r.on_chain) verdict.set(r.id, v);
     }
     const current = rows.filter((r) => r.epoch === epoch);

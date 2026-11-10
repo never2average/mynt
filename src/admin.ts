@@ -41,7 +41,7 @@ import { ENTITY_STATUSES } from "./store.js";
 import type { SolanaService } from "./solana/service.js";
 import type { MainnetGateService } from "./solana/mainnet-gate.js";
 import type { ProductHealthService } from "./product-health.js";
-import type { CovenantService } from "./covenants.js";
+import { auditForAdmin, type CovenantService } from "./covenants.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -657,6 +657,6 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       inputSchema: { limit: z.number().int().min(1).max(500).default(100) },
       annotations: { readOnlyHint: true },
     },
-    async ({ limit }) => json(await store.auditLog(limit)),
+    async ({ limit }) => json((await store.auditLog(limit)).map(auditForAdmin)),
   );
 }

@@ -222,6 +222,7 @@ export function registerLicenseProviderTools(server: McpServer, store: Store, us
       const s = await mine(sponsorship_id);
       if (!s) return fail(`No sponsorship '${sponsorship_id}' by your firm`);
       if (s.status !== "approved") return fail(`The sponsorship is ${s.status}, not approved`);
+      if (((await store.getUser(user.id)) ?? user).roles.includes("admin")) return fail("Revoking is the licence provider's own decision: an admin account can't do it, even one that belongs to the firm");
       if (breach_id) {
         const problem = await revocationBreachProblem(store, user, s, breach_id);
         if (problem) return fail(problem);

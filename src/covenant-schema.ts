@@ -22,6 +22,8 @@ export const COVENANT_TABLES = `
     status text NOT NULL DEFAULT 'unevaluated' CHECK (status IN ('unevaluated', 'pass', 'fail', 'unknown')),
     status_reason text,
     status_since timestamptz,
+    status_sandbox boolean NOT NULL DEFAULT false,
+    first_live_seen_at timestamptz,
     last_evaluated_at timestamptz,
     last_epoch integer,
     last_sequence integer,

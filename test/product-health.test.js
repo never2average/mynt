@@ -1258,6 +1258,17 @@ test("a retired program whose head is gone but whose history remains can't be re
   assert.equal((await health.reanchor(admin, productId, null, "moved to a new program")).previous_record, "gone", "with no history either, it was a reset");
 });
 
+test("deleting every anchor reads as a mismatch too", async () => {
+  const { health, productId, provider, admin, chain, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.programId = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  await health.reanchor(admin, productId, null, "moved to a new program");
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  await pg.query("DELETE FROM financial_products.product_health_anchors");
+  const out = await health.get(provider.user, productId, null, 10);
+  assert.equal(out.history.find((h) => h.epoch === 0).verification.on_chain, "previous_chain_mismatch");
+});
+
 test("a missing middle anchor reads as a mismatch, not as unverifiable", async () => {
   const { health, productId, provider, admin, chain, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
   await tickAt(T0 + 5 * 60_000);

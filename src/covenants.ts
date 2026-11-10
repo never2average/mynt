@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
-import { checkDrift } from "./pins.js";
+import { checkDrift, driftDependents } from "./pins.js";
 import type { Figure, Figures, ProductHealthService, SnapshotRow } from "./product-health.js";
 import { emitFirmEvent } from "./runtime.js";
 import type { DriftChange, ProductRecord, Sponsorship, Store, User } from "./store.js";
@@ -94,6 +94,8 @@ interface Covenant {
   status: CovenantStatus;
   status_reason: string | null;
   status_since: string | null;
+  status_sandbox: boolean;
+  first_live_seen_at: string | null;
   last_evaluated_at: string | null;
   last_epoch: number | null;
   last_sequence: number | null;
@@ -244,9 +246,30 @@ export class CovenantService {
         const fresh = c.last_version !== c.version || c.last_epoch === null || c.last_sequence === null;
         const pending = fresh ? [latest] : current.filter((r) => r.epoch > c.last_epoch! || r.sequence > c.last_sequence!).slice(-MAX_REPLAY);
         for (const r of pending) c = await this.applyResult(c, record, await this.judgeSnapshot(c, sponsorship, r));
+        // A figure says nothing about now once the record has stopped moving, so it can't go on reading as a pass.
+        if (this.now().getTime() - new Date(latest.period_end).getTime() > 2 * this.health.config.intervalMs)
+          c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "The latest snapshot is more than two intervals old, so it can't speak for now", sealed: false, snapshot: null, sandbox: this.sandboxOnly(sponsorship) });
       }
     } else c = await this.applyResult(c, record, await this.judgeTiming(c, sponsorship, record, history));
+    c = await this.repairHold(c, record);
     return this.checkUnknownLimit(c, record, sponsorship);
+  }
+
+  // Whether drift can hold this product: only a live product with pinned state can drift.
+  private canPause(record: ProductRecord) {
+    return record.status === "published" && !!record.pins;
+  }
+
+  // A pause rule with an open breach and no hold: the rule changed to pause, the product went live, or a failure
+  // partway left it unheld. A hold once released has a row, so an override isn't undone here.
+  private async repairHold(c: Covenant, record: ProductRecord): Promise<Covenant> {
+    if (c.action !== "pause" || !c.open_breach_id) return c;
+    const b = await this.breach(c.open_breach_id);
+    if (!b || b.sandbox || b.kind !== "breach" || !this.canPause(record) || (await this.holdFor(b.id))) return c;
+    const now = this.now();
+    await this.hold(c, b, record, now, true);
+    await this.alert(c, b, "covenant.breached", { paused: true });
+    return this.recordAlert(c, now);
   }
 
   private sandboxOnly(s: Sponsorship) {
@@ -275,7 +298,8 @@ export class CovenantService {
     const earliest = new Date(Math.max(new Date(c.created_at).getTime(), s.decided_at ? new Date(s.decided_at).getTime() : 0));
     const result = (status: Judged["status"], observed: number | null, reason: string | null): RuleResult => ({ status, observed, reason, sealed: false, snapshot, sandbox });
     if (c.rule_type === "snapshot_missed_for") {
-      const real = [...history.rows].reverse().find((r) => r.status !== "missed");
+      const real = await this.lastRealSnapshot(history.rows);
+      if (real === undefined) return result("unknown", null, "Mynt can't authenticate this record's snapshots (the vault key isn't available)");
       const elapsed = seconds(real ? new Date(real.period_end) : earliest);
       return elapsed > c.threshold ? result("fail", elapsed, real ? "No snapshot has arrived for longer than the limit" : "No snapshot has ever arrived, for longer than the limit") : result("pass", elapsed, null);
     }
@@ -293,11 +317,37 @@ export class CovenantService {
       return gaps >= c.threshold ? result("fail", gaps, "The latest periods have no snapshot") : result("pass", gaps, null);
     }
     // unverified_for: a live product's snapshots carrying no partner signature.
-    if (record.status !== "published") return result("pass", null, "The product isn't live");
-    const signed = await this.health.lastPartnerSignedAt(history.rows);
+    if (record.status !== "published") return result("unknown", null, "The product isn't live, so there's no partner signature to expect");
+    // Only this sponsor's own signature counts, and its clock starts the first time the product was seen live: publishing again doesn't restart it.
+    const signed = await this.health.lastPartnerSignedAt(history.rows.filter((r) => r.partner_entity_id === s.provider_entity_id));
     if (signed === undefined) return result("unknown", null, "Mynt can't check the signatures on this record (the vault key isn't available)");
-    const elapsed = seconds(signed ?? (record.published_at && new Date(record.published_at).getTime() > earliest.getTime() ? new Date(record.published_at) : earliest));
+    const firstLive = await this.firstLiveSeen(c, now);
+    const elapsed = seconds(signed ?? new Date(Math.max(earliest.getTime(), firstLive.getTime())));
     return elapsed > c.threshold ? result("fail", elapsed, signed ? "No partner-signed snapshot for longer than the limit" : "No partner signature on any snapshot, for longer than the limit") : result("pass", elapsed, null);
+  }
+
+  // The newest snapshot that really arrived: not a missed period, a failed ledger read or a report that can't be
+  // authenticated. Null when there's none; undefined when Mynt can't authenticate anything.
+  private async lastRealSnapshot(rows: SnapshotRow[]): Promise<SnapshotRow | null | undefined> {
+    for (const r of [...rows].reverse().slice(0, 200)) {
+      if (r.status === "missed" || r.source === "unavailable") continue;
+      const a = await this.health.assessOne(r);
+      if (!a) return undefined;
+      if (a.report && a.report_matches === true && a.source !== "unavailable") return r;
+    }
+    return null;
+  }
+
+  private async firstLiveSeen(c: Covenant, now: Date): Promise<Date> {
+    const { rows } = await this.db.query(`UPDATE ${T}.covenants SET first_live_seen_at = COALESCE(first_live_seen_at, $2) WHERE id = $1 RETURNING first_live_seen_at`, [c.id, now]);
+    return new Date((rows[0] as { first_live_seen_at: string }).first_live_seen_at);
+  }
+
+  // A sandbox result says nothing about live figures, so it can't close what they opened.
+  private async sandboxCantClose(id: string, r: RuleResult) {
+    if (!r.sandbox) return false;
+    const b = await this.breach(id);
+    return !!b && !b.sandbox;
   }
 
   private async applyResult(c: Covenant, record: ProductRecord, r: RuleResult): Promise<Covenant> {
@@ -305,13 +355,13 @@ export class CovenantService {
     const changed = r.status !== c.status;
     const { rows } = await this.db.query(
       `UPDATE ${T}.covenants SET status = $2, status_reason = $3, status_since = CASE WHEN status_since IS NULL OR $4 THEN $5::timestamptz ELSE status_since END,
-         last_evaluated_at = $5, last_epoch = COALESCE($6, last_epoch), last_sequence = COALESCE($7, last_sequence), last_version = $8
+         status_sandbox = $9, last_evaluated_at = $5, last_epoch = COALESCE($6, last_epoch), last_sequence = COALESCE($7, last_sequence), last_version = $8
        WHERE id = $1 RETURNING *`,
-      [c.id, r.status, r.reason, changed, now, r.snapshot?.epoch ?? null, r.snapshot?.sequence ?? null, c.version],
+      [c.id, r.status, r.reason, changed, now, r.snapshot?.epoch ?? null, r.snapshot?.sequence ?? null, c.version, r.sandbox],
     );
     let next = covenantOf(rows[0] as Record<string, unknown>);
-    if (r.status !== "unknown" && next.open_unknown_breach_id) next = await this.resolve(next, "open_unknown_breach_id", "the rule can be evaluated again");
-    if (r.status === "pass" && next.open_breach_id) next = await this.resolve(next, "open_breach_id", "the rule passes again", true);
+    if (r.status !== "unknown" && next.open_unknown_breach_id && !(await this.sandboxCantClose(next.open_unknown_breach_id, r))) next = await this.resolve(next, "open_unknown_breach_id", "the rule can be evaluated again");
+    if (r.status === "pass" && next.open_breach_id && !(await this.sandboxCantClose(next.open_breach_id, r))) next = await this.resolve(next, "open_breach_id", "the rule passes again", true);
     if (r.status === "fail") next = await this.onFail(next, record, r);
     return next;
   }
@@ -331,8 +381,6 @@ export class CovenantService {
       return this.openBreach(next, record, r, "breach");
     }
     if (!open) return this.openBreach(next, record, r, "breach");
-    // A rule changed to `pause` while its breach was open takes effect now. A hold once released isn't taken again.
-    if (next.action === "pause" && !r.sandbox && record.status === "published" && !(await this.holdFor(open.id))) await this.hold(next, open, record, this.now(), true);
     return this.remind(next, open);
   }
 
@@ -352,13 +400,16 @@ export class CovenantService {
   private async openBreach(c: Covenant, record: ProductRecord, r: RuleResult, kind: Breach["kind"]): Promise<Covenant> {
     const now = this.now();
     const col = kind === "breach" ? "open_breach_id" : "open_unknown_breach_id";
-    const alerting = this.cooledDown(c, now);
-    const pausing = kind === "breach" && c.action === "pause" && !r.sandbox && record.status === "published";
+    const wantsPause = kind === "breach" && c.action === "pause" && !r.sandbox;
+    const pausing = wantsPause && this.canPause(record);
+    const pauseFailed = wantsPause && record.status === "published" && !pausing;
+    // A pause is always told to the sponsor, cooldown or not.
+    const alerting = pausing || pauseFailed || this.cooledDown(c, now);
     const inFlight = pausing ? await this.moneyInFlight(record.product.id) : null;
     let actionTaken: string;
     if (kind === "unknown_limit") actionTaken = alerting ? "alerted" : "alert_suppressed_by_cooldown";
     else if (r.sandbox) actionTaken = "sandbox_labelled";
-    else if (c.action === "pause") actionTaken = pausing ? "paused" : "pause_pending_publication";
+    else if (c.action === "pause") actionTaken = pausing ? "paused" : pauseFailed ? "pause_failed_no_pins" : "pause_pending_publication";
     else actionTaken = alerting ? "alerted" : "alert_suppressed_by_cooldown";
     const observedSealed = r.sealed && r.observed !== null ? seal(JSON.stringify({ value: r.observed }), r.sandbox, true) : null;
     const id = randomUUID();
@@ -377,6 +428,7 @@ export class CovenantService {
     let next: Covenant = { ...c, [col]: id } as Covenant;
     await this.store.audit(null, "covenant_breached", c.product_id, { breach_id: id, covenant_id: c.id, sponsorship_id: c.sponsorship_id, rule_type: c.rule_type, kind, action_taken: actionTaken, sandbox: r.sandbox, sequence: r.snapshot?.sequence ?? null, fingerprint: r.snapshot?.fingerprint ?? null });
     if (pausing) await this.hold(next, breach, record, now, false);
+    if (pauseFailed) await this.event(id, "pause_failed", null, "The product has no pinned state, so drift can't hold it: it wasn't paused", {}, now);
     if (alerting) {
       await this.alert(next, breach, "covenant.breached", {});
       next = await this.recordAlert(next, now);
@@ -386,10 +438,15 @@ export class CovenantService {
 
   private async remind(c: Covenant, breach: Breach): Promise<Covenant> {
     const now = this.now();
-    if (!this.cooledDown(c, now)) return c;
+    // Claimed here, in one statement: two evaluators can't both send the same reminder.
+    const { rows } = await this.db.query(
+      `UPDATE ${T}.covenants SET last_alert_at = $2::timestamptz WHERE id = $1 AND (last_alert_at IS NULL OR last_alert_at <= $2::timestamptz - make_interval(secs => $3::double precision)) RETURNING id`,
+      [c.id, now, c.cooldown_seconds],
+    );
+    if (!rows.length) return c;
     await this.alert(c, breach, "covenant.breached", { reminder: true });
     await this.event(breach.id, "alert_repeated", null, null, {}, now);
-    return this.recordAlert(c, now);
+    return { ...c, last_alert_at: now.toISOString() };
   }
 
   private async event(breachId: string, event: string, actorId: string | null, reason: string | null, details: unknown, at: Date) {
@@ -427,6 +484,7 @@ export class CovenantService {
     if (late) await this.event(breach.id, "paused", null, "the rule was changed to pause, or the product went live, while it was still failing", { in_flight: await this.moneyInFlight(record.product.id) }, now);
     await this.store.audit(null, "covenant_paused_product", c.product_id, { breach_id: breach.id, covenant_id: c.id, sponsorship_id: c.sponsorship_id, rule_type: c.rule_type });
     await checkDrift(this.store, (await this.store.getProduct(c.product_id))!);
+    await driftDependents(this.store, c.product_id);
   }
 
   // To the sponsor's own webhooks, with the numbers sealed until they're sent.
@@ -492,6 +550,8 @@ export class CovenantService {
     if (!me.roles.includes("license_provider")) return refuse("Only a licence provider firm's own members can do this");
     if (!me.entity_id || me.entity_id !== s.provider_entity_id) return refuse(`No sponsorship '${sponsorshipId}' by your firm`);
     if ((await this.store.getEntity(me.entity_id))?.status !== "active") return refuse("Your firm isn't active");
+    const product = await this.store.getProduct(s.product_id);
+    if (product && (product.owner_id === me.id || product.entity_id === me.entity_id)) return refuse("A firm doesn't hold covenants over its own product");
     return { sponsorship: s, me };
   }
 
@@ -583,6 +643,7 @@ export class CovenantService {
       status: c.status,
       status_reason: c.status_reason,
       status_since: c.status_since ? new Date(c.status_since).toISOString() : null,
+      status_sandbox: c.status_sandbox,
       last_evaluated_at: c.last_evaluated_at ? new Date(c.last_evaluated_at).toISOString() : null,
       evaluated_version: c.last_version,
       open_breach_id: c.open_breach_id,
@@ -631,7 +692,7 @@ export class CovenantService {
   }
 
   // What the record says about one breach. Admins get the status of it and not the figure, as with the health reports.
-  private breachView(b: Breach, events: BreachEvent[], hold: Hold | undefined, admin: boolean) {
+  private breachView(b: Breach, events: BreachEvent[], hold: Hold | undefined, admin: boolean, entitled: boolean) {
     const when = (t: string | null | undefined) => (t ? new Date(t).toISOString() : null);
     const last = (...names: string[]) => [...events].reverse().find((e) => names.includes(e.event));
     const resolved = last("resolved");
@@ -651,21 +712,26 @@ export class CovenantService {
       sandbox: b.sandbox,
       snapshot: b.snapshot_sequence === null ? null : { epoch: b.snapshot_epoch, sequence: b.snapshot_sequence, fingerprint: b.snapshot_fingerprint },
       reason: b.reason,
-      threshold: b.threshold,
-      unit: b.unit,
-      observed: admin ? null : this.observedOf(b),
-      ...(admin && b.observed_sealed ? { observed_withheld: "A figure from the firm's books: only its licence provider reads it" } : {}),
-      in_flight_when_paused: admin ? null : b.in_flight,
+      ...(admin ? { rule_config_withheld: "The rule's settings are the sponsor's" } : { threshold: b.threshold, unit: b.unit }),
+      observed: entitled ? this.observedOf(b) : null,
+      ...(!entitled && b.observed_sealed ? { observed_withheld: admin ? "A figure from the firm's books: only its licence provider reads it" : "Your firm no longer sponsors this product, so its figures aren't shown" } : {}),
+      in_flight_when_paused: entitled ? b.in_flight : null,
       opened_at: when(b.opened_at),
       status: resolved ? "resolved" : "open",
       resolved_at: when(resolved?.at),
-      resolved_reason: resolved?.reason ?? null,
+      resolved_reason: admin ? null : (resolved?.reason ?? null),
       acknowledged_by: ack?.actor_id ?? null,
       acknowledged_at: when(ack?.at),
-      pause: hold ? { paused_at: when(hold.paused_at), released_at: when(hold.released_at), released_by: hold.released_by, release_reason: hold.release_reason, override: hold.override } : null,
-      revocation: revoked ? { at: when(revoked.at), by: revoked.actor_id, reason: revoked.reason } : null,
-      events: admin ? events.map((e) => ({ event: e.event, at: when(e.at), actor_id: e.actor_id })) : events.map((e) => ({ event: e.event, at: when(e.at), actor_id: e.actor_id, reason: e.reason, details: e.details })),
+      pause: hold ? { paused_at: when(hold.paused_at), released_at: when(hold.released_at), released_by: hold.released_by, release_reason: admin ? null : hold.release_reason, override: hold.override } : null,
+      revocation: revoked ? { at: when(revoked.at), by: revoked.actor_id, reason: admin ? null : revoked.reason } : null,
+      events: admin ? events.map((e) => ({ event: e.event, at: when(e.at), actor_id: e.actor_id })) : events.map((e) => ({ event: e.event, at: when(e.at), actor_id: e.actor_id, reason: e.reason, details: entitled ? e.details : {} })),
     };
+  }
+
+  // Figures go only to a firm that's active and still sponsors the product: the same test as reading the report.
+  private async readsFigures(b: Breach) {
+    const [s, firm] = await Promise.all([this.store.getSponsorship(b.sponsorship_id), this.store.getEntity(b.provider_entity_id)]);
+    return s?.status === "approved" && firm?.status === "active";
   }
 
   async listBreaches(user: User, input: { product_id?: string; sponsorship_id?: string; open_only?: boolean; limit: number }) {
@@ -682,7 +748,7 @@ export class CovenantService {
     const breaches = (rows as Record<string, unknown>[]).map(breachOf);
     const events = await this.eventsOf(breaches.map((b) => b.id));
     const out = [];
-    for (const b of breaches) out.push(this.breachView(b, events.get(b.id) ?? [], await this.holdFor(b.id), admin));
+    for (const b of breaches) out.push(this.breachView(b, events.get(b.id) ?? [], await this.holdFor(b.id), admin, !admin && (await this.readsFigures(b))));
     return out;
   }
 
@@ -696,7 +762,7 @@ export class CovenantService {
     await this.event(b.id, "acknowledged", me.id, input.note ?? null, {}, now);
     await this.store.audit(user.id, "acknowledge_breach", b.id, { covenant_id: b.covenant_id, product_id: b.product_id, note: input.note ?? null });
     const refreshed = (await this.eventsOf([b.id])).get(b.id) ?? [];
-    return this.breachView(b, refreshed, await this.holdFor(b.id), false);
+    return this.breachView(b, refreshed, await this.holdFor(b.id), false, await this.readsFigures(b));
   }
 
   // Lifts a covenant's hold. The rule is checked again first, and must pass, or the sponsor overrides it with a reason.
@@ -715,18 +781,20 @@ export class CovenantService {
     const history = await this.health.covenantRows(c.product_id);
     const fresh = await this.evaluateCovenant(c, record, history);
     const now = this.now();
-    if (fresh.status !== "pass" && !input.override_reason) {
-      const why = fresh.status === "unknown" ? `it can't be evaluated (${fresh.status_reason ?? "no reason recorded"})` : "it's still failing";
+    const passed = fresh.status === "pass" && !fresh.status_sandbox;
+    if (!passed && !input.override_reason) {
+      const why = fresh.status === "unknown" ? `it can't be evaluated (${fresh.status_reason ?? "no reason recorded"})` : fresh.status === "pass" ? "it passes only on sandbox figures, which say nothing about the live product" : "it's still failing";
       await this.store.audit(user.id, "release_covenant_pause_refused", b.id, { covenant_id: c.id, status: fresh.status });
       throw new CovenantError(`The rule hasn't passed: ${why}. Pass override_reason to release it anyway; that's recorded`);
     }
-    const override = fresh.status !== "pass";
+    const override = !passed;
     const reason = override ? input.override_reason! : (input.override_reason ?? "the rule passes");
     const { rows } = await this.db.query(`UPDATE ${T}.covenant_holds SET released_at = $2, released_by = $3, release_reason = $4, override = $5 WHERE id = $1 AND released_at IS NULL RETURNING id`, [hold.id, now, me.id, reason, override]);
     if (!rows.length) throw new CovenantError("Someone else released it first");
     await this.event(b.id, "released", me.id, reason, { override, rule_status: fresh.status }, now);
     await this.store.audit(user.id, "release_covenant_pause", b.id, { covenant_id: c.id, product_id: c.product_id, rule_type: c.rule_type, override, reason, rule_status: fresh.status });
     await checkDrift(this.store, (await this.store.getProduct(c.product_id))!);
+    await driftDependents(this.store, c.product_id);
     const after = await this.store.getProduct(c.product_id);
     const others = await this.activeHolds(c.product_id);
     return {
@@ -758,6 +826,16 @@ export async function reassertCovenantPause(store: Store, productId: string) {
   if (!(await covenantChanges(store, productId)).length) return;
   const record = await store.getProduct(productId);
   if (record) await checkDrift(store, record);
+}
+
+// The audit log as an admin reads it: that a covenant was set, changed, released or acknowledged, and for what; its
+// settings and the sponsor's reasons stay the sponsor's (they remain in the log itself).
+const COVENANT_AUDIT = new Set(["set_covenant", "delete_covenant", "release_covenant_pause", "acknowledge_breach"].flatMap((a) => [a, `${a}_refused`]));
+const AUDIT_KEPT = ["sponsorship_id", "product_id", "rule_type", "covenant_id", "breach_id", "version", "weakening", "override", "open_breaches", "status"];
+export function auditForAdmin<E extends { action: string; details: unknown }>(entry: E): E {
+  if (!COVENANT_AUDIT.has(entry.action)) return entry;
+  const details = (entry.details ?? {}) as Record<string, unknown>;
+  return { ...entry, details: Object.fromEntries(AUDIT_KEPT.filter((k) => k in details).map((k) => [k, details[k]])) };
 }
 
 // A drift change as a stranger to the product sees it: that a covenant is why, and nothing about which.
@@ -862,7 +940,7 @@ export function registerCovenantTools(server: McpServer, _store: Store, user: Us
     "list_covenant_breaches",
     {
       title: "Covenant breaches",
-      description: "The record of covenant breaches, newest first: the rule, the snapshot sequence and fingerprint, the action taken, sandbox or not, money in flight when a pause took effect, and who acknowledged or released it. Licence provider: your firm's, with the observed figures. Admin: every firm's, with the rule's threshold but not the observed figure, which is the firm's own books.",
+      description: "The record of covenant breaches, newest first: the rule, the snapshot sequence and fingerprint, the action taken, sandbox or not, money in flight when a pause took effect, and who acknowledged or released it. Licence provider: your firm's, with the observed figures. Admin: every firm's, without the rule's settings, the reasons, or the observed figure, which is the firm's own books.",
       inputSchema: { product_id: z.string().optional(), sponsorship_id: z.string().uuid().optional(), open_only: z.boolean().default(false), limit: z.number().int().min(1).max(200).default(50) },
       annotations: { readOnlyHint: true },
     },
