@@ -47,7 +47,7 @@ const unitOf = (rule: RuleType) => FIGURE_RULES[rule]?.unit ?? (rule === "consec
 const SECONDS_RULES: RuleType[] = ["snapshot_missed_for", "unverified_for"];
 const NOT_LIVE_REASON = "The product isn't live, so there's no partner signature to expect";
 // A published product judged on test figures: unknown, not sandbox, so a pause rule's unknown limit can hold it.
-export const LEDGER_NOT_LIVE_REASON = "The sponsor's ledger isn't live: test figures can't speak for a live product (connect it with the partner kit)";
+export const LEDGER_NOT_LIVE_REASON = "The sponsor's ledger isn't live (it's still the sandbox): test figures can't speak for a live product (connect it with the partner kit)";
 
 export interface Judged {
   status: "pass" | "fail" | "unknown";
