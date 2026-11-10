@@ -40,6 +40,7 @@ import {
 } from "./store.js";
 import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
+import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
@@ -129,6 +130,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (!has("innovator")) registerRosterTools(server, store, user!);
     registerLicenseProviderTools(server, store, user!);
   }
+  if (has("license_provider") || has("admin") || has("innovator")) registerMoneyRailTools(server, store, user!, { admin: has("admin"), licenceProvider: has("license_provider"), builder: has("innovator") });
   if (has("vendor")) {
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });

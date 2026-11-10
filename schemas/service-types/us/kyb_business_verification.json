@@ -3,6 +3,7 @@
   "key": "kyb_business_verification",
   "name": "Business verification (state good standing)",
   "category": "kyc",
+  "moves_money": false,
   "description": "Checks a business against the Secretary of State registry of the state it was formed in: whether it exists and is in good standing, its officers and its registered agent, matched against the legal name, state and EIN given. Vendors such as Middesk or Baselayer serve it. Mynt uses it to show a licence provider's firm is a real company in good standing, alongside its free GLEIF and FinCEN checks.",
   "input_schema": {
     "type": "object",

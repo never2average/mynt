@@ -3,6 +3,7 @@
   "key": "bank_account_verification",
   "name": "Bank account verification",
   "category": "account_data",
+  "moves_money": false,
   "description": "Checks that a bank account exists and is open, by its routing and account numbers, and whether the name matches its owner.",
   "input_schema": {
     "type": "object",

@@ -3,6 +3,7 @@
   "key": "credit_bureau_report",
   "name": "Credit bureau report",
   "category": "credit_bureau",
+  "moves_money": false,
   "description": "Pulls the customer's credit report and score from a credit information company. Only a credit institution that is a member of the company may pull it, and the company must hold a certificate of registration from the RBI.",
   "input_schema": {
     "type": "object",

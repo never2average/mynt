@@ -93,6 +93,7 @@ const CKYC = {
   key: "ckyc_search_download",
   name: "CKYC search and download",
   category: "kyc",
+  moves_money: false,
   input_schema: { type: "object", required: ["pan"], properties: { pan: { type: "string", pattern: "^[A-Z]{5}[0-9]{4}[A-Z]$" } }, additionalProperties: false },
   output_schema: {
     type: "object",

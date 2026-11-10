@@ -3,6 +3,7 @@
   "key": "ckyc_search_download",
   "name": "CKYC search and download",
   "category": "kyc",
+  "moves_money": false,
   "description": "Finds the customer's record in the Central KYC Records Registry by PAN and downloads their KYC identity details. Only a reporting entity registered with the registry may search and download, so the subscribing firm must hold a licence that makes it one; the vendor acts for it.",
   "input_schema": {
     "type": "object",

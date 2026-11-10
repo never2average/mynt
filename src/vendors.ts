@@ -16,6 +16,21 @@ import type { Db } from "./db.js";
 import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
 import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
 import { rampCustomerKey, serveRampAdapter } from "./ramp-adapters/index.js";
+import {
+  authorizeMovement,
+  CUSTOMER_STATE_FIELD,
+  isDefiniteRefusal,
+  isMoneyMovement,
+  movementShape,
+  namesMoneyMovement,
+  recordMovementFailed,
+  recordMovementLateSettlement,
+  recordMovementOutput,
+  recordMovementPending,
+  recordMovementReversed,
+  recordMovementUnknown,
+  resolveCustomerState,
+} from "./money-rails.js";
 import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
 
 // Vendors: firms that offer standard services (identity, KYC, account data, bureau reports, e-sign,
@@ -107,6 +122,7 @@ export interface ServiceType {
   params_fixture: Record<string, unknown> | null; // params for conformance
   quote: boolean; // a price quote: output carries quote_id and expires_at
   accepts: string | null; // the quote service type this one executes
+  moves_money: boolean; // an admin's declaration: it goes through approved money rails (see money-rails.ts)
   updated_at: string;
 }
 export type OfferingStatus = "draft" | "conformance_passed" | "listed" | "suspended";
@@ -161,6 +177,7 @@ const toType = (r: Row): ServiceType => ({
   params_fixture: (r.params_fixture as Record<string, unknown> | null) ?? null,
   quote: (r.quote as boolean | null) ?? false,
   accepts: (r.accepts as string | null) ?? null,
+  moves_money: (r.moves_money as boolean | null) !== false, // never set: treated as moving money, so it can't skip the rails
   updated_at: iso(r.updated_at)!,
 });
 const toOffering = (r: Row): Offering => ({
@@ -306,6 +323,7 @@ export const ServiceTypeSchema = z
       .boolean()
       .default(false)
       .describe("true for a price quote: its output must require quote_id (string) and expires_at (date-time, at most an hour ahead). The device is shown expires_at and accepts the quote through the service type whose `accepts` names this one"),
+    moves_money: z.boolean().describe("Required. true for a service that instructs a money movement (every non-quote ramp service): it then runs only through an approved money rail"),
     accepts: Key.nullable().optional().describe(
       "The key of the quote service type (same region) this service executes. The device sends the quote's reference; Mynt sends the vendor its quote_id, once, only while it hasn't expired, and only to the vendor that quoted",
     ),
@@ -336,6 +354,12 @@ function scalarSchema(prop: unknown): boolean {
 
 export async function checkServiceType(store: Store, t: ServiceTypeInput): Promise<{ errors: string[]; fixtures: Record<string, unknown>[] }> {
   const errors: string[] = [];
+  // What moves money is declared, so it goes through approved money rails (see money-rails.ts).
+  const named = namesMoneyMovement(t.key) || namesMoneyMovement(t.name);
+  if (t.quote && t.moves_money) errors.push("moves_money: a quote only prices; the service that accepts it moves the money");
+  if (t.quote && named) errors.push(`'${t.key}' is a quote but is named as a transfer: a quote only prices`);
+  if (!t.quote && !t.moves_money && (t.category === "ramp" || named)) errors.push(`'${t.key}' looks like it moves money: declare moves_money: true, so it goes through approved money rails`);
+  if (t.fills.includes(CUSTOMER_STATE_FIELD)) errors.push(`fills: '${CUSTOMER_STATE_FIELD}' comes only from the customer (see resolveCustomerState), never from a service's output`);
   const ids = await licenceTypeIds(store, t.region);
   if (!ids) return { errors: [`No region '${t.region}'; see list_regions`], fixtures: [] };
   for (const [name, schema] of [
@@ -434,13 +458,13 @@ export async function checkServiceType(store: Store, t: ServiceTypeInput): Promi
 export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtures: Record<string, unknown>[], by: string | null): Promise<ServiceType> {
   const { rows } = await store.db.query(
     `INSERT INTO ${T}.service_types (region, key, name, category, description, input_schema, output_schema, consent_purpose, fills, innovator_licences, vendor_licences, fixtures, updated_by, client_result,
-       params_schema, params_fixture, quote, accepts, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
+       params_schema, params_fixture, quote, accepts, moves_money, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
      ON CONFLICT (region, key) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
        input_schema = EXCLUDED.input_schema, output_schema = EXCLUDED.output_schema, consent_purpose = EXCLUDED.consent_purpose, fills = EXCLUDED.fills,
        innovator_licences = EXCLUDED.innovator_licences, vendor_licences = EXCLUDED.vendor_licences, fixtures = EXCLUDED.fixtures,
        updated_by = EXCLUDED.updated_by, client_result = EXCLUDED.client_result, params_schema = EXCLUDED.params_schema, params_fixture = EXCLUDED.params_fixture,
-       quote = EXCLUDED.quote, accepts = EXCLUDED.accepts, updated_at = now()
+       quote = EXCLUDED.quote, accepts = EXCLUDED.accepts, moves_money = EXCLUDED.moves_money, updated_at = now()
      RETURNING *`,
     [
       t.region,
@@ -461,6 +485,7 @@ export async function upsertServiceType(store: Store, t: ServiceTypeInput, fixtu
       t.params_fixture ? JSON.stringify(t.params_fixture) : null,
       t.quote,
       t.accepts ?? null,
+      t.moves_money,
     ],
   );
   return toType(rows[0]);
@@ -751,6 +776,20 @@ async function rampRefusal(store: Store, t: ServiceType, entityId: string): Prom
   return ramp === entityId ? null : "Ramp services are offered only by the firm that operates the Mynt Ramp: all fiat in and out goes through the one Mynt Ramp";
 }
 
+// A ramp's test and live endpoints must differ, so a sandbox transfer can't reach real money.
+function rampUrlsClash(t: ServiceType, test: string, live: string | null): string | null {
+  // As URLs, not text: case, a default port and a trailing dot or slash make no difference, and nor does the scheme.
+  const endpoint = (raw: string) => {
+    try {
+      const u = new URL(raw.trim());
+      return `${u.hostname.replace(/\.$/, "")}:${u.port}${u.pathname.replace(/\/+$/, "")}`;
+    } catch {
+      return raw.trim().toLowerCase();
+    }
+  };
+  return t.category === "ramp" && live !== null && endpoint(test) === endpoint(live) ? "A ramp offering's test_base_url and live_base_url must be different endpoints" : null;
+}
+
 // ---- runtime: calls through a product's bound vendor ----
 
 type Bound = { sub: Subscription; o: Offering; t: ServiceType };
@@ -762,7 +801,7 @@ async function resolveSubscription(store: Store, subscriptionId: string): Promis
 }
 
 type VendorAnswer =
-  | { kind: "error"; status: number; code: string; message: string }
+  | { kind: "error"; status: number; code: string; message: string; outcome_unknown?: string } // outcome_unknown: it may have reached the partner
   | { kind: "ok"; output: Record<string, unknown> }
   | { kind: "pending"; redirect_url: string | null };
 
@@ -783,11 +822,15 @@ async function callBoundVendor(
     params?: Record<string, unknown>; // checked against the service type's params_schema by the caller
     quote_id?: string; // the vendor's own quote id, for a service that accepts a quote
     customer_key?: string; // Mynt's pseudonymous key for the customer, for a ramp adapter (never sent over the wire)
+    movement_id?: string; // a transfer's authorisation from the rail chokepoint (see money-rails.ts)
+    reached?: { partner: boolean }; // set just before the partner is called: until then, nothing can have moved
   },
   opts: VendorCallOptions,
 ): Promise<VendorAnswer> {
   const environment = a.sandbox ? "test" : "live";
   const unavailable = (why = "isn't available right now"): VendorAnswer => ({ kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service this product uses ${why}` });
+  // The backstop: nothing instructs a transfer without the chokepoint's yes.
+  if (isMoneyMovement(t) && !a.movement_id) return unavailable("can't be used: the transfer wasn't authorised");
   if (sub.status !== "active" || !["listed", "conformance_passed"].includes(o.status)) return unavailable();
   // A ramp offering whose firm no longer operates the Mynt Ramp isn't called, in sandbox or live.
   if (await rampRefusal(store, t, o.entity_id)) return unavailable("isn't the Mynt Ramp");
@@ -821,6 +864,7 @@ async function callBoundVendor(
     ...(a.quote_id ? { quote: { quote_id: a.quote_id } } : {}),
     consent: { purpose: t.consent_purpose, artefact_ref: consent.id, given_at: consent.created_at },
   };
+  if (a.reached) a.reached.partner = true;
   const r = await callOffering(
     store,
     o,
@@ -829,7 +873,13 @@ async function callBoundVendor(
   );
   const problems = r.ok ? responseProblems(r.body, body.request_id, t, a.allowPending) : [r.error ?? "failed"];
   await recordUsage(store.db, sub.id, environment, !problems.length);
-  if (problems.length) return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later` };
+  if (problems.length) {
+    // Only a refusal the partner made clearly means nothing moved; see isDefiniteRefusal.
+    const said = r.ok ? (r.body as { status?: unknown; error?: { code?: unknown; partner_status?: unknown } } | null) : null;
+    const code = said?.status === "error" && typeof said.error?.code === "string" ? said.error.code : null;
+    const refused = isDefiniteRefusal(code, said?.error?.partner_status);
+    return { kind: "error", status: 502, code: "vendor_error", message: `The ${t.name} service didn't return a usable answer; try again later`, ...(refused ? {} : { outcome_unknown: code ?? `http_${r.http_status ?? "none"}` }) };
+  }
   const answer = r.body as { status: string; output?: Record<string, unknown>; redirect_url?: unknown };
   if (answer.status === "pending") return { kind: "pending", redirect_url: safeRedirect(answer.redirect_url, opts) };
   return { kind: "ok", output: answer.output! };
@@ -963,7 +1013,7 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType | null, end: 
   if (status === "completed" && output && t && run.customer_ref)
     for (const f of t.fills) {
       const v = output[f];
-      if (v == null || validateValue(f, v)) continue;
+      if (f === CUSTOMER_STATE_FIELD || v == null || validateValue(f, v)) continue; // a stored type can't set where they live
       await store.putVaultField({ app_id: run.app_id, customer_ref: run.customer_ref, sandbox: run.sandbox, field: f, sealed: seal(String(v).trim(), run.sandbox), source: PREFILL_SOURCE[t.category] ?? "vendor" });
     }
   await store.recordClientEvidence({
@@ -1034,6 +1084,7 @@ export async function vendorAction(
     consent: (purpose: string) => Promise<{ id: string; created_at: string } | null>;
     params?: Record<string, unknown>; // what the device sent, for a service with a params_schema
     quote?: string; // the reference of the quote run this action accepts
+    component?: string | null; // the component the action serves, from the contract
   },
   opts: VendorCallOptions = {},
 ): Promise<VendorAction> {
@@ -1055,6 +1106,7 @@ export async function vendorAction(
   // Claim the quote for this run: the same app, customer, product and environment, from the same vendor, completed,
   // unexpired and not accepted before. Claiming is one UPDATE, so two accepts of one quote can't both go through.
   let quoteId: string | undefined;
+  let quoteOutput: Record<string, unknown> | null = null;
   if (t.accepts) {
     const { rows: claimed } = await store.db.query(
       `UPDATE ${T}.vendor_action_runs q SET accepted_by = $2
@@ -1062,7 +1114,7 @@ export async function vendorAction(
        WHERE q.id::text = $1 AND q.app_id = $3 AND q.customer_ref = $4 AND q.sandbox = $5 AND q.product_id = $6 AND q.service_type = $7
          AND q.status = 'completed' AND q.quote_id IS NOT NULL AND q.accepted_by IS NULL AND q.quote_expires_at > now()
          AND s.id = q.subscription_id AND o.id = s.offering_id AND o.entity_id = $8
-       RETURNING q.quote_id`,
+       RETURNING q.quote_id, q.result_sealed`,
       [a.quote, runId, a.app_id, a.customer_ref, a.sandbox, a.record.product.id, t.accepts, bound.o.entity_id],
     );
     if (!claimed[0]) {
@@ -1081,6 +1133,7 @@ export async function vendorAction(
       return bad(409, "quote_expired", "This quote has expired; get a new one");
     }
     quoteId = claimed[0].quote_id as string;
+    if (claimed[0].result_sealed) quoteOutput = JSON.parse(open(claimed[0].result_sealed as string, a.sandbox)) as Record<string, unknown>;
   }
   const releaseQuote = () =>
     t.accepts ? store.db.query(`UPDATE ${T}.vendor_action_runs SET accepted_by = NULL WHERE id::text = $1 AND accepted_by = $2`, [a.quote, runId]) : Promise.resolve();
@@ -1101,11 +1154,46 @@ export async function vendorAction(
     status: "calling",
     client_outcome: {},
   };
-  await store.db.query(
-    `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
-    [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
-  );
+  // A transfer asks the rail chokepoint before anything is instructed (see money-rails.ts); a quote only prices.
+  const at = { subscription_id: sub.id, request_id: run.request_id };
+  let movementId: string | undefined;
+  if (isMoneyMovement(t)) {
+    const customerState = resolveCustomerState(await a.held());
+    const verdict = await authorizeMovement(store, {
+      product_id: a.record.product.id,
+      sandbox: a.sandbox,
+      ...movementShape(t, a.params, quoteOutput),
+      channel: { kind: "ramp_adapter", provider: bound.o.adapter ?? bound.o.id },
+      customer_state: customerState.state,
+      state_source: customerState.source,
+      customer_ref: a.customer_ref,
+      // One quote is one movement, however many times it's accepted after a failure.
+      idempotency_key: a.quote ? `quote:${a.quote}` : `run:${run.id}`,
+      app_id: a.app_id,
+      action: a.action,
+      component_key: a.component ?? null,
+      subscription_id: sub.id,
+      request_id: run.request_id,
+    });
+    if (!verdict.allowed) {
+      await releaseQuote();
+      return bad(verdict.status, verdict.code, verdict.message);
+    }
+    if (verdict.replay) return bad(409, "quote_used", "This quote was already accepted");
+    movementId = verdict.movement_id;
+  }
+  try {
+    await store.db.query(
+      `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
+      [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
+    );
+  } catch (e) {
+    // Nothing was sent: the reservation goes, so the day's limit and the quote aren't held by a call that never happened.
+    if (movementId) await recordMovementFailed(store, at, "internal_before_call");
+    await releaseQuote();
+    throw e;
+  }
   // Nothing is kept of a call that was refused, failed, answered badly or threw, and its quote can be accepted again
   // (vendors treat a repeated quote_id as the same order, so a retry can't execute twice).
   const discard = async () => {
@@ -1113,21 +1201,26 @@ export async function vendorAction(
     await releaseQuote();
   };
   let answer: VendorAnswer;
+  const reached = { partner: false };
   try {
     answer = await callBoundVendor(
       store,
       bound,
-      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref) },
+      { sandbox: a.sandbox, request_id: run.request_id, held: a.held, consent: a.consent, allowPending: true, params: a.params, quote_id: quoteId, customer_key: rampCustomerKey(a.app_id, a.customer_ref), movement_id: movementId, reached },
       opts,
     );
   } catch (e) {
+    if (movementId) await (reached.partner ? recordMovementUnknown(store, at, "exception") : recordMovementFailed(store, at, "internal_before_call"));
     await discard();
     throw e;
   }
   if (answer.kind === "error") {
+    if (movementId) await (answer.outcome_unknown ? recordMovementUnknown(store, at, answer.outcome_unknown) : recordMovementFailed(store, at, answer.code));
     await discard();
-    return answer;
+    const { outcome_unknown: _kept, ...shown } = answer;
+    return shown;
   }
+  if (movementId) await (answer.kind === "pending" ? recordMovementPending(store, at) : recordMovementOutput(store, at, answer.output));
   if (answer.kind === "pending") {
     const outcome = { status: "pending", ...(t.client_result?.redirect && answer.redirect_url ? { redirect_url: answer.redirect_url } : {}) };
     const { rows } = await store.db.query(`UPDATE ${T}.vendor_action_runs SET status = 'pending', client_outcome = $2 WHERE id = $1 AND status = 'calling' RETURNING *`, [
@@ -1180,8 +1273,23 @@ export async function vendorCallback(
     return { status: 400, body: { error: "invalid_request", message: 'Send { request_id, status: "ok" | "error", output }' } };
   const { rows } = await store.db.query(`SELECT * FROM ${T}.vendor_action_runs WHERE request_id = $1 AND subscription_id = $2`, [body.request_id, sub.id]);
   const run = rows[0] as RunRow | undefined;
-  if (!run) return { status: 404, body: { error: "unknown_request", message: "No request with that request_id for this subscription" } };
-  if (!OPEN.includes(run.status)) return { status: 200, body: { request_id: run.request_id, status: run.status, duplicate: true } };
+  // A partner's answer about money counts in the ledger even when the run is gone or over: the money did what it did.
+  const noteLate = async () => {
+    const b = await resolveSubscription(store, sub.id);
+    if (!b || !isMoneyMovement(b.t)) return;
+    const late = { subscription_id: sub.id, request_id: body.request_id as string };
+    if (body.status === "error") return void (await recordMovementFailed(store, late, "partner_failed_late", { partner_confirmed: true }));
+    if (schemaProblems(b.t.output_schema, body.output).length) return;
+    await recordMovementOutput(store, late, body.output as Record<string, unknown>);
+  };
+  if (!run) {
+    await noteLate();
+    return { status: 404, body: { error: "unknown_request", message: "No request with that request_id for this subscription" } };
+  }
+  if (!OPEN.includes(run.status)) {
+    await noteLate();
+    return { status: 200, body: { request_id: run.request_id, status: run.status, duplicate: true } };
+  }
   const bound = await resolveSubscription(store, sub.id);
   if (!bound) return { status: 409, body: { error: "service_missing", message: "The service type behind this subscription no longer exists" } };
   let end: End;
@@ -1192,6 +1300,11 @@ export async function vendorCallback(
   } else {
     const code = (body.error as { code?: unknown } | null)?.code;
     end = { kind: "error", code: typeof code === "string" && /^[a-z0-9_]{1,60}$/.test(code) ? code : null };
+  }
+  // Before any consent check below: a partner's answer about money is recorded whatever happens to the run.
+  if (isMoneyMovement(bound.t)) {
+    const at = { subscription_id: sub.id, request_id: run.request_id };
+    await (end.kind === "output" ? recordMovementOutput(store, at, end.output) : recordMovementFailed(store, at, end.kind === "error" ? (end.code ?? "partner_error") : "partner_error", { partner_confirmed: true }));
   }
   // A late answer counts only while the customer's consent still stands; withdrawn, nothing of it is kept.
   const consent = await store.latestConsent(run.session_id, run.product_id, bound.t.consent_purpose);
@@ -1220,6 +1333,7 @@ export async function reverseVendorRun(store: Store, at: { subscription_id: stri
     [run.id, JSON.stringify(shown), sealed],
   );
   const wasCompleted = rows.length > 0;
+  await recordMovementReversed(store, at);
   await emitFirmEvent(
     store,
     run.entity_id,
@@ -1254,6 +1368,7 @@ export async function lateVendorSettlement(store: Store, at: { subscription_id: 
   const sealed = seal(JSON.stringify(output), run.sandbox, true);
   // Once per run: a retried webhook or a later poll finds it recorded and tells no one twice.
   const { rows: first } = await store.db.query(`UPDATE ${T}.vendor_action_runs SET late_result_sealed = $2 WHERE id = $1 AND late_result_sealed IS NULL RETURNING id`, [run.id, sealed]);
+  await recordMovementLateSettlement(store, at);
   if (!first.length) return true;
   await emitFirmEvent(
     store,
@@ -1496,7 +1611,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       if (!t) return fail(`No service type '${o.service_type}' in ${o.region}; see list_service_types`);
       const ramp = await rampRefusal(store, t, entityId);
       if (ramp) return fail(ramp);
-      const bad = (await checkUrls([o.test_base_url, o.live_base_url])) ?? (await checkLicences(entityId, o.region, o.licence_ids));
+      const bad = (await checkUrls([o.test_base_url, o.live_base_url])) ?? rampUrlsClash(t, o.test_base_url, o.live_base_url ?? null) ?? (await checkLicences(entityId, o.region, o.licence_ids));
       if (bad) return fail(bad);
       if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep signing secrets");
       const secret = newSecret();
@@ -1567,6 +1682,8 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
         ...(a.licence_ids !== undefined ? { licence_ids: a.licence_ids as string[] } : {}),
         ...(a.requires_credential !== undefined ? { requires_credential: a.requires_credential as boolean } : {}),
       };
+      const clash = rampUrlsClash((await serviceType(store.db, o.region, o.service_type))!, next.test_base_url, next.live_base_url);
+      if (clash) return fail(clash);
       const reverify = next.test_base_url !== o.test_base_url || next.live_base_url !== o.live_base_url || JSON.stringify(next.licence_ids) !== JSON.stringify(o.licence_ids);
       if (reverify && o.status !== "suspended") next.status = "draft";
       if (a.listed !== undefined) {

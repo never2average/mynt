@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -291,11 +291,7 @@ test("a sandbox report never carries real flows", async () => {
   assert.match(r.figures.flows_in_cents.reason, /Sandbox/);
 });
 
-test("loadFlowsFor binds the store for the real module, and is absent without it", { skip: existsSync(new URL("../dist/money-rails.js", import.meta.url)) }, async () => {
-  assert.equal(await loadFlowsFor({}), null);
-});
-
-test("against the real money-rails module", { skip: !existsSync(new URL("../dist/money-rails.js", import.meta.url)) }, async () => {
+test("against the real money-rails module", async () => {
   const { store, pg, health, productId, provider, tickAt } = await setup({ ledger: liveLedger });
   const bound = await loadFlowsFor(store);
   assert.ok(bound, "flowsFor(store, productId, from, to) is what the module exports");

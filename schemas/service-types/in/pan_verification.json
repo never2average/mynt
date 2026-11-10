@@ -3,6 +3,7 @@
   "key": "pan_verification",
   "name": "PAN verification",
   "category": "identity",
+  "moves_money": false,
   "description": "Checks a Permanent Account Number against the Income Tax Department's records, and whether the name and date of birth given match it. Online PAN verification is open to entities the Income Tax Department authorises, which isn't a licence in the financial regulatory model.",
   "input_schema": {
     "type": "object",

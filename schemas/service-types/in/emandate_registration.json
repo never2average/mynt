@@ -3,6 +3,7 @@
   "key": "emandate_registration",
   "name": "e-mandate registration",
   "category": "mandate",
+  "moves_money": false,
   "description": "Registers a recurring debit mandate on the customer's bank account through NPCI's e-mandate (eNACH) rails, through the firm's sponsor bank, and returns the mandate reference.",
   "input_schema": {
     "type": "object",

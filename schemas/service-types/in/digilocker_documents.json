@@ -3,6 +3,7 @@
   "key": "digilocker_documents",
   "name": "DigiLocker documents",
   "category": "documents",
+  "moves_money": false,
   "description": "Fetches documents the customer holds in DigiLocker, once the customer authorises the request in DigiLocker itself, and returns the identity details on them.",
   "input_schema": {
     "type": "object",
