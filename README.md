@@ -165,7 +165,7 @@ Mynt's platform ships as an MCP server covering eleven lines, grouped by economi
 | **Vendors** | A marketplace for standard services (identity, KYC, account data, bureau, e-sign, e-mandate) that builders plug into their products, tested by Mynt before they're listed |
 | **Admins** | The regulatory model (regulators, licences, law, GRC), a governance desk that reviews firms, licences and products, and `ops_status` for what needs attention |
 
-**Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](docs/reference.md#install--build) · **Technical reference:** [`docs/reference.md`](docs/reference.md) · **Architecture:** [`docs/architecture.md`](docs/architecture.md) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md)
+**Get early access:** [open an access request](https://github.com/never2average/mynt/issues/new?title=Early%20access%20request) · **Run it yourself:** [Install & build](docs/reference.md#install--build) · **Technical reference:** [`docs/reference.md`](docs/reference.md) · **Architecture:** [`docs/architecture.md`](docs/architecture.md) · **Partner walkthrough:** [`docs/demo.md`](docs/demo.md) · **Rules for coding agents:** [`AGENTS.md`](AGENTS.md)
 
 ## Disclaimer
 
