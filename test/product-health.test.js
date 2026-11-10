@@ -1266,7 +1266,8 @@ test("deleting every anchor reads as a mismatch too", async () => {
   await tickAt(T0 + HOUR + 5 * 60_000);
   await pg.query("DELETE FROM financial_products.product_health_anchors");
   const out = await health.get(provider.user, productId, null, 10);
-  assert.equal(out.history.find((h) => h.epoch === 0).verification.on_chain, "previous_chain_mismatch");
+  assert.equal(out.history.find((h) => h.epoch === 0).verification.on_chain, "mismatch", "with no anchors the epoch falls back to 0, which no longer matches the head");
+  assert.equal(out.history.find((h) => h.epoch === 1).verification.on_chain, "previous_chain_mismatch", "a record past the current epoch with no anchor isn't merely unverifiable");
 });
 
 test("a missing middle anchor reads as a mismatch, not as unverifiable", async () => {
