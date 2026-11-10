@@ -660,14 +660,14 @@ test("an account an admin adds to a firm with members joins only when a member a
   const puppetUser = await w.store.upsertClerkUser("puppet", "puppet@example.com", "Puppet", ["license_provider"]);
   const added = await w.ok(w.admin, "add_entity_member", { email: "puppet@example.com", entity_id: w.lp.entity.id });
   assert.equal(added.status, "pending_acceptance");
-  assert.equal((await w.store.getUser(puppetUser.id)).entity_id, null, "a member of nothing until accepted");
+  assert.equal((await w.store.getUser(puppetUser.id)).licence_provider_pending, true, "a member with no licence-provider powers until accepted");
   const notice = (await noticesOf(w, w.provider)).find((n) => n.type === "firm.member_pending");
   assert.equal(notice.data.request_id, added.request_id);
   assert.equal((await w.ok(w.provider, "get_partner_kit")).pending_members[0].member_email, "puppet@example.com");
   const puppet = await w.connect(puppetUser);
-  // Pending, it passes no gate: it isn't a member of the firm at all.
-  await w.refused(puppet, "register_partner_signing_key", { public_key: edKey().address }, /don't belong to a firm/);
-  await w.refused(puppet, "decide_firm_member", { request_id: added.request_id, accept: true }, /No such request at your firm/);
+  // Pending, it passes no gate: even through a session made from an object that still says license_provider.
+  await w.refused(puppet, "register_partner_signing_key", { public_key: edKey().address }, /Only a licence provider firm's own member/);
+  await w.refused(puppet, "decide_firm_member", { request_id: added.request_id, accept: true }, /existing licence-provider members decides/);
 
   await withCoolOff(72, async () => {
     await w.ok(w.provider, "decide_firm_member", { request_id: added.request_id, accept: true });
@@ -928,4 +928,90 @@ test("an account pending acceptance has no licence-provider powers: no figures, 
   const standing = await w.store.getUser(pending.id);
   assert.ok(standing.roles.includes("license_provider"));
   assert.ok((await w.health.get(standing, w.products[0], null, 5)).latest);
+});
+
+// ---- the fifth review: once a firm has had a licence provider, nobody gains standing there directly ----
+
+test("REPRO5: demoting the only licence provider doesn't let a puppet in as the 'first', and the real one is recovered without it", async () => {
+  const w = await world();
+  const firm = await w.ok(w.admin, "register_firm", { name: "Repro five bank", regions: ["US"], legal_form: "company_private", incorporation: { country: "us", subdivision: "us-ny" } });
+  const realUser = await w.store.upsertClerkUser("real5", "real5@example.com", "Real", ["license_provider"]);
+  const first = await w.ok(w.admin, "add_entity_member", { email: "real5@example.com", entity_id: firm.id });
+  assert.equal(first.status, undefined, "the firm's first ever licence provider has standing at once");
+  await backdate(w, realUser.id);
+  await w.store.createFirmWebhook(realUser.id, { entity_id: firm.id, url: "https://hooks.example.com/repro5", events: ["firm.member_standing_lost", "firm.recovery_pending", "firm.member_pending"] });
+  const hooks = async (type) => (await w.pg.query("SELECT payload FROM financial_products.webhook_deliveries")).rows.map((d) => (typeof d.payload === "string" ? JSON.parse(d.payload) : d.payload)).filter((d) => d.type === type);
+  const noticesFor = async (userId, type) => (await w.pg.query("SELECT data FROM financial_products.firm_notices WHERE user_id = $1 AND type = $2", [userId, type])).rows;
+
+  // 1. The admin demotes the real licence provider through an invite rewrite: its standing ends, and the firm is told.
+  await w.ok(w.admin, "invite_user", { email: "real5@example.com", roles: ["consumer"] });
+  await w.store.upsertClerkUser("real5", "real5@example.com", "Real", ["consumer"]);
+  assert.equal(await lpSince(w, realUser.id), null);
+  assert.equal((await hooks("firm.member_standing_lost")).length, 1);
+  assert.equal((await noticesFor(realUser.id, "firm.member_standing_lost")).length, 1);
+
+  // 2. The admin adds a puppet: the firm has had a licence provider, so it's only a request, with nobody to decide it.
+  const puppetUser = await w.store.upsertClerkUser("puppet5", "puppet5@example.com", "Puppet", ["license_provider"]);
+  const puppetAdd = await w.ok(w.admin, "add_entity_member", { email: "puppet5@example.com", entity_id: firm.id });
+  assert.equal(puppetAdd.status, "pending_acceptance");
+  assert.equal(await lpSince(w, puppetUser.id), null, "no standing as the 'first'");
+
+  // 3. The admin restores the real member: also a request, which doesn't wait on the puppet.
+  await w.ok(w.admin, "invite_user", { email: "real5@example.com", roles: ["license_provider"] });
+  await w.store.upsertClerkUser("real5", "real5@example.com", "Real", ["license_provider"]);
+  assert.equal(await lpSince(w, realUser.id), null);
+  const requests = (await w.pg.query("SELECT id, user_id FROM financial_products.firm_member_requests WHERE entity_id = $1 AND status = 'pending'", [firm.id])).rows;
+  const realRequest = requests.find((r) => r.user_id === realUser.id).id;
+  const puppetRequest = requests.find((r) => r.user_id === puppetUser.id).id;
+
+  // 4. 72 hours on, the puppet has no powers: its key registration is refused, and it can't accept the real member.
+  await w.pg.query("UPDATE financial_products.users SET created_at = now() - interval '4 days', entity_joined_at = now() - interval '4 days' WHERE id = $1", [puppetUser.id]);
+  const puppet = await w.connect(await w.store.getUser(puppetUser.id));
+  await withCoolOff(72, async () => {
+    const names = (await puppet.listTools()).tools.map((t) => t.name);
+    assert.ok(!names.includes("register_partner_signing_key") && !names.includes("decide_firm_member"));
+    await w.refused(await w.connect({ ...puppetUser, entity_id: firm.id }), "register_partner_signing_key", { public_key: edKey().address }, /Only a licence provider firm's own member/);
+  });
+
+  // Nobody at the firm can decide: an admin's recovery, announced to every current and past licence provider.
+  const started = await w.ok(w.admin, "recover_firm_member", { request_id: realRequest, reason: "The firm's only licence provider was demoted by mistake" });
+  assert.equal(started.status, "recovery_pending");
+  assert.ok((await noticesFor(realUser.id, "firm.recovery_pending")).length >= 1, "the past licence provider is told");
+  await w.refused(w.admin, "recover_firm_member", { request_id: realRequest, reason: "Trying to finish it straight away" }, /completes only after/);
+  // The puppet was never a licence provider there: it can't block anything.
+  await w.refused(puppet, "block_firm_recovery", { request_id: realRequest, reason: "not us" }, /has been a licence provider/);
+  // After the wait, the admin completes it: the real member has standing again, from now.
+  await w.pg.query("UPDATE financial_products.firm_member_requests SET recovery_started_at = now() - interval '8 days' WHERE id = $1", [realRequest]);
+  const done = await w.ok(w.admin, "recover_firm_member", { request_id: realRequest, reason: "The wait is over with no objection" });
+  assert.equal(done.status, "accepted");
+  assert.ok(await lpSince(w, realUser.id));
+
+  // A recovery of the puppet is blocked by a past licence provider: here the real member, through its own session.
+  await w.ok(w.admin, "recover_firm_member", { request_id: puppetRequest, reason: "Trying to recover the puppet as well" });
+  const real = await w.connect(await w.store.getUser(realUser.id));
+  const blocked = await w.ok(real, "block_firm_recovery", { request_id: puppetRequest, reason: "We don't know this account" });
+  assert.equal(blocked.status, "blocked");
+  assert.equal((await w.pg.query("SELECT status FROM financial_products.firm_member_requests WHERE id = $1", [puppetRequest])).rows[0].status, "declined");
+  assert.equal(await lpSince(w, puppetUser.id), null);
+  assert.equal((await w.store.getUser(puppetUser.id)).entity_id, null, "declined, it keeps no place at the firm");
+  assert.ok((await w.pg.query("SELECT 1 FROM financial_products.audit_log WHERE action = 'block_firm_recovery'")).rows.length);
+});
+
+test("a demoted licence provider can block a recovery even without the role, and two firsts can't race in", async () => {
+  const w = await world();
+  const firm = await w.ok(w.admin, "register_firm", { name: "Race bank", regions: ["US"], legal_form: "company_private", incorporation: { country: "us", subdivision: "us-ny" } });
+  const a = await w.store.upsertClerkUser("racer_a", "racer_a@example.com", "A", ["license_provider"]);
+  const b = await w.store.upsertClerkUser("racer_b", "racer_b@example.com", "B", ["license_provider"]);
+  // Two joins at once: the firm's row is locked, so only one is its first licence provider.
+  const [ra, rb] = await Promise.all([w.store.setUserEntity(a.id, firm.id), w.store.setUserEntity(b.id, firm.id)]);
+  assert.deepEqual([ra.standing, rb.standing].sort(), ["granted", "requested"]);
+  const [firstId, secondId] = ra.standing === "granted" ? [a.id, b.id] : [b.id, a.id];
+  // The first is demoted; the second's request has nobody to decide it, so an admin starts a recovery.
+  const firstEmail = firstId === a.id ? "racer_a@example.com" : "racer_b@example.com";
+  await w.store.upsertClerkUser(firstId === a.id ? "racer_a" : "racer_b", firstEmail, "First", ["consumer"]);
+  const request = (await w.pg.query("SELECT id FROM financial_products.firm_member_requests WHERE user_id = $1 AND status = 'pending'", [secondId])).rows[0].id;
+  await w.ok(w.admin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept this" });
+  // The demoted one has no licence-provider role now, and still blocks it.
+  const demoted = await w.connect(await w.store.getUser(firstId));
+  assert.equal((await w.ok(demoted, "block_firm_recovery", { request_id: request, reason: "Not without us" })).status, "blocked");
 });

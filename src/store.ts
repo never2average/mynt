@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { currentLine, lineForTreasuryCategory, PRODUCT_LINES, UNDERLYINGS, WRAPPERS, type FinancialProduct } from "./catalog.js";
 import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
-import type { Db } from "./db.js";
+import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
@@ -1417,7 +1417,8 @@ const TABLES = `
     requested_at timestamptz NOT NULL DEFAULT now(),
     decided_by uuid REFERENCES financial_products.users(id),
     decided_at timestamptz,
-    approving_at timestamptz -- when an approval claimed it: one stuck here past a few minutes is checked and put right
+    approving_at timestamptz, -- when an approval claimed it: one stuck here past a few minutes is checked and put right
+    expected_run_id uuid -- for a switch: the conformance run it would go live on, so a stuck claim is settled by it
   );
   CREATE INDEX IF NOT EXISTS partner_kit_approvals_idx ON financial_products.partner_kit_approvals (entity_id, status, requested_at DESC);
   -- An account an admin added to a licence provider that already has members: not a member of anything until one of
@@ -1433,6 +1434,31 @@ const TABLES = `
     decided_at timestamptz
   );
   CREATE UNIQUE INDEX IF NOT EXISTS firm_member_requests_one_pending_idx ON financial_products.firm_member_requests (entity_id, user_id) WHERE status = 'pending';
+  -- An admin's recovery of a request nobody at the firm can decide (firm-notices.ts): it waits 7 days, told to every
+  -- current and past licence provider of the firm, any of whom can block it.
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_reason text;
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_started_by uuid REFERENCES financial_products.users(id);
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_started_at timestamptz;
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS reason text;
+  -- Every time an account gained or lost licence-provider standing at a firm: who its past licence providers are.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_standing_history (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    user_id uuid NOT NULL REFERENCES financial_products.users(id),
+    event text NOT NULL CHECK (event IN ('gained', 'lost')),
+    reason text,
+    at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS firm_standing_history_idx ON financial_products.firm_standing_history (entity_id, user_id);
+  INSERT INTO financial_products.firm_standing_history (entity_id, user_id, event, reason, at)
+    SELECT u.entity_id, u.id, 'gained', 'backfill', u.lp_since FROM financial_products.users u
+    WHERE u.lp_since IS NOT NULL AND u.entity_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM financial_products.firm_standing_history h WHERE h.entity_id = u.entity_id AND h.user_id = u.id);
+  -- When a firm first had a licence provider with standing. From then on nobody gains standing there directly: every
+  -- route goes through a request an existing licence provider (or, failing one, an admin's delayed recovery) settles.
+  ALTER TABLE financial_products.entities ADD COLUMN IF NOT EXISTS lp_established_at timestamptz;
+  UPDATE financial_products.entities e SET lp_established_at = (SELECT min(h.at) FROM financial_products.firm_standing_history h WHERE h.entity_id = e.id AND h.event = 'gained')
+    WHERE e.lp_established_at IS NULL AND EXISTS (SELECT 1 FROM financial_products.firm_standing_history h WHERE h.entity_id = e.id AND h.event = 'gained');
   -- Notices to each member of a firm, so a change made by one member (or an admin) is seen by the others.
   CREATE TABLE IF NOT EXISTS financial_products.firm_notices (
     id uuid PRIMARY KEY,
@@ -2947,30 +2973,72 @@ export class Store {
   // Losing the role ends the standing.
   private async licenceProviderRoleChanged(userId: string, had: boolean, has: boolean): Promise<void> {
     if (had === has) return;
-    if (!has) {
-      await this.db.query("UPDATE financial_products.users SET lp_since = NULL WHERE id = $1", [userId]);
-      return;
-    }
-    const u = await this.one("SELECT entity_id, email, roles FROM financial_products.users WHERE id = $1", [userId]);
+    const u = await this.one("SELECT entity_id, lp_since FROM financial_products.users WHERE id = $1", [userId]);
     const entityId = (u?.entity_id as string | null) ?? null;
     if (!entityId) return; // standing comes when they join a firm
-    const others = await this.all(
-      "SELECT id FROM financial_products.users WHERE entity_id = $1 AND id <> $2 AND lp_since IS NOT NULL AND 'license_provider' = ANY(roles) AND NOT ('admin' = ANY(roles))",
-      [entityId, userId],
-    );
-    if (!others.length) {
-      await this.db.query("UPDATE financial_products.users SET lp_since = now() WHERE id = $1", [userId]);
+    if (!has) {
+      if (u?.lp_since) await this.loseStanding(userId, entityId, "role_removed");
       return;
     }
-    const pending = await this.one("SELECT id FROM financial_products.firm_member_requests WHERE entity_id = $1 AND user_id = $2 AND status = 'pending'", [entityId, userId]);
-    if (pending) return;
-    const requestId = randomUUID();
-    await this.db.query("INSERT INTO financial_products.firm_member_requests (id, entity_id, user_id, requested_by) VALUES ($1, $2, $3, NULL)", [requestId, entityId, userId]);
-    const data = { request_id: requestId, member_email: u?.email ?? null, member_roles: u?.roles ?? [], reason: "role_gained", requested_at: new Date().toISOString(), decide_with: "decide_firm_member { request_id, accept: true | false }" };
-    const members = await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1 AND id <> $2", [entityId, userId]);
-    for (const m of members) await this.db.query("INSERT INTO financial_products.firm_notices (id, entity_id, user_id, type, data) VALUES ($1, $2, $3, 'firm.member_pending', $4)", [randomUUID(), entityId, m.id, JSON.stringify(data)]);
-    await this.enqueueFirmEvent(entityId, { id: randomUUID(), type: "firm.member_pending", created_at: new Date().toISOString(), data } as never, false);
-    await this.audit(null, "licence_provider_standing_requested", entityId, { request_id: requestId, user_id: userId });
+    await this.grantOrRequestStanding(userId, entityId, null, "role_gained");
+  }
+
+  // ---- licence-provider standing (firm-notices.ts has the rest) ----
+
+  // Notices to these accounts about a firm (all its current members by default), and the firm's webhook event.
+  async noticeAccounts(entityId: string, type: string, data: Record<string, unknown>, userIds?: string[]): Promise<number> {
+    const ids = userIds ?? (await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1", [entityId])).map((r) => r.id as string);
+    for (const id of new Set(ids)) await this.db.query("INSERT INTO financial_products.firm_notices (id, entity_id, user_id, type, data) VALUES ($1, $2, $3, $4, $5)", [randomUUID(), entityId, id, type, JSON.stringify(data)]);
+    await this.enqueueFirmEvent(entityId, { id: randomUUID(), type, created_at: new Date().toISOString(), data } as never, false);
+    return ids.length;
+  }
+
+  // Every account that has ever had licence-provider standing at the firm, current or not.
+  async pastLicenceProviders(entityId: string): Promise<string[]> {
+    return (await this.all("SELECT DISTINCT user_id FROM financial_products.firm_standing_history WHERE entity_id = $1 AND event = 'gained'", [entityId])).map((r) => r.user_id as string);
+  }
+
+  // An account of a firm takes up the licence-provider role there. The firm's first ever licence provider has standing
+  // at once, and that marks the firm established (in one transaction, with the firm's row locked, so two can't both be
+  // first). After that it's always a request (firm_member_requests), however the account got there.
+  async grantOrRequestStanding(userId: string, entityId: string, requestedBy: string | null, reason: string): Promise<{ standing: "granted" } | { standing: "requested"; request_id: string }> {
+    const out = await inTransaction(this.db, async (tx) => {
+      const e = (await tx.query("SELECT lp_established_at FROM financial_products.entities WHERE id = $1 FOR UPDATE", [entityId])).rows[0];
+      if (!e) throw new Error(`No firm '${entityId}'`);
+      // Claimed in one statement too, so it holds even where the row lock can't (one shared connection).
+      const first = e.lp_established_at ? [] : (await tx.query("UPDATE financial_products.entities SET lp_established_at = now() WHERE id = $1 AND lp_established_at IS NULL RETURNING id", [entityId])).rows;
+      if (first.length) {
+        await tx.query("UPDATE financial_products.users SET lp_since = now() WHERE id = $1", [userId]);
+        await tx.query("INSERT INTO financial_products.firm_standing_history (entity_id, user_id, event, reason) VALUES ($1, $2, 'gained', 'first_licence_provider')", [entityId, userId]);
+        return { standing: "granted" as const };
+      }
+      const pending = (await tx.query("SELECT id FROM financial_products.firm_member_requests WHERE entity_id = $1 AND user_id = $2 AND status = 'pending'", [entityId, userId])).rows[0];
+      if (pending) return { standing: "requested" as const, request_id: pending.id as string, fresh: false };
+      const id = randomUUID();
+      await tx.query("INSERT INTO financial_products.firm_member_requests (id, entity_id, user_id, requested_by, reason) VALUES ($1, $2, $3, $4, $5)", [id, entityId, userId, requestedBy, reason]);
+      return { standing: "requested" as const, request_id: id, fresh: true };
+    });
+    if (out.standing === "granted") {
+      await this.audit(null, "licence_provider_standing_granted", entityId, { user_id: userId, reason: "first_licence_provider" });
+      return out;
+    }
+    if ("fresh" in out && out.fresh) {
+      const u = await this.one("SELECT email, roles FROM financial_products.users WHERE id = $1", [userId]);
+      const members = (await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1 AND id <> $2", [entityId, userId])).map((r) => r.id as string);
+      await this.noticeAccounts(entityId, "firm.member_pending", { request_id: out.request_id, member_email: u?.email ?? null, member_roles: u?.roles ?? [], reason, requested_at: new Date().toISOString(), decide_with: "decide_firm_member { request_id, accept: true | false }" }, members);
+      await this.audit(requestedBy, "licence_provider_standing_requested", entityId, { request_id: out.request_id, user_id: userId, reason });
+    }
+    return { standing: "requested", request_id: out.request_id };
+  }
+
+  // Standing ends (the role was taken away, or the account left the firm): recorded, and told to the firm.
+  async loseStanding(userId: string, entityId: string, reason: string): Promise<void> {
+    const { rows } = await this.db.query("UPDATE financial_products.users SET lp_since = NULL WHERE id = $1 AND lp_since IS NOT NULL RETURNING email", [userId]);
+    if (!rows.length) return;
+    await this.db.query("INSERT INTO financial_products.firm_standing_history (entity_id, user_id, event, reason) VALUES ($1, $2, 'lost', $3)", [entityId, userId, reason]);
+    const members = (await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1", [entityId])).map((r) => r.id as string);
+    await this.noticeAccounts(entityId, "firm.member_standing_lost", { member_email: rows[0].email ?? null, reason, at: new Date().toISOString() }, [...members, userId]);
+    await this.audit(null, "licence_provider_standing_lost", entityId, { user_id: userId, reason });
   }
 
   // Whitelist
@@ -3529,16 +3597,16 @@ export class Store {
     return (await this.all("SELECT * FROM financial_products.entities ORDER BY created_at")).map(toEntity);
   }
 
-  async setUserEntity(userId: string, entityId: string | null): Promise<void> {
-    // Joining a firm as a licence provider grants standing there from now; leaving it, or moving, ends the old standing.
-    // (add_entity_member asks the firm's members first when it already has a licence provider: firm-notices.ts.)
-    await this.db.query(
-      `UPDATE financial_products.users SET entity_id = $2,
-         lp_since = CASE WHEN entity_id IS DISTINCT FROM $2 THEN (CASE WHEN $2::uuid IS NOT NULL AND 'license_provider' = ANY(roles) THEN now() END) ELSE lp_since END,
-         entity_joined_at = CASE WHEN entity_id IS DISTINCT FROM $2 THEN now() ELSE entity_joined_at END
-       WHERE id = $1`,
-      [userId, entityId],
-    );
+  // Membership of a firm. Leaving or moving ends standing at the old firm (told to it). Joining as a licence provider
+  // has standing at once only as a firm's first ever licence provider; otherwise it's a request the firm settles.
+  async setUserEntity(userId: string, entityId: string | null): Promise<{ standing: "none" | "granted" | "requested"; request_id?: string }> {
+    const before = await this.one("SELECT entity_id, lp_since, roles FROM financial_products.users WHERE id = $1", [userId]);
+    if (!before) return { standing: "none" };
+    if (before.entity_id === entityId) return { standing: before.lp_since ? "granted" : "none" };
+    if (before.entity_id && before.lp_since) await this.loseStanding(userId, before.entity_id as string, "left_firm");
+    await this.db.query("UPDATE financial_products.users SET entity_id = $2, entity_joined_at = now(), lp_since = NULL WHERE id = $1", [userId, entityId]);
+    if (!entityId || !((before.roles as string[]) ?? []).includes("license_provider")) return { standing: "none" };
+    return this.grantOrRequestStanding(userId, entityId, null, "joined");
   }
 
   async userByEmail(email: string): Promise<User | undefined> {

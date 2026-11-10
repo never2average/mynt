@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { needsAcceptance, noticeFirm, requestMembership } from "./firm-notices.js";
+import { noticeFirm, recoverMembership } from "./firm-notices.js";
 import { z } from "zod";
 import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import type { ClerkAdmin } from "./auth.js";
@@ -429,20 +429,37 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (!member) return fail(`${email} hasn't signed in to Mynt yet`);
       const entity = await store.getEntity(entity_id);
       if (!entity) return fail(`No firm '${entity_id}'`);
-      // A licence provider that already has a licence-provider member decides who joins it: the account waits for one
-      // of them to accept it, and is a member of nothing until then (firm-notices.ts).
-      if (member.entity_id !== entity.id && (await needsAcceptance(store, entity.id, member))) {
-        const pending = await requestMembership(store, entity.id, member, user.id);
-        await audit("add_entity_member_requested", entity.id, { email: member.email, request_id: pending.request_id });
-        return json({ entity_id: entity.id, entity: entity.name, member: member.email, ...pending, note: "The firm already has members: one of them accepts this account (decide_firm_member) before it joins" });
-      }
-      // The firm's existing members are told before the new one joins, on its webhooks and as a notice each: an admin
-      // adding someone to a firm is never silent (firm-notices.ts).
-      const already = member.entity_id === entity.id;
-      const told = already ? null : await noticeFirm(store, entity.id, "firm.member_added", { member_email: member.email, member_roles: member.roles, added_at: new Date().toISOString(), by: "admin" });
-      await store.setUserEntity(member.id, entity.id);
-      await audit("add_entity_member", entity.id, { email: member.email });
-      return json({ entity_id: entity.id, entity: entity.name, member: member.email, ...(told ? { firm_told: told } : {}) });
+      if (member.entity_id === entity.id) return json({ entity_id: entity.id, entity: entity.name, member: member.email, note: "Already a member" });
+      // The firm's existing members are told, on its webhooks and as a notice each: an admin adding someone to a firm
+      // is never silent. A licence provider joins with standing only as the firm's first ever one; otherwise it's a
+      // request one of the firm's licence providers settles (store.ts, grantOrRequestStanding; firm-notices.ts).
+      const told = await noticeFirm(store, entity.id, "firm.member_added", { member_email: member.email, member_roles: member.held_roles ?? member.roles, added_at: new Date().toISOString(), by: "admin" });
+      const joined = await store.setUserEntity(member.id, entity.id);
+      await audit("add_entity_member", entity.id, { email: member.email, standing: joined.standing, ...(joined.request_id ? { request_id: joined.request_id } : {}) });
+      return json({
+        entity_id: entity.id,
+        entity: entity.name,
+        member: member.email,
+        firm_told: told,
+        ...(joined.standing === "requested"
+          ? { status: "pending_acceptance", request_id: joined.request_id, note: "The firm has had a licence provider: one of its licence providers accepts this account (decide_firm_member) before it has any licence-provider powers there" }
+          : {}),
+      });
+    },
+  );
+
+  server.registerTool(
+    "recover_firm_member",
+    {
+      title: "Recover a firm's licence provider nobody there can accept",
+      description:
+        "Admin, last resort: a request for licence-provider standing at a firm that none of its licence providers can decide (none has standing from before it, past the cool-off). The first call, with a reason, starts a 7-day wait and tells every current and past licence provider of the firm (firm.recovery_pending), any of whom can block it (block_firm_recovery). Calling again after the wait completes it. Audited. One admin is enough, because production has one.",
+      inputSchema: { request_id: z.string().uuid(), reason: z.string().min(10).max(2000) },
+      annotations: { destructiveHint: true },
+    },
+    async ({ request_id, reason }) => {
+      const out = await recoverMembership(store, request_id, user, reason);
+      return "error" in out ? fail(out.error as string) : json(out);
     },
   );
 

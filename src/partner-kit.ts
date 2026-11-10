@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { checkStatement, failedCases, ledgerUrl, requestLedger, signBody, type CheckCase, type Statement } from "./partner-ledger/contract.js";
 import { isLedgerError, ledgerError, sandboxPartnerLedger, type LedgerError, type PartnerLedger, type PartnerLedgerContext, type PartnerLedgerReading } from "./partner-ledger/index.js";
-import { decideMembership, firmNotices, memberCoolOffMs, noticeFirm, pendingMembers, standingSince } from "./firm-notices.js";
+import { decideMembership, memberCoolOffMs, noticeFirm, pendingMembers, standingSince } from "./firm-notices.js";
 import { inTransaction } from "./db.js";
 import { base58Decode, isAddress, isWeakEd25519Key } from "./solana/codec.js";
 import type { Store, User } from "./store.js";
@@ -603,14 +603,17 @@ export async function partnerKitSummary(store: Store, entityId: string, o: { run
 }
 
 // An approval left 'approving' for more than a few minutes (a crash between the claim and the end) is put right from
-// what's actually there: if the change it asked for is in place, it's approved; otherwise it waits again.
+// what's actually there: if the change it asked for is in place (the key; for a switch, the very conformance run it
+// was claimed for, now active), it's approved; otherwise it waits again.
 export async function recoverStuckApprovals(store: Store, entityId: string, signingKeyOf: (entityId: string) => Promise<string | null>, now: Date) {
   const { rows } = await store.db.query(
-    `SELECT id, action, payload FROM ${T}.partner_kit_approvals WHERE entity_id = $1 AND status = 'approving' AND approving_at < $2`,
+    `SELECT id, action, payload, expected_run_id FROM ${T}.partner_kit_approvals WHERE entity_id = $1 AND status = 'approving' AND approving_at < $2`,
     [entityId, new Date(now.getTime() - STUCK_APPROVING_MS)],
   );
-  for (const r of rows as { id: string; action: string; payload: Record<string, string> }[]) {
-    const happened = r.action === "live_key" ? (await signingKeyOf(entityId)) === r.payload.public_key : (await sourceRow(store, entityId))?.active_source === r.payload.source;
+  for (const r of rows as { id: string; action: string; payload: Record<string, string>; expected_run_id: string | null }[]) {
+    const src = await sourceRow(store, entityId);
+    // A switch happened only if the very run it was claimed for is the one now active.
+    const happened = r.action === "live_key" ? (await signingKeyOf(entityId)) === r.payload.public_key : !!r.expected_run_id && src?.active_source === r.payload.source && src?.active_run_id === r.expected_run_id;
     await store.db.query(
       happened
         ? `UPDATE ${T}.partner_kit_approvals SET status = 'approved', decided_at = now() WHERE id = $1 AND status = 'approving'`
@@ -772,18 +775,6 @@ export function registerPartnerKitTools(
   if (!member) return;
 
   server.registerTool(
-    "list_firm_notices",
-    {
-      title: "Notices to you about your firm",
-      description:
-        "Licence provider: what's changed at your firm that you should know about, newest first: members added (by an admin), signing keys registered or replaced, endpoints proposed and confirmed, the ledger source switched (including by an admin, or because a conformance pass ran out), passes about to run out, and changes waiting for your approval. The same go to your firm's webhooks. Reading them marks them read.",
-      inputSchema: { limit: z.number().int().min(1).max(200).default(50) },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ limit }) => json(await firmNotices(store, user.id, limit)),
-  );
-
-  server.registerTool(
     "decide_firm_member",
     {
       title: "Accept (or decline) an account an admin added to your firm",
@@ -849,9 +840,11 @@ export function registerPartnerKitTools(
       }
       // A switch reads the partner's live endpoint, so it can't sit in a transaction: claimed first (so a decline can't
       // land while it's made), put back if it fails, and put right later if a crash leaves it claimed (recoverStuck).
-      const { rows: claimed } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approving', approving_at = now(), decided_by = $2 WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id]);
+      // The run it would go live on is recorded with the claim: a stuck claim is settled by whether that run is active.
+      const expected = await latestRun(store, firm, a.payload.source as "http" | "file");
+      const { rows: claimed } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approving', approving_at = now(), decided_by = $2, expected_run_id = $3 WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id, expected?.id ?? null]);
       if (!claimed.length) return fail("That request isn't waiting any more: read get_partner_kit again");
-      const release = () => store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'pending', decided_by = NULL, approving_at = NULL WHERE id = $1 AND status = 'approving'`, [a.id]);
+      const release = () => store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'pending', decided_by = NULL, approving_at = NULL, expected_run_id = NULL WHERE id = $1 AND status = 'approving'`, [a.id]);
       try {
         {
           const cool = await coolOffRefusal(store, requester.id, now(), "switch your firm's ledger to a live source");

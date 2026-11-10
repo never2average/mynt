@@ -598,7 +598,13 @@ test("ops_status: paused products, open breaches, and a covenant timer that isn'
 const HOOK_URL = "http://127.0.0.1:9/hook";
 const memberOf = async (t, firm, roles, name) => {
   const { user } = await t.store.createUser(name, roles);
-  await t.store.setUserEntity(user.id, firm.id);
+  const joined = await t.store.setUserEntity(user.id, firm.id);
+  // A second licence provider at a firm that has one gains standing only when an existing one accepts it.
+  if (joined.standing === "requested") {
+    const { decideMembership } = await import("../dist/firm-notices.js");
+    const out = await decideMembership(t.store, joined.request_id, t.provider.user, true);
+    assert.equal(out.error, undefined, out.error);
+  }
   user.entity_id = firm.id;
   return user;
 };

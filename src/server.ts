@@ -44,6 +44,7 @@ import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
 import { registerPartnerKitTools } from "./partner-kit.js";
+import { registerFirmNoticeTools } from "./firm-notices.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
 import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
@@ -145,6 +146,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   if (user && hasLiquidityRole(rolesFrom(user))) registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null);
   if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
+  // Every signed-in account reads its firm notices, and can block a recovery at a firm it has been a licence provider at.
+  if (user) registerFirmNoticeTools(server, store, user);
   // The partner kit: a licence provider connects its ledger and sees pass or fail; admins set endpoints, never see figures.
   if (user && (has("license_provider") || has("admin"))) {
     const health = ctx.productHealth ?? null;
