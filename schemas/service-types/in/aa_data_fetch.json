@@ -3,6 +3,7 @@
   "key": "aa_data_fetch",
   "name": "Account Aggregator data fetch",
   "category": "account_data",
+  "moves_money": false,
   "description": "Fetches the customer's bank account data through an RBI-licensed Account Aggregator under the customer's consent. The subscribing firm is the Financial Information User receiving the data, so it must be regulated by a financial sector regulator; the vendor is the Account Aggregator or the firm's technology provider to one.",
   "input_schema": {
     "type": "object",

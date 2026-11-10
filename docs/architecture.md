@@ -250,7 +250,7 @@ Two secrets protect stored data: `MYNT_VAULT_KEY` seals the customer vault, firm
 | Vendor result → device | Everything except a status, a reference and what `client_result` allows |
 | Anything → Mynt's logs and outputs | Secret values and customer data (scrubbed by `src/boxes.ts`) |
 
-Mynt itself **never holds customer funds or assets**. Money moves in the licensed providers' own flows (innovators' hosted flows, vendors' services); Mynt records consent, evidence and outcomes. That includes the **Mynt Ramp**, the one on- and off-ramp for digital-asset liquidity: it is a `ramp` vendor service offered only by the firm designated with `set_mynt_ramp`, today a licensed ramp partner that holds funds in transit under its own licences ([plan](plans/crypto-liquidity.md)).
+Mynt itself **never holds customer funds or assets**. Money moves in the licensed providers' own flows (innovators' hosted flows, vendors' services); Mynt records consent, evidence and outcomes. Every transfer Mynt instructs goes through one chokepoint, `authorizeMovement` in `src/money-rails.ts`: it is refused unless an admin-approved rail of the product's licence provider fits its direction, customer state and limits, and each is a row in the money ledger. That includes the **Mynt Ramp**, the one on- and off-ramp for digital-asset liquidity: it is a `ramp` vendor service offered only by the firm designated with `set_mynt_ramp`, today a licensed ramp partner that holds funds in transit under its own licences ([plan](plans/crypto-liquidity.md)).
 
 ## 11. Deployment
 

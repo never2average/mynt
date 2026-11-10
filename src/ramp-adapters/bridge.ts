@@ -65,7 +65,7 @@ const str = (v: unknown) => (typeof v === "string" && v ? v : null);
 function updateOf(t: BridgeTransfer, direction: RampDirection): RampTransferUpdate | RampError {
   const id = str(t.id);
   const status = bridgeStatus(t.state);
-  if (!id || !status) return rampError("partner_bad_answer", "The ramp partner's answer wasn't a transfer Mynt understands");
+  if (!id || !status) return { ...rampError("partner_bad_answer", "The ramp partner's answer wasn't a transfer Mynt understands"), ...(id ? { partner_transfer_id: id } : {}) };
   const d = t.source_deposit_instructions ?? null;
   return {
     partner_transfer_id: id,
@@ -113,10 +113,11 @@ const hostOf = (u: string | null) => {
 const partnerError = (r: { status: number | null; body: unknown; error: string | null }): RampError => {
   const code = (r.body as { code?: unknown } | null)?.code;
   const safe = typeof code === "string" && /^[a-z0-9_]{1,60}$/.test(code) ? code : null;
-  if (r.status === 401) return rampError("partner_credential_refused", "The ramp partner refused Mynt's credential");
-  if (safe === "requires_active_kyc_status" || safe === "has_not_accepted_tos") return rampError("partner_customer_not_ready", "The ramp partner hasn't finished verifying this customer");
-  if (r.status === null) return rampError("partner_unreachable", "The ramp partner didn't answer");
-  return rampError(safe ? `partner_${safe}`.slice(0, 60) : "partner_error", "The ramp partner refused the request");
+  const withStatus = (e: RampError): RampError => ({ ...e, partner_status: r.status });
+  if (r.status === 401) return withStatus(rampError("partner_credential_refused", "The ramp partner refused Mynt's credential"));
+  if (safe === "requires_active_kyc_status" || safe === "has_not_accepted_tos") return withStatus(rampError("partner_customer_not_ready", "The ramp partner hasn't finished verifying this customer"));
+  if (r.status === null) return withStatus(rampError("partner_unreachable", "The ramp partner didn't answer"));
+  return withStatus(rampError(safe ? `partner_${safe}`.slice(0, 60) : "partner_error", "The ramp partner refused the request"));
 };
 
 const configNumber = (config: Record<string, string>, key: string, fallback: number) => {

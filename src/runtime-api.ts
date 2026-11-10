@@ -12,6 +12,7 @@ import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 import { requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
+import { CUSTOMER_STATE_FIELD, productMoneyDirections, recordCustomerStateChange } from "./money-rails.js";
 
 // The runtime REST API under /v1, for developers' shipped apps. Authenticated with a per-app key
 // (Authorization: Bearer mynt_live_… / mynt_test_…), read-only over products, plus hand-offs to
@@ -243,6 +244,23 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       return session.customer_ref;
     };
 
+    // Every change to where the customer lives, before the vault changes (see money-rails.ts).
+    // It never gets in the way of the change itself: above all, of a customer erasing their data.
+    const noteStateChange = async (customer: string, next: string | null, source: string) => {
+      try {
+        const was = (await store.vaultFields(app.id, customer, session.sandbox)).find((h) => h.field === CUSTOMER_STATE_FIELD);
+        let old_state: string | null = null;
+        let old_state_unreadable = false;
+        try {
+          old_state = was ? open(was.sealed, session.sandbox).toLowerCase() : null;
+        } catch {
+          old_state_unreadable = true; // a rotated vault key, or a sandbox value from before a restart
+        }
+        await recordCustomerStateChange(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, old_state, old_state_unreadable, new_state: next, changed_by: `session:${session.id}`, source });
+      } catch (e) {
+        console.error("customer state history:", (e as Error).message);
+      }
+    };
     if (path === "/v1/client/fields") {
       allow("GET, POST, DELETE");
       const customer = requireCustomer();
@@ -251,12 +269,15 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         return send(res, 200, { fields: held.map((h) => ({ field: h.field, source: h.source, value: masked(h.field, open(h.sealed, session.sandbox)), updated_at: h.updated_at })) }, cors);
       }
       if (method === "DELETE") {
+        await noteStateChange(customer, null, "erased");
         const erased = await store.eraseVault(app.id, customer, session.sandbox);
         return send(res, 200, { erased }, cors);
       }
       const body = parse(FieldsBody, await readJson(req, maxBody));
       const record = await inSession(body.product_id);
       const needed = neededFields(record.pins.contract);
+      // A product that moves money needs the customer's state, whatever its contract was published with.
+      if ((await productMoneyDirections(store, record)).size) needed.add(CUSTOMER_STATE_FIELD);
       const consents = await activeConsents(record);
       const problems: string[] = [];
       for (const [field, value] of Object.entries(body.values)) {
@@ -269,6 +290,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         else if (!f.capture.includes(body.source)) problems.push(`${field} can't be captured by ${body.source}`);
       }
       if (problems.length) throw new ApiError(400, "invalid_fields", problems.join("; "));
+      if (CUSTOMER_STATE_FIELD in body.values) await noteStateChange(customer, String(body.values[CUSTOMER_STATE_FIELD]).trim().toLowerCase(), body.source);
       for (const [field, value] of Object.entries(body.values))
         await store.putVaultField({ app_id: app.id, customer_ref: customer, sandbox: session.sandbox, field, sealed: seal(String(value).trim(), session.sandbox), source: body.source });
       return send(res, 201, { stored: Object.keys(body.values) }, cors);
@@ -372,6 +394,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
             },
             params: body.params,
             quote: body.quote,
+            component: a.component ?? null,
           },
           opts.vendors,
         );

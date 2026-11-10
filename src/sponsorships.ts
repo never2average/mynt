@@ -20,7 +20,7 @@ const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSO
 const fail = (error: string) => ({ ...json({ error }), isError: true });
 
 // Where a held licence covers ("*": the whole country), by its type in the regulatory model.
-async function whereHeld(store: Store, h: HeldLicense) {
+export async function whereHeld(store: Store, h: HeldLicense) {
   const region = (await store.referenceData(true)).regions.find((r) => r.code === h.region);
   const regulator = normalizeModel(region?.regulatory).regulators.find((r) => r.id === h.regulator_id);
   return licenceJurisdictions(regulator, regulator?.license_types.find((l) => l._id === h.license_id), h);

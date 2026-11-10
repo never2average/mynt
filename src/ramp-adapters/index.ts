@@ -7,6 +7,7 @@ import { derivedKey, open, seal, vaultAvailable } from "../vault.js";
 import { safeRequest, signBody, type VendorCallOptions, type VendorResult } from "../vendor-call.js";
 import { emitFirmEvent } from "../runtime.js";
 import { getOffering, lateVendorSettlement, myntRampEntity, reverseVendorRun, serviceType, vendorCallback, type Offering } from "../vendors.js";
+import { recordMovementOutput } from "../money-rails.js";
 import { bridgeAdapter } from "./bridge.js";
 import { isRampError, type PartnerHttp, type RampAdapter, type RampAdapterContext, type RampDirection, type RampPrice, type RampTransferStatus, type RampTransferUpdate } from "./types.js";
 
@@ -141,7 +142,8 @@ export async function serveRampAdapter(
       ? candidates.find((c) => timingSafeEqual(createHmac("sha256", c.secret).update(`${m[1]}.${payload}`).digest(), Buffer.from(m[2], "hex")))
       : undefined;
   if (!signer) return answer(401, { request_id: body.request_id ?? null, status: "error", output: null, error: { code: "bad_signature", message: "Mynt-Signature doesn't verify" } });
-  const error = (code: string, message: string) => answer(200, { request_id: body.request_id, status: "error", output: null, error: { code, message } });
+  const error = (code: string, message: string, partner_status?: number | null) =>
+    answer(200, { request_id: body.request_id, status: "error", output: null, error: { code, message, ...(partner_status != null ? { partner_status } : {}) } });
   if (body.environment !== environment) return error("wrong_environment", "The request's environment doesn't match the endpoint");
   const conformance = signer.subscription_id === null || body.consent?.artefact_ref === "mynt_conformance";
   const c = await contextFor(store, o, row, environment, opts);
@@ -210,7 +212,17 @@ export async function serveRampAdapter(
     customer: { key: customerKey, partner_customer_id: link?.partner_customer_id ?? null, partner_payout_account_id: link?.partner_payout_account_id ?? null },
     input: { full_name: input.full_name, bank_account_number: input.bank_account_number, routing_number: input.routing_number },
   });
-  if (isRampError(done)) return error(done.error.code, done.error.message);
+  if (isRampError(done)) {
+    // The partner has a transfer with this id even though Mynt couldn't read the rest: keep it, so its webhooks and
+    // the poller find it.
+    if (done.partner_transfer_id)
+      await store.db.query(
+        `INSERT INTO ${T}.ramp_adapter_transfers (offering_id, environment, partner_transfer_id, subscription_id, request_id, direction, status, partner_side)
+         VALUES ($1, $2, $3, $4, $5, $6, 'submitted', '{}') ON CONFLICT (offering_id, environment, partner_transfer_id) DO UPDATE SET subscription_id = EXCLUDED.subscription_id, request_id = EXCLUDED.request_id, updated_at = now()`,
+        [o.id, env, done.partner_transfer_id, signer.subscription_id, body.request_id, t.direction],
+      );
+    return error(done.error.code, done.error.message, done.partner_status);
+  }
   // A repeat of one quote's transfer (a retried accept) finds the partner's same transfer: its state only moves on.
   const { rows: kept } = await store.db.query(
     `INSERT INTO ${T}.ramp_adapter_transfers (offering_id, environment, partner_transfer_id, subscription_id, request_id, direction, status, partner_side)
@@ -282,6 +294,8 @@ async function applyUpdate(store: Store, offeringId: string, environment: "test"
   if (!r) return "unknown";
   const output = outputOf(u, r.direction);
   const at = { subscription_id: r.subscription_id, request_id: r.request_id };
+  // What the partner says about money goes in the ledger whatever state the run or this row is in.
+  if (u.status !== "submitted") await recordMovementOutput(store, at, output);
   switch (r.status) {
     case "submitted": {
       if (u.status === "submitted") return "open";

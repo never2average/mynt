@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
+import { namesMoneyMovement } from "./money-rails.js";
 import { QUOTA_PATTERN } from "./transient.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -147,6 +148,9 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const hit = (rows: unknown) => ((rows as { error?: string }[] | undefined) ?? []).some((f) => QUOTA_PATTERN.test(f.error ?? ""));
   const backups = await backupStatus(opts.backupStatusFile);
   const quota = Object.values(agents).some((a) => hit((a as { failures: unknown }).failures)) || hit(hosting.failed_tenants) || hit(hosting.stopped_apps);
+  // A stored service type named as if it moves money, declared as not: it runs outside the money rails.
+  const { rows: undeclared } = await db.query<{ region: string; key: string; name: string }>("SELECT region, key, name FROM financial_products.service_types WHERE moves_money = false AND NOT quote");
+  const moneyNameMismatches = undeclared.filter((t) => namesMoneyMovement(t.key) || namesMoneyMovement(t.name)).map((t) => `${t.region}/${t.key}`);
   const attention = [
     ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
     ...Object.entries(agents).flatMap(([name, a]) => {
@@ -158,11 +162,12 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...((hosting.stuck_deploys as unknown[] | undefined)?.length ? [`hosting: ${(hosting.stuck_deploys as unknown[]).length} deploy(s) running over 45 min`] : []),
     ...(vendors.failed_conformance.length ? [`vendors: ${vendors.failed_conformance.length} conformance run(s) failed in the last ${hours}h`] : []),
     ...vendors.erroring_subscriptions.map((v) => `vendors: subscription ${v.subscription_id} erred on ${v.errors} of ${v.calls} calls`),
+    ...(moneyNameMismatches.length ? [`vendors: service type(s) named as moving money but declared moves_money: false: ${moneyNameMismatches.join(", ")}`] : []),
     ...backups.attention,
     ...(solana.flagged_programs.length ? [`solana: ${solana.flagged_programs.length} mainnet program(s) flagged by the vulnerability database; review with list_program_flags`] : []),
     ...(solana.reviews_awaiting_approval ? [`solana: ${solana.reviews_awaiting_approval} mainnet review(s) awaiting approval (list_mainnet_reviews)`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors, solana, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

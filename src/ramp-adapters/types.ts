@@ -14,7 +14,9 @@
 export type RampDirection = "in" | "out"; // in: dollars from the customer's bank; out: dollars to it
 export type RampTransferStatus = "submitted" | "settled" | "failed" | "returned"; // Mynt's wire statuses
 
-export type RampError = { error: { code: string; message: string } }; // code: [a-z0-9_]; message: no partner text, no secrets
+// code: [a-z0-9_]; message: no partner text, no secrets. partner_status: the partner's HTTP status, when it answered.
+// partner_transfer_id: the partner's id for a transfer it accepted in an answer Mynt couldn't otherwise read.
+export type RampError = { error: { code: string; message: string }; partner_status?: number | null; partner_transfer_id?: string };
 export const rampError = (code: string, message: string): RampError => ({ error: { code, message } });
 export const isRampError = (x: unknown): x is RampError => !!x && typeof x === "object" && "error" in (x as object);
 

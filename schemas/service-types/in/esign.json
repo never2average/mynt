@@ -3,6 +3,7 @@
   "key": "esign",
   "name": "Electronic signature (eSign)",
   "category": "esign",
+  "moves_money": false,
   "description": "Has the customer sign a document with an Aadhaar-based eSign. The vendor must be an eSign Service Provider empanelled by the Controller of Certifying Authorities.",
   "input_schema": {
     "type": "object",
