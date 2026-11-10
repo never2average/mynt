@@ -1238,6 +1238,134 @@ test("a short withdrawal is recorded as differing, a claim that already ended ca
   assert.equal((await t.withdrawals(t.admin))[0].status, "parked");
 });
 
+test("a new correction supersedes earlier ones, a dispute restores who set the state too, and it has a time limit", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 5_000);
+  const first = await ok(s.admin, "set_pool_firm_state", { pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id, state: "us-ca", reason: "first correction" });
+  const second = await ok(s.admin, "set_pool_firm_state", { pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id, state: "us-ny", reason: "second correction" });
+  const stale = await callTool(s.fundA.client, "respond_to_state_correction", { correction_id: first.correction_id, accept: false });
+  assert.equal(stale.isError, true, "an earlier correction can't be disputed once replaced");
+  assert.match(stale.data.error, /latest correction/);
+  await ok(s.fundA.client, "respond_to_state_correction", { correction_id: second.correction_id, accept: false });
+  const p = await s.position(s.fundA);
+  assert.equal(p.state, "us-ca", "back to what the replaced correction had set");
+  assert.equal(p.state_source, "admin_corrected", "and who had set it");
+
+  const third = await ok(s.admin, "set_pool_firm_state", { pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id, state: "us-ny", reason: "third correction" });
+  assert.ok((await s.position(s.fundA)).state_corrections_to_answer[0].dispute_until);
+  s.advance(15 * DAY);
+  const late = await callTool(s.fundA.client, "respond_to_state_correction", { correction_id: third.correction_id, accept: false });
+  assert.equal(late.data.code, "dispute_window_closed");
+  assert.match(late.data.error, /POOL_CORRECTION_DISPUTE_DAYS/);
+  assert.equal((await s.position(s.fundA)).state_corrections_to_answer.length, 0);
+  assert.equal((await s.position(s.fundA)).state, "us-ny");
+});
+
+test("an admin at the firm concerned or the product's firm can't correct its state or resolve its flags", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 5_000);
+  const adminAt = async (entityId) => {
+    const { user } = await s.store.createUser(`Admin ${randomBytes(2).toString("hex")}`, ["admin"]);
+    await s.store.setUserEntity(user.id, entityId);
+    return s.connect({ ...user, entity_id: entityId });
+  };
+  const args = { pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id, state: "us-ca", reason: "self-serving" };
+  const atFund = await adminAt(s.fundA.entity.id);
+  const atBuilder = await adminAt(s.builder.entity.id);
+  for (const client of [atFund, atBuilder]) assert.match((await callTool(client, "set_pool_firm_state", args)).data.error, /own firm/);
+  assert.equal((await s.position(s.fundA)).state, "us-ny");
+
+  const c = await s.commit(s.fundA, 1_000);
+  await s.db.query(`INSERT INTO financial_products.pool_flags (id, pool_id, lp_entity_id, movement_id, kind, sandbox, detail) VALUES ($1, $2, $3, $4, 'negative_balance', false, 'test')`, [randomUUID(), s.pool.id, s.fundA.entity.id, c.movement_id]);
+  const [flag] = await ok(s.admin, "list_pool_flags");
+  for (const client of [atFund, atBuilder]) assert.match((await callTool(client, "resolve_pool_flag", { flag_id: flag.id, resolution: "acknowledge", reason: "our own flag" })).data.error, /own firm/);
+  await ok(s.admin, "resolve_pool_flag", { flag_id: flag.id, resolution: "acknowledge", reason: "another admin looked at it" });
+});
+
+async function linkConflict(s) {
+  await s.funded(s.fundA, 5_000);
+  const w = await s.requestOut(s.fundA, 5_000);
+  // The worker ended this claim and then the rail call came back: a ledger payout with no claim behind it.
+  const id = randomUUID();
+  const key = `pool-withdrawal:${id}`;
+  const verdict = await authorizeMovement(s.store, { product_id: s.productId, sandbox: false, direction: "payout", amount_cents: 5_000, channel: { kind: "ramp_adapter", provider: "bridge" }, customer_state: "us-ny", customer_ref: "lp", idempotency_key: key, action: "pool_withdrawal", component_key: "account", subscription_id: s.pool.id, request_id: id, sponsor_entity_id: s.provider.entity.id });
+  await s.db.query(`INSERT INTO financial_products.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, withdrawal_id, amount_cents, state, claimed_at) VALUES ($1, $2, $3, $4, 'withdrawal', $5, 5000, 'refused', now())`, [id, key, s.pool.id, s.fundA.entity.id, w.id]);
+  assert.equal(await linkMovement(s.store, { id, idempotency_key: key, pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id, kind: "withdrawal", amount_cents: 5_000, state: "refused", movement_id: null }, verdict.movement_id), false);
+  const flag = (await ok(s.admin, "list_pool_flags")).find((f) => f.kind === "link_conflict");
+  return { flag, movement: verdict.movement_id, claim: id, w };
+}
+
+test("a link conflict counts against headroom until an admin links it or closes it", async () => {
+  const s = await world();
+  const { flag, movement } = await linkConflict(s);
+  await s.funded(s.fundB, 10_000);
+  await s.requestOut(s.fundB, 8_000);
+  await s.snapshot({ reserves: 1_008_000, obligations: 1_000_000 }); // 8,000 of room, less the 5,000 that may have left
+  await s.db.query("UPDATE financial_products.pool_withdrawals SET status = 'cancelled' WHERE lp_entity_id = $1", [s.fundA.entity.id]);
+  await s.tick();
+  let live = (await s.claims()).filter((c) => c.ledger_state !== "released" && c.lp_entity_id === s.fundB.entity.id);
+  assert.equal(Number(live[0].amount_cents), 3_000);
+  const refused = await callTool(s.admin, "resolve_pool_flag", { flag_id: flag.id, resolution: "acknowledge", reason: "can't just wave this through" });
+  assert.match(refused.data.error, /link_movement or close_movement/);
+
+  await ok(s.admin, "resolve_pool_flag", { flag_id: flag.id, resolution: "close_movement", reason: "partner confirmed nothing moved" });
+  const { rows: [row] } = await s.db.query("SELECT status, status_detail FROM financial_products.money_movements WHERE id = $1", [movement]);
+  assert.deepEqual([row.status, row.status_detail], ["failed", "admin_closed"]);
+  await s.settle(live[0].movement_id);
+  await s.snapshot({ reserves: 1_005_000, obligations: 1_000_000 });
+  await s.tick();
+  assert.equal((await ok(s.admin, "list_pool_flags")).filter((f) => f.kind === "link_conflict").length, 0);
+  live = (await s.claims()).filter((c) => c.ledger_state === "in_flight" && c.lp_entity_id === s.fundB.entity.id);
+  assert.equal(Number(live[0].amount_cents), 5_000, "the room is back, and pays what's left of the request");
+});
+
+test("an admin can link a conflicted ledger row to its claim, unless the amount has since gone out another way", async () => {
+  const s = await world();
+  const { flag, movement, claim } = await linkConflict(s);
+  await ok(s.admin, "resolve_pool_flag", { flag_id: flag.id, resolution: "link_movement", reason: "the partner did receive it" });
+  const [row] = (await s.db.query("SELECT state, movement_id FROM financial_products.pool_movements WHERE id = $1", [claim])).rows;
+  assert.equal(row.state, "authorized");
+  assert.equal(row.movement_id, movement);
+  assert.equal((await s.position(s.fundA)).pending_out_cents, 5_000);
+
+  const t = await world();
+  const conflict = await linkConflict(t);
+  await t.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await t.tick(); // the request is claimed again, since nothing it knows of has it
+  const blocked = await callTool(t.admin, "resolve_pool_flag", { flag_id: conflict.flag.id, resolution: "link_movement", reason: "partner says it landed" });
+  assert.match(blocked.data.error, /gone out another way/);
+  assert.equal((await ok(t.admin, "list_pool_flags")).filter((f) => f.kind === "link_conflict").length, 1, "still open");
+});
+
+test("accepting a settlement settles it and closes the flag together, or not at all", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 10_000);
+  const first = await s.requestOut(s.fundA, 10_000);
+  await s.tick();
+  const [claim] = await s.claims();
+  await ok(s.provider.client, "report_pool_movement", { movement_id: claim.movement_id, outcome: "failed" });
+  await ok(s.fundA.client, "cancel_withdrawal", { withdrawal_id: first.id });
+  await s.requestOut(s.fundA, 10_000);
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.tick();
+  await s.settle((await s.claims()).find((c) => c.ledger_state === "in_flight").movement_id);
+  await callTool(s.provider.client, "report_pool_movement", { movement_id: claim.movement_id, outcome: "settled", external_ref: "ref-late" });
+  const [flag] = await ok(s.admin, "list_pool_flags");
+
+  // A crash between settling and closing: the closing fails, so the settlement mustn't have happened.
+  await s.db.exec(`CREATE FUNCTION financial_products.boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'crash'; END $$;
+    CREATE TRIGGER boom BEFORE UPDATE ON financial_products.pool_flags FOR EACH ROW EXECUTE FUNCTION financial_products.boom();`);
+  await assert.rejects(s.db.query("SELECT * FROM financial_products.resolve_pool_flag($1, 'accept_settlement', 'x', NULL, now())", [flag.id]), /crash/);
+  assert.equal((await s.db.query("SELECT status FROM financial_products.money_movements WHERE id = $1", [claim.movement_id])).rows[0].status, "failed", "nothing half-done");
+  assert.equal((await s.db.query("SELECT status FROM financial_products.pool_flags WHERE id = $1", [flag.id])).rows[0].status, "open");
+  await s.db.exec("DROP TRIGGER boom ON financial_products.pool_flags; DROP FUNCTION financial_products.boom();");
+
+  await ok(s.admin, "resolve_pool_flag", { flag_id: flag.id, resolution: "accept_settlement", reason: "partner confirmed both transfers landed" });
+  assert.equal((await s.db.query("SELECT status FROM financial_products.money_movements WHERE id = $1", [claim.movement_id])).rows[0].status, "settled");
+  assert.equal((await callTool(s.admin, "resolve_pool_flag", { flag_id: flag.id, resolution: "reject_settlement", reason: "second decision" })).isError, true, "one decision");
+  assert.deepEqual((await ok(s.admin, "list_pool_flags")).map((f) => f.kind), ["negative_balance"], "raised in the same step");
+});
+
 test("a covenant pause stops neither deposits nor withdrawals, and pool money isn't in a covenant's figures", async () => {
   const { CovenantService } = await import("../dist/covenants.js");
   const s = await world();
