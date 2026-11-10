@@ -635,73 +635,121 @@ const withCoolOff = async (hours, f) => {
 };
 const noticesOf = async (w, client) => w.ok(client, "list_firm_notices", {});
 
-test("a member who just joined can't change what Mynt reads as the firm's books, and the firm is told who joined", async () => {
+// An account an admin adds to a firm that already has a licence-provider member: pending until a member accepts it.
+const addMember = async (w, handle, { accept = true } = {}) => {
+  const u = await w.store.upsertClerkUser(handle, `${handle}@example.com`, handle, ["license_provider"]);
+  const added = await w.ok(w.admin, "add_entity_member", { email: `${handle}@example.com`, entity_id: w.lp.entity.id });
+  if (accept) {
+    await w.ok(w.provider, "decide_firm_member", { request_id: added.request_id, accept: true });
+    u.entity_id = w.lp.entity.id;
+  }
+  return { user: u, added, client: await w.connect(u) };
+};
+
+test("an account an admin adds to a firm with members joins only when a member accepts it, and then waits out the cool-off", async () => {
   const w = await world();
   await w.connectHttp();
   await w.conformance();
   await w.ok(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` });
-  await w.ok(w.provider, "upload_partner_ledger_file", { statement: w.statement({ environment: "test" }, w.testKey) });
   await backdate(w, w.lp.user.id);
-  // An admin adds a new account to the firm: the existing member is told, on the webhooks and as a notice.
   const puppetUser = await w.store.upsertClerkUser("puppet", "puppet@example.com", "Puppet", ["license_provider"]);
   const added = await w.ok(w.admin, "add_entity_member", { email: "puppet@example.com", entity_id: w.lp.entity.id });
-  assert.equal(added.firm_told.members, 1);
-  assert.ok((await noticesOf(w, w.provider)).some((n) => n.type === "firm.member_added" && n.data.member_email === "puppet@example.com"));
-  puppetUser.entity_id = w.lp.entity.id;
+  assert.equal(added.status, "pending_acceptance");
+  assert.equal((await w.store.getUser(puppetUser.id)).entity_id, null, "a member of nothing until accepted");
+  const notice = (await noticesOf(w, w.provider)).find((n) => n.type === "firm.member_pending");
+  assert.equal(notice.data.request_id, added.request_id);
+  assert.equal((await w.ok(w.provider, "get_partner_kit")).pending_members[0].member_email, "puppet@example.com");
   const puppet = await w.connect(puppetUser);
+  // Pending, it passes no gate: it isn't a member of the firm at all.
+  await w.refused(puppet, "register_partner_signing_key", { public_key: edKey().address }, /don't belong to a firm/);
+  await w.refused(puppet, "decide_firm_member", { request_id: added.request_id, accept: true }, /No such request at your firm/);
+
   await withCoolOff(72, async () => {
-    await w.refused(puppet, "register_partner_signing_key", { public_key: edKey().address }, /joined this firm too recently/);
-    await w.refused(puppet, "register_partner_test_signing_key", { public_key: edKey().address }, /joined this firm too recently/);
-    await w.refused(puppet, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` }, /joined this firm too recently/);
-    await w.refused(puppet, "upload_partner_ledger_file", { statement: w.statement() }, /joined this firm too recently/);
-    await w.refused(puppet, "set_partner_ledger_source", { source: "http" }, /joined this firm too recently/);
-    // A test file is fine: it never reads as live.
-    await w.ok(puppet, "upload_partner_ledger_file", { statement: w.statement({ environment: "test", as_of: new Date(w.clock() + 1000).toISOString() }, w.testKey) });
+    await w.ok(w.provider, "decide_firm_member", { request_id: added.request_id, accept: true });
+    puppetUser.entity_id = w.lp.entity.id;
+    const member = await w.connect(puppetUser);
+    // Its cool-off starts at acceptance: no live key, no endpoints, no live file, no switch to live.
+    await w.refused(member, "register_partner_signing_key", { public_key: edKey().address }, /joined this firm too recently/);
+    await w.refused(member, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` }, /joined this firm too recently/);
+    await w.refused(member, "upload_partner_ledger_file", { statement: w.statement() }, /joined this firm too recently/);
+    await w.refused(member, "set_partner_ledger_source", { source: "http" }, /joined this firm too recently/);
+    // A test key can never sign live books, so it needs no cool-off.
+    await w.ok(member, "register_partner_test_signing_key", { public_key: edKey().address });
     // A long-standing member isn't held back.
     await w.ok(w.provider, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v3` });
+    assert.ok((await noticesOf(w, member)).some((n) => n.type === "partner_ledger.endpoints_confirmed"));
   });
-  assert.ok((await noticesOf(w, puppet)).some((n) => n.type === "partner_ledger.endpoints_confirmed"));
+  assert.ok((await noticesOf(w, w.provider)).some((n) => n.type === "firm.member_added" && n.data.member_email === "puppet@example.com"));
+
+  // Declined, the account never joins.
+  const other = await addMember(w, "declined", { accept: false });
+  await w.ok(w.provider, "decide_firm_member", { request_id: other.added.request_id, accept: false });
+  assert.equal((await w.store.getUser(other.user.id)).entity_id, null);
+  await w.refused(w.provider, "decide_firm_member", { request_id: other.added.request_id, accept: true }, /already declined/);
 });
 
-test("with a second long-standing member, a live key change and a switch to live need that member's approval", async () => {
+test("only a member who joined before the requester approves a live change; claims, failures and newer requests", async () => {
   const w = await world();
   await w.connectHttp();
-  await backdate(w, w.lp.user.id);
-  const otherUser = await w.store.upsertClerkUser("second", "second@example.com", "Second member", ["license_provider"]);
-  await w.ok(w.admin, "add_entity_member", { email: "second@example.com", entity_id: w.lp.entity.id });
-  otherUser.entity_id = w.lp.entity.id;
-  await backdate(w, otherUser.id);
-  const other = await w.connect(otherUser);
+  const second = await addMember(w, "second");
+  await backdate(w, w.lp.user.id, 10);
+  await backdate(w, second.user.id, 5);
+  const other = second.client;
 
   await withCoolOff(72, async () => {
-    // A live key change waits for the other member.
+    // The firm's earliest member needs nobody's approval (nobody joined before it).
+    const direct = edKey();
+    const done = await w.ok(w.provider, "register_partner_signing_key", { public_key: direct.address });
+    assert.equal(done.public_key, direct.address);
+    w.key.privateKey = direct.privateKey;
+    w.key.address = direct.address;
+
+    // The later member's live key change waits for the earlier one, and a newer request supersedes an older one.
+    const first = await w.ok(other, "register_partner_signing_key", { public_key: edKey().address });
+    assert.equal(first.status, "pending_approval");
     const replacement = edKey();
-    const asked = await w.ok(w.provider, "register_partner_signing_key", { public_key: replacement.address });
-    assert.equal(asked.status, "pending_approval");
-    assert.equal(await w.health.signingKey(w.lp.entity.id), w.key.address, "nothing changes until it's approved");
-    assert.ok((await noticesOf(w, other)).some((n) => n.type === "partner_ledger.approval_requested" && n.data.approval_id === asked.approval_id));
-    await w.refused(w.provider, "approve_partner_kit_change", { approval_id: asked.approval_id }, /another long-standing member/);
-    await w.ok(other, "approve_partner_kit_change", { approval_id: asked.approval_id, approve: false });
-    assert.equal(await w.health.signingKey(w.lp.entity.id), w.key.address);
-    const again = await w.ok(w.provider, "register_partner_signing_key", { public_key: replacement.address });
-    const approved = await w.ok(other, "approve_partner_kit_change", { approval_id: again.approval_id });
+    const again = await w.ok(other, "register_partner_signing_key", { public_key: replacement.address });
+    await w.refused(w.provider, "approve_partner_kit_change", { approval_id: first.approval_id }, /already superseded/);
+    await w.refused(other, "approve_partner_kit_change", { approval_id: again.approval_id }, /another long-standing member/);
+    assert.ok((await noticesOf(w, w.provider)).some((n) => n.type === "partner_ledger.approval_requested" && n.data.approval_id === again.approval_id));
+    const approved = await w.ok(w.provider, "approve_partner_kit_change", { approval_id: again.approval_id });
     assert.equal(approved.status, "approved");
     assert.equal(await w.health.signingKey(w.lp.entity.id), replacement.address);
-    assert.ok((await noticesOf(w, w.provider)).some((n) => n.type === "partner_ledger.key_changed" && n.data.public_key === replacement.address));
-    w.partner.state.mode = "ok";
-    // The partner signs live statements with its new key from now on.
     w.key.privateKey = replacement.privateKey;
     w.key.address = replacement.address;
 
-    // A switch to live waits too, and runs every check when approved.
+    // A request whose change fails when approved goes back to waiting, and can then be declined.
     await w.conformance();
-    const switching = await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+    const switching = await w.ok(other, "set_partner_ledger_source", { source: "http" });
     assert.equal(switching.status, "pending_approval");
+    w.partner.state.mode = "wrong_key";
+    await w.refused(w.provider, "approve_partner_kit_change", { approval_id: switching.approval_id }, /statement_signature/);
+    const back = (await w.pg.query("SELECT status FROM financial_products.partner_kit_approvals WHERE id = $1", [switching.approval_id])).rows[0];
+    assert.equal(back.status, "pending");
+    // While a request is being approved, a decline can't land under it.
+    await w.pg.query("UPDATE financial_products.partner_kit_approvals SET status = 'approving' WHERE id = $1", [switching.approval_id]);
+    await w.refused(w.provider, "approve_partner_kit_change", { approval_id: switching.approval_id, approve: false }, /already approving/);
+    await w.pg.query("UPDATE financial_products.partner_kit_approvals SET status = 'pending' WHERE id = $1", [switching.approval_id]);
+    await w.ok(w.provider, "approve_partner_kit_change", { approval_id: switching.approval_id, approve: false });
     assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), false);
-    const live = await w.ok(other, "approve_partner_kit_change", { approval_id: switching.approval_id });
+
+    // Approved, it runs every check again and goes live.
+    w.partner.state.mode = "ok";
+    const retry = await w.ok(other, "set_partner_ledger_source", { source: "http" });
+    const live = await w.ok(w.provider, "approve_partner_kit_change", { approval_id: retry.approval_id });
     assert.equal(live.result.live, true);
-    assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), true);
     assert.ok((await noticesOf(w, other)).some((n) => n.type === "partner_ledger.source_changed" && n.data.source === "http"));
+  });
+
+  // Two accounts added together can't approve each other: neither joined before the other.
+  const a = await addMember(w, "twin_a");
+  const b = await addMember(w, "twin_b");
+  const joined = new Date(Date.now() - 4 * 24 * 3_600_000).toISOString();
+  await w.pg.query("UPDATE financial_products.users SET created_at = $2, entity_joined_at = $2 WHERE id = ANY($1::uuid[])", [[a.user.id, b.user.id], joined]);
+  await withCoolOff(72, async () => {
+    const asked = await w.ok(a.client, "register_partner_signing_key", { public_key: edKey().address });
+    assert.equal(asked.status, "pending_approval", "earlier members exist, so it waits");
+    await w.refused(b.client, "approve_partner_kit_change", { approval_id: asked.approval_id }, /joined your firm before/);
   });
 });
 
@@ -745,4 +793,13 @@ test("confirming checks the very proposal it read: a newer one isn't confirmed b
   assert.equal(done.live_url, `${w.partner.url}/live/other`);
   // Nothing is left to confirm twice.
   await w.refused(w.provider, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/other` }, /No endpoint change/);
+});
+
+test("a confirmation matches the proposal by its id, whatever precision its timestamp has", async () => {
+  const w = await world();
+  await w.propose(`${w.partner.url}/test`, `${w.partner.url}/live`);
+  // Postgres keeps microseconds; a JS Date read back holds milliseconds. Comparing on the timestamp would never match.
+  await w.pg.query("UPDATE financial_products.partner_ledger_sources SET pending_at = '2026-11-10 12:00:00.123456+00' WHERE entity_id = $1", [w.lp.entity.id]);
+  const done = await w.confirm(`${w.partner.url}/test`, `${w.partner.url}/live`);
+  assert.equal(done.status, "confirmed");
 });

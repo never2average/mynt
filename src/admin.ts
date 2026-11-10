@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { noticeFirm } from "./firm-notices.js";
+import { needsAcceptance, noticeFirm, requestMembership } from "./firm-notices.js";
 import { z } from "zod";
 import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import type { ClerkAdmin } from "./auth.js";
@@ -421,7 +421,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "add_entity_member",
     {
       title: "Add someone to a firm",
-      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). The firm's existing members are told, on its webhooks (firm.member_added) and as a notice each.",
+      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). The firm's existing members are told, on its webhooks (firm.member_added) and as a notice each. A licence-provider account added to a licence provider that already has one waits for an existing member to accept it (decide_firm_member).",
       inputSchema: { email: z.string().email(), entity_id: z.string() },
     },
     async ({ email, entity_id }) => {
@@ -429,6 +429,13 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (!member) return fail(`${email} hasn't signed in to Mynt yet`);
       const entity = await store.getEntity(entity_id);
       if (!entity) return fail(`No firm '${entity_id}'`);
+      // A licence provider that already has a licence-provider member decides who joins it: the account waits for one
+      // of them to accept it, and is a member of nothing until then (firm-notices.ts).
+      if (member.entity_id !== entity.id && (await needsAcceptance(store, entity.id, member))) {
+        const pending = await requestMembership(store, entity.id, member, user.id);
+        await audit("add_entity_member_requested", entity.id, { email: member.email, request_id: pending.request_id });
+        return json({ entity_id: entity.id, entity: entity.name, member: member.email, ...pending, note: "The firm already has members: one of them accepts this account (decide_firm_member) before it joins" });
+      }
       // The firm's existing members are told before the new one joins, on its webhooks and as a notice each: an admin
       // adding someone to a firm is never silent (firm-notices.ts).
       const already = member.entity_id === entity.id;

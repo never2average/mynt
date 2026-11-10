@@ -1367,6 +1367,7 @@ const TABLES = `
     pending_live_url text,
     pending_by uuid REFERENCES financial_products.users(id),
     pending_at timestamptz,
+    pending_id uuid, -- a fresh id per proposal: what a confirmation names (a timestamp round-trips with less precision)
     expiry_warned_run_id uuid, -- the run whose coming expiry the firm was warned of
     expired_notified_run_id uuid, -- the run whose expiry the firm was told sent it back to the sandbox
     active_source text NOT NULL DEFAULT 'sandbox' CHECK (active_source IN ('sandbox', 'http', 'file')),
@@ -1392,13 +1393,26 @@ const TABLES = `
     entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
     action text NOT NULL CHECK (action IN ('live_key', 'source')),
     payload jsonb NOT NULL,
-    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'declined')),
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approving', 'approved', 'declined', 'superseded')),
     requested_by uuid NOT NULL REFERENCES financial_products.users(id),
     requested_at timestamptz NOT NULL DEFAULT now(),
     decided_by uuid REFERENCES financial_products.users(id),
     decided_at timestamptz
   );
   CREATE INDEX IF NOT EXISTS partner_kit_approvals_idx ON financial_products.partner_kit_approvals (entity_id, status, requested_at DESC);
+  -- An account an admin added to a licence provider that already has members: not a member of anything until one of
+  -- the firm's existing members accepts it (firm-notices.ts). Declining it ends the request.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_member_requests (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    user_id uuid NOT NULL REFERENCES financial_products.users(id),
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined')),
+    requested_by uuid REFERENCES financial_products.users(id),
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    decided_by uuid REFERENCES financial_products.users(id),
+    decided_at timestamptz
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS firm_member_requests_one_pending_idx ON financial_products.firm_member_requests (entity_id, user_id) WHERE status = 'pending';
   -- Notices to each member of a firm, so a change made by one member (or an admin) is seen by the others.
   CREATE TABLE IF NOT EXISTS financial_products.firm_notices (
     id uuid PRIMARY KEY,

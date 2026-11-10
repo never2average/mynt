@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { checkStatement, failedCases, ledgerUrl, requestLedger, signBody, type CheckCase, type Statement } from "./partner-ledger/contract.js";
 import { isLedgerError, ledgerError, sandboxPartnerLedger, type LedgerError, type PartnerLedger, type PartnerLedgerContext, type PartnerLedgerReading } from "./partner-ledger/index.js";
-import { firmNotices, noticeFirm } from "./firm-notices.js";
+import { decideMembership, firmNotices, noticeFirm, pendingMembers } from "./firm-notices.js";
 import { base58Decode, isAddress, isWeakEd25519Key } from "./solana/codec.js";
 import type { Store, User } from "./store.js";
 import type { FirmWebhookEvent } from "./runtime.js";
@@ -72,6 +72,7 @@ interface SourceRow {
   pending_test_url: string | null;
   pending_live_url: string | null;
   pending_at: string | null;
+  pending_id: string | null;
   signing_secret: string | null;
   secret_shown_at: string | null;
   config_version: number;
@@ -141,24 +142,36 @@ export async function coolOffRefusal(store: Store, userId: string, now: Date, wh
     ? `You joined this firm too recently to ${what}: a member waits ${Math.round(memberCoolOffMs() / HOUR)} hours from joining (PARTNER_MEMBER_COOLOFF_HOURS), so a newly added account can't change what Mynt reads as your books. About ${Math.ceil(left / HOUR)} hour(s) to go.`
     : null;
 }
-// The firm's other licence-provider members past the cool-off, who can approve a live change.
-async function seasonedOthers(store: Store, entityId: string, exceptUserId: string, now: Date): Promise<string[]> {
-  const { rows } = await store.db.query(`SELECT id, roles FROM ${T}.users WHERE entity_id = $1 AND id <> $2`, [entityId, exceptUserId]);
+// Who may approve a live change the requester asked for: the firm's other licence-provider members past the cool-off
+// who became members before the requester did (by effective join time, the later of creation and joining). So two
+// accounts added together can't approve each other, and the firm's longest-standing member needs nobody's approval:
+// with a firm's new members accepted by its existing ones (firm-notices.ts), nobody can be put above them.
+async function approversFor(store: Store, entityId: string, requesterId: string, now: Date): Promise<string[]> {
+  const requesterSince = await memberSince(store, requesterId);
+  if (!requesterSince) return [];
+  const { rows } = await store.db.query(`SELECT id, roles FROM ${T}.users WHERE entity_id = $1 AND id <> $2`, [entityId, requesterId]);
   const out: string[] = [];
   for (const r of rows) {
     const roles = (r.roles as string[]) ?? [];
     if (!roles.includes("license_provider") || roles.includes("admin")) continue;
+    const since = await memberSince(store, r.id as string);
+    if (!since || since.getTime() >= requesterSince.getTime()) continue;
     if ((await coolOffLeftMs(store, r.id as string, now)) === 0) out.push(r.id as string);
   }
   return out;
 }
+// Older requests of a kind stop counting when a newer one arrives, or the change is made another way.
+async function supersede(store: Store, entityId: string, action: "live_key" | "source") {
+  await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'superseded', decided_at = now() WHERE entity_id = $1 AND action = $2 AND status = 'pending'`, [entityId, action]);
+}
 // A live change that needs a second member: asked for, the firm told, and nothing done until one approves.
 async function requestApproval(store: Store, entityId: string, action: "live_key" | "source", payload: Record<string, unknown>, requestedBy: string) {
+  await supersede(store, entityId, action);
   const id = randomUUID();
   await store.db.query(`INSERT INTO ${T}.partner_kit_approvals (id, entity_id, action, payload, requested_by) VALUES ($1, $2, $3, $4, $5)`, [id, entityId, action, JSON.stringify(payload), requestedBy]);
   await store.audit(requestedBy, "partner_kit_approval_requested", entityId, { approval_id: id, action, ...payload });
   await noticeFirm(store, entityId, "partner_ledger.approval_requested", { approval_id: id, action, ...payload, approve_with: "approve_partner_kit_change" });
-  return { status: "pending_approval", approval_id: id, action, note: "Your firm has another long-standing member: one of them approves this with approve_partner_kit_change before it takes effect. They've been told." };
+  return { status: "pending_approval", approval_id: id, action, note: "Your firm has a member who joined before you: one of them approves this with approve_partner_kit_change before it takes effect. They've been told." };
 }
 
 // The partner kit's gate on a live key change (register_partner_signing_key): the cool-off, then a second member's
@@ -166,7 +179,8 @@ async function requestApproval(store: Store, entityId: string, action: "live_key
 export async function gateLiveKeyChange(store: Store, user: User, entityId: string, publicKey: string, now = new Date()) {
   const refused = await coolOffRefusal(store, user.id, now, "register or replace your firm's live signing key");
   if (refused) return { refused };
-  if ((await seasonedOthers(store, entityId, user.id, now)).length) return { pending: await requestApproval(store, entityId, "live_key", { public_key: publicKey }, user.id) };
+  if ((await approversFor(store, entityId, user.id, now)).length) return { pending: await requestApproval(store, entityId, "live_key", { public_key: publicKey }, user.id) };
+  await supersede(store, entityId, "live_key"); // a direct registration replaces whatever was waiting
   return null;
 }
 export const announceKeyChange = (store: Store, entityId: string, environment: "live" | "test", publicKey: string, by: string, approvedBy: string | null = null) =>
@@ -583,6 +597,7 @@ export async function partnerKitSummary(store: Store, entityId: string, o: { run
     pending_endpoint_change: row?.pending_at
       ? { test_url: row.pending_test_url, live_url: row.pending_live_url, proposed_at: iso(row.pending_at), note: "Proposed by a Mynt admin. It doesn't take effect until your firm's own licence provider checks both URLs are yours and confirms with confirm_partner_ledger_endpoints." }
       : null,
+    pending_members: await pendingMembers(store, entityId),
     pending_approvals: approvals.map((a) => ({ approval_id: a.id, action: a.action, ...(a.payload as object), requested_by: a.requested_by, requested_at: iso(a.requested_at), approve_with: "approve_partner_kit_change" })),
     request_secret: { issued: !!row?.signing_secret, taken: !!row?.secret_shown_at },
     test_signing_key: await testSigningKey(store, entityId),
@@ -686,9 +701,9 @@ export function registerPartnerKitTools(
         }
         if (normUrl(test_url) === normUrl(live_url)) return fail("test_url and live_url must be different endpoints: test books never stand in for live ones");
         await store.db.query(
-          `INSERT INTO ${T}.partner_ledger_sources (entity_id, pending_test_url, pending_live_url, pending_by, pending_at) VALUES ($1, $2, $3, $4, now())
-           ON CONFLICT (entity_id) DO UPDATE SET pending_test_url = EXCLUDED.pending_test_url, pending_live_url = EXCLUDED.pending_live_url, pending_by = EXCLUDED.pending_by, pending_at = now(), updated_at = now()`,
-          [entity_id, normUrl(test_url), normUrl(live_url), user.id],
+          `INSERT INTO ${T}.partner_ledger_sources (entity_id, pending_test_url, pending_live_url, pending_by, pending_at, pending_id) VALUES ($1, $2, $3, $4, now(), $5)
+           ON CONFLICT (entity_id) DO UPDATE SET pending_test_url = EXCLUDED.pending_test_url, pending_live_url = EXCLUDED.pending_live_url, pending_by = EXCLUDED.pending_by, pending_at = now(), pending_id = EXCLUDED.pending_id, updated_at = now()`,
+          [entity_id, normUrl(test_url), normUrl(live_url), user.id, randomUUID()],
         );
         await store.audit(user.id, "configure_partner_ledger", entity_id, { test_url: normUrl(test_url), live_url: normUrl(live_url), status: "pending_confirmation" });
         const notified = await tell(store, entity_id, "partner_ledger.endpoint_change_pending", { test_url: normUrl(test_url), live_url: normUrl(live_url), proposed_at: now().toISOString(), confirm_with: "confirm_partner_ledger_endpoints" });
@@ -726,14 +741,16 @@ export function registerPartnerKitTools(
         };
         const cooling = await coolOffRefusal(store, user.id, now(), "switch your firm's ledger to a live source");
         if (cooling) return refuse(cooling);
-        if ((await seasonedOthers(store, firm, user.id, now())).length) {
+        if ((await approversFor(store, firm, user.id, now())).length) {
           // Checked now so a request that can't pass isn't put to the other member; checked again when approved.
           const dry = await latestRun(store, firm, source);
           if (!dry || !dry.ledger_passed) return refuse(`Your latest ${source} conformance hasn't passed its ledger part: run_partner_conformance { source: "${source}" } until it does`);
           return json(await requestApproval(store, firm, "source", { source }, user.id));
         }
         const done = await switchToLive(store, deps, firm, source, user.id, null, now());
-        return "error" in done ? refuse(done.error as string) : json(done);
+        if ("error" in done) return refuse(done.error as string);
+        await supersede(store, firm, "source");
+        return json(done);
       },
     );
 
@@ -752,11 +769,25 @@ export function registerPartnerKitTools(
   );
 
   server.registerTool(
+    "decide_firm_member",
+    {
+      title: "Accept (or decline) an account an admin added to your firm",
+      description:
+        "Licence provider: an account an admin adds to your firm, when it already has licence-provider members, waits for one of you to accept it. Until then it's a member of nothing; once accepted it joins, and its member cool-off starts then. Declining ends the request. Pending ones are in get_partner_kit (pending_members) and your notices. Audited.",
+      inputSchema: { request_id: z.string().uuid(), accept: z.boolean() },
+    },
+    async ({ request_id, accept }) => {
+      const out = await decideMembership(store, request_id, user, accept);
+      return "error" in out ? fail(out.error as string) : json(out);
+    },
+  );
+
+  server.registerTool(
     "approve_partner_kit_change",
     {
       title: "Approve (or decline) a live change another member asked for",
       description:
-        "Licence provider: when your firm has more than one long-standing member, a live signing key change or a switch to a live ledger source needs a second member's approval. Approve or decline a pending request (its id is in get_partner_kit's pending_approvals and in your notices). You can't approve your own request, and you must be past the member cool-off yourself. Approving runs the change with every check again. Audited.",
+        "Licence provider: when your firm has a member who joined before the one asking, a live signing key change or a switch to a live ledger source needs that earlier member's approval. Approve or decline a pending request (its id is in get_partner_kit's pending_approvals and in your notices). Only a member who joined before the requester, and is past the member cool-off, decides it. Approving claims the request, runs the change with every check again, and puts it back if the change fails; a decline can't land while it's being approved. A newer request of the same kind supersedes an older one. Audited.",
       inputSchema: { approval_id: z.string().uuid(), approve: z.boolean().default(true) },
     },
     async ({ approval_id, approve }) => {
@@ -772,31 +803,37 @@ export function registerPartnerKitTools(
       if (cooling) return fail(cooling);
       const requester = await store.getUser(a.requested_by);
       if (!requester || requester.entity_id !== firm) return fail("Whoever asked for this is no longer a member of your firm");
-      const decide = async (status: "approved" | "declined") => {
-        const { rows: done } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, status, user.id]);
-        if (!done.length) return false;
-        await store.audit(user.id, `partner_kit_change_${status}`, firm, { approval_id: a.id, action: a.action, ...a.payload });
-        return true;
-      };
-      if (!approve) return (await decide("declined")) ? json({ approval_id: a.id, status: "declined" }) : fail("Someone else decided it first");
-      let result: Record<string, unknown>;
-      if (a.action === "live_key") {
-        if (!o.registerLiveKey) return fail("Signing keys can't be registered on this server (product health isn't running)");
-        try {
-          result = await o.registerLiveKey(requester, a.payload.public_key, user.id);
-        } catch (e) {
-          return fail((e as Error).message);
-        }
-        if (!(await decide("approved"))) return fail("Someone else decided it first");
-        await announceKeyChange(store, firm, "live", a.payload.public_key, "member", user.id);
-      } else {
-        const cool = await coolOffRefusal(store, requester.id, now(), "switch your firm's ledger to a live source");
-        if (cool) return fail(cool);
-        const done = await switchToLive(store, deps, firm, a.payload.source as "http" | "file", requester.id, user.id, now());
-        if ("error" in done) return fail(done.error as string);
-        if (!(await decide("approved"))) return fail("Someone else decided it first");
-        result = done;
+      if (!(await approversFor(store, firm, a.requested_by, now())).includes(user.id)) return fail("Only a member who joined your firm before the one who asked, and is past the member cool-off, approves this");
+      if (!approve) {
+        // A decline only takes a request that's still waiting: one being approved right now can't be declined under it.
+        const { rows: done } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'declined', decided_by = $2, decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id]);
+        if (!done.length) return fail("That request isn't waiting any more (someone is approving it, or it was decided): read get_partner_kit again");
+        await store.audit(user.id, "partner_kit_change_declined", firm, { approval_id: a.id, action: a.action, ...a.payload });
+        return json({ approval_id: a.id, status: "declined" });
       }
+      // Claimed first, so a decline can't land while the change is being made; put back if the change fails.
+      const { rows: claimed } = await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approving', decided_by = $2 WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id, user.id]);
+      if (!claimed.length) return fail("That request isn't waiting any more: read get_partner_kit again");
+      const release = () => store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'pending', decided_by = NULL WHERE id = $1 AND status = 'approving'`, [a.id]);
+      let result: Record<string, unknown>;
+      try {
+        if (a.action === "live_key") {
+          if (!o.registerLiveKey) throw new Error("Signing keys can't be registered on this server (product health isn't running)");
+          result = await o.registerLiveKey(requester, a.payload.public_key, user.id);
+        } else {
+          const cool = await coolOffRefusal(store, requester.id, now(), "switch your firm's ledger to a live source");
+          if (cool) throw new Error(cool);
+          const done = await switchToLive(store, deps, firm, a.payload.source as "http" | "file", requester.id, user.id, now());
+          if ("error" in done) throw new Error(done.error as string);
+          result = done;
+        }
+      } catch (e) {
+        await release();
+        return fail((e as Error).message);
+      }
+      await store.db.query(`UPDATE ${T}.partner_kit_approvals SET status = 'approved', decided_at = now() WHERE id = $1`, [a.id]);
+      await store.audit(user.id, "partner_kit_change_approved", firm, { approval_id: a.id, action: a.action, ...a.payload });
+      if (a.action === "live_key") await announceKeyChange(store, firm, "live", a.payload.public_key, "member", user.id);
       return json({ approval_id: a.id, status: "approved", result });
     },
   );
@@ -818,10 +855,11 @@ export function registerPartnerKitTools(
       const liveUrl = normUrl(live_url);
       if (testUrl !== row.pending_test_url || liveUrl !== row.pending_live_url) return fail("Those aren't the URLs proposed: read pending_endpoint_change in get_partner_kit and pass them back exactly");
       // Only the very proposal that was checked: a newer one made meanwhile isn't confirmed or declined by this call.
-      const same = `entity_id = $1 AND pending_test_url = $2 AND pending_live_url = $3 AND pending_at = $4`;
-      const checked = [firm, testUrl, liveUrl, row.pending_at];
+      // Compared by the proposal's own id, never its timestamp: Postgres keeps microseconds, a JS Date only milliseconds.
+      const same = `entity_id = $1 AND pending_test_url = $2 AND pending_live_url = $3 AND pending_id = $4`;
+      const checked = [firm, testUrl, liveUrl, row.pending_id];
       if (!accept) {
-        const { rows } = await store.db.query(`UPDATE ${T}.partner_ledger_sources SET pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL, updated_at = now() WHERE ${same} RETURNING entity_id`, checked);
+        const { rows } = await store.db.query(`UPDATE ${T}.partner_ledger_sources SET pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL, pending_id = NULL, updated_at = now() WHERE ${same} RETURNING entity_id`, checked);
         if (!rows.length) return fail("The proposal changed while you were looking: read get_partner_kit again");
         await store.audit(user.id, "decline_partner_ledger_endpoints", firm, { test_url: testUrl, live_url: liveUrl });
         return json({ entity_id: firm, status: "declined" });
@@ -831,7 +869,7 @@ export function registerPartnerKitTools(
       const changed = row.test_url !== testUrl || row.live_url !== liveUrl;
       const backToSandbox = changed && row.active_source === "http";
       const { rows: done } = await store.db.query(
-        `UPDATE ${T}.partner_ledger_sources SET test_url = $2, live_url = $3, pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL,
+        `UPDATE ${T}.partner_ledger_sources SET test_url = $2, live_url = $3, pending_test_url = NULL, pending_live_url = NULL, pending_by = NULL, pending_at = NULL, pending_id = NULL,
            signing_secret = COALESCE(signing_secret, $5), config_version = config_version + CASE WHEN $6 THEN 1 ELSE 0 END,
            active_source = CASE WHEN $7 THEN 'sandbox' ELSE active_source END, active_run_id = CASE WHEN $7 THEN NULL ELSE active_run_id END,
            configured_by = $8, configured_at = now(), updated_at = now()
@@ -868,8 +906,7 @@ export function registerPartnerKitTools(
       if (typeof firm !== "string") return fail(firm.error);
       if (!vaultAvailable(false)) return fail("The partner kit needs MYNT_VAULT_KEY set on the server");
       if (!isAddress(public_key) || isWeakEd25519Key(base58Decode(public_key))) return fail("public_key must be a usable Ed25519 public key, base58 (a Solana-style address)");
-      const cooling = await coolOffRefusal(store, user.id, now(), "register or replace your firm's test signing key");
-      if (cooling) return fail(cooling);
+      // No cool-off: a test key can never sign live books, so a new firm's first member can run conformance at once.
       if ((await o.signingKeyOf(firm)) === public_key || (await everLiveKey(store, public_key))) return fail("That key has been registered as a live signing key: the test key must be a different key");
       await store.db.query(
         `INSERT INTO ${T}.partner_test_signing_keys (entity_id, public_key, registered_by, mac) VALUES ($1, $2, $3, $4)

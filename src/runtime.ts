@@ -109,6 +109,7 @@ export const FIRM_WEBHOOK_EVENTS = [
   "partner_ledger.approval_requested",
   "partner_ledger.conformance_expiring",
   "firm.member_added",
+  "firm.member_pending",
 ] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 
