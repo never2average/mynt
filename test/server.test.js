@@ -14,7 +14,7 @@ import { PRODUCT_LINES } from "../dist/catalog.js";
 import { CATALOG, licensed } from "./helpers.js";
 
 const CATALOG_TOOLS = ["find_licenses", "get_product", "get_product_regime", "get_region", "get_regulator", "get_template", "list_apps", "list_categories", "list_legal_instruments", "list_product_categories", "list_products", "list_regions", "list_regulated_product_types", "list_template_defaults", "whoami"];
-const CONSUMER_TOOLS = ["cancel_enrollment", "enroll_in_product", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment"];
+const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_product", "list_firm_notices", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment"];
 const DEVELOPER_TOOLS = [
   "create_app", "list_my_apps", "preview_app", "publish_app", "update_app",
   // building on innovators' products
