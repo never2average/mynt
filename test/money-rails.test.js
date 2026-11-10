@@ -1,13 +1,14 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { connectPostgres } from "../dist/db.js";
 import { createMcpHttpServer } from "../dist/http.js";
-import { authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, movementShape, recordMovementFailed, recordMovementOutput, recordMovementPending, recordMovementReversed, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { opsStatus } from "../dist/ops.js";
 import { normalizeModel } from "../dist/regulatory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
@@ -89,11 +90,11 @@ async function moneyTransmitter(store, user, covers, { fincen = true, grants = "
 }
 
 // A licence provider whose verified US licence covers `covers`, sponsoring one product in `jurisdictions`.
-async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-ny", "us-ca"] } = {}) {
+async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-ny", "us-ca"], grants } = {}) {
   const tag = randomBytes(4).toString("hex");
   const { user: adminUser } = await store.createUser(`Admin ${tag}`, ["admin"]);
   const { user: lpUser } = await store.createUser(`Lena ${tag}`, ["license_provider"]);
-  const { held, registration } = await moneyTransmitter(store, lpUser, covers);
+  const { held, registration } = await moneyTransmitter(store, lpUser, covers, grants ? { grants } : {});
   const { user: builderUser } = await store.createUser(`Neo ${tag}`, ["innovator"]);
   const builderFirm = await store.createEntity(builderUser.id, { name: `Builder ${tag}`, registration_numbers: {}, regions: ["US"] });
   await store.setUserEntity(builderUser.id, builderFirm.id);
@@ -118,6 +119,7 @@ async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-
     customer_state: "us-ny",
     customer_ref: "cust_1",
     idempotency_key: randomUUID(),
+    component_key: "account",
     subscription_id: randomUUID(),
     request_id: randomUUID(),
     ...over,
@@ -345,11 +347,22 @@ test("only a licence granting money transmission counts, with its FinCEN prerequ
   await ok(a.admin, "suspend_rail", { rail_id: r1.id, reason: "looking into it" });
   assert.deepEqual((await callTool(a.admin, "approve_rail", { rail_id: r1.id })).data.outside_licence_coverage, ["us-ny"]);
 
-  // A licence claiming the whole country doesn't clear each state: money transmission is licensed state by state.
-  const nationwide = await openPglite();
-  const b = await world(nationwide, { covers: ["us"] });
-  const nw = await ok(b.provider, "propose_rail", b.RAIL);
-  assert.deepEqual((await callTool(b.admin, "approve_rail", { rail_id: nw.id })).data.outside_licence_coverage, ["us-ny"]);
+  // A federal charter: its type covers 'us' and it grants money transmission, so it counts in every state.
+  const b = await world(await openPglite(), { covers: ["us"] });
+  assert.equal((await b.approvedRail({ states: ["us-ny", "us-tx"] })).status, "approved");
+  assert.equal((await authorizeMovement(b.store, b.move())).allowed, true);
+
+  // Country-wide without the grant counts for nothing: the grant is what matters.
+  const d = await world(await openPglite(), { covers: ["us"], grants: "us_deposits" });
+  const dep = await ok(d.provider, "propose_rail", d.RAIL);
+  assert.deepEqual(dep.outside_licence_coverage, ["us-ny"]);
+  assert.deepEqual((await callTool(d.admin, "approve_rail", { rail_id: dep.id })).data.outside_licence_coverage, ["us-ny"]);
+
+  // Montana has no state money transmitter licence: a valid state, on which a rail can't be approved.
+  const mt = await ok(a.provider, "propose_rail", { ...a.RAIL, direction: "on_ramp", states: ["us-mt"] });
+  assert.deepEqual((await callTool(a.admin, "approve_rail", { rail_id: mt.id })).data.outside_licence_coverage, ["us-mt"]);
+  // The territories aren't valid until the model has licence types for them.
+  for (const s of ["us-pr", "us-gu", "us-vi", "us-as", "us-mp"]) assert.equal((await callTool(a.provider, "propose_rail", { ...a.RAIL, states: [s] })).isError, true, s);
 
   // Only the licences the sponsorship is under count at the chokepoint, not any other the firm holds.
   const c = await world(await openPglite());
@@ -358,10 +371,11 @@ test("only a licence granting money transmission counts, with its FinCEN prerequ
   assert.equal((await authorizeMovement(c.store, c.move())).code, "licence_not_in_force");
 });
 
-test("the sponsor must be the action's own; no component and several sponsors is refused", async () => {
+test("the sponsor must be the action's own, and an action must say what it serves", async () => {
   const store = await openPglite();
   const w = await world(store);
   await w.approvedRail();
+  assert.equal((await authorizeMovement(store, w.move({ component_key: undefined }))).code, "component_required", "even with one sponsor");
   assert.equal((await authorizeMovement(store, w.move({ component_key: "account" }))).allowed, true);
   // The product has a sponsor, but not of what this action serves.
   assert.equal((await authorizeMovement(store, w.move({ component_key: "lending" }))).code, "component_not_sponsored");
@@ -370,7 +384,6 @@ test("the sponsor must be the action's own; no component and several sponsors is
   const { held } = await moneyTransmitter(store, second, ["us-ny", "us-ca"]);
   const asked = await store.requestSponsorship(w.builderUser.id, { product_id: w.product_id, component_key: "lending", builder_entity_id: w.builderFirm.id, provider_entity_id: second.entity_id, requested_jurisdictions: ["us-ny"], note: null });
   await store.decideSponsorship(asked.id, { status: "approved", decided_by: second.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
-  assert.equal((await authorizeMovement(store, w.move())).code, "sponsor_ambiguous");
   assert.equal((await authorizeMovement(store, w.move({ component_key: "account" }))).allowed, true);
   // The other sponsor has no rail, and the first one's doesn't serve its component.
   assert.equal((await authorizeMovement(store, w.move({ component_key: "lending" }))).code, "no_approved_rail");
@@ -392,6 +405,51 @@ test("whoever proposed a rail, or works for its firm, can't approve it", async (
   await store.setUserEntity(colleague.id, w.lpUser.entity_id);
   colleague.entity_id = w.lpUser.entity_id;
   assert.match(JSON.stringify((await callTool(await connect(store, colleague), "approve_rail", { rail_id: own.id })).data), /another admin must/);
+});
+
+test("once an attempt's outcome is unknown, only the partner's own final answer can fail it; any attempt's answer lands", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail({ per_transfer_limit_cents: 60_000, daily_limit_cents: 100_000 });
+  const row = async () => (await w.ledger(rail.id))[0];
+  const first = w.move({ amount_cents: 60_000 });
+  await authorizeMovement(store, first);
+  await recordMovementUnknown(store, first, "partner_internal_server_error");
+
+  // A retry, refused for reasons that say nothing about the first attempt.
+  const second = { ...first, request_id: randomUUID() };
+  assert.equal((await authorizeMovement(store, second)).allowed, true);
+  for (const why of ["unknown_quote", "consent_required", "data_required", "vendor_unavailable", "internal_before_call"]) await recordMovementFailed(store, second, why);
+  assert.deepEqual([(await row()).status, (await row()).status_detail], ["requested", "outcome_unknown:partner_internal_server_error"]);
+  assert.equal((await authorizeMovement(store, w.move({ amount_cents: 40_001 }))).code, "over_daily_limit", "still holding the day's limit");
+
+  // A late answer to the first attempt still finds it, though a later attempt is the current one.
+  assert.deepEqual((await row()).earlier_request_ids, [first.request_id]);
+  await recordMovementOutput(store, first, { transfer_status: "settled", settlement_ref: "tr_first" });
+  assert.deepEqual([(await row()).status, (await row()).external_ref], ["settled", "tr_first"]);
+
+  // The partner's own final answer does fail one.
+  const third = w.move({ amount_cents: 10_000 });
+  await authorizeMovement(store, third);
+  await recordMovementUnknown(store, third, "try_later");
+  await recordMovementOutput(store, third, { transfer_status: "failed" });
+  assert.equal((await w.ledger(rail.id)).find((r) => r.request_id === third.request_id).status, "failed");
+  const fourth = w.move({ amount_cents: 10_000 });
+  await authorizeMovement(store, fourth);
+  await recordMovementUnknown(store, fourth, "try_later");
+  await recordMovementFailed(store, fourth, "bank_rejected", { partner_confirmed: true });
+  assert.equal((await w.ledger(rail.id)).find((r) => r.request_id === fourth.request_id).status, "failed");
+});
+
+test("service types: names that move money, and what ops_status reports", async () => {
+  for (const name of ["send_money", "Bank payment", "fund account", "collect_payment", "debit_account", "MoneyTransfer", "Cash out", "cash_out_now", "deposit", "wire", "ACH push"]) assert.equal(namesMoneyMovement(name), true, name);
+  for (const name of ["identity_verification", "Mynt Ramp: add dollars quote", "offramp_quote", "bank_account_verification", "accounting"]) assert.equal(namesMoneyMovement(name), false, name);
+  const store = await openPglite();
+  assert.deepEqual((await opsStatus(store.db)).vendors.money_name_mismatches, []);
+  await store.db.query("INSERT INTO financial_products.service_types (region, key, name, category, input_schema, output_schema, consent_purpose, moves_money) VALUES ('US', 'old_payouts', 'Old payouts', 'other', '{}', '{}', 'x', false)");
+  const s = await opsStatus(store.db);
+  assert.deepEqual(s.vendors.money_name_mismatches, ["US/old_payouts"]);
+  assert.ok(s.attention.some((a) => /moves_money: false: US\/old_payouts/.test(a)));
 });
 
 test("partner refusals: only the allowlist, and no server error, mean nothing moved", () => {
@@ -560,6 +618,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
       input_schema: inputSchema,
       params_schema: { type: "object", required: ["direction", "amount_usd"], properties: { direction: { enum: ["on", "off"] }, amount_usd: { type: "string" } }, additionalProperties: false },
       params_fixture: { direction: "on", amount_usd: "100.00" },
+      moves_money: false,
       output_schema: {
         type: "object",
         required: ["quote_id", "expires_at", "direction", "amount_usd", "currency"],
@@ -588,12 +647,18 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     },
   });
   // What moves money is declared: not by its category or its name alone, and a quote can't be one.
-  const plain = { region: "IN", name: "Plain", input_schema: inputSchema, output_schema: { type: "object", properties: {}, additionalProperties: false }, consent_purpose: "x", vendor_licences: [], client_result: { fields: [], redirect: false } };
+  const plain = { region: "IN", name: "Plain", moves_money: false, input_schema: inputSchema, output_schema: { type: "object", properties: {}, additionalProperties: false }, consent_purpose: "x", vendor_licences: [], client_result: { fields: [], redirect: false } };
   assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "bank_payout", name: "Payouts", category: "other" } })).data), /declare moves_money/);
   assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "ramp_undeclared", category: "ramp" } })).data), /declare moves_money/);
   const quoteOutput = { type: "object", required: ["quote_id", "expires_at"], properties: { quote_id: { type: "string" }, expires_at: { type: "string" } }, additionalProperties: false };
   assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "ramp_transfer_quote", category: "ramp", quote: true, output_schema: quoteOutput } })).data), /named as a transfer/);
   assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "ramp_price", category: "ramp", quote: true, moves_money: true, output_schema: quoteOutput } })).data), /a quote only prices/);
+  assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "cash_out_price", category: "ramp", quote: true, output_schema: quoteOutput } })).data), /named as a transfer/);
+  const { moves_money: _undeclared, ...silent } = plain;
+  assert.equal((await call(admin, "define_service_type", { service_type: { ...silent, key: "silent_one", category: "other" } })).isError, true, "moves_money has no default");
+  // Where a customer lives comes only from the customer.
+  const withFills = await call(admin, "define_service_type", { service_type: { ...plain, key: "address_check", category: "other", fills: ["residence_state"], output_schema: { type: "object", properties: { residence_state: { type: "string" } }, additionalProperties: false } } });
+  assert.match(JSON.stringify(withFills.data), /comes only from the customer/);
 
   // The ramp firm, with its partner listed as live.
   await must(admin, "invite_user", { email: "ops@rampco.example", roles: ["vendor"] });
@@ -609,6 +674,9 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   // A ramp's test and live endpoints can't be the same one.
   const clash = await call(rampClient, "create_vendor_offering", { region: "IN", service_type: "ramp_quote", name: "same", price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, live_base_url: `${partnerUrl}/`, licence_ids: [rampLic.id] });
   assert.match(JSON.stringify(clash.data), /must be different endpoints/);
+  const sameUrl = new URL(partnerUrl);
+  const clashCase = await call(rampClient, "create_vendor_offering", { region: "IN", service_type: "ramp_quote", name: "same", price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, live_base_url: `HTTP://${sameUrl.hostname}:${sameUrl.port}/`, licence_ids: [rampLic.id] });
+  assert.match(JSON.stringify(clashCase.data), /must be different endpoints/, "the same endpoint however it's written");
   for (const key of ["ramp_quote", "ramp_transfer"]) {
     const o = await must(rampClient, "create_vendor_offering", { region: "IN", service_type: key, name: key, price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, licence_ids: [rampLic.id] });
     await store.db.query("UPDATE financial_products.vendor_offerings SET status = 'listed', live_base_url = $2 WHERE id = $1", [o.id, partnerUrl]);
@@ -735,6 +803,10 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const q4 = await quote("100.00");
   assert.equal((await start("transfer", { quote: q4 })).status, 502);
   assert.deepEqual([(await rowOf(q4)).status, (await rowOf(q4)).status_detail], ["requested", "outcome_unknown:try_later"]);
+  // A clear refusal of the retry is no answer about the first attempt: it stays open, and still counts.
+  partner.answer = "refused";
+  assert.equal((await start("transfer", { quote: q4 })).status, 502);
+  assert.deepEqual([(await rowOf(q4)).status, (await rowOf(q4)).status_detail], ["requested", "outcome_unknown:try_later"]);
   partner.answer = "submitted";
 
   // The day's limit: 300 used of 400, so another 100 fits and then nothing does.
@@ -811,7 +883,21 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.deepEqual(history.map((h) => [h.old_state, h.new_state]), [[null, "us-ny"], ["us-ny", "us-ca"], ["us-ca", null]], "the same value twice is no change");
   assert.match(history[0].changed_by, /^session:/);
   assert.match(history[0].customer_key, /^[0-9a-f]{40}$/);
+  assert.notEqual(history[0].customer_key, createHash("sha256").update(`mynt-ledger:${app.id}:cust_rail_1`).digest("hex").slice(0, 40), "keyed, not recomputable from the reference");
   assert.ok(!JSON.stringify(history).includes("cust_rail_1"));
   await assert.rejects(store.db.query("UPDATE financial_products.customer_state_history SET new_state = 'us-tx'"), /append-only/);
   await assert.rejects(store.db.query("DELETE FROM financial_products.customer_state_history"), /append-only/);
+  await assert.rejects(store.db.query("TRUNCATE financial_products.customer_state_history"), /append-only/);
+
+  // A value that can't be decrypted (a rotated vault key) never blocks a change, and above all not an erasure.
+  const corrupt = () => store.db.query("UPDATE financial_products.customer_vault SET sealed = 'v1:not:really:sealed' WHERE field = 'residence_state'");
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-tx" } })).status, 201);
+  await corrupt();
+  assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ca" } })).status, 201, "a new value still goes in");
+  await corrupt();
+  const erased = await api("DELETE", "/v1/client/fields", device);
+  assert.equal(erased.status, 200, erased.text);
+  assert.equal((await store.db.query("SELECT 1 FROM financial_products.customer_vault WHERE field = 'residence_state'")).rows.length, 0, "and it's gone");
+  const unreadable = (await store.db.query("SELECT old_state, new_state FROM financial_products.customer_state_history WHERE old_state_unreadable ORDER BY created_at")).rows;
+  assert.deepEqual(unreadable.map((h) => [h.old_state, h.new_state]), [[null, "us-ca"], [null, null]]);
 });

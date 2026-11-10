@@ -3,6 +3,7 @@
   "key": "credit_bureau_report",
   "name": "Credit bureau report",
   "category": "credit_bureau",
+  "moves_money": false,
   "description": "Pulls the customer's consumer report and credit score from a consumer reporting agency. The subscribing firm needs a permissible purpose under the Fair Credit Reporting Act.",
   "input_schema": {
     "type": "object",

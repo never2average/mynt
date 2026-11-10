@@ -1369,6 +1369,7 @@ const TABLES = `
     external_ref text,
     subscription_id uuid,
     request_id uuid,
+    earlier_request_ids uuid[] NOT NULL DEFAULT '{}', -- every earlier attempt's, so a late answer to any of them still lands
     sandbox boolean NOT NULL DEFAULT false,
     would_refuse text,
     limit_day date NOT NULL DEFAULT ((now() AT TIME ZONE 'UTC')::date),
@@ -1389,9 +1390,10 @@ const TABLES = `
   CREATE TABLE IF NOT EXISTS financial_products.customer_state_history (
     id uuid PRIMARY KEY,
     app_id uuid NOT NULL,
-    customer_key text NOT NULL,
+    customer_key text,
     sandbox boolean NOT NULL,
     old_state text,
+    old_state_unreadable boolean NOT NULL DEFAULT false, -- the old value couldn't be decrypted (a rotated vault key)
     new_state text,
     changed_by text NOT NULL,
     source text NOT NULL,
@@ -1405,6 +1407,9 @@ const TABLES = `
   DROP TRIGGER IF EXISTS customer_state_history_append_only ON financial_products.customer_state_history;
   CREATE TRIGGER customer_state_history_append_only BEFORE UPDATE OR DELETE ON financial_products.customer_state_history
     FOR EACH ROW EXECUTE FUNCTION financial_products.customer_state_history_is_append_only();
+  DROP TRIGGER IF EXISTS customer_state_history_no_truncate ON financial_products.customer_state_history;
+  CREATE TRIGGER customer_state_history_no_truncate BEFORE TRUNCATE ON financial_products.customer_state_history
+    FOR EACH STATEMENT EXECUTE FUNCTION financial_products.customer_state_history_is_append_only();
   -- One live movement's reservation against its rail, in one transaction. The lock on the rail serialises every
   -- reservation and status change on that rail, and each statement here sees what the one before it committed, so
   -- the day's total can't be read stale and a rail suspended a moment ago can't be used.
@@ -1449,7 +1454,7 @@ const TABLES = `
     END IF;
     IF seen THEN
       UPDATE financial_products.money_movements SET status = 'requested', status_detail = NULL, failed_at = NULL, rail_id = p_rail, sponsor_entity_id = p_sponsor,
-        state = p_state, state_source = p_state_source, expected_total_cents = p_expected, limit_day = today, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
+        state = p_state, state_source = p_state_source, expected_total_cents = p_expected, limit_day = today, earlier_request_ids = CASE WHEN request_id IS NOT NULL AND request_id <> p_request THEN array_append(earlier_request_ids, request_id) ELSE earlier_request_ids END, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
       RETURN QUERY SELECT 'reserved'::text, m.id, 'requested'::text;
       RETURN;
     END IF;

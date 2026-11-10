@@ -3,6 +3,7 @@
   "key": "identity_verification",
   "name": "Identity and SSN verification",
   "category": "identity",
+  "moves_money": false,
   "description": "Checks that a name, date of birth and Social Security number belong together, with the customer's consent (as the Social Security Administration's electronic verification requires).",
   "input_schema": {
     "type": "object",

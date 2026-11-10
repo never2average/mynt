@@ -3,6 +3,7 @@
   "key": "smart_contract_audit",
   "name": "Smart contract audit",
   "category": "other",
+  "moves_money": false,
   "description": "An independent human security audit of a firm's Solana program before or alongside Mynt's mainnet program gate, by a specialist audit firm. The builder engages and pays the auditor directly; Mynt only lists the service. The request names the program, its verifiable-build hash and where the auditor can read the source; the auditor answers with the engagement's status and a link to its published report.",
   "input_schema": {
     "type": "object",

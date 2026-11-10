@@ -1,8 +1,9 @@
 {
   "region": "US",
   "key": "offramp_quote",
-  "name": "Mynt Ramp: cash out dollars quote",
+  "name": "Mynt Ramp: dollars out quote",
   "category": "ramp",
+  "moves_money": false,
   "description": "A firm price for a customer cashing out US dollars to their bank account through the Mynt Ramp: amount_usd to the bank, fee_usd, and total_usd taken from their dollar balance (amount plus fee). The price holds until expires_at; the customer accepts it with offramp_transfer. The device sees dollars only. Underneath, the licensed ramp partner receives USDC on Solana from the product's provider: settlement_asset, settlement_network and settlement_amount are partner-side and go only to the innovator, never to the device.",
   "input_schema": {
     "type": "object",

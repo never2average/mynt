@@ -3,6 +3,7 @@
   "key": "bank_statement_analytics",
   "name": "Bank statement analytics",
   "category": "analytics",
+  "moves_money": false,
   "description": "Reads six months of bank statements the customer shared and returns their monthly income and banking behaviour.",
   "input_schema": {
     "type": "object",

@@ -245,9 +245,21 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     };
 
     // Every change to where the customer lives, before the vault changes (see money-rails.ts).
+    // It never gets in the way of the change itself: above all, of a customer erasing their data.
     const noteStateChange = async (customer: string, next: string | null, source: string) => {
-      const was = (await store.vaultFields(app.id, customer, session.sandbox)).find((h) => h.field === CUSTOMER_STATE_FIELD);
-      await recordCustomerStateChange(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, old_state: was ? open(was.sealed, session.sandbox).toLowerCase() : null, new_state: next, changed_by: `session:${session.id}`, source });
+      try {
+        const was = (await store.vaultFields(app.id, customer, session.sandbox)).find((h) => h.field === CUSTOMER_STATE_FIELD);
+        let old_state: string | null = null;
+        let old_state_unreadable = false;
+        try {
+          old_state = was ? open(was.sealed, session.sandbox).toLowerCase() : null;
+        } catch {
+          old_state_unreadable = true; // a rotated vault key, or a sandbox value from before a restart
+        }
+        await recordCustomerStateChange(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, old_state, old_state_unreadable, new_state: next, changed_by: `session:${session.id}`, source });
+      } catch (e) {
+        console.error("customer state history:", (e as Error).message);
+      }
     };
     if (path === "/v1/client/fields") {
       allow("GET, POST, DELETE");

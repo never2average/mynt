@@ -101,6 +101,7 @@ const QUOTE = {
     additionalProperties: false,
   },
   quote: true,
+  moves_money: false,
   consent_purpose: "fiat_ramp_transfer",
   vendor_licences: ["rbi_pa"],
   client_result: { fields: ["direction", "fiat_amount", "fiat_currency", "receive_amount", "fee"], redirect: false },

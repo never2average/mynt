@@ -3,6 +3,7 @@
   "key": "onramp_quote",
   "name": "Mynt Ramp: add dollars quote",
   "category": "ramp",
+  "moves_money": false,
   "description": "A firm price for a customer adding US dollars from their bank account through the Mynt Ramp: amount_usd from the bank, fee_usd, and total_usd added to their dollar balance (amount less fee). The price holds until expires_at; the customer accepts it with onramp_transfer. The device sees dollars only. Underneath, the licensed ramp partner settles the dollars as USDC on Solana with the product's provider: settlement_asset, settlement_network and settlement_amount are partner-side and go only to the innovator, never to the device.",
   "input_schema": {
     "type": "object",
