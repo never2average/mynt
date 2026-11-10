@@ -1350,6 +1350,53 @@ const TABLES = `
   );
   CREATE UNIQUE INDEX IF NOT EXISTS money_rails_one_live_idx ON financial_products.money_rails (entity_id, kind, provider, direction) WHERE status <> 'revoked';
   CREATE INDEX IF NOT EXISTS money_rails_entity_idx ON financial_products.money_rails (entity_id, status);
+  -- The partner kit (partner-kit.ts): where a licence provider's ledger is read from. An admin fixes the endpoints;
+  -- the firm takes the request-signing secret once, passes conformance, then switches its source from the sandbox.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_ledger_sources (
+    entity_id uuid PRIMARY KEY REFERENCES financial_products.entities(id),
+    test_url text,
+    live_url text,
+    signing_secret text, -- sealed under MYNT_VAULT_KEY
+    secret_shown_at timestamptz,
+    config_version integer NOT NULL DEFAULT 1,
+    configured_by uuid REFERENCES financial_products.users(id),
+    configured_at timestamptz,
+    active_source text NOT NULL DEFAULT 'sandbox' CHECK (active_source IN ('sandbox', 'http', 'file')),
+    active_run_id uuid,
+    activated_by uuid REFERENCES financial_products.users(id),
+    activated_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- Each conformance run, with its three parts. Cases name rules and product ids, never a figure.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_conformance_runs (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    source text NOT NULL CHECK (source IN ('http', 'file')),
+    config_version integer,
+    passed boolean NOT NULL,
+    ledger_passed boolean NOT NULL,
+    identity_passed boolean NOT NULL,
+    rails_passed boolean NOT NULL,
+    ledger jsonb NOT NULL,
+    identity jsonb NOT NULL,
+    rails jsonb NOT NULL,
+    run_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS partner_conformance_entity_idx ON financial_products.partner_conformance_runs (entity_id, source, created_at DESC);
+  -- Daily files a licence provider uploaded: the signed statement, sealed (admins can't read the numbers).
+  CREATE TABLE IF NOT EXISTS financial_products.partner_ledger_uploads (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    environment text NOT NULL CHECK (environment IN ('test', 'live')),
+    as_of timestamptz NOT NULL,
+    public_key text NOT NULL,
+    statement_sealed text NOT NULL,
+    products integer NOT NULL,
+    uploaded_by uuid REFERENCES financial_products.users(id),
+    uploaded_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS partner_ledger_uploads_idx ON financial_products.partner_ledger_uploads (entity_id, environment, as_of DESC);
   -- The money ledger: every movement Mynt instructed, in integer US cents. A customer appears only as a pseudonymous
   -- key. Live rows always name their rail and amount; sandbox rows may not, and never count against a limit.
   CREATE TABLE IF NOT EXISTS financial_products.money_movements (

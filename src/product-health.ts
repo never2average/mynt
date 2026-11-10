@@ -539,7 +539,7 @@ export interface HealthChain {
 export interface ProductHealthDeps {
   chain?: HealthChain | null;
   flowsFor?: FlowsFor | null;
-  ledgerFor?: (entityId: string) => PartnerLedger;
+  ledgerFor?: (entityId: string) => PartnerLedger | Promise<PartnerLedger>;
   liquidityProvidersOf?: (productId: string) => Promise<string[]>; // firms entitled alongside the licence provider
   poolsOf?: (productId: string) => Promise<string[]>; // none until pools exist
   openWithdrawalRequests?: (productId: string, poolId: string | null) => Promise<number>; // the queue's size, for the report
@@ -550,6 +550,13 @@ export interface ProductHealthDeps {
 }
 
 export class HealthError extends Error {}
+
+const UNCHOSEN_LEDGER: PartnerLedger = {
+  id: "unavailable",
+  name: "No ledger could be chosen",
+  kind: "sandbox",
+  read: async () => ({ error: { code: "ledger_unchosen", message: "Mynt couldn't tell which ledger to read" } }),
+};
 
 const unix = (t: string | Date) => Math.floor(new Date(t).getTime() / 1000);
 const ERROR_LIMIT = 300;
@@ -751,7 +758,7 @@ export class ProductHealthService {
 
   // Builds one snapshot for a period, sealed and ready to go. Never throws for a figure it can't get.
   private async compute(s: Subject, start: Date, end: Date, sequence: number) {
-    const ledger = (this.deps.ledgerFor ?? defaultLedgerFor)(s.partner);
+    const ledger = await this.ledgerOf(s.partner);
     const reading = await ledger
       .read({ product_id: s.productId, pool_id: s.poolId, provider_entity_id: s.partner, period_end: end.toISOString(), now: () => this.now() })
       .catch(() => ({ error: { code: "ledger_error", message: "The ledger call failed" } }));
@@ -1305,8 +1312,18 @@ export class ProductHealthService {
   }
 
   // Whether the ledger this firm's snapshots would come from is a real one: when there's no snapshot to read it from.
-  ledgerIsLive(entityId: string) {
-    return (this.deps.ledgerFor ?? defaultLedgerFor)(entityId).kind === "live";
+  async ledgerIsLive(entityId: string) {
+    return (await this.ledgerOf(entityId)).kind === "live";
+  }
+
+  // The ledger a sponsor's snapshots read (the partner kit decides it per firm: partner-kit.ts). One that can't be
+  // chosen reads as unavailable, never as live.
+  private async ledgerOf(entityId: string): Promise<PartnerLedger> {
+    try {
+      return await (this.deps.ledgerFor ?? defaultLedgerFor)(entityId);
+    } catch {
+      return UNCHOSEN_LEDGER;
+    }
   }
 
   // The authenticated report of one stored snapshot; null when it can't be opened (no vault key).

@@ -1,0 +1,51 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "urn:mynt:schema:partner-ledger-statement:1",
+ "title": "Partner ledger statement (mynt.partner_ledger.v1)",
+ "description": "What a licence provider tells Mynt about its own books, per product it sponsors: the funds it holds in reserve and what it owes that product's customers, in integer US cents, as of one time, signed with the firm's Ed25519 key (the one registered with register_partner_signing_key). The same shape answers Mynt's HTTPS request (request_id echoes the request's) and is uploaded as the daily file (request_id null). A figure the partner can't give is null with a reason; never 0 in its place. The signature is over the UTF-8 text 'mynt.partner_ledger.v1', one zero byte, then the canonical JSON of the statement without its 'signature' member (keys sorted, no spaces, integers only).",
+ "type": "object",
+ "required": ["schema", "provider_entity_id", "environment", "request_id", "as_of", "products", "signature"],
+ "additionalProperties": false,
+ "properties": {
+  "schema": { "const": "mynt.partner_ledger.v1" },
+  "provider_entity_id": { "type": "string", "format": "uuid", "description": "Your firm's id on Mynt (get_my_entity)" },
+  "environment": { "enum": ["test", "live"], "description": "test: your test books, which never count as live. live: your real books" },
+  "request_id": { "type": ["string", "null"], "maxLength": 100, "description": "The request_id of Mynt's request, echoed; null in a daily file" },
+  "as_of": { "type": "string", "format": "date-time", "description": "When your books said this (ISO 8601 with a time zone)" },
+  "products": {
+   "type": "array",
+   "maxItems": 1000,
+   "items": { "$ref": "#/$defs/product" }
+  },
+  "signature": {
+   "type": "object",
+   "required": ["public_key", "value"],
+   "additionalProperties": false,
+   "properties": {
+    "public_key": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$", "description": "Your firm's registered Ed25519 public key, base58" },
+    "value": { "type": "string", "pattern": "^[0-9a-f]{128}$", "description": "The Ed25519 signature, 64 bytes as lowercase hex" }
+   }
+  }
+ },
+ "$defs": {
+  "cents": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 },
+  "product": {
+   "type": "object",
+   "required": ["product_id", "reserves_held_cents", "customer_obligations_cents", "reason"],
+   "additionalProperties": false,
+   "properties": {
+    "product_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "reserves_held_cents": { "$ref": "#/$defs/cents", "description": "Integer US cents you hold in reserve for this product, or null" },
+    "customer_obligations_cents": { "$ref": "#/$defs/cents", "description": "Integer US cents you owe this product's customers, or null" },
+    "reason": { "type": ["string", "null"], "maxLength": 500, "description": "Why a figure is null: required when either is" }
+   },
+   "if": {
+    "anyOf": [
+     { "properties": { "reserves_held_cents": { "type": "null" } } },
+     { "properties": { "customer_obligations_cents": { "type": "null" } } }
+    ]
+   },
+   "then": { "properties": { "reason": { "type": "string", "minLength": 1 } } }
+  }
+ }
+}

@@ -24,6 +24,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 | "Change what an agent does" | its folder, `workspaces/<agent>/` (`CLAUDE.md`, `.claude/agents`, `.claude/skills`, `scripts/`) | `test/vibecoder-workspace.test.js` and the agent's own test |
 | "Change the generated SDKs" | `src/sdk.ts`, `src/sdk-clients.ts`, `sdk-templates/` | `test/client-sdks.test.js`; CI compiles every language |
 | "Change the starter app the coding agents scaffold" | `workspaces/coding-build/templates/mynt-app/`, `scripts/scaffold_app.py` | CI's `starter-app` job builds and runs it |
+| "Change how a licence provider connects its ledger" | `src/partner-kit.ts`, `src/partner-ledger/`, `schemas/partner-ledger/`, `docs/partners.md` | `test/partner-kit.test.js`, `test/product-health.test.js` |
 | "Change hosting" | `src/hosting.ts`, `src/freestyle.ts`, `src/compose.ts` | `test/hosting.test.js` |
 | "Change agent sandboxes" | `src/boat.ts`, `src/freestyle-sandboxes.ts`, `src/agent-host.ts` | `test/freestyle-sandboxes.test.js`, `test/builds.test.js` |
 | "Change the sample chat app or developer console" | `examples/mynt-chat/` | `cd examples/mynt-chat && npx vitest run && npx tsc --noEmit` |

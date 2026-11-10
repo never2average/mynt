@@ -43,6 +43,7 @@ import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from ".
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
+import { registerPartnerKitTools } from "./partner-kit.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
 import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
@@ -141,6 +142,11 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   if (user && hasLiquidityRole(rolesFrom(user))) registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null);
   if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
+  // The partner kit: a licence provider connects its ledger and sees pass or fail; admins set endpoints, never see figures.
+  if (user && (has("license_provider") || has("admin"))) {
+    const health = ctx.productHealth ?? null;
+    registerPartnerKitTools(server, store, user, { signingKeyOf: async (id) => (health ? health.signingKey(id) : null), opts: ctx.vendors, admin: has("admin"), licenceProvider: has("license_provider") });
+  }
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);

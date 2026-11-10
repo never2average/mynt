@@ -1,0 +1,18 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "urn:mynt:schema:partner-ledger-error:1",
+ "title": "A partner's refusal of a ledger request",
+ "description": "The body of any 4xx or 5xx answer to Mynt's ledger request. Mynt keeps the code and never stores or shows the message.",
+ "type": "object",
+ "required": ["error"],
+ "properties": {
+  "error": {
+   "type": "object",
+   "required": ["code", "message"],
+   "properties": {
+    "code": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$", "description": "bad_signature, stale_request, bad_request, unavailable, …" },
+    "message": { "type": "string", "maxLength": 500 }
+   }
+  }
+ }
+}

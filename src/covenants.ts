@@ -259,10 +259,10 @@ export class CovenantService {
     if (FIGURE_RULES[c.rule_type]) {
       const current = history.rows.filter((r) => r.epoch === history.epoch);
       const latest = current[current.length - 1];
-      if (!latest) c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "No snapshot has been recorded yet", sealed: false, snapshot: null, sandbox: this.sandboxOnly(sponsorship) });
+      if (!latest) c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "No snapshot has been recorded yet", sealed: false, snapshot: null, sandbox: await this.sandboxOnly(sponsorship) });
       else if (this.isStale(latest)) {
         // A figure says nothing about now once the record has stopped moving: it isn't judged, for or against.
-        c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "The latest snapshot is more than two intervals old, so it can't speak for now", sealed: false, snapshot: null, sandbox: this.sandboxOnly(sponsorship) });
+        c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "The latest snapshot is more than two intervals old, so it can't speak for now", sealed: false, snapshot: null, sandbox: await this.sandboxOnly(sponsorship) });
       } else {
         // A rule that's new or just changed starts from the latest snapshot; otherwise every snapshot since it last
         // looked, leaving out any too old to speak for now.
@@ -321,15 +321,15 @@ export class CovenantService {
     return (await this.alertOrRecord(c, b, "covenant.breached", { paused: true }, now)) ? this.recordAlert(c, now) : c;
   }
 
-  private sandboxOnly(s: Sponsorship) {
-    return !this.health.ledgerIsLive(s.provider_entity_id);
+  private async sandboxOnly(s: Sponsorship) {
+    return !(await this.health.ledgerIsLive(s.provider_entity_id));
   }
 
   private async judgeSnapshot(c: Covenant, s: Sponsorship, r: SnapshotRow): Promise<RuleResult> {
     const snapshot = { epoch: r.epoch, sequence: r.sequence, fingerprint: r.fingerprint };
-    if (r.status === "missed") return { status: "unknown", observed: null, reason: r.missed_reason ?? "No snapshot for this period", sealed: false, snapshot, sandbox: this.sandboxOnly(s) };
+    if (r.status === "missed") return { status: "unknown", observed: null, reason: r.missed_reason ?? "No snapshot for this period", sealed: false, snapshot, sandbox: await this.sandboxOnly(s) };
     // A sponsor reads only its own books; a second sponsor's numeric rules can't be answered from the first's figures.
-    if (r.partner_entity_id !== s.provider_entity_id) return { status: "unknown", observed: null, reason: "This snapshot's figures come from another licence provider's books, which your firm can't read", sealed: false, snapshot, sandbox: this.sandboxOnly(s) };
+    if (r.partner_entity_id !== s.provider_entity_id) return { status: "unknown", observed: null, reason: "This snapshot's figures come from another licence provider's books, which your firm can't read", sealed: false, snapshot, sandbox: await this.sandboxOnly(s) };
     const assessed = await this.health.assessOne(r);
     if (!assessed || !assessed.report) return { status: "unknown", observed: null, reason: assessed ? "The snapshot's report can't be authenticated" : "Mynt can't open the snapshot's report", sealed: false, snapshot, sandbox: false };
     if (assessed.source === "unavailable") return { status: "unknown", observed: null, reason: "The partner's ledger couldn't be read for this period", sealed: false, snapshot, sandbox: false };
@@ -339,7 +339,7 @@ export class CovenantService {
 
   private async judgeTiming(c: Covenant, s: Sponsorship, record: ProductRecord, history: History): Promise<RuleResult> {
     const now = this.now();
-    const sandbox = this.sandboxOnly(s);
+    const sandbox = await this.sandboxOnly(s);
     const current = history.rows.filter((r) => r.epoch === history.epoch);
     const last = current[current.length - 1];
     const snapshot = last ? { epoch: last.epoch, sequence: last.sequence, fingerprint: last.fingerprint } : null;
@@ -611,7 +611,7 @@ export class CovenantService {
     if (open) return this.remind(c, open);
     if (unknownFor <= c.unknown_limit_seconds) return c;
     const snapshot = c.last_sequence !== null ? { epoch: c.last_epoch!, sequence: c.last_sequence, fingerprint: await this.health.fingerprintAt(c.product_id, c.last_epoch!, c.last_sequence) } : null;
-    return this.openBreach(c, record, { status: "unknown", observed: unknownFor, reason: c.status_reason ?? "This rule can't be evaluated", sealed: false, snapshot, sandbox: this.sandboxOnly(s) }, "unknown_limit");
+    return this.openBreach(c, record, { status: "unknown", observed: unknownFor, reason: c.status_reason ?? "This rule can't be evaluated", sealed: false, snapshot, sandbox: await this.sandboxOnly(s) }, "unknown_limit");
   }
 
   // ---- who may do what ----
