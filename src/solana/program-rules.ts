@@ -52,12 +52,16 @@ export interface RuleFinding {
   detail: string;
   file?: string;
   line?: number;
+  // A blocking source hit in a file the compiler's dep-info doesn't list (read only because build-time code ran):
+  // it doesn't block by itself; it's an exception (uncompiled-hit:<file>) an admin must allow by name.
+  uncompiled?: boolean;
 }
 export interface RuleResult {
   passed: boolean;
   db_version: number;
   findings: RuleFinding[];
   flags: number; // findings that don't block: leads the audit agent must confirm or dismiss
+  uncompiled_hits: string[]; // files outside dep-info's list with a hit that would otherwise block (see RuleFinding)
   // Which signals Mynt had: a missing one is a weaker check, and says so.
   signals: Record<"source" | "idl" | "bytes", boolean>;
   limits: string[];
@@ -82,6 +86,9 @@ export interface ProgramUnderReview {
   // The workspace files the compiler read (rustc's dep-info, from Mynt's build container): when given, the rules
   // read exactly these, and the module-tree resolver is only a cross-check.
   compiled_files?: string[] | null;
+  // The files dep-info lists, when compiled_files is wider than that (build-time code ran, so the rules read every
+  // captured .rs file): a blocking hit outside this list is an uncompiled hit, not a refusal.
+  listed_files?: string[] | null;
 }
 
 // ---- source ----
@@ -651,6 +658,15 @@ export function runDetections(p: ProgramUnderReview, db: VulnDb = loadVulnDb(), 
 
 export function checkProgramRules(p: ProgramUnderReview, db: VulnDb = loadVulnDb()): RuleResult {
   const findings = runDetections(p, db);
+  const listed = p.listed_files ? new Set(p.listed_files) : null;
+  const uncompiled = new Set<string>();
+  if (listed)
+    for (const f of findings)
+      if (f.blocks && f.signal === "source" && f.file && !listed.has(f.file)) {
+        f.blocks = false;
+        f.uncompiled = true;
+        uncompiled.add(f.file);
+      }
   const signals = { source: !!(p.sources && Object.keys(p.sources).length), idl: !!p.idl, bytes: !!p.program };
   const missing = (Object.keys(signals) as (keyof typeof signals)[]).filter((k) => !signals[k]);
   // Without the source the rules can't see system transfers or authority changes at all: a program can't pass.
@@ -669,6 +685,7 @@ export function checkProgramRules(p: ProgramUnderReview, db: VulnDb = loadVulnDb
     db_version: db.version,
     findings,
     flags: findings.filter((f) => !f.blocks).length,
+    uncompiled_hits: [...uncompiled].sort(),
     signals,
     limits: [...RULE_LIMITS, ...(missing.length ? [`Not available for this program: ${missing.join(", ")}.`] : [])],
   };

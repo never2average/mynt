@@ -1409,3 +1409,30 @@ test("pool actions are audited", async () => {
   const actions = new Set((await s.db.query("SELECT action FROM financial_products.audit_log")).rows.map((r) => r.action));
   for (const a of ["create_pool", "approve_pool", "commit_to_pool", "report_pool_movement", "request_withdrawal", "cancel_withdrawal", "list_my_positions", "list_withdrawals", "list_pools", "list_pools_with_health", "pause_pool", "resume_pool", "set_pool_offering_cleared"]) assert.ok(actions.has(a), a);
 });
+
+test("a sponsor's pending correction doesn't take away the firm's right to dispute an admin's applied one; accepting it does", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 5_000);
+  const args = { pool_id: s.pool.id, lp_entity_id: s.fundA.entity.id };
+  const applied = await ok(s.admin, "set_pool_firm_state", { ...args, state: "us-ca", reason: "regulator's correction" });
+  const proposal = await ok(s.provider.client, "set_pool_firm_state", { ...args, state: "us-ny", reason: "sponsor's own view" });
+  assert.equal(proposal.status, "pending");
+  const open = (await s.position(s.fundA)).state_corrections_to_answer.map((c) => c.id).sort();
+  assert.deepEqual(open, [applied.correction_id, proposal.correction_id].sort(), "both are still the firm's to answer");
+  assert.equal((await s.db.query("SELECT status FROM financial_products.pool_state_corrections WHERE id = $1", [applied.correction_id])).rows[0].status, "applied");
+  await ok(s.fundA.client, "respond_to_state_correction", { correction_id: applied.correction_id, accept: false, reason: "We're in New York" });
+  assert.equal((await s.position(s.fundA)).state, "us-ny", "the dispute still puts the old state back");
+
+  // The firm's own acceptance of a pending correction replaces an applied one: it can't be disputed afterwards.
+  const t = await world();
+  await t.funded(t.fundA, 5_000);
+  const targs = { pool_id: t.pool.id, lp_entity_id: t.fundA.entity.id };
+  const admins = await ok(t.admin, "set_pool_firm_state", { ...targs, state: "us-ca", reason: "regulator's correction" });
+  const sponsors = await ok(t.provider.client, "set_pool_firm_state", { ...targs, state: "us-ny", reason: "address on file" });
+  await ok(t.fundA.client, "respond_to_state_correction", { correction_id: sponsors.correction_id, accept: true });
+  assert.equal((await t.position(t.fundA)).state, "us-ny");
+  assert.equal((await t.db.query("SELECT status FROM financial_products.pool_state_corrections WHERE id = $1", [admins.correction_id])).rows[0].status, "superseded");
+  const stale = await callTool(t.fundA.client, "respond_to_state_correction", { correction_id: admins.correction_id, accept: false });
+  assert.equal(stale.isError, true);
+  assert.equal((await t.position(t.fundA)).state, "us-ny");
+});
