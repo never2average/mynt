@@ -1415,9 +1415,25 @@ const TABLES = `
   -- One live movement's reservation against its rail, in one transaction. The lock on the rail serialises every
   -- reservation and status change on that rail, and each statement here sees what the one before it committed, so
   -- the day's total can't be read stale and a rail suspended a moment ago can't be used.
+  ALTER TABLE financial_products.money_movements ADD COLUMN IF NOT EXISTS state_verified_by text;
+  ALTER TABLE financial_products.money_movements ADD COLUMN IF NOT EXISTS state_verified_at timestamptz;
+  -- The state a licensed partner verified for a customer in its identity checks: the only state a live movement may
+  -- use (see resolveCustomerState). Live only; latest verification wins; gone when the customer erases their data.
+  CREATE TABLE IF NOT EXISTS financial_products.customer_verified_states (
+    app_id uuid NOT NULL,
+    customer_ref text NOT NULL,
+    state text NOT NULL,
+    source text NOT NULL,
+    verified_by_entity uuid,
+    verified_by text NOT NULL,
+    verified_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (app_id, customer_ref)
+  );
+  DROP FUNCTION IF EXISTS financial_products.reserve_money_movement(uuid, uuid, text, text, uuid, text, uuid, text, bigint, text, text, uuid, uuid, bigint, text);
   CREATE OR REPLACE FUNCTION financial_products.reserve_money_movement(
     p_rail uuid, p_id uuid, p_key text, p_product text, p_app uuid, p_action text, p_sponsor uuid, p_direction text,
-    p_amount bigint, p_state text, p_customer text, p_subscription uuid, p_request uuid, p_expected bigint, p_state_source text
+    p_amount bigint, p_state text, p_customer text, p_subscription uuid, p_request uuid, p_expected bigint, p_state_source text, p_state_verified_by text, p_state_verified_at timestamptz
   ) RETURNS TABLE (o_outcome text, o_id uuid, o_status text) LANGUAGE plpgsql AS $fn$
   DECLARE
     r financial_products.money_rails%ROWTYPE;
@@ -1456,12 +1472,12 @@ const TABLES = `
     END IF;
     IF seen THEN
       UPDATE financial_products.money_movements SET status = 'requested', status_detail = NULL, failed_at = NULL, rail_id = p_rail, sponsor_entity_id = p_sponsor,
-        state = p_state, state_source = p_state_source, expected_total_cents = p_expected, limit_day = today, earlier_request_ids = CASE WHEN request_id IS NOT NULL AND request_id <> p_request THEN array_append(earlier_request_ids, request_id) ELSE earlier_request_ids END, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
+        state = p_state, state_source = p_state_source, state_verified_by = p_state_verified_by, state_verified_at = p_state_verified_at, expected_total_cents = p_expected, limit_day = today, earlier_request_ids = CASE WHEN request_id IS NOT NULL AND request_id <> p_request THEN array_append(earlier_request_ids, request_id) ELSE earlier_request_ids END, subscription_id = p_subscription, request_id = p_request, updated_at = now() WHERE id = m.id;
       RETURN QUERY SELECT 'reserved'::text, m.id, 'requested'::text;
       RETURN;
     END IF;
-    INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, state_source, customer_key, expected_total_cents, status, subscription_id, request_id, limit_day)
-      VALUES (p_id, p_key, p_product, p_app, p_action, p_sponsor, p_rail, p_direction, p_amount, p_state, p_state_source, p_customer, p_expected, 'requested', p_subscription, p_request, today)
+    INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, app_id, action, sponsor_entity_id, rail_id, direction, amount_cents, state, state_source, state_verified_by, state_verified_at, customer_key, expected_total_cents, status, subscription_id, request_id, limit_day)
+      VALUES (p_id, p_key, p_product, p_app, p_action, p_sponsor, p_rail, p_direction, p_amount, p_state, p_state_source, p_state_verified_by, p_state_verified_at, p_customer, p_expected, 'requested', p_subscription, p_request, today)
       ON CONFLICT (idempotency_key) DO NOTHING RETURNING id INTO new_id;
     IF new_id IS NULL THEN
       SELECT * INTO m FROM financial_products.money_movements WHERE idempotency_key = p_key;

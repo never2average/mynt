@@ -7,7 +7,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { connectPostgres } from "../dist/db.js";
 import { createMcpHttpServer } from "../dist/http.js";
-import { ANY_ATTEMPT, authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, MAX_MOVEMENT_ATTEMPTS, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementGaveUp, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { ANY_ATTEMPT, authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, MAX_MOVEMENT_ATTEMPTS, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementGaveUp, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, recordVerifiedCustomerState, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { eraseCustomerVerification, RAMP_ADAPTERS, rampCustomerKey, refreshVerifiedCustomerState } from "../dist/ramp-adapters/index.js";
+import { bridgeAdapter } from "../dist/ramp-adapters/bridge.js";
+import { rampError } from "../dist/ramp-adapters/types.js";
+import { seal } from "../dist/vault.js";
+import { getOffering } from "../dist/vendors.js";
 import { opsStatus } from "../dist/ops.js";
 import { normalizeModel } from "../dist/regulatory.js";
 import { createServer } from "../dist/server.js";
@@ -120,6 +125,9 @@ async function world(store, { covers = ["us-ny", "us-ca"], jurisdictions = ["us-
     customer_ref: "cust_1",
     idempotency_key: randomUUID(),
     component_key: "account",
+    state_source: "partner_verified",
+    state_verified_by: "test_partner",
+    state_verified_at: new Date().toISOString(),
     subscription_id: randomUUID(),
     request_id: randomUUID(),
     ...over,
@@ -176,9 +184,9 @@ test("the customer's state must be on the rail and sponsored", async () => {
   assert.equal((await authorizeMovement(store, w.move({ customer_state: "us-tx" }))).code, "state_not_sponsored");
   // No state on file: asked for, in the customer's terms.
   const none = await authorizeMovement(store, w.move({ customer_state: undefined }));
-  assert.equal(none.code, "customer_state_required");
-  assert.equal(none.status, 409);
-  assert.equal((await authorizeMovement(store, w.move({ customer_state: "california" }))).code, "customer_state_required");
+  assert.equal(none.code, "state_unverified");
+  assert.equal(none.status, 403);
+  assert.equal((await authorizeMovement(store, w.move({ customer_state: "california" }))).code, "state_unverified");
 });
 
 test("over the per-transfer limit is refused and counts for nothing", async () => {
@@ -544,14 +552,146 @@ test("a service that accepts a quote takes its figures from the quote, never fro
 });
 
 test("the customer's state comes from one place, and what it was is on the movement", async () => {
-  assert.deepEqual(resolveCustomerState({ residence_state: "US-NY" }), { state: "us-ny", source: "customer_attested" });
-  assert.deepEqual(resolveCustomerState({}), { state: null, source: "customer_attested" });
   const store = await openPglite();
   const w = await world(store);
   const rail = await w.approvedRail();
-  await authorizeMovement(store, w.move({ customer_state: "us-ny", state_source: "customer_attested" }));
+  const app_id = randomUUID();
+  const customer_ref = "cust_verified";
+  const typed = { residence_state: "US-NY" };
+  const resolve = (sandbox, held = typed) => resolveCustomerState(store, { sandbox, app_id, customer_ref, held: async () => held });
+
+  // Sandbox goes by what the customer typed, and says so.
+  assert.deepEqual(await resolve(true), { state: "us-ny", source: "self_reported", verified_by: null, verified_at: null });
+  assert.equal((await resolve(true, {})).state, null);
+
+  // Live never does: no verification, no state, whatever is in the vault.
+  assert.deepEqual(await resolve(false), { state: null, source: "none", verified_by: null, verified_at: null });
+  const none = await resolve(false);
+  assert.equal((await authorizeMovement(store, w.move({ customer_state: none.state, state_source: none.source }))).code, "state_unverified");
+  // Even handed a valid state, the chokepoint refuses anything self-reported.
+  for (const state_source of ["self_reported", "customer_attested", undefined, null]) assert.equal((await authorizeMovement(store, w.move({ customer_state: "us-ny", state_source }))).code, "state_unverified", String(state_source));
+  assert.equal((await w.ledger(rail.id)).length, 0);
+  // A sandbox movement isn't refused, and is marked for what it is.
+  const sandbox = await authorizeMovement(store, w.move({ sandbox: true, customer_state: "us-ny", state_source: "self_reported" }));
+  assert.equal(sandbox.allowed, true);
+  assert.equal((await store.db.query("SELECT state_source FROM financial_products.money_movements WHERE id = $1", [sandbox.movement_id])).rows[0].state_source, "self_reported");
+
+  // Verified: used, and recorded with who and when.
+  const at = new Date(Date.now() - 86_400_000);
+  assert.equal(await recordVerifiedCustomerState(store, { app_id, customer_ref, state: "US-NY", source: "identity_service", verified_by_entity: w.lpUser.entity_id, verified_by: "identity_verification", verified_at: at }), true);
+  const found = await resolve(false, {});
+  assert.deepEqual(found, { state: "us-ny", source: "partner_verified", verified_by: "identity_verification", verified_at: at.toISOString() });
+  const first = w.move({ customer_state: found.state, state_source: found.source, state_verified_by: found.verified_by, state_verified_at: found.verified_at });
+  assert.equal((await authorizeMovement(store, first)).allowed, true);
   const [row] = await w.ledger(rail.id);
-  assert.deepEqual([row.state, row.state_source], ["us-ny", "customer_attested"]);
+  assert.deepEqual([row.state, row.state_source, row.state_verified_by, new Date(row.state_verified_at).toISOString()], ["us-ny", "partner_verified", "identity_verification", at.toISOString()]);
+
+  // Not a US state, or older than what's on file: nothing changes.
+  assert.equal(await recordVerifiedCustomerState(store, { app_id, customer_ref, state: "ontario", source: "identity_service", verified_by_entity: null, verified_by: "x" }), false);
+  assert.equal(await recordVerifiedCustomerState(store, { app_id, customer_ref, state: "us-tx", source: "identity_service", verified_by_entity: null, verified_by: "x", verified_at: new Date(at.getTime() - 1000) }), false);
+  assert.equal((await resolve(false, {})).state, "us-ny");
+
+  // Re-verified in California: a new movement goes by it (this rail is New York's only); the one in flight keeps its state.
+  await recordVerifiedCustomerState(store, { app_id, customer_ref, state: "us-ca", source: "identity_service", verified_by_entity: null, verified_by: "identity_verification", verified_at: new Date() });
+  const now = await resolve(false, {});
+  assert.equal(now.state, "us-ca");
+  const moved = { customer_state: now.state, state_source: now.source, state_verified_by: now.verified_by, state_verified_at: now.verified_at };
+  assert.equal((await authorizeMovement(store, w.move(moved))).code, "state_not_on_rail");
+  await recordMovementUnknown(store, first, "try_later");
+  assert.equal((await authorizeMovement(store, { ...first, ...moved, request_id: randomUUID() })).allowed, true, "a retry of the one in flight");
+  assert.equal((await w.ledger(rail.id))[0].state, "us-ny");
+
+  // Partner-verified changes are in the history, with old, new and source.
+  const history = (await store.db.query("SELECT old_state, new_state, source, changed_by FROM financial_products.customer_state_history WHERE app_id = $1 ORDER BY created_at", [app_id])).rows;
+  assert.deepEqual(history.map((h) => [h.old_state, h.new_state, h.source]), [[null, "us-ny", "partner_verified:identity_verification"], ["us-ny", "us-ca", "partner_verified:identity_verification"]]);
+  assert.equal(history[0].changed_by, `partner:${w.lpUser.entity_id}`);
+
+  // Erased: no state, so live is refused, and that's in the history too. A retry in flight is refused as well.
+  await eraseCustomerVerification(store, { app_id, customer_ref, sandbox: false, changed_by: "session:s1" });
+  const gone = await resolve(false);
+  assert.deepEqual(gone, { state: null, source: "none", verified_by: null, verified_at: null });
+  assert.equal((await authorizeMovement(store, { ...first, customer_state: gone.state, state_source: gone.source, request_id: randomUUID() })).code, "state_unverified");
+  const last = (await store.db.query("SELECT old_state, new_state, source FROM financial_products.customer_state_history WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1", [app_id])).rows[0];
+  assert.deepEqual(last, { old_state: "us-ca", new_state: null, source: "partner_verified:erased" });
+});
+
+test("an adapter that knows the verified state: re-read before each transfer, gone with the link on erasure; Bridge can't say", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const app_id = randomUUID();
+  const customer_ref = "cust_adapter";
+  const partner = { state: "us-ny", reads: 0, fails: false };
+  RAMP_ADAPTERS.verifying = {
+    ...bridgeAdapter,
+    id: "verifying",
+    environmentProblems: () => [],
+    customerIdentity: async () => {
+      partner.reads++;
+      return partner.fails ? rampError("partner_unreachable", "no") : { full_name: "A", date_of_birth: "1990-01-01", residential_state: partner.state };
+    },
+  };
+  const firm = w.lpUser.entity_id;
+  await store.db.query("INSERT INTO financial_products.service_types (region, key, name, category, input_schema, output_schema, consent_purpose, moves_money) VALUES ('US', 'onramp_transfer', 'o', 'ramp', '{}', '{}', 'x', true)");
+  const offeringId = randomUUID();
+  const keyId = randomUUID();
+  await store.db.query("INSERT INTO financial_products.key_vault (id, entity_id, type, label, sealed, created_by) VALUES ($1, $2, 'ramp_partner_live_credential', 'k', $3, $4)", [keyId, firm, seal("sk-live", false), w.lpUser.id]);
+  await store.db.query(
+    `INSERT INTO financial_products.vendor_offerings (id, entity_id, region, service_type, name, test_base_url, live_base_url, price, licence_ids, conformance_secret, adapter, adapter_config, adapter_live_key_id, status)
+     VALUES ($1, $2, 'US', 'onramp_transfer', 'o', 'https://t.example', 'https://l.example', '{"amount":0,"currency":"USD"}', '{}', $3, 'verifying', '{}', $4, 'listed')`,
+    [offeringId, firm, seal("c", false), keyId],
+  );
+  const offering = await getOffering(store.db, offeringId);
+  const resolve = () => resolveCustomerState(store, { sandbox: false, app_id, customer_ref, held: async () => ({ residence_state: "us-tx" }) });
+  const refresh = () => refreshVerifiedCustomerState(store, offering, { app_id, customer_ref }, {});
+
+  // Nobody linked: nothing to read.
+  await refresh();
+  assert.equal(partner.reads, 0);
+  assert.equal((await resolve()).state, null);
+  await store.db.query("INSERT INTO financial_products.ramp_partner_links (entity_id, environment, customer_key, partner_customer_id, identity_verified_at) VALUES ($1, 'live', $2, 'cust_p', now())", [firm, rampCustomerKey(app_id, customer_ref)]);
+
+  await refresh();
+  const first = await resolve();
+  assert.deepEqual([first.state, first.source, first.verified_by], ["us-ny", "partner_verified", "verifying"]);
+  // The same answer again isn't a new verification.
+  await refresh();
+  assert.equal((await resolve()).verified_at, first.verified_at);
+  assert.equal(partner.reads, 2);
+  // The partner re-verified them.
+  partner.state = "us-ca";
+  await refresh();
+  assert.equal((await resolve()).state, "us-ca");
+  // The partner can't be read, or doesn't say: what it last verified stands. Nothing else takes its place.
+  partner.fails = true;
+  await refresh();
+  partner.fails = false;
+  partner.state = null;
+  await refresh();
+  assert.equal((await resolve()).state, "us-ca");
+  partner.state = "us-ny";
+
+  // Erased: the state and the link go, so the partner's record can't bring it back.
+  await eraseCustomerVerification(store, { app_id, customer_ref, sandbox: false, changed_by: "session:s" });
+  const reads = partner.reads;
+  await refresh();
+  assert.equal(partner.reads, reads);
+  assert.equal((await resolve()).state, null);
+
+  // Linking a customer in live takes the state from the partner's record of them.
+  const linkedApp = randomUUID();
+  await store.db.query("INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status) VALUES ($1, $2, 'a', 'a', 'a', '{}', 'published')", [linkedApp, w.lpUser.id]);
+  for (const [field, value] of [["full_name", "A"], ["date_of_birth", "1990-01-01"]]) await store.putVaultField({ app_id: linkedApp, customer_ref: "cust_linked", sandbox: false, field, sealed: seal(value, false), source: "typed" });
+  await store.setSetting("mynt_ramp", { entity_id: firm }, null);
+  const linkId = randomUUID();
+  await store.db.query("INSERT INTO financial_products.ramp_link_requests (id, entity_id, app_id, customer_ref, sandbox, session_id, product_id, consent_purpose) VALUES ($1, $2, $3, 'cust_linked', false, $4, 'p', 'x')", [linkId, firm, linkedApp, randomUUID()]);
+  await ok(w.admin, "link_ramp_partner_customer", { link_reference: linkId, partner_customer_id: "cust_p2" });
+  const linked = await resolveCustomerState(store, { sandbox: false, app_id: linkedApp, customer_ref: "cust_linked", held: async () => ({}) });
+  assert.deepEqual([linked.state, linked.source, linked.verified_by], ["us-ny", "partner_verified", "verifying"]);
+  delete RAMP_ADAPTERS.verifying;
+
+  // Bridge's documented customer response has no address, even if a response happens to carry something.
+  const identity = await bridgeAdapter.customerIdentity({ http: async () => ({ status: 200, body: { first_name: "A", last_name: "B", birth_date: "1990-01-01", residential_address: { subdivision: "NY" } }, error: null }) }, "c1");
+  assert.equal(identity.residential_state, null);
 });
 
 test("what settled is kept, and a difference from the quote is flagged", async () => {
@@ -667,7 +807,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const innovator = await connectV(ctx.user);
 
   // The ramp partner: it quotes, and takes transfers; how it answers is set per test.
-  const partner = { transfers: [], answer: "submitted" };
+  const partner = { transfers: [], answer: "submitted", identity: { result: "no_match" } };
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
@@ -675,6 +815,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     res.writeHead(200, { "Content-Type": "application/json" });
     if (req.url.endsWith("/v1/ramp_quote"))
       return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: { quote_id: `q_${randomUUID()}`, expires_at: new Date(Date.now() + 60_000).toISOString(), direction: "on", amount_usd: body.params.amount_usd, currency: "USD" } }));
+    if (req.url.endsWith("/v1/identity_check")) return res.end(JSON.stringify({ request_id: body.request_id, status: "ok", output: partner.identity }));
     partner.transfers.push(body);
     if (partner.answer === "refused") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "unknown_quote", message: "no" } }));
     if (partner.answer === "vague") return res.end(JSON.stringify({ request_id: body.request_id, status: "error", output: null, error: { code: "try_later", message: "hm" } }));
@@ -722,6 +863,20 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
       client_result: { status: { from: "transfer_status", map: { submitted: "pending", settled: "completed", failed: "failed", returned: "failed" } }, fields: ["transfer_status"], redirect: false },
     },
   });
+  await must(admin, "define_service_type", {
+    service_type: {
+      region: "IN",
+      key: "identity_check",
+      name: "Identity check",
+      category: "identity",
+      moves_money: false,
+      input_schema: inputSchema,
+      output_schema: { type: "object", required: ["result"], properties: { result: { enum: ["match", "no_match"] }, residential_state: { type: "string" } }, additionalProperties: false },
+      consent_purpose: "fiat_ramp_transfer",
+      vendor_licences: [],
+      client_result: { status: { from: "result", map: { match: "verified", no_match: "not_verified" } }, fields: [], redirect: false },
+    },
+  });
   // What moves money is declared: not by its category or its name alone, and a quote can't be one.
   const plain = { region: "IN", name: "Plain", moves_money: false, input_schema: inputSchema, output_schema: { type: "object", properties: {}, additionalProperties: false }, consent_purpose: "x", vendor_licences: [], client_result: { fields: [], redirect: false } };
   assert.match(JSON.stringify((await call(admin, "define_service_type", { service_type: { ...plain, key: "bank_payout", name: "Payouts", category: "other" } })).data), /declare moves_money/);
@@ -753,7 +908,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const sameUrl = new URL(partnerUrl);
   const clashCase = await call(rampClient, "create_vendor_offering", { region: "IN", service_type: "ramp_quote", name: "same", price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, live_base_url: `HTTP://${sameUrl.hostname}:${sameUrl.port}/`, licence_ids: [rampLic.id] });
   assert.match(JSON.stringify(clashCase.data), /must be different endpoints/, "the same endpoint however it's written");
-  for (const key of ["ramp_quote", "ramp_transfer"]) {
+  for (const key of ["ramp_quote", "ramp_transfer", "identity_check"]) {
     const o = await must(rampClient, "create_vendor_offering", { region: "IN", service_type: key, name: key, price: { amount: 0, currency: "INR" }, test_base_url: partnerUrl, licence_ids: [rampLic.id] });
     await store.db.query("UPDATE financial_products.vendor_offerings SET status = 'listed', live_base_url = $2 WHERE id = $1", [o.id, partnerUrl]);
     offerings[key] = o.id;
@@ -763,7 +918,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   }
   await publishDefined(ctx, (d) => {
     d.descriptions.documents = { kfs: "https://bank.example.com/kfs.pdf" };
-    for (const [id, key] of [["get_quote", "ramp_quote"], ["transfer", "ramp_transfer"]]) {
+    for (const [id, key] of [["get_quote", "ramp_quote"], ["transfer", "ramp_transfer"], ["verify_identity", "identity_check"]]) {
       d.partner_handoffs.push({ _id: id, name: id, trigger: "account_opened", sends: { type: "object", required: ["full_name"] }, returns: { type: "object", required: ["status"] } });
       d.connections.push(
         { _id: `h_${id}`, type: "handoff_to_party", from: { kind: "partner_handoff", id }, to: { kind: "party", id: subs[key].vendor_party_id }, attributes: { sla: "PT1M", consent_purpose: "fiat_ramp_transfer", channel: "api", vendor_subscription_id: subs[key].subscription_id, service_type: key } },
@@ -790,7 +945,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     const text = await res.text();
     return { status: res.status, body: JSON.parse(text), text };
   };
-  const session = (customer_ref) => api("POST", "/v1/client_sessions", key, { product_ids: [P], scopes: ["get_quote", "transfer"], customer_ref }).then((r) => r.body.client_secret);
+  const session = (customer_ref) => api("POST", "/v1/client_sessions", key, { product_ids: [P], scopes: ["get_quote", "transfer", "verify_identity"], customer_ref }).then((r) => r.body.client_secret);
   const device = await session("cust_rail_1");
   assert.equal((await api("POST", "/v1/client/evidence", device, { product_id: P, type: "consent_given", subject: "fiat_ramp_transfer" })).status, 201);
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { full_name: "Avery Stone" } })).status, 201);
@@ -801,16 +956,30 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
     return q.body.reference;
   };
 
-  // No state on file yet: the transfer asks for it, the partner hears nothing, and the quote stays usable.
+  // No verified state yet: refused, the partner hears nothing, and the quote stays usable.
   const q1 = await quote();
   const noState = await start("transfer", { quote: q1 });
-  assert.equal(noState.status, 409, noState.text);
-  assert.equal(noState.body.error, "customer_state_required");
+  assert.equal(noState.status, 403, noState.text);
+  assert.equal(noState.body.error, "state_unverified");
   assert.equal(partner.transfers.length, 0);
 
   // The customer's state is accepted, because this product moves money.
   const stateSet = await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ny" } });
   assert.equal(stateSet.status, 201, stateSet.text);
+  // ... for forms and sandbox. It doesn't move money live, however valid it is.
+  assert.equal((await start("transfer", { quote: q1 })).body.error, "state_unverified");
+  // A failed identity check says nothing about where they live, even if it names a state.
+  partner.identity = { result: "no_match", residential_state: "us-ny" };
+  assert.equal((await start("verify_identity", {})).body.status, "not_verified");
+  assert.equal((await start("transfer", { quote: q1 })).body.error, "state_unverified");
+  // A passed check with no address doesn't either.
+  partner.identity = { result: "match" };
+  assert.equal((await start("verify_identity", {})).body.status, "verified");
+  assert.equal((await start("transfer", { quote: q1 })).body.error, "state_unverified");
+  // A passed check that verified the address does.
+  partner.identity = { result: "match", residential_state: "us-ny" };
+  assert.equal((await start("verify_identity", {})).body.status, "verified");
+  assert.equal(partner.transfers.length, 0);
 
   // Nobody sponsors it: refused before anything is instructed.
   const noSponsor = await start("transfer", { quote: q1 });
@@ -845,7 +1014,17 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal(row.direction, "on_ramp");
   assert.equal(row.state, "us-ny");
   assert.equal(row.sponsor_entity_id, lpUser.entity_id);
-  assert.equal(row.state_source, "customer_attested");
+  assert.equal(row.state_source, "partner_verified");
+  assert.equal(row.state_verified_by, "identity_check");
+  assert.ok(row.state_verified_at);
+
+  // Re-verified elsewhere: new movements go by it, and this one keeps the state it was reserved under.
+  partner.identity = { result: "match", residential_state: "us-ca" };
+  await start("verify_identity", {});
+  assert.equal((await start("transfer", { quote: await quote("10.00") })).body.error, "state_not_sponsored");
+  assert.equal((await rowOf(q1)).state, "us-ny");
+  partner.identity = { result: "match", residential_state: "us-ny" };
+  await start("verify_identity", {});
 
   // If the run can't even be started, or fails before the partner is called, nothing moved: the reservation goes.
   const realQuery = store.db.query;
@@ -965,7 +1144,15 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ny" } })).status, 201);
   assert.equal((await api("POST", "/v1/client/fields", device, { product_id: P, values: { residence_state: "us-ca" } })).status, 201);
   assert.equal((await api("DELETE", "/v1/client/fields", device)).status, 200);
-  const history = (await store.db.query("SELECT * FROM financial_products.customer_state_history ORDER BY created_at, new_state NULLS LAST")).rows;
+  const allHistory = (await store.db.query("SELECT * FROM financial_products.customer_state_history ORDER BY created_at, new_state NULLS LAST")).rows;
+  const history = allHistory.filter((h) => h.source.startsWith("self_reported"));
+  assert.deepEqual(allHistory.filter((h) => h.source.startsWith("partner_verified")).map((h) => [h.old_state, h.new_state, h.source]), [
+    [null, "us-ny", "partner_verified:identity_check"],
+    ["us-ny", "us-ca", "partner_verified:identity_check"],
+    ["us-ca", "us-ny", "partner_verified:identity_check"],
+    ["us-ny", null, "partner_verified:erased"],
+  ]);
+  assert.equal((await resolveCustomerState(store, { sandbox: false, app_id: app.id, customer_ref: "cust_rail_1", held: async () => ({ residence_state: "us-ny" }) })).state, null, "erased: no state for live");
   assert.deepEqual(history.map((h) => [h.old_state, h.new_state]), [[null, "us-ny"], ["us-ny", "us-ca"], ["us-ca", null]], "the same value twice is no change");
   assert.match(history[0].changed_by, /^session:/);
   assert.match(history[0].customer_key, /^[0-9a-f]{40}$/);

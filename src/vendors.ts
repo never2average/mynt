@@ -15,7 +15,7 @@ import { checkWebhookUrl, emitFirmEvent, emitEvent, FIRM_WEBHOOK_EVENTS } from "
 import type { Db } from "./db.js";
 import type { HeldLicense, ProductRecord, Store, User, VendorBinding } from "./store.js";
 import { fixtureValue, open, seal, validateValue, vaultAvailable } from "./vault.js";
-import { rampCustomerKey, serveRampAdapter } from "./ramp-adapters/index.js";
+import { rampCustomerKey, refreshVerifiedCustomerState, serveRampAdapter } from "./ramp-adapters/index.js";
 import {
   authorizeMovement,
   CUSTOMER_STATE_FIELD,
@@ -29,6 +29,7 @@ import {
   recordMovementPending,
   recordMovementReversed,
   recordMovementUnknown,
+  recordVerifiedCustomerState,
   resolveCustomerState,
 } from "./money-rails.js";
 import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
@@ -1016,6 +1017,12 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType | null, end: 
       if (f === CUSTOMER_STATE_FIELD || v == null || validateValue(f, v)) continue; // a stored type can't set where they live
       await store.putVaultField({ app_id: run.app_id, customer_ref: run.customer_ref, sandbox: run.sandbox, field: f, sealed: seal(String(v).trim(), run.sandbox), source: PREFILL_SOURCE[t.category] ?? "vendor" });
     }
+  // An identity check that passed, live, from a partner that says where the customer lives (see resolveCustomerState).
+  if (status === "completed" && shown === "verified" && output && t && !run.sandbox && run.customer_ref && (t.category === "identity" || t.category === "kyc") && output.residential_state) {
+    const sub = await getSubscription(store.db, run.subscription_id);
+    const vendor = sub && (await getOffering(store.db, sub.offering_id));
+    await recordVerifiedCustomerState(store, { app_id: run.app_id, customer_ref: run.customer_ref, state: output.residential_state, source: "identity_service", verified_by_entity: vendor?.entity_id ?? null, verified_by: t.key, verified_at: new Date() });
+  }
   await store.recordClientEvidence({
     app_id: run.app_id,
     session_id: run.session_id,
@@ -1158,7 +1165,8 @@ export async function vendorAction(
   const at = { subscription_id: sub.id, request_id: run.request_id };
   let movementId: string | undefined;
   if (isMoneyMovement(t)) {
-    const customerState = resolveCustomerState(await a.held());
+    if (!a.sandbox && bound.o.adapter) await refreshVerifiedCustomerState(store, bound.o, { app_id: a.app_id, customer_ref: a.customer_ref }, opts);
+    const customerState = await resolveCustomerState(store, { sandbox: a.sandbox, app_id: a.app_id, customer_ref: a.customer_ref, held: a.held });
     const verdict = await authorizeMovement(store, {
       product_id: a.record.product.id,
       sandbox: a.sandbox,
@@ -1166,6 +1174,8 @@ export async function vendorAction(
       channel: { kind: "ramp_adapter", provider: bound.o.adapter ?? bound.o.id },
       customer_state: customerState.state,
       state_source: customerState.source,
+      state_verified_by: customerState.verified_by,
+      state_verified_at: customerState.verified_at,
       customer_ref: a.customer_ref,
       // One quote is one movement, however many times it's accepted after a failure.
       idempotency_key: a.quote ? `quote:${a.quote}` : `run:${run.id}`,

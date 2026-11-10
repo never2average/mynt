@@ -40,6 +40,11 @@
           "deceased",
           "unavailable"
         ]
+      },
+      "residential_state": {
+        "type": "string",
+        "pattern": "^us-[a-z]{2}$",
+        "description": "The US state of the residential address this check verified, as ISO 3166-2 (e.g. us-ny). Send it only when the check verified the address, and only with result match: a live money movement goes by it."
       }
     },
     "additionalProperties": false

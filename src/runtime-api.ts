@@ -10,7 +10,7 @@ import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { masked, open, sandboxPrefill, seal, validateValue, vaultAvailable } from "./vault.js";
 import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import type { VendorCallOptions } from "./vendor-call.js";
-import { requestRampLink } from "./ramp-adapters/index.js";
+import { eraseCustomerVerification, requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
 import { CUSTOMER_STATE_FIELD, productMoneyDirections, recordCustomerStateChange } from "./money-rails.js";
 
@@ -256,7 +256,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         } catch {
           old_state_unreadable = true; // a rotated vault key, or a sandbox value from before a restart
         }
-        await recordCustomerStateChange(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, old_state, old_state_unreadable, new_state: next, changed_by: `session:${session.id}`, source });
+        await recordCustomerStateChange(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, old_state, old_state_unreadable, new_state: next, changed_by: `session:${session.id}`, source: `self_reported:${source}` });
       } catch (e) {
         console.error("customer state history:", (e as Error).message);
       }
@@ -271,6 +271,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
       if (method === "DELETE") {
         await noteStateChange(customer, null, "erased");
         const erased = await store.eraseVault(app.id, customer, session.sandbox);
+        await eraseCustomerVerification(store, { app_id: app.id, customer_ref: customer, sandbox: session.sandbox, changed_by: `session:${session.id}` });
         return send(res, 200, { erased }, cors);
       }
       const body = parse(FieldsBody, await readJson(req, maxBody));

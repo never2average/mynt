@@ -93,6 +93,8 @@ const toMovement = (r: Row) => ({
   amount_cents: r.amount_cents == null ? null : Number(r.amount_cents),
   state: (r.state as string | null) ?? null,
   state_source: (r.state_source as string | null) ?? null,
+  state_verified_by: (r.state_verified_by as string | null) ?? null,
+  state_verified_at: iso(r.state_verified_at),
   expected_total_cents: r.expected_total_cents == null ? null : Number(r.expected_total_cents),
   settled_amount_cents: r.settled_amount_cents == null ? null : Number(r.settled_amount_cents),
   settled_amount_differs: (r.settled_amount_differs as boolean | null) ?? null,
@@ -174,10 +176,59 @@ export const customerKey = (appId: string | null, customerRef: string | null) =>
 
 // ---- the customer's state ----
 
-// The one place that decides which US state a customer is in. Today it's what the customer told Mynt (their vault's
-// residence_state). When a partner-verified address exists, this is the function that changes.
-export function resolveCustomerState(held: Record<string, string>): { state: string | null; source: string } {
-  return { state: stateOf(held[CUSTOMER_STATE_FIELD]), source: "customer_attested" };
+// The one place that decides which US state a customer is in, read afresh for every attempt.
+// Live: only the residential state a licensed partner verified in its identity checks. No verified state means no
+// state: nothing else stands in for it. Sandbox: what the customer typed (residence_state), marked self-reported.
+export const PARTNER_VERIFIED = "partner_verified";
+export const SELF_REPORTED = "self_reported";
+export interface ResolvedCustomerState {
+  state: string | null;
+  source: typeof PARTNER_VERIFIED | typeof SELF_REPORTED | "none";
+  verified_by: string | null;
+  verified_at: string | null;
+}
+export async function resolveCustomerState(store: Store, c: { sandbox: boolean; app_id: string; customer_ref: string; held: () => Promise<Record<string, string>> }): Promise<ResolvedCustomerState> {
+  if (c.sandbox) return { state: stateOf((await c.held())[CUSTOMER_STATE_FIELD]), source: SELF_REPORTED, verified_by: null, verified_at: null };
+  const { rows } = await store.db.query(`SELECT state, verified_by, verified_at FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2`, [c.app_id, c.customer_ref]);
+  const state = rows[0] ? stateOf(rows[0].state) : null;
+  return state ? { state, source: PARTNER_VERIFIED, verified_by: rows[0].verified_by as string, verified_at: iso(rows[0].verified_at) } : { state: null, source: "none", verified_by: null, verified_at: null };
+}
+
+// A licensed partner verified where a customer lives. The latest verification wins. verified_at: when the partner says
+// it verified them; left out, it's now for a new or changed state, and an unchanged state keeps the time it had, so
+// reading the same answer again isn't a new verification. Returns false for what isn't a US state.
+export async function recordVerifiedCustomerState(store: Store, v: { app_id: string; customer_ref: string; state: unknown; source: "ramp_link" | "identity_service"; verified_by_entity: string | null; verified_by: string; verified_at?: string | Date | null }): Promise<boolean> {
+  const state = stateOf(v.state);
+  if (!state) return false;
+  const at = v.verified_at ? new Date(v.verified_at).toISOString() : null;
+  const { rows } = await store.db.query(
+    `WITH was AS (SELECT state FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2)
+     INSERT INTO ${T}.customer_verified_states AS t (app_id, customer_ref, state, source, verified_by_entity, verified_by, verified_at)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, now()))
+     ON CONFLICT (app_id, customer_ref) DO UPDATE SET state = EXCLUDED.state, source = EXCLUDED.source, verified_by_entity = EXCLUDED.verified_by_entity, verified_by = EXCLUDED.verified_by,
+       verified_at = CASE WHEN $7::timestamptz IS NULL AND t.state = EXCLUDED.state THEN t.verified_at ELSE EXCLUDED.verified_at END, updated_at = now()
+       WHERE $7::timestamptz IS NULL OR EXCLUDED.verified_at >= t.verified_at
+     RETURNING (SELECT state FROM was) AS old_state`,
+    [v.app_id, v.customer_ref, state, v.source, v.verified_by_entity, v.verified_by, at],
+  );
+  if (!rows[0]) return false; // an older verification than the one on file
+  await noteHistory(store, { app_id: v.app_id, customer_ref: v.customer_ref, sandbox: false, old_state: (rows[0].old_state as string | null) ?? null, new_state: state, changed_by: `partner:${v.verified_by_entity ?? v.verified_by}`, source: `${PARTNER_VERIFIED}:${v.verified_by}` });
+  return true;
+}
+
+// Erasure takes the verified state too: an erased customer has no state, so a live movement is refused.
+export async function eraseVerifiedCustomerState(store: Store, c: { app_id: string; customer_ref: string; changed_by: string }): Promise<void> {
+  const { rows } = await store.db.query(`DELETE FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2 RETURNING state`, [c.app_id, c.customer_ref]);
+  if (rows[0]) await noteHistory(store, { app_id: c.app_id, customer_ref: c.customer_ref, sandbox: false, old_state: rows[0].state as string, new_state: null, changed_by: c.changed_by, source: `${PARTNER_VERIFIED}:erased` });
+}
+
+// The history is a record of the change, never a condition of it.
+async function noteHistory(store: Store, c: Parameters<typeof recordCustomerStateChange>[1]) {
+  try {
+    await recordCustomerStateChange(store, c);
+  } catch (e) {
+    console.error("customer state history:", (e as Error).message);
+  }
 }
 
 // Appends one change of a customer's state to its history. Nothing updates or deletes that table.
@@ -206,7 +257,9 @@ export interface MovementRequest {
   expected_total_cents?: number | null; // what the quote said the balance side would be, to compare with what settles
   channel: { kind: RailKind; provider: string }; // how Mynt would instruct it: the rail must be this one
   customer_state: unknown; // from resolveCustomerState; checked here
-  state_source?: string | null; // where that state came from, kept on the movement
+  state_source?: string | null; // where that state came from, kept on the movement. Live needs partner_verified.
+  state_verified_by?: string | null; // the partner that verified it
+  state_verified_at?: string | null; // and when
   customer_ref: string | null; // kept only as a pseudonymous key
   idempotency_key: string; // the same for every attempt at one movement
   app_id?: string | null;
@@ -267,6 +320,7 @@ async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string 
   if (!m.direction) return refusal(403, "movement_unknown", "Mynt can't tell which way this transfer moves money, so it isn't allowed");
   if (m.amount_cents === null) return refusal(403, "amount_unknown", "Mynt can't tell how much this transfer moves, so it isn't allowed");
   const state = stateOf(m.customer_state);
+  if (!m.sandbox && (!state || m.state_source !== PARTNER_VERIFIED)) return refusal(403, "state_unverified", "Money can't move for this customer: a licensed partner hasn't verified their home state in an identity check");
   if (!state) return refusal(409, "customer_state_required", `Record the customer's US state first: POST /v1/client/fields with ${CUSTOMER_STATE_FIELD}, e.g. us-ny`);
   let sponsorships = await store.sponsorships({ product_id: m.product_id, status: "approved" });
   if (!sponsorships.length) return refusal(403, "no_sponsor", "Money can't move for this product: no licence provider sponsors it");
@@ -328,7 +382,9 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
     await store.audit(null, "money_movement_refused", m.product_id, { code: "too_many_attempts", idempotency_key: m.idempotency_key, attempts: existing.earlier_request_ids.length + 1, sandbox: m.sandbox });
     return refusal(409, "too_many_attempts", `This transfer has been tried ${MAX_MOVEMENT_ATTEMPTS} times, so it can't be tried again; get a new quote once it has settled or failed`);
   }
-  const eligible = await eligibleRails(store, m, !m.sandbox && existing?.status === "requested" ? existing.rail_id : null);
+  // A retry of a movement still in flight keeps the state it was reserved under, as long as the customer still has one.
+  const retrying = !m.sandbox && existing?.status === "requested" && stateOf(m.customer_state) && m.state_source === PARTNER_VERIFIED;
+  const eligible = await eligibleRails(store, retrying ? { ...m, customer_state: existing.state } : m, !m.sandbox && existing?.status === "requested" ? existing.rail_id : null);
   if (m.sandbox) return recordSandbox(store, m, existing, eligible);
   if (existing && existing.status !== "failed" && existing.status !== "requested") return { allowed: true, movement_id: existing.id, status: existing.status, replay: true };
   const refuse = async (r: Refusal): Promise<Refusal> => {
@@ -347,7 +403,7 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
   let last: string | null = null;
   const id = randomUUID();
   for (const rail of eligible.rails) {
-    const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_money_movement($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`, [
+    const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_money_movement($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`, [
       rail.id,
       id,
       m.idempotency_key,
@@ -363,6 +419,8 @@ export async function authorizeMovement(store: Store, m: MovementRequest): Promi
       m.request_id ?? null,
       m.expected_total_cents ?? null,
       m.state_source ?? null,
+      m.state_verified_by ?? null,
+      m.state_verified_at ?? null,
     ]);
     const r = rows[0] as { o_outcome: string; o_id: string | null; o_status: MovementStatus | null };
     if (r.o_outcome === "reserved") return { allowed: true, movement_id: r.o_id!, status: "requested", replay: false };
