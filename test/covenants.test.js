@@ -52,10 +52,12 @@ async function setup({ kind = "live", books = { reserves: 150_00, owed: 100_00 }
   const builder = await firm("Builder Co", ["innovator"]);
   const stranger = await firm("Other Bank", ["license_provider"]);
   const { user: admin } = await store.createUser("Ada", ["admin"]);
+  let sponsorships = 0;
   const sponsor = async (who) => {
     const s = await store.requestSponsorship(builder.user.id, { product_id: productId, component_key: "core", builder_entity_id: builder.entity.id, provider_entity_id: who.entity.id, requested_jurisdictions: [], note: null });
     const approved = await store.decideSponsorship(s.id, { status: "approved", decided_by: who.user.id, note: null });
-    await pg.query("UPDATE financial_products.sponsorships SET decided_at = $2 WHERE id = $1", [s.id, new Date(T0 - 7 * 24 * HOUR)]); // before this test's clock
+    // Before this test's clock, and in order: the earliest-approved sponsor supplies the books.
+    await pg.query("UPDATE financial_products.sponsorships SET decided_at = $2 WHERE id = $1", [s.id, new Date(T0 - 7 * 24 * HOUR + 60_000 * sponsorships++)]);
     return approved;
   };
   const sponsorship = await sponsor(provider);
