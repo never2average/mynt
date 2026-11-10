@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import http from "node:http";
-import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -214,6 +214,20 @@ class FakeCluster {
           assert.ok(signed.has(current) && base58Encode(buf.data.subarray(5, 37)) === current, "only the buffer's authority hands it over");
           assert.ok(next, "a buffer's authority can't be removed");
           Buffer.from(base58Decode(next)).copy(buf.data, 5);
+        } else if (tag === 5 && this.accounts.get(ix.accounts[0])?.data.readUInt32LE(0) === 3) {
+          // Close on a program's program data: [program data, recipient, upgrade authority (signs), program], all
+          // but the authority writable. The program data's lamports go to the recipient and the program is dead.
+          const [programData, recipient, authority, program] = ix.accounts;
+          const pd = this.accounts.get(programData);
+          assert.equal(ix.accounts.length, 4, "closing program data needs the program account too");
+          assert.ok(signed.has(authority) && pd.data[12] === 1 && base58Encode(pd.data.subarray(13, 45)) === authority, "only the upgrade authority closes a program");
+          const prog = this.accounts.get(program);
+          assert.ok(prog && prog.owner === UPGRADEABLE_LOADER && base58Encode(prog.data.subarray(4, 36)) === programData, "the program account is the program data's own");
+          for (const k of [programData, recipient, program]) assert.ok(tx.writable.has(k), `${k} is writable`);
+          assert.ok(recipient !== programData);
+          this.accounts.get(recipient).lamports += pd.lamports;
+          this.accounts.delete(programData);
+          prog.closed = true;
         } else if (tag === 5) {
           const [bufAddr, recipient, authority] = ix.accounts;
           const buf = this.accounts.get(bufAddr);
@@ -2256,4 +2270,309 @@ test("the exact toolchain each program was built with is kept with it, its deplo
   const old = await w.build();
   await w.solana.recordArtifacts(old, [{ name: "x", declared_id: null, sha256: executableHash(code), size: code.length, program: code, idl: null }]);
   assert.equal((await w.solana.artifacts(old))[0].toolchain, null);
+});
+
+// ---- removing a test app, and closing devnet programs ----
+
+// A devnet program of the world's app, deployed from a build Mynt verified; `captured` is the source, dependencies
+// and dep-info Mynt kept with it (shared by hash with any other build that captured the same).
+async function deployedProgram(w, name = "mynt_program", captured = {}) {
+  const { program_id } = await w.ok(w.dev, "reserve_program_id", { name, cluster: "devnet", app_id: w.app.id });
+  const buildId = await w.build();
+  const code = w.program(3000, name.length);
+  await w.solana.recordArtifacts(buildId, [{ name, declared_id: program_id, sha256: executableHash(code), size: code.length, program: code, idl: null, ...captured }]);
+  await w.ok(w.dev, "deploy_program", { program_id, build_id: buildId });
+  await w.solana.settled(program_id);
+  const p = await w.ok(w.dev, "get_program", { program_id });
+  assert.equal(p.status, "deployed", p.error);
+  return { ...p, build_id: buildId };
+}
+
+const loaderTag = (ix) => (ix.program === UPGRADEABLE_LOADER ? ix.data.readUInt32LE(0) : -1);
+
+test("close_program: the loader's Close on the program data, signed by Mynt's devnet authority, returns its lamports there", async () => {
+  const w = await world();
+  const p = await deployedProgram(w);
+  const chain = w.clusters.devnet;
+  const authority = p.upgrade_authority;
+  const held = chain.accounts.get(p.programdata_address).lamports;
+  const before = chain.accounts.get(authority).lamports;
+
+  // Developers don't get the tool; admins do.
+  assert.ok(!(await w.dev.listTools()).tools.some((t) => t.name === "close_program"));
+  assert.ok((await w.admin.listTools()).tools.some((t) => t.name === "close_program"));
+
+  const r = await w.ok(w.admin, "close_program", { program_id: p.program_id, reason: "test cleanup" });
+  assert.equal(r.status, "closed");
+  assert.equal(r.recipient, authority);
+  assert.equal(r.lamports_returned, held);
+  // One transaction, one instruction: Close (5) with [program data (w), recipient (w), authority (signer), program (w)].
+  const tx = chain.sent.at(-1);
+  assert.equal(tx.signature, r.signature);
+  assert.deepEqual(tx.signers, [authority]);
+  assert.equal(tx.ixs.length, 1);
+  assert.equal(loaderTag(tx.ixs[0]), 5);
+  assert.equal(tx.ixs[0].data.length, 4);
+  assert.deepEqual(tx.ixs[0].accounts, [p.programdata_address, authority, authority, p.program_id]);
+  assert.equal(chain.accounts.get(p.programdata_address), undefined, "the program data is gone");
+  assert.equal(chain.accounts.get(authority).lamports, before + held - 5000, "its lamports went back to the authority, less the fee");
+
+  const after = await w.ok(w.dev, "get_program", { program_id: p.program_id });
+  assert.equal(after.status, "closed");
+  assert.equal(after.in_progress, null);
+  const audit = (await w.db.query("SELECT details FROM financial_products.audit_log WHERE action = 'close_program' AND target = $1", [p.program_id])).rows;
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].details.lamports_returned, held);
+  assert.equal(audit[0].details.reason, "test cleanup");
+
+  // Closed is for good: not again, and no deploy at that address.
+  let e = await w.call(w.admin, "close_program", { program_id: p.program_id });
+  assert.match(e.data.error, /already closed/);
+  e = await w.call(w.dev, "deploy_program", { program_id: p.program_id, build_id: p.build_id });
+  assert.ok(e.isError);
+
+  // A reserved program has nothing on chain; a mainnet program is never closed, deployed or not.
+  const reserved = await w.ok(w.dev, "reserve_program_id", { name: "spare", cluster: "devnet", app_id: w.app.id });
+  e = await w.call(w.admin, "close_program", { program_id: reserved.program_id });
+  assert.match(e.data.error, /Only a deployed program/);
+  const main = await w.ok(w.dev, "reserve_program_id", { name: "main_program", cluster: "mainnet" });
+  await w.db.query("UPDATE financial_products.solana_programs SET status = 'deployed', upgrade_authority = $2 WHERE program_id = $1", [main.program_id, authority]);
+  const sentBefore = w.clusters.mainnet.sent.length;
+  e = await w.call(w.admin, "close_program", { program_id: main.program_id });
+  assert.match(e.data.error, /Only devnet programs can be closed/);
+  assert.equal(w.clusters.mainnet.sent.length, sentBefore, "nothing was sent to mainnet");
+});
+
+test("remove_app: a dry run lists everything; confirm closes the devnet program and leaves no row naming the app; the audit entry stays", async () => {
+  const w = await world();
+  const app = w.app;
+  const hex = (c) => c.repeat(64);
+  // Captured with the deployed build: one source shared with another app's build (kept), the rest its own (removed).
+  const p = await deployedProgram(w, "mynt_program", {
+    sources: { sha256: hex("a"), files: { "lib.rs": "shared" } },
+    deps: { sha256: hex("b"), data: { packages: [] } },
+    depinfo: { sha256: hex("c"), data: { files: [] } },
+  });
+  const reserved = await w.ok(w.dev, "reserve_program_id", { name: "spare", cluster: "devnet", app_id: app.id });
+  const otherApp = await w.store.createApp(w.devUser.id, { name: "Other", description: "", audience: "", product_ids: [] });
+  const otherBuild = (await w.builds.start(w.devUser, { goal: "Another app", app_id: otherApp.id })).id;
+  const code = w.program(1000, 9);
+  await w.solana.recordArtifacts(otherBuild, [
+    { name: "other", declared_id: null, sha256: executableHash(code), size: code.length, program: code, idl: null, sources: { sha256: hex("a"), files: { "lib.rs": "shared" } } },
+  ]);
+  await (await import("../dist/agent-meter.js")).AgentMeter.open(w.db);
+  await w.db.query("INSERT INTO financial_products.agent_spend (run_key, usd, calls) VALUES ($1, 1.5, 3)", [`build:${p.build_id}`]);
+
+  // The app's runtime, all sandbox: keys, a session and what it recorded, a webhook and a delivery, and the rest.
+  const { key } = await w.store.createApiKey(w.devUser.id, { app_id: app.id, environment: "sandbox", label: "test", allowed_origins: [] });
+  await w.store.createApiKey(w.devUser.id, { app_id: app.id, environment: "live", label: "never used", allowed_origins: [] });
+  const { session } = await w.store.createClientSession({ app_id: app.id, key_id: key.id, customer_ref: "c1", product_ids: [], scopes: [], sandbox: true, ttl_seconds: 600 });
+  await w.store.recordClientEvidence({ app_id: app.id, session_id: session.id, product_id: "savings-account", contract_hash: null, type: "disclosure_shown", subject: "x", content_hash: null, customer_ref: "c1", sandbox: true });
+  await w.store.putVaultField({ app_id: app.id, customer_ref: "c1", sandbox: true, field: "name", sealed: "sealed", source: "test" });
+  await w.store.createHandoff({ id: randomUUID(), app_id: app.id, key_id: key.id, product_id: "savings-account", action: "open", consumer_ref: null, sandbox: true, redirect_url: "https://example.com" });
+  await w.store.recordAppEvent({ app_id: app.id, product_id: "savings-account", type: "view", screen: null, sandbox: true });
+  await w.store.createTestConsumer(app.id, "Test");
+  await w.store.createAppRelease(app.id, "0.1.0", "first", w.devUser.id);
+  await w.store.createRequest({ kind: "product_access", product_id: "savings-account", app_id: app.id, campaign_id: null, requester_id: w.devUser.id, status: "pending", note: "" });
+  const { webhook } = await w.store.createWebhook(w.devUser.id, { app_id: app.id, url: "https://hooks.example.com/app", events: ["handoff.completed"] });
+  await w.db.query(
+    "INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status) VALUES (gen_random_uuid(), $1, gen_random_uuid(), 't', '{}', true, 'delivered')",
+    [webhook.id],
+  );
+  await w.store.audit(w.devUser.id, "create_app", app.id, {});
+  const auditBefore = Number((await w.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log")).rows[0].n);
+
+  // Every table with an app_id, and every table pointing at a program or a build: what must be empty afterwards.
+  const appTables = (await w.db.query("SELECT table_name FROM information_schema.columns WHERE table_schema = 'financial_products' AND column_name = 'app_id'")).rows.map((r) => r.table_name);
+  const programIds = [p.program_id, reserved.program_id];
+  const programUuids = (await w.db.query("SELECT id FROM financial_products.solana_programs WHERE app_id = $1", [app.id])).rows.map((r) => r.id);
+  const buildIds = (await w.db.query("SELECT id FROM financial_products.build_runs WHERE app_id = $1", [app.id])).rows.map((r) => r.id);
+  assert.ok(buildIds.length >= 1 && programUuids.length === 2);
+  const programTables = (
+    await w.db.query(
+      `SELECT DISTINCT c.conrelid::regclass::text AS t, a.attname AS col FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+        WHERE c.contype = 'f' AND c.confrelid = 'financial_products.solana_programs'::regclass`,
+    )
+  ).rows;
+  assert.ok(programTables.length >= 2, "the program registry's foreign keys");
+  const by = async (sql, params) => Number((await w.db.query(sql, params)).rows[0].n);
+  const remaining = async () => {
+    const out = {};
+    for (const t of appTables) out[t] = await by(`SELECT count(*)::int AS n FROM financial_products.${t} WHERE app_id = $1`, [app.id]);
+    for (const { t, col } of programTables) out[`${t} (${col})`] = await by(`SELECT count(*)::int AS n FROM ${t} WHERE ${col} = ANY($1)`, [programUuids]);
+    out["apps (id)"] = await by("SELECT count(*)::int AS n FROM financial_products.apps WHERE id = $1", [app.id]);
+    out["solana_programs (program_id)"] = await by("SELECT count(*)::int AS n FROM financial_products.solana_programs WHERE program_id = ANY($1)", [programIds]);
+    out["solana_keys (program scope)"] = await by("SELECT count(*)::int AS n FROM financial_products.solana_keys WHERE scope = ANY($1)", [programUuids]);
+    for (const t of ["solana_program_artifacts", "build_events", "solana_program_versions"])
+      out[`${t} (build)`] = await by(`SELECT count(*)::int AS n FROM financial_products.${t} WHERE build_id = ANY($1)`, [buildIds]);
+    out["agent_spend (build)"] = await by("SELECT count(*)::int AS n FROM financial_products.agent_spend WHERE run_key = ANY($1)", [buildIds.map((b) => `build:${b}`)]);
+    out["webhook_deliveries (webhook)"] = await by("SELECT count(*)::int AS n FROM financial_products.webhook_deliveries WHERE webhook_id = $1", [webhook.id]);
+    return out;
+  };
+  const start = await remaining();
+  for (const t of ["apps (id)", "api_keys", "client_sessions", "client_evidence", "customer_vault", "handoffs", "app_events", "test_consumers", "app_releases", "requests", "webhooks", "build_runs", "solana_programs"])
+    assert.ok(start[t] > 0, `the setup put rows in ${t}`);
+
+  // Admins only.
+  assert.ok(!(await w.dev.listTools()).tools.some((t) => t.name === "remove_app"));
+
+  // The dry run: everything listed, nothing touched.
+  const dry = await w.ok(w.admin, "remove_app", { app_id: app.id });
+  assert.equal(dry.removed, false);
+  assert.equal(dry.dry_run, true);
+  const rows = dry.would_remove.rows;
+  const expected = {
+    apps: 1,
+    api_keys: 2,
+    client_sessions: 1,
+    client_evidence: 1,
+    customer_vault: 1,
+    handoffs: 1,
+    app_events: 1,
+    test_consumers: 1,
+    app_releases: 1,
+    requests: 1,
+    webhooks: 1,
+    webhook_deliveries: 1,
+    solana_programs: 2,
+    solana_program_versions: 1,
+    solana_program_sources: 0,
+    solana_program_deps: 1,
+    solana_program_depinfo: 1,
+    agent_spend: 1,
+    build_runs: buildIds.length,
+  };
+  for (const [t, n] of Object.entries(expected)) assert.equal(rows[t] ?? 0, n, `${t} in the dry run`);
+  assert.ok(rows.solana_program_artifacts >= 1);
+  assert.ok(rows.build_events >= 1, "the builds' events");
+  assert.ok(rows.solana_keys >= 1, "the spare program's reserved keypair");
+  assert.deepEqual(
+    dry.would_remove.programs.map((x) => [x.program_id, x.on_chain]).sort(),
+    [
+      [p.program_id, "close"],
+      [reserved.program_id, "nothing to close"],
+    ].sort(),
+  );
+  assert.match(dry.would_remove.kept, /audit_log/);
+  assert.deepEqual(await remaining(), start, "a dry run removes nothing");
+  assert.ok(w.clusters.devnet.accounts.get(p.programdata_address), "and closes nothing");
+
+  // Confirmed: the program is closed on chain first, then every row goes in one transaction.
+  const held = w.clusters.devnet.accounts.get(p.programdata_address).lamports;
+  const done = await w.ok(w.admin, "remove_app", { app_id: app.id, confirm: true, reason: "devnet connector test" });
+  assert.equal(done.removed, true);
+  assert.equal(done.closed.length, 1);
+  assert.equal(done.closed[0].program_id, p.program_id);
+  assert.equal(done.closed[0].lamports_returned, held);
+  assert.equal(w.clusters.devnet.accounts.get(p.programdata_address), undefined);
+  assert.equal(loaderTag(w.clusters.devnet.sent.at(-1).ixs[0]), 5);
+
+  const end = await remaining();
+  for (const [t, n] of Object.entries(end)) assert.equal(n, 0, `${t} still names the app`);
+  // Captured material shared with another app's build stays; the app's own goes.
+  assert.equal((await w.db.query("SELECT 1 FROM financial_products.solana_program_sources WHERE sha256 = $1", [hex("a")])).rows.length, 1);
+  for (const t of ["solana_program_deps", "solana_program_depinfo"]) assert.equal((await w.db.query(`SELECT 1 FROM financial_products.${t}`)).rows.length, 0, t);
+  // Nothing else was touched: the other app, its build and its artifact, the developer's firm webhook.
+  assert.ok(await w.store.getApp(otherApp.id));
+  assert.equal((await w.solana.artifacts(otherBuild)).length, 1);
+  assert.equal((await w.db.query("SELECT 1 FROM financial_products.webhooks WHERE entity_id = $1", [w.entity.id])).rows.length, 1);
+
+  // The audit log: nothing deleted, one entry added listing what went.
+  const audit = (await w.db.query("SELECT actor_id, action, target, details FROM financial_products.audit_log ORDER BY created_at")).rows;
+  assert.equal(audit.length, auditBefore + 1);
+  assert.ok(audit.some((a) => a.action === "create_app" && a.target === app.id), "the app's earlier audit entries survive");
+  const entry = audit.find((a) => a.action === "remove_app" && a.target === app.id);
+  assert.equal(entry.details.outcome, "removed");
+  assert.equal(entry.actor_id, w.adminUser.id);
+  assert.equal(entry.details.reason, "devnet connector test");
+  assert.deepEqual(entry.details.removed.apps.ids, [app.id]);
+  assert.deepEqual(entry.details.removed.solana_programs.ids.sort(), [...programIds].sort());
+  assert.deepEqual(entry.details.removed.build_runs.ids.sort(), [...buildIds].sort());
+  assert.equal(entry.details.removed.api_keys.count, 2);
+  assert.equal(entry.details.closed[0].program_id, p.program_id);
+
+  const gone = await w.call(w.admin, "remove_app", { app_id: app.id });
+  assert.match(gone.data.error, /No app/);
+});
+
+test("remove_app refuses a published, hosted or live app, or one with a mainnet program, and deletes nothing", async () => {
+  const fresh = async () => {
+    const w = await world();
+    return { w, app: await w.store.getApp(w.app.id) };
+  };
+  const refused = async (w, app, pattern) => {
+    for (const confirm of [false, true]) {
+      const r = await w.call(w.admin, "remove_app", { app_id: app.id, confirm });
+      assert.ok(r.isError, JSON.stringify(r.data));
+      assert.equal(r.data.removed, false);
+      assert.ok(r.data.refused.some((x) => pattern.test(x)), `${pattern}: ${JSON.stringify(r.data.refused)}`);
+    }
+    assert.ok(await w.store.getApp(app.id), "the app is still there");
+  };
+
+  // Published.
+  let { w, app } = await fresh();
+  await w.store.saveApp({ ...app, status: "published" });
+  await refused(w, app, /published/);
+
+  // Hosted on Mynt (undeploy first).
+  ({ w, app } = await fresh());
+  const { HostingService } = await import("../dist/hosting.js");
+  await HostingService.open(w.db, null, null);
+  const tenant = randomUUID();
+  await w.db.query("INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status) VALUES ($1, $2, 'test', 'running')", [tenant, w.devUser.id]);
+  await w.db.query(
+    "INSERT INTO financial_products.hosted_apps (app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status) VALUES ($1, $2, gen_random_uuid(), 'o/r', 'abc', 3001, 'sealed', 'running')",
+    [app.id, tenant],
+  );
+  await refused(w, app, /hosted on Mynt.*undeploy/);
+
+  // A mainnet program, even one only reserved.
+  ({ w, app } = await fresh());
+  await w.ok(w.dev, "reserve_program_id", { name: "main_program", cluster: "mainnet", app_id: app.id });
+  await refused(w, app, /mainnet programs/);
+
+  // Live customer data, and live money movements.
+  ({ w, app } = await fresh());
+  await w.store.putVaultField({ app_id: app.id, customer_ref: "c1", sandbox: false, field: "name", sealed: "sealed", source: "test" });
+  await refused(w, app, /live customer data: 1 live row in customer_vault/);
+  ({ w, app } = await fresh());
+  await w.store.recordAppEvent({ app_id: app.id, product_id: "savings-account", type: "view", screen: null, sandbox: false });
+  await refused(w, app, /live row in app_events/);
+
+  // A table it can't clean: customers' state history is append-only.
+  ({ w, app } = await fresh());
+  await w.db.query(
+    "INSERT INTO financial_products.customer_state_history (id, app_id, customer_key, sandbox, new_state, changed_by, source) VALUES (gen_random_uuid(), $1, 'k', true, 'CA', 'test', 'test')",
+    [app.id],
+  );
+  await refused(w, app, /customer_state_history can't be cleaned safely/);
+});
+
+test("remove_app stops before deleting anything when a devnet program can't be closed, unless told to proceed (recorded)", async () => {
+  const w = await world();
+  const p = await deployedProgram(w);
+  // The program's upgrade authority isn't Mynt's any more (handed over outside Mynt): Mynt can't close it.
+  const pd = w.clusters.devnet.accounts.get(p.programdata_address);
+  Buffer.from(base58Decode(codec.Keypair.generate().address)).copy(pd.data, 13);
+
+  const r = await w.call(w.admin, "remove_app", { app_id: w.app.id, confirm: true });
+  assert.ok(r.isError);
+  assert.equal(r.data.removed, false);
+  assert.match(r.data.stopped, /nothing was deleted/);
+  assert.match(r.data.not_closed[0].error, /upgrade authority on chain/);
+  assert.ok(await w.store.getApp(w.app.id));
+  assert.equal((await w.solana.get(p.program_id)).status, "deployed");
+  assert.equal((await w.db.query("SELECT 1 FROM financial_products.audit_log WHERE action = 'remove_app' AND details->>'outcome' = 'stopped'")).rows.length, 1);
+
+  const done = await w.ok(w.admin, "remove_app", { app_id: w.app.id, confirm: true, proceed_without_closing: true });
+  assert.equal(done.removed, true);
+  assert.equal(done.proceeded_without_closing, true);
+  assert.equal(done.not_closed[0].program_id, p.program_id);
+  assert.equal(await w.store.getApp(w.app.id), undefined);
+  assert.equal(await w.solana.get(p.program_id), undefined);
+  assert.ok(w.clusters.devnet.accounts.get(p.programdata_address), "the program is still on devnet, as recorded");
+  const entry = (await w.db.query("SELECT details FROM financial_products.audit_log WHERE action = 'remove_app' AND details->>'outcome' = 'removed'")).rows[0];
+  assert.equal(entry.details.proceeded_without_closing, true);
+  assert.equal(entry.details.not_closed[0].program_id, p.program_id);
 });
