@@ -135,7 +135,7 @@ export class ClerkAuth {
         message: email ? "Your account is not on this server's whitelist" : "Verify your email address with the sign-in provider, then sign in again",
       };
     }
-    if (linked && linked.roles.join() === invite.roles.join()) return { ok: true, user: linked };
+    if (linked && (linked.held_roles ?? linked.roles).join() === invite.roles.join()) return { ok: true, user: linked };
     return { ok: true, user: await this.store.upsertClerkUser(subject, email, name, invite.roles) };
   }
 }

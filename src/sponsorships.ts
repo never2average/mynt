@@ -57,8 +57,12 @@ async function describe(store: Store, s: Sponsorship) {
 // The licence provider's side: its licences, the requests it's asked to sponsor, and what it sponsors.
 export function registerLicenseProviderTools(server: McpServer, store: Store, user: User) {
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
-  const myEntity = async () => ((await store.getUser(user.id)) ?? user).entity_id;
-  const noFirm = "You don't belong to a firm yet; an admin adds your firm (register_firm) and you to it (add_entity_member)";
+  // Read afresh each call: a licence provider without standing at its firm (store.ts, rolesWithStanding) acts for none.
+  const myEntity = async () => {
+    const me = await store.getUser(user.id);
+    return me && effectiveRoles(me.roles).includes("license_provider") ? me.entity_id : null;
+  };
+  const noFirm = "You don't belong to a firm as a licence provider yet; an admin adds your firm (register_firm) and you to it (add_entity_member), or, at a firm that already has one, one of its licence providers accepts you";
   const mine = async (id: string) => {
     const entity = await myEntity();
     const s = entity ? await store.getSponsorship(id) : undefined;

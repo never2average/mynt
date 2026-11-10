@@ -91,7 +91,9 @@ const productFields = {
 // catalog tools.
 export function createServer(store: Store, user: User | null = null, ctx: AdminContext = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, title: "Mynt: financial products", version: "0.6.0" });
-  const roles = effectiveRoles(user?.roles ?? []);
+  // Licence-provider powers need standing at the firm (store.ts, rolesWithStanding): a user read from the store already
+  // has license_provider dropped while it's pending acceptance; one flagged pending is held to that here too.
+  const roles = effectiveRoles((user?.licence_provider_pending ? user.roles.filter((r) => r !== "license_provider") : user?.roles) ?? []);
   const has = (role: Role) => roles.includes(role);
 
   registerCatalogTools(server, store, user);

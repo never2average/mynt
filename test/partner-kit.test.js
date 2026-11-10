@@ -826,7 +826,8 @@ test("the reviewer's sequence: members added as consumers who later gain the lic
     // An admin invites them as licence providers, and they sign in again: the invite's roles are copied over.
     await w.ok(w.admin, "invite_user", { email: `${h}@example.com`, roles: ["license_provider"] });
     const signedIn = await w.store.upsertClerkUser(h, `${h}@example.com`, h, ["license_provider"]);
-    assert.deepEqual(signedIn.roles, ["license_provider"]);
+    assert.deepEqual(signedIn.held_roles, ["license_provider"]);
+    assert.deepEqual(signedIn.roles, [], "held, but without standing it grants nothing");
     assert.equal(await lpSince(w, u.id), null, "the role alone grants no standing");
     puppets.push({ user: signedIn, client: await w.connect(signedIn) });
   }
@@ -837,15 +838,21 @@ test("the reviewer's sequence: members added as consumers who later gain the lic
   for (const p of puppets) await w.pg.query("UPDATE financial_products.users SET created_at = now() - interval '4 days', entity_joined_at = now() - interval '4 days' WHERE id = $1", [p.user.id]);
   await withCoolOff(72, async () => {
     const [p1, p2] = puppets;
-    await w.refused(p2.client, "register_partner_signing_key", { public_key: edKey().address }, /no licence-provider standing/);
-    await w.refused(p1.client, "get_partner_kit", {}, /no licence-provider standing/);
-    await w.refused(p1.client, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet2@example.com").request_id, accept: true }, /before this request was made/);
+    // Without standing, the role grants nothing: none of a licence provider's tools are there for them.
+    for (const p of [p1, p2]) {
+      assert.equal((await w.store.getUser(p.user.id)).licence_provider_pending, true);
+      const names = (await p.client.listTools()).tools.map((t) => t.name);
+      for (const t of ["register_partner_signing_key", "get_partner_kit", "decide_firm_member", "approve_partner_kit_change", "get_product_health", "approve_sponsorship", "set_covenant"]) assert.ok(!names.includes(t), t);
+    }
+    // Even an account object that still says license_provider is refused: the firm's members' standing is read afresh.
+    await w.refused(await w.connect({ ...p1.user, roles: ["license_provider"], licence_provider_pending: undefined }), "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet2@example.com").request_id, accept: true }, /decides/);
     // The firm's own licence provider accepts one: its standing, and its cool-off, start now.
     await w.ok(w.provider, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet1@example.com").request_id, accept: true });
     assert.ok(await lpSince(w, p1.user.id));
-    await w.refused(p1.client, "register_partner_signing_key", { public_key: edKey().address }, /too recently/);
+    const accepted = await w.connect(await w.store.getUser(p1.user.id));
+    await w.refused(accepted, "register_partner_signing_key", { public_key: edKey().address }, /too recently/);
     // Accepted after puppet2's request was made, it can't decide that one.
-    await w.refused(p1.client, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet2@example.com").request_id, accept: true }, /before this request was made/);
+    await w.refused(accepted, "decide_firm_member", { request_id: requests.find((r) => r.member_email === "puppet2@example.com").request_id, accept: true }, /before this request was made/);
   });
 });
 
@@ -889,4 +896,36 @@ test("accounts that were licence providers before standing existed keep it, from
   await Store.open({ query: (s, p) => w.pg.query(s, p), exec: (s) => w.pg.exec(s), close: () => {} }, CATALOG);
   const since = await lpSince(w, w.lp.user.id);
   assert.ok(since && Date.now() - new Date(since).getTime() > 8 * 24 * 3_600_000);
+});
+
+test("an account pending acceptance has no licence-provider powers: no figures, no sponsorship, no covenant", async () => {
+  const w = await world();
+  const { CovenantService } = await import("../dist/covenants.js");
+  const covenants = await CovenantService.open(w.store.db, w.store, w.health);
+  await w.tick();
+  // An account of the firm gains the licence-provider role through an invite applied at its next sign-in.
+  await w.store.upsertClerkUser("gainer", "gainer@example.com", "Gainer", ["consumer"]);
+  await w.ok(w.admin, "add_entity_member", { email: "gainer@example.com", entity_id: w.lp.entity.id });
+  const pending = await w.store.upsertClerkUser("gainer", "gainer@example.com", "Gainer", ["license_provider"]);
+  assert.equal(pending.licence_provider_pending, true);
+  assert.deepEqual(pending.roles, []);
+  const client = await w.connect(pending);
+  const names = (await client.listTools()).tools.map((t) => t.name);
+  for (const t of ["get_product_health", "approve_sponsorship", "decline_sponsorship", "set_covenant", "list_covenant_breaches", "register_partner_signing_key", "submit_partner_signature"]) assert.ok(!names.includes(t), t);
+  // The services re-read the account, so even an object claiming the role is refused.
+  const claims = { ...pending, roles: ["license_provider"], licence_provider_pending: undefined };
+  await assert.rejects(w.health.get(claims, w.products[0], null, 5), /aren't entitled/);
+  await assert.rejects(covenants.set(claims, { sponsorship_id: w.sponsorships[0].id, rule_type: "coverage_below", threshold: 10_000, action: "pause" }), /licence provider/);
+  const bypass = await w.connect(claims);
+  const asked = await w.store.requestSponsorship(w.builder.user.id, { product_id: w.products[0], component_key: "core2", builder_entity_id: w.builder.entity.id, provider_entity_id: w.lp.entity.id, requested_jurisdictions: [], note: null });
+  const refusedApproval = await w.call(bypass, "approve_sponsorship", { sponsorship_id: asked.id, licence_ids: [randomUUID()] });
+  assert.equal(refusedApproval.isError, true);
+  assert.match(JSON.stringify(refusedApproval.data), /to your firm/);
+  assert.equal((await w.store.getSponsorship(asked.id)).status, "pending");
+  // Once a licence provider of the firm accepts it, it reads the firm's figures like any other.
+  const request = (await w.ok(w.provider, "get_partner_kit")).pending_members.find((r) => r.member_email === "gainer@example.com");
+  await w.ok(w.provider, "decide_firm_member", { request_id: request.request_id, accept: true });
+  const standing = await w.store.getUser(pending.id);
+  assert.ok(standing.roles.includes("license_provider"));
+  assert.ok((await w.health.get(standing, w.products[0], null, 5)).latest);
 });

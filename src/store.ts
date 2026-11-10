@@ -187,10 +187,20 @@ export function effectiveRoles(roles: Role[]): Role[] {
 export interface User {
   id: string;
   name: string;
-  roles: Role[];
+  roles: Role[]; // the roles the account may act with now: license_provider only with standing at its firm (below)
   email: string | null;
   entity_id: string | null;
   created_at: string;
+  held_roles?: Role[]; // the roles granted to the account, standing or not (for deciding who must accept it)
+  licence_provider_pending?: boolean; // holds license_provider at a firm without standing there yet
+}
+
+// The one place licence-provider powers are resolved. An account of a firm that holds the license_provider role but
+// has no standing there (users.lp_since: a firm's first licence provider, or one an existing licence provider accepted;
+// see firm-notices.ts) acts as if it didn't hold the role: no licence-provider tool, no sealed figures, no
+// sponsorship, covenant or licence decision. An account with no firm keeps the role, which grants nothing without one.
+export function rolesWithStanding(roles: Role[], entityId: string | null, lpSince: unknown): Role[] {
+  return entityId && !lpSince && roles.includes("license_provider") ? roles.filter((r) => r !== "license_provider") : roles;
 }
 
 export interface Invite {
@@ -1708,14 +1718,20 @@ const isUniqueViolation = (e: unknown) => (e as { code?: string })?.code === "23
 
 type Row = Record<string, unknown>;
 
-const toUser = (r: Row): User => ({
-  id: r.id as string,
-  name: r.name as string,
-  roles: r.roles as Role[],
-  email: (r.email as string | null) ?? null,
-  entity_id: (r.entity_id as string | null) ?? null,
-  created_at: iso(r.created_at)!,
-});
+const toUser = (r: Row): User => {
+  const held = r.roles as Role[];
+  const entityId = (r.entity_id as string | null) ?? null;
+  const roles = rolesWithStanding(held, entityId, r.lp_since);
+  return {
+    id: r.id as string,
+    name: r.name as string,
+    roles,
+    email: (r.email as string | null) ?? null,
+    entity_id: entityId,
+    created_at: iso(r.created_at)!,
+    ...(roles.length !== held.length ? { held_roles: held, licence_provider_pending: true } : {}),
+  };
+};
 
 const toInvite = (r: Row): Invite => ({ email: r.email as string, roles: r.roles as Role[], created_at: iso(r.created_at)! });
 

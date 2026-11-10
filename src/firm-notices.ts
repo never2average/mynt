@@ -57,7 +57,7 @@ export async function standingSince(store: Store, userId: string): Promise<Date 
 // Whether adding this account to this firm needs an existing member's acceptance: it's a licence provider and the firm
 // already has one with standing.
 export async function needsAcceptance(store: Store, entityId: string, member: User): Promise<boolean> {
-  if (!isLicenceProvider(member.roles)) return false;
+  if (!isLicenceProvider(member.held_roles ?? member.roles)) return false;
   const { rows } = await store.db.query(`SELECT roles FROM ${T}.users WHERE entity_id = $1 AND id <> $2 AND lp_since IS NOT NULL`, [entityId, member.id]);
   return rows.some((r) => isLicenceProvider((r.roles as string[]) ?? []));
 }
