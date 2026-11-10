@@ -1,3 +1,7 @@
+// A firm webhook may carry covenant.* events only while whoever created it is, right now, a named licence-provider
+// member of that firm and no admin. Used where a delivery is queued, where it's sent, and to show a hook as blocked.
+export const COVENANT_HOOK_ELIGIBLE = `EXISTS (SELECT 1 FROM financial_products.users u WHERE u.id = w.created_by AND u.entity_id::text = w.entity_id::text AND 'license_provider' = ANY(u.roles) AND NOT 'admin' = ANY(u.roles))`;
+
 // The covenants' tables (see covenants.ts), in a file of its own because the drift check reads them, and so the store
 // creates them, on every Mynt, whether or not the covenant timer runs. Additive: nothing here changes an existing table.
 export const COVENANT_TABLES = `
@@ -23,7 +27,9 @@ export const COVENANT_TABLES = `
     status_reason text,
     status_since timestamptz,
     status_sandbox boolean NOT NULL DEFAULT false,
-    first_live_seen_at timestamptz,
+    live_tick_at timestamptz, -- the last evaluation that saw the product live; cleared while it isn't
+    unsigned_anchor timestamptz, -- the signed period the unsigned clock counts from
+    unsigned_live_seconds bigint NOT NULL DEFAULT 0, -- time live since then
     last_evaluated_at timestamptz,
     last_epoch integer,
     last_sequence integer,

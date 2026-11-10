@@ -107,9 +107,11 @@ export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 
 // Queues `type` for every webhook of the firm subscribed to it. `sealedResult` (sealed with the sandbox or live
 // key, as `sandbox` says) goes out as data.result.
-export async function emitFirmEvent(store: Store, entityId: string, type: FirmWebhookEvent, data: Record<string, unknown>, sandbox: boolean, sealedResult?: string) {
+export async function emitFirmEvent(store: Store, entityId: string, type: FirmWebhookEvent, data: Record<string, unknown>, sandbox: boolean, sealedResult?: string): Promise<number> {
   const payload = { id: randomUUID(), type, created_at: new Date().toISOString(), data: { ...data, ...(sealedResult ? { result_sealed: sealedResult } : {}) } };
-  if ((await store.enqueueFirmEvent(entityId, payload, sandbox)) > 0) kick?.();
+  const queued = await store.enqueueFirmEvent(entityId, payload, sandbox);
+  if (queued > 0) kick?.();
+  return queued; // how many webhooks it was queued for: none is something a caller may need to record
 }
 
 // A queued payload as sent: a sealed result is opened into data.result.
@@ -214,6 +216,13 @@ export async function deliverDueWebhooks(store: Store, opts: WebhookWorkerOption
         const t = Math.floor(Date.now() / 1000);
         let code: number | null = null;
         let error: string | null = null;
+        // A covenant alert carries sealed figures, so whoever created the hook is checked again at the moment it goes.
+        if (d.type.startsWith("covenant.") && (await store.covenantWebhookBlocked(d.webhook_id))) {
+          await store.recordDeliveryAttempt(d.id, { ok: false, code: null, error: "Held back: this webhook's creator is no longer a named licence-provider member of the firm", next_attempt_at: null });
+          result.attempted++;
+          result.failed++;
+          return;
+        }
         try {
           const body = wireBody(d.payload, d.sandbox);
           // Resolved, checked and pinned like a call to a vendor: never a private address, never a redirect.

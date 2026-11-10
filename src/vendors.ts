@@ -2107,6 +2107,9 @@ export function registerFirmWebhookTools(server: McpServer, store: Store, user: 
             url: h.url,
             events: h.events,
             created_at: h.created_at,
+            ...(h.events.some(isCovenantEvent) && (await store.covenantWebhookBlocked(h.id))
+              ? { blocked: true, blocked_reason: "This webhook's creator is no longer a named licence-provider member of the firm, so covenant alerts aren't sent to it: a member with that role should create it again" }
+              : {}),
             deliveries: (await store.webhookDeliveries(h.id, 20)).map((d) => ({ type: d.type, status: d.status, attempts: d.attempts, last_response_code: d.last_response_code, sandbox: d.sandbox, created_at: d.created_at })),
           })),
         ),

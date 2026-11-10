@@ -1,4 +1,4 @@
-import { COVENANT_TABLES } from "./covenant-schema.js";
+import { COVENANT_HOOK_ELIGIBLE, COVENANT_TABLES } from "./covenant-schema.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { currentLine, lineForTreasuryCategory, PRODUCT_LINES, UNDERLYINGS, WRAPPERS, type FinancialProduct } from "./catalog.js";
 import type { DeveloperContract } from "./contract.js";
@@ -2532,12 +2532,26 @@ export class Store {
       `INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status, next_attempt_at)
        SELECT gen_random_uuid(), w.id, $2::uuid, $3, $4::jsonb, $5, 'pending', now()
        FROM financial_products.webhooks w WHERE w.entity_id::text = $1 AND $3 = ANY(w.events)
-         -- A covenant's alert goes only to a hook whose creator is, right now, a named licence-provider member and no admin.
-         AND ($3 NOT LIKE 'covenant.%' OR EXISTS (SELECT 1 FROM financial_products.users u WHERE u.id = w.created_by AND u.entity_id::text = w.entity_id::text AND 'license_provider' = ANY(u.roles) AND NOT 'admin' = ANY(u.roles)))
+         AND ($3 NOT LIKE 'covenant.%' OR ${COVENANT_HOOK_ELIGIBLE})
        RETURNING id`,
       [entityId, payload.id, payload.type, JSON.stringify(payload), sandbox],
     );
     return rows.length;
+  }
+
+  // How many of a firm's webhooks would receive this event now.
+  async reachableFirmWebhooks(entityId: string, type: string): Promise<number> {
+    const rows = await this.all(
+      `SELECT count(*)::int AS n FROM financial_products.webhooks w WHERE w.entity_id::text = $1 AND $2 = ANY(w.events) AND ($2 NOT LIKE 'covenant.%' OR ${COVENANT_HOOK_ELIGIBLE})`,
+      [entityId, type],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  // A hook subscribed to covenant.* whose creator can no longer receive them: its alerts are held back.
+  async covenantWebhookBlocked(webhookId: string): Promise<boolean> {
+    const rows = await this.all(`SELECT ${COVENANT_HOOK_ELIGIBLE} AS ok FROM financial_products.webhooks w WHERE w.id = $1`, [webhookId]);
+    return rows[0]?.ok !== true;
   }
 
   // Claims due deliveries with their webhook's url and secret, leasing them for `leaseSeconds` so

@@ -13,6 +13,7 @@ process.env.MYNT_VAULT_KEY = randomBytes(32).toString("base64");
 const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
 const { opsStatus } = await import("../dist/ops.js");
+const { deliverDueWebhooks } = await import("../dist/runtime.js");
 const { ProductHealthService } = await import("../dist/product-health.js");
 const { CovenantService, judgeFigure, reassertCovenantPause } = await import("../dist/covenants.js");
 const { driftSweep } = await import("../dist/pins.js");
@@ -111,6 +112,7 @@ test("judging one figure: null is unknown with its reason, partial can't pass, a
 
 test("coverage_below breaches on the snapshot, with the observed value and the snapshot it came from", async () => {
   const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.listen();
   await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
   await t.tickHour(0);
   const [b] = await breaches(t);
@@ -199,6 +201,7 @@ test("a sandbox or failed ledger read is unknown or labelled, and sandbox figure
 
 test("snapshot_missed_for fires on the timer alone, with no snapshot and no health worker ever run", async () => {
   const t = await setup();
+  await t.listen();
   await t.ok(t.set(t.provider.user, { rule_type: "snapshot_missed_for", threshold: 3 * 3600, action: "pause" }));
   t.setClock(T0 + 5 * 60_000 + HOUR);
   await t.covenants.tick();
@@ -659,18 +662,69 @@ test("a stale figure reads unknown on the timer alone, starts the unknown clock,
   assert.ok(unknown, "unknown past its limit alerts");
 });
 
-test("unverified_for: publishing again doesn't restart the clock, and a product that isn't live reads unknown", async () => {
+test("unverified_for: publishing again doesn't restart the clock; a product not live is never released on", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "unverified_for", threshold: 3 * 3600, action: "pause" }));
+  await t.tickHour(0);
+  await t.pg.query("UPDATE financial_products.products SET published_at = $2 WHERE id = $1", [t.productId, new Date(T0 + 4 * HOUR)]);
+  await t.tickHour(1);
+  await t.tickHour(5);
+  const [b] = await breaches(t);
+  assert.equal(b?.rule_type, "unverified_for", "the new published_at doesn't reset it");
+  await t.pg.query("UPDATE financial_products.products SET status = 'unpublished' WHERE id = $1", [t.productId]);
+  const refused = await t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /isn't live/);
+});
+
+test("unverified_for counts only time live, so a relaunch doesn't breach at once", async () => {
   const t = await setup();
   await t.ok(t.set(t.provider.user, { rule_type: "unverified_for", threshold: 3 * 3600, action: "alert" }));
   await t.tickHour(0);
-  await t.pg.query("UPDATE financial_products.products SET published_at = $2 WHERE id = $1", [t.productId, new Date(T0 + 4 * HOUR)]);
-  await t.tickHour(5);
-  assert.equal((await breaches(t))[0]?.rule_type, "unverified_for", "the new published_at doesn't reset it");
-  await t.pg.query("UPDATE financial_products.products SET status = 'draft' WHERE id = $1", [t.productId]);
+  await t.pg.query("UPDATE financial_products.products SET status = 'unpublished' WHERE id = $1", [t.productId]);
   await t.covenants.tick();
-  const [c] = await covenantsOf(t);
-  assert.equal(c.status, "unknown");
-  assert.match(c.status_reason, /isn't live/);
+  t.setClock(T0 + 30 * 24 * HOUR);
+  await t.covenants.tick();
+  await t.pg.query("UPDATE financial_products.products SET status = 'published' WHERE id = $1", [t.productId]);
+  await t.tickHour(30 * 24 + 1);
+  assert.equal((await covenantsOf(t))[0].status, "pass");
+  assert.deepEqual(await breaches(t), []);
+});
+
+test("a draft product raises no false alarm: its rules aren't evaluated", async () => {
+  const t = await setup();
+  await t.ok(t.set(t.provider.user, { rule_type: "unverified_for", threshold: 3 * 3600, action: "alert", unknown_limit_seconds: 3600 }));
+  await t.pg.query("UPDATE financial_products.products SET status = 'draft' WHERE id = $1", [t.productId]);
+  await t.tickHour(1);
+  t.setClock(T0 + 10 * HOUR);
+  await t.covenants.tick();
+  assert.equal((await covenantsOf(t))[0].status, "unevaluated");
+  assert.deepEqual(await breaches(t), []);
+});
+
+test("a stale snapshot isn't judged: a new rule over it doesn't pause, and editing one doesn't resolve a live breach", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.tickHour(0);
+  t.setClock(T0 + 30 * 24 * HOUR);
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.covenants.tick();
+  assert.equal((await covenantsOf(t))[0].status, "unknown");
+  assert.deepEqual(await breaches(t), [], "the old failing figure opens nothing");
+  assert.equal(await drift(t), null);
+
+  const u = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  const rule = await u.ok(u.set(u.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
+  await u.tickHour(0);
+  assert.equal((await breaches(u))[0].status, "open");
+  u.setClock(T0 + 30 * 24 * HOUR);
+  await u.ok(u.set(u.provider.user, { covenant_id: rule.id, rule_type: "coverage_below", threshold: 5_000, action: "alert", reason: "A looser floor agreed with the builder" }));
+  await u.covenants.tick();
+  assert.equal((await covenantsOf(u))[0].status, "unknown");
+  assert.equal((await breaches(u))[0].status, "open", "a stale pass doesn't resolve it");
+  // A fresh snapshot judges it under the new rule; rows older than the staleness window stay unjudged.
+  await u.tickHour(30 * 24);
+  assert.equal((await covenantsOf(u))[0].status, "pass");
+  assert.equal((await breaches(u))[0].status, "resolved");
 });
 
 test("a hold drifts what's built on the product, and a release clears it", async () => {
@@ -686,19 +740,82 @@ test("a hold drifts what's built on the product, and a release clears it", async
   assert.equal((await t.store.getProduct(other.id)).drift, null);
 });
 
-test("unverified_for counts only this sponsor's own signature", async () => {
+test("unverified_for reads unknown for a sponsor whose books aren't the record's, and never pauses for it", async () => {
   const t = await setup();
   const second = await t.sponsor(t.stranger);
-  await t.ok(t.tool(t.stranger.user, "set_covenant", { sponsorship_id: second.id, rule_type: "unverified_for", threshold: 3 * 3600, action: "alert" }));
+  await t.ok(t.tool(t.stranger.user, "set_covenant", { sponsorship_id: second.id, rule_type: "unverified_for", threshold: 3 * 3600, action: "pause", unknown_limit_seconds: 3600 }));
   await t.tickHour(0);
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  await t.health.registerSigningKey(t.provider.user, base58Encode(Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url")));
+  let [c] = await t.ok(t.tool(t.stranger.user, "list_covenants", {}));
+  assert.equal(c.status, "unknown");
+  assert.match(c.status_reason, /your firm's books/);
   await t.tickHour(5);
-  const [row] = await t.raw("SELECT sequence, fingerprint FROM financial_products.product_health_snapshots ORDER BY sequence DESC LIMIT 1");
-  await t.health.submitSignature(t.provider.user, t.productId, null, row.sequence, edSign(null, Buffer.from(chainLib.cosignMessage(Buffer.from(row.fingerprint, "hex"))), privateKey).toString("hex"));
-  await t.covenants.tick();
   const list = await t.ok(t.tool(t.stranger.user, "list_covenant_breaches", {}));
-  assert.equal(list[0]?.rule_type, "unverified_for", "the first sponsor's signature isn't the second's");
+  assert.equal(list[0]?.kind, "unknown_limit", "unknown too long alerts");
+  assert.equal(await drift(t), null, "and never pauses");
+});
+
+test("an alert that reached no webhook says so; a blocked hook shows in list_firm_webhooks and ops_status", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
+  await t.tickHour(0);
+  let [b] = await breaches(t);
+  assert.equal(b.alerted, false);
+  assert.equal(b.action_taken, "alert_undelivered");
+  assert.ok(b.events.some((e) => e.event === "alert_undelivered"));
+
+  const p = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await p.ok(p.set(p.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await p.tickHour(0);
+  [b] = await breaches(p);
+  assert.equal(b.action_taken, "paused_alert_undelivered");
+  assert.ok(await drift(p), "the pause doesn't depend on the alert");
+
+  const u = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  const member = await memberOf(u, u.provider.entity, ["license_provider"], "Second member");
+  const hook = await u.ok(u.tool(member, "create_firm_webhook", { url: HOOK_URL }));
+  await u.pg.query("UPDATE financial_products.users SET roles = '{innovator}' WHERE id = $1", [member.id]);
+  const hooks = await u.ok(u.tool(u.provider.user, "list_firm_webhooks", {}));
+  assert.equal(hooks.find((h) => h.id === hook.id).blocked, true);
+  assert.match(hooks.find((h) => h.id === hook.id).blocked_reason, /create it again/);
+  const s = await opsStatus(u.db, { backupStatusFile: "/nonexistent" });
+  assert.equal(s.covenants.blocked_webhooks, 1);
+  assert.match(s.attention.join("\n"), /firm webhook\(s\) blocked/);
+});
+
+test("a queued covenant delivery is held back if its creator stopped qualifying before it's sent", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.listen();
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
+  await t.tickHour(0);
+  await t.pg.query("UPDATE financial_products.users SET roles = '{admin,license_provider}' WHERE id = $1", [t.provider.user.id]);
+  const out = await deliverDueWebhooks(t.store, { now: new Date(Date.now() + 3600_000) });
+  assert.equal(out.delivered, 0);
+  const [d] = await t.raw("SELECT status, last_error, attempts FROM financial_products.webhook_deliveries WHERE type = 'covenant.breached'");
+  assert.equal(d.status, "failed");
+  assert.match(d.last_error, /Held back/);
+});
+
+test("a hold isn't repaired while the rule can't be judged or passes only on sandbox figures", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
+  await t.tickHour(0);
+  await t.pg.query("DELETE FROM financial_products.covenant_holds");
+  await t.store.setDrift(t.productId, null);
+  t.setClock(T0 + 10 * HOUR);
+  await t.covenants.tick();
+  assert.equal((await t.raw("SELECT count(*)::int AS n FROM financial_products.covenant_holds"))[0].n, 0, "stale: unknown, so nothing to repair");
+  assert.equal(await drift(t), null);
+});
+
+test("sandbox figures don't keep a live breach's alarm ringing", async () => {
+  const t = await setup({ books: { reserves: 80_00, owed: 100_00 } });
+  await t.listen();
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert", cooldown_seconds: 60 }));
+  await t.tickHour(0);
+  assert.equal((await t.webhooks("covenant.breached")).length, 1);
+  t.state.kind = "sandbox";
+  await t.tickHour(1);
+  assert.equal((await t.webhooks("covenant.breached")).length, 1, "no reminder off sandbox figures");
 });
 
 test("admins see that a rule tripped, not its settings or the sponsor's reasons, in breaches and the audit log", async () => {
