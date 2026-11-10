@@ -24,6 +24,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+  # The partner walkthrough (docs/demo.md) as a presenter runs it, so its narrated output is in the log. npm test
+  # runs it too (test/partner-walkthrough.test.js), with its checks and that it leaves nothing behind.
+  partner-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run demo:partner
   # Mynt's Solana toolchain, installed by the same pinned, checksum-verified script the sandboxes run, builds the
   # coding agents' template Anchor program verifiably and tests it on a local validator, exactly as Mynt's verify
   # sandbox does (src/solana/toolchain.ts).
