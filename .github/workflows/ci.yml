@@ -100,6 +100,14 @@ jobs:
           for key in ("sources", "deps", "idl"):
               raw = open(f"{tmp}/out/{prog[key]}", "rb").read()
               assert hashlib.sha256(raw).hexdigest() == prog[f"{key}_sha256"] and len(raw) == prog[f"{key}_size"], (key, prog)
+          # The real dep-info record must fit what Mynt keeps of it: keptJson refuses a file over MAX_SOURCES_BYTES
+          # (src/builds.ts), which would leave every build without it and refuse every mainnet review.
+          import re
+          limit = int(re.search(r"const MAX_SOURCES_BYTES = (\d+) \* 1024 \* 1024;", open("src/builds.ts").read()).group(1)) * 1024 * 1024
+          raw = open(f"{tmp}/out/{prog['depinfo']}", "rb").read()
+          print(f"depinfo JSON: {len(raw)} bytes ({len(raw) / 1048576:.2f} MB; Mynt keeps up to {limit // 1048576} MB)")
+          assert hashlib.sha256(raw).hexdigest() == prog["depinfo_sha256"] and len(raw) == prog["depinfo_size"], prog
+          assert len(raw) <= limit, f"the template's depinfo JSON is {len(raw)} bytes, over keptJson's {limit}"
           bundle = json.load(open(f"{tmp}/out/{prog['sources']}"))
           files = bundle["files"]
           # Everything the container got, dot-folders and tests included; nothing it didn't.

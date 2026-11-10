@@ -15,7 +15,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import { checkProgramRules } from "../dist/solana/program-rules.js";
-import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, verifyIdl, workspaceExceptions } from "../dist/solana/crate-tree.js";
+import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, uncompiledHitExceptions, verifyIdl, workspaceExceptions } from "../dist/solana/crate-tree.js";
 import { loadCrateAllowlist } from "../dist/solana/vuln-db.js";
 
 const { values } = parseArgs({
@@ -51,19 +51,21 @@ const depsCapture = values.deps ? JSON.parse(readFileSync(values.deps, "utf8")) 
 const deps = depsCapture ? dependencyVerdict(depsCapture, new Set(allow.crates), tree.packages) : null;
 const lockCrates = new Set((depsCapture?.packages ?? []).filter((p) => p.source).map((p) => `${p.name}-${p.version}`));
 // As the gate does: build scripts' output may come from the Cargo.lock's crates and the workspace's own build
-// scripts; when any build-time code ran, the rules also read every captured .rs file.
+// scripts; when any build-time code ran, the rules also read every captured .rs file, and a blocking hit in one
+// dep-info doesn't list is an exception (uncompiled-hit:<file>), not a refusal.
 const depinfo = values.depinfo ? JSON.parse(readFileSync(values.depinfo, "utf8")) : null;
 const scripts = new Set([...(depsCapture?.packages ?? []).filter((p) => p.source).map((p) => p.name), ...tree.packages.filter((p) => p.build).map((p) => p.name)]);
 const compiled = depinfo ? evaluateDepInfo(depinfo, bundle, lockCrates, scripts) : null;
 const buildTimeCode = !!compiled && (tree.packages.some((p) => p.build || p.procMacro) || compiled.generated.length > 0 || Object.values(depinfo.crate_files ?? {}).some((f) => f["build.rs"] !== undefined));
 const rulesFiles = compiled ? (buildTimeCode ? [...new Set([...compiled.workspace, ...Object.keys(bundle.files).filter((f) => f.endsWith(".rs"))])] : compiled.workspace) : null;
-const rules = checkProgramRules({ name: "program", program_id: values["program-id"], program, idl: idlCheck?.verified ? idl : null, sources: bundle.files, compiled_files: rulesFiles });
+const listedFiles = buildTimeCode && !compiled.problems.length ? compiled.workspace : null;
+const rules = checkProgramRules({ name: "program", program_id: values["program-id"], program, idl: idlCheck?.verified ? idl : null, sources: bundle.files, compiled_files: rulesFiles, listed_files: listedFiles });
 const result = {
   passed: rules.passed && (!idlCheck || idlCheck.verified) && (!deps || deps.refusals.length === 0) && (!compiled || compiled.problems.length === 0),
   rules,
   compiled_files: compiled ? compiled.workspace : [...tree.code.keys()],
   compiled: compiled && { problems: compiled.problems, registry_files: compiled.registry.length, generated: compiled.generated },
-  exceptions: [...workspaceExceptions(bundle, tree), ...(deps?.exceptions ?? []), ...(compiled ? crossCheck(tree, compiled) : [])],
+  exceptions: [...workspaceExceptions(bundle, tree), ...(deps?.exceptions ?? []), ...(compiled ? crossCheck(tree, compiled) : []), ...uncompiledHitExceptions(rules.uncompiled_hits)],
   idl: idlCheck,
   dependencies: deps && { refusals: deps.refusals, off_allowlist: deps.exceptions.map((e) => e.id), crates: deps.crates.length },
 };

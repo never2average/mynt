@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
@@ -1164,25 +1164,56 @@ test("the capture refuses a workspace that ships build output or unprintable nam
     assert.equal(r.ok, false, `${bad} wasn't refused`);
     assert.match(r.why, /refused: the workspace ships build output/, bad);
   }
+  // A folder named target is cargo's only when cargo marked it: a module called target is ordinary source.
+  const module = { ...clean, "programs/p/src/target/mod.rs": "pub fn aim() {}\n", "programs/p/src/target.rs": "pub mod x;\n" };
+  assert.deepEqual(run(module), { ok: true, files: ["Cargo.toml", "programs/p/src/lib.rs", "programs/p/src/target.rs", "programs/p/src/target/mod.rs"] });
+  for (const marker of [".rustc_info.json", "CACHEDIR.TAG"]) {
+    const r = run({ ...clean, [`programs/p/target/${marker}`]: "x", "programs/p/target/release/build/out.txt": "x" });
+    assert.equal(r.ok, false, `a target folder marked by ${marker} wasn't refused`);
+    assert.match(r.why, /refused: the workspace ships build output/);
+  }
+  // Artifacts stay refused wherever they are, a module folder called target included.
+  for (const path of ["programs/p/src/target/libp.rlib", "programs/p/src/target/p.so", "programs/p/src/target/.fingerprint/x"]) assert.equal(run({ ...clean, [path]: "x" }).ok, false, path);
 });
 
-test("when build-time code ran, the rules also read every captured .rs file, not just dep-info's list", async () => {
-  // The workspace has a build script: its dep-info could have been rewritten, so a file it leaves out is read anyway.
+test("when build-time code ran, the rules also read every captured .rs file; a blocking hit in one dep-info doesn't list is an exception an admin must name", async () => {
+  // The workspace has a build script: its dep-info could have been rewritten, so a file it leaves out is read anyway,
+  // but a hit there is an exception (uncompiled-hit:<file>), not a refusal; a hit in a compiled file still refuses.
   let w = await world();
   let id = await w.mainnetProgram();
   const lib = "programs/mynt_program/src/lib.rs";
   const files = { ...TEMPLATE, "programs/mynt_program/build.rs": "fn main() {}\n", "programs/mynt_program/src/unlisted.rs": EVIL };
   let b = await w.build(id, files, 1, { depinfo: DEPINFO(files, [lib, "programs/mynt_program/build.rs"]) });
   let r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
-  assert.match(r.blocked_reason, /RUG-TOKEN2022-EXTENSIONS \(source, programs\/mynt_program\/src\/unlisted.rs:1\)/);
+  assert.equal(r.status, "running", r.blocked_reason);
   assert.equal(r.checks.rules.compiled.rules_read_every_rust_file, true);
-  // A dependency with a build script counts too.
+  assert.ok(r.exceptions.some((e) => e.id === "uncompiled-hit:programs/mynt_program/src/unlisted.rs" && e.kind === "uncompiled_hit"), JSON.stringify(r.exceptions));
+  assert.ok(r.checks.rules.findings.some((f) => f.rule === "RUG-TOKEN2022-EXTENSIONS" && f.file === "programs/mynt_program/src/unlisted.rs" && f.uncompiled && !f.blocks), "still shown, as an uncompiled hit");
+  // The same hit in a file dep-info lists refuses.
   w = await world();
   id = await w.mainnetProgram();
-  const files2 = { ...TEMPLATE, "programs/mynt_program/src/unlisted.rs": EVIL };
+  b = await w.build(id, files, 1, { depinfo: DEPINFO(files, [lib, "programs/mynt_program/build.rs", "programs/mynt_program/src/unlisted.rs"]) });
+  r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+  assert.match(r.blocked_reason, /RUG-TOKEN2022-EXTENSIONS \(source, programs\/mynt_program\/src\/unlisted.rs:1\)/);
+  // A dependency with a build script counts too, and an integration test the compiler never compiled is no refusal:
+  // the admin names it, and the deploy-time re-check holds the approval to exactly what was allowed.
+  w = await world();
+  id = await w.mainnetProgram();
+  const files2 = { ...TEMPLATE, "programs/mynt_program/tests/it.rs": EVIL };
   b = await w.build(id, files2, 1, { depinfo: DEPINFO(files2, [lib], { crate_files: { "anchor-lang-0.32.1": { "build.rs": sum("b") } } }) });
   r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
-  assert.match(r.blocked_reason, /unlisted.rs/);
+  assert.equal(r.status, "running", r.blocked_reason);
+  assert.deepEqual(r.exceptions.map((e) => e.id).filter((x) => x.startsWith("uncompiled-hit:")), ["uncompiled-hit:programs/mynt_program/tests/it.rs"]);
+  await w.tick(10);
+  assert.equal((await w.review(r.review_id)).status, "awaiting_approval");
+  const named = r.exceptions.map((e) => e.id);
+  assert.match((await w.call(w.admin, "approve_mainnet_program", { review_id: r.review_id, note: "fine", allow_exceptions: named.filter((x) => !x.startsWith("uncompiled-hit:")) })).data.error, /uncompiled-hit:programs\/mynt_program\/tests\/it.rs/);
+  await w.ok(w.admin, "approve_mainnet_program", { review_id: r.review_id, note: "it.rs is an integration test, never compiled into the program", allow_exceptions: named });
+  const p = await w.solana.get(id);
+  await w.gate.check(p, b.sha256, "deploy");
+  // An approval that didn't name it (as one made before this check existed) is refused at deploy time.
+  await w.db.query("UPDATE financial_products.solana_mainnet_reviews SET allowed_exceptions = '[]'::jsonb WHERE id = $1", [r.review_id]);
+  await assert.rejects(w.gate.check(p, b.sha256, "deploy"), /refuse this program: RUG-TOKEN2022-EXTENSIONS/);
   // Without any build-time code, dep-info's list is what's read (the unreachable file is left alone).
   w = await world();
   id = await w.mainnetProgram();
@@ -1190,4 +1221,51 @@ test("when build-time code ran, the rules also read every captured .rs file, not
   r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
   assert.equal(r.status, "running", r.blocked_reason);
   assert.equal(r.checks.rules.compiled.rules_read_every_rust_file, false);
+  assert.ok(!r.exceptions.some((e) => e.kind === "uncompiled_hit"));
+});
+
+test("retention: captured source, dependencies and dep-info go after PROGRAM_SOURCE_RETENTION_DAYS unless a mainnet review or a deployed version needs them", async () => {
+  const w = await world();
+  assert.equal(w.gate.config.sourceRetentionDays, 30, "the default");
+  const id = await w.mainnetProgram();
+  const stale = await w.build(id, TEMPLATE, 1); // a build nobody took further
+  const reviewed = await w.build(id, TEMPLATE, 2);
+  const deployed = await w.build(id, TEMPLATE, 3);
+  const recent = await w.build(id, TEMPLATE, 4);
+  const sharing = await w.build(id, TEMPLATE, 4); // old, but its rows are the recent build's too (same hashes)
+  const middling = await w.build(id, TEMPLATE, 5); // 20 days old: inside the window
+  await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: reviewed.build_id });
+  const program = (await w.db.query("SELECT id FROM financial_products.solana_programs WHERE program_id = $1", [id])).rows[0].id;
+  await w.db.query(
+    "INSERT INTO financial_products.solana_program_versions (id, program, version, action, build_id, verifiable_hash, tx, signer_backend) VALUES ($1, $2, 1, 'deploy', $3, $4, 'tx', 'mainnet-vault')",
+    [randomUUID(), program, deployed.build_id, deployed.sha256],
+  );
+  const age = async (buildId, days) => {
+    const a = (await w.db.query("SELECT sources_sha256, deps_sha256, depinfo_sha256 FROM financial_products.solana_program_artifacts WHERE build_id = $1", [buildId])).rows[0];
+    const at = new Date(Date.now() - days * 86_400_000).toISOString();
+    await w.db.query("UPDATE financial_products.solana_program_artifacts SET created_at = $2 WHERE build_id = $1", [buildId, at]);
+    await w.db.query("UPDATE financial_products.solana_program_sources SET created_at = $2 WHERE sha256 = $1", [a.sources_sha256, at]);
+    await w.db.query("UPDATE financial_products.solana_program_deps SET created_at = $2 WHERE sha256 = $1", [a.deps_sha256, at]);
+    await w.db.query("UPDATE financial_products.solana_program_depinfo SET created_at = $2 WHERE sha256 = $1", [a.depinfo_sha256, at]);
+    return a;
+  };
+  const gone = await age(stale.build_id, 40);
+  for (const b of [reviewed, deployed, sharing]) await age(b.build_id, 40);
+  await age(middling.build_id, 20);
+  await w.db.query("UPDATE financial_products.solana_program_artifacts SET created_at = now() WHERE build_id = $1", [recent.build_id]);
+
+  const deleted = await w.gate.pruneCapturedSources();
+  assert.deepEqual(deleted, { solana_program_sources: 1, solana_program_deps: 1, solana_program_depinfo: 1 });
+  for (const [table, sha] of [["solana_program_sources", gone.sources_sha256], ["solana_program_deps", gone.deps_sha256], ["solana_program_depinfo", gone.depinfo_sha256]])
+    assert.equal((await w.db.query(`SELECT count(*)::int AS n FROM financial_products.${table} WHERE sha256 = $1`, [sha])).rows[0].n, 0, table);
+  const p = await w.solana.get(id);
+  assert.equal((await w.solana.reviewMaterial(null, p, stale.build_id)).sources, null, "a pruned build has no source to review: it must be built again");
+  for (const b of [reviewed, deployed, sharing, recent, middling]) {
+    const m = await w.solana.reviewMaterial(null, p, b.build_id);
+    assert.ok(m.sources && m.deps && m.depinfo, `kept: ${b.build_id}`);
+  }
+  // The worker loop runs it.
+  await age(middling.build_id, 40);
+  await w.tick();
+  assert.equal((await w.solana.reviewMaterial(null, p, middling.build_id)).sources, null);
 });

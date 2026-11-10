@@ -197,8 +197,15 @@ export interface Exception {
     | "cfg_attr_path"
     | "manifest_unparsed"
     | "module_tree_mismatch"
-    | "generated_code";
+    | "generated_code"
+    | "uncompiled_hit";
   detail: string;
+}
+
+// A blocking hit in a file the compiler's dep-info doesn't list (the rules read it only because build-time code ran
+// and could have rewritten dep-info): not a refusal, but an exception an admin must allow by name.
+export function uncompiledHitExceptions(files: string[]): Exception[] {
+  return files.map((f) => ({ id: `uncompiled-hit:${f}`, kind: "uncompiled_hit" as const, detail: `a hard rule would block on ${f}, which the compiler's dep-info doesn't list as compiled; the rules read it only because build-time code ran` }));
 }
 
 // The one cargo setting a workspace may carry without an exception (the template's, which Mynt's build sets by
