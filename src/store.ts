@@ -3,6 +3,7 @@ import { currentLine, lineForTreasuryCategory, PRODUCT_LINES, UNDERLYINGS, WRAPP
 import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
 import type { Db } from "./db.js";
+import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
   hydrateRegulators,
@@ -14,7 +15,7 @@ import {
   type RegulatoryModel,
 } from "./regulatory.js";
 
-export const ROLES = ["consumer", "developer", "innovator", "vendor", "license_provider", "admin"] as const;
+export const ROLES = ["consumer", "developer", "innovator", "vendor", "license_provider", "liquidity_provider", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
 // Roles nest: every admin is a builder, every builder a consumer. Builders compose and publish products and
@@ -22,13 +23,15 @@ export type Role = (typeof ROLES)[number];
 // kept so existing users, invites and docs keep working. A builder needn't be licensed: a component can be
 // covered by a licence provider's licence instead (see sponsorships.ts). Vendors (firms offering standard
 // services builders plug in) and licence providers (firms holding the licences that sponsor builders'
-// products) are peers of builders with their own tools only, and an admin is all of them.
+// products) are peers of builders with their own tools only, and an admin is all of them. Liquidity providers
+// (firms putting capital into products' pools) are peers too, but an admin isn't one: Mynt's staff don't commit capital.
 const IMPLIES: Record<Role, Role[]> = {
   consumer: [],
   developer: ["consumer", "innovator"],
   innovator: ["developer"],
   vendor: [],
   license_provider: [],
+  liquidity_provider: [],
   admin: ["innovator", "vendor", "license_provider"],
 };
 
@@ -1485,6 +1488,7 @@ const TABLES = `
     run_by uuid REFERENCES financial_products.users(id)
   );
   CREATE INDEX IF NOT EXISTS firm_checks_entity_idx ON financial_products.firm_checks (entity_id, source, retrieved_at DESC);
+  ${LIQUIDITY_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");

@@ -214,6 +214,7 @@ export interface MovementRequest {
   component_key?: string | null; // the component the action serves, when the contract says
   subscription_id?: string | null; // with request_id, how a partner's later answer finds this movement
   request_id?: string | null;
+  sponsor_entity_id?: string | null; // only this sponsor's rails may carry it (a liquidity pool's own sponsor)
 }
 export type MovementVerdict =
   | { allowed: true; movement_id: string; status: MovementStatus; replay: boolean }
@@ -274,6 +275,10 @@ async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string 
   if (!m.component_key) return refusal(403, "component_required", "Money can't move for this action: it doesn't say which part of the product it serves");
   sponsorships = sponsorships.filter((s) => s.component_key === m.component_key);
   if (!sponsorships.length) return refusal(403, "component_not_sponsored", "Money can't move for this action: no licence provider sponsors what it serves");
+  if (m.sponsor_entity_id) {
+    sponsorships = sponsorships.filter((s) => s.provider_entity_id === m.sponsor_entity_id);
+    if (!sponsorships.length) return refusal(403, "no_sponsor", "Money can't move for this pool: its sponsor no longer sponsors it");
+  }
   const here = sponsorships.filter((s) => s.jurisdictions.includes(state) || s.jurisdictions.includes("us"));
   const sponsors = [...new Set(here.map((s) => s.provider_entity_id))];
   if (!sponsors.length) return refusal(403, "state_not_sponsored", `Money can't move for this product in ${state}: its licence provider doesn't sponsor it there`);
@@ -472,6 +477,10 @@ export const GAVE_UP_DETAIL = "mynt_gave_up";
 export const recordMovementGaveUp = (store: Store, at: Where) => move(store, at, "failed", { detail: GAVE_UP_DETAIL, partner_confirmed: true });
 export const recordMovementReversed = (store: Store, at: Where, detail = "reversed") => move(store, at, "reversed", { detail });
 export const recordMovementLateSettlement = (store: Store, at: Where) => move(store, at, "settled", { detail: "late_settlement" });
+// A partner settling on what Mynt had given up on: nothing moved, so the attempt no longer counts as unresolved.
+export async function resolveUnresolvedMovement(store: Store, at: Where, detail: string): Promise<void> {
+  await store.db.query(`UPDATE ${T}.money_movements SET status_detail = $3, updated_at = now() WHERE ${ANY_ATTEMPT} AND status = 'failed' AND status_detail = ANY($4::text[])`, [at.subscription_id, at.request_id, detail, [STALE_DETAIL, GAVE_UP_DETAIL]]);
+}
 // No clear answer (a timeout, a server error): it may have reached the partner, so it stays requested and keeps
 // counting against the daily limit. A retry with the same idempotency key is the same movement.
 export async function recordMovementUnknown(store: Store, at: Where, detail: string): Promise<void> {
