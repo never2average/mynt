@@ -744,6 +744,15 @@ test("an entitled reader can verify a snapshot with the standalone script, and a
     assert.equal(memo.code, 1);
     assert.match(memo.stdout, /FAIL {2}the transaction has a record_snapshot/);
 
+    // A versioned message is refused, never read one byte off as if it were legacy.
+    const legacy = Buffer.from(wireOf(record(chain.log[0])), "base64");
+    const messageAt = 1 + 64 * legacy[0];
+    world.tx = Buffer.concat([legacy.subarray(0, messageAt), Buffer.from([0x80]), legacy.subarray(messageAt)]).toString("base64");
+    const versioned = await run(later, [...full, "--sequence", "1"]);
+    assert.equal(versioned.code, 1, versioned.stdout);
+    assert.match(versioned.stdout, /FAIL {2}the snapshot's transaction is a legacy transaction/);
+    assert.doesNotMatch(versioned.stdout, /PASS {2}it's this fingerprint/);
+
     // A record_snapshot of another record, or a head other than this one, doesn't count either.
     world.tx = wireOf(record(chain.log[1]));
     const another = await run(later, [...full, "--sequence", "1"]);

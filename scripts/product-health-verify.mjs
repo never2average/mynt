@@ -215,7 +215,14 @@ function checkTransaction(tx) {
     }
   };
   let [nsig, o] = shortVec(0);
-  o += 64 * nsig + 3; // the signatures, and the message's header
+  o += 64 * nsig; // the signatures
+  // Mynt only sends legacy transactions. A versioned message starts with a byte whose high bit is set, and reading
+  // it as legacy would start one byte off, so account keys the sender chose could pass as a record_snapshot.
+  if (wire[o] & 0x80) {
+    check("the snapshot's transaction is a legacy transaction", false, "a versioned transaction can't be a Mynt record");
+    return;
+  }
+  o += 3; // the message's header
   let nkeys;
   [nkeys, o] = shortVec(o);
   const keys = [];
