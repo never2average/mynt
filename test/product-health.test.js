@@ -1241,3 +1241,35 @@ test("the product-health program passes Mynt's own mainnet gate rules on its sou
   const literals = [...lib.matchAll(/"([1-9A-HJ-NP-Za-km-z]{32,44})"/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(literals)], [PROGRAM_ID]);
 });
+
+test("a retired program whose head is gone but whose history remains can't be re-anchored away", async () => {
+  const { health, productId, admin, chain, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.programId = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME"; // a new program, so the current program's history is empty
+  chain.heads.clear(); // and the old program's head is gone
+  chain.hasHeadHistory = async (_subject, programId) => programId === PROGRAM_ID;
+  await assert.rejects(health.reanchor(admin, productId, null, "moved to a new program"), /previous program .*transaction history/);
+  chain.hasHeadHistory = async (_subject, programId) => {
+    if (programId === PROGRAM_ID) throw new Error("the RPC was unreachable");
+    return false;
+  };
+  await assert.rejects(health.reanchor(admin, productId, null, "moved to a new program"), /previous program's history can't be read/);
+  chain.hasHeadHistory = async () => false;
+  assert.equal((await health.reanchor(admin, productId, null, "moved to a new program")).previous_record, "gone", "with no history either, it was a reset");
+});
+
+test("a missing middle anchor reads as a mismatch, not as unverifiable", async () => {
+  const { health, productId, provider, admin, chain, pg, tickAt } = await setup({ config: { cosignWindowMs: 0 } });
+  await tickAt(T0 + 5 * 60_000);
+  chain.programId = "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME";
+  await health.reanchor(admin, productId, null, "moved to a new program");
+  await tickAt(T0 + HOUR + 5 * 60_000);
+  chain.programId = "11111111111111111111111111111111";
+  await health.reanchor(admin, productId, null, "moved to another program");
+  await tickAt(T0 + 2 * HOUR + 5 * 60_000);
+  assert.equal((await health.get(provider.user, productId, null, 10)).history.find((h) => h.epoch === 0).verification.on_chain, "previous_chain_matched");
+  await pg.query("DELETE FROM financial_products.product_health_anchors WHERE epoch = 1");
+  const out = await health.get(provider.user, productId, null, 10);
+  assert.equal(out.history.find((h) => h.epoch === 0).verification.on_chain, "previous_chain_mismatch", "the record it was replaced by has no anchor");
+  assert.equal(out.latest.verification.on_chain, "matches", "the current record still matches its chain");
+});

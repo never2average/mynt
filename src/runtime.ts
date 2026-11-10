@@ -85,6 +85,8 @@ export async function emitEvent(store: Store, appIds: string[], type: WebhookEve
 // passed the mainnet program gate and is announced before its timelock ends, or was cancelled or rejected.
 // program.review_flagged: a new vulnerability database version refuses a deployed mainnet program (it keeps
 // running; its upgrades wait for an admin's review).
+// covenant.breached, covenant.cleared: to a licence provider, one of its rules on a sponsored product tripped or
+// passed again (covenants.ts), with the observed value sealed until it's sent.
 // Developer-side data only; customers never see it.
 export const FIRM_WEBHOOK_EVENTS = [
   "vendor_action.completed",
@@ -98,6 +100,8 @@ export const FIRM_WEBHOOK_EVENTS = [
   "program.upgrade_scheduled",
   "program.upgrade_cancelled",
   "program.review_flagged",
+  "covenant.breached",
+  "covenant.cleared",
 ] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 

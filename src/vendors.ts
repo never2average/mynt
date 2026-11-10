@@ -2051,14 +2051,20 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     },
   );
 
-  // ---- the firm's own webhooks: results of client actions its vendor services answered ----
+  registerFirmWebhookTools(server, store, user);
+}
+
+// ---- the firm's own webhooks: results of client actions its vendor services answered, and a licence provider's alerts ----
+
+export function registerFirmWebhookTools(server: McpServer, store: Store, user: User) {
+  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
 
   server.registerTool(
     "create_firm_webhook",
     {
       title: "Receive your vendor services' results",
       description:
-        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. It also gets your Solana programs' deploys, upgrades and events (program.deployed, program.upgraded, program.event). Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
+        "Innovator: an https URL where Mynt sends your firm the full result of every client action a product's bound vendor service answered (vendor_action.completed, with data.result) or that failed (vendor_action.failed), so your firm acts on it; apps' devices only get a status. It also gets your Solana programs' deploys, upgrades and events (program.deployed, program.upgraded, program.event), and, for a licence provider, its covenants' alerts on the products it sponsors (covenant.breached, covenant.cleared). Each POST carries Mynt-Signature (t=<unix>,v1=<HMAC-SHA256 of \"t.body\" with the secret>). The secret is shown once.",
       inputSchema: { url: z.string().url(), events: z.array(z.enum(FIRM_WEBHOOK_EVENTS)).min(1).default([...FIRM_WEBHOOK_EVENTS]) },
     },
     async ({ url, events }) => {

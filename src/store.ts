@@ -1,3 +1,4 @@
+import { COVENANT_TABLES } from "./covenant-schema.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { currentLine, lineForTreasuryCategory, PRODUCT_LINES, UNDERLYINGS, WRAPPERS, type FinancialProduct } from "./catalog.js";
 import type { DeveloperContract } from "./contract.js";
@@ -278,7 +279,7 @@ export interface VendorBinding {
   service_type: string;
   consent_purpose: string;
 }
-export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship" | "legitimacy"; id: string; was: string; now: string; jurisdictions?: string[] };
+export type DriftChange = { kind: "entity" | "licence" | "party" | "vendor" | "product" | "sponsorship" | "legitimacy" | "covenant"; id: string; was: string; now: string; jurisdictions?: string[]; rule_type?: string };
 
 // One public check that a firm is a real, legitimate company (see firm-checks.ts).
 export const FIRM_CHECK_STATUSES = ["match", "mismatch", "not_found", "unavailable"] as const;
@@ -1865,6 +1866,7 @@ export class Store {
     const { rows } = await db.query("SELECT 1 FROM pg_namespace WHERE nspname = 'financial_products'");
     if (rows.length === 0) await db.exec("CREATE SCHEMA financial_products");
     await db.exec(TABLES);
+    await db.exec(COVENANT_TABLES);
     await db.query(
       `INSERT INTO financial_products.products (id, owner_id, status, data, published_at)
        SELECT p->>'id', NULL, 'published', p, now() FROM jsonb_array_elements($1::jsonb) AS p

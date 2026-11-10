@@ -519,7 +519,7 @@ export interface HealthChain {
   readonly publisher: string;
   head(subject: Uint8Array, programId?: string): Promise<HeadAccount | null>; // of another program, to read one retired
   latestRecordTx?(subject: Uint8Array, expected: Uint8Array): Promise<string | null>; // the newest successful transaction on a subject's head that carries these bytes
-  hasHeadHistory(subject: Uint8Array): Promise<boolean>; // whether a subject's head has ever had a transaction
+  hasHeadHistory(subject: Uint8Array, programId?: string): Promise<boolean>; // whether a subject's head has ever had a transaction (of another program, to read one retired)
   publishSnapshot(subject: Uint8Array, entry: SnapshotEntry, opening: boolean): Promise<string>;
   publishMissed(subject: Uint8Array, entry: MissedEntry, opening: boolean): Promise<string>;
 }
@@ -563,6 +563,8 @@ interface Subject {
 
 export class ProductHealthService {
   private timer: NodeJS.Timeout | null = null;
+  // Told after each product's record is brought up to date, so what watches it (covenants.ts) can look at a new snapshot.
+  afterAdvance: ((productId: string) => Promise<unknown>) | null = null;
   private constructor(
     private readonly db: Db,
     private readonly store: Store,
@@ -952,7 +954,10 @@ export class ProductHealthService {
     const now = this.now();
     if (!vaultAvailable(false)) return;
     await this.db.query(`INSERT INTO ${T}.product_health_worker (id, last_tick_at) VALUES ('worker', $1) ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at`, [now]);
-    for (const s of await this.subjects()) await this.advance(s, now).catch((e) => console.error("product health:", s.productId, (e as Error).message));
+    for (const s of await this.subjects()) {
+      await this.advance(s, now).catch((e) => console.error("product health:", s.productId, (e as Error).message));
+      if (!s.poolId && this.afterAdvance) await this.afterAdvance(s.productId).catch((e) => console.error("product health:", s.productId, (e as Error).message));
+    }
     await this.publishDue(now);
   }
 
@@ -1056,7 +1061,9 @@ export class ProductHealthService {
     for (const r of rows) verdict.set(r.id, r.on_chain ? "pending" : "not_on_chain");
     for (const e of new Set(rows.filter((r) => r.epoch !== epoch).map((r) => r.epoch))) {
       const old = rows.filter((r) => r.epoch === e);
-      const v = this.previousVerdict(old, anchors.find((a) => a.epoch === e + 1));
+      const anchor = anchors.find((a) => a.epoch === e + 1);
+      // A record that was replaced always has the anchor that replaced it. None, among other anchors, means it was removed.
+      const v = !anchor && anchors.length ? "previous_chain_mismatch" : this.previousVerdict(old, anchor);
       for (const r of old) if (r.on_chain) verdict.set(r.id, v);
     }
     const current = rows.filter((r) => r.epoch === epoch);
@@ -1233,6 +1240,44 @@ export class ProductHealthService {
     };
   }
 
+  // ---- for covenants (covenants.ts) ----
+
+  // The product's own record (not a pool's), oldest first, and which epoch is current. Readable with no vault key.
+  async covenantRows(productId: string): Promise<{ rows: SnapshotRow[]; epoch: number }> {
+    const rows = (await this.db.query(`SELECT * FROM ${T}.product_health_snapshots WHERE product_id = $1 AND pool_id = '' ORDER BY epoch, sequence`, [productId])).rows as unknown as SnapshotRow[];
+    return { rows, epoch: rows.length ? await this.currentEpoch(rows[0].subject) : 0 };
+  }
+
+  // Whether the ledger this firm's snapshots would come from is a real one: when there's no snapshot to read it from.
+  ledgerIsLive(entityId: string) {
+    return (this.deps.ledgerFor ?? defaultLedgerFor)(entityId).kind === "live";
+  }
+
+  // The authenticated report of one stored snapshot; null when it can't be opened (no vault key).
+  async assessOne(r: SnapshotRow): Promise<Assessment | null> {
+    try {
+      return (await this.assess([r], r.subject, new Map())).get(r.id) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // When the newest validly partner-signed period ended; null if none has been, undefined if it can't be checked.
+  async lastPartnerSignedAt(rows: SnapshotRow[]): Promise<Date | null | undefined> {
+    const candidates = rows.filter((r) => r.partner_signature && r.status !== "missed").slice(-50).reverse();
+    for (const r of candidates) {
+      const a = await this.assessOne(r);
+      if (!a) return undefined;
+      if (a.attestation === "partner_signed" && a.signature_ok === true) return new Date(r.period_end);
+    }
+    return null;
+  }
+
+  async fingerprintAt(productId: string, epoch: number, sequence: number): Promise<string | null> {
+    const { rows } = await this.db.query(`SELECT fingerprint FROM ${T}.product_health_snapshots WHERE product_id = $1 AND pool_id = '' AND epoch = $2 AND sequence = $3`, [productId, epoch, sequence]);
+    return (rows[0] as { fingerprint: string | null } | undefined)?.fingerprint ?? null;
+  }
+
   // After a chain reset or a move to a new program, a product's record can't continue where it was. An admin starts it
   // again, in the open. Only when the chain has no record for it: a head that disagrees with Mynt is evidence, not
   // something an admin can start over from. What the old record looked like is saved and stays reported.
@@ -1275,6 +1320,16 @@ export class ProductHealthService {
         oldHead = await chain.head(subjectBytes, previousProgram!);
       } catch (e) {
         return refuse(`The previous program can't be read, so its record can't be saved: ${(e as Error).message.slice(0, ERROR_LIMIT)}`);
+      }
+      // The same test under the old program: its head gone but its history there means it wasn't a reset.
+      if (!oldHead) {
+        let oldHistory: boolean;
+        try {
+          oldHistory = await chain.hasHeadHistory(subjectBytes, previousProgram!);
+        } catch (e) {
+          return refuse(`The previous program's history can't be read, so a reset can't be confirmed: ${(e as Error).message.slice(0, ERROR_LIMIT)}`);
+        }
+        if (oldHistory) return refuse("The previous program has no head for this product but does have its transaction history, so it wasn't reset: this needs investigating");
       }
     }
     const check = oldHead ? this.verifyAgainstChain(current, oldHead, null, epoch) : null;
@@ -1332,12 +1387,12 @@ export class SolanaHealthChain implements HealthChain {
     return this.publisherKey;
   }
 
-  private signatures(subject: Uint8Array, limit: number) {
-    return this.solana.rpc("devnet").call<{ signature: string; err: unknown }[]>("getSignaturesForAddress", [headAddress(this.programId, subject), { limit, commitment: "confirmed" }]);
+  private signatures(subject: Uint8Array, limit: number, programId: string = this.programId) {
+    return this.solana.rpc("devnet").call<{ signature: string; err: unknown }[]>("getSignaturesForAddress", [headAddress(programId, subject), { limit, commitment: "confirmed" }]);
   }
 
-  async hasHeadHistory(subject: Uint8Array): Promise<boolean> {
-    return (await this.signatures(subject, 1)).length > 0;
+  async hasHeadHistory(subject: Uint8Array, programId: string = this.programId): Promise<boolean> {
+    return (await this.signatures(subject, 1, programId)).length > 0;
   }
 
   // Never just the newest transaction: only one that carries this record's own bytes.

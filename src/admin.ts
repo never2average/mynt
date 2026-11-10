@@ -41,6 +41,7 @@ import { ENTITY_STATUSES } from "./store.js";
 import type { SolanaService } from "./solana/service.js";
 import type { MainnetGateService } from "./solana/mainnet-gate.js";
 import type { ProductHealthService } from "./product-health.js";
+import type { CovenantService } from "./covenants.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -58,6 +59,7 @@ export interface AdminContext {
   solana?: SolanaService | null; // developers' Solana programs: registry, deployer, signer, indexer
   gate?: MainnetGateService | null; // the mainnet program gate every mainnet deploy and upgrade passes
   productHealth?: ProductHealthService | null; // each product's on-chain financial-health record
+  covenants?: CovenantService | null; // licence providers' rules on the products they sponsor
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
 }
 
