@@ -615,6 +615,38 @@ test("the customer's state comes from one place, and what it was is on the movem
   assert.deepEqual(last, { old_state: "us-ca", new_state: null, source: "partner_verified:erased" });
 });
 
+test("a pool's firm state counts only for pool movements, and a customer's movement can never claim it", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail();
+  const pool = (over = {}) => w.move({ action: "pool_withdrawal", customer_ref: "lp:firm-1", state_source: "liquidity_provider_stated", state_verified_by: null, state_verified_at: null, ...over });
+
+  // Each firm source, on each pool action, through the same reservation as any other movement.
+  for (const action of ["pool_deposit", "pool_withdrawal"])
+    for (const state_source of ["liquidity_provider_stated", "sponsor_corrected", "admin_corrected"]) {
+      const m = pool({ action, state_source, amount_cents: 1_000 });
+      assert.equal((await authorizeMovement(store, m)).allowed, true, `${action} ${state_source}`);
+      const row = (await w.ledger(rail.id)).find((r) => r.request_id === m.request_id);
+      assert.deepEqual([row.state, row.state_source, row.state_verified_by, row.action], ["us-ny", state_source, null, action]);
+    }
+  // A firm with no state is that firm's problem, not a verification failure: the pool parks it on this code.
+  assert.equal((await authorizeMovement(store, pool({ customer_state: undefined }))).code, "customer_state_required");
+
+  // A pool movement goes by the firm's state: no other source counts.
+  for (const state_source of ["partner_verified", "self_reported", "none", undefined]) assert.equal((await authorizeMovement(store, pool({ state_source }))).code, "state_unverified", String(state_source));
+
+  // A customer's movement can't claim a firm's source, with a real state or with the pool's action.
+  for (const state_source of ["liquidity_provider_stated", "sponsor_corrected", "admin_corrected"]) {
+    assert.equal((await authorizeMovement(store, w.move({ state_source }))).code, "state_unverified", `customer, ${state_source}`);
+    assert.equal((await authorizeMovement(store, w.move({ action: "pool_withdrawal", state_source }))).code, "state_unverified", `pool action, customer reference, ${state_source}`);
+    assert.equal((await authorizeMovement(store, w.move({ action: "transfer", customer_ref: "lp:firm-1", state_source }))).code, "state_unverified", `firm reference, customer action, ${state_source}`);
+  }
+  // Nor can a handoff named like a pool's get a customer through on a verified state.
+  assert.equal((await authorizeMovement(store, w.move({ action: "pool_deposit" }))).code, "state_unverified");
+  // A customer's reference can't take that form at all, and an ordinary verified movement is untouched.
+  assert.equal((await authorizeMovement(store, w.move({ action: "transfer" }))).allowed, true);
+});
+
 test("an adapter that knows the verified state: re-read before each transfer, gone with the link on erasure; Bridge can't say", async () => {
   const store = await openPglite();
   const w = await world(store);

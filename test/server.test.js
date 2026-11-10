@@ -58,6 +58,8 @@ const INNOVATOR_TOOLS = [
   "list_my_sponsorships", "request_sponsorship",
   // the ledger of money its products moved
   "list_money_movements",
+  // liquidity pools on its products
+  "create_pool", "list_pools", "list_withdrawals",
 ];
 
 async function connect(store, user = null) {

@@ -385,7 +385,7 @@ test("a second sponsor doesn't read the first sponsor's books, and a suspended f
 test("a liquidity provider on the list reads the numbers; the list decides, not the code", async () => {
   let lp;
   const s = await setup({ liquidityProvidersOf: async () => (lp ? [lp.entity.id] : []) });
-  lp = await s.firm("Liquidity Fund", ["license_provider"]);
+  lp = await s.firm("Liquidity Fund", ["liquidity_provider"]);
   await s.tickAt(T0 + 5 * 60_000);
   assert.equal((await s.health.entitlement(lp.user, s.productId)).as, "liquidity_provider");
   assert.ok((await s.health.get(lp.user, s.productId, null, 5)).latest.report);

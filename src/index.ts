@@ -22,6 +22,7 @@ import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
 import { sweepStaleMovements } from "./money-rails.js";
+import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf } from "./liquidity.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { CovenantService } from "./covenants.js";
@@ -131,10 +132,18 @@ const openServices = async () => {
   const productHealth = await ProductHealthService.open(db, store, healthConfig, {
     chain: healthConfig.programId ? new SolanaHealthChain(solana, healthConfig.programId) : null,
     flowsFor: await loadFlowsFor(store),
+    liquidityProvidersOf: (productId) => liquidityProvidersOf(store, productId),
+    exitedLiquidityProvider: (productId, entityId) => exitedLiquidityProvider(store, productId, entityId),
+    liquidityProviderBooks: (productId, entityId) => liquidityProviderBooks(store, productId, entityId),
+    poolsOf: (productId) => poolsOf(store, productId),
+    poolSponsorOf: (poolId) => poolSponsorOf(store, poolId),
+    openWithdrawalRequests: (productId, poolId) => openWithdrawalRequests(store, productId, poolId),
   });
+  // Pays liquidity pools' withdrawal queues, as far as each pool's latest verified health allows.
+  const liquidity = new LiquidityWorker(store, productHealth, liquidityConfigFromEnv(process.env, healthConfig.intervalMs));
   // Licence providers' rules on those records: evaluated on each snapshot and on their own timer.
   const covenants = await CovenantService.open(db, store, productHealth);
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants };
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants };
 };
 
 const parseRoles = (): Role[] => {
@@ -163,7 +172,7 @@ if (values.help) {
   await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -173,6 +182,7 @@ if (values.help) {
   review.startWorker();
   gate.startWorker();
   productHealth.startWorker();
+  liquidity.startWorker();
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
@@ -212,6 +222,7 @@ if (values.help) {
     review.stopWorker();
     gate.stopWorker();
     productHealth.stopWorker();
+    liquidity.stopWorker();
     covenants.stopWorker();
     http.close(() => process.exit(0));
   });

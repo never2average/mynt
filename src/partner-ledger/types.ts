@@ -4,6 +4,11 @@
 //
 // A ledger only translates. It returns the partner's own figures, never decides what's healthy, and never logs or
 // returns a credential. A figure it can't give is null; there's no such thing as a default of zero.
+//
+// What the figures cover: one licence provider's books for one product, per sponsor per product. pool_id is passed for
+// the ledger's own use, and a partner that ring-fences a pool can report it, but Mynt doesn't rely on that: a sponsor's
+// pools on a product are treated as sharing these reserves. Money that leaves those reserves in a way Mynt can't see
+// (outside its movement ledger) is treated as none until the next reading shows it.
 
 export type LedgerError = { error: { code: string; message: string } }; // code: [a-z0-9_]; message: no partner text, no secrets
 export const ledgerError = (code: string, message: string): LedgerError => ({ error: { code, message } });

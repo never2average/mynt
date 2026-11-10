@@ -542,7 +542,7 @@ export class CovenantService {
 
   // Money already moving is reported and left alone: a pause only stops new sales.
   private async moneyInFlight(productId: string) {
-    const { rows } = await this.db.query<{ n: number; cents: string }>(`SELECT count(*)::int AS n, COALESCE(sum(amount_cents), 0)::text AS cents FROM ${T}.money_movements WHERE product_id = $1 AND NOT sandbox AND status IN ('requested', 'submitted')`, [productId]);
+    const { rows } = await this.db.query<{ n: number; cents: string }>(`SELECT count(*)::int AS n, COALESCE(sum(amount_cents), 0)::text AS cents FROM ${T}.money_movements WHERE product_id = $1 AND NOT sandbox AND status IN ('requested', 'submitted') AND COALESCE(action, '') NOT IN ('pool_deposit', 'pool_withdrawal')`, [productId]);
     return { movements: Number(rows[0]?.n ?? 0), amount_cents: Number(rows[0]?.cents ?? 0), statuses: ["requested", "submitted"], note: "These stay as they are: a covenant pause stops new sales only and cancels nothing already in flight" };
   }
 
