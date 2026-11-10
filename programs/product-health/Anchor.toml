@@ -1,0 +1,16 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+product_health = "GLi9SM8q1Q8S1k5SFHWpZ7v9uWK9M5ZDxhd6ESjuSfVz"
+
+[programs.devnet]
+product_health = "GLi9SM8q1Q8S1k5SFHWpZ7v9uWK9M5ZDxhd6ESjuSfVz"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"

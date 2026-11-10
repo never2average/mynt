@@ -42,6 +42,7 @@ import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
+import { registerProductHealthTools } from "./product-health-tools.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
@@ -134,6 +135,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
+  if (ctx.productHealth && user && (has("license_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
