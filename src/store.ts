@@ -1420,19 +1420,91 @@ const TABLES = `
   -- the day's total can't be read stale and a rail suspended a moment ago can't be used.
   ALTER TABLE financial_products.money_movements ADD COLUMN IF NOT EXISTS state_verified_by text;
   ALTER TABLE financial_products.money_movements ADD COLUMN IF NOT EXISTS state_verified_at timestamptz;
-  -- The state a licensed partner verified for a customer in its identity checks: the only state a live movement may
-  -- use (see resolveCustomerState). Live only; latest verification wins; gone when the customer erases their data.
+  -- What each identity provider verified about a customer, one row per provider, so one provider can't overwrite
+  -- another's result. A live movement goes by the latest row from a provider its sponsor accepts (see
+  -- resolveCustomerState). identity_digest: a keyed hash of what was checked, to tell if the customer has changed since.
+  -- suspended: the provider's latest check didn't pass.
   CREATE TABLE IF NOT EXISTS financial_products.customer_verified_states (
     app_id uuid NOT NULL,
     customer_ref text NOT NULL,
-    state text NOT NULL,
+    offering_id uuid NOT NULL,
+    state text,
+    status text NOT NULL CHECK (status IN ('verified', 'suspended')),
+    status_reason text,
     source text NOT NULL,
     verified_by_entity uuid,
     verified_by text NOT NULL,
     verified_at timestamptz NOT NULL,
+    identity_fields text[] NOT NULL DEFAULT '{}',
+    identity_digest text,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (app_id, customer_ref)
+    PRIMARY KEY (app_id, customer_ref, offering_id),
+    CHECK (status <> 'verified' OR (state IS NOT NULL AND identity_digest IS NOT NULL))
   );
+  -- Identity providers a sponsor (or an admin) accepts for one sponsorship. The sponsor's own offerings need no entry.
+  CREATE TABLE IF NOT EXISTS financial_products.sponsorship_identity_providers (
+    sponsorship_id uuid NOT NULL REFERENCES financial_products.sponsorships(id),
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    note text,
+    approved_by uuid REFERENCES financial_products.users(id),
+    approved_at timestamptz NOT NULL DEFAULT now(),
+    revoked_by uuid REFERENCES financial_products.users(id),
+    revoked_at timestamptz,
+    PRIMARY KEY (sponsorship_id, offering_id)
+  );
+  -- When a customer erased their data, by keyed hash: a check that began before then can't write a state back.
+  CREATE TABLE IF NOT EXISTS financial_products.customer_state_erasures (
+    app_id uuid NOT NULL,
+    customer_key text NOT NULL,
+    erased_at timestamptz NOT NULL,
+    PRIMARY KEY (app_id, customer_key)
+  );
+  ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS identity_fields text[];
+  ALTER TABLE financial_products.vendor_action_runs ADD COLUMN IF NOT EXISTS identity_digest text;
+  -- A write and an erasure of one customer's verified state take the same lock, so neither can slip past the other.
+  CREATE OR REPLACE FUNCTION financial_products.record_verified_customer_state(
+    p_app uuid, p_ref text, p_key text, p_offering uuid, p_state text, p_status text, p_reason text, p_source text, p_entity uuid, p_by text,
+    p_at timestamptz, p_fields text[], p_digest text, p_started timestamptz
+  ) RETURNS TABLE (o_written boolean, o_old text) LANGUAGE plpgsql AS $fn$
+  DECLARE
+    c financial_products.customer_verified_states%ROWTYPE;
+    seen boolean;
+    v_at timestamptz := COALESCE(p_at, clock_timestamp());
+  BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('cvs:' || p_app || ':' || p_ref, 0));
+    IF EXISTS (SELECT 1 FROM financial_products.customer_state_erasures e WHERE e.app_id = p_app AND e.customer_key = p_key AND e.erased_at >= p_started) THEN
+      RETURN QUERY SELECT false, NULL::text;
+      RETURN;
+    END IF;
+    SELECT * INTO c FROM financial_products.customer_verified_states v WHERE v.app_id = p_app AND v.customer_ref = p_ref AND v.offering_id = p_offering;
+    seen := FOUND;
+    IF seen THEN
+      -- The same answer read again, with no time of its own, isn't a new verification.
+      IF p_at IS NULL AND c.status = 'verified' AND p_status = 'verified' AND c.state = p_state THEN
+        v_at := c.verified_at;
+      ELSIF v_at < c.verified_at THEN
+        RETURN QUERY SELECT false, c.state;
+        RETURN;
+      END IF;
+      UPDATE financial_products.customer_verified_states v SET state = p_state, status = p_status, status_reason = p_reason, source = p_source, verified_by_entity = p_entity, verified_by = p_by,
+        verified_at = v_at, identity_fields = p_fields, identity_digest = p_digest, updated_at = now()
+        WHERE v.app_id = p_app AND v.customer_ref = p_ref AND v.offering_id = p_offering;
+      RETURN QUERY SELECT true, c.state;
+      RETURN;
+    END IF;
+    INSERT INTO financial_products.customer_verified_states (app_id, customer_ref, offering_id, state, status, status_reason, source, verified_by_entity, verified_by, verified_at, identity_fields, identity_digest)
+      VALUES (p_app, p_ref, p_offering, p_state, p_status, p_reason, p_source, p_entity, p_by, v_at, p_fields, p_digest);
+    RETURN QUERY SELECT true, NULL::text;
+  END $fn$;
+  CREATE OR REPLACE FUNCTION financial_products.erase_verified_customer_state(p_app uuid, p_ref text, p_key text) RETURNS TABLE (o_state text) LANGUAGE plpgsql AS $fn$
+  BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('cvs:' || p_app || ':' || p_ref, 0));
+    IF p_key IS NOT NULL THEN
+      INSERT INTO financial_products.customer_state_erasures AS e (app_id, customer_key, erased_at) VALUES (p_app, p_key, clock_timestamp())
+        ON CONFLICT (app_id, customer_key) DO UPDATE SET erased_at = EXCLUDED.erased_at;
+    END IF;
+    RETURN QUERY DELETE FROM financial_products.customer_verified_states v WHERE v.app_id = p_app AND v.customer_ref = p_ref RETURNING v.state;
+  END $fn$;
   DROP FUNCTION IF EXISTS financial_products.reserve_money_movement(uuid, uuid, text, text, uuid, text, uuid, text, bigint, text, text, uuid, uuid, bigint, text);
   CREATE OR REPLACE FUNCTION financial_products.reserve_money_movement(
     p_rail uuid, p_id uuid, p_key text, p_product text, p_app uuid, p_action text, p_sponsor uuid, p_direction text,

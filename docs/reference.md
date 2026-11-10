@@ -912,7 +912,13 @@ Every rail change, and every refused approval, is in the audit log.
 
 Each refusal is audited (`money_movement_refused`) and its quote stays usable. **Sandbox** movements never move real money, so they go through the same check but aren't refused and use no limit: they're in the ledger with `sandbox: true` and `would_refuse` naming what live would have said.
 
-**Partner requirements.** A live movement needs a home state a licensed partner verified. Mynt takes it from whichever of these says so, the latest verification winning:
+**Partner requirements.** A live movement needs a home state verified by an identity provider its sponsor accepts: the sponsor itself, or an offering the licence provider (or an admin) approved for that sponsorship with `approve_identity_provider` (`revoke_identity_provider` and `list_identity_providers` go with it). A builder's own firm can never be approved for its own product. Each provider's result is kept separately, and the latest from a provider the sponsor accepts is the one that counts, checked per movement, so another provider can't overwrite it and a check for one sponsor doesn't satisfy another. It's refused with `state_unverified` and the reason when:
+
+- that provider's latest check didn't pass (`not_verified`, `no_match` or `deceased`);
+- the customer's vault no longer matches what was checked (a keyed hash of the identity details is kept with the verification, so rotating `MYNT_VAULT_KEY` means verifying again);
+- it's older than `VERIFIED_STATE_MAX_AGE_DAYS` (default 365).
+
+A `verified_at` in the future is refused. A check that began before a customer erased their data can't write a state back. Mynt takes the state from whichever of these says so:
 
 | Source | Supplies a verified state? | What's needed |
 |---|---|---|

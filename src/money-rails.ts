@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { licenseInForce, productsAnsweredBy } from "./access.js";
-import { RAMP_ADAPTER_IDS } from "./ramp-adapters/index.js";
+import { normName, RAMP_ADAPTER_IDS } from "./ramp-adapters/index.js";
 import { licenseProducts, normalizeModel } from "./regulatory.js";
 import { whereHeld } from "./sponsorships.js";
 import type { ProductRecord, Store, User } from "./store.js";
@@ -186,40 +186,100 @@ export interface ResolvedCustomerState {
   source: typeof PARTNER_VERIFIED | typeof SELF_REPORTED | "none";
   verified_by: string | null;
   verified_at: string | null;
-}
-export async function resolveCustomerState(store: Store, c: { sandbox: boolean; app_id: string; customer_ref: string; held: () => Promise<Record<string, string>> }): Promise<ResolvedCustomerState> {
-  if (c.sandbox) return { state: stateOf((await c.held())[CUSTOMER_STATE_FIELD]), source: SELF_REPORTED, verified_by: null, verified_at: null };
-  const { rows } = await store.db.query(`SELECT state, verified_by, verified_at FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2`, [c.app_id, c.customer_ref]);
-  const state = rows[0] ? stateOf(rows[0].state) : null;
-  return state ? { state, source: PARTNER_VERIFIED, verified_by: rows[0].verified_by as string, verified_at: iso(rows[0].verified_at) } : { state: null, source: "none", verified_by: null, verified_at: null };
+  sponsors: string[]; // the sponsoring firms that accept the provider behind this state
+  problem: string | null; // why there's no state, in words a customer's app can show
 }
 
-// A licensed partner verified where a customer lives. The latest verification wins. verified_at: when the partner says
-// it verified them; left out, it's now for a new or changed state, and an unchanged state keeps the time it had, so
-// reading the same answer again isn't a new verification. Returns false for what isn't a US state.
-export async function recordVerifiedCustomerState(store: Store, v: { app_id: string; customer_ref: string; state: unknown; source: "ramp_link" | "identity_service"; verified_by_entity: string | null; verified_by: string; verified_at?: string | Date | null }): Promise<boolean> {
-  const state = stateOf(v.state);
-  if (!state) return false;
-  const at = v.verified_at ? new Date(v.verified_at).toISOString() : null;
-  const { rows } = await store.db.query(
-    `WITH was AS (SELECT state FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2)
-     INSERT INTO ${T}.customer_verified_states AS t (app_id, customer_ref, state, source, verified_by_entity, verified_by, verified_at)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, now()))
-     ON CONFLICT (app_id, customer_ref) DO UPDATE SET state = EXCLUDED.state, source = EXCLUDED.source, verified_by_entity = EXCLUDED.verified_by_entity, verified_by = EXCLUDED.verified_by,
-       verified_at = CASE WHEN $7::timestamptz IS NULL AND t.state = EXCLUDED.state THEN t.verified_at ELSE EXCLUDED.verified_at END, updated_at = now()
-       WHERE $7::timestamptz IS NULL OR EXCLUDED.verified_at >= t.verified_at
-     RETURNING (SELECT state FROM was) AS old_state`,
-    [v.app_id, v.customer_ref, state, v.source, v.verified_by_entity, v.verified_by, at],
-  );
-  if (!rows[0]) return false; // an older verification than the one on file
-  await noteHistory(store, { app_id: v.app_id, customer_ref: v.customer_ref, sandbox: false, old_state: (rows[0].old_state as string | null) ?? null, new_state: state, changed_by: `partner:${v.verified_by_entity ?? v.verified_by}`, source: `${PARTNER_VERIFIED}:${v.verified_by}` });
+// What an identity check was run on: a keyed hash, so the check is tied to the person and the values aren't kept.
+export const IDENTITY_FIELDS = ["full_name", "date_of_birth", "ssn"];
+export const isIdentityCheck = (t: { category: string }) => t.category === "identity" || t.category === "kyc";
+export const identityFieldsOf = (schema: Record<string, unknown>) => IDENTITY_FIELDS.filter((f) => f in ((schema.properties ?? {}) as Record<string, unknown>));
+const normIdentity = (field: string, v: string) => (field === "full_name" ? normName(v) : field === "ssn" ? v.replace(/\D/g, "") : v.trim().slice(0, 10));
+export function identityDigest(held: Record<string, string>, fields: string[]): string | null {
+  const key = derivedKey("identity-digest");
+  const values = [...fields].sort().map((f) => (held[f] ? normIdentity(f, held[f]) : ""));
+  if (!key || !values.length || values.some((v) => !v)) return null;
+  return createHmac("sha256", key).update(JSON.stringify(values)).digest("hex");
+}
+
+// How long a verification lasts before a live movement needs a new one.
+export const verifiedStateMaxAgeDays = () => Number(process.env.VERIFIED_STATE_MAX_AGE_DAYS) || 365;
+
+export async function resolveCustomerState(store: Store, c: { sandbox: boolean; app_id: string; customer_ref: string; held: () => Promise<Record<string, string>>; product_id: string; component_key: string | null; now?: Date }): Promise<ResolvedCustomerState> {
+  const none = (problem: string): ResolvedCustomerState => ({ state: null, source: "none", verified_by: null, verified_at: null, sponsors: [], problem: `Money can't move for this customer: ${problem}` });
+  if (c.sandbox) return { state: stateOf((await c.held())[CUSTOMER_STATE_FIELD]), source: SELF_REPORTED, verified_by: null, verified_at: null, sponsors: [], problem: null };
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2`, [c.app_id, c.customer_ref]);
+  if (!rows.length) return none("a licensed partner hasn't verified their home state in an identity check");
+  // Only a provider the sponsor of this action's component accepts: the sponsor itself, or one it approved for this
+  // sponsorship. The builder's own firm never counts for its own product.
+  const sponsorships = (await store.sponsorships({ product_id: c.product_id, status: "approved" })).filter((s) => s.component_key === c.component_key);
+  const { rows: list } = await store.db.query(`SELECT sponsorship_id, offering_id FROM ${T}.sponsorship_identity_providers WHERE sponsorship_id = ANY($1::uuid[]) AND revoked_at IS NULL`, [sponsorships.map((s) => s.id)]);
+  const approved = new Set(list.map((l) => `${l.sponsorship_id}:${l.offering_id}`));
+  const acceptedBy = (r: Row) => sponsorships.filter((s) => r.verified_by_entity !== s.builder_entity_id && (r.verified_by_entity === s.provider_entity_id || approved.has(`${s.id}:${r.offering_id}`)));
+  const latest = rows.filter((r) => acceptedBy(r).length).sort((a, b) => new Date(b.verified_at as string).getTime() - new Date(a.verified_at as string).getTime())[0];
+  if (!latest) return none("no identity provider its licence provider accepts has verified their home state");
+  if (latest.status !== "verified") return none("their latest identity check didn't pass");
+  const verifiedAt = new Date(latest.verified_at as string);
+  if ((c.now ?? new Date()).getTime() - verifiedAt.getTime() > verifiedStateMaxAgeDays() * 86_400_000) return none("their home state was verified too long ago, and needs verifying again");
+  let held: Record<string, string> = {};
+  try {
+    held = await c.held();
+  } catch {
+    // an unreadable vault can't match
+  }
+  if (identityDigest(held, latest.identity_fields as string[]) !== latest.identity_digest) return none("their details have changed since their home state was verified, so it needs verifying again");
+  const state = stateOf(latest.state);
+  if (!state) return none("a licensed partner hasn't verified their home state in an identity check");
+  return { state, source: PARTNER_VERIFIED, verified_by: latest.verified_by as string, verified_at: verifiedAt.toISOString(), sponsors: [...new Set(acceptedBy(latest).map((s) => s.provider_entity_id))], problem: null };
+}
+
+// What one identity provider said about a customer. Latest wins, per provider. verified_at: when the partner says it
+// verified them; left out, it's now for a new or changed state, and an unchanged state keeps the time it had, so
+// reading the same answer again isn't a new verification. A future date is refused. status suspended: its check didn't
+// pass, which stands until a later one does. started_at: when this check began, so one that began before the customer
+// erased their data can't write it back. Returns whether it was recorded.
+const MAX_CLOCK_SKEW_MS = 5 * 60_000;
+export type VerifiedStateWrite = {
+  app_id: string;
+  customer_ref: string;
+  offering_id: string;
+  source: "ramp_link" | "identity_service";
+  verified_by_entity: string | null;
+  verified_by: string;
+  started_at: string | Date;
+  verified_at?: string | Date | null;
+} & ({ status?: "verified"; state: unknown; identity_fields: string[]; identity_digest: string | null } | { status: "suspended"; reason: string });
+export async function recordVerifiedCustomerState(store: Store, v: VerifiedStateWrite): Promise<boolean> {
+  const suspended = v.status === "suspended";
+  const state = suspended ? null : stateOf(v.state);
+  if (!suspended && (!state || !v.identity_digest)) return false;
+  const at = v.verified_at ? new Date(v.verified_at) : null;
+  if (at && (Number.isNaN(at.getTime()) || at.getTime() > Date.now() + MAX_CLOCK_SKEW_MS)) return false;
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.record_verified_customer_state($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`, [
+    v.app_id,
+    v.customer_ref,
+    customerKey(v.app_id, v.customer_ref),
+    v.offering_id,
+    state,
+    suspended ? "suspended" : "verified",
+    suspended ? v.reason : null,
+    v.source,
+    v.verified_by_entity,
+    v.verified_by,
+    at?.toISOString() ?? null,
+    suspended ? [] : v.identity_fields,
+    suspended ? null : v.identity_digest,
+    new Date(v.started_at).toISOString(),
+  ]);
+  if (!rows[0]?.o_written) return false;
+  await noteHistory(store, { app_id: v.app_id, customer_ref: v.customer_ref, sandbox: false, old_state: (rows[0].o_old as string | null) ?? null, new_state: state, changed_by: `partner:${v.verified_by_entity ?? v.verified_by}`, source: `${PARTNER_VERIFIED}:${suspended ? "suspended:" : ""}${v.verified_by}` });
   return true;
 }
 
 // Erasure takes the verified state too: an erased customer has no state, so a live movement is refused.
 export async function eraseVerifiedCustomerState(store: Store, c: { app_id: string; customer_ref: string; changed_by: string }): Promise<void> {
-  const { rows } = await store.db.query(`DELETE FROM ${T}.customer_verified_states WHERE app_id = $1 AND customer_ref = $2 RETURNING state`, [c.app_id, c.customer_ref]);
-  if (rows[0]) await noteHistory(store, { app_id: c.app_id, customer_ref: c.customer_ref, sandbox: false, old_state: rows[0].state as string, new_state: null, changed_by: c.changed_by, source: `${PARTNER_VERIFIED}:erased` });
+  const { rows } = await store.db.query(`SELECT * FROM ${T}.erase_verified_customer_state($1, $2, $3)`, [c.app_id, c.customer_ref, customerKey(c.app_id, c.customer_ref)]);
+  for (const r of rows) if (r.o_state) await noteHistory(store, { app_id: c.app_id, customer_ref: c.customer_ref, sandbox: false, old_state: r.o_state as string, new_state: null, changed_by: c.changed_by, source: `${PARTNER_VERIFIED}:erased` });
 }
 
 // The history is a record of the change, never a condition of it.
@@ -260,6 +320,8 @@ export interface MovementRequest {
   state_source?: string | null; // where that state came from, kept on the movement. Live needs partner_verified, or a firm's source on a pool movement.
   state_verified_by?: string | null; // the partner that verified it
   state_verified_at?: string | null; // and when
+  state_sponsors?: string[]; // live customer movements: the sponsors that accept the provider behind the state
+  state_problem?: string | null; // why resolveCustomerState found none, for the refusal
   customer_ref: string | null; // kept only as a pseudonymous key
   idempotency_key: string; // the same for every attempt at one movement
   app_id?: string | null;
@@ -322,6 +384,7 @@ export async function outsideLicenceCoverage(store: Store, entityId: string, sta
 // its action and its `lp:` reference together, which a customer's can't be: a customer reference has no colon.
 export const POOL_ACTIONS = new Set(["pool_deposit", "pool_withdrawal"]);
 export const FIRM_STATE_SOURCES = new Set(["liquidity_provider_stated", "sponsor_corrected", "admin_corrected"]);
+const isFirmMovement = (m: MovementRequest) => POOL_ACTIONS.has(m.action ?? "") && (m.customer_ref ?? "").startsWith("lp:");
 function liveStateAcceptable(m: MovementRequest, state: string | null): boolean {
   const poolAction = POOL_ACTIONS.has(m.action ?? "");
   const firmRef = (m.customer_ref ?? "").startsWith("lp:");
@@ -334,9 +397,6 @@ function liveStateAcceptable(m: MovementRequest, state: string | null): boolean 
 export async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string | null): Promise<{ rails: Rail[]; state: string } | Refusal> {
   if (!m.direction) return refusal(403, "movement_unknown", "Mynt can't tell which way this transfer moves money, so it isn't allowed");
   if (m.amount_cents === null) return refusal(403, "amount_unknown", "Mynt can't tell how much this transfer moves, so it isn't allowed");
-  const state = stateOf(m.customer_state);
-  if (!m.sandbox && !liveStateAcceptable(m, state)) return refusal(403, "state_unverified", "Money can't move for this customer: a licensed partner hasn't verified their home state in an identity check");
-  if (!state) return refusal(409, "customer_state_required", `Record the customer's US state first: POST /v1/client/fields with ${CUSTOMER_STATE_FIELD}, e.g. us-ny`);
   let sponsorships = await store.sponsorships({ product_id: m.product_id, status: "approved" });
   if (!sponsorships.length) return refusal(403, "no_sponsor", "Money can't move for this product: no licence provider sponsors it");
   // The sponsor of the component this action serves, and no other: a sponsor of something else doesn't answer for it.
@@ -347,9 +407,18 @@ export async function eligibleRails(store: Store, m: MovementRequest, onlyRail: 
     sponsorships = sponsorships.filter((s) => s.provider_entity_id === m.sponsor_entity_id);
     if (!sponsorships.length) return refusal(403, "no_sponsor", "Money can't move for this pool: its sponsor no longer sponsors it");
   }
-  const here = sponsorships.filter((s) => s.jurisdictions.includes(state) || s.jurisdictions.includes("us"));
+  const unverified = (why?: string | null) => refusal(403, "state_unverified", why ?? "Money can't move for this customer: a licensed partner hasn't verified their home state in an identity check");
+  const state = stateOf(m.customer_state);
+  if (!m.sandbox && !liveStateAcceptable(m, state)) return unverified(m.state_problem);
+  if (!state) return refusal(409, "customer_state_required", `Record the customer's US state first: POST /v1/client/fields with ${CUSTOMER_STATE_FIELD}, e.g. us-ny`);
+  let here = sponsorships.filter((s) => s.jurisdictions.includes(state) || s.jurisdictions.includes("us"));
+  if (!here.length) return refusal(403, "state_not_sponsored", `Money can't move for this product in ${state}: its licence provider doesn't sponsor it there`);
+  // A customer's state counts only with the sponsors that accept whoever verified it.
+  if (!m.sandbox && !isFirmMovement(m)) {
+    here = here.filter((s) => (m.state_sponsors ?? []).includes(s.provider_entity_id));
+    if (!here.length) return unverified("Money can't move for this customer: no identity provider this product's licence provider accepts has verified their home state");
+  }
   const sponsors = [...new Set(here.map((s) => s.provider_entity_id))];
-  if (!sponsors.length) return refusal(403, "state_not_sponsored", `Money can't move for this product in ${state}: its licence provider doesn't sponsor it there`);
   const { rows } = await store.db.query(`SELECT * FROM ${T}.money_rails WHERE entity_id = ANY($1::uuid[]) AND direction = $2 AND kind = $3 AND provider = $4 ORDER BY created_at, id`, [
     sponsors,
     m.direction,
@@ -817,6 +886,75 @@ export function registerMoneyRailTools(server: McpServer, store: Store, user: Us
           return json({ ...done, in_flight });
         },
       );
+  }
+
+  if (roles.licenceProvider || roles.admin) {
+    const sponsorship = async (id: string) => {
+      if (!UUID.test(id)) return undefined;
+      const s = await store.getSponsorship(id);
+      return s && (roles.admin || s.provider_entity_id === (await myFirm())) ? s : undefined;
+    };
+    server.registerTool(
+      "approve_identity_provider",
+      {
+        title: "Accept an identity provider for a sponsorship",
+        description:
+          "Licence provider (for a sponsorship of yours) or admin: accept one identity provider's offering, so the home state it verifies counts for live money movements under this sponsorship. Your own firm's offerings need no approval. A builder's own firm can never be approved for its own product. Audited.",
+        inputSchema: { sponsorship_id: z.string().uuid(), offering_id: z.string().uuid(), note: z.string().max(2000).optional() },
+      },
+      async ({ sponsorship_id, offering_id, note }) => {
+        const s = await sponsorship(sponsorship_id);
+        if (!s) return fail(`No sponsorship '${sponsorship_id}' of yours`);
+        if (s.status !== "approved") return fail(`The sponsorship is ${s.status}, not approved`);
+        const o = await getOffering(store.db, offering_id);
+        const t = o && (await serviceType(store.db, o.region, o.service_type));
+        if (!o || !t) return fail(`No offering '${offering_id}'`);
+        if (!isIdentityCheck(t) && t.category !== "ramp") return fail(`'${o.name}' isn't an identity service (it's ${t.category})`);
+        if (o.entity_id === s.builder_entity_id) {
+          await audit("approve_identity_provider_refused", s.id, { offering_id: o.id, reason: "builder_own_firm" });
+          return fail("A builder's own firm can't be approved to verify customers for its own product");
+        }
+        await store.db.query(
+          `INSERT INTO ${T}.sponsorship_identity_providers (sponsorship_id, offering_id, note, approved_by) VALUES ($1, $2, $3, $4)
+           ON CONFLICT (sponsorship_id, offering_id) DO UPDATE SET note = EXCLUDED.note, approved_by = EXCLUDED.approved_by, approved_at = now(), revoked_by = NULL, revoked_at = NULL`,
+          [s.id, o.id, note ?? null, user.id],
+        );
+        await audit("approve_identity_provider", s.id, { offering_id: o.id, vendor_entity_id: o.entity_id, note: note ?? null });
+        return json({ sponsorship_id: s.id, offering_id: o.id, status: "approved" });
+      },
+    );
+    server.registerTool(
+      "revoke_identity_provider",
+      {
+        title: "Stop accepting an identity provider",
+        description: "Licence provider (for a sponsorship of yours) or admin: stop accepting an identity provider for a sponsorship. Home states it verified stop counting for new movements at once. Audited.",
+        inputSchema: { sponsorship_id: z.string().uuid(), offering_id: z.string().uuid(), reason: z.string().min(3).max(2000) },
+        annotations: { destructiveHint: true },
+      },
+      async ({ sponsorship_id, offering_id, reason }) => {
+        const s = await sponsorship(sponsorship_id);
+        if (!s) return fail(`No sponsorship '${sponsorship_id}' of yours`);
+        const { rows } = await store.db.query(`UPDATE ${T}.sponsorship_identity_providers SET revoked_by = $3, revoked_at = now() WHERE sponsorship_id = $1 AND offering_id = $2 AND revoked_at IS NULL RETURNING offering_id`, [s.id, offering_id, user.id]);
+        if (!rows.length) return fail("That identity provider isn't approved for this sponsorship");
+        await audit("revoke_identity_provider", s.id, { offering_id, reason });
+        return json({ sponsorship_id: s.id, offering_id, status: "revoked" });
+      },
+    );
+    server.registerTool(
+      "list_identity_providers",
+      {
+        title: "Identity providers accepted for a sponsorship",
+        description: "Licence provider (for a sponsorship of yours) or admin: the identity providers accepted for a sponsorship, with who approved each and when, and whether it's been revoked.",
+        inputSchema: { sponsorship_id: z.string().uuid() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ sponsorship_id }) => {
+        const s = await sponsorship(sponsorship_id);
+        if (!s) return fail(`No sponsorship '${sponsorship_id}' of yours`);
+        const { rows } = await store.db.query(`SELECT * FROM ${T}.sponsorship_identity_providers WHERE sponsorship_id = $1 ORDER BY approved_at`, [s.id]);
+        return json(rows);
+      },
+    );
   }
 
   server.registerTool(

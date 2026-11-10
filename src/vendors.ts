@@ -19,7 +19,10 @@ import { rampCustomerKey, refreshVerifiedCustomerState, serveRampAdapter } from 
 import {
   authorizeMovement,
   CUSTOMER_STATE_FIELD,
+  identityDigest,
+  identityFieldsOf,
   isDefiniteRefusal,
+  isIdentityCheck,
   isMoneyMovement,
   movementShape,
   namesMoneyMovement,
@@ -969,6 +972,9 @@ type RunRow = {
   sandbox: boolean;
   status: RunStatus;
   client_outcome: Record<string, unknown>;
+  identity_fields?: string[] | null;
+  identity_digest?: string | null;
+  created_at?: string | Date;
 };
 const outcomeOf = (r: RunRow): ClientOutcome & { sandbox: boolean } => ({
   ...r.client_outcome,
@@ -1017,11 +1023,15 @@ async function finishRun(store: Store, run: RunRow, t: ServiceType | null, end: 
       if (f === CUSTOMER_STATE_FIELD || v == null || validateValue(f, v)) continue; // a stored type can't set where they live
       await store.putVaultField({ app_id: run.app_id, customer_ref: run.customer_ref, sandbox: run.sandbox, field: f, sealed: seal(String(v).trim(), run.sandbox), source: PREFILL_SOURCE[t.category] ?? "vendor" });
     }
-  // An identity check that passed, live, from a partner that says where the customer lives (see resolveCustomerState).
-  if (status === "completed" && shown === "verified" && output && t && !run.sandbox && run.customer_ref && (t.category === "identity" || t.category === "kyc") && output.residential_state) {
+  // A live identity check: one that passed and says where the customer lives is a verified state, for the sponsors
+  // that accept this provider (see resolveCustomerState); one that didn't pass suspends what this provider said.
+  if (status === "completed" && output && t && !run.sandbox && run.customer_ref && isIdentityCheck(t) && (shown === "not_verified" || (shown === "verified" && output.residential_state))) {
     const sub = await getSubscription(store.db, run.subscription_id);
     const vendor = sub && (await getOffering(store.db, sub.offering_id));
-    await recordVerifiedCustomerState(store, { app_id: run.app_id, customer_ref: run.customer_ref, state: output.residential_state, source: "identity_service", verified_by_entity: vendor?.entity_id ?? null, verified_by: t.key, verified_at: new Date() });
+    if (vendor) {
+      const base = { app_id: run.app_id, customer_ref: run.customer_ref, offering_id: vendor.id, source: "identity_service" as const, verified_by_entity: vendor.entity_id, verified_by: t.key, verified_at: new Date(), started_at: done.created_at ?? new Date() };
+      await recordVerifiedCustomerState(store, shown === "not_verified" ? { ...base, status: "suspended", reason: String(output.result ?? "not_verified") } : { ...base, state: output.residential_state, identity_fields: done.identity_fields ?? [], identity_digest: done.identity_digest ?? null });
+    }
   }
   await store.recordClientEvidence({
     app_id: run.app_id,
@@ -1161,12 +1171,17 @@ export async function vendorAction(
     status: "calling",
     client_outcome: {},
   };
+  // A live identity check: what it was run on, as a keyed hash, so a verification stays tied to this person.
+  if (!a.sandbox && isIdentityCheck(t)) {
+    run.identity_fields = identityFieldsOf(t.input_schema);
+    run.identity_digest = identityDigest(await a.held(), run.identity_fields);
+  }
   // A transfer asks the rail chokepoint before anything is instructed (see money-rails.ts); a quote only prices.
   const at = { subscription_id: sub.id, request_id: run.request_id };
   let movementId: string | undefined;
   if (isMoneyMovement(t)) {
     if (!a.sandbox && bound.o.adapter) await refreshVerifiedCustomerState(store, bound.o, { app_id: a.app_id, customer_ref: a.customer_ref }, opts);
-    const customerState = await resolveCustomerState(store, { sandbox: a.sandbox, app_id: a.app_id, customer_ref: a.customer_ref, held: a.held });
+    const customerState = await resolveCustomerState(store, { sandbox: a.sandbox, app_id: a.app_id, customer_ref: a.customer_ref, held: a.held, product_id: a.record.product.id, component_key: a.component ?? null });
     const verdict = await authorizeMovement(store, {
       product_id: a.record.product.id,
       sandbox: a.sandbox,
@@ -1176,6 +1191,8 @@ export async function vendorAction(
       state_source: customerState.source,
       state_verified_by: customerState.verified_by,
       state_verified_at: customerState.verified_at,
+      state_sponsors: customerState.sponsors,
+      state_problem: customerState.problem,
       customer_ref: a.customer_ref,
       // One quote is one movement, however many times it's accepted after a failure.
       idempotency_key: a.quote ? `quote:${a.quote}` : `run:${run.id}`,
@@ -1194,9 +1211,9 @@ export async function vendorAction(
   }
   try {
     await store.db.query(
-      `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling')`,
-      [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox],
+      `INSERT INTO ${T}.vendor_action_runs (id, request_id, subscription_id, entity_id, app_id, session_id, product_id, contract_hash, action, service_type, customer_ref, sandbox, status, identity_fields, identity_digest)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'calling', $13, $14)`,
+      [run.id, run.request_id, run.subscription_id, run.entity_id, run.app_id, run.session_id, run.product_id, run.contract_hash, run.action, run.service_type, run.customer_ref, run.sandbox, run.identity_fields ?? null, run.identity_digest ?? null],
     );
   } catch (e) {
     // Nothing was sent: the reservation goes, so the day's limit and the quote aren't held by a call that never happened.
