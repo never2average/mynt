@@ -77,6 +77,7 @@ export const LIQUIDITY_TABLES = `
     decided_by uuid,
     decided_at timestamptz
   );
+  ALTER TABLE ${T}.pool_state_corrections ADD COLUMN IF NOT EXISTS from_state_source text; -- who had set from_state, restored with it on a dispute
   CREATE INDEX IF NOT EXISTS pool_state_corrections_idx ON ${T}.pool_state_corrections (pool_id, lp_entity_id, status);
   -- A firm's standing in one pool. The money itself is only ever in the movement ledger; exited_at is set by
   -- refresh_pool_withdrawals when nothing of the firm's is left in the pool, and cleared when it comes back.
@@ -308,6 +309,7 @@ export const LIQUIDITY_TABLES = `
     spent bigint;
     other bigint;
     undone bigint;
+    conflicted bigint;
     pay bigint;
   BEGIN
     SELECT product_id INTO pid FROM ${T}.liquidity_pools WHERE id = p_pool;
@@ -350,7 +352,11 @@ export const LIQUIDITY_TABLES = `
           AND (m.status IN ('requested', 'submitted') OR (m.status = 'failed' AND m.status_detail IN ('stale_no_answer', 'mynt_gave_up')) OR (m.status = 'settled' AND m.settled_at > p_as_of));
       SELECT COALESCE(sum(s.amount_cents), 0) INTO undone FROM ${T}.pool_movement_states s JOIN ${T}.liquidity_pools q ON q.id = s.pool_id
         WHERE q.product_id = p.product_id AND q.sponsor_entity_id = p.sponsor_entity_id AND q.sandbox = p.sandbox AND s.kind = 'deposit' AND s.ledger_state = 'reversed' AND s.reversed_at > p_as_of AND s.settled_at <= p_as_of;
-      pay := LEAST(remaining, held - out_flight, p_headroom - spent - other - undone, p_max_transfer);
+      -- A ledger payout no claim can be tied to is money that may have left, until an admin links it or closes it.
+      SELECT COALESCE(sum(COALESCE(m.settled_amount_cents, m.amount_cents, 0)), 0) INTO conflicted FROM ${T}.pool_flags f JOIN ${T}.money_movements m ON m.id = f.movement_id JOIN ${T}.liquidity_pools q ON q.id = f.pool_id
+        WHERE f.kind = 'link_conflict' AND f.status = 'open' AND q.product_id = p.product_id AND q.sponsor_entity_id = p.sponsor_entity_id AND q.sandbox = p.sandbox AND m.direction IN ('off_ramp', 'payout')
+          AND (m.status IN ('requested', 'submitted') OR (m.status = 'failed' AND m.status_detail IN ('stale_no_answer', 'mynt_gave_up')) OR (m.status = 'settled' AND m.settled_at > p_as_of));
+      pay := LEAST(remaining, held - out_flight, p_headroom - spent - other - undone - conflicted, p_max_transfer);
       IF pay <= 0 THEN
         RETURN QUERY SELECT 'no_headroom'::text, w.id, w.lp_entity_id, NULL::bigint;
         RETURN;
@@ -447,5 +453,78 @@ export const LIQUIDITY_TABLES = `
       settled_amount_differs = CASE WHEN p_settled IS NULL THEN settled_amount_differs ELSE p_settled <> amount_cents END
     WHERE id = p_movement AND status = st;
     RETURN QUERY SELECT 'settled'::text;
+  END $fn$;
+
+  -- An admin's decision on an open flag, in one transaction: what it does to the ledger and the flag's closing happen
+  -- together or not at all, so a crash can't leave a settlement recorded and the decision still open.
+  CREATE OR REPLACE FUNCTION ${T}.resolve_pool_flag(p_flag uuid, p_resolution text, p_note text, p_by uuid, p_now timestamptz)
+  RETURNS TABLE (o_outcome text, o_negative boolean) LANGUAGE plpgsql AS $fn$
+  DECLARE
+    f ${T}.pool_flags%ROWTYPE;
+    pm ${T}.pool_movements%ROWTYPE;
+    w ${T}.pool_withdrawals%ROWTYPE;
+    m ${T}.money_movements%ROWTYPE;
+    res text;
+    others bigint;
+    held bigint;
+    out_flight bigint;
+    bal bigint;
+    negative boolean := false;
+  BEGIN
+    SELECT * INTO f FROM ${T}.pool_flags WHERE id = p_flag FOR UPDATE;
+    IF NOT FOUND OR f.status <> 'open' THEN
+      RETURN QUERY SELECT 'not_open'::text, false;
+      RETURN;
+    END IF;
+    IF p_resolution = 'accept_settlement' THEN
+      SELECT s.o_outcome INTO res FROM ${T}.settle_pool_withdrawal(f.movement_id, f.external_ref, f.settled_amount_cents, true) AS s;
+      IF res <> 'settled' THEN
+        RETURN QUERY SELECT ('cannot_settle:' || res)::text, false;
+        RETURN;
+      END IF;
+      PERFORM ${T}.refresh_pool_withdrawals(f.pool_id, p_now);
+      SELECT COALESCE(sum(contributed_cents - withdrawn_cents), 0) INTO bal FROM ${T}.pool_positions WHERE pool_id = f.pool_id AND lp_entity_id = f.lp_entity_id;
+      IF bal < 0 THEN
+        negative := true;
+        INSERT INTO ${T}.pool_flags (id, pool_id, lp_entity_id, movement_id, kind, amount_cents, external_ref, sandbox, detail)
+          VALUES (gen_random_uuid(), f.pool_id, f.lp_entity_id, f.movement_id, 'negative_balance', bal, f.external_ref, f.sandbox,
+                  'This firm''s settled position is below zero after an admin accepted a settlement')
+          ON CONFLICT DO NOTHING;
+      END IF;
+    ELSIF p_resolution IN ('link_movement', 'close_movement') THEN
+      SELECT * INTO m FROM ${T}.money_movements WHERE id = f.movement_id FOR UPDATE;
+      IF NOT FOUND THEN
+        RETURN QUERY SELECT 'no_movement'::text, false;
+        RETURN;
+      END IF;
+      PERFORM 1 FROM ${T}.liquidity_pools WHERE id = f.pool_id FOR UPDATE;
+      IF p_resolution = 'close_movement' THEN
+        IF m.status IN ('settled', 'reversed') THEN
+          RETURN QUERY SELECT 'already_settled'::text, false; -- money moved: it can only be linked
+          RETURN;
+        END IF;
+        UPDATE ${T}.money_movements SET status = 'failed', status_detail = 'admin_closed', failed_at = COALESCE(failed_at, now()), updated_at = now() WHERE id = m.id;
+      ELSE
+        SELECT * INTO pm FROM ${T}.pool_movements WHERE idempotency_key = m.idempotency_key AND movement_id IS NULL;
+        IF NOT FOUND THEN
+          RETURN QUERY SELECT 'no_claim'::text, false;
+          RETURN;
+        END IF;
+        IF pm.kind = 'withdrawal' THEN
+          SELECT * INTO w FROM ${T}.pool_withdrawals WHERE id = pm.withdrawal_id;
+          SELECT COALESCE(sum(amount_cents), 0) INTO others FROM ${T}.pool_movement_states WHERE withdrawal_id = pm.withdrawal_id AND id <> pm.id AND ledger_state <> 'released';
+          SELECT COALESCE(sum(contributed_cents - withdrawn_cents), 0), COALESCE(sum(pending_out_cents + unresolved_out_cents), 0) INTO held, out_flight
+            FROM ${T}.pool_positions WHERE pool_id = pm.pool_id AND lp_entity_id = pm.lp_entity_id;
+          IF others + pm.amount_cents > w.amount_cents OR held - out_flight - pm.amount_cents < 0 THEN
+            RETURN QUERY SELECT 'already_repaid'::text, false; -- it would count the same money twice: close it, or investigate
+            RETURN;
+          END IF;
+        END IF;
+        UPDATE ${T}.pool_movements SET movement_id = m.id, state = 'authorized', refusal = NULL WHERE id = pm.id;
+        PERFORM ${T}.refresh_pool_withdrawals(f.pool_id, p_now);
+      END IF;
+    END IF;
+    UPDATE ${T}.pool_flags SET status = 'resolved', resolution = p_resolution || ': ' || p_note, resolved_by = p_by, resolved_at = now() WHERE id = p_flag;
+    RETURN QUERY SELECT 'resolved'::text, negative;
   END $fn$;
 `;
