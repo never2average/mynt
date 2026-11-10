@@ -21,9 +21,13 @@ Addresses in this guide are placeholders. `https://ledger.partner.example` stand
 You need a Mynt account with the licence-provider role at your firm (an admin at Mynt adds you). Then:
 
 1. **Your firm id.** `get_my_entity` shows it (`id`). It goes in every statement as `provider_entity_id`.
-2. **Your signing key.** Make an Ed25519 key pair in your own key store. The private key never leaves you. Register the public key, base58 encoded (the same form as a Solana address), with `register_partner_signing_key`. It's the same key you co-sign product-health snapshots with.
-3. **Your endpoints** (for the HTTPS feed). Tell your Mynt contact your test and live URLs, for example `https://ledger-test.partner.example` and `https://ledger.partner.example`. An admin fixes them with `configure_partner_ledger`; you can't point Mynt anywhere else yourself. They must be HTTPS on port 443, on public addresses, and different from each other.
-4. **Mynt's request secret.** Once the endpoints are set, take the secret Mynt signs its requests with: `reveal_partner_ledger_secret`. It's shown once, to your firm's own people only (admins never see it). Keep it in your secrets store. `rotate_partner_ledger_secret` replaces it.
+2. **Two signing keys.** Make two Ed25519 key pairs in your own key store; the private keys never leave you.
+   - Your **live key** signs your real books. Register its public key, base58 encoded (the same form as a Solana address), with `register_partner_signing_key`. It's the same key you co-sign product-health snapshots with.
+   - Your **test key** signs your test books only. Register it with `register_partner_test_signing_key`. It must be a different key.
+
+   A statement signed with the test key is never accepted as live, and one signed with the live key is never accepted as test. Keep the live private key out of your test deployment altogether.
+3. **Your endpoints** (for the HTTPS feed). Tell your Mynt contact your test and live URLs, for example `https://ledger-test.partner.example` and `https://ledger.partner.example`. Each must be an origin and a path only (no query string, no fragment), HTTPS on port 443, on a public address, and different from the other. An admin proposes them with `configure_partner_ledger`, and **nothing changes until you confirm**: you get a `partner_ledger.endpoint_change_pending` event on your firm's webhooks, `get_partner_kit` shows the proposal under `pending_endpoint_change`, and you check that both URLs are your own deployments before passing them back with `confirm_partner_ledger_endpoints` (or `accept: false` to decline). Confirming a change puts your firm back on the sandbox until you pass conformance again.
+4. **Mynt's request secret.** Once your endpoints are confirmed, take the secret Mynt signs its requests with: `reveal_partner_ledger_secret`. It's shown once, to your firm's own people only (admins never see it). Keep it in your secrets store. `rotate_partner_ledger_secret` replaces it.
 
 ## (a) The ledger feed over HTTPS
 
@@ -43,13 +47,21 @@ User-Agent: Mynt-Vendor-Client/1
   "environment": "live",
   "provider_entity_id": "<your firm id>",
   "product_ids": ["product-a", "product-b"],
-  "period_end": "2026-11-10T14:00:00.000Z"
+  "period_end": "2026-11-10T14:00:00.000Z",
+  "audience": "https://ledger.partner.example/v1/ledger"
 }
 ```
 
+Mynt asks once per round for every product you sponsor, so expect one request per hour, not one per product.
+
 Schema: [`schemas/partner-ledger/request.v1.schema.json`](../schemas/partner-ledger/request.v1.schema.json).
 
-**Check every request before you answer it.** Compute the HMAC-SHA256 of the text `<t>.<raw body>` (the timestamp from the header, a dot, then the body exactly as received) with your request secret, and compare it to `v1` in constant time. Refuse with `401` when it doesn't match, or when `t` is more than 300 seconds from your clock. Treat a repeated `request_id` as a replay. This is the same signing as Mynt's vendor wire contract.
+**Check every request before you answer it.**
+
+1. Compute the HMAC-SHA256 of the text `<t>.<raw body>` (the timestamp from the header, a dot, then the body exactly as received) with your request secret, and compare it to `v1` in constant time. Refuse with `401` when it doesn't match, or when `t` is more than 300 seconds from your clock. This is the same signing as Mynt's vendor wire contract.
+2. **Environment.** Each deployment knows which environment it serves, from its own configuration, never from the request. Refuse with `400` a request whose `environment` isn't that one: your test deployment never answers `"live"`.
+3. **Audience.** `audience` is the exact URL Mynt sent the request to. Refuse with `400` unless it's your own endpoint's URL, written exactly as Mynt has it (`<your base URL>/v1/ledger`). The signature covers the body, so this is what stops someone relaying Mynt's request to you from an address of their own and reading your answer.
+4. Treat a repeated `request_id` as a replay.
 
 ### Your answer: a signed statement
 
@@ -79,18 +91,18 @@ The rules:
 - **A figure you can't give is `null`, with a `reason`.** Never send `0` in its place: zero means zero. A `null` without a reason is refused.
 - **A product you don't recognise** comes back with both figures `null` and a reason (for example `"unknown_product"`). Don't leave it out.
 - **`as_of`** is when your books said this, with a time zone. Mynt refuses a time more than 300 seconds in the future (check your clock) or older than 24 hours.
-- **`environment`** must match the request's. Test figures never stand in for live ones.
+- **`environment`** is your deployment's own, which is the request's (you refused any other). Sign live statements with your live key and test statements with your test key: test figures never stand in for live ones.
 - **`request_id`** echoes the request's.
 
 ### Signing the statement
 
-Sign with Ed25519, using your registered key, over these bytes:
+Sign with Ed25519, using your registered key for that environment, over these bytes:
 
 1. the UTF-8 text `mynt.partner_ledger.v1`,
 2. one zero byte,
 3. the **canonical JSON** of the statement without its `signature` member, as UTF-8.
 
-Canonical JSON means: object keys sorted (by UTF-16 code unit, as JavaScript's default sort does), no spaces or line breaks, integers written plainly, `null`, `true`, `false`, and strings escaped as `JSON.stringify` escapes them (quotes, backslashes and control characters only; other characters as UTF-8). Put the 64-byte signature in `signature.value` as lowercase hex and your base58 public key in `signature.public_key`.
+Canonical JSON is [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) (the JSON Canonicalization Scheme), with integers only: object keys sorted by UTF-16 code unit, no spaces or line breaks, integers written plainly, `null`, `true`, `false`, and strings escaped as `JSON.stringify` escapes them (quotes, backslashes and control characters only; other characters as UTF-8). Any RFC 8785 library produces the same bytes for a statement. Put the 64-byte signature in `signature.value` as lowercase hex and your base58 public key in `signature.public_key`.
 
 ### Errors
 
@@ -104,20 +116,28 @@ Any refusal is a `4xx` or `5xx` with a small JSON body ([`schemas/partner-ledger
 |---|---|---|
 | The signature doesn't verify, or is more than 300 s old | `401` | `bad_signature`, `stale_request` |
 | The body isn't the request's shape | `400` | `bad_request` |
+| `environment` isn't the one this deployment serves | `400` | `wrong_environment` |
+| `audience` isn't this endpoint's own URL | `400` | `wrong_audience` |
 | Your systems can't answer just now | `503` | `unavailable` |
 
 Mynt keeps the code, never your message. When a live read fails, that period's snapshot says `source: unavailable` with its figures null, and you'll see it in `list_product_health`; nothing is guessed.
 
 ### What Mynt checks on every live read
 
-The same as conformance: the schema, that it's your firm and the live environment, that `request_id` echoes, that the signature verifies with your registered key, the clock, and that each null has a reason. A statement that fails any of these isn't used. A product it leaves out is recorded as null, "the partner's statement didn't cover this product".
+The same as conformance: the schema, that it's your firm and the live environment, that `request_id` echoes, that the signature verifies with your registered live key (a statement signed with your test key is refused), the clock, and that each null has a reason. A statement that fails any of these isn't used. A product it leaves out is recorded as null, "the partner's statement didn't cover this product".
 
 ## A worked example (Node.js)
 
-Your endpoint, in outline. Any language works: these are the only two cryptographic steps.
+Your endpoint, in outline. Any language works: these are the only two cryptographic steps. Run it twice, as two separate deployments with their own configuration: a test one with your test key and test books, and a live one with your live key and real books.
 
 ```js
 import { createHmac, timingSafeEqual, sign } from "node:crypto";
+
+// Fixed per deployment, from its own configuration: never taken from the request.
+const ENVIRONMENT = "live"; // "test" in your test deployment
+const OWN_URL = "https://ledger.partner.example/v1/ledger"; // this deployment's own URL, exactly as Mynt calls it
+const PRIVATE_KEY = loadKey(ENVIRONMENT === "live" ? "ledger-live-key" : "ledger-test-key"); // your key store
+const PUBLIC_KEY = ENVIRONMENT === "live" ? "<your live key, base58>" : "<your test key, base58>";
 
 // 1. Verify Mynt's request.
 function verifyMynt(header, rawBody, secret) {
@@ -145,10 +165,13 @@ function signStatement(unsigned, privateKey, publicKeyBase58) {
 
 // In your handler:
 //   if (!verifyMynt(req.headers["mynt-signature"], raw, process.env.MYNT_LEDGER_SECRET)) return 401 { error: { code: "bad_signature", … } }
-//   const body = JSON.parse(raw); if (!Array.isArray(body.product_ids)) return 400 { error: { code: "bad_request", … } }
+//   const body = JSON.parse(raw);
+//   if (!Array.isArray(body.product_ids)) return 400 { error: { code: "bad_request", … } }
+//   if (body.environment !== ENVIRONMENT) return 400 { error: { code: "wrong_environment", … } }
+//   if (body.audience !== OWN_URL) return 400 { error: { code: "wrong_audience", … } }
 //   const products = body.product_ids.map((id) => yourBooks(id) ?? { product_id: id, reserves_held_cents: null, customer_obligations_cents: null, reason: "unknown_product" });
-//   return 200 signStatement({ schema: "mynt.partner_ledger.v1", provider_entity_id: YOUR_FIRM_ID, environment: body.environment,
-//                              request_id: body.request_id, as_of: new Date().toISOString(), products }, privateKey, PUBLIC_KEY);
+//   return 200 signStatement({ schema: "mynt.partner_ledger.v1", provider_entity_id: YOUR_FIRM_ID, environment: ENVIRONMENT,
+//                              request_id: body.request_id, as_of: new Date().toISOString(), products }, PRIVATE_KEY, PUBLIC_KEY);
 ```
 
 For the request in the example above, the signed bytes start `mynt.partner_ledger.v1`, a zero byte, then:
@@ -162,11 +185,12 @@ For the request in the example above, the signed bytes start `mynt.partner_ledge
 No API? Upload the same statement once a day with `upload_partner_ledger_file` (licence-provider members only; admins can't upload for you). Differences from the feed:
 
 - `request_id` is `null`.
+- A live file is signed with your live key; a test file (`"environment": "test"`) with your test key.
 - Cover every product you sponsor; the answer lists any you left out (`missing`), and those read as null with a reason.
 - `as_of` must be newer than your last file for that environment, not in the future, and at most 36 hours old.
 - A file with `"environment": "test"` is for conformance only and never read as live.
 
-Mynt checks the schema, your firm, the signature and the clock when you upload, stores the file sealed (admins see only its time and how many products it covers), and checks its age again on every read: once your latest live file is older than 36 hours, snapshots say `source: unavailable` until the next one arrives.
+Mynt checks the schema, your firm, the signature and the clock when you upload, and stores the file sealed (admins see only its time and how many products it covers). It checks the file again on every read: against your **current** live key, so replacing that key stops an old file counting at once, and its age, so once your latest live file is older than 36 hours, snapshots say `source: unavailable` until the next one arrives.
 
 ## (b) The customer's home state
 
@@ -185,11 +209,11 @@ Propose your rails with `propose_rail`; an admin approves them against your lice
 
 | Case | Passes when |
 |---|---|
-| `setup` | Your endpoints are set, the secret was issued, your key is registered, and you sponsor at least one product |
+| `setup` | Your endpoints are confirmed, the secret was issued, your live and test keys are registered, and you sponsor at least one product |
 | `answer` | Your test endpoint answered a signed request with `200` and JSON |
 | `schema` | The statement matches the schema (integers, nulls with reasons, no extra members) |
 | `identity` | Your firm id, the `test` environment, and the echoed `request_id` |
-| `signature` | It verifies with your registered key |
+| `signature` | It verifies with your registered test key (not your live key) |
 | `clock` | `as_of` isn't in the future (300 s grace) or older than the maximum age |
 | `null_handling` | Every null figure has a reason |
 | `coverage` | Every product you sponsor is answered |
@@ -197,14 +221,18 @@ Propose your rails with `propose_rail`; an admin approves them against your lice
 | `bad_signature_refused` | A request signed with the wrong secret gets `401` and an error body |
 | `stale_request_refused` | A correctly signed request from 600 s ago gets `401` and an error body |
 | `malformed_request_refused` | A correctly signed request with no `product_ids` gets `400` (or `422`) and an error body |
+| `wrong_environment_refused` | A correctly signed request for `"live"`, sent to your test endpoint, gets a `4xx` and an error body |
+| `wrong_audience_refused` | A correctly signed request whose `audience` is another URL (your live endpoint's) gets a `4xx` and an error body |
 
 For the file source, the cases are `setup` and the statement checks above, run on your latest upload. The run also reports (b) as `identity` and (c) as `rails`, each with its own `passed`.
 
-**Going live.** When the ledger part passes (`can_go_live: true`), switch with `set_partner_ledger_source { "source": "http" }`. Mynt then reads your live endpoint once and checks the statement (the figures are discarded); if that passes, your next snapshots read your live books and are marked `source: partner_ledger`. For the file source, upload a live file first, then `set_partner_ledger_source { "source": "file" }`. `set_partner_ledger_source { "source": "sandbox" }` goes back; an admin can also send a firm back to the sandbox, but never switch it to live.
+**Going live.** When the ledger part passes (`can_go_live: true`), switch with `set_partner_ledger_source { "source": "http" }`. Mynt then reads your live endpoint once and checks the statement, which must be signed with your live key (the figures are discarded); if that passes, your next snapshots read your live books and are marked `source: partner_ledger`. For the file source, upload a live file first, then `set_partner_ledger_source { "source": "file" }`. `set_partner_ledger_source { "source": "sandbox" }` goes back. An admin can also send your firm back to the sandbox, never switch it to live, and you're told with a `partner_ledger.source_changed` event on your webhooks.
+
+**A pass runs out.** Each run has an `expires_at`, 30 days after it ran. A pass that has run out neither lets you switch nor keeps you live: your snapshots go back to the sandbox until you run conformance again, so run it on a schedule. `get_partner_kit` shows `live_until`.
 
 (b) and (c) don't hold up the ledger switch: they're checked on every money movement already, and conformance shows you where you stand.
 
-**When things change.** If an admin changes your endpoints, you're back on the sandbox until you pass conformance again. Rotating the request secret doesn't change your source; update your endpoint as soon as you rotate.
+**When things change.** An endpoint change takes effect only when you confirm it, and then you're back on the sandbox until you pass conformance again. Rotating the request secret doesn't change your source; update your endpoint as soon as you rotate.
 
 ## What Mynt does and doesn't do with your figures
 
@@ -218,6 +246,8 @@ For the file source, the cases are `setup` and the statement checks above, run o
 |---|---|
 | `PARTNER_LEDGER_MAX_AGE_HOURS`: oldest `as_of` accepted from the feed | 24 |
 | `PARTNER_LEDGER_FILE_MAX_AGE_HOURS`: oldest daily file accepted or read | 36 |
+| `PARTNER_CONFORMANCE_MAX_AGE_DAYS`: how long a conformance pass counts | 30 |
+| `PARTNER_LEDGER_TIMEOUT_MS`: time limit per request (one request per firm per round) | 10000 |
 | Clock skew allowed on `as_of` and on Mynt's request timestamp | 300 s |
-| Time limit per request / largest answer | 10 s / 1 MiB |
+| Largest answer | 1 MiB |
 | Products per statement | 1000 |

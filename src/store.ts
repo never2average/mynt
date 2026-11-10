@@ -1361,11 +1361,24 @@ const TABLES = `
     config_version integer NOT NULL DEFAULT 1,
     configured_by uuid REFERENCES financial_products.users(id),
     configured_at timestamptz,
+    pending_test_url text, -- an admin's change, waiting for the firm's own member to confirm it
+    pending_live_url text,
+    pending_by uuid REFERENCES financial_products.users(id),
+    pending_at timestamptz,
     active_source text NOT NULL DEFAULT 'sandbox' CHECK (active_source IN ('sandbox', 'http', 'file')),
     active_run_id uuid,
     activated_by uuid REFERENCES financial_products.users(id),
     activated_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- A firm's separate key for signing its test statements: a test signature never counts for live, nor a live one
+  -- for test. MACed under a key derived from the vault, so a key written straight into the table doesn't count.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_test_signing_keys (
+    entity_id uuid PRIMARY KEY REFERENCES financial_products.entities(id),
+    public_key text NOT NULL,
+    registered_by uuid REFERENCES financial_products.users(id),
+    registered_at timestamptz NOT NULL DEFAULT now(),
+    mac text NOT NULL
   );
   -- Each conformance run, with its three parts. Cases name rules and product ids, never a figure.
   CREATE TABLE IF NOT EXISTS financial_products.partner_conformance_runs (

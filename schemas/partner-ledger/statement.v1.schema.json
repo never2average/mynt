@@ -2,7 +2,7 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "$id": "urn:mynt:schema:partner-ledger-statement:1",
  "title": "Partner ledger statement (mynt.partner_ledger.v1)",
- "description": "What a licence provider tells Mynt about its own books, per product it sponsors: the funds it holds in reserve and what it owes that product's customers, in integer US cents, as of one time, signed with the firm's Ed25519 key (the one registered with register_partner_signing_key). The same shape answers Mynt's HTTPS request (request_id echoes the request's) and is uploaded as the daily file (request_id null). A figure the partner can't give is null with a reason; never 0 in its place. The signature is over the UTF-8 text 'mynt.partner_ledger.v1', one zero byte, then the canonical JSON of the statement without its 'signature' member (keys sorted, no spaces, integers only).",
+ "description": "What a licence provider tells Mynt about its own books, per product it sponsors: the funds it holds in reserve and what it owes that product's customers, in integer US cents, as of one time, signed with the firm's Ed25519 key for that environment (live: the key registered with register_partner_signing_key; test: the separate key registered with register_partner_test_signing_key). The same shape answers Mynt's HTTPS request (request_id echoes the request's) and is uploaded as the daily file (request_id null). A figure the partner can't give is null with a reason; never 0 in its place. The signature is over the UTF-8 text 'mynt.partner_ledger.v1', one zero byte, then the canonical JSON of the statement without its 'signature' member: RFC 8785 (JCS), with integers only.",
  "type": "object",
  "required": ["schema", "provider_entity_id", "environment", "request_id", "as_of", "products", "signature"],
  "additionalProperties": false,
@@ -22,7 +22,7 @@
    "required": ["public_key", "value"],
    "additionalProperties": false,
    "properties": {
-    "public_key": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$", "description": "Your firm's registered Ed25519 public key, base58" },
+    "public_key": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$", "description": "Your firm's registered Ed25519 public key for this environment, base58" },
     "value": { "type": "string", "pattern": "^[0-9a-f]{128}$", "description": "The Ed25519 signature, 64 bytes as lowercase hex" }
    }
   }

@@ -13,7 +13,7 @@ import { serialLoop } from "./worker.js";
 // (product-health.ts). A rule either alerts the sponsor or pauses the product, as the sponsor chose per rule.
 //
 //   - a null figure is `unknown`, with its reason: never a pass, never a breach; unknown too long is itself an alert;
-//   - a figure from sandbox books is labelled sandbox and never pauses anything;
+//   - a figure from sandbox books never pauses anything: on a published product it's unknown, otherwise labelled sandbox;
 //   - each new snapshot is evaluated, and a timer evaluates too, so a rule about missing snapshots fires with no snapshot;
 //   - the breach record is append-only; the sealed figures in it are opened for the sponsor's own people only;
 //   - a pause holds the product through the drift mechanism (kind `covenant`) until the sponsor releases it; it stops new
@@ -256,21 +256,22 @@ export class CovenantService {
     let c = start;
     const sponsorship = await this.store.getSponsorship(c.sponsorship_id);
     if (!sponsorship) return c;
+    const published = record.status === "published";
     if (FIGURE_RULES[c.rule_type]) {
       const current = history.rows.filter((r) => r.epoch === history.epoch);
       const latest = current[current.length - 1];
-      if (!latest) c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "No snapshot has been recorded yet", sealed: false, snapshot: null, sandbox: await this.sandboxOnly(sponsorship) });
+      if (!latest) c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "No snapshot has been recorded yet", sealed: false, snapshot: null, sandbox: await this.sandboxOnly(sponsorship, published) });
       else if (this.isStale(latest)) {
         // A figure says nothing about now once the record has stopped moving: it isn't judged, for or against.
-        c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "The latest snapshot is more than two intervals old, so it can't speak for now", sealed: false, snapshot: null, sandbox: await this.sandboxOnly(sponsorship) });
+        c = await this.applyResult(c, record, { status: "unknown", observed: null, reason: "The latest snapshot is more than two intervals old, so it can't speak for now", sealed: false, snapshot: null, sandbox: await this.sandboxOnly(sponsorship, published) });
       } else {
         // A rule that's new or just changed starts from the latest snapshot; otherwise every snapshot since it last
         // looked, leaving out any too old to speak for now.
         const fresh = c.last_version !== c.version || c.last_epoch === null || c.last_sequence === null;
         const unseen = fresh ? [] : current.filter((r) => r.epoch > c.last_epoch! || r.sequence > c.last_sequence!);
-        await this.recordUnjudged(c, sponsorship, unseen.filter((r) => this.isStale(r)));
+        await this.recordUnjudged(c, sponsorship, unseen.filter((r) => this.isStale(r)), published);
         const pending = fresh ? [latest] : unseen.filter((r) => !this.isStale(r)).slice(-MAX_REPLAY);
-        for (const r of pending) c = await this.applyResult(c, record, await this.judgeSnapshot(c, sponsorship, r));
+        for (const r of pending) c = await this.applyResult(c, record, await this.judgeSnapshot(c, sponsorship, r, published));
       }
     } else c = await this.applyResult(c, record, await this.judgeTiming(c, sponsorship, record, history));
     c = await this.repairHold(c, record);
@@ -279,14 +280,14 @@ export class CovenantService {
 
   // Snapshots too old to act on still leave a trace: how many went unjudged and their range, and if any of them would
   // have breached, a breach labelled historical that pauses nothing and is closed from the start.
-  private async recordUnjudged(c: Covenant, s: Sponsorship, skipped: SnapshotRow[]) {
+  private async recordUnjudged(c: Covenant, s: Sponsorship, skipped: SnapshotRow[], published: boolean) {
     if (!skipped.length) return;
     const now = this.now();
     const range = { count: skipped.length, from_sequence: skipped[0].sequence, to_sequence: skipped[skipped.length - 1].sequence, from: new Date(skipped[0].period_start).toISOString(), to: new Date(skipped[skipped.length - 1].period_end).toISOString() };
     await this.store.audit(null, "covenant_rows_unjudged", c.product_id, { covenant_id: c.id, sponsorship_id: c.sponsorship_id, rule_type: c.rule_type, ...range });
     const failing: { row: SnapshotRow; result: RuleResult }[] = [];
     for (const row of skipped.slice(-MAX_REPLAY)) {
-      const result = await this.judgeSnapshot(c, s, row);
+      const result = await this.judgeSnapshot(c, s, row, published);
       if (result.status === "fail") failing.push({ row, result });
     }
     if (!failing.length) return;
@@ -321,25 +322,32 @@ export class CovenantService {
     return (await this.alertOrRecord(c, b, "covenant.breached", { paused: true }, now)) ? this.recordAlert(c, now) : c;
   }
 
-  private async sandboxOnly(s: Sponsorship) {
-    return !(await this.health.ledgerIsLive(s.provider_entity_id));
+  // Whether a result is sandbox-only, so it labels rather than acts. A published product is never sandbox here: its
+  // sponsor's ledger being the sandbox makes its figures unknown, not harmless. Otherwise a snapshot is judged by its
+  // own source, and without one by the ledger the firm is on now; a ledger Mynt can't tell is unknown, never sandbox.
+  private async sandboxOnly(s: Sponsorship, published: boolean, r?: SnapshotRow) {
+    if (published) return false;
+    if (r && r.status !== "missed" && r.source) return r.source === "sandbox";
+    return (await this.health.ledgerState(s.provider_entity_id)) === "sandbox";
   }
 
-  private async judgeSnapshot(c: Covenant, s: Sponsorship, r: SnapshotRow): Promise<RuleResult> {
+  private async judgeSnapshot(c: Covenant, s: Sponsorship, r: SnapshotRow, published: boolean): Promise<RuleResult> {
     const snapshot = { epoch: r.epoch, sequence: r.sequence, fingerprint: r.fingerprint };
-    if (r.status === "missed") return { status: "unknown", observed: null, reason: r.missed_reason ?? "No snapshot for this period", sealed: false, snapshot, sandbox: await this.sandboxOnly(s) };
+    if (r.status === "missed") return { status: "unknown", observed: null, reason: r.missed_reason ?? "No snapshot for this period", sealed: false, snapshot, sandbox: await this.sandboxOnly(s, published, r) };
     // A sponsor reads only its own books; a second sponsor's numeric rules can't be answered from the first's figures.
-    if (r.partner_entity_id !== s.provider_entity_id) return { status: "unknown", observed: null, reason: "This snapshot's figures come from another licence provider's books, which your firm can't read", sealed: false, snapshot, sandbox: await this.sandboxOnly(s) };
+    if (r.partner_entity_id !== s.provider_entity_id) return { status: "unknown", observed: null, reason: "This snapshot's figures come from another licence provider's books, which your firm can't read", sealed: false, snapshot, sandbox: await this.sandboxOnly(s, published, r) };
     const assessed = await this.health.assessOne(r);
     if (!assessed || !assessed.report) return { status: "unknown", observed: null, reason: assessed ? "The snapshot's report can't be authenticated" : "Mynt can't open the snapshot's report", sealed: false, snapshot, sandbox: false };
     if (assessed.source === "unavailable") return { status: "unknown", observed: null, reason: "The partner's ledger couldn't be read for this period", sealed: false, snapshot, sandbox: false };
+    // Test figures say nothing about a live product: unknown (which starts the unknown clock), neither a pass nor a fail.
+    if (assessed.source === "sandbox" && published) return { status: "unknown", observed: null, reason: "The sponsor's ledger is still the sandbox: test figures can't speak for a live product (connect it with the partner kit)", sealed: false, snapshot, sandbox: false };
     const figure = assessed.report.figures[FIGURE_RULES[c.rule_type]!.figure];
     return { ...judgeFigure(c.rule_type, c.threshold, figure), sealed: true, snapshot, sandbox: assessed.source === "sandbox" };
   }
 
   private async judgeTiming(c: Covenant, s: Sponsorship, record: ProductRecord, history: History): Promise<RuleResult> {
     const now = this.now();
-    const sandbox = await this.sandboxOnly(s);
+    const sandbox = await this.sandboxOnly(s, record.status === "published");
     const current = history.rows.filter((r) => r.epoch === history.epoch);
     const last = current[current.length - 1];
     const snapshot = last ? { epoch: last.epoch, sequence: last.sequence, fingerprint: last.fingerprint } : null;
@@ -611,7 +619,7 @@ export class CovenantService {
     if (open) return this.remind(c, open);
     if (unknownFor <= c.unknown_limit_seconds) return c;
     const snapshot = c.last_sequence !== null ? { epoch: c.last_epoch!, sequence: c.last_sequence, fingerprint: await this.health.fingerprintAt(c.product_id, c.last_epoch!, c.last_sequence) } : null;
-    return this.openBreach(c, record, { status: "unknown", observed: unknownFor, reason: c.status_reason ?? "This rule can't be evaluated", sealed: false, snapshot, sandbox: await this.sandboxOnly(s) }, "unknown_limit");
+    return this.openBreach(c, record, { status: "unknown", observed: unknownFor, reason: c.status_reason ?? "This rule can't be evaluated", sealed: false, snapshot, sandbox: await this.sandboxOnly(s, record.status === "published") }, "unknown_limit");
   }
 
   // ---- who may do what ----

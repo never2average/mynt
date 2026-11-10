@@ -182,13 +182,17 @@ test("complaints_above can be set and reads unknown, since Mynt doesn't track co
   assert.equal((await covenantsOf(t))[0].status, "unknown");
 });
 
-test("a sandbox or failed ledger read is unknown or labelled, and sandbox figures never pause a live product", async () => {
+test("a sandbox or failed ledger read is unknown, and sandbox figures never pause a live product", async () => {
+  // A published product whose sponsor's ledger is still the sandbox: its test figures can't speak for it, so the rule
+  // is unknown (not a sandbox-labelled pass or fail), and nothing pauses.
   const t = await setup({ kind: "sandbox", books: { reserves: 10_00, owed: 100_00 } });
   await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
   await t.tickHour(0);
-  const [b] = await breaches(t);
-  assert.equal(b.sandbox, true);
-  assert.equal(b.action_taken, "sandbox_labelled");
+  const [c] = await covenantsOf(t);
+  assert.equal(c.status, "unknown");
+  assert.equal(c.status_sandbox, false);
+  assert.match(c.status_reason, /still the sandbox/);
+  assert.deepEqual(await breaches(t), []);
   assert.equal(await drift(t), null, "sandbox never pauses");
   assert.deepEqual((await t.covenants.list(t.provider.user, {}))[0].pause_held_by_breach_ids, []);
   // A live ledger that fails has no figures at all: unknown, not a pass.
@@ -631,8 +635,9 @@ test("a sandbox pass neither closes a live breach nor permits a release", async 
   t.state.books = { reserves: 150_00, owed: 100_00 };
   await t.tickHour(1);
   const [c] = await covenantsOf(t);
-  assert.equal(c.status, "pass");
-  assert.equal(c.status_sandbox, true);
+  // On a published product, the sandbox's figures make the rule unknown: neither a pass nor a fail.
+  assert.equal(c.status, "unknown");
+  assert.equal(c.status_sandbox, false);
   assert.equal((await breaches(t))[0].status, "open", "sandbox figures don't close what live ones opened");
   const refused = await t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id });
   assert.equal(refused.isError, true);

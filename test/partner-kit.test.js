@@ -40,10 +40,14 @@ const signStatement = (unsigned, key) => {
 };
 
 // The partner's ledger endpoint, as docs/partners.md describes it.
-async function partnerServer(entityId, key) {
+// Each deployment (here /test and /live on one port) knows its own environment and its own URL, signs with that
+// environment's key, and refuses a request for the other environment or meant for another URL.
+async function partnerServer(entityId, keys) {
   const state = {
     secret: null,
-    mode: "ok", // ok | wrong_key | stale | float | null_no_reason | zero_unknown | omit | env_flip | accept_any | accept_stale
+    // ok | wrong_key | test_key_on_live | stale | float | null_no_reason | zero_unknown | env_flip | accept_any |
+    // accept_stale | accept_any_env | ignore_audience
+    mode: "ok",
     omit: [],
     nulls: {}, // product_id -> reason: answer that product null
     known: new Set(),
@@ -60,15 +64,18 @@ async function partnerServer(entityId, key) {
     let raw = "";
     for await (const c of req) raw += c;
     const env = req.url.startsWith("/live/") ? "live" : "test";
+    const own = `http://127.0.0.1:${server.address().port}${req.url}`;
     const reply = (code, value) => {
       res.writeHead(code, { "Content-Type": "application/json" });
       res.end(JSON.stringify(value));
     };
     const signed = verify(req.headers["mynt-signature"], raw);
-    state.seen.push({ env, path: req.url, signed });
-    if (!signed && state.mode !== "accept_any") return reply(401, { error: { code: "bad_signature", message: "no" } });
     const body = JSON.parse(raw || "{}");
-    if (!Array.isArray(body.product_ids) || body.environment !== env) return reply(400, { error: { code: "bad_request", message: "no" } });
+    state.seen.push({ env, path: req.url, signed, audience: body.audience ?? null });
+    if (!signed && state.mode !== "accept_any") return reply(401, { error: { code: "bad_signature", message: "no" } });
+    if (!Array.isArray(body.product_ids)) return reply(400, { error: { code: "bad_request", message: "no" } });
+    if (body.environment !== env && state.mode !== "accept_any_env") return reply(400, { error: { code: "wrong_environment", message: "no" } });
+    if (body.audience !== own && state.mode !== "ignore_audience") return reply(400, { error: { code: "wrong_audience", message: "no" } });
     const products = body.product_ids
       .filter((id) => !state.omit.includes(id))
       .map((id) => {
@@ -78,8 +85,9 @@ async function partnerServer(entityId, key) {
       });
     const asOf = state.mode === "stale" ? new Date(Date.now() - 48 * HOUR) : new Date();
     const unsigned = { schema: "mynt.partner_ledger.v1", provider_entity_id: entityId, environment: state.mode === "env_flip" ? "test" : env, request_id: body.request_id, as_of: asOf.toISOString(), products };
-    if (state.mode === "float") return reply(200, { ...unsigned, signature: { public_key: key.address, value: "0".repeat(128) } });
-    reply(200, signStatement(unsigned, state.mode === "wrong_key" ? edKey() : key));
+    if (state.mode === "float") return reply(200, { ...unsigned, signature: { public_key: keys.live.address, value: "0".repeat(128) } });
+    const key = state.mode === "wrong_key" ? edKey() : state.mode === "live_key_on_test" ? keys.live : state.mode === "test_key_on_live" || unsigned.environment === "test" ? keys.test : keys.live;
+    reply(200, signStatement(unsigned, key));
   });
   server.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
@@ -146,12 +154,17 @@ async function world() {
   const provider = await connect(lp.user);
   const admin = await connect(adminUser);
   const key = edKey();
+  const testKey = edKey();
   await ok(provider, "register_partner_signing_key", { public_key: key.address });
-  const partner = await partnerServer(lp.entity.id, key);
+  await ok(provider, "register_partner_test_signing_key", { public_key: testKey.address });
+  const partner = await partnerServer(lp.entity.id, { live: key, test: testKey });
   partner.state.known = new Set(products);
-  // An admin fixes the endpoints; the firm's own member takes the secret.
+  // An admin proposes the endpoints; the firm's own member confirms them and takes the secret.
+  const propose = (test_url, live_url) => ok(admin, "configure_partner_ledger", { entity_id: lp.entity.id, test_url, live_url });
+  const confirm = (test_url, live_url) => ok(provider, "confirm_partner_ledger_endpoints", { test_url, live_url });
   const connectHttp = async () => {
-    await ok(admin, "configure_partner_ledger", { entity_id: lp.entity.id, test_url: `${partner.url}/test`, live_url: `${partner.url}/live` });
+    await propose(`${partner.url}/test`, `${partner.url}/live`);
+    await confirm(`${partner.url}/test`, `${partner.url}/live`);
     partner.state.secret = (await ok(provider, "reveal_partner_ledger_secret")).secret;
   };
   const tick = async (advance = HOUR) => {
@@ -163,7 +176,7 @@ async function world() {
   const caseOf = (run, name) => run.ledger.cases.find((c) => c.case === name);
   const statement = (over = {}, k = key) =>
     signStatement({ schema: "mynt.partner_ledger.v1", provider_entity_id: lp.entity.id, environment: "live", request_id: null, as_of: new Date(clock).toISOString(), products: products.map((id) => ({ product_id: id, reserves_held_cents: 150_00, customer_obligations_cents: 100_00, reason: null })), ...over }, k);
-  return { pg, store, health, lp, builder, adminUser, products, sponsorships, provider, admin, key, partner, connectHttp, tick, latest, conformance, caseOf, statement, call, ok, refused, connect, setClock: (t) => (clock = t), clock: () => clock };
+  return { pg, store, health, lp, builder, adminUser, products, sponsorships, provider, admin, key, testKey, partner, propose, confirm, connectHttp, tick, latest, conformance, caseOf, statement, call, ok, refused, connect, setClock: (t) => (clock = t), clock: () => clock };
 }
 
 test("the shipped schemas are JSON, and a signed statement passes them", async () => {
@@ -193,7 +206,7 @@ test("contract happy path: conformance passes, and switching from sandbox to liv
   const run = await w.conformance("http");
   assert.equal(run.ledger.passed, true, JSON.stringify(run.ledger.cases));
   assert.equal(run.can_go_live, true);
-  for (const c of ["setup", "answer", "schema", "identity", "signature", "clock", "null_handling", "coverage", "unknown_product_null", "bad_signature_refused", "stale_request_refused", "malformed_request_refused"])
+  for (const c of ["setup", "answer", "schema", "identity", "signature", "clock", "null_handling", "coverage", "unknown_product_null", "bad_signature_refused", "stale_request_refused", "malformed_request_refused", "wrong_environment_refused", "wrong_audience_refused"])
     assert.equal(w.caseOf(run, c)?.passed, true, c);
   // (b) and (c) are reported: this firm accepts no identity provider and has no rail yet.
   assert.equal(run.identity.passed, false);
@@ -222,7 +235,7 @@ test("contract happy path: conformance passes, and switching from sandbox to liv
   const seen = await w.ok(w.admin, "get_partner_kit", { entity_id: w.lp.entity.id });
   assert.equal(seen.live, true);
   assert.equal(seen.conformance_runs[0].ledger_passed, true);
-  assert.doesNotMatch(JSON.stringify(seen), /15000|10000|reserves_held_cents/);
+  assert.doesNotMatch(JSON.stringify(seen), /15000|reserves_held_cents|customer_obligations_cents/);
   // An admin can't read the numbers through product health either.
   assert.equal((await w.call(w.admin, "get_product_health", { product_id: w.products[0] })).isError, true);
 });
@@ -252,14 +265,22 @@ test("conformance gates going live; changing the endpoints puts the firm back on
   await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
   assert.equal((await w.health.ledgerIsLive(w.lp.entity.id)), true);
 
-  const moved = await w.ok(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live/v2` });
-  assert.equal(moved.ledger_source, "sandbox");
+  // An admin's change waits for the firm: nothing moves until its own member confirms it.
+  const moved = await w.propose(`${w.partner.url}/test`, `${w.partner.url}/live/v2`);
+  assert.equal(moved.status, "pending_confirmation");
+  assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), true);
+  await w.refused(w.provider, "confirm_partner_ledger_endpoints", { test_url: `${w.partner.url}/test`, live_url: `${w.partner.url}/live` }, /aren't the URLs proposed/);
+  const confirmed = await w.confirm(`${w.partner.url}/test`, `${w.partner.url}/live/v2`);
+  assert.equal(confirmed.ledger_source, "sandbox");
   assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), false);
   await w.tick();
   assert.equal((await w.latest(w.products[0])).source, "sandbox");
   // An admin can always send a firm back to sandbox; endpoints must be public HTTPS and different.
   await w.refused(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: "https://10.0.0.1/x", live_url: "https://10.0.0.2/x" }, /private/);
   await w.refused(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: `${w.partner.url}/same`, live_url: `${w.partner.url}/same/` }, /different endpoints/);
+  // An origin and a path only: no query string, no fragment.
+  await w.refused(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: `${w.partner.url}/t?x=1`, live_url: `${w.partner.url}/l` }, /no query string or fragment/);
+  await w.refused(w.admin, "configure_partner_ledger", { entity_id: w.lp.entity.id, test_url: `${w.partner.url}/t`, live_url: `${w.partner.url}/l#frag` }, /no query string or fragment/);
   await w.ok(w.admin, "set_partner_ledger_source", { source: "sandbox", entity_id: w.lp.entity.id });
 });
 
@@ -364,7 +385,7 @@ test("the daily file: signed, checked, sealed, and the ledger once it passes and
   await w.refused(w.provider, "upload_partner_ledger_file", { statement: w.statement({ provider_entity_id: randomUUID() }) }, /isn't your firm's/);
 
   // A test file passes conformance, but never reads as live.
-  const testFile = await w.ok(w.provider, "upload_partner_ledger_file", { statement: w.statement({ environment: "test", as_of: new Date(w.clock() - 60_000).toISOString() }) });
+  const testFile = await w.ok(w.provider, "upload_partner_ledger_file", { statement: w.statement({ environment: "test", as_of: new Date(w.clock() - 60_000).toISOString() }, w.testKey) });
   assert.equal(testFile.environment, "test");
   assert.deepEqual(testFile.missing, []);
   const run = await w.conformance("file");
@@ -438,4 +459,152 @@ test("identity: an accepted provider must return residential_state on a passed t
   assert.equal(kit.conformance_runs.length, 2);
   assert.ok(new Date(kit.conformance_runs[0].at) >= new Date(kit.conformance_runs[1].at));
   assert.equal(kit.conformance_runs[0].identity_passed, false);
+});
+
+// ---- review fixes: test books never live, no relaying, endpoint changes wait for the firm ----
+
+test("test books can't be read as live: a separate test key, and each deployment refuses the other environment", async () => {
+  const w = await world();
+  // The two keys must differ, whichever is registered second.
+  await w.refused(w.provider, "register_partner_test_signing_key", { public_key: w.key.address }, /different key/);
+  await w.refused(w.provider, "register_partner_signing_key", { public_key: w.testKey.address }, /test signing key/);
+
+  await w.connectHttp();
+  // A test deployment signing with the live key fails, and says so.
+  w.partner.state.mode = "live_key_on_test";
+  const liveOnTest = await w.conformance();
+  assert.equal(w.caseOf(liveOnTest, "signature").passed, false);
+  assert.match(w.caseOf(liveOnTest, "signature").problems[0], /signed with your live key/);
+  // A test deployment that answers a live request fails.
+  w.partner.state.mode = "accept_any_env";
+  assert.equal(w.caseOf(await w.conformance(), "wrong_environment_refused").passed, false);
+
+  w.partner.state.mode = "ok";
+  assert.equal((await w.conformance()).ledger.passed, true);
+  // The switch-time live read refuses a statement signed with the test key.
+  w.partner.state.mode = "test_key_on_live";
+  await w.refused(w.provider, "set_partner_ledger_source", { source: "http" }, /statement_signature/);
+  w.partner.state.mode = "ok";
+  await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+  // And once live, a statement signed with the test key reads as unavailable, never as live figures.
+  w.partner.state.mode = "test_key_on_live";
+  await w.tick();
+  const r = await w.latest(w.products[0]);
+  assert.equal(r.source, "unavailable");
+  assert.equal(r.figures.reserves_cents.value, null);
+
+  // A live daily file signed with the test key is refused at upload.
+  const refused = await w.refused(w.provider, "upload_partner_ledger_file", { statement: w.statement({}, w.testKey) }, /signature/);
+  assert.match(JSON.stringify(refused), /signed with your test key/);
+});
+
+test("a relayed request is refused by the partner, and an admin's endpoint change waits for the firm", async () => {
+  const w = await world();
+  await w.store.createFirmWebhook(w.lp.user.id, { entity_id: w.lp.entity.id, url: "https://hooks.example.com/mynt", events: ["partner_ledger.endpoint_change_pending", "partner_ledger.source_changed"] });
+  const delivered = async (type) => (await w.pg.query("SELECT payload FROM financial_products.webhook_deliveries")).rows.filter((d) => (typeof d.payload === "string" ? JSON.parse(d.payload) : d.payload).type === type);
+  await w.connectHttp();
+  // A partner that doesn't check the audience fails conformance.
+  w.partner.state.mode = "ignore_audience";
+  assert.equal(w.caseOf(await w.conformance(), "wrong_audience_refused").passed, false);
+  w.partner.state.mode = "ok";
+  await w.conformance();
+  await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+
+  // A relay that forwards Mynt's signed request, untouched, to the partner's real live endpoint.
+  const relayed = [];
+  const relay = http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const c of req) raw += c;
+    relayed.push(raw);
+    const upstream = await fetch(`${w.partner.url}/live/v1/ledger`, { method: "POST", headers: { "content-type": "application/json", "mynt-signature": req.headers["mynt-signature"] }, body: raw });
+    res.writeHead(upstream.status, { "Content-Type": "application/json" });
+    res.end(await upstream.text());
+  });
+  relay.listen(0, "127.0.0.1");
+  await new Promise((r) => relay.once("listening", r));
+  closers.push(() => (relay.closeAllConnections(), relay.close()));
+  const relayUrl = `http://127.0.0.1:${relay.address().port}/relay`;
+
+  // The admin's change is only a proposal: shown plainly, sent to the firm's webhooks, and nothing moves.
+  await w.propose(`${w.partner.url}/test`, relayUrl);
+  assert.equal((await delivered("partner_ledger.endpoint_change_pending")).length, 2, "one for each proposal: the first setup and this one");
+  const kit = await w.ok(w.provider, "get_partner_kit");
+  assert.equal(kit.pending_endpoint_change.live_url, relayUrl);
+  assert.equal(kit.endpoints.live_url, `${w.partner.url}/live`);
+  assert.equal(kit.live, true);
+  await w.tick();
+  assert.equal((await w.latest(w.products[0])).source, "partner_ledger");
+  assert.equal(relayed.length, 0, "the proposed endpoint isn't called before the firm confirms it");
+
+  // Even if the firm confirms it, the partner refuses the relayed request: its audience is the relay's URL.
+  await w.confirm(`${w.partner.url}/test`, relayUrl);
+  assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), false);
+  await w.conformance();
+  await w.refused(w.provider, "set_partner_ledger_source", { source: "http" }, /http_400/);
+  assert.equal(relayed.length, 1);
+  assert.equal(w.partner.state.seen.at(-1).audience, `${relayUrl}/v1/ledger`);
+
+  // An admin sending the firm back to sandbox tells the firm.
+  await w.ok(w.admin, "set_partner_ledger_source", { source: "sandbox", entity_id: w.lp.entity.id });
+  assert.equal((await delivered("partner_ledger.source_changed")).length, 1);
+});
+
+test("a daily file counts only under the firm's current live key", async () => {
+  const w = await world();
+  await w.ok(w.provider, "upload_partner_ledger_file", { statement: w.statement() });
+  assert.equal((await w.conformance("file")).ledger.passed, true);
+  await w.ok(w.provider, "set_partner_ledger_source", { source: "file" });
+  await w.tick();
+  assert.equal((await w.latest(w.products[0])).source, "partner_ledger");
+  // The firm replaces its live key: the file signed with the old one stops counting at once.
+  await w.ok(w.provider, "register_partner_signing_key", { public_key: edKey().address });
+  await w.tick();
+  const r = await w.latest(w.products[0]);
+  assert.equal(r.source, "unavailable");
+  assert.match(r.figures.reserves_cents.reason, /daily_file_signature/);
+});
+
+test("one live request per firm per round, covering every product it sponsors", async () => {
+  const w = await world();
+  await w.connectHttp();
+  await w.conformance();
+  await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+  const before = w.partner.state.seen.length;
+  await w.tick();
+  const live = w.partner.state.seen.slice(before).filter((s) => s.env === "live");
+  assert.equal(live.length, 1, "two products, one request");
+  for (const p of w.products) assert.equal((await w.latest(p)).source, "partner_ledger");
+});
+
+test("conformance passes run out, and an inactive firm can't use the kit", async () => {
+  const w = await world();
+  await w.connectHttp();
+  const run = await w.conformance();
+  assert.ok(run.expires_at);
+  await w.ok(w.provider, "set_partner_ledger_source", { source: "http" });
+  await w.pg.query("UPDATE financial_products.partner_conformance_runs SET created_at = now() - interval '40 days'");
+  assert.equal(await w.health.ledgerIsLive(w.lp.entity.id), false, "a pass that ran out doesn't keep a firm live");
+  const kit = await w.ok(w.provider, "get_partner_kit");
+  assert.equal(kit.live, false);
+  assert.match(kit.note, /ran out/);
+  await w.refused(w.provider, "set_partner_ledger_source", { source: "http" }, /run out/);
+
+  await w.store.setEntityStatus(w.lp.entity.id, "suspended");
+  await w.refused(w.provider, "run_partner_conformance", { source: "http" }, /isn't active/);
+  await w.refused(w.provider, "register_partner_signing_key", { public_key: edKey().address }, /isn't active/);
+  await w.refused(w.provider, "register_partner_test_signing_key", { public_key: edKey().address }, /isn't active/);
+});
+
+test("a ledger Mynt can't tell is unknown, never sandbox", async () => {
+  const pg = new PGlite();
+  const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
+  const store = await Store.open(db, CATALOG);
+  const health = await ProductHealthService.open(db, store, { intervalMs: HOUR, cosignWindowMs: 60_000, pollMs: 60_000, programId: null }, {
+    chain: null,
+    ledgerFor: async () => {
+      throw new Error("database down");
+    },
+  });
+  assert.equal(await health.ledgerState(randomUUID()), "unknown");
+  assert.equal(await health.ledgerIsLive(randomUUID()), false);
 });

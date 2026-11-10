@@ -7,9 +7,14 @@ import { callVendor, signBody, type VendorCallOptions, type VendorResult } from 
 import { schemaProblems } from "../vendors.js";
 
 // The partner ledger contract (docs/partners.md): how a licence provider tells Mynt what it holds and what it owes,
-// per product it sponsors. Mynt is the client. It POSTs a signed request to the partner's fixed endpoint (set by an
-// admin) under the same outbound rules as a vendor call, and the partner answers with a statement it signed with its
-// registered Ed25519 key. A partner without an API uploads the same statement as a daily file.
+// per product it sponsors. Mynt is the client. It POSTs a signed request to the partner's fixed endpoint (proposed by
+// an admin, confirmed by the firm) under the same outbound rules as a vendor call. The signed body names the URL it's
+// for (`audience`), and the partner refuses one meant for any other URL, so a request can't be relayed to it from
+// somewhere else. The partner answers with a statement signed with its registered Ed25519 key for that environment:
+// its live key for live books, a separate test key for test books, so test books can never be read as live. A partner
+// without an API uploads the same statement as a daily file.
+//
+// Canonical JSON is RFC 8785 (JCS) restricted to integers: sorted keys, no whitespace, JSON.stringify's escaping.
 //
 // Nothing here logs or returns a partner's figures in a problem: problems name rules and product ids only, because
 // conformance results are shown to admins, who must never see a firm's numbers.
@@ -46,7 +51,11 @@ export interface LedgerRequest {
   provider_entity_id: string;
   product_ids: string[];
   period_end: string;
+  audience: string; // the exact URL this request was sent to: the partner refuses any other
 }
+
+// The URL a request to `base_url` goes to, and so its audience.
+export const ledgerUrl = (baseUrl: string) => `${baseUrl.replace(/\/+$/, "")}/v1/${LEDGER_PATH}`;
 
 // What the partner signs: the domain text, one zero byte, then the canonical JSON of the statement without `signature`.
 export function statementMessage(statement: Omit<Statement, "signature"> | Statement): Uint8Array {
@@ -63,7 +72,8 @@ export interface StatementExpectation {
   entity_id: string;
   environment: "test" | "live";
   request_id: string | null; // null: a daily file
-  public_key: string | null; // the firm's registered key; null fails the signature check
+  public_key: string | null; // the firm's registered key for this environment; null fails the signature check
+  other_key?: string | null; // the firm's key for the other environment: named plainly when it signed
   now: Date;
   max_age_ms: number;
   product_ids: string[]; // what must be covered
@@ -94,8 +104,10 @@ export function checkStatement(body: unknown, x: StatementExpectation): Statemen
   add("identity", who);
 
   const sig: string[] = [];
-  if (!x.public_key) sig.push("your firm has no registered signing key: use register_partner_signing_key");
-  else if (s.signature.public_key !== x.public_key) sig.push("signed with a key other than your firm's registered one");
+  if (!x.public_key) sig.push(x.environment === "live" ? "your firm has no registered signing key: use register_partner_signing_key" : "your firm has no registered test signing key: use register_partner_test_signing_key");
+  else if (x.other_key && s.signature.public_key === x.other_key)
+    sig.push(x.environment === "live" ? "signed with your test key: test books never read as live" : "signed with your live key: test statements are signed with your test key");
+  else if (s.signature.public_key !== x.public_key) sig.push(`signed with a key other than your firm's registered ${x.environment} key`);
   else {
     let verified = false;
     try {
@@ -134,12 +146,21 @@ export function checkStatement(body: unknown, x: StatementExpectation): Statemen
 export const failedCases = (c: StatementCheck) => c.cases.filter((k) => !k.passed).map((k) => k.case);
 
 // One signed request to the partner's endpoint. `sign` replaces Mynt-Signature (conformance's bad and stale cases);
-// `body` replaces the request (conformance's malformed case).
+// `body` replaces the request (the malformed case); `environment_claim` and `audience` lie about where it's going
+// (the wrong-environment and wrong-audience cases).
 export async function requestLedger(
-  r: { base_url: string; secret: string; environment: "test" | "live"; entity_id: string; product_ids: string[]; period_end: string; sign?: (payload: string) => string; body?: unknown },
+  r: { base_url: string; secret: string; environment: "test" | "live"; entity_id: string; product_ids: string[]; period_end: string; sign?: (payload: string) => string; body?: unknown; environment_claim?: "test" | "live"; audience?: string },
   opts: VendorCallOptions = {},
 ): Promise<{ request: LedgerRequest; result: VendorResult }> {
-  const request: LedgerRequest = { schema: REQUEST_SCHEMA_ID, request_id: randomUUID(), environment: r.environment, provider_entity_id: r.entity_id, product_ids: r.product_ids, period_end: r.period_end };
+  const request: LedgerRequest = {
+    schema: REQUEST_SCHEMA_ID,
+    request_id: randomUUID(),
+    environment: r.environment_claim ?? r.environment,
+    provider_entity_id: r.entity_id,
+    product_ids: r.product_ids,
+    period_end: r.period_end,
+    audience: r.audience ?? ledgerUrl(r.base_url),
+  };
   const body = r.body ?? request;
   const signature = r.sign ? r.sign(JSON.stringify(body)) : undefined;
   const result = await callVendor({ base_url: r.base_url, service_type: LEDGER_PATH, body, signing_secret: r.secret, signature }, { maxResponseBytes: MAX_RESPONSE_BYTES, ...opts });

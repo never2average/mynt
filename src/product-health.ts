@@ -993,10 +993,18 @@ export class ProductHealthService {
     const now = this.now();
     if (!vaultAvailable(false)) return;
     await this.db.query(`INSERT INTO ${T}.product_health_worker (id, last_tick_at) VALUES ('worker', $1) ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at`, [now]);
-    for (const s of await this.subjects()) {
-      await this.advance(s, now).catch((e) => console.error("product health:", s.productId, (e as Error).message));
-      if (!s.poolId && this.afterAdvance) await this.afterAdvance(s.productId).catch((e) => console.error("product health:", s.productId, (e as Error).message));
-    }
+    // Firms in parallel, each firm's products in turn: a partner's ledger is read once per firm per round (partner-kit.ts),
+    // so a slow or unreachable partner holds up its own products only, for at most its request's time limit.
+    const byFirm = new Map<string, Subject[]>();
+    for (const s of await this.subjects()) byFirm.set(s.partner, [...(byFirm.get(s.partner) ?? []), s]);
+    await Promise.all(
+      [...byFirm.values()].map(async (subjects) => {
+        for (const s of subjects) {
+          await this.advance(s, now).catch((e) => console.error("product health:", s.productId, (e as Error).message));
+          if (!s.poolId && this.afterAdvance) await this.afterAdvance(s.productId).catch((e) => console.error("product health:", s.productId, (e as Error).message));
+        }
+      }),
+    );
     await this.publishDue(now);
   }
 
@@ -1018,7 +1026,11 @@ export class ProductHealthService {
     const me = (await this.store.getUser(user.id)) ?? user;
     if (!me.entity_id) throw new HealthError("You don't belong to a firm yet");
     if (!me.roles.includes("license_provider") || me.roles.includes("admin")) throw new HealthError("Only a licence provider firm's own member registers a signing key");
+    if (!(await this.isActive(me.entity_id))) throw new HealthError("Your firm isn't active");
     if (!isAddress(publicKey) || isWeakEd25519Key(base58Decode(publicKey))) throw new HealthError("public_key must be a usable Ed25519 public key, base58 (a Solana-style address)");
+    // The firm's test key (partner-kit.ts) signs test books only: it can never also be the live key.
+    const { rows: testKey } = await this.db.query(`SELECT 1 FROM ${T}.partner_test_signing_keys WHERE entity_id = $1 AND public_key = $2`, [me.entity_id, publicKey]);
+    if (testKey.length) throw new HealthError("That's your firm's test signing key: the live key must be a different key");
     await this.db.query(
       `INSERT INTO ${T}.product_health_signing_keys (entity_id, public_key, registered_by) VALUES ($1, $2, $3)
        ON CONFLICT (entity_id) DO UPDATE SET public_key = EXCLUDED.public_key, registered_by = EXCLUDED.registered_by, registered_at = now()`,
@@ -1313,7 +1325,16 @@ export class ProductHealthService {
 
   // Whether the ledger this firm's snapshots would come from is a real one: when there's no snapshot to read it from.
   async ledgerIsLive(entityId: string) {
-    return (await this.ledgerOf(entityId)).kind === "live";
+    return (await this.ledgerState(entityId)) === "live";
+  }
+
+  // What a firm's ledger is now: live, sandbox, or unknown when Mynt can't tell (which is never taken for sandbox).
+  async ledgerState(entityId: string): Promise<"live" | "sandbox" | "unknown"> {
+    try {
+      return (await (this.deps.ledgerFor ?? defaultLedgerFor)(entityId)).kind === "live" ? "live" : "sandbox";
+    } catch {
+      return "unknown";
+    }
   }
 
   // The ledger a sponsor's snapshots read (the partner kit decides it per firm: partner-kit.ts). One that can't be
