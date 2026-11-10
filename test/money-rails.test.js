@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { connectPostgres } from "../dist/db.js";
 import { createMcpHttpServer } from "../dist/http.js";
-import { authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
+import { ANY_ATTEMPT, authorizeMovement, centsOf, flowsFor, isDefiniteRefusal, MAX_MOVEMENT_ATTEMPTS, movementShape, namesMoneyMovement, recordMovementFailed, recordMovementGaveUp, recordMovementOutput, recordMovementPending, recordMovementReversed, recordMovementUnknown, resolveCustomerState, sweepStaleMovements } from "../dist/money-rails.js";
 import { opsStatus } from "../dist/ops.js";
 import { normalizeModel } from "../dist/regulatory.js";
 import { createServer } from "../dist/server.js";
@@ -77,7 +77,7 @@ async function moneyTransmitter(store, user, covers, { fincen = true, grants = "
     regulators: [
       ...model.regulators.filter((r) => !["t_fincen", "t_state"].includes(r.id)),
       { id: "t_fincen", name: "Test FinCEN", scope, license_types: [{ _id: "t_msb", name: "MSB", scope: "", application_procedure: [], covers: [], grc: grc([grants]) }] },
-      { id: "t_state", name: "Test state", scope, license_types: [{ _id: "t_mt", name: "Money transmitter", scope: "", application_procedure: [], covers, requires: [["t_msb"]], grc: grc([grants]) }] },
+      { id: "t_state", name: "Test state", scope, license_types: [{ _id: "t_mt", name: "Money transmitter", scope: "", application_procedure: [], ...(covers === null ? {} : { covers }), requires: [["t_msb"]], grc: grc([grants]) }] },
     ],
   });
   const hold = async (regulator_id, license_id) => {
@@ -439,6 +439,82 @@ test("once an attempt's outcome is unknown, only the partner's own final answer 
   await recordMovementUnknown(store, fourth, "try_later");
   await recordMovementFailed(store, fourth, "bank_rejected", { partner_confirmed: true });
   assert.equal((await w.ledger(rail.id)).find((r) => r.request_id === fourth.request_id).status, "failed");
+});
+
+test("an earlier attempt's answer lands only if money arrived: its failure can't close a live retry", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail({ per_transfer_limit_cents: 60_000, daily_limit_cents: 100_000 });
+  const row = async () => (await w.ledger(rail.id))[0];
+  const a = w.move({ amount_cents: 60_000 });
+  await authorizeMovement(store, a);
+  await recordMovementUnknown(store, a, "try_later");
+  const b = { ...a, request_id: randomUUID() };
+  await authorizeMovement(store, b);
+
+  // Attempt A's own error, even signed by the partner, says nothing about attempt B.
+  await recordMovementFailed(store, a, "bank_rejected", { partner_confirmed: true });
+  await recordMovementOutput(store, a, { transfer_status: "failed" });
+  await recordMovementPending(store, a);
+  assert.equal((await row()).status, "requested");
+  assert.equal((await authorizeMovement(store, w.move({ amount_cents: 40_001 }))).code, "over_daily_limit", "the limit is still held");
+
+  // Attempt B's own failure does close it, and A's reversal or settlement would still have landed.
+  const c = w.move({ amount_cents: 1_000 });
+  await authorizeMovement(store, c);
+  const d = { ...c, request_id: randomUUID() };
+  await authorizeMovement(store, d);
+  await recordMovementFailed(store, d, "bank_rejected", { partner_confirmed: true });
+  assert.equal((await w.ledger(rail.id)).find((r) => r.request_id === d.request_id).status, "failed");
+});
+
+test("one movement can be tried only so many times", async () => {
+  const store = await openPglite();
+  const w = await world(store);
+  const rail = await w.approvedRail();
+  const first = w.move();
+  await authorizeMovement(store, first);
+  for (let i = 1; i < MAX_MOVEMENT_ATTEMPTS; i++) assert.equal((await authorizeMovement(store, { ...first, request_id: randomUUID() })).allowed, true, `attempt ${i + 1}`);
+  const [row] = await w.ledger(rail.id);
+  assert.equal(row.earlier_request_ids.length, MAX_MOVEMENT_ATTEMPTS - 1);
+  const over = await authorizeMovement(store, { ...first, request_id: randomUUID() });
+  assert.equal(over.code, "too_many_attempts");
+  assert.equal(over.status, 409);
+  assert.match(over.message, new RegExp(`${MAX_MOVEMENT_ATTEMPTS} times`));
+  assert.ok((await w.audited("money_movement_refused")).some((a) => a.details.code === "too_many_attempts"));
+  // The same attempt asking again isn't another try, and a finished movement is still a plain replay.
+  const current = { ...first, request_id: (await w.ledger(rail.id))[0].request_id };
+  assert.equal((await authorizeMovement(store, current)).allowed, true);
+  await recordMovementOutput(store, current, { transfer_status: "settled" });
+  assert.equal((await authorizeMovement(store, { ...first, request_id: randomUUID() })).replay, true);
+});
+
+test("finding a movement by any attempt's id uses an index", async () => {
+  const store = await openPglite();
+  // One busy subscription, so the planner has a reason not to walk all of its movements.
+  const sub = randomUUID();
+  const id = randomUUID();
+  await store.db.exec(`INSERT INTO financial_products.money_movements (id, idempotency_key, product_id, status, sandbox, subscription_id, request_id, earlier_request_ids)
+    SELECT gen_random_uuid(), 'k' || n, 'p', 'settled', true, '${sub}', gen_random_uuid(), ARRAY[gen_random_uuid()] FROM generate_series(1, 5000) n; ANALYZE financial_products.money_movements;`);
+  const where = ANY_ATTEMPT.replace("$1", `'${sub}'::uuid`).replaceAll("$2", `'${id}'`);
+  const plan = (await store.db.query(`EXPLAIN SELECT 1 FROM financial_products.money_movements WHERE ${where}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+  assert.match(plan, /money_movements_earlier_requests_idx/, plan);
+});
+
+test("a federal licence type that doesn't set covers is refused, and the refusal says so", async () => {
+  const store = await openPglite();
+  const w = await world(store, { covers: null });
+  const rail = await ok(w.provider, "propose_rail", w.RAIL);
+  const refused = await callTool(w.admin, "approve_rail", { rail_id: rail.id });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /doesn't set covers/);
+  assert.match(refused.data.error, /t_state\/t_mt/);
+  assert.deepEqual(refused.data.licences_missing_covers, ["t_state/t_mt"]);
+  assert.deepEqual(refused.data.outside_licence_coverage, ["us-ny"]);
+  // With covers set and the state outside it, the ordinary refusal.
+  const other = await world(await openPglite(), { covers: ["us-ca"] });
+  const r2 = await ok(other.provider, "propose_rail", other.RAIL);
+  assert.doesNotMatch((await callTool(other.admin, "approve_rail", { rail_id: r2.id })).data.error, /covers/);
 });
 
 test("service types: names that move money, and what ops_status reports", async () => {
@@ -804,9 +880,16 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal((await start("transfer", { quote: q4 })).status, 502);
   assert.deepEqual([(await rowOf(q4)).status, (await rowOf(q4)).status_detail], ["requested", "outcome_unknown:try_later"]);
   // A clear refusal of the retry is no answer about the first attempt: it stays open, and still counts.
+  const attemptA = await rowOf(q4);
   partner.answer = "refused";
   assert.equal((await start("transfer", { quote: q4 })).status, 502);
   assert.deepEqual([(await rowOf(q4)).status, (await rowOf(q4)).status_detail], ["requested", "outcome_unknown:try_later"]);
+  // Nor does attempt A's own signed error, now that a later attempt is the current one.
+  assert.notEqual((await rowOf(q4)).request_id, attemptA.request_id);
+  const secret = (await must(rampClient, "reveal_subscription_secret", { subscription_id: attemptA.subscription_id })).signing_secret;
+  const errorForA = JSON.stringify({ request_id: attemptA.request_id, status: "error", output: null, error: { code: "bank_rejected" } });
+  await fetch(`${base}/v1/vendor/callback/${attemptA.subscription_id}`, { method: "POST", headers: { "Content-Type": "application/json", "Mynt-Signature": signBody(secret, errorForA) }, body: errorForA });
+  assert.equal((await rowOf(q4)).status, "requested", "the movement stays open, and its share of the day stays held");
   partner.answer = "submitted";
 
   // The day's limit: 300 used of 400, so another 100 fits and then nothing does.
@@ -816,7 +899,6 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   // The partner settles by signed callback; the ledger follows.
   const runRow = (await store.db.query("SELECT request_id, subscription_id FROM financial_products.vendor_action_runs WHERE id = $1", [accepted.body.reference])).rows[0];
   const cb = JSON.stringify({ request_id: runRow.request_id, status: "ok", output: { transfer_status: "settled", settlement_ref: "tr_9" } });
-  const secret = (await must(rampClient, "reveal_subscription_secret", { subscription_id: runRow.subscription_id })).signing_secret;
   const answered = await fetch(`${base}/v1/vendor/callback/${runRow.subscription_id}`, { method: "POST", headers: { "Content-Type": "application/json", "Mynt-Signature": signBody(secret, cb) }, body: cb });
   assert.equal(answered.status, 200, await answered.text());
   row = await rowOf(q1);
@@ -861,9 +943,13 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   assert.equal((await fetch(`${base}/v1/vendor/callback/${q2Row.subscription_id}`, { method: "POST", headers: { "Content-Type": "application/json", "Mynt-Signature": signBody(secret, lateError) }, body: lateError })).status, 200);
   assert.deepEqual([(await rowOf(q2)).status, (await rowOf(q2)).status_detail], ["failed", "partner_failed_late"]);
 
-  // Nobody ever answers for the rest: swept, and reported apart from what's in flight or known to have failed.
+  // One Mynt itself gave up on, and the rest nobody ever answers for: swept, and both reported apart from what's in
+  // flight or known to have failed.
   assert.equal(await sweepStaleMovements(store, { now: new Date(Date.now() - 3_600_000) }), 0, "not stale yet");
-  assert.ok((await sweepStaleMovements(store, { now: new Date(Date.now() + 90 * 86_400_000) })) >= 2);
+  const gaveUpOn = await rowOf(q4);
+  await recordMovementGaveUp(store, { subscription_id: gaveUpOn.subscription_id, request_id: gaveUpOn.request_id });
+  assert.equal((await rowOf(q4)).status_detail, "mynt_gave_up");
+  assert.ok((await sweepStaleMovements(store, { now: new Date(Date.now() + 90 * 86_400_000) })) >= 1);
   const swept = await flowsFor(store, P, await store.getSetting("money_ledger_started_at"), new Date(Date.now() + 60_000));
   assert.deepEqual(swept.flows.on_ramp.requested, { count: 0, amount_cents: 0 });
   assert.deepEqual(swept.flows.on_ramp.submitted, { count: 0, amount_cents: 0 });

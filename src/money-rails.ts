@@ -100,6 +100,8 @@ const toMovement = (r: Row) => ({
   status: r.status as MovementStatus,
   status_detail: (r.status_detail as string | null) ?? null,
   external_ref: (r.external_ref as string | null) ?? null,
+  earlier_request_ids: (r.earlier_request_ids as string[] | null) ?? [],
+  request_id: (r.request_id as string | null) ?? null,
   sandbox: r.sandbox as boolean,
   would_refuse: (r.would_refuse as string | null) ?? null,
   created_at: iso(r.created_at)!,
@@ -225,6 +227,21 @@ const refusal = (status: number, code: string, message: string): Refusal => ({ a
 // reaches a state, or the country, without granting money transmission counts for nothing. `only`: just these licences,
 // e.g. what a sponsorship is under; a prerequisite counts whether or not it's named there.
 export const MONEY_TRANSMISSION_PRODUCT_TYPE = "us_money_transmission";
+
+// Licences the firm holds that grant money transmission but whose type says nothing about where: not counted, since
+// the model must say. A regulator with a jurisdiction speaks for its type; any other (a federal one) needs `covers`.
+export async function licencesMissingCovers(store: Store, entityId: string): Promise<string[]> {
+  const region = (await store.referenceData(true)).regions.find((r) => r.code === "US");
+  const model = normalizeModel(region?.regulatory);
+  const out = new Set<string>();
+  for (const h of await store.licensesOf(entityId)) {
+    if (h.region !== "US") continue;
+    const regulator = model.regulators.find((r) => r.id === h.regulator_id);
+    const type = regulator?.license_types.find((l) => l._id === h.license_id);
+    if (regulator && type && !type.covers && !type.issued_per_jurisdiction && !regulator.jurisdiction && licenseProducts(regulator, type).some((p) => p.id === MONEY_TRANSMISSION_PRODUCT_TYPE)) out.add(`${regulator.id}/${type._id}`);
+  }
+  return [...out].sort();
+}
 export async function outsideLicenceCoverage(store: Store, entityId: string, states: string[], only?: string[]): Promise<string[]> {
   const held = (await store.licensesOf(entityId)).filter((h) => h.region === "US");
   const region = (await store.referenceData(true)).regions.find((r) => r.code === "US");
@@ -287,6 +304,9 @@ async function eligibleRails(store: Store, m: MovementRequest, onlyRail: string 
   return { rails: usable, state };
 }
 
+// How many times one movement may be tried: each attempt is kept, and a loop shouldn't grow that without end.
+export const MAX_MOVEMENT_ATTEMPTS = 10;
+
 // A retry's request id becomes the current one; the ones before it are kept, since any attempt may still be answered.
 const NEW_ATTEMPT = `UPDATE ${T}.money_movements SET earlier_request_ids = CASE WHEN request_id IS NOT NULL AND request_id <> $2::uuid THEN array_append(earlier_request_ids, request_id) ELSE earlier_request_ids END, request_id = $2, subscription_id = COALESCE($3, subscription_id), updated_at = now() WHERE id = $1 AND status = 'requested'`;
 
@@ -303,6 +323,11 @@ const REFUSAL_OF: Record<string, (m: MovementRequest) => Refusal> = {
 export async function authorizeMovement(store: Store, m: MovementRequest): Promise<MovementVerdict> {
   const { rows: seen } = await store.db.query(`SELECT * FROM ${T}.money_movements WHERE idempotency_key = $1`, [m.idempotency_key]);
   const existing = seen[0] ? toMovement(seen[0]) : null;
+  // A new attempt at a movement still open or failed, past the cap. The movement itself stays as it is.
+  if (existing && (existing.status === "requested" || existing.status === "failed") && m.request_id && existing.request_id !== m.request_id && existing.earlier_request_ids.length + 1 >= MAX_MOVEMENT_ATTEMPTS) {
+    await store.audit(null, "money_movement_refused", m.product_id, { code: "too_many_attempts", idempotency_key: m.idempotency_key, attempts: existing.earlier_request_ids.length + 1, sandbox: m.sandbox });
+    return refusal(409, "too_many_attempts", `This transfer has been tried ${MAX_MOVEMENT_ATTEMPTS} times, so it can't be tried again; get a new quote once it has settled or failed`);
+  }
   const eligible = await eligibleRails(store, m, !m.sandbox && existing?.status === "requested" ? existing.rail_id : null);
   if (m.sandbox) return recordSandbox(store, m, existing, eligible);
   if (existing && existing.status !== "failed" && existing.status !== "requested") return { allowed: true, movement_id: existing.id, status: existing.status, replay: true };
@@ -406,14 +431,17 @@ const FROM: Record<Exclude<MovementStatus, "requested">, MovementStatus[]> = {
   reversed: ["settled"],
 };
 
-const ATTEMPT = "subscription_id = $1 AND (request_id = $2 OR $2::uuid = ANY(earlier_request_ids))"; // any attempt's answer finds it
+// Which attempts may speak to a movement. Money that arrived counts whichever attempt it came from (settled, reversed);
+// anything else is about the attempt in hand only, since an earlier attempt failing says nothing about a later one.
+export const ANY_ATTEMPT = "subscription_id = $1 AND (request_id = $2 OR earlier_request_ids @> ARRAY[$2::uuid])"; // uses the GIN index
+const CURRENT_ATTEMPT = "subscription_id = $1 AND request_id = $2";
 
 async function move(store: Store, at: Where, to: Exclude<MovementStatus, "requested">, o: { external_ref?: string | null; detail?: string | null; settled_cents?: number | null; partner_confirmed?: boolean } = {}): Promise<boolean> {
   const { rows } = await store.db.query(
     `UPDATE ${T}.money_movements SET status = $3, external_ref = COALESCE($4, external_ref), status_detail = CASE WHEN status = 'failed' AND $3 = 'settled' THEN 'late_settlement' ELSE $5 END, ${to}_at = now(), updated_at = now(),
        settled_amount_cents = COALESCE($7::bigint, settled_amount_cents),
        settled_amount_differs = CASE WHEN $7::bigint IS NULL THEN settled_amount_differs ELSE $7::bigint <> COALESCE(expected_total_cents, amount_cents) END
-     WHERE ${ATTEMPT} AND status = ANY($6::text[])
+     WHERE ${to === "settled" || to === "reversed" ? ANY_ATTEMPT : CURRENT_ATTEMPT} AND status = ANY($6::text[])
        -- Once an attempt may have moved money, only the partner's own terminal answer can say it didn't. A later
        -- attempt being refused says nothing about the earlier one.
        AND ($3 <> 'failed' OR $8::boolean OR COALESCE(status_detail, '') NOT LIKE 'outcome_unknown:%')
@@ -439,12 +467,15 @@ export async function recordMovementOutput(store: Store, at: Where, output: Reco
 export const recordMovementPending = (store: Store, at: Where) => move(store, at, "submitted");
 // partner_confirmed: the partner itself gave this as the transfer's final answer (a signed callback, not a refused call).
 export const recordMovementFailed = (store: Store, at: Where, detail: string, o: { partner_confirmed?: boolean } = {}) => move(store, at, "failed", { detail, ...o });
+// Mynt ended it (past the hard stop, with no void from the partner), not the partner: nobody knows what happened.
+export const GAVE_UP_DETAIL = "mynt_gave_up";
+export const recordMovementGaveUp = (store: Store, at: Where) => move(store, at, "failed", { detail: GAVE_UP_DETAIL, partner_confirmed: true });
 export const recordMovementReversed = (store: Store, at: Where, detail = "reversed") => move(store, at, "reversed", { detail });
 export const recordMovementLateSettlement = (store: Store, at: Where) => move(store, at, "settled", { detail: "late_settlement" });
 // No clear answer (a timeout, a server error): it may have reached the partner, so it stays requested and keeps
 // counting against the daily limit. A retry with the same idempotency key is the same movement.
 export async function recordMovementUnknown(store: Store, at: Where, detail: string): Promise<void> {
-  await store.db.query(`UPDATE ${T}.money_movements SET status_detail = $3, updated_at = now() WHERE ${ATTEMPT} AND status = 'requested'`, [at.subscription_id, at.request_id, `outcome_unknown:${detail}`]);
+  await store.db.query(`UPDATE ${T}.money_movements SET status_detail = $3, updated_at = now() WHERE ${CURRENT_ATTEMPT} AND status = 'requested'`, [at.subscription_id, at.request_id, `outcome_unknown:${detail}`]);
 }
 
 // A clear refusal by the partner means nothing moved, so the movement is `failed` and frees its share of the day.
@@ -494,7 +525,7 @@ export type Flows = {
   measured: boolean;
   // By direction, then status. A direction Mynt can't measure for this product is null, with the reason in not_measured.
   flows: Record<RailDirection, Record<MovementStatus, Tally> | null>;
-  // Movements swept with no answer: neither in flight nor known to have failed, so in none of the totals above.
+  // Movements swept with no answer, or that Mynt gave up on: neither in flight nor known to have failed, so in none of the totals above.
   unresolved: Record<RailDirection, Tally | null>;
   not_measured: Partial<Record<RailDirection, string>>;
 };
@@ -525,9 +556,9 @@ export async function flowsFor(store: Store, productId: string, from: string | D
     return out;
   }
   const { rows } = await store.db.query(
-    `SELECT direction, status, COALESCE(status_detail = $4, false) AS stale, count(*)::int AS n, sum(amount_cents)::text AS cents FROM ${T}.money_movements
+    `SELECT direction, status, COALESCE(status_detail = ANY($4::text[]), false) AS stale, count(*)::int AS n, sum(amount_cents)::text AS cents FROM ${T}.money_movements
      WHERE product_id = $1 AND NOT sandbox AND created_at >= $2 AND created_at < $3 GROUP BY 1, 2, 3`,
-    [productId, start.toISOString(), end.toISOString(), STALE_DETAIL],
+    [productId, start.toISOString(), end.toISOString(), [STALE_DETAIL, GAVE_UP_DETAIL]],
   );
   const measured = await productMoneyDirections(store, record!);
   for (const r of rows) measured.add(r.direction as RailDirection);
@@ -664,8 +695,14 @@ export function registerMoneyRailTools(server: McpServer, store: Store, user: Us
         }
         const outside = await outsideLicenceCoverage(store, rail.entity_id, rail.states);
         if (outside.length) {
-          await audit("approve_rail_refused", rail.id, { outside_licence_coverage: outside });
-          return fail("The rail can't be approved: the firm holds no verified licence granting money transmission in some of its states", { outside_licence_coverage: outside });
+          const missing = await licencesMissingCovers(store, rail.entity_id);
+          await audit("approve_rail_refused", rail.id, { outside_licence_coverage: outside, ...(missing.length ? { licences_missing_covers: missing } : {}) });
+          return fail(
+            missing.length
+              ? `The rail can't be approved: ${missing.join(", ")} grants money transmission, but its licence type doesn't set covers, so it isn't counted anywhere. Set covers on it in the regulatory model ('us' for a federal charter, or the states it covers)`
+              : "The rail can't be approved: the firm holds no verified licence granting money transmission in some of its states",
+            { outside_licence_coverage: outside, ...(missing.length ? { licences_missing_covers: missing } : {}) },
+          );
         }
         const done = await setStatus(rail, "approved", note ?? null, true);
         if (!done) return fail("The rail was changed by another call just now; look at it again");

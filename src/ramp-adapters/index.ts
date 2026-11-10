@@ -7,7 +7,7 @@ import { derivedKey, open, seal, vaultAvailable } from "../vault.js";
 import { safeRequest, signBody, type VendorCallOptions, type VendorResult } from "../vendor-call.js";
 import { emitFirmEvent } from "../runtime.js";
 import { getOffering, lateVendorSettlement, myntRampEntity, reverseVendorRun, serviceType, vendorCallback, type Offering } from "../vendors.js";
-import { recordMovementOutput } from "../money-rails.js";
+import { recordMovementGaveUp, recordMovementOutput } from "../money-rails.js";
 import { bridgeAdapter } from "./bridge.js";
 import { isRampError, type PartnerHttp, type RampAdapter, type RampAdapterContext, type RampDirection, type RampPrice, type RampTransferStatus, type RampTransferUpdate } from "./types.js";
 
@@ -456,6 +456,9 @@ export async function pollRampAdapterTransfers(
     // The partner wouldn't void it (its money may be moving): keep waiting, up to the hard stop.
     if (!voided && !hardStop && !("error" in c) && c.adapter.cancel) continue;
     if (!(await setRow(store, r, "expired", "submitted"))) continue;
+    // Without the partner's void this is Mynt's decision, not the partner's answer: the ledger says so, first, since
+    // the callback below reports it as a failure.
+    if (!voided) await recordMovementGaveUp(store, { subscription_id: r.subscription_id, request_id: r.request_id });
     await callbackRun(store, r, outputOf({ partner_transfer_id: r.partner_transfer_id, status: "failed", estimated_arrival: null, settlement_ref: r.partner_transfer_id, settlement_tx: null }, r.direction, { pay_to_status: voided ? "void" : "unknown" }));
     n++;
   }

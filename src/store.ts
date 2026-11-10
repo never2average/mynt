@@ -1384,6 +1384,7 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS money_movements_daily_idx ON financial_products.money_movements (rail_id, limit_day) WHERE NOT sandbox AND status <> 'failed';
   CREATE INDEX IF NOT EXISTS money_movements_product_idx ON financial_products.money_movements (product_id, created_at);
   CREATE INDEX IF NOT EXISTS money_movements_answer_idx ON financial_products.money_movements (subscription_id, request_id);
+  CREATE INDEX IF NOT EXISTS money_movements_earlier_requests_idx ON financial_products.money_movements USING gin (earlier_request_ids);
   CREATE INDEX IF NOT EXISTS money_movements_open_idx ON financial_products.money_movements (updated_at) WHERE status IN ('requested', 'submitted');
   INSERT INTO financial_products.settings (key, value) VALUES ('money_ledger_started_at', to_jsonb(now())) ON CONFLICT (key) DO NOTHING;
   -- Every change to a customer's state of residence, append-only: which rails may serve them turns on it.

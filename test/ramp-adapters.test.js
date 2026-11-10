@@ -482,11 +482,14 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.ok(bridge.state.calls.some((c) => c.method === "DELETE" && c.path === "/v0/transfers/tr_5"));
   const void5 = await run(t5.body.reference);
   assert.deepEqual([void5.body.status, void5.body.transfer_status, void5.body.pay_to_status], ["failed", "failed", "void"], "void only because Bridge confirmed it");
+  const detailOf = async (q) => (await store.db.query("SELECT status, status_detail FROM financial_products.money_movements WHERE idempotency_key = $1", [`quote:${q.body.reference}`])).rows[0];
+  assert.deepEqual(await detailOf(q5), { status: "failed", status_detail: "partner_failed" }, "the partner did void it");
   // tr_4 had its money arrive (funds_received): Bridge won't cancel it, so it keeps waiting, up to the hard stop.
   assert.equal((await run(t4.body.reference)).body.status, "pending");
   await pollRampAdapterTransfers(store, VENDOR_OPTS, { olderThanSeconds: 0, now: days(60) });
   const stop4 = await run(t4.body.reference);
   assert.deepEqual([stop4.body.status, stop4.body.pay_to_status], ["failed", "unknown"], "Bridge never confirmed a void: unknown, not void");
+  assert.deepEqual(await detailOf(q4), { status: "failed", status_detail: "mynt_gave_up" }, "Mynt's decision, not the partner's answer");
   // Then the money lands anyway: recorded, and the innovator is told to handle it; never dropped.
   const tr4 = bridge.state.transfers.get("tr_4");
   tr4.state = "payment_processed";
@@ -496,6 +499,7 @@ test("the Mynt Ramp through the Bridge adapter: conformance, dollar quotes, acce
   assert.ok(late.late_result_sealed, "the late result is kept, sealed");
   assert.equal((await store.db.query("SELECT status FROM financial_products.ramp_adapter_transfers WHERE partner_transfer_id = 'tr_4'")).rows[0].status, "settled_late");
   assert.equal((await run(t4.body.reference)).body.status, "failed", "the device's answer doesn't change");
+  assert.deepEqual(await detailOf(q4), { status: "settled", status_detail: "late_settlement" }, "and the ledger hears that the money moved");
 
   // ---- cash-out amounts: total_usd is what the customer is charged, paid_out_usd what reached their bank ----
   const q6 = await start("offramp_quote", { params: { direction: "out", amount_usd: "250.00" } });
