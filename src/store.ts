@@ -2957,7 +2957,14 @@ export class Store {
       [clerkUserId, lower, roles],
     );
     if (updated) {
-      await this.licenceProviderRoleChanged(updated.id as string, ((before?.roles as string[] | undefined) ?? []).includes("license_provider"), roles.includes("license_provider"));
+      const had = (before?.roles as string[] | undefined) ?? [];
+      // Made an admin by an invite rewrite: an admin account acts for no firm's books, so its standing ends, as an
+      // admin's action (which locks recovery at the firm for 30 days: firm-notices.ts).
+      if (!had.includes("admin") && roles.includes("admin")) {
+        const row = await this.one("SELECT entity_id, lp_since FROM financial_products.users WHERE id = $1", [updated.id]);
+        if (row?.entity_id && row.lp_since) await this.loseStanding(updated.id as string, row.entity_id as string, "admin_promoted");
+      }
+      await this.licenceProviderRoleChanged(updated.id as string, had.includes("license_provider"), roles.includes("license_provider"));
       return toUser((await this.one("SELECT * FROM financial_products.users WHERE id = $1", [updated.id]))!);
     }
     const r = await this.one(

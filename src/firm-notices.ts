@@ -49,8 +49,10 @@ export const memberCoolOffMs = () => {
 
 // When an account's licence-provider standing at its firm counts from: the latest of its creation, its joining the firm
 // and its gaining standing there (acceptance, once accepted). Null: no standing at any firm.
-export async function standingSince(store: Store, userId: string): Promise<Date | null> {
-  const { rows } = await store.db.query(`SELECT created_at, entity_joined_at, lp_since, entity_id, roles FROM ${T}.users WHERE id = $1`, [userId]);
+type Q = Pick<Store["db"], "query">;
+
+export async function standingSince(store: Store, userId: string, q: Q = store.db): Promise<Date | null> {
+  const { rows } = await q.query(`SELECT created_at, entity_joined_at, lp_since, entity_id, roles FROM ${T}.users WHERE id = $1`, [userId]);
   const r = rows[0];
   if (!r || !r.entity_id || !r.lp_since || !isLicenceProvider((r.roles as string[]) ?? [])) return null;
   const t = (v: unknown) => (v ? new Date(v as string).getTime() : 0);
@@ -59,11 +61,11 @@ export async function standingSince(store: Store, userId: string): Promise<Date 
 
 
 // The firm's licence providers who can decide a request made at `requestedAt`: standing since before it, past the cool-off.
-async function eligibleDeciders(store: Store, entityId: string, requestedAt: Date, now: Date, except: string | null): Promise<string[]> {
-  const { rows } = await store.db.query(`SELECT id FROM ${T}.users WHERE entity_id = $1 AND lp_since IS NOT NULL AND ($2::uuid IS NULL OR id <> $2)`, [entityId, except]);
+async function eligibleDeciders(store: Store, entityId: string, requestedAt: Date, now: Date, except: string | null, q: Q = store.db): Promise<string[]> {
+  const { rows } = await q.query(`SELECT id FROM ${T}.users WHERE entity_id = $1 AND lp_since IS NOT NULL AND ($2::uuid IS NULL OR id <> $2)`, [entityId, except]);
   const out: string[] = [];
   for (const r of rows) {
-    const since = await standingSince(store, r.id as string);
+    const since = await standingSince(store, r.id as string, q);
     if (since && since.getTime() < requestedAt.getTime() && since.getTime() + memberCoolOffMs() <= now.getTime()) out.push(r.id as string);
   }
   return out;
@@ -84,12 +86,22 @@ export async function pendingMembers(store: Store, entityId: string) {
   }));
 }
 
-type Req = { id: string; entity_id: string; user_id: string; status: string; requested_at: string; recovery_started_at: string | null; recovery_reason: string | null };
+type Req = { id: string; entity_id: string; user_id: string; status: string; requested_at: string; recovery_started_at: string | null; recovery_started_by: string | null; recovery_reason: string | null };
 const requestById = async (store: Store, id: string) => (await store.db.query(`SELECT * FROM ${T}.firm_member_requests WHERE id = $1`, [id])).rows[0] as Req | undefined;
 
 // Standing given on a request: the account joins (only if it isn't at another firm by now) and has standing from now.
 async function grantOnRequest(store: Store, r: Req, decidedBy: string, how: string): Promise<{ error: string } | null> {
-  const out = await inTransaction(store.db, async (tx) => {
+  return grantOnRequestIn(await inTransaction(store.db, (tx) => grantSteps(tx, r, decidedBy, how)));
+}
+const grantOnRequestIn = (out: string): { error: string } | null =>
+  out === "taken"
+    ? { error: "That request isn't waiting any more" }
+    : out === "elsewhere"
+      ? { error: "That account has joined another firm since it was added to yours, so it can't join yours: the request is closed" }
+      : null;
+// The grant's own statements, on the caller's transaction.
+async function grantSteps(tx: Q, r: Req, decidedBy: string, how: string): Promise<"taken" | "elsewhere" | "ok"> {
+  {
     const { rows: claimed } = await tx.query(`UPDATE ${T}.firm_member_requests SET status = 'accepted', decided_by = $2, decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING id`, [r.id, decidedBy]);
     if (!claimed.length) return "taken";
     const { rows: joined } = await tx.query(
@@ -104,10 +116,7 @@ async function grantOnRequest(store: Store, r: Req, decidedBy: string, how: stri
     }
     if (joined[0].lp_since) await tx.query(`INSERT INTO ${T}.firm_standing_history (entity_id, user_id, event, reason) VALUES ($1, $2, 'gained', $3)`, [r.entity_id, r.user_id, how]);
     return "ok";
-  });
-  if (out === "taken") return { error: "That request isn't waiting any more" };
-  if (out === "elsewhere") return { error: "That account has joined another firm since it was added to yours, so it can't join yours: the request is closed" };
-  return null;
+  }
 }
 
 // A declined request: the account keeps no place at the firm it has no standing at.
@@ -151,23 +160,25 @@ const everyone = async (store: Store, entityId: string) => {
 };
 
 // Standing lost by an admin's hand, which locks recovery at the firm for RECOVERY_LOCK_MS.
-export const ADMIN_LOSS_CAUSES = ["moved_by_admin", "role_removed_by_invite", "revoked_by_admin"];
+export const ADMIN_LOSS_CAUSES = ["moved_by_admin", "role_removed_by_invite", "revoked_by_admin", "admin_promoted"];
 export const RECOVERY_LOCK_MS = 30 * 24 * HOUR;
 
 // Why an admin's recovery at this firm can't go ahead now, if it can't. Recovery rests on the firm's past licence
 // providers being able to object, so it's locked while any of them can't sign in, and for 30 days after any of them lost
 // standing there through an admin's action. The account the request is for isn't counted (it's the one being restored).
 // The reasons name no one: they say what's wrong, and an admin sees who in its own tools.
-export async function recoveryLock(store: Store, entityId: string, subjectId: string, now: Date): Promise<string | null> {
-  const past = (await store.pastLicenceProviders(entityId)).filter((id) => id !== subjectId);
+export async function recoveryLock(store: Store, entityId: string, subjectId: string, now: Date, q: Q = store.db): Promise<string | null> {
+  const { rows: pastRows } = await q.query(`SELECT DISTINCT user_id FROM ${T}.firm_standing_history WHERE entity_id = $1 AND event = 'gained' AND user_id <> $2`, [entityId, subjectId]);
   let lockedOut = 0;
-  for (const id of past) {
-    const email = ((await store.db.query(`SELECT email FROM ${T}.users WHERE id = $1`, [id])).rows[0]?.email as string | null) ?? null;
+  for (const p of pastRows) {
+    const email = ((await q.query(`SELECT email FROM ${T}.users WHERE id = $1`, [p.user_id])).rows[0]?.email as string | null) ?? null;
     if (!email) continue; // a token account: nothing an admin can revoke from it here
-    if (!(await store.getInvite(email)) || (await store.isSignupBlocked(email))) lockedOut++;
+    const invited = (await q.query(`SELECT 1 FROM ${T}.invites WHERE email = $1`, [email.toLowerCase()])).rows.length > 0;
+    const blocked = (await q.query(`SELECT 1 FROM ${T}.signup_blocks WHERE email = $1`, [email.toLowerCase()])).rows.length > 0;
+    if (!invited || blocked) lockedOut++;
   }
   if (lockedOut) return `Recovery is locked: ${lockedOut} past licence provider(s) of this firm can't sign in (revoked, blocked or not on the whitelist), so they couldn't object. Restore their access first.`;
-  const { rows } = await store.db.query(
+  const { rows } = await q.query(
     `SELECT max(at) AS at FROM ${T}.firm_standing_history WHERE entity_id = $1 AND event = 'lost' AND reason = ANY($2::text[]) AND user_id <> $3 AND at > $4`,
     [entityId, ADMIN_LOSS_CAUSES, subjectId, new Date(now.getTime() - RECOVERY_LOCK_MS)],
   );
@@ -199,8 +210,20 @@ export async function recoverMembership(store: Store, requestId: string, admin: 
   }
   const due = new Date(r.recovery_started_at).getTime() + RECOVERY_DELAY_MS;
   if (now.getTime() < due) return { error: `The recovery completes only after ${new Date(due).toISOString()}, so the firm's licence providers have time to see it and block it` };
-  const failed = await grantOnRequest(store, r, admin.id, "admin_recovery");
-  if (failed) return failed;
+  // Completing: the lock and the deciders are checked again, and the grant made, in one transaction with the firm's row
+  // locked, so nothing can change in between (a demotion, a revocation, a decider appearing).
+  const out = await inTransaction(store.db, async (tx) => {
+    await tx.query(`SELECT id FROM ${T}.entities WHERE id = $1 FOR UPDATE`, [r.entity_id]);
+    const lockedNow = await recoveryLock(store, r.entity_id, r.user_id, now, tx);
+    if (lockedNow) return { error: lockedNow };
+    if ((await eligibleDeciders(store, r.entity_id, new Date(r.requested_at), now, r.user_id, tx)).length)
+      return { error: "The firm has a licence provider who can decide this: it's theirs to accept or decline (decide_firm_member), not an admin's" };
+    return grantOnRequestIn(await grantSteps(tx, r, admin.id, "admin_recovery"));
+  });
+  if (out) {
+    await store.audit(admin.id, "recover_firm_member_refused", r.entity_id, { request_id: r.id, reason: out.error });
+    return out;
+  }
   await store.audit(admin.id, "recover_firm_member_completed", r.entity_id, { request_id: r.id, member_email: member?.email ?? null, reason: r.recovery_reason, completion_reason: reason });
   await store.noticeAccounts(r.entity_id, "firm.member_added", { member_email: member?.email ?? null, by: "admin_recovery", at: now.toISOString() }, await everyone(store, r.entity_id));
   return { request_id: r.id, status: "accepted", note: "Recovered: they're a licence provider at the firm now, and the member cool-off starts from this moment" };
@@ -210,8 +233,11 @@ export async function recoverMembership(store: Store, requestId: string, admin: 
 export async function blockRecovery(store: Store, requestId: string, user: User, reason: string): Promise<{ error: string } | Record<string, unknown>> {
   const r = await requestById(store, requestId);
   if (!r || !r.recovery_started_at || r.status !== "pending") return { error: "No admin recovery is waiting on that request" };
-  if ((user.held_roles ?? user.roles).includes("admin") || r.user_id === user.id || !(await store.pastLicenceProviders(r.entity_id)).includes(user.id))
+  // A past licence provider blocks even if it's an admin now; the account the request is for, and the admin who started
+  // the recovery, can't.
+  if (r.user_id === user.id || !(await store.pastLicenceProviders(r.entity_id)).includes(user.id))
     return { error: "Only someone who has been a licence provider at that firm can block its recovery" };
+  if (r.recovery_started_by === user.id) return { error: "You started this recovery: someone else who has been a licence provider at the firm blocks it" };
   const { rows } = await store.db.query(`UPDATE ${T}.firm_member_requests SET status = 'declined', decided_by = $2, decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING id`, [r.id, user.id]);
   if (!rows.length) return { error: "That request isn't waiting any more" };
   await closeDeclined(store, r);
