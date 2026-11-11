@@ -381,7 +381,8 @@ jobs:
           docker compose --profile mobile down -v
   # Generates every device SDK for a defined product and compiles the native ones with their own toolchains.
   client-sdks:
-    # Pinned: swift-actions/setup-swift refuses Ubuntu 26.04, which ubuntu-latest has moved to.
+    # Pinned to a runner with docker. Swift builds inside the official swift:5.10 image, so it doesn't depend on
+    # setup-swift fetching signing keys from a keyserver (keyserver.ubuntu.com outages broke this job).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -408,12 +409,8 @@ jobs:
       - name: Dart analyzes
         working-directory: sdk-out/flutter
         run: dart pub get && dart analyze --fatal-warnings
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "5.10"
       - name: Swift builds
-        working-directory: sdk-out/swift
-        run: swift build
+        run: docker run --rm -v "$PWD/sdk-out/swift:/w" -w /w swift:5.10 swift build
   # The native mobile starters (templates/mynt-app-mobile), scaffolded the way the coding agents do it against a
   # freshly generated SDK, and compiled with each platform's own toolchain.
   starter-android:
