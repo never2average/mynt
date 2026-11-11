@@ -1095,3 +1095,45 @@ test("completing a recovery is refused when someone at the firm can decide by th
   });
   assert.equal((await w.pg.query("SELECT status FROM financial_products.firm_member_requests WHERE id = $1", [request])).rows[0].status, "pending");
 });
+
+// ---- follow-ups to the seventh review ----
+
+test("a past licence provider who is now an admin can still block a recovery, but not one it started itself", async () => {
+  const { w, firm, real, request } = await repro6World();
+  // Made an admin by an invite rewrite: its standing ends, as an admin's action, which locks recovery for 30 days.
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["admin", "license_provider"] });
+  const promoted = await w.store.upsertClerkUser("real6", "real6@example.com", "Real", ["admin", "license_provider"]);
+  assert.equal((await w.pg.query("SELECT reason FROM financial_products.firm_standing_history WHERE entity_id = $1 AND user_id = $2 AND event = 'lost'", [firm.id, real.id])).rows[0].reason, "admin_promoted");
+  await w.refused(w.admin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept the new account" }, /locked until/);
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '31 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
+  // Started by the promoted account itself: it can't then block its own recovery.
+  const asAdmin = await w.connect(promoted);
+  await w.ok(asAdmin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept the new account" });
+  await w.refused(asAdmin, "block_firm_recovery", { request_id: request, reason: "Changed my mind" }, /You started this recovery/);
+  // Started by another admin, the promoted past licence provider blocks it.
+  await w.pg.query("UPDATE financial_products.firm_member_requests SET recovery_started_by = $2 WHERE id = $1", [request, w.adminUser.id]);
+  assert.equal((await w.ok(asAdmin, "block_firm_recovery", { request_id: request, reason: "We don't know this account" })).status, "blocked");
+});
+
+test("completing a recovery is all or nothing: a failure partway leaves the request waiting and grants nothing", async () => {
+  const { w, firm, puppet, request } = await repro6World();
+  const { recoverMembership } = await import("../dist/firm-notices.js");
+  await w.ok(w.admin, "invite_user", { email: "real6@example.com", roles: ["consumer"] });
+  await w.store.upsertClerkUser("real6", "real6@example.com", "Real", ["consumer"]);
+  await w.pg.query("UPDATE financial_products.firm_standing_history SET at = now() - interval '31 days' WHERE entity_id = $1 AND event = 'lost'", [firm.id]);
+  await w.ok(w.admin, "recover_firm_member", { request_id: request, reason: "Nobody at the firm can accept the new account" });
+  await w.pg.query("UPDATE financial_products.firm_member_requests SET recovery_started_at = now() - interval '8 days' WHERE id = $1", [request]);
+  // The last statement of the grant fails: the request's acceptance and the account's standing roll back with it.
+  const real = w.store.db.query;
+  w.store.db.query = (s, p) => (s.includes("firm_standing_history (entity_id, user_id, event, reason) VALUES ($1, $2, 'gained'") ? Promise.reject(new Error("database went away")) : real.call(w.store.db, s, p));
+  try {
+    await assert.rejects(recoverMembership(w.store, request, w.adminUser, "Completing after the wait"), /database went away/);
+  } finally {
+    w.store.db.query = real;
+  }
+  assert.equal((await w.pg.query("SELECT status FROM financial_products.firm_member_requests WHERE id = $1", [request])).rows[0].status, "pending");
+  assert.equal(await lpSince(w, puppet.id), null);
+  // Run again, it completes.
+  assert.equal((await recoverMembership(w.store, request, w.adminUser, "Completing after the wait")).status, "accepted");
+  assert.ok(await lpSince(w, puppet.id));
+});
