@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { currentLine, lineForTreasuryCategory, PRODUCT_LINES, UNDERLYINGS, WRAPPERS, type FinancialProduct } from "./catalog.js";
 import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
-import type { Db } from "./db.js";
+import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
@@ -187,10 +187,20 @@ export function effectiveRoles(roles: Role[]): Role[] {
 export interface User {
   id: string;
   name: string;
-  roles: Role[];
+  roles: Role[]; // the roles the account may act with now: license_provider only with standing at its firm (below)
   email: string | null;
   entity_id: string | null;
   created_at: string;
+  held_roles?: Role[]; // the roles granted to the account, standing or not (for deciding who must accept it)
+  licence_provider_pending?: boolean; // holds license_provider at a firm without standing there yet
+}
+
+// The one place licence-provider powers are resolved. An account of a firm that holds the license_provider role but
+// has no standing there (users.lp_since: a firm's first licence provider, or one an existing licence provider accepted;
+// see firm-notices.ts) acts as if it didn't hold the role: no licence-provider tool, no sealed figures, no
+// sponsorship, covenant or licence decision. An account with no firm keeps the role, which grants nothing without one.
+export function rolesWithStanding(roles: Role[], entityId: string | null, lpSince: unknown): Role[] {
+  return entityId && !lpSince && roles.includes("license_provider") ? roles.filter((r) => r !== "license_provider") : roles;
 }
 
 export interface Invite {
@@ -861,6 +871,17 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES financial_products.entities(id);
+  -- When the account became a member of its current firm: the partner kit's member cool-off counts from it.
+  ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS entity_joined_at timestamptz;
+  -- When the account gained licence-provider standing at its firm: when it joined as the firm's first licence provider,
+  -- or when an existing member accepted it (firm-notices.ts). Null: no standing, so it counts for no partner-kit gate,
+  -- whatever its roles say. Accounts that were licence providers at a firm before this column existed are backfilled
+  -- once from when they joined (lp_since_backfilled marks rows the backfill has seen; new rows start seen).
+  ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS lp_since timestamptz;
+  ALTER TABLE financial_products.users ADD COLUMN IF NOT EXISTS lp_since_backfilled boolean NOT NULL DEFAULT false;
+  ALTER TABLE financial_products.users ALTER COLUMN lp_since_backfilled SET DEFAULT true;
+  UPDATE financial_products.users SET lp_since = CASE WHEN entity_id IS NOT NULL AND 'license_provider' = ANY(roles) THEN GREATEST(created_at, entity_joined_at) ELSE lp_since END, lp_since_backfilled = true
+    WHERE NOT lp_since_backfilled;
   CREATE TABLE IF NOT EXISTS financial_products.held_licenses (
     id uuid PRIMARY KEY,
     entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
@@ -1350,6 +1371,142 @@ const TABLES = `
   );
   CREATE UNIQUE INDEX IF NOT EXISTS money_rails_one_live_idx ON financial_products.money_rails (entity_id, kind, provider, direction) WHERE status <> 'revoked';
   CREATE INDEX IF NOT EXISTS money_rails_entity_idx ON financial_products.money_rails (entity_id, status);
+  -- The partner kit (partner-kit.ts): where a licence provider's ledger is read from. An admin fixes the endpoints;
+  -- the firm takes the request-signing secret once, passes conformance, then switches its source from the sandbox.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_ledger_sources (
+    entity_id uuid PRIMARY KEY REFERENCES financial_products.entities(id),
+    test_url text,
+    live_url text,
+    signing_secret text, -- sealed under MYNT_VAULT_KEY
+    secret_shown_at timestamptz,
+    config_version integer NOT NULL DEFAULT 1,
+    configured_by uuid REFERENCES financial_products.users(id),
+    configured_at timestamptz,
+    pending_test_url text, -- an admin's change, waiting for the firm's own member to confirm it
+    pending_live_url text,
+    pending_by uuid REFERENCES financial_products.users(id),
+    pending_at timestamptz,
+    pending_id uuid, -- a fresh id per proposal: what a confirmation names (a timestamp round-trips with less precision)
+    expiry_warned_run_id uuid, -- the run whose coming expiry the firm was warned of
+    expired_notified_run_id uuid, -- the run whose expiry the firm was told sent it back to the sandbox
+    active_source text NOT NULL DEFAULT 'sandbox' CHECK (active_source IN ('sandbox', 'http', 'file')),
+    active_run_id uuid,
+    activated_by uuid REFERENCES financial_products.users(id),
+    activated_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- A firm's separate key for signing its test statements: a test signature never counts for live, nor a live one
+  -- for test. MACed under a key derived from the vault, so a key written straight into the table doesn't count.
+  -- Every test key a firm has registered, MACed: a key once used for test is never accepted as a live key.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_test_signing_key_history (
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    public_key text NOT NULL,
+    registered_by uuid REFERENCES financial_products.users(id),
+    registered_at timestamptz NOT NULL DEFAULT now(),
+    mac text NOT NULL,
+    PRIMARY KEY (entity_id, public_key)
+  );
+  -- A second, long-standing member's approval of a live key change or a switch to live (partner-kit.ts).
+  CREATE TABLE IF NOT EXISTS financial_products.partner_kit_approvals (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    action text NOT NULL CHECK (action IN ('live_key', 'source')),
+    payload jsonb NOT NULL,
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approving', 'approved', 'declined', 'superseded')),
+    requested_by uuid NOT NULL REFERENCES financial_products.users(id),
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    decided_by uuid REFERENCES financial_products.users(id),
+    decided_at timestamptz,
+    approving_at timestamptz, -- when an approval claimed it: one stuck here past a few minutes is checked and put right
+    expected_run_id uuid -- for a switch: the conformance run it would go live on, so a stuck claim is settled by it
+  );
+  CREATE INDEX IF NOT EXISTS partner_kit_approvals_idx ON financial_products.partner_kit_approvals (entity_id, status, requested_at DESC);
+  -- An account an admin added to a licence provider that already has members: not a member of anything until one of
+  -- the firm's existing members accepts it (firm-notices.ts). Declining it ends the request.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_member_requests (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    user_id uuid NOT NULL REFERENCES financial_products.users(id),
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined')),
+    requested_by uuid REFERENCES financial_products.users(id),
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    decided_by uuid REFERENCES financial_products.users(id),
+    decided_at timestamptz
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS firm_member_requests_one_pending_idx ON financial_products.firm_member_requests (entity_id, user_id) WHERE status = 'pending';
+  -- An admin's recovery of a request nobody at the firm can decide (firm-notices.ts): it waits 7 days, told to every
+  -- current and past licence provider of the firm, any of whom can block it.
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_reason text;
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_started_by uuid REFERENCES financial_products.users(id);
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_started_at timestamptz;
+  ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS reason text;
+  -- Every time an account gained or lost licence-provider standing at a firm: who its past licence providers are.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_standing_history (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    user_id uuid NOT NULL REFERENCES financial_products.users(id),
+    event text NOT NULL CHECK (event IN ('gained', 'lost')),
+    reason text,
+    at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS firm_standing_history_idx ON financial_products.firm_standing_history (entity_id, user_id);
+  INSERT INTO financial_products.firm_standing_history (entity_id, user_id, event, reason, at)
+    SELECT u.entity_id, u.id, 'gained', 'backfill', u.lp_since FROM financial_products.users u
+    WHERE u.lp_since IS NOT NULL AND u.entity_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM financial_products.firm_standing_history h WHERE h.entity_id = u.entity_id AND h.user_id = u.id);
+  -- When a firm first had a licence provider with standing. From then on nobody gains standing there directly: every
+  -- route goes through a request an existing licence provider (or, failing one, an admin's delayed recovery) settles.
+  ALTER TABLE financial_products.entities ADD COLUMN IF NOT EXISTS lp_established_at timestamptz;
+  UPDATE financial_products.entities e SET lp_established_at = (SELECT min(h.at) FROM financial_products.firm_standing_history h WHERE h.entity_id = e.id AND h.event = 'gained')
+    WHERE e.lp_established_at IS NULL AND EXISTS (SELECT 1 FROM financial_products.firm_standing_history h WHERE h.entity_id = e.id AND h.event = 'gained');
+  -- Notices to each member of a firm, so a change made by one member (or an admin) is seen by the others.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_notices (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    user_id uuid NOT NULL REFERENCES financial_products.users(id),
+    type text NOT NULL,
+    data jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    read_at timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS firm_notices_user_idx ON financial_products.firm_notices (user_id, created_at DESC);
+  CREATE TABLE IF NOT EXISTS financial_products.partner_test_signing_keys (
+    entity_id uuid PRIMARY KEY REFERENCES financial_products.entities(id),
+    public_key text NOT NULL,
+    registered_by uuid REFERENCES financial_products.users(id),
+    registered_at timestamptz NOT NULL DEFAULT now(),
+    mac text NOT NULL
+  );
+  -- Each conformance run, with its three parts. Cases name rules and product ids, never a figure.
+  CREATE TABLE IF NOT EXISTS financial_products.partner_conformance_runs (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    source text NOT NULL CHECK (source IN ('http', 'file')),
+    config_version integer,
+    passed boolean NOT NULL,
+    ledger_passed boolean NOT NULL,
+    identity_passed boolean NOT NULL,
+    rails_passed boolean NOT NULL,
+    ledger jsonb NOT NULL,
+    identity jsonb NOT NULL,
+    rails jsonb NOT NULL,
+    run_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS partner_conformance_entity_idx ON financial_products.partner_conformance_runs (entity_id, source, created_at DESC);
+  -- Daily files a licence provider uploaded: the signed statement, sealed (admins can't read the numbers).
+  CREATE TABLE IF NOT EXISTS financial_products.partner_ledger_uploads (
+    id uuid PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id),
+    environment text NOT NULL CHECK (environment IN ('test', 'live')),
+    as_of timestamptz NOT NULL,
+    public_key text NOT NULL,
+    statement_sealed text NOT NULL,
+    products integer NOT NULL,
+    uploaded_by uuid REFERENCES financial_products.users(id),
+    uploaded_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS partner_ledger_uploads_idx ON financial_products.partner_ledger_uploads (entity_id, environment, as_of DESC);
   -- The money ledger: every movement Mynt instructed, in integer US cents. A customer appears only as a pseudonymous
   -- key. Live rows always name their rail and amount; sandbox rows may not, and never count against a limit.
   CREATE TABLE IF NOT EXISTS financial_products.money_movements (
@@ -1587,14 +1744,20 @@ const isUniqueViolation = (e: unknown) => (e as { code?: string })?.code === "23
 
 type Row = Record<string, unknown>;
 
-const toUser = (r: Row): User => ({
-  id: r.id as string,
-  name: r.name as string,
-  roles: r.roles as Role[],
-  email: (r.email as string | null) ?? null,
-  entity_id: (r.entity_id as string | null) ?? null,
-  created_at: iso(r.created_at)!,
-});
+const toUser = (r: Row): User => {
+  const held = r.roles as Role[];
+  const entityId = (r.entity_id as string | null) ?? null;
+  const roles = rolesWithStanding(held, entityId, r.lp_since);
+  return {
+    id: r.id as string,
+    name: r.name as string,
+    roles,
+    email: (r.email as string | null) ?? null,
+    entity_id: entityId,
+    created_at: iso(r.created_at)!,
+    ...(roles.length !== held.length ? { held_roles: held, licence_provider_pending: true } : {}),
+  };
+};
 
 const toInvite = (r: Row): Invite => ({ email: r.email as string, roles: r.roles as Role[], created_at: iso(r.created_at)! });
 
@@ -2782,6 +2945,10 @@ export class Store {
   // relinks the existing user, so they keep what they own.
   async upsertClerkUser(clerkUserId: string, email: string, name: string, roles: Role[]): Promise<User> {
     const lower = email.toLowerCase();
+    const before = await this.one(
+      "SELECT id, roles FROM financial_products.users WHERE clerk_user_id = $1 OR email = $2 ORDER BY (clerk_user_id = $1) DESC NULLS LAST LIMIT 1",
+      [clerkUserId, lower],
+    );
     const updated = await this.one(
       `UPDATE financial_products.users SET clerk_user_id = $1, email = $2, roles = $3
        WHERE id = (SELECT id FROM financial_products.users WHERE clerk_user_id = $1 OR email = $2
@@ -2789,12 +2956,90 @@ export class Store {
        RETURNING *`,
       [clerkUserId, lower, roles],
     );
-    if (updated) return toUser(updated);
+    if (updated) {
+      await this.licenceProviderRoleChanged(updated.id as string, ((before?.roles as string[] | undefined) ?? []).includes("license_provider"), roles.includes("license_provider"));
+      return toUser((await this.one("SELECT * FROM financial_products.users WHERE id = $1", [updated.id]))!);
+    }
     const r = await this.one(
       "INSERT INTO financial_products.users (id, name, roles, clerk_user_id, email) VALUES ($1, $2, $3, $4, $5) RETURNING *",
       [randomUUID(), name, roles, clerkUserId, lower],
     );
     return toUser(r!);
+  }
+
+  // A member whose roles gain license_provider (an admin's invite, applied when they sign in again) doesn't gain
+  // standing at their firm by it when the firm already has a licence provider with standing: that's a request one of
+  // them accepts (firm_member_requests), told to them on their webhooks and as notices. A firm with none grants it now.
+  // Losing the role ends the standing.
+  private async licenceProviderRoleChanged(userId: string, had: boolean, has: boolean): Promise<void> {
+    if (had === has) return;
+    const u = await this.one("SELECT entity_id, lp_since FROM financial_products.users WHERE id = $1", [userId]);
+    const entityId = (u?.entity_id as string | null) ?? null;
+    if (!entityId) return; // standing comes when they join a firm
+    if (!has) {
+      // The roles come from the whitelist entry an admin set (invite_user), applied at this sign-in.
+      if (u?.lp_since) await this.loseStanding(userId, entityId, "role_removed_by_invite");
+      return;
+    }
+    await this.grantOrRequestStanding(userId, entityId, null, "role_gained");
+  }
+
+  // ---- licence-provider standing (firm-notices.ts has the rest) ----
+
+  // Notices to these accounts about a firm (all its current members by default), and the firm's webhook event.
+  async noticeAccounts(entityId: string, type: string, data: Record<string, unknown>, userIds?: string[]): Promise<number> {
+    const ids = userIds ?? (await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1", [entityId])).map((r) => r.id as string);
+    for (const id of new Set(ids)) await this.db.query("INSERT INTO financial_products.firm_notices (id, entity_id, user_id, type, data) VALUES ($1, $2, $3, $4, $5)", [randomUUID(), entityId, id, type, JSON.stringify(data)]);
+    await this.enqueueFirmEvent(entityId, { id: randomUUID(), type, created_at: new Date().toISOString(), data } as never, false);
+    return ids.length;
+  }
+
+  // Every account that has ever had licence-provider standing at the firm, current or not.
+  async pastLicenceProviders(entityId: string): Promise<string[]> {
+    return (await this.all("SELECT DISTINCT user_id FROM financial_products.firm_standing_history WHERE entity_id = $1 AND event = 'gained'", [entityId])).map((r) => r.user_id as string);
+  }
+
+  // An account of a firm takes up the licence-provider role there. The firm's first ever licence provider has standing
+  // at once, and that marks the firm established (in one transaction, with the firm's row locked, so two can't both be
+  // first). After that it's always a request (firm_member_requests), however the account got there.
+  async grantOrRequestStanding(userId: string, entityId: string, requestedBy: string | null, reason: string): Promise<{ standing: "granted" } | { standing: "requested"; request_id: string }> {
+    const out = await inTransaction(this.db, async (tx) => {
+      const e = (await tx.query("SELECT lp_established_at FROM financial_products.entities WHERE id = $1 FOR UPDATE", [entityId])).rows[0];
+      if (!e) throw new Error(`No firm '${entityId}'`);
+      // Claimed in one statement too, so it holds even where the row lock can't (one shared connection).
+      const first = e.lp_established_at ? [] : (await tx.query("UPDATE financial_products.entities SET lp_established_at = now() WHERE id = $1 AND lp_established_at IS NULL RETURNING id", [entityId])).rows;
+      if (first.length) {
+        await tx.query("UPDATE financial_products.users SET lp_since = now() WHERE id = $1", [userId]);
+        await tx.query("INSERT INTO financial_products.firm_standing_history (entity_id, user_id, event, reason) VALUES ($1, $2, 'gained', 'first_licence_provider')", [entityId, userId]);
+        return { standing: "granted" as const };
+      }
+      const pending = (await tx.query("SELECT id FROM financial_products.firm_member_requests WHERE entity_id = $1 AND user_id = $2 AND status = 'pending'", [entityId, userId])).rows[0];
+      if (pending) return { standing: "requested" as const, request_id: pending.id as string, fresh: false };
+      const id = randomUUID();
+      await tx.query("INSERT INTO financial_products.firm_member_requests (id, entity_id, user_id, requested_by, reason) VALUES ($1, $2, $3, $4, $5)", [id, entityId, userId, requestedBy, reason]);
+      return { standing: "requested" as const, request_id: id, fresh: true };
+    });
+    if (out.standing === "granted") {
+      await this.audit(null, "licence_provider_standing_granted", entityId, { user_id: userId, reason: "first_licence_provider" });
+      return out;
+    }
+    if ("fresh" in out && out.fresh) {
+      const u = await this.one("SELECT email, roles FROM financial_products.users WHERE id = $1", [userId]);
+      const members = (await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1 AND id <> $2", [entityId, userId])).map((r) => r.id as string);
+      await this.noticeAccounts(entityId, "firm.member_pending", { request_id: out.request_id, member_email: u?.email ?? null, member_roles: u?.roles ?? [], reason, requested_at: new Date().toISOString(), decide_with: "decide_firm_member { request_id, accept: true | false }" }, members);
+      await this.audit(requestedBy, "licence_provider_standing_requested", entityId, { request_id: out.request_id, user_id: userId, reason });
+    }
+    return { standing: "requested", request_id: out.request_id };
+  }
+
+  // Standing ends (the role was taken away, or the account left the firm): recorded, and told to the firm.
+  async loseStanding(userId: string, entityId: string, reason: string): Promise<void> {
+    const { rows } = await this.db.query("UPDATE financial_products.users SET lp_since = NULL WHERE id = $1 AND lp_since IS NOT NULL RETURNING email", [userId]);
+    if (!rows.length) return;
+    await this.db.query("INSERT INTO financial_products.firm_standing_history (entity_id, user_id, event, reason) VALUES ($1, $2, 'lost', $3)", [entityId, userId, reason]);
+    const members = (await this.all("SELECT id FROM financial_products.users WHERE entity_id = $1", [entityId])).map((r) => r.id as string);
+    await this.noticeAccounts(entityId, "firm.member_standing_lost", { member_email: rows[0].email ?? null, reason, at: new Date().toISOString() }, [...members, userId]);
+    await this.audit(null, "licence_provider_standing_lost", entityId, { user_id: userId, reason });
   }
 
   // Whitelist
@@ -3353,8 +3598,24 @@ export class Store {
     return (await this.all("SELECT * FROM financial_products.entities ORDER BY created_at")).map(toEntity);
   }
 
-  async setUserEntity(userId: string, entityId: string | null): Promise<void> {
-    await this.db.query("UPDATE financial_products.users SET entity_id = $2 WHERE id = $1", [userId, entityId]);
+  // Membership of a firm. Leaving or moving ends standing at the old firm (told to it). Joining as a licence provider
+  // has standing at once only as a firm's first ever licence provider; otherwise it's a request the firm settles.
+  // `cause`: why standing at the old firm ends, kept in its history (an admin's move locks recovery there: firm-notices.ts).
+  async setUserEntity(userId: string, entityId: string | null, cause = "left_firm"): Promise<{ standing: "none" | "granted" | "requested"; request_id?: string; left_standing_at?: string }> {
+    const before = await this.one("SELECT entity_id, lp_since, roles FROM financial_products.users WHERE id = $1", [userId]);
+    if (!before) return { standing: "none" };
+    if (before.entity_id === entityId) return { standing: before.lp_since ? "granted" : "none" };
+    const leftStandingAt = before.entity_id && before.lp_since ? (before.entity_id as string) : undefined;
+    if (leftStandingAt) await this.loseStanding(userId, leftStandingAt, cause);
+    const joinedOut = await this.joinFirm(userId, entityId, before.roles as string[]);
+    return leftStandingAt ? { ...joinedOut, left_standing_at: leftStandingAt } : joinedOut;
+  }
+
+  private async joinFirm(userId: string, entityId: string | null, roles: string[]): Promise<{ standing: "none" | "granted" | "requested"; request_id?: string }> {
+    const before = { roles };
+    await this.db.query("UPDATE financial_products.users SET entity_id = $2, entity_joined_at = now(), lp_since = NULL WHERE id = $1", [userId, entityId]);
+    if (!entityId || !((before.roles as string[]) ?? []).includes("license_provider")) return { standing: "none" };
+    return this.grantOrRequestStanding(userId, entityId, null, "joined");
   }
 
   async userByEmail(email: string): Promise<User | undefined> {

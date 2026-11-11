@@ -7,6 +7,7 @@ import { folder, folderOf, GrcRecordInputSchema, reconcileEntityGrc, validateGrc
 import { EntityFactsSchema, PartyInputSchema, reconcileEntity, validateParty } from "./parties.js";
 import { driftSweep } from "./pins.js";
 import { vendorDriftSweep } from "./vendors.js";
+import { partnerKitSummary } from "./partner-kit.js";
 import { licenceJurisdictions, normalizeModel, SUBDIVISION } from "./regulatory.js";
 import { emitProductEvent, emitRequestEvent } from "./runtime.js";
 import { ACCESS_MODES, effectiveRoles, type AccessRequest, type Store, type User } from "./store.js";
@@ -409,6 +410,8 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
         grc: await reconcileEntityGrc(store, entity_id),
         // Mynt's public checks that the firm is a real company (an admin runs them; see firm-checks.ts).
         legitimacy: legitimacySummary(await firmLegitimacy(store, entity_id)),
+        // A licence provider's ledger source and its conformance runs, with their times (partner-kit.ts). No figures.
+        ...(effectiveRoles(user.roles).includes("license_provider") ? { partner_kit: await partnerKitSummary(store, entity_id, { runs: 3 }) } : {}),
       });
     },
   );

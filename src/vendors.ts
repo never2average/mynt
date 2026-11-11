@@ -19,6 +19,7 @@ import { rampCustomerKey, refreshVerifiedCustomerState, serveRampAdapter } from 
 import {
   authorizeMovement,
   CUSTOMER_STATE_FIELD,
+  US_STATES,
   identityDigest,
   identityFieldsOf,
   isDefiniteRefusal,
@@ -639,6 +640,43 @@ function responseProblems(body: unknown, requestId: string, t: ServiceType, allo
     problems.push(...p);
   }
   return problems;
+}
+
+// The partner kit's identity check (partner-kit.ts): does this identity provider, in its test environment, answer a
+// passed check with the customer's verified residential_state? Each fixture is sent signed with the offering's
+// conformance secret, as run_conformance does. Problems name rules only, never the answer's values.
+export async function probeIdentityOffering(store: Store, offeringId: string, opts: VendorCallOptions) {
+  const o = await getOffering(store.db, offeringId);
+  const t = o && (await serviceType(store.db, o.region, o.service_type));
+  const result = (passed: boolean, problems: string[]) => ({ offering_id: offeringId, name: o?.name ?? null, vendor_entity_id: o?.entity_id ?? null, service_type: t?.key ?? null, passed, problems });
+  if (!o || !t) return result(false, ["the offering no longer exists"]);
+  if (!isIdentityCheck(t)) return result(false, [`'${t.key}' isn't an identity service`]);
+  if (o.status !== "listed" && o.status !== "conformance_passed") return result(false, [`the offering is ${o.status}: it must pass run_conformance first`]);
+  if (o.adapter) return result(false, ["a ramp adapter's state comes from its partner's customer record, which can't be checked without a real customer: approve an identity service that returns residential_state"]);
+  if (o.requires_credential) return result(false, ["the offering needs a credential Mynt doesn't keep for tests: its vendor checks residential_state with run_conformance"]);
+  const secret = open((await sealedColumn(store.db, "vendor_offerings", "conformance_secret", o.id))!, false);
+  const problems: string[] = [];
+  let verifiedWithState = false;
+  for (const [i, input] of (t.fixtures.length ? t.fixtures : [{}]).entries()) {
+    const body = { request_id: randomUUID(), environment: "test", input, ...(t.params_schema ? { params: t.params_fixture ?? {} } : {}), consent: { purpose: t.consent_purpose, artefact_ref: "mynt_conformance", given_at: new Date().toISOString() } };
+    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret }, opts);
+    if (!r.ok) {
+      problems.push(`fixture ${i + 1}: ${r.error ?? "failed"}`);
+      continue;
+    }
+    const bad = responseProblems(r.body, body.request_id, t);
+    if (bad.length) {
+      problems.push(...bad.map((p) => `fixture ${i + 1}: ${p}`));
+      continue;
+    }
+    const output = (r.body as { output: Record<string, unknown> }).output;
+    if (deviceStatus(t, output) !== "verified") continue;
+    const state = typeof output.residential_state === "string" ? output.residential_state.trim().toLowerCase() : "";
+    if (US_STATES.has(state)) verifiedWithState = true;
+    else problems.push(`fixture ${i + 1}: a passed check came back without a valid residential_state (ISO 3166-2, e.g. us-ny)`);
+  }
+  if (!verifiedWithState && !problems.length) problems.push("no test check came back passed (verified), so Mynt couldn't see a residential_state on one");
+  return result(verifiedWithState && !problems.length, problems);
 }
 
 // A quote must be acceptable for a short, real window: expires_at in the future, at most an hour ahead.

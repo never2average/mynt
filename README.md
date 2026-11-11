@@ -161,7 +161,7 @@ Mynt's platform ships as an MCP server covering eleven lines, grouped by economi
 | --- | --- |
 | **Consumers** | Products and offers they can actually use, and a way to ask for what doesn't exist yet |
 | **Builders** (innovators and developers: one role under either name) | A product foundry: composition from regulated primitives, term sheets and feasibility analysis in their own model repository, versioning, licensing checks and distribution. And apps on top of products: SDKs, APIs, webhooks, a sandbox, GTM campaigns, and coding agents that build, verify and host them. Builders needn't be licensed |
-| **Licence providers** | Firms holding the licences: they sponsor builders' products under them, in the jurisdictions they cover, and can revoke a sponsorship |
+| **Licence providers** | Firms holding the licences: they sponsor builders' products under them, in the jurisdictions they cover, and can revoke a sponsorship. Their engineers connect their ledger and see pass or fail with the [partner kit](docs/partners.md) |
 | **Vendors** | A marketplace for standard services (identity, KYC, account data, bureau, e-sign, e-mandate) that builders plug into their products, tested by Mynt before they're listed |
 | **Admins** | The regulatory model (regulators, licences, law, GRC), a governance desk that reviews firms, licences and products, and `ops_status` for what needs attention |
 

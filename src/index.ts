@@ -26,6 +26,7 @@ import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { CovenantService } from "./covenants.js";
+import { partnerLedgerFor } from "./partner-kit.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
 import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
@@ -138,6 +139,8 @@ const openServices = async () => {
     poolsOf: (productId) => poolsOf(store, productId),
     poolSponsorOf: (poolId) => poolSponsorOf(store, poolId),
     openWithdrawalRequests: (productId, poolId) => openWithdrawalRequests(store, productId, poolId),
+    // Each sponsor's ledger: the sandbox until it passes the partner kit's conformance and switches (partner-kit.ts).
+    ledgerFor: partnerLedgerFor(store, { signingKeyOf: (entityId) => productHealth.signingKey(entityId) }),
   });
   // Pays liquidity pools' withdrawal queues, as far as each pool's latest verified health allows.
   const liquidity = new LiquidityWorker(store, productHealth, liquidityConfigFromEnv(process.env, healthConfig.intervalMs));

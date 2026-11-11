@@ -9,6 +9,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 // snapshot at all, pauses that hold until released, sandbox figures that can't pause, cooldowns, and who may touch what.
 
 process.env.MYNT_VAULT_KEY = randomBytes(32).toString("base64");
+// These tests' licence-provider accounts are minutes old: the partner kit's member cool-off (tested on its own in
+// partner-kit.test.js) is off here, so they can register keys straight away.
+process.env.PARTNER_MEMBER_COOLOFF_HOURS ??= "0";
 
 const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
@@ -182,14 +185,18 @@ test("complaints_above can be set and reads unknown, since Mynt doesn't track co
   assert.equal((await covenantsOf(t))[0].status, "unknown");
 });
 
-test("a sandbox or failed ledger read is unknown or labelled, and sandbox figures never pause a live product", async () => {
+test("a sandbox or failed ledger read is unknown, and sandbox figures never pause a live product", async () => {
+  // A published product whose sponsor's ledger is still the sandbox: its test figures can't speak for it, so the rule
+  // is unknown (not a sandbox-labelled pass or fail), and the figures themselves pause nothing.
   const t = await setup({ kind: "sandbox", books: { reserves: 10_00, owed: 100_00 } });
   await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause" }));
   await t.tickHour(0);
-  const [b] = await breaches(t);
-  assert.equal(b.sandbox, true);
-  assert.equal(b.action_taken, "sandbox_labelled");
-  assert.equal(await drift(t), null, "sandbox never pauses");
+  const [c] = await covenantsOf(t);
+  assert.equal(c.status, "unknown");
+  assert.equal(c.status_sandbox, false);
+  assert.match(c.status_reason, /ledger isn't live/);
+  assert.deepEqual(await breaches(t), []);
+  assert.equal(await drift(t), null, "sandbox figures never pause");
   assert.deepEqual((await t.covenants.list(t.provider.user, {}))[0].pause_held_by_breach_ids, []);
   // A live ledger that fails has no figures at all: unknown, not a pass.
   const down = await setup({ books: null });
@@ -591,7 +598,13 @@ test("ops_status: paused products, open breaches, and a covenant timer that isn'
 const HOOK_URL = "http://127.0.0.1:9/hook";
 const memberOf = async (t, firm, roles, name) => {
   const { user } = await t.store.createUser(name, roles);
-  await t.store.setUserEntity(user.id, firm.id);
+  const joined = await t.store.setUserEntity(user.id, firm.id);
+  // A second licence provider at a firm that has one gains standing only when an existing one accepts it.
+  if (joined.standing === "requested") {
+    const { decideMembership } = await import("../dist/firm-notices.js");
+    const out = await decideMembership(t.store, joined.request_id, t.provider.user, true);
+    assert.equal(out.error, undefined, out.error);
+  }
   user.entity_id = firm.id;
   return user;
 };
@@ -631,8 +644,9 @@ test("a sandbox pass neither closes a live breach nor permits a release", async 
   t.state.books = { reserves: 150_00, owed: 100_00 };
   await t.tickHour(1);
   const [c] = await covenantsOf(t);
-  assert.equal(c.status, "pass");
-  assert.equal(c.status_sandbox, true);
+  // On a published product, the sandbox's figures make the rule unknown: neither a pass nor a fail.
+  assert.equal(c.status, "unknown");
+  assert.equal(c.status_sandbox, false);
   assert.equal((await breaches(t))[0].status, "open", "sandbox figures don't close what live ones opened");
   const refused = await t.tool(t.provider.user, "release_covenant_pause", { breach_id: b.id });
   assert.equal(refused.isError, true);
@@ -1052,4 +1066,27 @@ test("an alert nothing could receive starts no cooldown, and ops_status raises i
   const hooks = await t.webhooks("covenant.breached");
   assert.equal(hooks.length, 1, "goes out as soon as there's a webhook, inside the default cooldown");
   assert.equal(hooks[0].payload.data.reminder, true);
+});
+
+test("with no snapshot to judge, a published product on a sandbox ledger reads unknown, not sandbox", async () => {
+  const t = await setup({ kind: "sandbox" });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "alert" }));
+  await t.covenants.tick();
+  const [c] = await covenantsOf(t);
+  assert.equal(c.status, "unknown");
+  assert.equal(c.status_sandbox, false, "not knowing is never excused as test data on a live product");
+});
+
+test("a published product left on test figures past a pause rule's unknown limit is paused; other unknowns only alert", async () => {
+  const t = await setup({ kind: "sandbox", books: { reserves: 150_00, owed: 100_00 } });
+  await t.ok(t.set(t.provider.user, { rule_type: "coverage_below", threshold: 10_000, action: "pause", unknown_limit_seconds: 3600 }));
+  await t.tickHour(0);
+  assert.equal(await drift(t), null, "inside the limit: unknown, nothing paused");
+  t.setClock(T0 + 2 * HOUR);
+  await t.covenants.tick();
+  const b = (await breaches(t)).find((x) => x.kind === "unknown_limit");
+  assert.ok(b);
+  assert.equal(b.sandbox, false);
+  assert.match(b.action_taken, /^paused/);
+  assert.ok(await drift(t), "the sponsor never connected its books: a pause rule holds the product");
 });

@@ -43,6 +43,8 @@ import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from ".
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
+import { registerPartnerKitTools } from "./partner-kit.js";
+import { registerFirmNoticeTools } from "./firm-notices.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
 import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
@@ -90,7 +92,9 @@ const productFields = {
 // catalog tools.
 export function createServer(store: Store, user: User | null = null, ctx: AdminContext = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, title: "Mynt: financial products", version: "0.6.0" });
-  const roles = effectiveRoles(user?.roles ?? []);
+  // Licence-provider powers need standing at the firm (store.ts, rolesWithStanding): a user read from the store already
+  // has license_provider dropped while it's pending acceptance; one flagged pending is held to that here too.
+  const roles = effectiveRoles((user?.licence_provider_pending ? user.roles.filter((r) => r !== "license_provider") : user?.roles) ?? []);
   const has = (role: Role) => roles.includes(role);
 
   registerCatalogTools(server, store, user);
@@ -142,6 +146,25 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   if (user && hasLiquidityRole(rolesFrom(user))) registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null);
   if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
+  // Every signed-in account reads its firm notices, and can block a recovery at a firm it has been a licence provider at.
+  if (user) registerFirmNoticeTools(server, store, user);
+  // The partner kit: a licence provider connects its ledger and sees pass or fail; admins set endpoints, never see figures.
+  if (user && (has("license_provider") || has("admin"))) {
+    const health = ctx.productHealth ?? null;
+    registerPartnerKitTools(server, store, user, {
+      signingKeyOf: async (id) => (health ? health.signingKey(id) : null),
+      opts: ctx.vendors,
+      admin: has("admin"),
+      licenceProvider: has("license_provider"),
+      // A live key change a second member approved: the requester's own checks again, then recorded.
+      registerLiveKey: health
+        ? async (requester, publicKey, approvedBy, tx) => {
+            const entityId = await health.checkSigningKey(requester, publicKey);
+            return health.registerSigningKeyFor(entityId, publicKey, requester.id, approvedBy, tx);
+          }
+        : undefined,
+    });
+  }
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);

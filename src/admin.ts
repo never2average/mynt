@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { noticeFirm, recoverMembership } from "./firm-notices.js";
 import { z } from "zod";
 import { firmLegitimacy, legitimacySummary } from "./firm-checks.js";
 import type { ClerkAdmin } from "./auth.js";
@@ -420,7 +421,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "add_entity_member",
     {
       title: "Add someone to a firm",
-      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles).",
+      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). The firm's existing members are told, on its webhooks (firm.member_added) and as a notice each. A licence-provider account added to a licence provider that already has one waits for an existing member to accept it (decide_firm_member).",
       inputSchema: { email: z.string().email(), entity_id: z.string() },
     },
     async ({ email, entity_id }) => {
@@ -428,9 +429,40 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (!member) return fail(`${email} hasn't signed in to Mynt yet`);
       const entity = await store.getEntity(entity_id);
       if (!entity) return fail(`No firm '${entity_id}'`);
-      await store.setUserEntity(member.id, entity.id);
-      await audit("add_entity_member", entity.id, { email: member.email });
-      return json({ entity_id: entity.id, entity: entity.name, member: member.email });
+      if (member.entity_id === entity.id) return json({ entity_id: entity.id, entity: entity.name, member: member.email, note: "Already a member" });
+      // The firm's existing members are told, on its webhooks and as a notice each: an admin adding someone to a firm
+      // is never silent. A licence provider joins with standing only as the firm's first ever one; otherwise it's a
+      // request one of the firm's licence providers settles (store.ts, grantOrRequestStanding; firm-notices.ts).
+      const told = await noticeFirm(store, entity.id, "firm.member_added", { member_email: member.email, member_roles: member.held_roles ?? member.roles, added_at: new Date().toISOString(), by: "admin" });
+      const joined = await store.setUserEntity(member.id, entity.id, "moved_by_admin");
+      await audit("add_entity_member", entity.id, { email: member.email, standing: joined.standing, ...(joined.request_id ? { request_id: joined.request_id } : {}), ...(joined.left_standing_at ? { left_standing_at: joined.left_standing_at } : {}) });
+      return json({
+        entity_id: entity.id,
+        entity: entity.name,
+        member: member.email,
+        firm_told: told,
+        ...(joined.standing === "requested"
+          ? { status: "pending_acceptance", request_id: joined.request_id, note: "The firm has had a licence provider: one of its licence providers accepts this account (decide_firm_member) before it has any licence-provider powers there" }
+          : {}),
+        ...(joined.left_standing_at
+          ? { left_standing_at: joined.left_standing_at, recovery_locked: `This account had licence-provider standing at its old firm (${joined.left_standing_at}); moving it ended that, the firm was told (firm.member_standing_lost), and recover_firm_member at that firm is locked for 30 days` }
+          : {}),
+      });
+    },
+  );
+
+  server.registerTool(
+    "recover_firm_member",
+    {
+      title: "Recover a firm's licence provider nobody there can accept",
+      description:
+        "Admin, last resort: a request for licence-provider standing at a firm that none of its licence providers can decide (none has standing from before it, past the cool-off). The first call, with a reason, starts a 7-day wait and tells every current and past licence provider of the firm (firm.recovery_pending), any of whom can block it (block_firm_recovery). Calling again after the wait completes it. Audited. One admin is enough, because production has one.",
+      inputSchema: { request_id: z.string().uuid(), reason: z.string().min(10).max(2000) },
+      annotations: { destructiveHint: true },
+    },
+    async ({ request_id, reason }) => {
+      const out = await recoverMembership(store, request_id, user, reason);
+      return "error" in out ? fail(out.error as string) : json(out);
     },
   );
 
@@ -549,6 +581,10 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       const admins = await adminInvites();
       if (admins.length === 1 && admins[0] === lower) return fail("That is the last admin; make someone else an admin first");
       if (!(await store.deleteInvite(lower))) return fail(`${lower} is not on the whitelist`);
+      // Revoking a licence provider ends its standing at its firm, as an admin action: recovery there locks for 30 days.
+      const revoked = await store.userByEmail(lower);
+      const revokedRow = revoked ? (await store.db.query("SELECT entity_id, lp_since FROM financial_products.users WHERE id = $1", [revoked.id])).rows[0] : null;
+      if (revoked && revokedRow?.entity_id && revokedRow.lp_since) await store.loseStanding(revoked.id, revokedRow.entity_id as string, "revoked_by_admin");
       // Public sign-up mustn't let them straight back in as a consumer.
       await store.blockSignup(lower, user.id);
       await ctx.clerkAdmin?.disallow(lower);
