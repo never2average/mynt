@@ -130,7 +130,12 @@ const openDb = async () => {
 async function world({ db, sandbox = false, notice = 0, clear = true, minBps = 10_000, floor = 0, makePool = true, healthStub = null } = {}) {
   db ??= await openDb();
   const store = await Store.open(db, CATALOG);
+  // The health record here runs on whole days, and snapshot() below assumes a few 11-minute steps stay inside one
+  // day. Late in the UTC day they'd cross midnight into a period nobody snapshotted (recorded as missed, which pauses
+  // the pool), so a late start is moved on to just after the next midnight (the clock here runs ahead of the database's
+  // anyway, a day at a time): the failures this caused depended only on when CI ran.
   let clock = Date.now();
+  if (clock % DAY > 18 * 3_600_000) clock = (Math.floor(clock / DAY) + 1) * DAY + 30 * 60_000;
   let lastBoundary = -Infinity;
   const chain = new FakeChain();
   const ledger = { id: "fake-live", name: "Fake live ledger", kind: "live", figures: {}, failing: false, async read(c) {
