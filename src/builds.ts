@@ -141,6 +141,7 @@ export interface Build {
   agent_report: unknown; // the coding agent's own report: advisory only
   prompt_id: string | null; // the coding agent's runner process in the build sandbox
   preview_url: string | null;
+  live_preview_url: string | null; // the app's dev server while the agents code (a private link)
   pr_url: string | null;
   branch: string | null;
   commit_sha: string | null;
@@ -218,6 +219,7 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_check jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_env jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS live_preview_url text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'once';
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_requested_at timestamptz;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_reason text;
@@ -322,6 +324,10 @@ const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
 const FILES = { spec: `${BUILD_JOB}/build.json`, status: `${BUILD_JOB}/status.json`, result: `${BUILD_JOB}/result.json`, sdk: `${BUILD_JOB}/sdk` };
 const WORKSPACE = "/home/user/workspace/app";
+// Mynt's live preview of the app while the agents code: its script, in the coding workspace, and Vite's port.
+const DEV_PREVIEW = `${workspaceCwd("coding-build")}/scripts/dev_preview.sh`;
+export const LIVE_PREVIEW_PORT = 5173;
+export const LIVE_PREVIEW_BACKOFF = 6;
 // What a failed audit left behind, kept on the build before its sandbox is deleted.
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
@@ -679,6 +685,7 @@ export class BuildService {
   async stop(build: Build, reason: string, status: BuildStatus = "stopped") {
     if (TERMINAL.includes(build.status)) return build;
     await this.retireKey(build);
+    this.previewTicks.delete(build.id); // stopped, or over budget (stop is how a build goes over budget)
     // What the agent did last, read before its sandbox goes, briefly: a stuck sandbox mustn't hold up a stop.
     if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, { maxChunks: 4, timeoutSeconds: 10, toEnd: true });
     if (build.sandbox_id && this.sandboxes) {
@@ -950,6 +957,7 @@ export class BuildService {
         // build keeps the status it ended with.
         if (TERMINAL.includes(current.status)) continue;
         await this.retireKey(current);
+        this.previewTicks.delete(build.id);
         // What the agent did up to the failure, read before its sandbox goes.
         if (AGENT_PHASES.includes(current.status)) await this.collectActivitySafely(current, { maxChunks: ACTIVITY_CHUNKS_AT_END, timeoutSeconds: 30, toEnd: true });
         // Don't leave a failed build's machines running until their TTL.
@@ -1045,6 +1053,8 @@ export class BuildService {
       await this.update(b.id, { status: phase, phase_message: status?.message ?? null });
       await this.event(b.id, phase, status?.message ?? phase);
     }
+    const now = phase && AGENT_PHASES.includes(phase) ? phase : b.status;
+    if (agent.running && now === "coding") await this.ensureLivePreview(b);
     if (b.mode === "session") await this.followSession(b, agent.state, agent.running, cost);
     // Once the agent has exited, its log is read to the end before the build moves on.
     await this.collectActivitySafely(b, agent.running ? {} : { maxChunks: ACTIVITY_CHUNKS_AT_END, toEnd: true });
@@ -1053,14 +1063,51 @@ export class BuildService {
     await this.startVerification(b);
   }
 
+  // The live preview while the agents code: once they've installed the app, Mynt starts its dev servers itself
+  // (scripts/dev_preview.sh: the api on 3000, Vite on 5173 with hot reload) and serves 5173 at a private link,
+  // once; the link works as long as the sandbox does. A preview that won't start never fails or holds up a build:
+  // it's tried again on the next tick.
+  // The script is cheap while it waits for the agents' install, so it runs every tick until the preview is up; once
+  // it is up (to restart a dev server that died), while its dev server is up but not answering yet ("starting"), or
+  // when the app has no web/ yet, every LIVE_PREVIEW_BACKOFF ticks. Entries go when the build leaves coding.
+  private previewTicks = new Map<string, { n: number; slow: boolean }>();
+  async ensureLivePreview(b: Build) {
+    if (!this.sandboxes || !b.sandbox_id) return null;
+    const seen = this.previewTicks.get(b.id) ?? { n: 0, slow: false };
+    seen.n++;
+    this.previewTicks.set(b.id, seen);
+    if ((b.live_preview_url || seen.slow) && seen.n % LIVE_PREVIEW_BACKOFF !== 0) return b.live_preview_url;
+    try {
+      // The script bounds its own waits well under this.
+      const r = await this.sandboxes.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 45 });
+      const said = r.stdout.trim().split("\n").at(-1);
+      seen.slow = said === "no-web" || said === "starting";
+      // started and running both mean the dev server answered on 5173.
+      if (r.exitCode !== 0 || (said !== "started" && said !== "running")) return b.live_preview_url;
+      if (b.live_preview_url) return b.live_preview_url; // restarted behind the link it already has
+      const { url } = await this.sandboxes.host(b.sandbox_id, LIVE_PREVIEW_PORT);
+      await this.update(b.id, { live_preview_url: url });
+      // The link is a credential: it goes on the build, never on the timeline.
+      await this.event(b.id, b.status, "Live preview started: the app as the agents write it, with hot reload");
+      return url;
+    } catch (e) {
+      console.error(`Build ${b.id} live preview: ${(e as Error).message}`);
+      return b.live_preview_url;
+    }
+  }
+
   // The coding agent doesn't grade its own work: Mynt packages the source and verifies it in a fresh
   // sandbox the agent never touched. The agent's report is kept, but only as advice.
   private async startVerification(b: Build) {
     const sandboxes = this.sandboxes!;
     const report = parseJson<AgentResult>(await sandboxes.readFile(b.sandbox_id!, FILES.result));
+    // Coding is over: the live preview's dev servers stop first, so nothing rewrites files while they're packaged.
+    this.previewTicks.delete(b.id);
+    await sandboxes.exec(b.sandbox_id!, `bash ${DEV_PREVIEW} --stop >/dev/null 2>&1; true`, { timeoutSeconds: 60 }).catch(() => undefined);
+    // Dependencies at any depth stay out of the source (web/node_modules and its caches among them).
     const pack = await sandboxes.exec(
       b.sandbox_id!,
-      `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=./node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
+      `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
       { timeoutSeconds: 300 },
     );
     const sha = pack.stdout.trim().split(/\s+/)[0];
@@ -1554,6 +1601,8 @@ export function developerBuild(b: Build) {
     status: b.status,
     phase_message: b.phase_message,
     preview_url: b.preview_url,
+    // Only while the agents code: Mynt stops the dev servers when coding ends (after shipping, preview_url).
+    live_preview_url: b.status === "coding" ? (b.live_preview_url ?? null) : null,
     pr_url: b.pr_url,
     commit_sha: b.commit_sha,
     readiness: b.readiness,
@@ -1846,7 +1895,8 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
     },
     async ({ status }) => {
       const all = await builds.listFor(null, status);
-      return json({ builds: all.map(({ source_url, agent_report, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
+      // Preview links are credentials for the build's developer only.
+      return json({ builds: all.map(({ source_url, agent_report, live_preview_url, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
     },
   );
 

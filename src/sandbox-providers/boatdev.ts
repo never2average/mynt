@@ -61,9 +61,10 @@ export class BoatDevSandboxes implements SandboxHost {
     }
   }
 
-  // Token-gated by default: the URL carries its own access token.
+  // Token-gated by default: the URL carries its own access token. Forwarded to 127.0.0.1 in the sandbox: previews and
+  // the editor listen only there.
   async host(id: string, port: number) {
-    const r = await this.call<{ url: string }>("POST", `/sandboxes/${encodeURIComponent(id)}/host`, { port, public: false });
+    const r = await this.call<{ url: string }>("POST", `/sandboxes/${encodeURIComponent(id)}/host`, { port, public: false, localhost: true });
     return { url: r.url };
   }
 

@@ -42,7 +42,9 @@ function fakeSandboxHost() {
     async readFile(id, path) {
       return sandboxes.get(id).files.get(path) ?? null;
     },
+    hosted: [],
     async host(id, port) {
+      host.hosted.push({ id, port });
       return { url: `https://${id}-${port}.preview.example?_token=t` };
     },
     async costDollars(id) {
@@ -70,6 +72,8 @@ function fakeSandboxHost() {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("verify.sh")) return { processId: 7, exitCode: null, stdout: "", stderr: "" };
+      // Mynt's live-preview script says what it did: no-web, waiting, running or started (the test sets it).
+      if (command.includes("scripts/dev_preview.sh")) return { exitCode: 0, stdout: `${s.devPreview ?? "no-web"}\n`, stderr: "" };
       if (command.includes("runner.mjs")) {
         s.agentRunning = true;
         return { processId: 99, exitCode: null, stdout: "", stderr: "" };
@@ -406,6 +410,137 @@ test("developers track, steer and stop their own builds; admins see all", async 
   assert.equal(all.builds.length, 1);
   assert.equal(all.builds[0].source_url, undefined);
   assert.match((await call(dev, "steer_build", { build_id: started.id, message: "go on" })).data.error, /only a running agent/);
+});
+
+test("while the agents code, Mynt starts the app's dev server itself and serves port 5173 at a private link", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  assert.equal(started.live_preview_url, null);
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick(); // agent started
+  const s = sandboxes.sandboxes.get(sbx);
+  const get = async () => (await call(dev, "get_build", { build_id: started.id })).data;
+
+  // Mynt's script, from the coding workspace it wrote, on the app's directory.
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /--host 127\.0\.0\.1 --port '"\$PORT_WEB"' --strictPort/);
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /never installs anything itself/);
+  const scriptRuns = () => s.commands.filter((c) => c.command === `bash ${BUILD}/scripts/dev_preview.sh /home/user/workspace/app`).length;
+  // No web/ yet: tried again only every 6th tick.
+  s.devPreview = "no-web";
+  await builds.tick();
+  assert.equal(scriptRuns(), 1);
+  s.devPreview = "waiting";
+  for (let i = 0; i < 4; i++) await builds.tick();
+  assert.equal(scriptRuns(), 1, "backs off after no-web");
+  await builds.tick();
+  assert.equal(scriptRuns(), 2);
+  assert.equal((await get()).live_preview_url, null, "no link while the script says waiting");
+  // Waiting for the agents' install: every tick.
+  await builds.tick();
+  assert.equal(scriptRuns(), 3);
+  // The dev server is up but doesn't answer yet: every 6th tick again.
+  s.devPreview = "starting";
+  await builds.tick();
+  assert.equal(scriptRuns(), 4);
+  for (let i = 0; i < 3; i++) await builds.tick();
+  assert.equal(scriptRuns(), 4, "backs off while starting");
+  assert.deepEqual(sandboxes.hosted, []);
+  s.devPreview = "started"; // Vite answers by the next try
+  await builds.tick(); // the 12th: tried again
+  assert.equal(scriptRuns(), 5);
+  assert.equal(s.commands.filter((c) => c.command.includes("dev_preview.sh /home")).at(-1).timeoutSeconds, 45);
+
+  s.devPreview = "started";
+  await builds.tick();
+  let b = await get();
+  assert.equal(b.live_preview_url, `https://${sbx}-5173.preview.example?_token=t`);
+  assert.deepEqual(sandboxes.hosted, [{ id: sbx, port: 5173 }]);
+  const event = b.timeline.find((e) => /Live preview started/.test(e.message));
+  assert.ok(event, "on the timeline");
+  assert.ok(!JSON.stringify(b.timeline).includes("5173.preview"), "the link itself is never on the timeline");
+
+  // Once up, the script runs every 6th tick (restarting a dev server that died), behind the same link.
+  const runs = scriptRuns();
+  for (let i = 0; i < 6; i++) await builds.tick();
+  assert.equal(scriptRuns(), runs + 1);
+  assert.equal(sandboxes.hosted.length, 1, "never another link");
+  s.devPreview = "waiting"; // the dev server is down for now: the link stays, and the next check restarts it
+  for (let i = 0; i < 6; i++) await builds.tick();
+  assert.equal((await get()).live_preview_url, `https://${sbx}-5173.preview.example?_token=t`);
+
+  // A script that fails, or a host that errors, never fails the build.
+  const other = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
+  await builds.tick();
+  const sbx2 = (await builds.get(other.id)).sandbox_id;
+  sandboxes.ready(sbx2);
+  await builds.tick();
+  const host = sandboxes.host;
+  sandboxes.host = async () => {
+    throw new Error("host API down");
+  };
+  sandboxes.sandboxes.get(sbx2).devPreview = "started";
+  await builds.tick();
+  sandboxes.host = host;
+  assert.equal((await builds.get(other.id)).status, "coding");
+  assert.equal((await builds.get(other.id)).live_preview_url, null);
+  // Only while the agents code: once they've moved on to auditing, it isn't started.
+  sandboxes.write(sbx2, `${BUILD}/job/status.json`, { phase: "auditing", message: "Reviewing" });
+  await builds.tick();
+  assert.equal((await builds.get(other.id)).status, "auditing");
+  assert.equal((await builds.get(other.id)).live_preview_url, null);
+  assert.equal(sandboxes.hosted.length, 1);
+
+  // Gone from a stopped build.
+  await call(dev, "stop_build", { build_id: started.id });
+  b = await get();
+  assert.equal(b.live_preview_url, null);
+});
+
+test("Mynt's live preview: the template's Vite config is behind the forwarder only when Mynt starts it", async () => {
+  const files = workspaceFiles("coding-build");
+  const vite = files["templates/mynt-app/web/vite.config.ts"];
+  assert.match(vite, /const live = process\.env\.MYNT_LIVE_PREVIEW === "1"/);
+  assert.match(vite, /allowedHosts: true/);
+  assert.match(vite, /hmr: \{ protocol: "wss", clientPort: 443 \}/);
+  assert.match(vite, /\.\.\.\(live \? \{/, "a developer's own dev server keeps Vite's localhost-only defaults");
+  assert.match(vite, /host: "127\.0\.0\.1"/);
+  assert.match(vite, /cacheDir: process\.env\.MYNT_VITE_CACHE/, "Vite's cache stays out of the app's source");
+  assert.match(files["scripts/dev_preview.sh"], /MYNT_LIVE_PREVIEW=1/);
+  assert.match(files["scripts/dev_preview.sh"], /export MYNT_VITE_CACHE="\$STATE\/vite-cache"/);
+  assert.equal(JSON.parse(files["templates/mynt-app/api/package.json"]).scripts.dev, "tsx watch src/server.ts", "the api's dev server comes from the app's own dependencies");
+  assert.ok(JSON.parse(files["templates/mynt-app/api/package.json"]).devDependencies.tsx);
+  assert.match(files["CLAUDE.md"], /live preview/i);
+  assert.match(files["CLAUDE.md"], /5173/);
+});
+
+test("when coding ends Mynt stops the live preview, then packages the source without any node_modules, at any depth", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const ctx = await setup();
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const { sbx, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" } });
+  assert.equal(build.status, "succeeded");
+  assert.equal(build.live_preview_url, null, "no live link once coding is over");
+  const commands = ctx.sandboxes.sandboxes.get(sbx).commands.map((c) => c.command);
+  const stop = commands.findIndex((c) => c.includes("scripts/dev_preview.sh --stop"));
+  const pack = commands.findIndex((c) => c.includes("tar --exclude"));
+  assert.ok(stop >= 0 && stop < pack, "the dev servers stop before the source is packaged");
+
+  // Mynt's own packaging command, run for real on an app with dependencies and Vite's cache nested in web/.
+  const root = mkdtempSync(join(tmpdir(), "mynt-pack-"));
+  const app = join(root, "app");
+  for (const d of ["node_modules/x", "web/node_modules/.vite/deps", "web/src", "packages/mynt-sdk/node_modules/y"]) mkdirSync(join(app, d), { recursive: true });
+  for (const f of ["node_modules/x/i.js", "web/node_modules/.vite/deps/react.js", "web/src/App.tsx", "packages/mynt-sdk/node_modules/y/i.js", "package.json"]) writeFileSync(join(app, f), "x");
+  const command = commands[pack].replaceAll("/home/user/workspace/app", app).replaceAll("/home/user/mynt-out", join(root, "out"));
+  execFileSync("bash", ["-c", command]);
+  const listed = execFileSync("tar", ["-tzf", join(root, "out", "app.tgz")], { encoding: "utf8" }).split("\n").filter(Boolean);
+  assert.ok(listed.includes("./web/src/App.tsx") && listed.includes("./package.json"), listed.join(" "));
+  assert.deepEqual(listed.filter((p) => p.includes("node_modules")), []);
 });
 
 const say = (text) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
@@ -1354,6 +1489,70 @@ test("boat.dev's file API: a file that isn't there yet reads as null, other erro
     await assert.rejects(sandboxes.readFile("sbx", "/root/x"), /Path must resolve/);
   } finally {
     globalThis.fetch = realFetch;
+  }
+});
+
+test("boat.dev's host forwards to the sandbox's 127.0.0.1, where previews and the editor listen", async () => {
+  const { BoatDevSandboxes } = await import("../dist/sandbox-providers/boatdev.js");
+  const sandboxes = new BoatDevSandboxes("boat_test", "https://boat.example/api/v1");
+  const realFetch = globalThis.fetch;
+  let sent;
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), body: JSON.parse(init.body) };
+    return new Response(JSON.stringify({ url: "https://sbx-5173.boat.example?_token=t" }), { status: 200 });
+  };
+  try {
+    assert.equal((await sandboxes.host("sbx", 5173)).url, "https://sbx-5173.boat.example?_token=t");
+    assert.deepEqual(sent.body, { port: 5173, public: false, localhost: true });
+    assert.match(sent.url, /\/sandboxes\/sbx\/host$/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("dev_preview.sh: any package manager's install record counts, a shell that merely mentions an install doesn't hold it up, a running install does", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync, spawn } = await import("node:child_process");
+  const script = new URL("../workspaces/coding-build/scripts/dev_preview.sh", import.meta.url).pathname;
+  const root = mkdtempSync(join(tmpdir(), "mynt-preview-"));
+  const app = join(root, "app");
+  mkdirSync(join(app, "web"), { recursive: true });
+  writeFileSync(join(app, "web", "package.json"), JSON.stringify({ name: "web", scripts: {} })); // no dev script: Vite never answers
+  const run = () => execFileSync("bash", [script, app], { env: { ...process.env, HOME: root }, encoding: "utf8" }).trim().split("\n").at(-1);
+  try {
+    assert.equal(run(), "waiting", "nothing installed yet");
+    mkdirSync(join(app, "node_modules"));
+    writeFileSync(join(app, "node_modules", ".modules.yaml"), "x"); // pnpm's record
+    // A shell whose command line merely mentions an install (like a CI step's) doesn't count as one running. Two
+    // commands, so bash stays the parent and keeps that command line (with one, it would exec sleep in its place).
+    const decoy = spawn("bash", ["-c", "sleep 30; true # then npm ci"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      assert.ok(execFileSync("pgrep", ["-f", "then npm ci"], { encoding: "utf8" }).trim(), "the decoy's command line is there to match");
+      assert.equal(run(), "starting", "installed: it starts the dev server, which here never answers");
+    } finally {
+      decoy.kill();
+    }
+    execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
+    // An install that is running (its command line starts with it) holds the preview back.
+    const install = spawn("bash", ["-c", 'exec -a "npm install" sleep 30'], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      assert.equal(run(), "waiting");
+    } finally {
+      install.kill();
+    }
+    // A dev server that accepts connections but never answers: the start path is still bounded by the clock.
+    writeFileSync(join(app, "web", "silent.js"), 'require("net").createServer(() => {}).listen(5173, "127.0.0.1");');
+    writeFileSync(join(app, "web", "package.json"), JSON.stringify({ name: "web", scripts: { dev: "node silent.js" } }));
+    const started = Date.now();
+    assert.equal(run(), "starting");
+    const took = (Date.now() - started) / 1000;
+    assert.ok(took < 32, `the start path took ${took.toFixed(1)} s`);
+  } finally {
+    execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
   }
 });
 
