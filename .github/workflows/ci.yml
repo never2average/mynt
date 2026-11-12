@@ -335,6 +335,31 @@ jobs:
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done
+  # The example apps under examples/ (mynt-chat's chat and developer console): each one's tests, type check and
+  # production build, from its own lockfile.
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [mynt-chat]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: examples/${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npx vitest run
+      - run: npx tsc --noEmit
+      - run: npx next build
   # The starter app the coding agents scaffold (api, web, Expo mobile) compiles against a freshly generated SDK,
   # and its Compose images build.
   starter-app:
