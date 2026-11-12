@@ -424,7 +424,7 @@ test("while the agents code, Mynt starts the app's dev server itself and serves 
 
   // Mynt's script, from the coding workspace it wrote, on the app's directory.
   assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /--host 127\.0\.0\.1 --port '"\$PORT_WEB"' --strictPort/);
-  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /never runs npm install itself/);
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /never installs anything itself/);
   const scriptRuns = () => s.commands.filter((c) => c.command === `bash ${BUILD}/scripts/dev_preview.sh /home/user/workspace/app`).length;
   // No web/ yet: tried again only every 6th tick.
   s.devPreview = "no-web";
@@ -436,10 +436,20 @@ test("while the agents code, Mynt starts the app's dev server itself and serves 
   await builds.tick();
   assert.equal(scriptRuns(), 2);
   assert.equal((await get()).live_preview_url, null, "no link while the script says waiting");
-  // Waiting for the agents' install (or for Vite to answer): every tick.
+  // Waiting for the agents' install: every tick.
   await builds.tick();
   assert.equal(scriptRuns(), 3);
+  // The dev server is up but doesn't answer yet: every 6th tick again.
+  s.devPreview = "starting";
+  await builds.tick();
+  assert.equal(scriptRuns(), 4);
+  for (let i = 0; i < 3; i++) await builds.tick();
+  assert.equal(scriptRuns(), 4, "backs off while starting");
   assert.deepEqual(boat.hosted, []);
+  s.devPreview = "started"; // Vite answers by the next try
+  await builds.tick(); // the 12th: tried again
+  assert.equal(scriptRuns(), 5);
+  assert.equal(s.commands.filter((c) => c.command.includes("dev_preview.sh /home")).at(-1).timeoutSeconds, 45);
 
   s.devPreview = "started";
   await builds.tick();
@@ -1411,6 +1421,60 @@ test("boat's file API: a file that isn't there yet reads as null, other errors s
     await assert.rejects(boat.readFile("sbx", "/root/x"), /Path must resolve/);
   } finally {
     globalThis.fetch = realFetch;
+  }
+});
+
+test("boat's host forwards to the sandbox's 127.0.0.1, where previews and the editor listen", async () => {
+  const { HttpBoatClient } = await import("../dist/boat.js");
+  const boat = new HttpBoatClient("boat_test", "https://boat.example/api/v1");
+  const realFetch = globalThis.fetch;
+  let sent;
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), body: JSON.parse(init.body) };
+    return new Response(JSON.stringify({ url: "https://sbx-5173.boat.example?_token=t" }), { status: 200 });
+  };
+  try {
+    assert.equal((await boat.host("sbx", 5173)).url, "https://sbx-5173.boat.example?_token=t");
+    assert.deepEqual(sent.body, { port: 5173, public: false, localhost: true });
+    assert.match(sent.url, /\/sandboxes\/sbx\/host$/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("dev_preview.sh: any package manager's install record counts, a shell that merely mentions an install doesn't hold it up, a running install does", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync, spawn } = await import("node:child_process");
+  const script = new URL("../workspaces/coding-build/scripts/dev_preview.sh", import.meta.url).pathname;
+  const root = mkdtempSync(join(tmpdir(), "mynt-preview-"));
+  const app = join(root, "app");
+  mkdirSync(join(app, "web"), { recursive: true });
+  writeFileSync(join(app, "web", "package.json"), JSON.stringify({ name: "web", scripts: {} })); // no dev script: Vite never answers
+  const run = () => execFileSync("bash", [script, app], { env: { ...process.env, HOME: root }, encoding: "utf8" }).trim().split("\n").at(-1);
+  try {
+    assert.equal(run(), "waiting", "nothing installed yet");
+    mkdirSync(join(app, "node_modules"));
+    writeFileSync(join(app, "node_modules", ".modules.yaml"), "x"); // pnpm's record
+    // A shell whose command line merely mentions an install (like a CI step's) doesn't count as one running.
+    const decoy = spawn("bash", ["-c", "sleep 30 # then npm ci"], { stdio: "ignore" });
+    try {
+      assert.equal(run(), "starting", "installed: it starts the dev server, which here never answers");
+    } finally {
+      decoy.kill();
+    }
+    execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
+    // An install that is running (its command line starts with it) holds the preview back.
+    const install = spawn("bash", ["-c", 'exec -a "npm install" sleep 30'], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      assert.equal(run(), "waiting");
+    } finally {
+      install.kill();
+    }
+  } finally {
+    execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
   }
 });
 

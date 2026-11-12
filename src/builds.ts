@@ -646,6 +646,7 @@ export class BuildService {
   async stop(build: Build, reason: string, status: BuildStatus = "stopped") {
     if (TERMINAL.includes(build.status)) return build;
     await this.retireKey(build);
+    this.previewTicks.delete(build.id); // stopped, or over budget (stop is how a build goes over budget)
     // What the agent did last, read before its sandbox goes, briefly: a stuck sandbox mustn't hold up a stop.
     if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, { maxChunks: 4, timeoutSeconds: 10, toEnd: true });
     if (build.sandbox_id && this.boat) {
@@ -917,6 +918,7 @@ export class BuildService {
         // build keeps the status it ended with.
         if (TERMINAL.includes(current.status)) continue;
         await this.retireKey(current);
+        this.previewTicks.delete(build.id);
         // What the agent did up to the failure, read before its sandbox goes.
         if (AGENT_PHASES.includes(current.status)) await this.collectActivitySafely(current, { maxChunks: ACTIVITY_CHUNKS_AT_END, timeoutSeconds: 30, toEnd: true });
         // Don't leave a failed build's machines running until their TTL.
@@ -1026,18 +1028,20 @@ export class BuildService {
   // once; the link works as long as the sandbox does. A preview that won't start never fails or holds up a build:
   // it's tried again on the next tick.
   // The script is cheap while it waits for the agents' install, so it runs every tick until the preview is up; once
-  // it is up (to restart a dev server that died) or when the app has no web/ yet, every LIVE_PREVIEW_BACKOFF ticks.
-  private previewTicks = new Map<string, { n: number; noWeb: boolean }>();
+  // it is up (to restart a dev server that died), while its dev server is up but not answering yet ("starting"), or
+  // when the app has no web/ yet, every LIVE_PREVIEW_BACKOFF ticks. Entries go when the build leaves coding.
+  private previewTicks = new Map<string, { n: number; slow: boolean }>();
   async ensureLivePreview(b: Build) {
     if (!this.boat || !b.sandbox_id) return null;
-    const seen = this.previewTicks.get(b.id) ?? { n: 0, noWeb: false };
+    const seen = this.previewTicks.get(b.id) ?? { n: 0, slow: false };
     seen.n++;
     this.previewTicks.set(b.id, seen);
-    if ((b.live_preview_url || seen.noWeb) && seen.n % LIVE_PREVIEW_BACKOFF !== 0) return b.live_preview_url;
+    if ((b.live_preview_url || seen.slow) && seen.n % LIVE_PREVIEW_BACKOFF !== 0) return b.live_preview_url;
     try {
-      const r = await this.boat.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 90 });
+      // The script bounds its own waits well under this.
+      const r = await this.boat.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 45 });
       const said = r.stdout.trim().split("\n").at(-1);
-      seen.noWeb = said === "no-web";
+      seen.slow = said === "no-web" || said === "starting";
       // started and running both mean the dev server answered on 5173.
       if (r.exitCode !== 0 || (said !== "started" && said !== "running")) return b.live_preview_url;
       if (b.live_preview_url) return b.live_preview_url; // restarted behind the link it already has
