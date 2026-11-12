@@ -43,7 +43,8 @@ Mynt Studio is built on [Adorable](https://github.com/freestyle-sh/Adorable) by 
 | Variable | What it is |
 |---|---|
 | `MYNT_MCP_URL` | Mynt's MCP endpoint, like `https://mynt.example.com/mcp`. |
-| `APP_URL` | The studio's public URL. Sign-in returns to `$APP_URL/api/auth/callback`. |
+| `APP_URL` | The studio's public URL. Sign-in returns to `$APP_URL/api/auth/callback`. Served on Mynt's domain, it's that domain. Changing it registers the studio with Mynt's sign-in again (the registration is kept per callback address). |
+| `TRUSTED_EDGE_IPS` | Served on Mynt's domain only: Mynt's server's public outbound addresses, comma-separated. Requests from them are proxied by Mynt, so the caller's address is taken from their `X-Mynt-Client-IP` (from anyone else it's ignored), and direct visits to the studio's own deployment address are sent to `APP_URL`. |
 | `PREVIEW_FRAME_SRC` | The origins previews are served from, space-separated `https` origins with optional wildcards, like `https://*.preview.example`. Unset, no preview can be shown. |
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | The Redis database for sessions. Vercel sets these when you connect a Redis database to the project. Upstash's own names, `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, work too. |
 | `SESSION_ENCRYPTION_KEY` | 32 random bytes, base64-encoded, that encrypt the stored sessions. Required with Redis. |
@@ -78,3 +79,10 @@ No `vercel.json` is needed: Vercel builds it as a standard Next.js app.
 2. In the project's **Storage** tab, connect a Redis database. That sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
 3. In **Settings → Environment Variables**, add `MYNT_MCP_URL`, `APP_URL` (the studio's own URL), `PREVIEW_FRAME_SRC` and `SESSION_ENCRYPTION_KEY`.
 4. Deploy.
+
+**On Mynt's domain.** To serve the studio at Mynt's own address instead of its own:
+1. On Mynt's server, run its host installer (`deploy/host/install-host` in this repository) with `<domain> --studio-upstream <the studio's deployment host>`. Mynt keeps its paths (`/mcp`, `/v1`, `/.well-known/*`, `/llms.txt` and the rest), and everything else is proxied to the studio. See *Mynt Studio on Mynt's domain* in `docs/reference.md`.
+2. In the studio's settings, set `APP_URL` to `https://<Mynt's domain>`, and `TRUSTED_EDGE_IPS` to Mynt's server's public outbound addresses.
+3. Redeploy. Everyone signs in once more: the new callback address gets its own client registration.
+
+If `TRUSTED_EDGE_IPS` misses one of the server's outbound addresses, nothing breaks. The sign-in rate limit then counts all callers coming through that address together.

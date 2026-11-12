@@ -1,3 +1,4 @@
+import { appUrl } from "./config";
 import type { SessionStore } from "./session-store";
 
 // Starting sign-in creates a session before anyone is signed in, so anyone could fill the
@@ -10,16 +11,40 @@ export const SHARED_LOGIN_LIMIT = 200;
 
 type Env = Record<string, string | undefined>;
 
-// The caller's address, from a header only a trusted proxy can set: on Vercel its own
-// x-vercel-forwarded-for (callers can't forge it; x-forwarded-for they can), elsewhere only the
-// header named in TRUSTED_PROXY_HEADER. Without either, null: the caller isn't known.
+// The address that connected to the studio, from a header only a trusted proxy can set: on
+// Vercel its own x-vercel-forwarded-for (callers can't forge it; x-forwarded-for they can),
+// elsewhere only the header named in TRUSTED_PROXY_HEADER. Without either, null.
 //
 // TRUSTED_PROXY_HEADER's last value is used: a proxy that appends (as with x-forwarded-for)
 // adds the address it saw at the end, after anything the caller sent.
-export function clientAddress(headers: Headers, env: Env = process.env): string | null {
+export function connectingAddress(headers: Headers, env: Env = process.env): string | null {
   const values = (name: string) => (headers.get(name) ?? "").split(",").map((v) => v.trim()).filter(Boolean);
   const value = env.VERCEL ? values("x-vercel-forwarded-for")[0] : env.TRUSTED_PROXY_HEADER?.trim() ? values(env.TRUSTED_PROXY_HEADER.trim().toLowerCase()).at(-1) : undefined;
-  return value ? addressBucket(value) : null;
+  return value ? withoutPort(value).toLowerCase() : null;
+}
+
+// The edges allowed to pass on a caller's address: Mynt's own server, when it serves the studio
+// on its domain (its host installer's --studio-upstream). TRUSTED_EDGE_IPS lists their addresses.
+export function trustedEdges(env: Env = process.env): Set<string> {
+  return new Set((env.TRUSTED_EDGE_IPS ?? "").split(/[\s,]+/).filter(Boolean).map((a) => withoutPort(a).toLowerCase()));
+}
+
+// Whether this request came through a trusted edge (Mynt's server proxying its domain).
+export function viaTrustedEdge(headers: Headers, env: Env = process.env): boolean {
+  const from = connectingAddress(headers, env);
+  return from !== null && trustedEdges(env).has(from);
+}
+
+// The caller's address, for the rate limit: what a trusted edge says in X-Mynt-Client-IP (it
+// removes any the caller sent and sets the address it saw), else the connecting address. From
+// anywhere else X-Mynt-Client-IP is ignored, so callers can't choose their bucket.
+export function clientAddress(headers: Headers, env: Env = process.env): string | null {
+  if (viaTrustedEdge(headers, env)) {
+    const passed = (headers.get("x-mynt-client-ip") ?? "").trim();
+    if (passed && !passed.includes(",")) return addressBucket(passed);
+  }
+  const from = connectingAddress(headers, env);
+  return from ? addressBucket(from) : null;
 }
 
 // An address without its port: an IPv4 address with ":443" after it, or a bracketed IPv6 one.
@@ -45,6 +70,14 @@ export function addressBucket(address: string): string {
     .slice(0, 4)
     .map((g) => (parseInt(g || "0", 16) || 0).toString(16))
     .join(":")}::/64`;
+}
+
+// Whether a request reached the studio's own deployment address directly while the studio is
+// served on Mynt's domain (TRUSTED_EDGE_IPS set, on Vercel), so it should go to APP_URL instead.
+export function shouldGoToAppUrl(headers: Headers, requestHost: string, env: Env = process.env, appHost = appUrl().host): boolean {
+  if (!env.VERCEL || trustedEdges(env).size === 0) return false;
+  if (headers.has("x-mynt-client-ip")) return false; // came through the edge (or says so)
+  return requestHost.toLowerCase() !== appHost.toLowerCase();
 }
 
 export async function loginAllowed(store: SessionStore, address: string | null): Promise<boolean> {

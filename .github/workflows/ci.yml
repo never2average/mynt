@@ -24,6 +24,21 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+  # Mynt's Caddy site as the host installer renders it, with and without Mynt Studio on the same domain: Caddy
+  # itself adapts it, and every path Mynt serves must still reach Mynt (the studio gets the rest).
+  caddy-site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CADDY_DOCKER_IMAGE: caddy:2.11.7
+      MYNT_REQUIRE_CADDY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: docker pull --quiet "$CADDY_DOCKER_IMAGE"
+      - run: node --test test/site-caddy.test.js
   # The partner walkthrough (docs/demo.md) as a presenter runs it, so its narrated output is in the log. npm test
   # runs it too (test/partner-walkthrough.test.js), with its checks and that it leaves nothing behind.
   partner-demo:

@@ -1,0 +1,28 @@
+	# With Mynt Studio on this domain (install-host.sh --studio-upstream): Mynt's own paths that the
+	# blocks above don't name go to Mynt, and everything else is the studio.
+	@mynt path /v1 /llms.txt /llms-full.txt /.well-known/* /ramp-sandbox/*
+	handle @mynt {
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy 127.0.0.1:@PORT@
+	}
+	# Mynt Studio, served from its own host. The studio sees the caller's address only in
+	# X-Mynt-Client-IP, set here after removing any the caller sent, and trusts it only from this
+	# server's address (its TRUSTED_EDGE_IPS).
+	handle {
+		request_body {
+			max_size 1MB
+		}
+		request_header -X-Mynt-Client-IP
+		reverse_proxy https://@STUDIO_UPSTREAM@ {
+			header_up Host @STUDIO_UPSTREAM@
+			header_up X-Mynt-Client-IP {remote_host}
+			# The chat streams its replies.
+			flush_interval -1
+			transport http {
+				tls_server_name @STUDIO_UPSTREAM@
+			}
+		}
+	}
+}

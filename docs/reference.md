@@ -1342,6 +1342,25 @@ docker compose -f /opt/mynt/src/deploy/docker-compose.yml exec mcp \
   node dist/index.js users add --name "Ines" --role innovator
 ```
 
+### Mynt Studio on Mynt's domain
+
+On a host installed with [`deploy/host/install-host.sh`](../deploy/host/install-host.sh), Mynt Studio can be served on the same domain as Mynt, with no studio subdomain:
+
+```bash
+bash install-host.sh <domain> [git-ref] --studio-upstream <studio host>
+```
+
+`<studio host>` is where the studio actually runs, for example its Vercel deployment's address (a host name only: no scheme, port or path).
+- **What stays with Mynt:** every path Mynt serves goes to it exactly as before: `/mcp`, `/healthz`, `/v1` and `/v1/*`, `/agent/*`, `/bd/*`, `/.well-known/*`, `/llms.txt`, `/llms-full.txt` and `/ramp-sandbox/*`.
+- **What goes to the studio:** everything else, `/` included, is proxied to the studio host. Streaming isn't buffered.
+- **Mynt's `/` pointer:** the one-line text Mynt used to answer at `/` is now the studio's home page, but `/llms.txt` still tells MCP clients and AI assistants where the endpoint is.
+- **Persistence:** the setting is kept in `/etc/mynt/edge.env`, which is root-only and holds no secrets, so later deploys without the flag keep it. `--no-studio` turns it off. Without it, Caddy's site for Mynt is exactly what it was. `deploy/host/render-site.sh` renders the site, and CI checks its routes with Caddy itself.
+
+**The caller's address.** This server passes the caller's address to the studio in `X-Mynt-Client-IP`, after removing any value the caller sent. The studio trusts that header only when the request comes from an address in its `TRUSTED_EDGE_IPS` setting. So:
+- Put this server's public outbound address (or addresses, IPv4 and IPv6) in `TRUSTED_EDGE_IPS`.
+- Set the studio's `APP_URL` to `https://<domain>`. Sign-in then returns to Mynt's domain.
+- Once `TRUSTED_EDGE_IPS` is set, visits to the studio's own deployment address are sent to `APP_URL`.
+
 ### Backups
 
 On a host installed with [`deploy/host/install-host.sh`](../deploy/host/install-host.sh), Supabase is backed up every night and a backup is test-restored every week. The installer sets this up on every deploy; there's nothing to switch on.
