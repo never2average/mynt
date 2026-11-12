@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { appUrl, myntMcpUrl, oauthScope } from "@/lib/config";
 import { currentOrNewSession, oauthProviderFor, setSessionCookie } from "@/lib/session";
+import { sessionStore } from "@/lib/session-store";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 // (kept in the server-side session) and gives us the URL to send the browser to.
 //
 // A GET, so another site can link here; it never signs anyone out. Someone already signed in
-// just goes back to the chat (to switch accounts, sign out first).
+// just goes back to the app (to switch accounts, sign out first).
 export async function GET() {
   const { session } = await currentOrNewSession();
   if (session.tokens) return NextResponse.redirect(new URL("/", appUrl()));
@@ -27,5 +28,6 @@ export async function GET() {
     res = NextResponse.redirect(new URL("/?auth_error=start", appUrl()));
   }
   setSessionCookie(res, session);
+  await sessionStore().save(session); // its PKCE verifier and state, for the callback
   return res;
 }

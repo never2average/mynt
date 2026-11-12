@@ -51,6 +51,7 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   { table: "solana_program_deps", where: capturedBy("deps_sha256") },
   { table: "solana_program_depinfo", where: capturedBy("depinfo_sha256") },
   { table: "solana_program_artifacts", where: `t.build_id IN ${BUILDS}` },
+  { table: "build_activity", where: `t.build_id IN ${BUILDS}` },
   { table: "build_events", where: `t.build_id IN ${BUILDS}` },
   // What each build's agents spent on models (the meter's run key).
   { table: "agent_spend", where: `t.run_key IN (SELECT 'build:' || id::text FROM ${T}.build_runs WHERE app_id = $1)` },

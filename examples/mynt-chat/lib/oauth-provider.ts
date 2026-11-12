@@ -5,6 +5,7 @@ import type {
   OAuthClientMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { oauthClientName } from "./config";
 import type { Session, SessionStore } from "./session-store";
 
 // The MCP SDK's OAuth hooks, backed by one server-side session.
@@ -14,6 +15,9 @@ import type { Session, SessionStore } from "./session-store";
 // flow with PKCE. This class only stores what the SDK hands it. Instead of redirecting a
 // browser itself (there is none on the server), it remembers the authorization URL so the
 // login route can send a 302.
+//
+// Tokens, verifier and state are set on the session object; the routes save the session to the
+// store afterwards (a no-op for an in-memory store).
 export class SessionOAuthProvider implements OAuthClientProvider {
   authorizationUrl?: URL;
 
@@ -26,7 +30,7 @@ export class SessionOAuthProvider implements OAuthClientProvider {
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      client_name: "Mynt chat (sample)",
+      client_name: oauthClientName(),
       redirect_uris: [this.redirectUrl],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
@@ -40,12 +44,14 @@ export class SessionOAuthProvider implements OAuthClientProvider {
     return this.session.oauthState;
   }
 
-  clientInformation(): OAuthClientInformationMixed | undefined {
+  // The client registration is app-wide, so it lives in the store, not the session. These return
+  // whatever the app's store returns: a value from an in-memory store, a promise from a remote one.
+  clientInformation() {
     return this.store.clientInformation(this.redirectUrl);
   }
 
-  saveClientInformation(info: OAuthClientInformationMixed): void {
-    this.store.saveClientInformation(this.redirectUrl, info);
+  saveClientInformation(info: OAuthClientInformationMixed) {
+    return this.store.saveClientInformation(this.redirectUrl, info);
   }
 
   tokens(): OAuthTokens | undefined {
@@ -69,9 +75,9 @@ export class SessionOAuthProvider implements OAuthClientProvider {
     return this.session.codeVerifier;
   }
 
-  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
-    if (scope === "all" || scope === "client") this.store.forgetClient(this.redirectUrl);
+  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery") {
     if (scope === "all" || scope === "tokens") this.session.tokens = undefined;
     if (scope === "all" || scope === "verifier") this.session.codeVerifier = undefined;
+    if (scope === "all" || scope === "client") return this.store.forgetClient(this.redirectUrl);
   }
 }

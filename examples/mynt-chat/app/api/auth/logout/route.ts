@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const session = await currentSession();
-  sessionStore().destroy(session?.id);
+  await sessionStore().destroy(session?.id);
   const res = NextResponse.redirect(new URL("/", appUrl()), 303);
   clearSessionCookie(res);
   return res;

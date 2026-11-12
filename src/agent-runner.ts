@@ -23,6 +23,10 @@ export interface AgentState {
   exit_code: number | null;
   error: string | null;
   summary: string | null; // the agent's final message
+  // A held session only: why it is finishing ("developer", "idle", "ttl", "cap"; null until then), and how many
+  // messages arrived once it was finishing (never sent: the session ends after shipping).
+  finish?: string | null;
+  undelivered?: number;
 }
 
 export const AGENT_RUNNER = String.raw`
@@ -81,7 +85,9 @@ const say = (text) => {
 const inbox = join(dir, "inbox");
 mkdirSync(inbox, { recursive: true });
 const seen = new Set();
-const pending = () => readdirSync(inbox).filter((f) => !seen.has(f)).sort();
+const unreadable = new Map();
+// Dot-files are inbox items still being written (Mynt renames them into place when whole).
+const pending = () => readdirSync(inbox).filter((f) => !f.startsWith(".") && !seen.has(f)).sort();
 let ended = false;
 // After its input is closed, Claude Code exits on its own, unless a background task it started (a preview
 // server, say) keeps it alive: then it sits silent, waking only to report on that task. So once it has produced
@@ -109,14 +115,19 @@ const settle = () => {
 // finish prompt (config.json's finishPrompt) is its last message, so the work is shipped, not lost. The machine's
 // idle time still counts against the build's cap.
 const HOLD = process.env.MYNT_AGENT_HOLD === "1";
-const IDLE_MS = Number(process.env.MYNT_AGENT_IDLE_MS || 900000);
+const idleSetting = Number(process.env.MYNT_AGENT_IDLE_MS);
+const IDLE_MS = Number.isFinite(idleSetting) && idleSetting >= 1 ? idleSetting : 900000;
 let finishing = !HOLD;
 let idleTimer = null;
-if (HOLD) state.finish = null; // "developer" or "idle", once the session is finishing
+if (HOLD) {
+  state.finish = null; // why the session is finishing: "developer", "idle", or Mynt's own reason ("ttl", "cap")
+  state.undelivered = 0; // messages that arrived once it was finishing: never sent, since the session then ends
+}
 const finish = (why, message) => {
   finishing = true;
   clearTimeout(idleTimer);
   state.finish = why;
+  save();
   say(message);
 };
 // Close stdin once every message has had its turn and nothing is waiting: Claude Code then exits.
@@ -171,7 +182,11 @@ const timer = setInterval(() => {
     try {
       item = JSON.parse(readFileSync(join(inbox, f), "utf8"));
     } catch {
-      seen.add(f);
+      // Mynt writes inbox files whole (a temporary name, then a rename), so one that won't parse is retried on the
+      // next rounds before it's given up on.
+      const n = (unreadable.get(f) || 0) + 1;
+      unreadable.set(f, n);
+      if (n >= 5) seen.add(f);
       continue;
     }
     const message = item && item.message;
@@ -180,20 +195,28 @@ const timer = setInterval(() => {
       continue;
     }
     const busy = state.turns < state.sent;
-    // Finishing never interrupts: it waits for the current turn (and anything sent before it) to end.
     if (item.finish === true) {
-      if (busy) break;
+      // Finishing never interrupts: it waits for the current turn (and anything sent before it) to end. A second
+      // finish, or one for a run that isn't a session, changes nothing.
+      if (busy && !finishing) break;
       seen.add(f);
-      if (finishing) say(message);
-      else finish("developer", message);
+      if (!finishing) finish(item.reason || "developer", message);
       continue;
     }
     seen.add(f);
+    if (HOLD && finishing) {
+      // The session is shipping its work: nothing may interrupt that turn, and the session ends after it.
+      state.undelivered++;
+      save();
+      continue;
+    }
     clearTimeout(idleTimer);
     idleTimer = null;
     if (busy) send({ type: "control_request", request_id: "steer-" + f, request: { subtype: "interrupt" } });
     say(message);
   }
+  // Items held back or dropped this round may have been all that kept the run open (or the idle clock stopped).
+  maybeEnd();
 }, 2000);
 
 say(cfg.prompt);
@@ -201,6 +224,7 @@ say(cfg.prompt);
 child.on("exit", (code) => {
   clearInterval(timer);
   clearTimeout(quiet);
+  clearTimeout(idleTimer);
   state.done = true;
   state.exit_code = code;
   save();
