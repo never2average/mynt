@@ -114,7 +114,8 @@ function ProjectAssistant({
         api: "/api/chat",
         prepareSendMessagesRequest: async (options) => ({
           body: {
-            messages: options.messages,
+            // Only the new message: Mynt keeps the conversation, and the server reads just this.
+            messages: options.messages.slice(-1),
             projectId,
             conversationId: activeBuildIdRef.current,
           },
