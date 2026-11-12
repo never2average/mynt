@@ -1,0 +1,24 @@
+{
+  "repo": "shadcn-ui/ui",
+  "path": "apps/v4/registry (blocks sidebar-07 and dashboard-01, and the ui components they use)",
+  "version": "shadcn CLI 4.23.0 (npx shadcn@4.23.0 add sidebar-07 dashboard-01)",
+  "url": "https://github.com/shadcn-ui/ui",
+  "license": "MIT",
+  "modified": true,
+  "files": {
+    "components/ui/sidebar.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/sheet.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/separator.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/dropdown-menu.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/card.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/chart.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/table.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/badge.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/nav-user.tsx": "the account menu: Sign out only, lucide icons, initials",
+    "components/section-cards.tsx": "the KPI cards, fed by the dashboard; unmeasured figures say so",
+    "components/chart-area-interactive.tsx": "one series (money moved per day), no range picker, an unmeasured state",
+    "components/site-header.tsx": "a title and actions",
+    "components/app-sidebar.tsx": "laid out as sidebar-07 (collapsible to icons), with the studio's destinations and apps",
+    "components/dashboard-view.tsx": "laid out as dashboard-01 (cards, chart, table), with the studio's apps table and empty state"
+  }
+}

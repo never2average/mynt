@@ -42,3 +42,14 @@ export function mcpClientInfo(): { name: string; version: string } {
 export function oauthScope(): string {
   return process.env.MYNT_OAUTH_SCOPE?.trim() || "openid profile email";
 }
+
+// Every page needs a signed-in user, so a failed sign-in and a sign-out land on pages that don't
+// (app/signin-error, app/signed-out): no loop when sign-in fails, and no silent sign-in straight
+// after signing out.
+export function authErrorPath(): string {
+  return "/signin-error";
+}
+
+export function signedOutPath(): string {
+  return "/signed-out";
+}

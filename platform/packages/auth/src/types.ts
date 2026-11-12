@@ -11,6 +11,7 @@ export interface AuthSession {
   tokens?: OAuthTokens;
   codeVerifier?: string;
   oauthState?: string; // CSRF check between /api/auth/login and /api/auth/callback
+  returnTo?: string; // the page to go back to after sign-in (a checked relative path)
 }
 
 // The store's methods this package calls. Each returns a value (an in-memory store) or a promise
@@ -35,6 +36,11 @@ export interface AuthConfig {
   oauthClientName(): string;
   mcpClientInfo(): { name: string; version: string };
   oauthScope(): string;
+  // Optional. Where a failed sign-in lands (with ?auth_error=<reason>), and where sign-out lands.
+  // Both default to "/". An app that sends signed-out visitors straight to sign-in points them at
+  // pages that don't, so a failure can't loop and signing out doesn't sign straight back in.
+  authErrorPath?(): string;
+  signedOutPath?(): string;
 }
 
 export interface AuthApp<S extends AuthSession> {

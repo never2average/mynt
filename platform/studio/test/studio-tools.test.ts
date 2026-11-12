@@ -2,16 +2,15 @@ import { describe, expect, it } from "vitest";
 import { isDeveloper, parseStudioCall, rolesFrom, STUDIO_TOOLS } from "@/lib/studio-tools";
 
 describe("STUDIO_TOOLS", () => {
-  it("can start and steer builds, and nothing else that writes: no running, shipping, hosting changes or VM access", () => {
+  it("can create apps and start and steer builds, and nothing else that writes: no running, shipping, hosting changes or VM access", () => {
     const names = Object.keys(STUDIO_TOOLS);
-    expect(names).toEqual(expect.arrayContaining(["start_build", "steer_build"]));
+    expect(names).toEqual(expect.arrayContaining(["start_build", "steer_build", "create_app"]));
     for (const banned of [
       "finish_build",
       "stop_build",
       "sandbox_run",
       "open_sandbox_editor",
       "reopen_sandbox",
-      "create_app",
       "update_app",
       "connect_repository",
       "request_hosting",
@@ -59,6 +58,19 @@ describe("STUDIO_TOOLS", () => {
     expect(parseStudioCall("get_build_activity", { build_id: "b1", after: 12 })).toHaveProperty("tool");
     expect(parseStudioCall("get_build_activity", { build_id: "b1", after: -1 })).toHaveProperty("error");
     expect(parseStudioCall("list_builds", { app_id: "a1" })).toHaveProperty("tool");
+  });
+
+  it("checks New app's and the dashboard's tools strictly", () => {
+    const app = { name: "Round-up savings", description: "Rounds up card purchases", audience: "Savers", product_ids: ["p1"] };
+    expect(parseStudioCall("create_app", app)).toHaveProperty("tool");
+    expect(parseStudioCall("create_app", { ...app, product_ids: [] })).toHaveProperty("error");
+    expect(parseStudioCall("create_app", { ...app, owner_id: "someone-else" })).toHaveProperty("error");
+    expect(parseStudioCall("create_app", { ...app, name: "x".repeat(81) })).toHaveProperty("error");
+    expect(parseStudioCall("get_developer_dashboard", {})).toHaveProperty("tool");
+    expect(parseStudioCall("get_developer_dashboard", { days: 30 })).toHaveProperty("tool");
+    expect(parseStudioCall("get_developer_dashboard", { days: 365 })).toHaveProperty("error");
+    expect(parseStudioCall("get_developer_dashboard", { user_id: "u2" })).toHaveProperty("error");
+    expect(parseStudioCall("list_buildable_products", { query: "savings" })).toHaveProperty("tool");
   });
 
   it("lets developers, innovators and admins in", () => {

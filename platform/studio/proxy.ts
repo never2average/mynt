@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { contentSecurityPolicy } from "./lib/csp";
 import { appUrlFor, clientAddress, loginAllowed, shouldGoToAppUrl, warnUntrustedEdgeOnce } from "./lib/rate-limit";
+import { pageNeedsSignIn, signInPathFor } from "./lib/page-gate";
+import { sessionCookieName } from "./lib/session";
 import { sessionStore } from "./lib/session-store";
 
 // Runs before every page and API route:
@@ -13,7 +15,9 @@ import { sessionStore } from "./lib/session-store";
 //   is reachable only through that server: every other caller is sent to APP_URL, for every
 //   path (lib/rate-limit.ts, shouldGoToAppUrl); a request carrying X-Mynt-Client-IP from an
 //   address not in TRUSTED_EDGE_IPS is served with a warning instead, so a missing server
-//   address can't loop its users.
+//   address can't loop its users;
+// - sends a visit to any page without a signed-in session straight to sign-in, which comes
+//   back to that page afterwards (lib/page-gate.ts).
 export async function proxy(req: NextRequest) {
   // Before the redirect, so a server address missing from TRUSTED_EDGE_IPS is named in the logs.
   warnUntrustedEdgeOnce(req.headers);
@@ -28,6 +32,11 @@ export async function proxy(req: NextRequest) {
     });
   }
 
+  if (pageNeedsSignIn(req.nextUrl.pathname) && !(await signedIn(req))) {
+    const to = signInPathFor(req.nextUrl.pathname, req.nextUrl.search);
+    return NextResponse.redirect(appUrlFor(to.pathname, to.search), 307);
+  }
+
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
   const csp = contentSecurityPolicy(process.env.PREVIEW_FRAME_SRC, process.env.NODE_ENV !== "production", nonce);
   const requestHeaders = new Headers(req.headers);
@@ -36,6 +45,14 @@ export async function proxy(req: NextRequest) {
   const res = NextResponse.next({ request: { headers: requestHeaders } });
   res.headers.set("Content-Security-Policy", csp);
   return res;
+}
+
+// Whether the request's session cookie names a signed-in session.
+async function signedIn(req: NextRequest): Promise<boolean> {
+  const id = req.cookies.get(sessionCookieName())?.value;
+  if (!id) return false;
+  const session = await sessionStore().get(id);
+  return Boolean(session?.tokens);
 }
 
 // Every path, Next's own assets included, so the deployment address serves nothing directly

@@ -53,7 +53,7 @@ describe("session cookie", () => {
 
     clock.now = 3 * 24 * 60 * 60 * 1000; // used again after 3 days
     const res = await session.GET();
-    expect(await res.json()).toEqual({ signedIn: true });
+    expect(await res.json()).toEqual({ signedIn: true, name: null, email: null });
     const cookie = res.headers.get("set-cookie") ?? "";
     expect(cookie).toContain(`=${fake.id}`);
     expect(cookie).toMatch(/Max-Age=604800/);

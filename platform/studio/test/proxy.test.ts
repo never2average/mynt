@@ -38,10 +38,10 @@ describe("proxy", () => {
   it("serves X-Mynt-Client-IP from an untrusted address (a missing server address must not loop), with one warning", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
-      const res = await proxy(request("/", { "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-x" }));
+      const res = await proxy(request("/api/session", { "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-x" }));
       expect(res.status).toBe(200);
       expect(res.headers.get("location")).toBeNull();
-      await proxy(request("/", { "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-y" }));
+      await proxy(request("/api/session", { "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-y" }));
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0][0])).toContain("edge-a-v6");
     } finally {
@@ -50,7 +50,7 @@ describe("proxy", () => {
   });
 
   it("serves a request whose Host is already APP_URL's, rather than redirecting it to itself", async () => {
-    const res = await proxy(request("/", { "x-vercel-forwarded-for": "someone" }, "mynt.example.com"));
+    const res = await proxy(request("/api/session", { "x-vercel-forwarded-for": "someone" }, "mynt.example.com"));
     expect(res.status).toBe(200);
   });
 
