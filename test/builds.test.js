@@ -1152,7 +1152,22 @@ test("redact scrubs every token Mynt mints, provider keys, URL passwords and sec
   assert.equal(redact("OPENAI_API_KEY=abcdef123456 next"), "OPENAI_API_KEY=[redacted] next");
   assert.equal(redact("SIGNING_PRIVATE_KEY=abcdef123456"), "SIGNING_PRIVATE_KEY=[redacted]");
   assert.equal(redact("SENDGRID_KEY=abcdef123456"), "SENDGRID_KEY=[redacted]");
-  assert.equal(redact("DB_PASS='hunter2hunter2'"), "DB_PASS=[redacted]");
+  assert.equal(redact("DB_PASS='hunter2hunter2'"), "DB_PASS='[redacted]'");
+  assert.equal(redact("db_pass=hunter2hunter2"), "db_pass=[redacted]");
+  // Quoted values go whole, spaces and all, whatever their length.
+  assert.equal(redact("DB_PASSWORD='correct horse battery staple' next"), "DB_PASSWORD='[redacted]' next");
+  assert.equal(redact(`DB_PASSWORD="a b c"`), `DB_PASSWORD="[redacted]"`);
+  assert.equal(redact(`SENDGRID_KEY="abc def"`), `SENDGRID_KEY="[redacted]"`);
+  assert.equal(redact(`db:\n  password: "a b c"\n  user: demo`), `db:\n  password: "[redacted]"\n  user: demo`);
+  assert.equal(redact("PASSWORD=hunter2hunter2\r\nnext"), "PASSWORD=[redacted]\r\nnext");
+  assert.equal(redact("env:GITHUB_TOKEN=abcdef123456"), "env:GITHUB_TOKEN=[redacted]", "an assignment inside another value");
+  // Authorization headers and bare JWTs.
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+  assert.equal(redact("Authorization: Bearer abc123def456"), "Authorization: Bearer [redacted]");
+  assert.equal(redact(`curl -H "Authorization: Basic dXNlcjpwYXNz" https://x`), `curl -H "Authorization: Basic [redacted]" https://x`);
+  assert.equal(redact(`{"authorization": "Bearer abc123def456"}`), `{"authorization": "Bearer [redacted]"}`);
+  assert.equal(redact(`authorization: Bearer ${jwt}`), "authorization: Bearer [redacted]");
+  assert.equal(redact(`session ${jwt} ok`), "session [redacted] ok");
   assert.equal(redact("PASS=hunter2hunter2"), "PASS=[redacted]");
   assert.equal(redact("DB_PASSWORD=hunter2hunter2"), "DB_PASSWORD=[redacted]");
   assert.equal(redact("aws_secret_access_key = wJalrXUtnFEMIK7MDENG"), "aws_secret_access_key = [redacted]");
@@ -1164,15 +1179,20 @@ test("redact scrubs every token Mynt mints, provider keys, URL passwords and sec
     "ghr_abcdefghijklmnopqrstuvwxyz0123", "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
     "xoxb-123456789012-abcdefghijkl", "xoxp-123456789012-abcdefghijkl", "AKIAIOSFODNN7EXAMPLE",
     "sk-ant-api03-abcdefghijkl", "whsec_abcdefghijkl",
+    // Stripe keys with _ in the body, OpenAI, npm, Google and Slack app tokens (assembled so no scanner takes them for real).
+    "sk_live_" + "51H_abc_defghijklmnop", "sk-" + "proj-abcdefghij_klmnopqrst-uvwxyz012345", "sk-" + "a".repeat(20) + "0123456789AB",
+    "npm_" + "aB3".repeat(12), "AIza" + "Sy" + "b".repeat(33), "xapp-" + "1-A0123456789-0123456789-abcdef",
   ]) assert.equal(redact(`using ${key} now`), "using [redacted] now", key);
   const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\nabcd==\n-----END RSA PRIVATE KEY-----";
   assert.equal(redact(`key:\n${pem}\ndone`), "key:\n[redacted]\ndone");
   assert.equal(redact("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg"), "[redacted]", "a key cut off mid-way");
   assert.equal(redact("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1r\n-----END OPENSSH PRIVATE KEY-----"), "[redacted]");
+  assert.equal(redact("x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBGRk\n=abcd\n-----END PGP PRIVATE KEY BLOCK-----\ny"), "x\n[redacted]\ny");
 
-  // Passwords in URLs keep the user and host.
+  // Passwords in URLs keep the user (even an empty one) and host.
   assert.equal(redact("DATABASE_URL=postgres://mynt:s3cr3tpw@db.internal:5432/mynt"), "DATABASE_URL=postgres://mynt:[redacted]@db.internal:5432/mynt");
   assert.equal(redact("git clone https://x-access-token:abc123@github.com/o/r"), "git clone https://x-access-token:[redacted]@github.com/o/r");
+  assert.equal(redact("REDIS_URL=redis://:s3cr3tpw@cache:6379"), "REDIS_URL=redis://:[redacted]@cache:6379");
 
   // JSON and YAML.
   assert.equal(redact(`{"api_key": "abcdef123456", "name": "demo"}`), `{"api_key": "[redacted]", "name": "demo"}`);
@@ -1188,8 +1208,15 @@ test("redact leaves ordinary text alone", () => {
     "The token is valid and the secret is safe",
     "password:\nEnter something here",
     `{"password": ""}`,
-    `{"password": "short"}`,
+    "password: ",
     `{"bypass": "everything ok", "primary": "abcdef123456"}`,
+    "SOLANA_PUBLIC_KEY=7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    "SSH_PRIVATE_KEY=~/.ssh/id_ed25519",
+    "SIGNING_KEY=/run/secrets/signing.pem",
+    "GOOGLE_APPLICATION_CREDENTIALS=./service-account.json",
+    `if (pem.startsWith("-----BEGIN PRIVATE KEY-----")) return pem;\nconst rest = 1;`,
+    "Authorization: Bearer $TOKEN",
+    "sk-loading-spinner-component",
     "PASSWORD=short",
     "API_KEY=",
     "BYPASS_MODE=enabled",
@@ -1202,4 +1229,37 @@ test("redact leaves ordinary text alone", () => {
     "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----",
     "ready on 8080",
   ]) assert.equal(redact(text), text, text);
+});
+
+// redact() runs synchronously on uncapped sandbox output: a pattern that backtracks quadratically stalls Mynt for
+// everyone. Each input is 100 KB, built to make a careless pattern retry a long run from every position inside it.
+test("redact stays linear on adversarial output", () => {
+  const N = 100_000;
+  const rep = (s) => s.repeat(Math.ceil(N / s.length)).slice(0, N);
+  const inputs = [
+    "a+", "a-", "a.", "some-kebab-case-words-here ", "a://a:", "a://", ":", "a:", "key:", "token=", 'token="', "password: 'x ",
+    '"password":"\\', "A_", "A_ ", "AAAA_KEY", "db_pass", "x".repeat(47) + " ", "eyJ-", "eyJabcde.eyJabcde.", "-ghp_",
+    "-sk_live_", "sk-", "xoxb-", "-mynt_agent_", "Authorization: Bearer ", "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n", "-----BEGIN A ",
+  ].map(rep);
+  inputs.push(`x://u:${"p".repeat(N)}`, '"'.repeat(N / 2) + "a".repeat(N / 2), "-----BEGIN " + rep("A "));
+  for (const text of inputs) redact(text.slice(0, 10_000)); // warm up the regex engine and JIT on a tenth of each
+  // CPU time, not wall time, so a busy machine doesn't fail the test.
+  const cpuMs = (start) => {
+    const d = process.cpuUsage(start);
+    return (d.user + d.system) / 1000;
+  };
+  const slowest = [];
+  const started = process.cpuUsage();
+  for (const text of inputs) {
+    const t = process.cpuUsage();
+    redact(text);
+    slowest.push([cpuMs(t), JSON.stringify(text.slice(0, 24))]);
+  }
+  const total = cpuMs(started);
+  slowest.sort((a, b) => b[0] - a[0]);
+  // Linear patterns take a few ms per input (about 100-250 ms of CPU for all of them on a busy 4-core machine); the
+  // quadratic ones this replaced took 3 to 60 seconds on a single input. The bounds leave room for slow CI runners.
+  assert.ok(slowest[0][0] < 150, `redact took ${slowest[0][0].toFixed(0)} ms of CPU on ${slowest[0][1]}`);
+  assert.ok(total < 1000, `redact took ${total.toFixed(0)} ms of CPU over ${inputs.length} inputs; slowest: ${slowest.slice(0, 3).map(([ms, s]) => `${s} ${ms.toFixed(0)} ms`).join(", ")}`);
 });
