@@ -54,6 +54,9 @@ export const MIN_STEER = 3;
 export const MAX_MESSAGE = 4000;
 
 export const STARTING_NOTE = "A build of this app is still starting. Send your message again once the agent is working; here's what it's doing.";
+export const START_BUSY_NOTE = "A build of this app is being started right now (from here or another window). Open the app again in a moment to follow it.";
+export const MAYBE_LOST_NOTE =
+  "_Your message may not have reached the agent: it was finishing its turn as the message arrived. If nothing above answers it, send it again._";
 export const FINISHING_NOTE =
   "The agent has finished its work on this build, and Mynt is checking and shipping it, so it can't take more instructions. Here's its progress; send your message again once it's done to start a new build.";
 
@@ -113,17 +116,21 @@ export function planSteer(latest: ActivityItem | undefined, capabilities: Capabi
 
 /**
  * Reads a batch of new activity for the end of the agent's answer: the first finished turn
- * after any that are to be skipped. Returns whether the answer is over and how many finished
- * turns are still to skip.
+ * after any that are to be skipped. Returns whether the answer is over, how many finished turns
+ * are still to skip, and whether any of the answer itself (after the skipped turns) arrived.
  */
-export function consumeTurnEnds(items: ActivityItem[], skip: number, status: string | null): { over: boolean; skip: number } {
+export function consumeTurnEnds(items: ActivityItem[], skip: number, status: string | null): { over: boolean; skip: number; answered: boolean } {
   let left = skip;
+  let answered = false;
   for (const i of items) {
-    if (i.type !== "turn_finished") continue;
+    if (i.type !== "turn_finished") {
+      if (left === 0) answered = true;
+      continue;
+    }
     if (left > 0) left--;
-    else return { over: true, skip: left };
+    else return { over: true, skip: left, answered };
   }
-  return { over: status !== null && FINISHED.has(status), skip: left };
+  return { over: status !== null && FINISHED.has(status), skip: left, answered };
 }
 
 /* ------------------------------------------------------------------ */

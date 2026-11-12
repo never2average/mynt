@@ -2,11 +2,14 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { clientAddress, LOGIN_LIMIT, LOGIN_WINDOW_SECONDS, loginAllowed } from "@/lib/rate-limit";
+import { withoutPort } from "@/lib/rate-limit";
+import { addressBucket, clientAddress, LOGIN_LIMIT, LOGIN_WINDOW_SECONDS, loginAllowed, SHARED_LOGIN_LIMIT } from "@/lib/rate-limit";
 import { MemoryKeyValue, Sealer, SessionStore } from "@/lib/session-store";
 import { ensureRoles, isAuthError, ROLES_MAX_AGE_MS } from "@/lib/studio-server";
 import { NotSignedInError } from "@/lib/mynt-client";
-import { ensureFreshTokens, expiresSoon } from "@/lib/tokens";
+import { deadlineFetch, ensureFreshTokens, expiresSoon, RefreshFailedError, refreshWithMynt } from "@/lib/tokens";
+import { oauthRedirectUrl } from "@/lib/config";
+import { InvalidClientError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
 function memoryStore() {
   const clock = { now: 0 };
@@ -63,6 +66,100 @@ describe("token refresh", () => {
   });
 });
 
+describe("refreshing with Mynt's authorization server", () => {
+  const server = { authorizationServerUrl: "https://auth.example.com", authorizationServerMetadata: undefined } as unknown as Awaited<ReturnType<typeof import("@modelcontextprotocol/sdk/client/auth.js").discoverOAuthServerInfo>>;
+  async function signedIn() {
+    process.env.MYNT_MCP_URL = "https://mynt.example.com/mcp";
+    const { store } = memoryStore();
+    await store.saveClientInformation(oauthRedirectUrl(), { client_id: "c1" });
+    const s = store.create();
+    s.tokens = token("old");
+    return { store, s };
+  }
+
+  it("keeps the tokens on a passing failure (timeout, 5xx, network)", async () => {
+    const { store, s } = await signedIn();
+    const refreshAuth = async () => {
+      throw new ServerError("upstream down");
+    };
+    await expect(refreshWithMynt(s, store, { discover: async () => server, refreshAuth })).rejects.toBeInstanceOf(RefreshFailedError);
+    expect(s.tokens?.access_token).toBe("old");
+    expect(isAuthError(new RefreshFailedError("x"))).toBe(false); // answered 502, not a sign-out
+  });
+
+  it("signs out only when the server says the grant or the client is no longer valid", async () => {
+    for (const E of [InvalidGrantError, InvalidClientError]) {
+      const { store, s } = await signedIn();
+      const refreshAuth = async () => {
+        throw new E("no");
+      };
+      await expect(refreshWithMynt(s, store, { discover: async () => server, refreshAuth })).rejects.toBeInstanceOf(NotSignedInError);
+      expect(s.tokens).toBeUndefined();
+    }
+  });
+
+  it("won't send the refresh token to an authorization server other than the one that issued it", async () => {
+    const { store, s } = await signedIn();
+    s.tokens = { ...token("old"), issuer: "https://auth.example.com" } as typeof s.tokens;
+    let sent = false;
+    const elsewhere = { ...server, authorizationServerUrl: "https://elsewhere.example" };
+    const refreshAuth = async () => {
+      sent = true;
+      return token("x");
+    };
+    await expect(refreshWithMynt(s, store, { discover: async () => elsewhere as typeof server, refreshAuth })).rejects.toBeInstanceOf(NotSignedInError);
+    expect(sent).toBe(false);
+    expect(s.tokens).toBeUndefined();
+  });
+
+  it("nor with a client registered at another one", async () => {
+    const { store, s } = await signedIn();
+    await store.saveClientInformation(oauthRedirectUrl(), { client_id: "c1", issuer: "https://elsewhere.example" } as never);
+    let sent = false;
+    const refreshAuth = async () => {
+      sent = true;
+      return token("x");
+    };
+    await expect(refreshWithMynt(s, store, { discover: async () => server, refreshAuth })).rejects.toBeInstanceOf(NotSignedInError);
+    expect(sent).toBe(false);
+  });
+
+  it("binds new tokens and the registration to the issuing server", async () => {
+    const { store, s } = await signedIn();
+    await refreshWithMynt(s, store, { discover: async () => server, refreshAuth: (async () => token("new")) as never });
+    expect((s.tokens as { issuer?: string }).issuer).toBe("https://auth.example.com");
+    expect(await store.clientInformation(oauthRedirectUrl())).toEqual({ client_id: "c1", issuer: "https://auth.example.com" });
+  });
+
+  it("gives the whole refresh (discovery and token request) one deadline", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const base = (async (_input: unknown, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined);
+      return new Response("{}");
+    }) as typeof fetch;
+    const f = deadlineFetch(30, base);
+    await f("https://auth.example.com/.well-known/x");
+    await tick(10);
+    await f("https://auth.example.com/token");
+    expect(signals[0]).toBe(signals[1]);
+    expect(signals[0]?.aborted).toBe(false);
+    await tick(40);
+    expect(signals[0]?.aborted).toBe(true); // 30 ms after the refresh began, not after each request
+  });
+
+  it("stores the new tokens, refreshing with the registered client", async () => {
+    const { store, s } = await signedIn();
+    let used: unknown;
+    const refreshAuth = async (_url: string | URL, o: { clientInformation: unknown; refreshToken: string }) => {
+      used = [o.clientInformation, o.refreshToken];
+      return token("new");
+    };
+    await refreshWithMynt(s, store, { discover: async () => server, refreshAuth: refreshAuth as never });
+    expect(used).toEqual([{ client_id: "c1" }, "r-old"]);
+    expect(s.tokens?.access_token).toBe("new");
+  });
+});
+
 describe("sign-in rate limit", () => {
   it(`lets an address start sign-in ${LOGIN_LIMIT} times per window, then refuses it`, async () => {
     const { clock, store } = memoryStore();
@@ -73,10 +170,42 @@ describe("sign-in rate limit", () => {
     expect(await loginAllowed(store, "client-a")).toBe(true); // a new window
   });
 
-  it("reads the caller's address from the platform's headers", () => {
-    expect(clientAddress(new Headers({ "x-forwarded-for": "client-c, proxy-1" }))).toBe("client-c");
-    expect(clientAddress(new Headers({ "x-real-ip": "client-d" }))).toBe("client-d");
-    expect(clientAddress(new Headers())).toBe("unknown");
+  it("on Vercel, trusts only Vercel's own header, so a forged x-forwarded-for changes nothing", () => {
+    const vercel = { VERCEL: "1" };
+    expect(clientAddress(new Headers({ "x-vercel-forwarded-for": "client-c", "x-forwarded-for": "forged" }), vercel)).toBe("client-c");
+    expect(clientAddress(new Headers({ "x-forwarded-for": "forged", "x-real-ip": "forged" }), vercel)).toBeNull();
+  });
+
+  it("elsewhere, trusts only a configured proxy header; without one the caller is unknown", () => {
+    expect(clientAddress(new Headers({ "x-forwarded-for": "forged" }), {})).toBeNull();
+    expect(clientAddress(new Headers({ "x-real-ip": "client-d", "x-forwarded-for": "forged" }), { TRUSTED_PROXY_HEADER: "X-Real-IP" })).toBe("client-d");
+  });
+
+  it("takes the trusted header's last value: what the proxy appended, after anything the caller sent", () => {
+    const env = { TRUSTED_PROXY_HEADER: "x-forwarded-for" };
+    expect(clientAddress(new Headers({ "x-forwarded-for": "forged-1, forged-2, client-f" }), env)).toBe("client-f");
+  });
+
+  it("drops ports before counting", () => {
+    const v4 = [192, 0, 2, 9].join(".");
+    expect(addressBucket(`${v4}:51234`)).toBe(v4);
+    expect(addressBucket("[2001:db8:1:2::9]:443")).toBe("2001:db8:1:2::/64");
+    expect(withoutPort("client-g")).toBe("client-g");
+  });
+
+  it("counts IPv6 callers per /64", () => {
+    expect(addressBucket("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("2001:db8:1:2:bbbb:cccc:dddd:eeee")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("[2001:DB8::1]")).toBe("2001:db8:0:0::/64");
+    const v4 = [192, 0, 2, 7].join("."); // a documentation address, built so no literal address sits in the source
+    expect(addressBucket(`::ffff:${v4}`)).toBe(v4);
+    expect(addressBucket("client-e")).toBe("client-e");
+  });
+
+  it("unknown callers share one larger bucket", async () => {
+    const { store } = memoryStore();
+    for (let i = 0; i < SHARED_LOGIN_LIMIT; i++) expect(await loginAllowed(store, null)).toBe(true);
+    expect(await loginAllowed(store, null)).toBe(false);
   });
 });
 

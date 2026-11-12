@@ -9,6 +9,16 @@ import { isDeveloper, parseStudioCall, parseToolText, rolesFrom } from "./studio
 // or a generic one. Raw replies and validation details are never shown.
 export class ToolRefusedError extends Error {}
 
+// Mynt received the call and answered that it didn't do it. Unlike a timeout or a lost
+// connection, this says for certain that nothing happened.
+export class MyntRefusedError extends ToolRefusedError {}
+
+// Whether an error means the call certainly had no effect: Mynt refused it, or the studio never
+// sent it (the arguments didn't pass the allow-list).
+export function certainlyNotDone(err: unknown): boolean {
+  return err instanceof ToolRefusedError;
+}
+
 export const GENERIC_REFUSAL = "Mynt couldn't do that just now. Please try again.";
 const MAX_SHOWN = 500;
 
@@ -22,12 +32,12 @@ export function refusalMessage(text: string): string {
 }
 
 // The only way the studio's server calls Mynt: through the STUDIO_TOOLS allow-list. Returns
-// Mynt's parsed reply; a tool error from Mynt is thrown as a ToolRefusedError.
+// Mynt's parsed reply; a tool error from Mynt is thrown as a MyntRefusedError.
 export async function callStudioTool(client: Client, tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const call = parseStudioCall(tool, args);
   if ("error" in call) throw new ToolRefusedError("The studio couldn't send that to Mynt.");
   const outcome = await callMyntTool(client, call.tool, call.args);
-  if (outcome.isError) throw new ToolRefusedError(refusalMessage(outcome.text));
+  if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text));
   return parseToolText(outcome.text);
 }
 
