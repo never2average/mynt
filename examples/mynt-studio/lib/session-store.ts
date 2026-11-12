@@ -25,10 +25,11 @@ export interface Session extends AppState {
 
 const SESSION_ID = /^[A-Za-z0-9_-]{43}$/; // 32 random bytes, base64url
 
-// The few key-value operations the store needs, with expiry in seconds.
+// The few key-value operations the store needs, with expiry in seconds. `only` makes a write
+// conditional: "nx" only creates, "xx" only replaces. It returns whether it wrote.
 export interface KeyValue {
   get(key: string): Promise<string | null>;
-  set(key: string, value: string, ttlSeconds: number): Promise<void>;
+  set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx"): Promise<boolean>;
   del(key: string): Promise<void>;
 }
 
@@ -147,6 +148,12 @@ export class SessionStore {
     if (id && SESSION_ID.test(id)) await this.kv.del(this.sessionKey(id));
   }
 
+  // Claims something once for a while (true the first time, false on repeats until it
+  // expires); used so a message sent twice doesn't start two builds.
+  async claim(name: string, subject: string, ttlSeconds: number): Promise<boolean> {
+    return this.kv.set(`${this.prefix}:claim:${name}:${createHash("sha256").update(subject).digest("base64url")}`, "1", ttlSeconds, "nx");
+  }
+
   // Dynamic client registration happens once per app (per redirect URL), not per user.
   async clientInformation(redirectUrl: string): Promise<OAuthClientInformationMixed | undefined> {
     const key = this.clientKey(redirectUrl);
@@ -194,17 +201,22 @@ export class MemoryKeyValue implements KeyValue {
     private maxEntries = 10_000,
   ) {}
 
-  async get(key: string): Promise<string | null> {
+  private live(key: string): { value: string; expiresAt: number } | undefined {
     const e = this.entries.get(key);
-    if (!e) return null;
-    if (e.expiresAt <= this.now()) {
+    if (e && e.expiresAt <= this.now()) {
       this.entries.delete(key);
-      return null;
+      return undefined;
     }
-    return e.value;
+    return e;
   }
 
-  async set(key: string, value: string, ttlSeconds: number): Promise<void> {
+  async get(key: string): Promise<string | null> {
+    return this.live(key)?.value ?? null;
+  }
+
+  async set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx"): Promise<boolean> {
+    const exists = this.live(key) !== undefined;
+    if ((only === "nx" && exists) || (only === "xx" && !exists)) return false;
     const t = this.now();
     this.entries.delete(key);
     for (const [k, e] of this.entries) if (e.expiresAt <= t) this.entries.delete(k);
@@ -216,6 +228,7 @@ export class MemoryKeyValue implements KeyValue {
       this.entries.delete(victim);
     }
     this.entries.set(key, { value, expiresAt: t + ttlSeconds * 1000 });
+    return true;
   }
 
   async del(key: string): Promise<void> {
@@ -230,7 +243,7 @@ export class MemoryKeyValue implements KeyValue {
 // The subset of an Upstash Redis client the store uses.
 export interface RedisLike {
   get(key: string): Promise<unknown>;
-  set(key: string, value: string, opts: { ex: number }): Promise<unknown>;
+  set(key: string, value: string, opts: { ex: number; nx?: true; xx?: true }): Promise<unknown>;
   del(key: string): Promise<unknown>;
 }
 
@@ -242,8 +255,10 @@ export class RedisKeyValue implements KeyValue {
     return typeof v === "string" ? v : null;
   }
 
-  async set(key: string, value: string, ttlSeconds: number): Promise<void> {
-    await this.redis.set(key, value, { ex: Math.max(1, ttlSeconds) });
+  async set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx"): Promise<boolean> {
+    const ex = Math.max(1, ttlSeconds);
+    const r = await this.redis.set(key, value, only === "nx" ? { ex, nx: true } : only === "xx" ? { ex, xx: true } : { ex });
+    return r !== null; // a conditional SET that didn't apply replies nil
   }
 
   async del(key: string): Promise<void> {
@@ -276,7 +291,7 @@ export function storeFromEnv(env: Env, redisClient?: (cfg: { url: string; token:
     if (!key) throw new Error("SESSION_ENCRYPTION_KEY is not set (see .env.example); it's required with Redis");
     const client = redisClient
       ? redisClient(redis)
-      : new Redis({ url: redis.url, token: redis.token, automaticDeserialization: false });
+      : (new Redis({ url: redis.url, token: redis.token, automaticDeserialization: false }) as unknown as RedisLike);
     return new SessionStore(new RedisKeyValue(client), new Sealer(key));
   }
   if (env.VERCEL) throw new Error("No session store: connect a Redis database (KV_REST_API_URL and KV_REST_API_TOKEN)");

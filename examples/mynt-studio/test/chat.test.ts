@@ -7,11 +7,16 @@ import {
   capabilitiesFrom,
   chooseAction,
   newSince,
+  consumeTurnEnds,
+  planSteer,
+  FINISHING_NOTE,
+  STARTING_NOTE,
   parseToolSummary,
   turnOver,
   type BuildSummary,
 } from "@/lib/chat";
 import { toUIMessages } from "@/lib/conversation";
+import { GENERIC_REFUSAL, refusalMessage } from "@/lib/studio-server";
 
 const plain = { sessionBuilds: false };
 const session = { sessionBuilds: true };
@@ -41,7 +46,7 @@ describe("start or steer", () => {
   });
 
   it("never steers another app's build, or one that isn't running", () => {
-    const builds = [build("x", "coding", { app_id: "other" }), build("q", "queued"), build("v", "verifying"), build("s", "succeeded")];
+    const builds = [build("x", "coding", { app_id: "other" }), build("v", "verifying"), build("s", "succeeded")];
     expect(chooseAction({ appId: "app", selectedBuildId: "x", builds, text: "Build the onboarding flow", capabilities: plain })).toEqual({
       kind: "start",
       args: { goal: "Build the onboarding flow", app_id: "app" },
@@ -60,6 +65,20 @@ describe("start or steer", () => {
     });
   });
 
+  it("follows a build that's still starting instead of starting another beside it", () => {
+    for (const status of ["queued", "provisioning"]) {
+      expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [build("q", status)], text: "Build the onboarding flow", capabilities: plain })).toEqual({
+        kind: "follow",
+        buildId: "q",
+        message: STARTING_NOTE,
+      });
+    }
+  });
+
+  it("refuses a steer under 3 characters before anything is sent", () => {
+    expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [build("b", "coding")], text: "ok", capabilities: plain }).kind).toBe("refuse");
+  });
+
   it("refuses empty, too short (for a new build) and too long messages", () => {
     expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [], text: "   ", capabilities: plain }).kind).toBe("refuse");
     expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [], text: "hi there", capabilities: plain }).kind).toBe("refuse");
@@ -72,6 +91,41 @@ describe("start or steer", () => {
       { id: "b", app_id: "a", status: "coding", commit_sha: null, updated_at: "t" },
     ]);
     expect(buildSummaries("text")).toEqual([]);
+  });
+});
+
+describe("steering a running build", () => {
+  const finished = { type: "turn_finished", summary: "success" };
+  it("mid-turn: the interrupted turn's end is skipped, and the next one ends the answer", () => {
+    expect(planSteer({ type: "tool_use", summary: "Bash" }, plain)).toEqual({ send: true, skipTurnEnds: 1 });
+    expect(planSteer(undefined, plain)).toEqual({ send: true, skipTurnEnds: 1 }); // first turn, nothing written yet
+    expect(planSteer({ type: "message", summary: "x" }, session)).toEqual({ send: true, skipTurnEnds: 1 });
+  });
+
+  it("between turns without session builds: not sent, since the runner no longer reads messages", () => {
+    expect(planSteer(finished, plain)).toEqual({ send: false, message: FINISHING_NOTE });
+  });
+
+  it("between turns with session builds: sent, and its own turn's end ends the answer", () => {
+    expect(planSteer(finished, session)).toEqual({ send: true, skipTurnEnds: 0 });
+  });
+
+  it("consumeTurnEnds skips across polls and stops on a finished build", () => {
+    expect(consumeTurnEnds([finished], 1, "coding")).toEqual({ over: false, skip: 0 });
+    expect(consumeTurnEnds([say("answer"), finished], 0, "coding")).toEqual({ over: true, skip: 0 });
+    expect(consumeTurnEnds([finished, say("a"), finished], 1, "coding")).toEqual({ over: true, skip: 0 });
+    expect(consumeTurnEnds([], 1, "failed")).toEqual({ over: true, skip: 1 });
+    expect(consumeTurnEnds([], 0, "coding")).toEqual({ over: false, skip: 0 });
+  });
+});
+
+describe("errors shown in the chat", () => {
+  it("are Mynt's own {error} message, else a generic one; raw replies are never shown", () => {
+    expect(refusalMessage(JSON.stringify({ error: "Build is succeeded; only a running agent can be steered" }))).toBe("Build is succeeded; only a running agent can be steered");
+    expect(refusalMessage("Traceback: internal detail at /srv/x.py")).toBe(GENERIC_REFUSAL);
+    expect(refusalMessage(JSON.stringify({ detail: "x" }))).toBe(GENERIC_REFUSAL);
+    expect(refusalMessage(JSON.stringify({ error: "a\u0007b" }))).toBe("a b");
+    expect(refusalMessage(JSON.stringify({ error: "x".repeat(900) })).length).toBe(501);
   });
 });
 

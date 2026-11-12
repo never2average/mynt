@@ -11,6 +11,8 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v 
 export const STEERABLE = new Set(["coding", "auditing", "checking", "previewing", "pushing"]);
 /** Statuses after which nothing more will happen. */
 export const FINISHED = new Set(["succeeded", "blocked", "failed", "stopped", "over_budget"]);
+/** A build that's starting: not steerable yet, but another must not be started beside it. */
+export const STARTING = new Set(["queued", "provisioning"]);
 
 export type BuildSummary = {
   id: string;
@@ -44,10 +46,16 @@ export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[
 export type ChatAction =
   | { kind: "steer"; buildId: string; args: { build_id: string; message: string } }
   | { kind: "start"; args: { goal: string; app_id: string; mode?: "session"; continue_from?: string } }
+  | { kind: "follow"; buildId: string; message: string }
   | { kind: "refuse"; message: string };
 
 export const MIN_GOAL = 10;
+export const MIN_STEER = 3;
 export const MAX_MESSAGE = 4000;
+
+export const STARTING_NOTE = "A build of this app is still starting. Send your message again once the agent is working; here's what it's doing.";
+export const FINISHING_NOTE =
+  "The agent has finished its work on this build, and Mynt is checking and shipping it, so it can't take more instructions. Here's its progress; send your message again once it's done to start a new build.";
 
 /**
  * Steer if the project has a running build (the one the user is looking at, else its newest),
@@ -67,7 +75,13 @@ export function chooseAction(opts: {
   const mine = opts.builds.filter((b) => b.app_id === opts.appId).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const live = mine.filter((b) => STEERABLE.has(b.status));
   const target = live.find((b) => b.id === opts.selectedBuildId) ?? live[0];
-  if (target) return { kind: "steer", buildId: target.id, args: { build_id: target.id, message: text } };
+  if (target) {
+    if (text.length < MIN_STEER) return { kind: "refuse", message: `Say a little more (at least ${MIN_STEER} characters).` };
+    return { kind: "steer", buildId: target.id, args: { build_id: target.id, message: text } };
+  }
+  // One build at a time per app: a build that's still starting is followed, not doubled.
+  const starting = mine.find((b) => STARTING.has(b.status));
+  if (starting) return { kind: "follow", buildId: starting.id, message: STARTING_NOTE };
 
   if (text.length < MIN_GOAL) return { kind: "refuse", message: `Say a little more about what to build (at least ${MIN_GOAL} characters).` };
   const args: { goal: string; app_id: string; mode?: "session"; continue_from?: string } = { goal: text, app_id: opts.appId };
@@ -77,6 +91,39 @@ export function chooseAction(opts: {
     if (previous) args.continue_from = previous.id;
   }
   return { kind: "start", args };
+}
+
+/**
+ * Whether a steer reaches the agent, decided from the build's latest activity just before it's
+ * sent, and how to tell when the agent has answered it.
+ *
+ * - Mid-turn (the latest entry isn't a finished turn): Mynt's runner interrupts the running
+ *   turn to deliver the steer, so the interrupted turn reports finishing first. That first
+ *   finished turn isn't the answer; the next one is.
+ * - Between turns, without session builds: the runner has stopped taking messages (it's
+ *   finishing the build), though the status may still say coding for a while. A steer would be
+ *   accepted and never read, so it isn't sent.
+ * - Between turns, with session builds: the agent is waiting for the next message.
+ */
+export function planSteer(latest: ActivityItem | undefined, capabilities: Capabilities): { send: true; skipTurnEnds: number } | { send: false; message: string } {
+  const betweenTurns = latest?.type === "turn_finished";
+  if (betweenTurns && !capabilities.sessionBuilds) return { send: false, message: FINISHING_NOTE };
+  return { send: true, skipTurnEnds: betweenTurns ? 0 : 1 };
+}
+
+/**
+ * Reads a batch of new activity for the end of the agent's answer: the first finished turn
+ * after any that are to be skipped. Returns whether the answer is over and how many finished
+ * turns are still to skip.
+ */
+export function consumeTurnEnds(items: ActivityItem[], skip: number, status: string | null): { over: boolean; skip: number } {
+  let left = skip;
+  for (const i of items) {
+    if (i.type !== "turn_finished") continue;
+    if (left > 0) left--;
+    else return { over: true, skip: left };
+  }
+  return { over: status !== null && FINISHED.has(status), skip: left };
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,9 +221,9 @@ export class ActivityFollower {
   }
 
   /** Records the current state without showing it (before the user's message is sent). */
-  baseline(reply: unknown): { status: string | null } {
-    const { status } = this.take(reply);
-    return { status };
+  baseline(reply: unknown): { status: string | null; latest: ActivityItem | undefined } {
+    const { items, status } = this.take(reply);
+    return { status, latest: items[items.length - 1] };
   }
 }
 
