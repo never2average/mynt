@@ -9,7 +9,10 @@ User=mynt
 Group=mynt
 EnvironmentFile=/etc/mynt/env
 Environment=NODE_ENV=production HOST=127.0.0.1
-WorkingDirectory=/opt/mynt/current
+# The server is the release's core/ folder (install-host.sh). Releases from before the monorepo had it at
+# the release root; their installer puts back their own copy of this unit, so a rollback keeps working,
+# and each new release links dist -> core/dist, so an older unit runs a new release too.
+WorkingDirectory=/opt/mynt/current/core
 ExecStart=/usr/bin/node dist/index.js serve-http
 Restart=on-failure
 RestartSec=5

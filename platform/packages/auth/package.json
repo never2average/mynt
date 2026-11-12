@@ -1,0 +1,22 @@
+{
+  "name": "@mynt/auth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Signing in to Mynt from a Next.js app (OAuth with PKCE through the MCP SDK, server-side sessions), shared by Mynt Studio and mynt-chat. TypeScript source, compiled by each app (transpilePackages).",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "next": "16.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}

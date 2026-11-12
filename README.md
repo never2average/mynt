@@ -38,7 +38,7 @@ Changing a product means re-composing it, not rebuilding it. Add a part, change 
 Agents do the work on Mynt: designing, pricing, building, reviewing, prospecting. Not one of them grades its own work.
 
 - **Every build is verified in a clean sandbox the agent never touched.** Tests, lint and types, a secrets scan, a dependency audit, an SBOM, every required disclosure, and an independent security audit all run before a pull request is opened.
-- **Agents are steered by folders, not by prompts in code.** Each agent's instructions, skills and scripts live in `workspaces/<agent>/`, which becomes its working directory. Its skills are human-written ones found on GitHub and vendored with their licence and source.
+- **Agents are steered by folders, not by prompts in code.** Each agent's instructions, skills and scripts live in `core/workspaces/<agent>/`, which becomes its working directory. Its skills are human-written ones found on GitHub and vendored with their licence and source.
 - **Secrets never enter a sandbox or a hosted app.** Agents reach the model through Mynt's proxy with a token that dies with the run. A hosted app sends a placeholder, and the real key is added on the way out.
 - **Every cost is counted.** Sandboxes, model spend and hosting are billed from metered records against per-build and monthly caps. A figure that can't be measured is never shown as $0.
 
@@ -102,7 +102,7 @@ Mynt:  ┌───────────────────────�
 
 - **Primitives** are the regulated building blocks: a line of business and an action on it.
 - **Products** are compositions of primitives, versioned, each with a definition, a developer contract and build terms.
-- **Workspaces** (`workspaces/<agent>/`) steer the hosted agents: the coding team, the product desk and its algorithm explorers, the governance desk and the business-development agent.
+- **Workspaces** (`core/workspaces/<agent>/`) steer the hosted agents: the coding team, the product desk and its algorithm explorers, the governance desk and the business-development agent.
 
 ## What a developer ships
 
@@ -123,7 +123,7 @@ Behind it is a whole coding team. An **architect** plans. **Server**, **web** an
 
 ## Works with the MCP client you already have
 
-Mynt is an [MCP](https://modelcontextprotocol.io) server; clients show it as `mynt`. Any MCP client can use it, so you're never tied to one tool. Claude Code is the reference client. `examples/mynt-chat` is a sample of your own: a mobile-friendly chat for customers, and a developer console for builds, sandboxes and hosting. `examples/mynt-studio` is Mynt Studio, where developers sign in with their Mynt account and see their apps and each build's live preview (built on the open-source Adorable; chatting with the coding agent from it comes next).
+Mynt is an [MCP](https://modelcontextprotocol.io) server; clients show it as `mynt`. Any MCP client can use it, so you're never tied to one tool. Claude Code is the reference client. `platform/chat` (mynt-chat) is a sample of your own: a mobile-friendly chat for customers, and a developer console for builds, sandboxes and hosting. `platform/studio` is Mynt Studio, where developers sign in with their Mynt account and see their apps and each build's live preview (built on the open-source Adorable; chatting with the coding agent from it comes next).
 
 **For AI assistants:** every Mynt server answers `GET /llms.txt` (also at `/.well-known/llms.txt`) with a short guide in the [llms.txt](https://llmstxt.org) format: what Mynt is, its MCP endpoint, how to sign in, the roles and the first tools each one should call. `GET /llms-full.txt` lists every tool each role gets, with its inputs, generated from the server's live tool registry, plus the runtime API and the vendor contract.
 

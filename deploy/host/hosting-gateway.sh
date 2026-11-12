@@ -28,7 +28,10 @@ wg pubkey <"$DIR/wg.key" >"$DIR/wg.pub"
 chmod 644 "$DIR/wg.pub"
 
 # Mynt's view of the tenants, read as the mynt user with its environment (never on a command line).
-mynt() { runuser -u mynt -- bash -c 'set -a; . /etc/mynt/env; set +a; exec node /opt/mynt/current/dist/index.js hosting "$0"' "$1"; }
+# The server is the release's core/ folder; releases from before the monorepo had it at the root.
+MYNT_JS=/opt/mynt/current/core/dist/index.js
+[ -f "$MYNT_JS" ] || MYNT_JS=/opt/mynt/current/dist/index.js
+mynt() { runuser -u mynt -- bash -c 'set -a; . /etc/mynt/env; set +a; exec node "$1" hosting "$0"' "$1" "$MYNT_JS"; }
 
 # WireGuard: running tenants only; anything else they send is dropped except the proxy.
 {

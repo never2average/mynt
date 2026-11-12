@@ -4,6 +4,10 @@ on: [push, pull_request, workflow_dispatch]
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     strategy:
       matrix:
         node: [22, 24]
@@ -22,12 +26,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm test
   # Mynt's Caddy site as the host installer renders it, with and without Mynt Studio on the same domain: Caddy
   # itself adapts it, and every path Mynt serves must still reach Mynt (the studio gets the rest).
   caddy-site:
     runs-on: ubuntu-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     timeout-minutes: 10
     env:
       CADDY_DOCKER_IMAGE: caddy:2.11.7
@@ -39,10 +48,17 @@ jobs:
           node-version: 22
       - run: docker pull --quiet "$CADDY_DOCKER_IMAGE"
       - run: node --test test/site-caddy.test.js
+      # The server is locked only in core/package-lock.json: core is no root workspace, and the root lockfile holds
+      # nothing of it (npm test in the test job runs this too).
+      - run: node --test test/workspace-layout.test.js
   # The partner walkthrough (docs/demo.md) as a presenter runs it, so its narrated output is in the log. npm test
   # runs it too (test/partner-walkthrough.test.js), with its checks and that it leaves nothing behind.
   partner-demo:
     runs-on: ubuntu-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +66,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - run: npm run demo:partner
   # Mynt's Solana toolchain, installed by the same pinned, checksum-verified script the sandboxes run, builds the
@@ -58,6 +75,10 @@ jobs:
   # sandbox does (src/solana/toolchain.ts).
   solana-program:
     runs-on: ubuntu-24.04
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -65,7 +86,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - name: Mynt's scripts, from its source
         run: |
@@ -350,19 +372,20 @@ jobs:
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done
-  # The example apps under examples/ (mynt-chat's chat and developer console, and Mynt Studio): each one's tests,
-  # type check and production build, from its own lockfile. For the studio, also: its sign-in files are still
-  # byte-for-byte mynt-chat's, and it names no real host or IP address and none of the wording Mynt doesn't use.
-  examples:
+  # The apps under platform/ (chat: mynt-chat's chat and developer console; studio: Mynt Studio), the repository's npm
+  # workspaces, each installed on its own from the root lockfile with the sign-in code both import (@mynt/auth,
+  # platform/packages/auth): each app's tests, type check and production build. For the studio, also: it and the
+  # sign-in code name no real host or IP address and none of the wording Mynt doesn't use.
+  platform:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        app: [mynt-chat, mynt-studio]
+        app: [chat, studio]
     defaults:
       run:
-        working-directory: examples/${{ matrix.app }}
+        working-directory: platform/${{ matrix.app }}
     env:
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
@@ -371,18 +394,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: examples/${{ matrix.app }}/package-lock.json
-      - name: Sign-in files are shared with mynt-chat, unchanged
-        if: matrix.app == 'mynt-studio'
-        run: |
-          for f in lib/oauth-provider.ts lib/session.ts lib/mynt-client.ts \
-                   app/api/auth/login/route.ts app/api/auth/callback/route.ts app/api/auth/logout/route.ts; do
-            diff -u "../mynt-chat/$f" "$f" || { echo "::error file=examples/mynt-studio/$f::differs from examples/mynt-chat/$f; change both"; exit 1; }
-          done
+          cache-dependency-path: package-lock.json
       - name: No real hosts, IP addresses or banned wording
-        if: matrix.app == 'mynt-studio'
+        if: matrix.app == 'studio'
         run: |
-          files=$(git ls-files . | grep -v '^package-lock.json$')
+          files=$(git ls-files . ../packages/auth)
           fail=0
           if grep -IinwE 'merchants?' $files; then echo "::error::Mynt's users are never framed as merchants"; fail=1; fi
           if grep -IEn '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' $files | grep -Ev '\b(127\.0\.0\.1|0\.0\.0\.0)\b'; then
@@ -393,7 +409,13 @@ jobs:
             | tr 'A-Z' 'a-z' | sort -u | grep -Ev "$allowed" || true)
           if [ -n "$hosts" ]; then echo "$hosts"; echo "::error::hostnames found; use example placeholders"; fail=1; fi
           exit $fail
-      - run: npm ci
+      # Installed as Vercel installs the studio (its vercel.json): this app and @mynt/auth only, from the root
+      # lockfile; never the server in core/.
+      - run: npm ci -w .
+      - name: Nothing of the server was installed
+        run: test ! -e ../../core/node_modules && test ! -e ../../node_modules/pg && test ! -e ../../core/dist
+      - name: The shared sign-in package type-checks
+        run: npx tsc --noEmit -p ../packages/auth
       - run: npx vitest run
       - run: npx tsc --noEmit
       - run: npx next build
@@ -401,18 +423,23 @@ jobs:
   # and its Compose images build.
   starter-app:
     runs-on: ubuntu-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - run: node test/fixtures/generate-client-sdks.mjs sdk-out
       - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out
       - name: api, web and mobile compile
-        working-directory: starter
+        working-directory: core/starter
         run: |
           npm install --no-audit --no-fund
           npm run build -w mynt-sdk
@@ -437,7 +464,7 @@ jobs:
           sleep 2
           ! curl -fsS http://127.0.0.1:5173/ >/dev/null 2>&1
       - name: Compose images build
-        working-directory: starter
+        working-directory: core/starter
         env:
           MYNT_API_KEY: mynt_test_ci
           MYNT_API_ORIGIN: https://mynt.example
@@ -445,7 +472,7 @@ jobs:
           rm -rf node_modules */node_modules packages/*/node_modules packages/*/dist
           docker compose --profile mobile build
       - name: The app runs hardened (read-only, no capabilities) and serves
-        working-directory: starter
+        working-directory: core/starter
         env:
           MYNT_API_KEY: mynt_test_ci
           MYNT_API_ORIGIN: https://mynt.example
@@ -462,13 +489,18 @@ jobs:
     # Pinned to a runner with docker. Swift builds inside the official swift:5.10 image, so it doesn't depend on
     # setup-swift fetching signing keys from a keyserver (keyserver.ubuntu.com outages broke this job).
     runs-on: ubuntu-24.04
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - run: node test/fixtures/generate-client-sdks.mjs sdk-out
       - uses: actions/setup-java@v4
@@ -485,7 +517,7 @@ jobs:
         with:
           sdk: "3.5.4"
       - name: Dart analyzes
-        working-directory: sdk-out/flutter
+        working-directory: core/sdk-out/flutter
         run: dart pub get && dart analyze --fatal-warnings
       - name: Swift builds
         run: docker run --rm -v "$PWD/sdk-out/swift:/w" -w /w swift:5.10 swift build
@@ -493,13 +525,18 @@ jobs:
   # freshly generated SDK, and compiled with each platform's own toolchain.
   starter-android:
     runs-on: ubuntu-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - run: node test/fixtures/generate-client-sdks.mjs sdk-out
       - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out --mobile kotlin
@@ -514,20 +551,25 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: Android app builds
-        working-directory: starter/mobile
+        working-directory: core/starter/mobile
         run: |
           gradle wrapper --gradle-version 8.9
           ./gradlew :app:assembleDebug --stacktrace
           test -f app/build/outputs/apk/debug/app-debug.apk
   starter-flutter:
     runs-on: ubuntu-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - run: node test/fixtures/generate-client-sdks.mjs sdk-out
       - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out --mobile flutter
@@ -543,7 +585,7 @@ jobs:
           flutter-version: "3.24.5"
           channel: stable
       - name: Flutter app analyzes, tests and builds
-        working-directory: starter/mobile
+        working-directory: core/starter/mobile
         run: |
           flutter create --platforms=android,ios --project-name mynt_starter .
           flutter pub get
@@ -552,19 +594,24 @@ jobs:
           flutter build apk --debug
   starter-ios:
     runs-on: macos-latest
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
       - run: npm run build
       - run: node test/fixtures/generate-client-sdks.mjs sdk-out
       - run: python3 workspaces/coding-build/scripts/scaffold_app.py starter --sdk sdk-out --mobile swift
       - name: SwiftUI app builds (macOS)
-        working-directory: starter/mobile
+        working-directory: core/starter/mobile
         run: swift build
       - name: SwiftUI app builds (iOS simulator)
-        working-directory: starter/mobile
+        working-directory: core/starter/mobile
         run: xcodebuild -scheme MyntStarter -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build

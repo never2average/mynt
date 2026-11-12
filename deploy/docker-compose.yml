@@ -1,10 +1,10 @@
-# MCP server + Caddy (automatic HTTPS). The MCP joins Supabase's network to reach its Postgres
+# MCP server (built from core/) + Caddy (automatic HTTPS). The MCP joins Supabase's network to reach its Postgres
 # at db:5432; only Caddy publishes ports.
 name: mynt
 
 services:
   mcp:
-    build: ..
+    build: ../core
     restart: unless-stopped
     env_file: .env
     networks: [default, supabase]

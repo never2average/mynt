@@ -63,12 +63,32 @@ git -C "$BASE/src" remote set-url origin "$REPO"
 git -C "$BASE/src" fetch -q origin "$REF"
 SHA=$(git -C "$BASE/src" rev-parse --short FETCH_HEAD)
 REL=$BASE/releases/$SHA
-if [ ! -f "$REL/dist/index.js" ]; then
+# Each release is the whole repository; the server is its core/ folder, installed from core's own
+# lockfile (core isn't one of the root's npm workspaces; --workspaces=false keeps npm in core/ even if
+# it were, so the apps under platform/ are never installed here). npm ci builds dist/ (prepare).
+APP=$REL/core
+# A commit from before core/ existed is installed by its own installer, never by this one: refuse
+# before anything is deleted or changed.
+if ! git -C "$BASE/src" cat-file -e FETCH_HEAD:core/package.json 2>/dev/null; then
+  echo "install-host.sh: $SHA uses the old layout; run that commit's own installer" | tee /dev/fd/3
+  exit 1
+fi
+if [ ! -f "$APP/dist/index.js" ]; then
+  # Never delete the release that is live (a half-built one is rebuilt only while it isn't).
+  if [ "$(readlink -f "$BASE/current" 2>/dev/null)" = "$(readlink -f "$REL")" ]; then
+    echo "install-host.sh: $SHA is the live release but isn't built; deploy another commit first" | tee /dev/fd/3
+    exit 1
+  fi
   rm -rf "$REL"
   mkdir -p "$REL"
   git -C "$BASE/src" archive FETCH_HEAD | tar -x -C "$REL"
-  (cd "$REL" && npm ci --no-audit --no-fund --loglevel=error && npm prune --omit=dev --no-audit --no-fund --loglevel=error)
+  (cd "$APP" && npm ci --workspaces=false --no-audit --no-fund --loglevel=error \
+    && npm prune --omit=dev --workspaces=false --no-audit --no-fund --loglevel=error)
 fi
+[ -f "$APP/dist/index.js" ]
+# Where the server used to be, for anything that still runs /opt/mynt/current/dist/index.js: a unit
+# file put back by an older installer, the hosting gateway's sync, an operator's command.
+ln -sfn core/dist "$REL/dist"
 chown -R root:root "$REL"
 
 # --- Docker --------------------------------------------------------------------------------------
@@ -169,18 +189,25 @@ rm -f "$ENV_DIR/env.new"
 unset DB_PASSWORD
 
 # --- Mynt service --------------------------------------------------------------------------------
-ln -sfn "$REL" "$BASE/current.new"
-mv -T "$BASE/current.new" "$BASE/current"
 if grep -q '^CLERK_SECRET_KEY=' "$ENV_DIR/env"; then
   # Allowlist, MCP client registration, PKCE and audience claims on the Clerk instance (idempotent).
-  (set -a; . "$ENV_DIR/env"; set +a; cd "$REL" && node dist/index.js clerk setup)
+  (set -a; . "$ENV_DIR/env"; set +a; cd "$APP" && node dist/index.js clerk setup)
 fi
+# The release and the unit that runs it (from core/ under /opt/mynt/current) change together, just
+# before the restart. A rollback runs the older commit's installer, which puts back its own unit.
+ln -sfn "$REL" "$BASE/current.new"
+mv -T "$BASE/current.new" "$BASE/current"
 install -m 644 "$REL/deploy/host/mynt.service" /etc/systemd/system/mynt.service
 systemctl daemon-reload
 systemctl enable -q mynt
 systemctl restart mynt
 for _ in $(seq 30); do curl -fsS "http://127.0.0.1:$APP_PORT/healthz" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "http://127.0.0.1:$APP_PORT/healthz" >/dev/null
+# The hosting gateway's sync (hosting-gateway.sh), where it was set up, is a copy of that script:
+# keep it current, since it runs Mynt from the release (it finds core/dist or, before, dist).
+if [ -f /usr/local/sbin/mynt-gateway-sync ]; then
+  install -m 700 "$REL/deploy/host/hosting-gateway.sh" /usr/local/sbin/mynt-gateway-sync
+fi
 
 # --- backups -------------------------------------------------------------------------------------
 # Daily backups of Supabase (databases, roles, Storage files) and a weekly restore test; see backup.sh. Off-site
