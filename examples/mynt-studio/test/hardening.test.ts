@@ -2,11 +2,13 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { clientAddress, LOGIN_LIMIT, LOGIN_WINDOW_SECONDS, loginAllowed } from "@/lib/rate-limit";
+import { addressBucket, clientAddress, LOGIN_LIMIT, LOGIN_WINDOW_SECONDS, loginAllowed, SHARED_LOGIN_LIMIT } from "@/lib/rate-limit";
 import { MemoryKeyValue, Sealer, SessionStore } from "@/lib/session-store";
 import { ensureRoles, isAuthError, ROLES_MAX_AGE_MS } from "@/lib/studio-server";
 import { NotSignedInError } from "@/lib/mynt-client";
-import { ensureFreshTokens, expiresSoon } from "@/lib/tokens";
+import { ensureFreshTokens, expiresSoon, RefreshFailedError, refreshWithMynt } from "@/lib/tokens";
+import { oauthRedirectUrl } from "@/lib/config";
+import { InvalidClientError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
 function memoryStore() {
   const clock = { now: 0 };
@@ -63,6 +65,51 @@ describe("token refresh", () => {
   });
 });
 
+describe("refreshing with Mynt's authorization server", () => {
+  const server = { authorizationServerUrl: "https://auth.example.com", authorizationServerMetadata: undefined } as unknown as Awaited<ReturnType<typeof import("@modelcontextprotocol/sdk/client/auth.js").discoverOAuthServerInfo>>;
+  async function signedIn() {
+    process.env.MYNT_MCP_URL = "https://mynt.example.com/mcp";
+    const { store } = memoryStore();
+    await store.saveClientInformation(oauthRedirectUrl(), { client_id: "c1" });
+    const s = store.create();
+    s.tokens = token("old");
+    return { store, s };
+  }
+
+  it("keeps the tokens on a passing failure (timeout, 5xx, network)", async () => {
+    const { store, s } = await signedIn();
+    const refreshAuth = async () => {
+      throw new ServerError("upstream down");
+    };
+    await expect(refreshWithMynt(s, store, { discover: async () => server, refreshAuth })).rejects.toBeInstanceOf(RefreshFailedError);
+    expect(s.tokens?.access_token).toBe("old");
+    expect(isAuthError(new RefreshFailedError("x"))).toBe(false); // answered 502, not a sign-out
+  });
+
+  it("signs out only when the server says the grant or the client is no longer valid", async () => {
+    for (const E of [InvalidGrantError, InvalidClientError]) {
+      const { store, s } = await signedIn();
+      const refreshAuth = async () => {
+        throw new E("no");
+      };
+      await expect(refreshWithMynt(s, store, { discover: async () => server, refreshAuth })).rejects.toBeInstanceOf(NotSignedInError);
+      expect(s.tokens).toBeUndefined();
+    }
+  });
+
+  it("stores the new tokens, refreshing with the registered client", async () => {
+    const { store, s } = await signedIn();
+    let used: unknown;
+    const refreshAuth = async (_url: string | URL, o: { clientInformation: unknown; refreshToken: string }) => {
+      used = [o.clientInformation, o.refreshToken];
+      return token("new");
+    };
+    await refreshWithMynt(s, store, { discover: async () => server, refreshAuth: refreshAuth as never });
+    expect(used).toEqual([{ client_id: "c1" }, "r-old"]);
+    expect(s.tokens?.access_token).toBe("new");
+  });
+});
+
 describe("sign-in rate limit", () => {
   it(`lets an address start sign-in ${LOGIN_LIMIT} times per window, then refuses it`, async () => {
     const { clock, store } = memoryStore();
@@ -73,10 +120,30 @@ describe("sign-in rate limit", () => {
     expect(await loginAllowed(store, "client-a")).toBe(true); // a new window
   });
 
-  it("reads the caller's address from the platform's headers", () => {
-    expect(clientAddress(new Headers({ "x-forwarded-for": "client-c, proxy-1" }))).toBe("client-c");
-    expect(clientAddress(new Headers({ "x-real-ip": "client-d" }))).toBe("client-d");
-    expect(clientAddress(new Headers())).toBe("unknown");
+  it("on Vercel, trusts only Vercel's own header, so a forged x-forwarded-for changes nothing", () => {
+    const vercel = { VERCEL: "1" };
+    expect(clientAddress(new Headers({ "x-vercel-forwarded-for": "client-c", "x-forwarded-for": "forged" }), vercel)).toBe("client-c");
+    expect(clientAddress(new Headers({ "x-forwarded-for": "forged", "x-real-ip": "forged" }), vercel)).toBeNull();
+  });
+
+  it("elsewhere, trusts only a configured proxy header; without one the caller is unknown", () => {
+    expect(clientAddress(new Headers({ "x-forwarded-for": "forged" }), {})).toBeNull();
+    expect(clientAddress(new Headers({ "x-real-ip": "client-d", "x-forwarded-for": "forged" }), { TRUSTED_PROXY_HEADER: "X-Real-IP" })).toBe("client-d");
+  });
+
+  it("counts IPv6 callers per /64", () => {
+    expect(addressBucket("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("2001:db8:1:2:bbbb:cccc:dddd:eeee")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("[2001:DB8::1]")).toBe("2001:db8:0:0::/64");
+    const v4 = [192, 0, 2, 7].join("."); // a documentation address, built so no literal address sits in the source
+    expect(addressBucket(`::ffff:${v4}`)).toBe(v4);
+    expect(addressBucket("client-e")).toBe("client-e");
+  });
+
+  it("unknown callers share one larger bucket", async () => {
+    const { store } = memoryStore();
+    for (let i = 0; i < SHARED_LOGIN_LIMIT; i++) expect(await loginAllowed(store, null)).toBe(true);
+    expect(await loginAllowed(store, null)).toBe(false);
   });
 });
 

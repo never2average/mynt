@@ -9,6 +9,9 @@ const fake = {
   activity: [] as unknown[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
   saved: 0,
+  startFails: 0, // start_build refuses this many times
+  startDelayMs: 0,
+  refreshOnConnect: false, // connecting refreshes the session's tokens
 };
 
 vi.mock("@/lib/session", () => ({
@@ -22,13 +25,17 @@ vi.mock("@/lib/session", () => ({
 const claimed = new Set<string>();
 vi.mock("@/lib/session-store", () => ({
   sessionStore: () => ({
-    save: async () => void fake.saved++,
+    save: async () => {
+      fake.saved++;
+      return true;
+    },
     claim: async (name: string, subject: string) => {
       const key = `${name}\n${subject}`;
       if (claimed.has(key)) return false;
       claimed.add(key);
       return true;
     },
+    unclaim: async (name: string, subject: string) => void claimed.delete(`${name}\n${subject}`),
   }),
 }));
 
@@ -38,10 +45,13 @@ vi.mock("@/lib/mynt-client", () => {
   return {
     NotSignedInError,
     NotAllowedError,
-    connectMynt: async () => ({
-      listTools: async () => ({ tools: fake.tools }),
-      close: async () => undefined,
-    }),
+    connectMynt: async () => {
+      if (fake.refreshOnConnect && fake.session) fake.session.tokens = { access_token: "refreshed", token_type: "Bearer" };
+      return {
+        listTools: async () => ({ tools: fake.tools }),
+        close: async () => undefined,
+      };
+    },
     callMyntTool: async (_client: unknown, name: string, args: Record<string, unknown>) => {
       fake.calls.push({ name, args });
       const reply = (data: unknown) => ({ isError: false, text: JSON.stringify(data) });
@@ -51,6 +61,11 @@ vi.mock("@/lib/mynt-client", () => {
         case "list_builds":
           return reply({ builds: fake.builds });
         case "start_build":
+          if (fake.startDelayMs) await new Promise((r) => setTimeout(r, fake.startDelayMs));
+          if (fake.startFails > 0) {
+            fake.startFails--;
+            return { isError: true, text: JSON.stringify({ error: "Monthly build budget reached" }) };
+          }
           return reply({ id: "new-build", status: "queued" });
         case "steer_build":
           return reply({ build_id: args.build_id, steered: true });
@@ -65,7 +80,7 @@ vi.mock("@/lib/mynt-client", () => {
   };
 });
 
-const { POST } = await import("@/app/api/chat/route");
+const { POST, WATCH_MS, maxDuration } = await import("@/app/api/chat/route");
 
 function post(body: unknown, origin = "http://localhost:3000") {
   return POST(new Request("http://localhost:3000/api/chat", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }));
@@ -89,6 +104,9 @@ beforeEach(() => {
   fake.activity = [];
   fake.calls = [];
   fake.saved = 0;
+  fake.startFails = 0;
+  fake.startDelayMs = 0;
+  fake.refreshOnConnect = false;
   claimed.clear();
 });
 
@@ -202,8 +220,82 @@ describe("/api/chat", () => {
     expect((await post({ projectId: "", messages: [] })).status).toBe(400);
     fake.session = undefined;
     expect((await post({ projectId: "app1", messages: [userMessage("Build it now please")] })).status).toBe(401);
-    fake.session = { id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles: ["consumer"] } as Session;
+    // Roles read from Mynt a moment ago (they're read again after a few minutes).
+    fake.session = { id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles: ["consumer"], rolesAt: Date.now() } as Session;
     expect((await post({ projectId: "app1", messages: [userMessage("Build it now please")] })).status).toBe(403);
     expect(fake.calls.some((c) => c.name === "start_build")).toBe(false);
   });
+});
+
+describe("/api/chat follow-ups", () => {
+  const statements = () => ({ projectId: "app1", messages: [userMessage("Add a statements page")] });
+
+  it("gives the message back when the build couldn't start, so sending it again works", async () => {
+    fake.startFails = 1;
+    fake.activity = [{ status: "failed", activity: [] }];
+    const first = await chunks(await post(statements()));
+    expect(first).toContainEqual(expect.objectContaining({ type: "error", errorText: "Monthly build budget reached" }));
+    expect(claimed.size).toBe(0); // claims and the start lock released
+    await chunks(await post(statements()));
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(2);
+  });
+
+  it("claims nothing when a steer is withheld because the build is finishing", async () => {
+    fake.builds = [{ id: "live", app_id: "app1", status: "previewing", updated_at: "2026-11-02" }];
+    fake.activity = [{ status: "previewing", activity: [{ type: "turn_finished", summary: "success", seq: 5 }], cursor: 5 }, { status: "succeeded", activity: [], cursor: 5 }];
+    await chunks(await post({ projectId: "app1", conversationId: "live", messages: [userMessage("One more thing please")] }));
+    expect(claimed.size).toBe(0);
+  });
+
+  it("two devices of one user starting at the same moment start one build", async () => {
+    fake.startDelayMs = 50;
+    fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
+    const deviceA = { id: "a", createdAt: 0, lastSeen: 0, tokens: { access_token: "a", token_type: "Bearer" } } as Session;
+    const deviceB = { id: "b", createdAt: 0, lastSeen: 0, tokens: { access_token: "b", token_type: "Bearer" } } as Session;
+    fake.session = deviceA;
+    const first = post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.session = deviceB;
+    const second = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a budgeting screen instead")] }));
+    await chunks(await first);
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+    expect(second.find((c) => c.type === "text-delta")?.delta).toMatch(/being started right now/);
+  });
+
+  it("the same text from another device of the same user counts as sent", async () => {
+    fake.activity = [{ status: "failed", activity: [] }];
+    fake.session = { id: "a", createdAt: 0, lastSeen: 0, tokens: { access_token: "a", token_type: "Bearer" } } as Session;
+    await chunks(await post(statements()));
+    fake.session = { id: "b", createdAt: 0, lastSeen: 0, tokens: { access_token: "b", token_type: "Bearer" } } as Session;
+    const again = await chunks(await post(statements()));
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+    expect(again.find((c) => c.type === "text-delta")?.delta).toMatch(/just sent that/);
+  });
+
+  it("saves the session on early answers only when something changed", async () => {
+    const fresh = () => ({ id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles: ["developer"], rolesAt: Date.now() }) as Session;
+    fake.session = fresh();
+    await chunks(await post({ projectId: "app1", messages: [userMessage("hi")] })); // refused: too short
+    expect(fake.saved).toBe(0);
+    fake.session = fresh();
+    fake.refreshOnConnect = true;
+    await chunks(await post({ projectId: "app1", messages: [userMessage("hi")] }));
+    expect(fake.saved).toBe(1); // refreshed tokens are kept
+  });
+
+  it("stops watching with time to spare for the last call before Vercel's limit", () => {
+    const mcpTimeoutMs = 60_000;
+    expect(WATCH_MS + mcpTimeoutMs).toBeLessThan(maxDuration * 1000);
+  });
+
+  it("without session builds, says the message may not have arrived when no answer came", async () => {
+    fake.builds = [{ id: "live", app_id: "app1", status: "coding", updated_at: "2026-11-02" }];
+    fake.activity = [
+      { status: "coding", activity: [{ type: "message", summary: "Working", seq: 7 }], cursor: 7 },
+      { status: "coding", activity: [{ type: "turn_finished", summary: "success", seq: 8 }], cursor: 8 }, // the natural end, taken as the interrupted one
+      { status: "succeeded", activity: [], cursor: 8 },
+    ];
+    const out = await chunks(await post({ projectId: "app1", conversationId: "live", messages: [userMessage("Make it green")] }));
+    expect(out.filter((c) => c.type === "text-delta").map((c) => c.delta).join("\n")).toMatch(/may not have reached the agent/);
+  }, 15_000);
 });

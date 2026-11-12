@@ -12,6 +12,8 @@ import {
   storeFromEnv,
   type KeyValue,
   type RedisLike,
+  DEL_IF_EQUALS,
+  INCR_WITH_EXPIRY,
 } from "@/lib/session-store";
 
 const REDIRECT = "http://localhost:3000/api/auth/callback";
@@ -35,6 +37,12 @@ class FakeKv implements KeyValue {
   }
   del(key: string) {
     return this.inner.del(key);
+  }
+  delIfEquals(key: string, value: string) {
+    return this.inner.delIfEquals(key, value);
+  }
+  expire(key: string, ttlSeconds: number) {
+    return this.inner.expire(key, ttlSeconds);
   }
   incr(key: string, ttlSeconds: number) {
     return this.inner.incr(key, ttlSeconds);
@@ -236,6 +244,36 @@ describe("concurrent requests on one session", () => {
     expect((await store.get(s.id))?.tokens).toBeUndefined();
   });
 
+  it("a stale sign-out (Mynt refused the old token) doesn't clear newer tokens another request got", async () => {
+    const { kv, store } = setup();
+    const s = store.create();
+    s.tokens = token("old");
+    await store.save(s);
+    const refresher = await store.get(s.id);
+    const stale = await store.get(s.id);
+    kv.clock.now = 1000;
+    refresher!.tokens = token("new");
+    await store.save(refresher!);
+    stale!.tokens = undefined; // its call with "old" was refused
+    await store.save(stale!);
+    expect((await store.get(s.id))?.tokens?.access_token).toBe("new");
+    expect((stale as typeof s).tokens?.access_token).toBe("new"); // reloaded instead
+  });
+
+  it("a lock taken over after its TTL isn't released by its first holder", async () => {
+    const { kv, store } = setup();
+    const s = store.create();
+    await store.save(s);
+    const first = await store.lock(s.id, "refresh", 15);
+    kv.clock.now = 16_000; // the first holder overran its TTL
+    const second = await store.lock(s.id, "refresh", 15);
+    expect(second).not.toBeNull();
+    await first!(); // late release by the first holder
+    expect(await store.lock(s.id, "refresh", 15)).toBeNull(); // still the second's
+    await second!();
+    expect(await store.lock(s.id, "refresh", 15)).not.toBeNull();
+  });
+
   it("only one request at a time holds the refresh lock; it frees on release or after its TTL", async () => {
     const { kv, store } = setup();
     const s = store.create();
@@ -287,6 +325,32 @@ describe("Sealer", () => {
   });
 });
 
+describe("client registration", () => {
+  it("survives a key rotation: re-sealed with the new key when read, then the old key can go", async () => {
+    const kv = new FakeKv();
+    const oldKey = randomBytes(32);
+    const newKey = randomBytes(32);
+    const before = new SessionStore(kv, new Sealer(oldKey), { now: () => kv.clock.now });
+    await before.saveClientInformation(REDIRECT, { client_id: "c1" });
+
+    const rotating = new SessionStore(kv, new Sealer(newKey, [oldKey]), { now: () => kv.clock.now });
+    expect(await rotating.clientInformation(REDIRECT)).toEqual({ client_id: "c1" });
+    expect(kv.last().value.split(".")[1]).toBe(keyId(newKey)); // re-sealed
+
+    const after = new SessionStore(kv, new Sealer(newKey), { now: () => kv.clock.now });
+    expect(await after.clientInformation(REDIRECT)).toEqual({ client_id: "c1" });
+  });
+
+  it("doesn't expire while it's being used", async () => {
+    const { kv, store } = setup();
+    await store.saveClientInformation(REDIRECT, { client_id: "c1" });
+    for (let day = 1; day <= 60; day += 20) {
+      kv.clock.now = day * DAY;
+      expect(await store.clientInformation(REDIRECT)).toEqual({ client_id: "c1" });
+    }
+  });
+});
+
 describe("SessionOAuthProvider over the key-value store", () => {
   it("keeps the client registration app-wide and encrypted, and forgets it on request", async () => {
     const { kv, store } = setup();
@@ -320,6 +384,12 @@ describe("MemoryKeyValue", () => {
     expect(await kv.get("short")).toBeNull();
     now = 3601 * 1000;
     expect(await kv.get("long")).toBeNull();
+  });
+
+  it("evicts counters too when full", async () => {
+    const kv = new MemoryKeyValue(() => 0, 3);
+    for (let i = 0; i < 10; i++) await kv.incr(`rate-${i}`, 60);
+    expect(kv.size).toBe(3);
   });
 
   it("honours NX and XX, and counts within a window", async () => {
@@ -357,6 +427,7 @@ describe("Redis wiring", () => {
   it("stores sessions through the Redis client: NX to create, XX to replace, with an expiry", async () => {
     const data = new Map<string, string>();
     const calls: { key: string; opts: object }[] = [];
+    const evals: { key: string; expire: unknown }[] = [];
     const fake: RedisLike = {
       get: async (key) => data.get(key) ?? null,
       set: async (key, value, opts) => {
@@ -366,12 +437,19 @@ describe("Redis wiring", () => {
         return "OK";
       },
       del: async (key) => (data.delete(key) ? 1 : 0),
-      incr: async (key) => {
-        const n = Number(data.get(key) ?? 0) + 1;
-        data.set(key, String(n));
-        return n;
-      },
       expire: async () => 1,
+      // The two scripts, as Redis would run them.
+      eval: async (script, keys, args) => {
+        const [key] = keys;
+        if (script === INCR_WITH_EXPIRY) {
+          const n = Number(data.get(key) ?? 0) + 1;
+          data.set(key, String(n));
+          if (n === 1) evals.push({ key, expire: args[0] });
+          return n;
+        }
+        if (script === DEL_IF_EQUALS) return data.get(key) === args[0] && data.delete(key) ? 1 : 0;
+        throw new Error("unknown script");
+      },
     };
     let made: { url: string; token: string } | undefined;
     const store = storeFromEnv(
@@ -393,5 +471,10 @@ describe("Redis wiring", () => {
     expect(data.size).toBe(0);
     expect(await new RedisKeyValue(fake).get("missing")).toBeNull();
     expect(await new RedisKeyValue(fake).incr("c", 60)).toBe(1);
+    expect(await new RedisKeyValue(fake).incr("c", 60)).toBe(2);
+    expect(evals).toEqual([{ key: "c", expire: 60 }]); // INCR and EXPIRE in one script
+    data.set("lock", "mine");
+    expect(await new RedisKeyValue(fake).delIfEquals("lock", "theirs")).toBe(false);
+    expect(await new RedisKeyValue(fake).delIfEquals("lock", "mine")).toBe(true);
   });
 });
