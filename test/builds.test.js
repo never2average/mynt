@@ -40,7 +40,9 @@ function fakeBoat() {
     async readFile(id, path) {
       return sandboxes.get(id).files.get(path) ?? null;
     },
+    hosted: [],
     async host(id, port) {
+      boat.hosted.push({ id, port });
       return { url: `https://${id}-${port}.preview.example?_token=t` };
     },
     async costDollars(id) {
@@ -59,6 +61,8 @@ function fakeBoat() {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("verify.sh")) return { processId: 7, exitCode: null, stdout: "", stderr: "" };
+      // Mynt's live-preview script says what it did: no-web, waiting, running or started (the test sets it).
+      if (command.includes("scripts/dev_preview.sh")) return { exitCode: 0, stdout: `${s.devPreview ?? "no-web"}\n`, stderr: "" };
       if (command.includes("runner.mjs")) {
         s.agentRunning = true;
         return { processId: 99, exitCode: null, stdout: "", stderr: "" };
@@ -384,6 +388,85 @@ test("developers track, steer and stop their own builds; admins see all", async 
   assert.equal(all.builds.length, 1);
   assert.equal(all.builds[0].source_url, undefined);
   assert.match((await call(dev, "steer_build", { build_id: started.id, message: "go on" })).data.error, /only a running agent/);
+});
+
+test("while the agents code, Mynt starts the app's dev server itself and serves port 5173 at a private link", async () => {
+  const { builds, boat, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  assert.equal(started.live_preview_url, null);
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick(); // agent started
+  const s = boat.sandboxes.get(sbx);
+  const get = async () => (await call(dev, "get_build", { build_id: started.id })).data;
+
+  // Mynt's script, from the coding workspace it wrote, on the app's directory.
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /--port 5173 --strictPort/);
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /installs nothing/);
+  for (const state of ["no-web", "waiting"]) {
+    s.devPreview = state;
+    await builds.tick();
+    assert.equal((await get()).live_preview_url, null, `no link while the script says ${state}`);
+  }
+  assert.ok(s.commands.some((c) => c.command === `bash ${BUILD}/scripts/dev_preview.sh /home/user/workspace/app`));
+  assert.deepEqual(boat.hosted, []);
+
+  s.devPreview = "started";
+  await builds.tick();
+  let b = await get();
+  assert.equal(b.live_preview_url, `https://${sbx}-5173.preview.example?_token=t`);
+  assert.deepEqual(boat.hosted, [{ id: sbx, port: 5173 }]);
+  const event = b.timeline.find((e) => /Live preview started/.test(e.message));
+  assert.ok(event, "on the timeline");
+  assert.ok(!JSON.stringify(b.timeline).includes("5173.preview"), "the link itself is never on the timeline");
+
+  // Started once: later ticks neither run the script again nor ask for another link.
+  const runs = s.commands.filter((c) => c.command.includes("dev_preview.sh")).length;
+  await builds.tick();
+  await builds.tick();
+  assert.equal(s.commands.filter((c) => c.command.includes("dev_preview.sh")).length, runs);
+  assert.equal(boat.hosted.length, 1);
+
+  // A script that fails, or a host that errors, never fails the build.
+  const other = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
+  await builds.tick();
+  const sbx2 = (await builds.get(other.id)).sandbox_id;
+  boat.ready(sbx2);
+  await builds.tick();
+  const host = boat.host;
+  boat.host = async () => {
+    throw new Error("host API down");
+  };
+  boat.sandboxes.get(sbx2).devPreview = "started";
+  await builds.tick();
+  boat.host = host;
+  assert.equal((await builds.get(other.id)).status, "coding");
+  assert.equal((await builds.get(other.id)).live_preview_url, null);
+  // Only while the agents code: once they've moved on to auditing, it isn't started.
+  boat.write(sbx2, `${BUILD}/job/status.json`, { phase: "auditing", message: "Reviewing" });
+  await builds.tick();
+  assert.equal((await builds.get(other.id)).status, "auditing");
+  assert.equal((await builds.get(other.id)).live_preview_url, null);
+  assert.equal(boat.hosted.length, 1);
+
+  // Gone from a stopped build.
+  await call(dev, "stop_build", { build_id: started.id });
+  b = await get();
+  assert.equal(b.live_preview_url, null);
+});
+
+test("Mynt's live preview: the template's Vite config is behind the forwarder only when Mynt starts it", async () => {
+  const files = workspaceFiles("coding-build");
+  const vite = files["templates/mynt-app/web/vite.config.ts"];
+  assert.match(vite, /const live = process\.env\.MYNT_LIVE_PREVIEW === "1"/);
+  assert.match(vite, /allowedHosts: true/);
+  assert.match(vite, /hmr: \{ protocol: "wss", clientPort: 443 \}/);
+  assert.match(vite, /\.\.\.\(live \? \{/, "a developer's own dev server keeps Vite's localhost-only defaults");
+  assert.match(files["scripts/dev_preview.sh"], /MYNT_LIVE_PREVIEW=1/);
+  assert.match(files["CLAUDE.md"], /live preview/i);
+  assert.match(files["CLAUDE.md"], /5173/);
 });
 
 test("developers work in their build's sandbox: VS Code, commands, files and the diff, scrubbed and on the timeline", async () => {

@@ -358,6 +358,22 @@ jobs:
           npm run typecheck -w api
           npm run build -w web
           npm run typecheck -w mobile
+      - name: The live preview starts (dev_preview.sh) and serves the app and its api, on any host name
+        env:
+          MYNT_SANDBOX_KEY: mynt_test_ci
+        run: |
+          S=workspaces/coding-build/scripts/dev_preview.sh
+          test "$(bash $S starter)" = started
+          test "$(bash $S starter)" = running
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:5173/api/healthz 2>/dev/null | grep -q '"ok":true' && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:5173/api/healthz | grep -q '"ok":true'
+          curl -fsS -H 'Host: mynt-pv-ci.example' http://127.0.0.1:5173/ | grep -q '<div id="root">'
+          bash $S --stop starter
+          sleep 2
+          ! curl -fsS http://127.0.0.1:5173/ >/dev/null 2>&1
       - name: Compose images build
         working-directory: starter
         env:

@@ -96,6 +96,11 @@ At each phase run `python3 scripts/report_status.py <phase> "<one line>"`. The p
      with `$GITHUB_TOKEN` through a credential helper, never in the URL.
    - Otherwise start from `templates/mynt-app/` in `~/workspace/app` (`python3 scripts/scaffold_app.py ~/workspace/app`, then the `scaffold` skill).
    - `architect` plans; the engineers build their parts with tests; `compliance-reviewer` reviews until clean.
+   - **Live preview.** Once the app is installed (`node_modules`, and the SDK built), Mynt starts its dev servers
+     itself with `scripts/dev_preview.sh`: the api on port 3000 and Vite on port 5173, with hot reload. The
+     developer watches the app there as you write it. Don't stop or restart them, and don't use ports 3000 or 5173
+     for anything else: run your own test servers on other ports. Keep the `MYNT_LIVE_PREVIEW` block in
+     `web/vite.config.ts`, and keep `npm run dev` in `web/` starting Vite.
 2. **Security self-review** (phase `auditing`): `compliance-reviewer`, and the `secure` skill over the code. Fix
    every critical and high finding. Don't install or run Maxwell: Mynt runs it once, independently, when it
    verifies the build, and only that audit decides.

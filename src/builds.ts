@@ -118,6 +118,7 @@ export interface Build {
   agent_report: unknown; // the coding agent's own report: advisory only
   prompt_id: string | null; // the coding agent's runner process in the build sandbox
   preview_url: string | null;
+  live_preview_url: string | null; // the app's dev server while the agents code (a private link)
   pr_url: string | null;
   branch: string | null;
   commit_sha: string | null;
@@ -183,6 +184,7 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_check jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_env jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS live_preview_url text;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -259,6 +261,9 @@ const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
 const FILES = { spec: `${BUILD_JOB}/build.json`, status: `${BUILD_JOB}/status.json`, result: `${BUILD_JOB}/result.json`, sdk: `${BUILD_JOB}/sdk` };
 const WORKSPACE = "/home/user/workspace/app";
+// Mynt's live preview of the app while the agents code: its script, in the coding workspace, and Vite's port.
+const DEV_PREVIEW = `${workspaceCwd("coding-build")}/scripts/dev_preview.sh`;
+export const LIVE_PREVIEW_PORT = 5173;
 // What a failed audit left behind, kept on the build before its sandbox is deleted.
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
@@ -727,9 +732,32 @@ export class BuildService {
       await this.update(b.id, { status: phase, phase_message: status?.message ?? null });
       await this.event(b.id, phase, status?.message ?? phase);
     }
+    const now = phase && AGENT_PHASES.includes(phase) ? phase : b.status;
+    if (agent.running && now === "coding" && !b.live_preview_url) await this.ensureLivePreview(b);
     if (agent.running) return;
     if (!agent.ok) throw new Error(`Coding agent ${agent.state?.error ?? agent.state?.last_subtype ?? `exited with code ${agent.state?.exit_code ?? "unknown"}`}`);
     await this.startVerification(b);
+  }
+
+  // The live preview while the agents code: once they've installed the app, Mynt starts its dev servers itself
+  // (scripts/dev_preview.sh: the api on 3000, Vite on 5173 with hot reload) and serves 5173 at a private link,
+  // once; the link works as long as the sandbox does. A preview that won't start never fails or holds up a build:
+  // it's tried again on the next tick.
+  async ensureLivePreview(b: Build) {
+    if (!this.boat || !b.sandbox_id || b.live_preview_url) return b.live_preview_url;
+    try {
+      const r = await this.boat.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 60 });
+      const said = r.stdout.trim().split("\n").at(-1);
+      if (r.exitCode !== 0 || (said !== "started" && said !== "running")) return null;
+      const { url } = await this.boat.host(b.sandbox_id, LIVE_PREVIEW_PORT);
+      await this.update(b.id, { live_preview_url: url });
+      // The link is a credential: it goes on the build, never on the timeline.
+      await this.event(b.id, b.status, "Live preview started: the app as the agents write it, with hot reload");
+      return url;
+    } catch (e) {
+      console.error(`Build ${b.id} live preview: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   // The coding agent doesn't grade its own work: Mynt packages the source and verifies it in a fresh
@@ -1225,6 +1253,8 @@ export function developerBuild(b: Build) {
     status: b.status,
     phase_message: b.phase_message,
     preview_url: b.preview_url,
+    // Only while the build's sandbox is up: a stopped or failed build's sandbox is gone.
+    live_preview_url: ["stopped", "failed", "over_budget"].includes(b.status) ? null : (b.live_preview_url ?? null),
     pr_url: b.pr_url,
     commit_sha: b.commit_sha,
     readiness: b.readiness,
