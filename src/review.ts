@@ -8,7 +8,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { coveringLicenses } from "./access.js";
 import { agentState, launchAgent, workspaceCwd, WORKSPACES_ROOT, type AgentHostConfig } from "./agent-host.js";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import { feasibilityCheck, type DeskService } from "./desk.js";
 import { evidenceChecker, type Fetcher } from "./evidence.js";
@@ -125,19 +125,19 @@ export class ReviewService {
   private constructor(
     private readonly db: Db,
     private readonly store: Store,
-    readonly boat: BoatClient | null,
+    readonly sandboxes: SandboxHost | null,
     readonly config: ReviewConfig,
     private readonly desk: DeskService | null,
     private readonly fetcher?: Fetcher,
   ) {}
 
-  static async open(db: Db, store: Store, boat: BoatClient | null, config: ReviewConfig, desk: DeskService | null = null, fetcher?: Fetcher) {
+  static async open(db: Db, store: Store, sandboxes: SandboxHost | null, config: ReviewConfig, desk: DeskService | null = null, fetcher?: Fetcher) {
     await db.exec(TABLES);
-    return new ReviewService(db, store, boat, config, desk, fetcher);
+    return new ReviewService(db, store, sandboxes, config, desk, fetcher);
   }
 
   get enabled() {
-    return !!this.boat && !!this.config.agentBackend && !!this.config.publicUrl;
+    return !!this.sandboxes && !!this.config.agentBackend && !!this.config.publicUrl;
   }
 
   private async all(sql: string, params: unknown[] = []) {
@@ -319,7 +319,7 @@ export class ReviewService {
   }
 
   private async end(c: Row, status: string, f: Row = {}) {
-    if (c.sandbox_id && this.boat) await this.boat.stop(c.sandbox_id as string).catch(() => {});
+    if (c.sandbox_id && this.sandboxes) await this.sandboxes.stop(c.sandbox_id as string).catch(() => {});
     await this.update(c.id as string, { ...f, status });
   }
 
@@ -377,19 +377,19 @@ export class ReviewService {
   }
 
   private async advance(c: Row) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     if (c.status === "queued") {
-      const s = await boat.createSandbox({ name: `mynt-review-${c.id}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_review: c.id as string }, env: {} });
+      const s = await sandboxes.createSandbox({ name: `mynt-review-${c.id}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_review: c.id as string }, env: {} });
       await this.update(c.id as string, { status: "provisioning", sandbox_id: s.id, phase_message: "Sandbox requested" });
       return;
     }
     if (c.status === "provisioning") {
-      const s = await boat.getSandbox(c.sandbox_id as string);
+      const s = await sandboxes.getSandbox(c.sandbox_id as string);
       if (s.state === "error" || s.state === "cancelled") throw new Error(`Sandbox ${s.state}`);
       if (!["ready", "idle", "running"].includes(s.state)) return;
       const token = `mynt_review_${randomBytes(24).toString("base64url")}`;
       await this.update(c.id as string, { token_hash: hash(token) });
-      const pid = await launchAgent(boat, this.config, c.sandbox_id as string, {
+      const pid = await launchAgent(sandboxes, this.config, c.sandbox_id as string, {
         prompt: "Review the case in job/case.json, following CLAUDE.md and its skills. Write job/review.json and run scripts/check_review.py until it passes.",
         budgetUsd: Number(c.cap_usd),
         token,
@@ -399,12 +399,12 @@ export class ReviewService {
       await this.update(c.id as string, { status: "reviewing", process_id: pid, phase_message: "The review agent is researching" });
       return;
     }
-    const agent = await agentState(boat, c.sandbox_id as string, c.process_id as string);
-    const cost = Math.max(agent.cost, this.meter ? await this.meter.spent(`review:${c.id}`) : 0) + (await boat.costDollars(c.sandbox_id as string));
+    const agent = await agentState(sandboxes, c.sandbox_id as string, c.process_id as string);
+    const cost = Math.max(agent.cost, this.meter ? await this.meter.spent(`review:${c.id}`) : 0) + (await sandboxes.costDollars(c.sandbox_id as string));
     await this.update(c.id as string, { cost_usd: cost });
     if (cost > Number(c.cap_usd) + 0.5) return this.end(c, "stopped", { error: `Over the US$${c.cap_usd} case cap`, cost_usd: cost });
     if (agent.running) return;
-    const raw = await boat.readFile(c.sandbox_id as string, `${workspaceCwd(WORKSPACE)}/job/review.json`);
+    const raw = await sandboxes.readFile(c.sandbox_id as string, `${workspaceCwd(WORKSPACE)}/job/review.json`);
     const items = await this.assess(c.snapshot as Row, raw);
     await this.end(c, "ready", {
       items,

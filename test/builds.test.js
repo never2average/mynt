@@ -18,13 +18,13 @@ const A = "/home/user/mynt-agent";
 const BUILD = "/home/user/workspaces/coding-build";
 const AUDIT = "/home/user/workspaces/build-audit";
 
-// A stand-in for boat.dev: sandboxes become ready when told to, files live in memory, the agents' work
+// A fake sandbox host: sandboxes become ready when told to, files live in memory, the agents' work
 // is simulated by writing files (the runner's state.json among them), and shell commands are matched by
 // what they do.
-function fakeBoat() {
+function fakeSandboxHost() {
   const sandboxes = new Map();
   let n = 0;
-  const boat = {
+  const host = {
     sandboxes,
     branchMatches: true,
     tamperDuringAudit: false,
@@ -57,7 +57,7 @@ function fakeBoat() {
       // Mynt puts inbox items in place with a rename.
       const mv = command.match(/^mv -f '([^']+)' '([^']+)'$/);
       if (mv) {
-        if (boat.failMv) return { exitCode: 1, stdout: "", stderr: "sandbox unreachable" };
+        if (host.failMv) return { exitCode: 1, stdout: "", stderr: "sandbox unreachable" };
         if (!s.files.has(mv[1])) return { exitCode: 1, stdout: "", stderr: "no such file" };
         s.files.set(mv[2], s.files.get(mv[1]));
         s.files.delete(mv[1]);
@@ -65,8 +65,8 @@ function fakeBoat() {
       }
       if (command.includes("tar --exclude")) return { exitCode: 0, stdout: `${SHA}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
       if (command.includes("verify.sh --rehash")) {
-        s.files.set(`${V}/after.sha`, boat.tamperDuringAudit ? "changed\n" : s.files.get(`${V}/before.sha`));
-        s.files.set(`${V}/changed.txt`, boat.tamperDuringAudit ? "./api/index.ts\n" : "");
+        s.files.set(`${V}/after.sha`, host.tamperDuringAudit ? "changed\n" : s.files.get(`${V}/before.sha`));
+        s.files.set(`${V}/changed.txt`, host.tamperDuringAudit ? "./api/index.ts\n" : "");
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("verify.sh")) return { processId: 7, exitCode: null, stdout: "", stderr: "" };
@@ -82,7 +82,7 @@ function fakeBoat() {
         const from = Number(read[1]) - 1;
         return { exitCode: 0, stdout: log == null ? "" : Buffer.from(log).subarray(from, from + Number(read[2])).toString("base64"), stderr: "" };
       }
-      if (command.includes("git rev-parse")) return boat.branchMatches ? { exitCode: 0, stdout: `${COMMIT}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
+      if (command.includes("git rev-parse")) return host.branchMatches ? { exitCode: 0, stdout: `${COMMIT}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     },
     async commandStatus(id, processId) {
@@ -115,7 +115,7 @@ function fakeBoat() {
       return JSON.parse(sandboxes.get(id).files.get(`${A}/config.json`));
     },
   };
-  return boat;
+  return host;
 }
 
 function fakeRepos() {
@@ -136,13 +136,13 @@ function fakeRepos() {
   };
 }
 
-async function setup({ boat = fakeBoat(), config = {}, refuse = null } = {}) {
+async function setup({ sandboxes = fakeSandboxHost(), config = {}, refuse = null } = {}) {
   const pg = new PGlite();
   // `refuse`: stands in for a database that rejects some statements (those it returns true for).
   const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
-  const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
+  const builds = await BuildService.open(db, store, sandboxes, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
   const as = async (name, roles) => (await store.createUser(name, roles)).user;
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -162,7 +162,7 @@ async function setup({ boat = fakeBoat(), config = {}, refuse = null } = {}) {
     }
     return { isError: res.isError ?? false, data };
   };
-  return { pg, store, builds, boat, repos, as, connect, call };
+  return { pg, store, builds, sandboxes, repos, as, connect, call };
 }
 
 const passingChecks = [
@@ -179,7 +179,7 @@ const agentReport = { maxwell: { counts: { critical: 0, high: 0 } }, readiness: 
 // Drives one build from start through the agent's work into verification, then lets `verification`
 // shape what the clean sandbox reports, and returns the final build.
 async function runBuild(ctx, { dev, startArgs, agent = agentReport, verification = {} }) {
-  const { builds, boat, call } = ctx;
+  const { builds, sandboxes, call } = ctx;
   const started = (await call(dev, "start_build", startArgs)).data;
   assert.ok(started.id, JSON.stringify(started));
   assert.ok(!("source_url" in started) && !("agent_report" in started), "start_build shows the build as get_build does");
@@ -189,27 +189,27 @@ async function runBuild(ctx, { dev, startArgs, agent = agentReport, verification
   for (const k of ["id", "goal", "status", "phase_message", "cost_usd", "cap_usd", "sandbox_open_until", "created_at"]) assert.ok(k in started, `start_build shows ${k}`);
   await builds.tick(); // sandbox requested
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick(); // agent prompted
-  boat.write(sbx, `${BUILD}/job/result.json`, agent);
-  boat.finishAgent(sbx);
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agent);
+  sandboxes.finishAgent(sbx);
   await builds.tick(); // source packaged, verifier requested
   const vid = (await builds.get(started.id)).verify_sandbox_id;
-  boat.ready(vid);
+  sandboxes.ready(vid);
   await builds.tick(); // checks started
-  boat.sandboxes.get(vid).checksRunning = false;
-  boat.write(vid, `${V}/before.sha`, "tree\n");
-  boat.write(vid, `${V}/report.json`, { checks: verification.checks ?? passingChecks });
+  sandboxes.sandboxes.get(vid).checksRunning = false;
+  sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+  sandboxes.write(vid, `${V}/report.json`, { checks: verification.checks ?? passingChecks });
   await builds.tick(); // auditor prompted
-  if (verification.maxwell !== null) boat.write(vid, `${V}/maxwell.json`, verification.maxwell ?? cleanAudit);
-  boat.finishAgent(vid, verification.auditStatus ?? "success");
+  if (verification.maxwell !== null) sandboxes.write(vid, `${V}/maxwell.json`, verification.maxwell ?? cleanAudit);
+  sandboxes.finishAgent(vid, verification.auditStatus ?? "success");
   await builds.tick(); // decided
   return { started, sbx, vid, build: (await call(dev, "get_build", { build_id: started.id })).data };
 }
 
 test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", async () => {
   const ctx = await setup();
-  const { boat, repos, as, connect, call, builds } = ctx;
+  const { sandboxes, repos, as, connect, call, builds } = ctx;
   const dev = await connect(await as("Dev", ["developer"]));
   const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
   assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
@@ -220,10 +220,10 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   });
 
   // The coding sandbox: secrets only in its env, the task and SDK in files, no PR from the agent.
-  const coding = boat.sandboxes.get(sbx);
+  const coding = sandboxes.sandboxes.get(sbx);
   // Mynt runs a pinned Claude Code itself, budgeted from the build's cap, through Mynt's proxy: no
   // Anthropic key in the sandbox, and the build's proxy token dies with the build.
-  const config = boat.agentConfig(sbx);
+  const config = sandboxes.agentConfig(sbx);
   assert.equal(config.model, "claude-opus-5-5");
   assert.ok(config.budgetUsd > 0 && config.budgetUsd <= 10);
   assert.match(config.version, /^\d+\.\d+\.\d+$/);
@@ -232,7 +232,7 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   assert.deepEqual(auth.env, { ANTHROPIC_BASE_URL: "https://mynt.example.com/agent", ANTHROPIC_AUTH_TOKEN: auth.token });
   assert.ok(!JSON.stringify(coding.opts.env).includes("sk-ant") && !coding.opts.env.ANTHROPIC_API_KEY);
   assert.equal(await builds.agentTokenActive(auth.token), false, "the coding agent's token was replaced for the audit");
-  const auditAuth = JSON.parse(boat.sandboxes.get(vid).files.get(`${A}/auth.json`));
+  const auditAuth = JSON.parse(sandboxes.sandboxes.get(vid).files.get(`${A}/auth.json`));
   assert.equal(await builds.agentTokenActive(auditAuth.token), false, "and that one died with the build");
   assert.equal(coding.opts.env.GITHUB_TOKEN, "ghs_short_lived");
   assert.match(coding.opts.env.MYNT_SANDBOX_KEY, /^mynt_test_/);
@@ -249,7 +249,7 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   assert.ok(coding.files.has(`${BUILD}/job/sdk/openapi.json`));
 
   // The verifier: a fresh sandbox with no secrets, Mynt's own script, and an audit-only agent.
-  const verifier = boat.sandboxes.get(vid);
+  const verifier = sandboxes.sandboxes.get(vid);
   assert.deepEqual(verifier.opts.env, {});
   assert.match(verifier.files.get(`${V}/verify.sh`), /gitleaks/);
   assert.match(verifier.commands.find((c) => c.detached).command, new RegExp(`verify\\.sh 'https://files\\.example/${sbx}/home/user/mynt-out/app\\.tgz\\?sig=x' ${SHA}`));
@@ -261,11 +261,11 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
     workflows: ["execute-scr", "probe-cicd-env"],
     minutes: 20,
   });
-  assert.equal(boat.agentConfig(vid).cwd, AUDIT);
+  assert.equal(sandboxes.agentConfig(vid).cwd, AUDIT);
   // Mynt's audit runs on its own model and budget, not the developer's: the coding agent's runs on the deployment's.
-  assert.equal(boat.agentConfig(vid).model, "claude-sonnet-5-5");
-  assert.equal(boat.agentConfig(vid).budgetUsd, 5);
-  assert.notEqual(boat.agentConfig(sbx).model, "claude-sonnet-5-5");
+  assert.equal(sandboxes.agentConfig(vid).model, "claude-sonnet-5-5");
+  assert.equal(sandboxes.agentConfig(vid).budgetUsd, 5);
+  assert.notEqual(sandboxes.agentConfig(sbx).model, "claude-sonnet-5-5");
   assert.ok(verifier.stopped, "the verifier is stopped once it has reported");
 
   assert.equal(build.status, "succeeded");
@@ -303,13 +303,13 @@ test("a build is blocked if the audit changed the code, or the pushed branch isn
   const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
   await ctx.call(dev, "connect_repository", { repository: "acme/savings-app" });
 
-  ctx.boat.tamperDuringAudit = true;
+  ctx.sandboxes.tamperDuringAudit = true;
   let r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please", repository: "acme/savings-app" } });
   assert.equal(r.build.status, "blocked");
   assert.match(r.build.error, /source changed during the audit: \.\/api\/index\.ts;/);
 
-  ctx.boat.tamperDuringAudit = false;
-  ctx.boat.branchMatches = false;
+  ctx.sandboxes.tamperDuringAudit = false;
+  ctx.sandboxes.branchMatches = false;
   r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please", repository: "acme/savings-app" } });
   assert.equal(r.build.status, "blocked");
   assert.match(r.build.error, /pushed branch doesn't match/);
@@ -332,32 +332,32 @@ test("the verifier is told which disclosures to find", async () => {
   await ctx.store.setProductAccess("fixed-deposit", "open", { required_disclosures: ["Deposits are insured up to the statutory limit"] });
   const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
   const { vid } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please", app_id: app.id } });
-  assert.deepEqual(JSON.parse(ctx.boat.sandboxes.get(vid).files.get(`${V}/disclosures.json`)), [
+  assert.deepEqual(JSON.parse(ctx.sandboxes.sandboxes.get(vid).files.get(`${V}/disclosures.json`)), [
     { product_id: "fixed-deposit", text: "Deposits are insured up to the statutory limit" },
   ]);
 });
 
 test("spend caps count both sandboxes, and the monthly budget refuses new builds", async () => {
   const ctx = await setup({ config: { capUsd: 5, monthlyCapUsd: 8 } });
-  const { builds, boat, as, connect, call } = ctx;
+  const { builds, sandboxes, as, connect, call } = ctx;
   const dev = await connect(await as("Dev", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please", cap_usd: 50 })).data;
   assert.equal(started.cap_usd, 5, "capped at the platform maximum");
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
-  boat.finishAgent(sbx, "success", 1);
-  boat.sandboxes.get(sbx).cost = 2;
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx, "success", 1);
+  sandboxes.sandboxes.get(sbx).cost = 2;
   await builds.tick(); // verifying
   const vid = (await builds.get(started.id)).verify_sandbox_id;
-  boat.sandboxes.get(vid).cost = 2.5;
+  sandboxes.sandboxes.get(vid).cost = 2.5;
   await builds.tick();
   const b = (await call(dev, "get_build", { build_id: started.id })).data;
   assert.equal(b.status, "over_budget");
   assert.equal(b.cost_usd, 5.5);
-  assert.ok(boat.sandboxes.get(sbx).stopped && boat.sandboxes.get(vid).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped && sandboxes.sandboxes.get(vid).stopped);
   // US$2.50 of the US$8 month is left: the default US$5 cap doesn't fit, and the error says how much would.
   assert.equal(
     (await call(dev, "start_build", { goal: "Another build please" })).data.error,
@@ -375,32 +375,32 @@ test("a used-up month says so", async () => {
 });
 
 test("developers track, steer and stop their own builds; admins see all", async () => {
-  const { builds, boat, as, connect, call } = await setup();
+  const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
   const other = await connect(await as("Other", ["developer"]));
   const admin = await connect(await as("Ada", ["admin"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  boat.write(sbx, `${BUILD}/job/status.json`, { phase: "auditing", message: "Running Maxwell" });
-  boat.log(sbx, { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } });
+  sandboxes.write(sbx, `${BUILD}/job/status.json`, { phase: "auditing", message: "Running Maxwell" });
+  sandboxes.log(sbx, { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } });
   await builds.tick();
   let b = (await call(dev, "get_build", { build_id: started.id })).data;
   assert.equal(b.status, "auditing");
   const activity = (await call(dev, "get_build_activity", { build_id: started.id })).data.activity;
   assert.deepEqual({ type: activity[0].type, summary: activity[0].summary }, { type: "tool_use", summary: 'Bash {"command":"npm test"}' });
   assert.equal((await call(dev, "steer_build", { build_id: started.id, message: "Use the existing design system" })).data.steered, true);
-  const inbox = [...boat.sandboxes.get(sbx).files].filter(([path]) => path.startsWith(`${A}/inbox/`));
+  const inbox = [...sandboxes.sandboxes.get(sbx).files].filter(([path]) => path.startsWith(`${A}/inbox/`));
   assert.deepEqual(inbox.map(([, v]) => JSON.parse(v)), [{ message: "Use the existing design system" }], "steering goes to the runner's inbox");
-  const token = JSON.parse(boat.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
+  const token = JSON.parse(sandboxes.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
   assert.equal(await builds.agentTokenActive(token), true);
   assert.equal((await call(other, "get_build", { build_id: started.id })).isError, true);
   assert.equal((await call(other, "stop_build", { build_id: started.id })).isError, true);
   b = (await call(dev, "stop_build", { build_id: started.id })).data;
   assert.equal(b.status, "stopped");
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
   assert.equal(await builds.agentTokenActive(token), false, "stopping a build kills its proxy token");
   const all = (await call(admin, "list_all_builds")).data;
   assert.equal(all.builds.length, 1);
@@ -412,7 +412,7 @@ const say = (text) => ({ type: "assistant", message: { content: [{ type: "text",
 const run = (command) => ({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command } }] } });
 
 test("the agent's activity is stored as the build runs: paged with a cursor, and kept after the sandbox stops", async () => {
-  const { builds, boat, as, connect, call } = await setup();
+  const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
   const other = await connect(await as("Other", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
@@ -420,18 +420,18 @@ test("the agent's activity is stored as the build runs: paged with a cursor, and
   assert.deepEqual((await activity()).activity, [], "nothing before the agent starts");
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
 
   // Complete lines only: a line still being written waits for its newline. Lines Mynt doesn't show (tool results)
   // are read past.
-  boat.log(sbx, say("Reading the spec"), { type: "user", message: { content: [{ type: "tool_result", content: "x".repeat(500) }] } }, run("npm test"), '{"type":"assistant","message":{"content":[{"type":"text","text":"Half');
+  sandboxes.log(sbx, say("Reading the spec"), { type: "user", message: { content: [{ type: "tool_result", content: "x".repeat(500) }] } }, run("npm test"), '{"type":"assistant","message":{"content":[{"type":"text","text":"Half');
   await builds.tick();
   let all = await activity({ after: 0 });
   assert.deepEqual(all.activity.map((a) => [a.seq, a.type, a.summary]), [[1, "message", "Reading the spec"], [2, "tool_use", 'Bash {"command":"npm test"}']]);
   assert.equal(all.cursor, 2);
   assert.ok(all.activity.every((a) => !Number.isNaN(Date.parse(a.at))));
-  boat.log(sbx, ' written"}]}}\n', { type: "result", subtype: "success", total_cost_usd: 0.42 });
+  sandboxes.log(sbx, ' written"}]}}\n', { type: "result", subtype: "success", total_cost_usd: 0.42 });
   await builds.tick();
   await builds.tick(); // nothing new: nothing stored twice
 
@@ -446,9 +446,9 @@ test("the agent's activity is stored as the build runs: paged with a cursor, and
   assert.equal((await activity()).cursor, 4);
 
   // What the agent did just before the developer stopped it is kept, and all of it outlives the sandbox.
-  boat.log(sbx, run("git status"));
+  sandboxes.log(sbx, run("git status"));
   await call(dev, "stop_build", { build_id: started.id });
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
   all = await activity({ after: 0 });
   assert.deepEqual(all.activity.map((a) => a.summary), ["Reading the spec", 'Bash {"command":"npm test"}', "Half written", "success, US$0.42", 'Bash {"command":"git status"}']);
   assert.equal(all.status, "stopped");
@@ -456,22 +456,22 @@ test("the agent's activity is stored as the build runs: paged with a cursor, and
 });
 
 test("a line too long to keep is skipped, across reads, without losing the lines around it; each build keeps its latest entries", async () => {
-  const { builds, boat, as, connect, call } = await setup();
+  const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
   // A 600 KB tool result (more than two reads), with multi-byte text before and after it.
-  boat.log(sbx, say("Café – first"), { type: "user", message: { content: [{ type: "tool_result", content: "é".repeat(300_000) }] } }, say("naïve – after"));
+  sandboxes.log(sbx, say("Café – first"), { type: "user", message: { content: [{ type: "tool_result", content: "é".repeat(300_000) }] } }, say("naïve – after"));
   await builds.tick();
   const got = (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity;
   assert.deepEqual(got.map((a) => a.summary), ["Café – first", "naïve – after"]);
-  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(boat.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
+  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(sandboxes.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
 
   // Over the per-build limit, the oldest entries go; seq keeps counting.
-  boat.log(sbx, ...Array.from({ length: 5003 }, (_, i) => say(`step ${i}`)));
+  sandboxes.log(sbx, ...Array.from({ length: 5003 }, (_, i) => say(`step ${i}`)));
   for (let i = 0; i < 3; i++) await builds.tick();
   const { ACTIVITY_KEEP } = await import("../dist/builds.js");
   const count = (await builds.activity({ id: started.id }, { after: 0, limit: 200 })).activity;
@@ -484,41 +484,41 @@ test("a line too long to keep is skipped, across reads, without losing the lines
 test("one bad line never stalls activity: NULs are stripped, and an entry the database refuses is dropped, not retried forever", async () => {
   let poisoned = 0;
   const refuse = (sql, params) => sql.includes("INSERT INTO financial_products.build_activity") && (params ?? []).some((p) => typeof p === "string" && p.includes("POISON") && ++poisoned);
-  const { builds, boat, as, connect, call } = await setup({ refuse });
+  const { builds, sandboxes, as, connect, call } = await setup({ refuse });
   const dev = await connect(await as("Dev", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
   const summaries = async () => (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity.map((a) => a.summary);
 
   // A NUL (which Postgres text refuses) between good lines: all three are kept, the NUL gone.
-  boat.log(sbx, say("before"), say("bad\u0000text"), say("after"));
+  sandboxes.log(sbx, say("before"), say("bad\u0000text"), say("after"));
   await builds.tick();
   assert.deepEqual(await summaries(), ["before", "bad text", "after"]);
 
   // An entry the database refuses for any other reason: the rest of its chunk is kept, and the offset moves on.
-  boat.log(sbx, say("good one"), say("POISON"), say("good two"));
+  sandboxes.log(sbx, say("good one"), say("POISON"), say("good two"));
   await builds.tick();
   assert.ok(poisoned >= 2, "the batch, then the entry on its own, were refused");
-  boat.log(sbx, say("later"));
+  sandboxes.log(sbx, say("later"));
   await builds.tick();
   assert.deepEqual(await summaries(), ["before", "bad text", "after", "good one", "good two", "later"]);
-  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(boat.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
+  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(sandboxes.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
 });
 
 test("activity is scrubbed of secrets before it is cut to length", async () => {
   const { activitySummary } = await import("../dist/builds.js");
-  const { builds, boat, as, connect, call } = await setup();
+  const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
   const gh = "ghs_abcdefghijklmnopqrstuvwxyz0123456789";
-  boat.log(sbx, say(`the token is ${gh}, don't share it`), run("GITHUB_TOKEN=supersecretvalue123 git push"), say(`${"x".repeat(385)} ${gh}`));
+  sandboxes.log(sbx, say(`the token is ${gh}, don't share it`), run("GITHUB_TOKEN=supersecretvalue123 git push"), say(`${"x".repeat(385)} ${gh}`));
   await builds.tick();
   const got = (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity.map((a) => a.summary);
   assert.equal(got[0], "the token is [redacted], don't share it");
@@ -531,16 +531,16 @@ test("activity is scrubbed of secrets before it is cut to length", async () => {
 });
 
 test("remove_app deletes a removed app's stored build activity", async () => {
-  const { builds, boat, as, connect, call, pg } = await setup();
+  const { builds, sandboxes, as, connect, call, pg } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
   const admin = await connect(await as("Ada", ["admin"]));
   const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
   const started = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  boat.log(sbx, say("hello"));
+  sandboxes.log(sbx, say("hello"));
   await builds.tick();
   await call(dev, "stop_build", { build_id: started.id });
   const rows = async () => (await pg.query("SELECT count(*)::int AS n FROM financial_products.build_activity WHERE build_id = $1", [started.id])).rows[0].n;
@@ -577,7 +577,7 @@ test("list_builds filters by app", async () => {
 
 test("a session build stays open for the developer's requests; finish_build ships it and Mynt verifies it as usual", async () => {
   const ctx = await setup();
-  const { builds, boat, as, connect, call, repos } = ctx;
+  const { builds, sandboxes, as, connect, call, repos } = ctx;
   const dev = await connect(await as("Dev", ["developer"]));
   const other = await connect(await as("Other", ["developer"]));
   const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
@@ -587,21 +587,21 @@ test("a session build stays open for the developer's requests; finish_build ship
   assert.equal(started.finish_requested_at, null);
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  const s = boat.sandboxes.get(sbx);
+  const s = sandboxes.sandboxes.get(sbx);
 
   // The runner is held open, with the 15-minute idle default, and knows how to finish; the agent is told it's a session.
   const launch = s.commands.find((c) => c.command.includes("runner.mjs")).command;
   assert.match(launch, /^MYNT_AGENT_HOLD=1 MYNT_AGENT_IDLE_MS=900000 node /);
-  assert.match(boat.agentConfig(sbx).finishPrompt, /steps 2 to 6/);
-  assert.match(boat.agentConfig(sbx).prompt, /session mode/);
+  assert.match(sandboxes.agentConfig(sbx).finishPrompt, /steps 2 to 6/);
+  assert.match(sandboxes.agentConfig(sbx).prompt, /session mode/);
   assert.equal(JSON.parse(s.files.get(`${BUILD}/job/build.json`)).build.mode, "session");
   assert.match(s.files.get(`${BUILD}/CLAUDE.md`), /## Session mode/);
   assert.match(s.files.get(`${BUILD}/CLAUDE.md`), /Waiting for your next message/);
 
   // Between requests the agent waits (still coding); each request is a steer.
-  boat.write(sbx, `${BUILD}/job/status.json`, { phase: "coding", message: "Waiting for your next message" });
+  sandboxes.write(sbx, `${BUILD}/job/status.json`, { phase: "coding", message: "Waiting for your next message" });
   await builds.tick();
   assert.equal((await builds.get(started.id)).phase_message, "Waiting for your next message");
   assert.equal((await call(dev, "steer_build", { build_id: started.id, message: "Add a rates table" })).data.steered, true);
@@ -620,19 +620,19 @@ test("a session build stays open for the developer's requests; finish_build ship
   assert.ok((await call(dev, "get_build", { build_id: started.id })).data.finish_requested_at);
 
   // The agent ships and exits; Mynt verifies in a clean sandbox exactly as for any build.
-  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
-  boat.finishAgent(sbx);
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
   await builds.tick();
   const vid = (await builds.get(started.id)).verify_sandbox_id;
   assert.ok(vid, "verification started");
-  boat.ready(vid);
+  sandboxes.ready(vid);
   await builds.tick();
-  boat.sandboxes.get(vid).checksRunning = false;
-  boat.write(vid, `${V}/before.sha`, "tree\n");
-  boat.write(vid, `${V}/report.json`, { checks: passingChecks });
+  sandboxes.sandboxes.get(vid).checksRunning = false;
+  sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+  sandboxes.write(vid, `${V}/report.json`, { checks: passingChecks });
   await builds.tick();
-  boat.write(vid, `${V}/maxwell.json`, cleanAudit);
-  boat.finishAgent(vid);
+  sandboxes.write(vid, `${V}/maxwell.json`, cleanAudit);
+  sandboxes.finishAgent(vid);
   await builds.tick();
   const done = (await call(dev, "get_build", { build_id: started.id })).data;
   assert.equal(done.status, "succeeded");
@@ -641,18 +641,18 @@ test("a session build stays open for the developer's requests; finish_build ship
 });
 
 test("a session's idle machine time counts against its cap", async () => {
-  const { builds, boat, as, connect, call } = await setup();
+  const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
-  const started = (await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2 })).data;
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 3 })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  boat.sandboxes.get(sbx).cost = 2.5; // the sandbox sat waiting; no model spend at all
+  sandboxes.sandboxes.get(sbx).cost = 3.5; // the sandbox sat waiting; no model spend at all
   await builds.tick();
   const b = await builds.get(started.id);
   assert.equal(b.status, "over_budget");
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
 });
 
 // A session build with its agent running, for the tests below.
@@ -661,19 +661,19 @@ async function runningSession(ctx, args = {}) {
   const started = (await ctx.call(dev, "start_build", { goal: "Build a savings page please", mode: "session", ...args })).data;
   await ctx.builds.tick();
   const sbx = (await ctx.builds.get(started.id)).sandbox_id;
-  ctx.boat.ready(sbx);
+  ctx.sandboxes.ready(sbx);
   await ctx.builds.tick();
-  return { dev, started, sbx, s: ctx.boat.sandboxes.get(sbx) };
+  return { dev, started, sbx, s: ctx.sandboxes.sandboxes.get(sbx) };
 }
 // Finish items in place in the runner's inbox (a dot-name is one still being written, which the runner skips).
 const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && !p.startsWith(`${A}/inbox/.`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
 
 test("a session the runner finished on its own (idle) takes no more steers; nor does one finished after the steer loaded it", async () => {
   const ctx = await setup();
-  const { builds, boat, call } = ctx;
+  const { builds, sandboxes, call } = ctx;
   const { dev, started, sbx, s } = await runningSession(ctx);
   // The runner went idle and sent the finish prompt itself: Mynt records it on the next tick.
-  boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 2, sent: 2, last_subtype: "success", done: false, exit_code: null, error: null, summary: null, finish: "idle", undelivered: 0 });
+  sandboxes.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 2, sent: 2, last_subtype: "success", done: false, exit_code: null, error: null, summary: null, finish: "idle", undelivered: 0 });
   await builds.tick();
   const b = await builds.get(started.id);
   assert.ok(b.finish_requested_at);
@@ -696,13 +696,13 @@ test("a session the runner finished on its own (idle) takes no more steers; nor 
   assert.ok(third.s.commands.some((c) => /^mv -f '\/home\/user\/mynt-agent\/inbox\/\.[^']+-finish\.json' '\/home\/user\/mynt-agent\/inbox\/[^.][^']+-finish\.json'$/.test(c.command)));
 
   // Messages the runner held back while finishing are reported when it exits.
-  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
-  boat.finishAgent(sbx);
-  boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 3, sent: 3, last_subtype: "success", done: true, exit_code: 0, error: null, summary: "shipped", finish: "idle", undelivered: 2 });
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
+  sandboxes.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 3, sent: 3, last_subtype: "success", done: true, exit_code: 0, error: null, summary: "shipped", finish: "idle", undelivered: 2 });
   // Moving on to verification fails once (a provider's passing 503), so the tick is retried: the report is made once.
-  const exec = boat.exec;
+  const exec = sandboxes.exec;
   let failed = false;
-  boat.exec = async (id, command, opts) => {
+  sandboxes.exec = async (id, command, opts) => {
     if (!failed && command.includes("tar --exclude")) {
       failed = true;
       throw new Error('Freestyle POST /vms/vm-1/exec-await: 503 {"code":"INTERNAL_ERROR"}');
@@ -712,7 +712,7 @@ test("a session the runner finished on its own (idle) takes no more steers; nor 
   await builds.tick();
   assert.equal((await builds.get(started.id)).status, "coding", "a passing 503 is ridden out");
   await builds.tick();
-  boat.exec = exec;
+  sandboxes.exec = exec;
   const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline;
   assert.equal(timeline.filter((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)).length, 1);
   assert.equal((await builds.get(started.id)).status, "verifying", "and Mynt verifies the work as usual");
@@ -755,7 +755,7 @@ test("Mynt finishes a session itself before its sandbox's time limit or its cap 
 test("a finish stands even when the agent can't be reached at that moment: Mynt delivers it on the next tick", async () => {
   const ctx = await setup();
   const { started, s, dev } = await runningSession(ctx);
-  ctx.boat.failMv = true;
+  ctx.sandboxes.failMv = true;
   const r = (await ctx.call(dev, "finish_build", { build_id: started.id })).data;
   assert.equal(r.finishing, true);
   assert.deepEqual(finishItems(s), []);
@@ -764,13 +764,22 @@ test("a finish stands even when the agent can't be reached at that moment: Mynt 
   assert.match((await ctx.call(dev, "steer_build", { build_id: started.id, message: "One more" })).data.error, /finishing/);
   await ctx.builds.tick();
   assert.deepEqual(finishItems(s), [], "still unreachable: still pending");
-  ctx.boat.failMv = false;
+  ctx.sandboxes.failMv = false;
   await ctx.builds.tick();
   assert.deepEqual(finishItems(s).map((f) => f.reason), ["developer"]);
   b = await ctx.builds.get(started.id);
   assert.ok(b.finish_delivered_at);
   await ctx.builds.tick();
   assert.equal(finishItems(s).length, 1, "delivered once");
+});
+
+test("a session build needs a cap above the finish reserve; a one-off build doesn't", async () => {
+  const { as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  assert.match((await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2 })).data.error, /cap above US\$2/);
+  assert.match((await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 1.5 })).data.error, /cap above US\$2/);
+  assert.equal((await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2.5 })).isError, false);
+  assert.equal((await call(dev, "start_build", { goal: "Build a savings page please", cap_usd: 2 })).isError, false);
 });
 
 test("BUILD_SESSION_IDLE_MS must be a sensible number of milliseconds, or the 15-minute default applies", () => {
@@ -780,7 +789,7 @@ test("BUILD_SESSION_IDLE_MS must be a sensible number of milliseconds, or the 15
 
 test("continue_from starts a build from an earlier build's pushed branch, on the same app and repository", async () => {
   const ctx = await setup();
-  const { builds, boat, as, connect, call } = ctx;
+  const { builds, sandboxes, as, connect, call } = ctx;
   const dev = await connect(await as("Dev", ["developer"]));
   const other = await connect(await as("Other", ["developer"]));
   const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
@@ -794,12 +803,12 @@ test("continue_from starts a build from an earlier build's pushed branch, on the
   assert.equal(next.repository, "acme/savings-app", "and the repository");
   await builds.tick();
   const sbx = (await builds.get(next.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  const spec = JSON.parse(boat.sandboxes.get(sbx).files.get(`${BUILD}/job/build.json`)).build;
+  const spec = JSON.parse(sandboxes.sandboxes.get(sbx).files.get(`${BUILD}/job/build.json`)).build;
   assert.deepEqual(spec.base, { branch: shipped.branch, commit_sha: COMMIT, build_id: first.id });
   assert.notEqual(spec.branch, shipped.branch, "it pushes a branch of its own");
-  assert.match(boat.sandboxes.get(sbx).files.get(`${BUILD}/CLAUDE.md`), /build\.base\.branch/);
+  assert.match(sandboxes.sandboxes.get(sbx).files.get(`${BUILD}/CLAUDE.md`), /build\.base\.branch/);
 
   // Only the developer's own, finished builds that pushed a branch, on the same app and repository.
   assert.match((await call(other, "start_build", { goal: "Continue someone else's work", continue_from: first.id })).data.error, /No build of yours/);
@@ -818,29 +827,29 @@ test("continue_from starts a build from an earlier build's pushed branch, on the
 });
 
 test("developers work in their build's sandbox: VS Code, commands, files and the diff, scrubbed and on the timeline", async () => {
-  const { builds, boat, as, connect, call } = await setup();
+  const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
   const other = await connect(await as("Other", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
   assert.match((await call(dev, "sandbox_run", { build_id: started.id, command: "ls" })).data.error, /sandbox is provisioning/);
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
 
   // VS Code in the browser: a token-gated URL plus a password that never goes on a command line.
   const editor = (await call(dev, "open_sandbox_editor", { build_id: started.id })).data;
   assert.equal(editor.url, `https://${sbx}-8443.preview.example?_token=t`);
   assert.match(editor.password, /^[A-Za-z0-9_-]{24}$/);
-  const s = boat.sandboxes.get(sbx);
+  const s = sandboxes.sandboxes.get(sbx);
   assert.match(s.files.get("/home/user/.config/mynt-editor.yaml"), new RegExp(`bind-addr: 127\\.0\\.0\\.1:8443\\nauth: password\\npassword: ${editor.password}`));
   const start = s.commands.find((c) => c.command.includes("code-server --config"));
   assert.match(start.command, /code-server\/releases\/download\/v4\.96\.4\//, "a pinned release");
   assert.ok(!s.commands.some((c) => c.command.includes(editor.password)), "the password is never in a command");
 
   // Commands run in the app's directory; output is scrubbed of credentials.
-  const exec = boat.exec;
-  boat.exec = async (id, command, opts) => {
+  const exec = sandboxes.exec;
+  sandboxes.exec = async (id, command, opts) => {
     const r = await exec(id, command, opts);
     return command.includes("npm test") ? { exitCode: 1, stdout: "GITHUB_TOKEN=ghs_abcdefghijklmnopqrstuvwxyz123456 key mynt_test_0123456789abcdef\n1 failing", stderr: "" } : r;
   };
@@ -848,7 +857,7 @@ test("developers work in their build's sandbox: VS Code, commands, files and the
   assert.equal(ran.exit_code, 1);
   assert.doesNotMatch(ran.stdout, /ghs_|mynt_test_0123/);
   assert.match(ran.stdout, /GITHUB_TOKEN=\[redacted\] key \[redacted\]\n1 failing/);
-  boat.exec = exec;
+  sandboxes.exec = exec;
   const last = s.commands.at(-1);
   assert.ok(last.command.startsWith("cd /home/user/workspace/app 2>/dev/null || cd ~; npm test") && last.timeoutSeconds === 300);
 
@@ -869,7 +878,7 @@ test("developers work in their build's sandbox: VS Code, commands, files and the
 
 test("a finished build's sandbox reopens on its branch for the developer, with the coding workspace, until closed", async () => {
   const ctx = await setup();
-  const { boat, as, connect, call } = ctx;
+  const { sandboxes, as, connect, call } = ctx;
   const dev = await connect(await as("Dev", ["developer"]));
   const other = await connect(await as("Other", ["developer"]));
   const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
@@ -880,7 +889,7 @@ test("a finished build's sandbox reopens on its branch for the developer, with t
 
   const first = (await call(dev, "reopen_sandbox", { build_id: started.id, hours: 2 })).data;
   assert.equal(first.ready, false);
-  const box = [...boat.sandboxes.values()].find((s) => s.opts.labels.mynt_role === "box");
+  const box = [...sandboxes.sandboxes.values()].find((s) => s.opts.labels.mynt_role === "box");
   assert.equal(box.opts.ttlSeconds, 7200);
   assert.equal(box.opts.env.GITHUB_TOKEN, "ghs_short_lived");
   assert.equal(box.opts.env.GITHUB_REPOSITORY, "acme/savings-app");
@@ -888,7 +897,7 @@ test("a finished build's sandbox reopens on its branch for the developer, with t
   assert.equal(box.opts.env.MYNT_BRANCH, build.branch);
   assert.match((await call(dev, "sandbox_run", { build_id: started.id, command: "ls" })).data.error, /still starting/);
 
-  boat.ready(box.id);
+  sandboxes.ready(box.id);
   const second = (await call(dev, "reopen_sandbox", { build_id: started.id })).data;
   assert.equal(second.ready, true);
   const clone = box.commands.find((c) => c.command.includes("git clone"));
@@ -922,9 +931,9 @@ test("the agent proxy forwards only an active build's calls, with Mynt's key", a
   const started = (await ctx.call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await ctx.builds.tick();
   const sbx = (await ctx.builds.get(started.id)).sandbox_id;
-  ctx.boat.ready(sbx);
+  ctx.sandboxes.ready(sbx);
   await ctx.builds.tick();
-  const token = JSON.parse(ctx.boat.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
+  const token = JSON.parse(ctx.sandboxes.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
 
   const seen = [];
   const realFetch = globalThis.fetch;
@@ -966,9 +975,9 @@ test("on Vertex AI, the agent's calls carry its token in the path and Mynt signs
   const started = (await ctx.call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await ctx.builds.tick();
   const sbx = (await ctx.builds.get(started.id)).sandbox_id;
-  ctx.boat.ready(sbx);
+  ctx.sandboxes.ready(sbx);
   await ctx.builds.tick();
-  const { token, env } = JSON.parse(ctx.boat.sandboxes.get(sbx).files.get(`${A}/auth.json`));
+  const { token, env } = JSON.parse(ctx.sandboxes.sandboxes.get(sbx).files.get(`${A}/auth.json`));
   assert.deepEqual(env, {
     CLAUDE_CODE_USE_VERTEX: "1",
     CLAUDE_CODE_SKIP_VERTEX_AUTH: "1",
@@ -1294,8 +1303,8 @@ test("a session runner ignores a non-numeric idle setting, skips dot-files and r
   assert.ok(!r.received().some((m) => m.type === "user" && /Never read/.test(m.message.content)));
 });
 
-test("without a boat.dev key builds are disabled cleanly, and agents never connect outside services", async () => {
-  const { as, connect, call } = await setup({ boat: null });
+test("without a sandbox provider key builds are disabled cleanly, and agents never connect outside services", async () => {
+  const { as, connect, call } = await setup({ sandboxes: null });
   const dev = await connect(await as("Dev", ["developer"]));
   assert.match((await call(dev, "start_build", { goal: "Build a savings page please" })).data.error, /aren't enabled/);
   assert.match(workspaceFiles("build-audit")["CLAUDE.md"], /Don't connect any external service or sign in anywhere/);
@@ -1328,21 +1337,21 @@ test("Mynt's Google service account signs a JWT for a cloud-platform token, and 
   assert.equal(sa.projectId, "acme-prod");
 });
 
-test("boat's file API: a file that isn't there yet reads as null, other errors still throw", async () => {
-  const { HttpBoatClient } = await import("../dist/boat.js");
-  const boat = new HttpBoatClient("boat_test", "https://boat.example/api/v1");
+test("boat.dev's file API: a file that isn't there yet reads as null, other errors still throw", async () => {
+  const { BoatDevSandboxes } = await import("../dist/sandbox-providers/boatdev.js");
+  const sandboxes = new BoatDevSandboxes("boat_test", "https://boat.example/api/v1");
   const realFetch = globalThis.fetch;
   let answer;
   globalThis.fetch = async () => new Response(JSON.stringify(answer.body), { status: answer.status });
   try {
     answer = { status: 500, body: { ok: false, message: "ENOENT: no such file or directory, stat '/home/user/mynt/status.json'" } };
-    assert.equal(await boat.readFile("sbx", "/home/user/mynt/status.json"), null);
+    assert.equal(await sandboxes.readFile("sbx", "/home/user/mynt/status.json"), null);
     answer = { status: 404, body: { ok: false, message: "Not found" } };
-    assert.equal(await boat.readFile("sbx", "/home/user/x"), null);
+    assert.equal(await sandboxes.readFile("sbx", "/home/user/x"), null);
     answer = { status: 200, body: { content: "hi" } };
-    assert.equal(await boat.readFile("sbx", "/home/user/x"), "hi");
+    assert.equal(await sandboxes.readFile("sbx", "/home/user/x"), "hi");
     answer = { status: 403, body: { ok: false, message: "Path must resolve under /home/user or /tmp" } };
-    await assert.rejects(boat.readFile("sbx", "/root/x"), /Path must resolve/);
+    await assert.rejects(sandboxes.readFile("sbx", "/root/x"), /Path must resolve/);
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -1354,15 +1363,15 @@ test("a build that fails stops its sandboxes and kills its proxy token", async (
   const started = (await ctx.call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await ctx.builds.tick();
   const sbx = (await ctx.builds.get(started.id)).sandbox_id;
-  ctx.boat.ready(sbx);
+  ctx.sandboxes.ready(sbx);
   await ctx.builds.tick();
-  const token = JSON.parse(ctx.boat.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
-  ctx.boat.finishAgent(sbx, "error_max_budget_usd", 9.9);
+  const token = JSON.parse(ctx.sandboxes.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
+  ctx.sandboxes.finishAgent(sbx, "error_max_budget_usd", 9.9);
   await ctx.builds.tick();
   const b = await ctx.builds.get(started.id);
   assert.equal(b.status, "failed");
   assert.match(b.error, /error_max_budget_usd/);
-  assert.ok(ctx.boat.sandboxes.get(sbx).stopped, "the coding sandbox is stopped");
+  assert.ok(ctx.sandboxes.sandboxes.get(sbx).stopped, "the coding sandbox is stopped");
   assert.equal(await ctx.builds.agentTokenActive(token), false);
 });
 
@@ -1371,15 +1380,15 @@ test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real
   const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
   const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
   const start = async () => (await ctx.call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id })).data;
-  const real = ctx.boat.getSandbox;
-  const failWith = (msg) => { ctx.boat.getSandbox = async () => { throw new Error(msg); }; };
-  const heal = () => { ctx.boat.getSandbox = real; };
+  const real = ctx.sandboxes.getSandbox;
+  const failWith = (msg) => { ctx.sandboxes.getSandbox = async () => { throw new Error(msg); }; };
+  const heal = () => { ctx.sandboxes.getSandbox = real; };
   const outage = 'Freestyle POST /vms/vm-1/exec-await: 503 {"code":"INTERNAL_ERROR"}';
 
   // A passing outage: the build rides it out and carries on.
   const a = await start();
   await ctx.builds.tick(); // sandbox requested
-  ctx.boat.ready((await ctx.builds.get(a.id)).sandbox_id);
+  ctx.sandboxes.ready((await ctx.builds.get(a.id)).sandbox_id);
   failWith(outage);
   await ctx.builds.tick();
   await ctx.builds.tick();
@@ -1394,7 +1403,7 @@ test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real
   BuildService.TRANSIENT_GRACE_MS = 30;
   const b = await start();
   await ctx.builds.tick();
-  ctx.boat.ready((await ctx.builds.get(b.id)).sandbox_id);
+  ctx.sandboxes.ready((await ctx.builds.get(b.id)).sandbox_id);
   failWith(outage);
   await ctx.builds.tick();
   assert.equal((await ctx.builds.get(b.id)).status, "provisioning");
@@ -1408,7 +1417,7 @@ test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real
   // A provider out of allowance fails at once, saying what to do; retrying wouldn't help.
   const q = await start();
   await ctx.builds.tick();
-  ctx.boat.ready((await ctx.builds.get(q.id)).sandbox_id);
+  ctx.sandboxes.ready((await ctx.builds.get(q.id)).sandbox_id);
   failWith('Freestyle POST /vms/vm-1/exec-await: 429 {"code":"LIMIT_EXCEEDED","message":"Cannot start this VM because the allowance for vcpu_time, memory_time has been used."}');
   await ctx.builds.tick();
   heal();
@@ -1418,7 +1427,7 @@ test("a provider's passing 5xx doesn't fail a build; a persistent one, or a real
   // A real error fails at once.
   const c = await start();
   await ctx.builds.tick();
-  ctx.boat.ready((await ctx.builds.get(c.id)).sandbox_id);
+  ctx.sandboxes.ready((await ctx.builds.get(c.id)).sandbox_id);
   failWith('Freestyle POST /vms/vm-1/exec-await: 400 {"code":"BAD_REQUEST"}');
   await ctx.builds.tick();
   heal();
@@ -1477,32 +1486,32 @@ test("the runner waits out a silent background task the agent is waiting on, up 
 
 test("Mynt's audit has its own token, budget and model, isn't charged to the developer, and times out", async () => {
   const ctx = await setup();
-  const { builds, boat, call, pg } = ctx;
+  const { builds, sandboxes, call, pg } = ctx;
   const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
   const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await builds.tick();
-  const coderToken = JSON.parse(boat.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
-  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
-  boat.finishAgent(sbx);
+  const coderToken = JSON.parse(sandboxes.sandboxes.get(sbx).files.get(`${A}/auth.json`)).token;
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
   await builds.tick();
   const vid = (await builds.get(started.id)).verify_sandbox_id;
-  boat.ready(vid);
+  sandboxes.ready(vid);
   await builds.tick();
-  boat.sandboxes.get(vid).checksRunning = false;
-  boat.write(vid, `${V}/before.sha`, "tree\n");
-  boat.write(vid, `${V}/report.json`, { checks: passingChecks });
+  sandboxes.sandboxes.get(vid).checksRunning = false;
+  sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+  sandboxes.write(vid, `${V}/report.json`, { checks: passingChecks });
   await builds.tick(); // auditor started
 
   // Its own token: its own meter key, Mynt's budget, the audit model; the coding agent's token is retired.
-  const auditToken = JSON.parse(boat.sandboxes.get(vid).files.get(`${A}/auth.json`)).token;
+  const auditToken = JSON.parse(sandboxes.sandboxes.get(vid).files.get(`${A}/auth.json`)).token;
   assert.deepEqual(await builds.agentRun(auditToken), { key: `audit:${started.id}`, capUsd: 5, model: "claude-sonnet-5-5" });
   assert.equal(await builds.agentRun(coderToken), null);
 
   // What the audit spends on the model isn't the developer's: its runner reports US$4 so far.
-  boat.write(vid, `${A}/state.json`, { cost_usd: 4, turns: 1, sent: 1, last_subtype: "success", done: false });
+  sandboxes.write(vid, `${A}/state.json`, { cost_usd: 4, turns: 1, sent: 1, last_subtype: "success", done: false });
   const before = (await builds.get(started.id)).cost_usd;
   await builds.tick();
   assert.equal((await builds.get(started.id)).cost_usd, before);
@@ -1523,27 +1532,27 @@ test("by default a build ships on Mynt's own checks, with no agent audit; a fail
   ]) {
     const ctx = await setup({ config: { audit: buildConfigFromEnv({}).audit } });
     assert.equal(ctx.builds.config.audit.mode, "none");
-    const { builds, boat, call } = ctx;
+    const { builds, sandboxes, call } = ctx;
     const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
     const app = (await call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
     assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
     const started = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id, repository: "acme/savings-app" })).data;
     await builds.tick();
     const sbx = (await builds.get(started.id)).sandbox_id;
-    boat.ready(sbx);
+    sandboxes.ready(sbx);
     await builds.tick();
-    boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
-    boat.finishAgent(sbx);
+    sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+    sandboxes.finishAgent(sbx);
     await builds.tick();
     const vid = (await builds.get(started.id)).verify_sandbox_id;
-    boat.ready(vid);
+    sandboxes.ready(vid);
     await builds.tick();
-    boat.sandboxes.get(vid).checksRunning = false;
-    boat.write(vid, `${V}/report.json`, { checks });
+    sandboxes.sandboxes.get(vid).checksRunning = false;
+    sandboxes.write(vid, `${V}/report.json`, { checks });
     await builds.tick(); // decided on the checks alone
     const b = await builds.get(started.id);
     assert.equal(b.status, status, b.error ?? "");
-    assert.ok(!boat.sandboxes.get(vid).files.has(`${A}/auth.json`), "no auditor was started");
+    assert.ok(!sandboxes.sandboxes.get(vid).files.has(`${A}/auth.json`), "no auditor was started");
     if (status === "failed") assert.match(b.error, /Not production-ready: static_scan/);
   }
 });

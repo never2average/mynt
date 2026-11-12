@@ -170,13 +170,13 @@ and expects `200` with `{ "request_id": "<the same>", "status": "ok" | "error", 
 
 ### Coding-agent builds (developers)
 
-A developer can have Mynt **build and ship** one of their experiences. `start_build` runs a coding agent in a fresh [boat.dev](https://boat.dev) sandbox. boat.dev only provides the machine: Mynt installs a pinned Claude Code there and runs it headless with a dollar budget (`--max-budget-usd`, from the build's cap). The agent reaches the model only through Mynt's agent proxy (`/agent`), using a token that works only while its build runs. Mynt calls Claude on Google Cloud Vertex AI with its own service account, or the Anthropic API with its own key, so no credentials ever enter a sandbox. Developers follow the agent's activity live and can steer it: Mynt interrupts the current turn and sends their message as the next one. The agent writes the code against the app's products and their build terms, using a freshly generated SDK and a Mynt **sandbox key** (simulated hand-offs) for end-to-end tests. It reviews its own code for security issues and fixes them, starts a preview, and pushes a branch. The [Maxwell](https://github.com/OnFinance/Maxwell) security audit runs once, in Mynt's independent verification below, never in the agent's sandbox.
+A developer can have Mynt **build and ship** one of their experiences. `start_build` runs a coding agent in a fresh sandbox (boat.dev by default, or Freestyle; see below). The sandbox only provides the machine: Mynt installs a pinned Claude Code there and runs it headless with a dollar budget (`--max-budget-usd`, from the build's cap). The agent reaches the model only through Mynt's agent proxy (`/agent`), using a token that works only while its build runs. Mynt calls Claude on Google Cloud Vertex AI with its own service account, or the Anthropic API with its own key, so no credentials ever enter a sandbox. Developers follow the agent's activity live and can steer it: Mynt interrupts the current turn and sends their message as the next one. The agent writes the code against the app's products and their build terms, using a freshly generated SDK and a Mynt **sandbox key** (simulated hand-offs) for end-to-end tests. It reviews its own code for security issues and fixes them, starts a preview, and pushes a branch. The [Maxwell](https://github.com/OnFinance/Maxwell) security audit runs once, in Mynt's independent verification below, never in the agent's sandbox.
 
 **What the agent builds is a whole app, not just a server:** one Docker Compose project with `api/` (holds the app key, mints client sessions, handles webhooks), `web/` and `mobile/` (Expo React Native by default; Kotlin, Swift or Flutter on request), started from `workspaces/coding-build/templates/mynt-app/` with the build's generated SDKs wired in. The lead agent works with a team of subagents in `workspaces/coding-build/.claude/agents/` (architect, server, web and mobile engineers, a read-only compliance reviewer, QA and release). Their skills are human-written skills found on GitHub by HyDE search (Mynt's own drafts used as the queries) and vendored with their upstream licence and source, plus a short Mynt layer.
 
-**Agent sandboxes on Freestyle.** Builds, the product desk, governance review and the connector run in boat.dev sandboxes by default. With `SANDBOX_PROVIDER=freestyle` (and `FREESTYLE_API_KEY`), the same agents run in Freestyle VMs instead (`src/freestyle-sandboxes.ts`):
+**Agent sandboxes on Freestyle.** Builds, the product desk, governance review and the connector run in boat.dev sandboxes by default. With `SANDBOX_PROVIDER=freestyle` (and `FREESTYLE_API_KEY`), the same agents run in Freestyle VMs instead (`src/sandbox-providers/freestyle.ts`, behind the `SandboxHost` interface in `src/sandbox-host.ts`):
 - each sandbox is a VM with the agents' own `user` account and the sandbox env in a 0600 file;
-- previews and source downloads are served at unguessable `style.dev` names, so the link is the credential, as with boat's token-gated links;
+- previews and source downloads are served at unguessable `style.dev` names, so the link is the credential, as with boat.dev's token-gated links;
 - stopping a sandbox deletes the VM;
 - machine spend counts toward the caps at `FREESTYLE_USD_PER_HOUR`.
 
@@ -204,7 +204,7 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 - A session that has been idle (nothing running, nothing waiting) for `BUILD_SESSION_IDLE_MS` (default 15 minutes; from 1 minute to 24 hours) finishes the same way, so its work is shipped, not lost.
 - Mynt also finishes a session itself, so neither the time limit nor the cap ends it with the work unshipped:
   - 30 minutes before its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours, counted from when Mynt asked for the sandbox);
-  - once it has spent 70% of its cap, or earlier on a small cap, so that at least US$2 is left for the finish turn. That US$2 is an estimate of one finish turn, not a measured figure.
+  - once it has spent 70% of its cap, or earlier on a small cap, so that at least US$2 is left for the finish turn. That US$2 is an estimate of one finish turn, not a measured figure. A session build therefore needs a cap above US$2; `start_build` refuses a smaller one.
 - A finish is recorded first and then put in the agent's inbox. If the sandbox can't be reached at that moment, the finish still stands and Mynt delivers it on its next ticks.
 - `steer_build`'s `steered: true` means Mynt queued the message, not that the agent read it. A message held back because the session was finishing shows on the timeline as not delivered.
 - The sandbox is billed while it waits, so idle time counts against the build's cap.
@@ -560,7 +560,7 @@ Work is split by what it needs:
 
 `test_product` adds an advisory `feasibility` check from the latest report for the current term sheet, and reports stale when the terms changed. `get_product_terms` shows the term sheet and its analysis; `list_desk_jobs`, `get_desk_job` and `stop_desk_job` track the work.
 
-**Configuration:** a boat.dev key and the GitHub App, plus a model backend for agent tasks. Optional: `DESK_JOB_CAP_USD` (per agent task, default 5), `DESK_RUN_CAP_USD` (per code run, default 1) and `DESK_MONTHLY_CAP_USD` (per firm, default 50; unfinished jobs count at their cap).
+**Configuration:** a sandbox provider key and the GitHub App, plus a model backend for agent tasks. Optional: `DESK_JOB_CAP_USD` (per agent task, default 5), `DESK_RUN_CAP_USD` (per code run, default 1) and `DESK_MONTHLY_CAP_USD` (per firm, default 50; unfinished jobs count at their cap).
 
 **Algorithm explorations.** A product's decision algorithms (the eligibility, underwriting, limit, pricing and fraud-screening entries in its `core_algorithms`) can be improved by experiment. `start_exploration` names one algorithm, an objective to maximise (`net_margin`, `approved_volume`, …) and its constraints: a loss-rate ceiling, an APR cap, a minimum adverse-impact ratio (default 0.8), and reason codes on every decline.
 - **Synthetic data.** Mynt generates applicants from the product, deterministically and from a seed (`src/explore-data.ts`). It makes a dev set with outcomes for the explorers, and a holdout only Mynt sees. Its assumptions are saved on the job.
@@ -621,7 +621,7 @@ workspaces/governance-review/
   - `get_review_case` shows the dossier: each item's status, verified and unverified evidence, what was searched, the agent's notes, and its suggestions for improving the workspace.
   - `decide_review_case` records the decision in the audit log next to Mynt's recommendation. For a licence, verify or reject sets its review status, as `review_license` does.
 
-**Configuration:** a boat.dev key, `PUBLIC_URL` and a model backend. Optional: `REVIEW_AUTO_OPEN`, `REVIEW_CASE_CAP_USD` (default 3) and `REVIEW_MONTHLY_CAP_USD` (default 60).
+**Configuration:** a sandbox provider key, `PUBLIC_URL` and a model backend. Optional: `REVIEW_AUTO_OPEN`, `REVIEW_CASE_CAP_USD` (default 3) and `REVIEW_MONTHLY_CAP_USD` (default 60).
 
 ### The connector: business development by an agent
 
@@ -647,7 +647,7 @@ Everything the connector does to a person goes through one path, and Mynt enforc
 
 Anyone signed in can talk to the connector from their MCP client: `connect_with_mynt` (what you do and who you'd like to meet), `connect_refer`, and `connect_my_intros` / `connect_answer_intro`. Admins have `bd_overview`, `bd_prospects`, `bd_run_now`, `bd_suppress` and the kill switch `bd_pause`, which also stops a running agent.
 
-**Configuration:** `BD_ENABLED=1`, on top of what builds need (a boat.dev key, `PUBLIC_URL` and a model backend). Optional: `BD_DAILY_CAP` (default 40), `BD_MAX_UNANSWERED` (3), `BD_FOLLOW_UP_GAP_DAYS` (3), `BD_RUN_CAP_USD` (3), `BD_MONTHLY_CAP_USD` (60), `BD_RUN_EVERY_HOURS` (6) and `BD_SENDER_NAME`. Sending providers for email, WhatsApp and voice plug into `ChannelSender`. Until a channel has one, its messages are kept as drafts for admins to review.
+**Configuration:** `BD_ENABLED=1`, on top of what builds need (a sandbox provider key, `PUBLIC_URL` and a model backend). Optional: `BD_DAILY_CAP` (default 40), `BD_MAX_UNANSWERED` (3), `BD_FOLLOW_UP_GAP_DAYS` (3), `BD_RUN_CAP_USD` (3), `BD_MONTHLY_CAP_USD` (60), `BD_RUN_EVERY_HOURS` (6) and `BD_SENDER_NAME`. Sending providers for email, WhatsApp and voice plug into `ChannelSender`. Until a channel has one, its messages are kept as drafts for admins to review.
 
 ### SDKs and experiences (developers)
 

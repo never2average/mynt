@@ -7,7 +7,7 @@ import { CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { accessStatus, productEntity } from "./access.js";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, redact, shellQuote } from "./boxes.js";
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
@@ -22,7 +22,7 @@ import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
 
 // Coding-agent builds: a developer asks Mynt to build or ship one of their experiences; Mynt runs a coding
-// agent (Claude Code, run by Mynt itself) in a boat.dev sandbox that writes the code, passes a Maxwell security audit and a production-
+// agent (Claude Code, run by Mynt itself) in a sandbox that writes the code, passes a Maxwell security audit and a production-
 // readiness checklist, deploys a preview and opens a pull request. Developers track every step.
 
 export const BUILD_STATUSES = [
@@ -316,7 +316,7 @@ const MAX_SOURCES_BYTES = 24 * 1024 * 1024;
 // A Solana program is an ELF file.
 const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 
-// Files the agent reads and writes inside the sandbox. boat.dev's file API only accepts paths under
+// Files the agent reads and writes inside the sandbox. A sandbox host's file API may only accept paths under
 // the sandbox user's home (/home/user) or /tmp.
 // The coding agent works in Mynt's workspaces/coding-build folder; its job files live under job/ there.
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
@@ -366,20 +366,20 @@ export class BuildService {
   private constructor(
     private readonly db: Db,
     private readonly store: Store,
-    readonly boat: BoatClient | null,
+    readonly sandboxes: SandboxHost | null,
     readonly repos: RepoAccess | null,
     readonly config: BuildConfig,
     readonly solanaEnv: SolanaBuildEnv,
   ) {}
 
-  static async open(db: Db, store: Store, boat: BoatClient | null, repos: RepoAccess | null, config: BuildConfig) {
+  static async open(db: Db, store: Store, sandboxes: SandboxHost | null, repos: RepoAccess | null, config: BuildConfig) {
     await db.exec(TABLES);
-    const solanaEnv = await SolanaBuildEnv.open(db, boat, { enabled: config.solanaSnapshot ?? true, sandboxType: config.sandboxType, maxAgeDays: config.solanaSnapshotMaxAgeDays });
-    return new BuildService(db, store, boat, repos, config, solanaEnv);
+    const solanaEnv = await SolanaBuildEnv.open(db, sandboxes, { enabled: config.solanaSnapshot ?? true, sandboxType: config.sandboxType, maxAgeDays: config.solanaSnapshotMaxAgeDays });
+    return new BuildService(db, store, sandboxes, repos, config, solanaEnv);
   }
 
   get enabled() {
-    return this.boat !== null && !!this.config.agentBackend && !!this.config.publicUrl;
+    return this.sandboxes !== null && !!this.config.agentBackend && !!this.config.publicUrl;
   }
 
   // ---- the agent (Claude Code, run by Mynt in the sandbox) ----
@@ -410,7 +410,7 @@ export class BuildService {
   private async startAuditor(b: Build, sandbox: string, o: { prompt: string; workspace: string; jobFiles: Record<string, string> }) {
     const token = `mynt_agent_${randomBytes(24).toString("base64url")}`;
     await this.db.query("UPDATE financial_products.build_runs SET agent_token_hash = NULL, audit_token_hash = $2, audit_started_at = now() WHERE id = $1", [b.id, hashToken(token)]);
-    return launchAgent(this.boat!, this.config, sandbox, { ...o, budgetUsd: this.config.audit.capUsd, model: this.config.audit.model, token });
+    return launchAgent(this.sandboxes!, this.config, sandbox, { ...o, budgetUsd: this.config.audit.capUsd, model: this.config.audit.model, token });
   }
 
   private async metered(id: string) {
@@ -419,11 +419,11 @@ export class BuildService {
 
   // Claude Code in one of the build's sandboxes, with a fresh proxy token for the build.
   private async startAgent(b: Build, sandbox: string, o: { prompt: string; budgetUsd: number; workspace: string; jobFiles: Record<string, string> }) {
-    return launchAgent(this.boat!, this.config, sandbox, { ...o, token: await this.mintAgentToken(b.id) });
+    return launchAgent(this.sandboxes!, this.config, sandbox, { ...o, token: await this.mintAgentToken(b.id) });
   }
 
   private agentState(sandbox: string, processId: string) {
-    return agentState(this.boat!, sandbox, processId);
+    return agentState(this.sandboxes!, sandbox, processId);
   }
 
   // The pinned Solana toolchain, installed in the background (a few minutes, about 2 GB); the agents wait for
@@ -431,30 +431,30 @@ export class BuildService {
   // hash Mynt kept first (holding the env file back until it passes); the installer then finds it complete, or
   // (when the check wiped it, or ended any other way and Mynt's wipe ran) installs it afresh.
   private async installSolana(sandbox: string, env?: SolanaEnvSnapshot) {
-    await this.boat!.writeFile(sandbox, SOLANA_INSTALLER, SOLANA_TOOLCHAIN_SCRIPT);
+    await this.sandboxes!.writeFile(sandbox, SOLANA_INSTALLER, SOLANA_TOOLCHAIN_SCRIPT);
     let check = "";
     if (env) {
       await this.solanaEnv.writeCheck(sandbox);
       check = this.solanaEnv.backgroundCheck(env);
     }
-    await this.boat!.exec(sandbox, `${check}bash ${SOLANA_INSTALLER} > /home/user/.mynt-solana-install.log 2>&1`, { detached: true });
+    await this.sandboxes!.exec(sandbox, `${check}bash ${SOLANA_INSTALLER} > /home/user/.mynt-solana-install.log 2>&1`, { detached: true });
   }
 
   // A Solana sandbox: booted from the pre-built environment when there is one (a snapshot that won't boot is
   // dropped, and the sandbox starts plain; a transient host error is retried by the worker instead), else plain.
   // Returns the environment it booted from.
-  private async solanaSandbox(opts: Parameters<BoatClient["createSandbox"]>[0], solana: boolean) {
+  private async solanaSandbox(opts: Parameters<SandboxHost["createSandbox"]>[0], solana: boolean) {
     const env = solana ? await this.solanaEnv.ready().catch(() => null) : null;
     if (env) {
       try {
-        const sandbox = await this.boat!.createSandbox({ ...opts, snapshot: env.snapshot_id });
+        const sandbox = await this.sandboxes!.createSandbox({ ...opts, snapshot: env.snapshot_id });
         await this.solanaEnv.used(env);
         return { sandbox, env };
       } catch (e) {
         await this.solanaEnv.bootFailed(env, e);
       }
     }
-    return { sandbox: await this.boat!.createSandbox(opts), env: undefined };
+    return { sandbox: await this.sandboxes!.createSandbox(opts), env: undefined };
   }
 
   // ---- persistence ----
@@ -558,6 +558,12 @@ export class BuildService {
       opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: prev.repository, solana: opts.solana ?? (prev.solana || undefined) };
     }
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
+    // A session finishes itself while SESSION_FINISH_RESERVE_USD is still left for shipping: a cap no bigger than that
+    // would finish it as soon as it starts.
+    if (opts.mode === "session" && cap <= SESSION_FINISH_RESERVE_USD)
+      throw new Error(
+        `A session build needs a cap above US$${SESSION_FINISH_RESERVE_USD} (it keeps that much to ship the work when it finishes); start it with a bigger cap_usd, or as a one-off build`,
+      );
     const spent = await this.monthSpend(developer.id);
     // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
     // what's left (and how much a smaller cap may be).
@@ -660,8 +666,8 @@ export class BuildService {
   private async toInbox(sandbox: string, item: unknown, suffix = "") {
     const name = `${Date.now()}-${randomUUID().slice(0, 8)}${suffix}.json`;
     const tmp = `${AGENT_DIR}/inbox/.${name}`;
-    await this.boat!.writeFile(sandbox, tmp, JSON.stringify(item));
-    const r = await this.boat!.exec(sandbox, `mv -f ${shellQuote(tmp)} ${shellQuote(`${AGENT_DIR}/inbox/${name}`)}`, { timeoutSeconds: 30 });
+    await this.sandboxes!.writeFile(sandbox, tmp, JSON.stringify(item));
+    const r = await this.sandboxes!.exec(sandbox, `mv -f ${shellQuote(tmp)} ${shellQuote(`${AGENT_DIR}/inbox/${name}`)}`, { timeoutSeconds: 30 });
     if (r.exitCode !== 0) throw new Error("Couldn't deliver the message to the agent");
   }
 
@@ -675,10 +681,10 @@ export class BuildService {
     await this.retireKey(build);
     // What the agent did last, read before its sandbox goes, briefly: a stuck sandbox mustn't hold up a stop.
     if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, { maxChunks: 4, timeoutSeconds: 10, toEnd: true });
-    if (build.sandbox_id && this.boat) {
-      await this.boat.stop(build.sandbox_id).catch(() => {});
+    if (build.sandbox_id && this.sandboxes) {
+      await this.sandboxes.stop(build.sandbox_id).catch(() => {});
     }
-    if (build.verify_sandbox_id && this.boat) await this.boat.stop(build.verify_sandbox_id).catch(() => {});
+    if (build.verify_sandbox_id && this.sandboxes) await this.sandboxes.stop(build.verify_sandbox_id).catch(() => {});
     await this.update(build.id, { status, error: reason });
     await this.event(build.id, status, reason);
     return (await this.get(build.id))!;
@@ -725,13 +731,13 @@ export class BuildService {
   // that stores the rows, so two readers never store the same lines. What the agent says is its own account: shown
   // to the developer, never trusted.
   async collectActivity(b: Build, maxChunks = ACTIVITY_CHUNKS_PER_TICK, timeoutSeconds = 60): Promise<{ complete: boolean; offset: number } | null> {
-    if (!this.boat || !b.sandbox_id) return null;
+    if (!this.sandboxes || !b.sandbox_id) return null;
     let offset = b.activity_offset;
     for (let i = 0; i < maxChunks; i++) {
       // From one byte before the offset, so the first byte says whether the offset is at the start of a line.
       const from = Math.max(0, offset - 1);
       const want = ACTIVITY_CHUNK + (offset > 0 ? 1 : 0);
-      const r = await this.boat.exec(
+      const r = await this.sandboxes.exec(
         b.sandbox_id,
         `f=${AGENT_DIR}/agent.jsonl; if [ -f "$f" ]; then tail -c +${from + 1} "$f" | head -c ${want} | base64 -w0; fi`,
         { timeoutSeconds },
@@ -795,8 +801,8 @@ export class BuildService {
   private async collectActivitySafely(b: Build, opts: { maxChunks?: number; timeoutSeconds?: number; toEnd?: boolean } = {}) {
     try {
       const r = await this.collectActivity(b, opts.maxChunks, opts.timeoutSeconds);
-      if (r && !r.complete && opts.toEnd && this.boat && b.sandbox_id) {
-        const size = await this.boat.exec(b.sandbox_id, `stat -c %s ${AGENT_DIR}/agent.jsonl 2>/dev/null || echo 0`, { timeoutSeconds: opts.timeoutSeconds ?? 30 });
+      if (r && !r.complete && opts.toEnd && this.sandboxes && b.sandbox_id) {
+        const size = await this.sandboxes.exec(b.sandbox_id, `stat -c %s ${AGENT_DIR}/agent.jsonl 2>/dev/null || echo 0`, { timeoutSeconds: opts.timeoutSeconds ?? 30 });
         const left = Math.max(0, Number(size.stdout.trim()) - r.offset);
         if (left > 0) console.error(`Build ${b.id} activity: ${left} bytes of the agent's log were left unread`);
       }
@@ -808,13 +814,13 @@ export class BuildService {
   // The build's box: the sandbox the coding agents work in, for as long as it's up (during the build and, once
   // it has shipped, while its preview runs). Everything a developer does there goes on the build's timeline.
   private async box(build: Build): Promise<string> {
-    if (this.boat && build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) {
+    if (this.sandboxes && build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) {
       if (!(await this.prepareBox(build))) throw new Error("The reopened sandbox is still starting; try again in a few seconds");
       return build.box_sandbox_id;
     }
-    if (!this.boat || !build.sandbox_id) throw new Error("This build has no sandbox");
+    if (!this.sandboxes || !build.sandbox_id) throw new Error("This build has no sandbox");
     if (build.status === "stopped" || build.status === "over_budget") throw new Error(`The build is ${build.status}; its sandbox is gone (reopen_sandbox starts a fresh one on its branch)`);
-    const s = await this.boat.getSandbox(build.sandbox_id);
+    const s = await this.sandboxes.getSandbox(build.sandbox_id);
     if (!["ready", "idle", "running", "provisioned"].includes(s.state)) throw new Error(`The build's sandbox is ${s.state}`);
     return build.sandbox_id;
   }
@@ -823,7 +829,7 @@ export class BuildService {
     const id = await this.box(build);
     const t = Math.max(1, Math.min(BOX_TIMEOUT_MAX, Math.floor(timeoutSeconds)));
     await this.event(build.id, "box", "The developer ran a command in the sandbox", { command });
-    const r = await this.boat!.exec(id, `cd ${WORKSPACE} 2>/dev/null || cd ~; ${command}`, { timeoutSeconds: t });
+    const r = await this.sandboxes!.exec(id, `cd ${WORKSPACE} 2>/dev/null || cd ~; ${command}`, { timeoutSeconds: t });
     return { exit_code: r.exitCode, stdout: boxOutput(r.stdout), stderr: boxOutput(r.stderr) };
   }
 
@@ -831,7 +837,7 @@ export class BuildService {
   async boxFiles(build: Build, path = ".") {
     const id = await this.box(build);
     const target = path.startsWith("/") ? path : `${WORKSPACE}/${path}`;
-    const r = await this.boat!.exec(id, `if [ -d ${shellQuote(target)} ]; then echo DIR; ls -la ${shellQuote(target)}; else echo FILE; head -c ${BOX_OUTPUT_LIMIT} ${shellQuote(target)}; fi`, { timeoutSeconds: 30 });
+    const r = await this.sandboxes!.exec(id, `if [ -d ${shellQuote(target)} ]; then echo DIR; ls -la ${shellQuote(target)}; else echo FILE; head -c ${BOX_OUTPUT_LIMIT} ${shellQuote(target)}; fi`, { timeoutSeconds: 30 });
     if (r.exitCode !== 0) return { path: target, error: boxOutput(r.stderr) || "Not found" };
     const [kind, ...rest] = r.stdout.split("\n");
     return kind === "DIR" ? { path: target, listing: boxOutput(rest.join("\n")) } : { path: target, content: boxOutput(rest.join("\n")) };
@@ -840,7 +846,7 @@ export class BuildService {
   // What the agents changed so far: git status and diff of the app.
   async boxDiff(build: Build) {
     const id = await this.box(build);
-    const r = await this.boat!.exec(id, `cd ${WORKSPACE} && git status --short && echo ---- && git diff HEAD --stat && echo ---- && git diff HEAD`, { timeoutSeconds: 60 });
+    const r = await this.sandboxes!.exec(id, `cd ${WORKSPACE} && git status --short && echo ---- && git diff HEAD --stat && echo ---- && git diff HEAD`, { timeoutSeconds: 60 });
     return { exit_code: r.exitCode, diff: boxOutput(r.stdout), stderr: boxOutput(r.stderr) };
   }
 
@@ -848,10 +854,10 @@ export class BuildService {
   async openEditor(build: Build) {
     const id = await this.box(build);
     const password = randomBytes(18).toString("base64url");
-    await this.boat!.writeFile(id, EDITOR_CONFIG, editorConfig(password));
-    const r = await this.boat!.exec(id, editorCommand(WORKSPACE), { timeoutSeconds: 300 });
+    await this.sandboxes!.writeFile(id, EDITOR_CONFIG, editorConfig(password));
+    const r = await this.sandboxes!.exec(id, editorCommand(WORKSPACE), { timeoutSeconds: 300 });
     if (r.exitCode !== 0) throw new Error(`The editor didn't start: ${boxOutput(r.stderr).slice(-500)}`);
-    const { url } = await this.boat!.host(id, EDITOR_PORT);
+    const { url } = await this.sandboxes!.host(id, EDITOR_PORT);
     await this.event(build.id, "box", "The developer opened the editor");
     return { url, password, note: "Opens VS Code on the app the agents are building, with a terminal. Edits land in the same working tree; tell the agents with steer_build." };
   }
@@ -859,7 +865,7 @@ export class BuildService {
   // A fresh sandbox on a finished build's pushed branch: the app checked out where the agents had it, the coding
   // team's workspace beside it, a short-lived GitHub token to push with, for a few hours.
   async reopen(build: Build, hours = 4) {
-    if (!this.boat) throw new Error("Sandboxes aren't configured on this deployment");
+    if (!this.sandboxes) throw new Error("Sandboxes aren't configured on this deployment");
     if (!TERMINAL.includes(build.status)) throw new Error(`The build is still ${build.status}: use its own sandbox`);
     if (!build.repository || !build.branch || !this.repos) throw new Error("This build pushed no branch, so there's nothing to reopen");
     if (build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) return { sandbox: "already open", until: build.box_until };
@@ -867,7 +873,7 @@ export class BuildService {
     if (!installation) throw new Error(`Mynt's GitHub App can't reach ${build.repository} any more`);
     const { token } = await this.repos.tokenFor(build.repository, installation);
     const ttl = Math.round(Math.max(1, Math.min(8, hours)) * 3600);
-    const s = await this.boat.createSandbox({
+    const s = await this.sandboxes.createSandbox({
       name: `mynt-box-${build.id}`,
       type: this.config.sandboxType,
       ttlSeconds: ttl,
@@ -884,17 +890,17 @@ export class BuildService {
   // URL or the remote), and the coding workspace written beside it.
   private async prepareBox(build: Build) {
     const id = build.box_sandbox_id!;
-    const s = await this.boat!.getSandbox(id);
+    const s = await this.sandboxes!.getSandbox(id);
     if (!["ready", "idle", "running", "provisioned"].includes(s.state)) return false;
-    if ((await this.boat!.readFile(id, `${OUT}/box.ready`)) !== null) return true;
+    if ((await this.sandboxes!.readFile(id, `${OUT}/box.ready`)) !== null) return true;
     const helper = `!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f`;
-    const r = await this.boat!.exec(
+    const r = await this.sandboxes!.exec(
       id,
       `set -e; git config --global credential.helper ${shellQuote(helper)}; git config --global user.name "Mynt"; git config --global user.email "builds@mynt.invalid"; rm -rf ${WORKSPACE}; git clone --quiet --branch "$MYNT_BRANCH" "https://github.com/$GITHUB_REPOSITORY.git" ${WORKSPACE}; mkdir -p ${OUT}; touch ${OUT}/box.ready; git -C ${WORKSPACE} log --oneline -1`,
       { timeoutSeconds: 300 },
     );
     if (r.exitCode !== 0) throw new Error(`Couldn't check out ${build.branch}: ${boxOutput(r.stderr).slice(-300)}`);
-    for (const [path, content] of Object.entries(workspaceFiles("coding-build"))) await this.boat!.writeFile(id, `${workspaceCwd("coding-build")}/${path}`, content);
+    for (const [path, content] of Object.entries(workspaceFiles("coding-build"))) await this.sandboxes!.writeFile(id, `${workspaceCwd("coding-build")}/${path}`, content);
     if (build.solana) await this.installSolana(id);
     return true;
   }
@@ -906,7 +912,7 @@ export class BuildService {
 
   async closeBox(build: Build) {
     if (!build.box_sandbox_id) throw new Error("No reopened sandbox for this build");
-    if (this.boat) await this.boat.stop(build.box_sandbox_id).catch(() => undefined);
+    if (this.sandboxes) await this.sandboxes.stop(build.box_sandbox_id).catch(() => undefined);
     await this.db.query("UPDATE financial_products.build_runs SET box_sandbox_id = NULL, box_until = NULL, updated_at = now() WHERE id = $1", [build.id]);
     await this.event(build.id, "box", "The developer closed the reopened sandbox");
     return { closed: true };
@@ -914,7 +920,7 @@ export class BuildService {
 
   // Background loop; tests call tick() directly.
   startWorker(intervalMs = Number(process.env.BUILD_POLL_MS ?? 5000)) {
-    if (this.timer || !this.boat) return;
+    if (this.timer || !this.sandboxes) return;
     this.timer = serialLoop(() => this.tick(), intervalMs, "build worker");
   }
 
@@ -929,7 +935,7 @@ export class BuildService {
   private transient = new GraceTracker(() => BuildService.TRANSIENT_GRACE_MS);
 
   async tick() {
-    if (!this.boat) return;
+    if (!this.sandboxes) return;
     await this.solanaEnv.tick().catch((e) => console.error(`Solana build environment: ${(e as Error).message}`));
     const active = (await this.db.query(`SELECT * FROM financial_products.build_runs WHERE status <> ALL($1) ORDER BY created_at`, [TERMINAL])).rows as Row[];
     for (const r of active) {
@@ -947,7 +953,7 @@ export class BuildService {
         // What the agent did up to the failure, read before its sandbox goes.
         if (AGENT_PHASES.includes(current.status)) await this.collectActivitySafely(current, { maxChunks: ACTIVITY_CHUNKS_AT_END, timeoutSeconds: 30, toEnd: true });
         // Don't leave a failed build's machines running until their TTL.
-        for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.boat.stop(id).catch(() => {});
+        for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.sandboxes.stop(id).catch(() => {});
         const error = failureMessage(e);
         await this.update(build.id, { status: "failed", error });
         await this.event(build.id, "failed", error);
@@ -956,7 +962,7 @@ export class BuildService {
   }
 
   private async advance(b: Build) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     if (b.status === "queued") {
       const env: Record<string, string> = { MYNT_BUILD_ID: b.id };
       // A sandbox key for the app, so the agent tests against Mynt's sandbox (simulated hand-offs).
@@ -993,7 +999,7 @@ export class BuildService {
     }
 
     if (b.status === "provisioning") {
-      const s = await boat.getSandbox(b.sandbox_id!);
+      const s = await sandboxes.getSandbox(b.sandbox_id!);
       if (s.state === "error" || s.state === "cancelled") throw new Error(`Sandbox ${s.state}: ${s.error ?? "no detail"}`);
       if (!["ready", "idle", "running"].includes(s.state)) return;
       const jobFiles: Record<string, string> = { "job/build.json": JSON.stringify(await this.spec(b), null, 2) };
@@ -1027,13 +1033,13 @@ export class BuildService {
     const agent = await this.agentState(b.sandbox_id!, b.prompt_id!);
     // The model spend is the larger of what the agent reports and what the proxy metered (which also sees any
     // nested runs the agent started).
-    const cost = (await boat.costDollars(b.sandbox_id!)) + Math.max(agent.cost, await this.metered(b.id));
+    const cost = (await sandboxes.costDollars(b.sandbox_id!)) + Math.max(agent.cost, await this.metered(b.id));
     if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");
       return;
     }
-    const status = parseJson<{ phase?: string; message?: string }>(await boat.readFile(b.sandbox_id!, FILES.status));
+    const status = parseJson<{ phase?: string; message?: string }>(await sandboxes.readFile(b.sandbox_id!, FILES.status));
     const phase = status?.phase as BuildStatus | undefined;
     if (phase && AGENT_PHASES.includes(phase) && (phase !== b.status || status?.message !== b.phase_message)) {
       await this.update(b.id, { status: phase, phase_message: status?.message ?? null });
@@ -1050,17 +1056,17 @@ export class BuildService {
   // The coding agent doesn't grade its own work: Mynt packages the source and verifies it in a fresh
   // sandbox the agent never touched. The agent's report is kept, but only as advice.
   private async startVerification(b: Build) {
-    const boat = this.boat!;
-    const report = parseJson<AgentResult>(await boat.readFile(b.sandbox_id!, FILES.result));
-    const pack = await boat.exec(
+    const sandboxes = this.sandboxes!;
+    const report = parseJson<AgentResult>(await sandboxes.readFile(b.sandbox_id!, FILES.result));
+    const pack = await sandboxes.exec(
       b.sandbox_id!,
       `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=./node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
       { timeoutSeconds: 300 },
     );
     const sha = pack.stdout.trim().split(/\s+/)[0];
     if (pack.exitCode !== 0 || !/^[0-9a-f]{64}$/.test(sha ?? "")) throw new Error(`Couldn't package the build's source: ${pack.stderr.slice(0, 300)}`);
-    // boat signs download URLs for at most an hour; the verifier fetches the source as soon as it starts.
-    const url = await boat.downloadUrl(b.sandbox_id!, `${OUT}/app.tgz`, 3600);
+    // Sandbox hosts sign download URLs for at most an hour; the verifier fetches the source as soon as it starts.
+    const url = await sandboxes.downloadUrl(b.sandbox_id!, `${OUT}/app.tgz`, 3600);
     if (!/^https:\/\/[^\s'"`$\\]+$/.test(url)) throw new Error("Unexpected source URL from the sandbox host");
     // No secrets: the verifier needs none.
     const { sandbox: v, env: base } = await this.solanaSandbox(
@@ -1081,13 +1087,13 @@ export class BuildService {
   }
 
   private async verify(b: Build) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     const vid = b.verify_sandbox_id!;
     // Both sandboxes' machine time, plus what the coding agent spent on the model. Mynt's audit is on Mynt.
-    const coder = parseJson<AgentState>(await boat.readFile(b.sandbox_id!, `${AGENT_DIR}/state.json`));
+    const coder = parseJson<AgentState>(await sandboxes.readFile(b.sandbox_id!, `${AGENT_DIR}/state.json`));
     const auditor = b.verify_step === "audit" ? await this.agentState(vid, b.verify_prompt_id!) : null;
     const cost =
-      (await boat.costDollars(b.sandbox_id!)) + (await boat.costDollars(vid)) + Math.max(coder?.cost_usd ?? 0, await this.metered(b.id));
+      (await sandboxes.costDollars(b.sandbox_id!)) + (await sandboxes.costDollars(vid)) + Math.max(coder?.cost_usd ?? 0, await this.metered(b.id));
     if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");
@@ -1095,7 +1101,7 @@ export class BuildService {
     }
 
     if (b.verify_step === "provisioning") {
-      const state = (await boat.getSandbox(vid)).state;
+      const state = (await sandboxes.getSandbox(vid)).state;
       if (state === "error" || state === "cancelled") throw new Error(`Verification sandbox ${state}`);
       if (!["ready", "idle", "running"].includes(state)) return;
       // Booted from the pre-built environment: checked against the hash Mynt kept before anything else runs. It is
@@ -1106,19 +1112,19 @@ export class BuildService {
       if (base) {
         await this.solanaEnv.writeCheck(vid);
         const started = Date.now();
-        const c = await boat.exec(vid, this.solanaEnv.checkCommand(base), { timeoutSeconds: 300 }).catch((e) => ({ exitCode: null, stdout: "", stderr: (e as Error).message }));
+        const c = await sandboxes.exec(vid, this.solanaEnv.checkCommand(base), { timeoutSeconds: 300 }).catch((e) => ({ exitCode: null, stdout: "", stderr: (e as Error).message }));
         const ok = c.exitCode === 0;
         let wiped = c.exitCode === 3;
         if (!ok && !wiped) {
-          const w = await boat.exec(vid, SOLANA_ENV_WIPE_COMMAND, { timeoutSeconds: 120 }).catch(() => null);
+          const w = await sandboxes.exec(vid, SOLANA_ENV_WIPE_COMMAND, { timeoutSeconds: 120 }).catch(() => null);
           wiped = w?.exitCode === 0 && /^wiped$/m.test(w.stdout);
         }
         const data = { solana_environment: base.key, verified: ok, check_exit: c.exitCode, check_seconds: Math.round((Date.now() - started) / 1000) };
         if (!ok) await this.solanaEnv.invalidate(base, `a sandbox booted from it failed its check (exit ${c.exitCode ?? "none"})`);
         if (!ok && !wiped) {
           // Neither matched nor confirmed wiped: this machine isn't used. A plain one replaces it.
-          await boat.stop(vid).catch(() => undefined);
-          const fresh = await boat.createSandbox({ name: `mynt-verify-${b.id}-plain`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_build: b.id, mynt_role: "verify" }, env: {} });
+          await sandboxes.stop(vid).catch(() => undefined);
+          const fresh = await sandboxes.createSandbox({ name: `mynt-verify-${b.id}-plain`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_build: b.id, mynt_role: "verify" }, env: {} });
           await this.update(b.id, { verify_sandbox_id: fresh.id, solana_env: { ...b.solana_env, verify: undefined } });
           await this.event(b.id, "verifying", "The pre-built Solana environment couldn't be checked or wiped; verifying in a plain sandbox instead", { ...data, verify_sandbox_id: fresh.id });
           return;
@@ -1134,22 +1140,22 @@ export class BuildService {
       // Mynt fetches the source in the clean sandbox and reads, itself, whether the hash-verified archive has an
       // Anchor workspace. If it does, Mynt's Solana build runs first, on its own, so the programs are read back
       // before any of the app's code runs on the machine; then the checks.
-      const fetched = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --fetch '${b.source_url}' ${b.source_sha256}`, { timeoutSeconds: 300 });
+      const fetched = await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --fetch '${b.source_url}' ${b.source_sha256}`, { timeoutSeconds: 300 });
       if (!fetched.stdout.includes("anchor-workspace")) {
         await this.startChecks(b, vid, "Running Mynt's checks: tests, lint and types, secrets, dependencies, SBOM, disclosures");
         return;
       }
-      const run = await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --solana-build ${b.source_sha256}`, { detached: true });
+      const run = await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --solana-build ${b.source_sha256}`, { detached: true });
       await this.update(b.id, { verify_step: "solana_build", verify_process_id: run.processId ?? null, solana: true });
       await this.event(b.id, "verifying", "Building the Solana programs verifiably, in a container, before the checks");
       return;
     }
 
     if (b.verify_step === "solana_build") {
-      if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
+      if ((await sandboxes.commandStatus(vid, b.verify_process_id!)).running) return;
       // Nothing may outlive the build: every container and every process of the sandbox's user goes before Mynt
       // reads the programs back.
-      await boat.exec(vid, "docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1; pkill -KILL -u user >/dev/null 2>&1; true", { timeoutSeconds: 60 }).catch(() => undefined);
+      await sandboxes.exec(vid, "docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1; pkill -KILL -u user >/dev/null 2>&1; true", { timeoutSeconds: 60 }).catch(() => undefined);
       await this.collectPrograms(b, vid);
       // Mynt's scripts and data, written again: nothing from the build phase may have edited them.
       await this.writeVerifier(b, vid);
@@ -1158,11 +1164,11 @@ export class BuildService {
     }
 
     if (b.verify_step === "checks") {
-      if ((await boat.commandStatus(vid, b.verify_process_id!)).running) return;
+      if ((await sandboxes.commandStatus(vid, b.verify_process_id!)).running) return;
       // The tests ran against the programs Mynt hashed; they must still be exactly those bytes.
       const swapped = await this.recheckPrograms(b, vid);
       if (swapped) {
-        await boat.stop(vid).catch(() => {});
+        await sandboxes.stop(vid).catch(() => {});
         await this.retireKey(b);
         await this.update(b.id, { status: "blocked", error: swapped });
         await this.event(b.id, "blocked", swapped);
@@ -1171,8 +1177,8 @@ export class BuildService {
       const { audit } = this.config;
       if (audit.mode === "none") {
         // No agent audit: the source can't change after Mynt's checks, so decide on their report alone.
-        const report = parseJson<{ checks: Check[] }>(await boat.readFile(vid, `${VERIFY_DIR}/report.json`));
-        await boat.stop(vid).catch(() => {});
+        const report = parseJson<{ checks: Check[] }>(await sandboxes.readFile(vid, `${VERIFY_DIR}/report.json`));
+        await sandboxes.stop(vid).catch(() => {});
         await this.event(b.id, "verifying", "Checks finished; deciding on Mynt's checks (no agent audit configured)");
         await this.decide(b, { report, maxwell: null, unchanged: true, auditFinished: false, auditRequired: false });
         return;
@@ -1200,25 +1206,25 @@ export class BuildService {
       const started = b.audit_started_at ? Date.parse(b.audit_started_at) : Date.now();
       const timedOut = auditor!.running && Date.now() - started > this.config.audit.minutes * 60_000;
       if (auditor!.running && !timedOut) return;
-      await boat.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 });
+      await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 });
       const [report, maxwell, before, after, changed] = await Promise.all([
-        boat.readFile(vid, `${VERIFY_DIR}/report.json`).then((t) => parseJson<{ checks: Check[] }>(t)),
-        boat.readFile(vid, `${VERIFY_DIR}/maxwell.json`).then((t) => parseJson<NonNullable<AgentResult["maxwell"]>>(t)),
-        boat.readFile(vid, `${VERIFY_DIR}/before.sha`),
-        boat.readFile(vid, `${VERIFY_DIR}/after.sha`),
-        boat.readFile(vid, `${VERIFY_DIR}/changed.txt`).catch(() => null),
+        sandboxes.readFile(vid, `${VERIFY_DIR}/report.json`).then((t) => parseJson<{ checks: Check[] }>(t)),
+        sandboxes.readFile(vid, `${VERIFY_DIR}/maxwell.json`).then((t) => parseJson<NonNullable<AgentResult["maxwell"]>>(t)),
+        sandboxes.readFile(vid, `${VERIFY_DIR}/before.sha`),
+        sandboxes.readFile(vid, `${VERIFY_DIR}/after.sha`),
+        sandboxes.readFile(vid, `${VERIFY_DIR}/changed.txt`).catch(() => null),
       ]);
       // The sandbox goes next, and with it the only record of a failed audit: keep the agent's own account.
       let audit: AuditRun | undefined;
       if (!auditor!.ok || !maxwell) {
-        const log = await boat
+        const log = await sandboxes
           .exec(vid, `tail -c 1500 ${AGENT_DIR}/runner.log 2>/dev/null; echo; tail -n 3 ${AGENT_DIR}/agent.jsonl 2>/dev/null | cut -c1-600`, { timeoutSeconds: 30 })
           .then((r) => r.stdout ?? "")
           .catch(() => "");
         const st = auditor!.state;
         audit = { result: timedOut ? `timed out after ${this.config.audit.minutes} min` : (st?.last_subtype ?? null), exit_code: st?.exit_code ?? null, error: st?.error ?? null, summary: st?.summary?.slice(0, 1500) ?? null, log: log.slice(-3000) || null, report_written: !!maxwell };
       }
-      await boat.stop(vid).catch(() => {});
+      await sandboxes.stop(vid).catch(() => {});
       await this.decide(b, {
         report,
         maxwell,
@@ -1231,15 +1237,15 @@ export class BuildService {
   }
 
   private async writeVerifier(b: Build, vid: string) {
-    await this.boat!.writeFile(vid, `${VERIFY_DIR}/verify.sh`, VERIFY_SCRIPT);
-    await this.boat!.writeFile(vid, `${VERIFY_DIR}/solana-toolchain.sh`, SOLANA_TOOLCHAIN_SCRIPT);
-    await this.boat!.writeFile(vid, `${VERIFY_DIR}/solana-verify.sh`, SOLANA_VERIFY_SCRIPT);
-    await this.boat!.writeFile(vid, `${VERIFY_DIR}/solana-crate-allowlist.json`, JSON.stringify(loadCrateAllowlist()));
-    await this.boat!.writeFile(vid, `${VERIFY_DIR}/disclosures.json`, JSON.stringify(await this.requiredDisclosures(b)));
+    await this.sandboxes!.writeFile(vid, `${VERIFY_DIR}/verify.sh`, VERIFY_SCRIPT);
+    await this.sandboxes!.writeFile(vid, `${VERIFY_DIR}/solana-toolchain.sh`, SOLANA_TOOLCHAIN_SCRIPT);
+    await this.sandboxes!.writeFile(vid, `${VERIFY_DIR}/solana-verify.sh`, SOLANA_VERIFY_SCRIPT);
+    await this.sandboxes!.writeFile(vid, `${VERIFY_DIR}/solana-crate-allowlist.json`, JSON.stringify(loadCrateAllowlist()));
+    await this.sandboxes!.writeFile(vid, `${VERIFY_DIR}/disclosures.json`, JSON.stringify(await this.requiredDisclosures(b)));
   }
 
   private async startChecks(b: Build, vid: string, message: string) {
-    const run = await this.boat!.exec(vid, `bash ${VERIFY_DIR}/verify.sh '${b.source_url}' ${b.source_sha256}`, { detached: true });
+    const run = await this.sandboxes!.exec(vid, `bash ${VERIFY_DIR}/verify.sh '${b.source_url}' ${b.source_sha256}`, { detached: true });
     await this.update(b.id, { verify_step: "checks", verify_process_id: run.processId ?? null });
     await this.event(b.id, "verifying", message);
   }
@@ -1254,7 +1260,7 @@ export class BuildService {
   // Every program Mynt's verification built (programs.json, written by solana-verify.sh), read back in chunks and
   // handed to the program registry, which hashes the bytes itself.
   private async collectPrograms(b: Build, vid: string) {
-    const built = (await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/checks.jsonl`)) ?? "";
+    const built = (await this.sandboxes!.readFile(vid, `${VERIFY_DIR}/solana/checks.jsonl`)) ?? "";
     const row = built.split("\n").map((l) => parseJson<Check>(l)).find((c) => c?.name === "solana_build");
     const record = async (c: Check) => this.update(b.id, { solana_check: { name: "solana_build", status: c.status, detail: (c.detail ?? "").slice(0, 1500) } });
     await record(row ?? { name: "solana_build", status: "fail", detail: "Mynt's Solana build didn't finish" });
@@ -1262,7 +1268,7 @@ export class BuildService {
     type K = "sources" | "deps" | "idl" | "depinfo";
     type Kept = { [k in K]?: string } & { [k in `${K}_size`]?: number } & { [k in `${K}_sha256`]?: string };
     const listed = parseJson<({ name: string; size: number; sha256: string; declared_id: string | null; cargo_lock_sha256?: string | null } & Kept)[]>(
-      await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`),
+      await this.sandboxes!.readFile(vid, `${VERIFY_DIR}/solana/programs.json`),
     );
     if (!listed?.length) return;
     const artifacts = [];
@@ -1272,7 +1278,7 @@ export class BuildService {
     const readBack = async (path: string, size: number) => {
       const chunks: Buffer[] = [];
       for (let offset = 0; offset < size; offset += 192 * 1024) {
-        const r = await this.boat!.exec(vid, `[ -f ${path} ] && [ ! -L ${path} ] && tail -c +${offset + 1} ${path} | head -c ${192 * 1024} | base64 -w0`, { timeoutSeconds: 60 });
+        const r = await this.sandboxes!.exec(vid, `[ -f ${path} ] && [ ! -L ${path} ] && tail -c +${offset + 1} ${path} | head -c ${192 * 1024} | base64 -w0`, { timeoutSeconds: 60 });
         if (r.exitCode !== 0) return null;
         chunks.push(Buffer.from(r.stdout.trim(), "base64"));
       }
@@ -1340,7 +1346,7 @@ export class BuildService {
     const kept = await this.solana.artifacts(b.id);
     for (const a of kept) {
       if (!/^[a-z0-9_]+$/.test(a.name)) continue;
-      const r = await this.boat!.exec(
+      const r = await this.sandboxes!.exec(
         vid,
         `cd ${VERIFY_APP} && for f in ${VERIFY_DIR}/solana/${a.name}.so $(find . -path '*/node_modules' -prune -o -path '*/target/deploy/${a.name}.so' -print); do python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read().rstrip(b"\\0")).hexdigest())' "$f" 2>/dev/null || echo missing; done`,
         { timeoutSeconds: 120 },
@@ -1348,7 +1354,7 @@ export class BuildService {
       const hashes = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
       if (r.exitCode !== 0 || !hashes.length || hashes.some((h) => h !== a.sha256))
         return `The Solana program ${a.name} changed after Mynt built it (its tests didn't run against the bytes Mynt hashed); the result can't be trusted`;
-      const idl = parseJson<unknown>(await this.boat!.readFile(vid, `${VERIFY_DIR}/solana/${a.name}.idl.json`));
+      const idl = parseJson<unknown>(await this.sandboxes!.readFile(vid, `${VERIFY_DIR}/solana/${a.name}.idl.json`));
       if (idl) await this.solana.recordIdl(b.id, a.name, idl);
     }
     return null;
@@ -1360,7 +1366,7 @@ export class BuildService {
     b: Build,
     v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean; audit?: AuditRun; auditRequired?: boolean },
   ) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     const counts = v.maxwell?.counts ?? {};
     const serious = (counts.critical ?? 0) + (counts.high ?? 0);
     const checks = this.withSolanaBuild(b, v.report?.checks ?? []);
@@ -1388,7 +1394,7 @@ export class BuildService {
     let pr: string | null = null;
     if (b.repository && b.branch && this.repos) {
       // The branch the agent pushed must be exactly the source Mynt verified.
-      const head = await boat.exec(
+      const head = await sandboxes.exec(
         b.sandbox_id!,
         `cd ${WORKSPACE} && test -z "$(git status --porcelain)" && git fetch -q origin ${b.branch} && test "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" && git rev-parse HEAD`,
         { timeoutSeconds: 120 },
@@ -1404,7 +1410,7 @@ export class BuildService {
     }
     const advisory = b.agent_report as AgentResult | null;
     let preview: string | null = null;
-    if (advisory?.preview?.port) preview = (await boat.host(b.sandbox_id!, advisory.preview.port)).url;
+    if (advisory?.preview?.port) preview = (await sandboxes.host(b.sandbox_id!, advisory.preview.port)).url;
     await this.update(b.id, { status: "succeeded", preview_url: preview, pr_url: pr, commit_sha: commit, phase_message: "Verified" });
     await this.event(b.id, "succeeded", "Verified by Mynt and shipped", { preview_url: preview, pr_url: pr, maxwell: counts });
   }

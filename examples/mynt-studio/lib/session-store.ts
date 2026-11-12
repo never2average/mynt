@@ -33,13 +33,24 @@ export interface Session extends AppState {
 
 const SESSION_ID = /^[A-Za-z0-9_-]{43}$/; // 32 random bytes, base64url
 
+// How many refused sign-ins within an hour it takes to drop the app's client registration.
+export const CLIENT_REJECTIONS = 3;
+
+// Gives back a claim or lock (only while it's still the caller's).
+export type Release = () => Promise<void>;
+
 // The few key-value operations the store needs, with expiry in seconds. `only` makes a write
 // conditional: "nx" only creates, "xx" only replaces. It returns whether it wrote.
 export interface KeyValue {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx"): Promise<boolean>;
   del(key: string): Promise<void>;
+  // Deletes the key only if it still holds this value (atomically); returns whether it did.
+  delIfEquals(key: string, value: string): Promise<boolean>;
+  // Moves an existing key's expiry.
+  expire(key: string, ttlSeconds: number): Promise<void>;
   // Adds one to a counter and returns it; the counter expires ttlSeconds after it's created.
+  // Atomic: a counter never outlives its window.
   incr(key: string, ttlSeconds: number): Promise<number>;
 }
 
@@ -74,6 +85,11 @@ export class Sealer {
     cipher.setAAD(Buffer.from(storeKey));
     const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
     return ["v2", this.current.id, iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), body.toString("base64url")].join(".");
+  }
+
+  // Whether a value was sealed with an older key (so it should be sealed again with the current).
+  isStale(sealed: string): boolean {
+    return sealed.split(".")[1] !== this.current.id;
   }
 
   open(storeKey: string, sealed: string): string | undefined {
@@ -186,13 +202,17 @@ export class SessionStore {
     session.lastSeen = Math.max(session.lastSeen, this.now());
     const key = this.sessionKey(session.id);
     const creating = this.unsaved.has(session);
-    const changedHere = session.tokens?.access_token !== this.readWith.get(session);
+    const readWith = this.readWith.get(session);
+    const changedHere = session.tokens?.access_token !== readWith;
     if (changedHere && session.tokens) session.tokensAt = this.now();
     if (!creating) {
       const stored = await this.load(session.id);
       if (!stored) return false; // signed out (or expired) meanwhile: stays gone
-      // Never put back older tokens than the stored ones (another request refreshed them).
-      if (!changedHere && stored.tokens && (stored.tokensAt ?? 0) > (session.tokensAt ?? 0)) {
+      const changedElsewhere = stored.tokens?.access_token !== readWith;
+      // Another request changed the tokens since this one read them. Its tokens win when this
+      // request didn't change them, and when this request would clear them: a sign-in Mynt
+      // refused with the old token says nothing about the new one (compare-and-clear).
+      if (changedElsewhere && (!changedHere || !session.tokens)) {
         session.tokens = stored.tokens;
         session.tokensAt = stored.tokensAt;
       }
@@ -219,27 +239,26 @@ export class SessionStore {
     if (id && SESSION_ID.test(id)) await this.kv.del(this.sessionKey(id));
   }
 
-  // Claims something once for a while (true the first time, false on repeats until it
-  // expires); used so a message sent twice doesn't start two builds.
-  async claim(name: string, subject: string, ttlSeconds: number): Promise<boolean> {
-    return this.kv.set(this.claimKey(name, subject), "1", ttlSeconds, "nx");
-  }
-
-  // Gives a claim back (nothing was done with it).
-  async unclaim(name: string, subject: string): Promise<void> {
-    await this.kv.del(this.claimKey(name, subject));
-  }
-
-  private claimKey(name: string, subject: string): string {
-    return `${this.prefix}:claim:${name}:${createHash("sha256").update(subject).digest("base64url")}`;
+  // Claims something once for a while: a message sent, a build being started. Returns a release
+  // function, or null when it's already claimed. Releasing removes the claim only while it's
+  // still this one (after its TTL another request may hold it), so a late release can't free
+  // someone else's.
+  async claim(name: string, subject: string, ttlSeconds: number): Promise<Release | null> {
+    return this.hold(`${this.prefix}:claim:${name}:${createHash("sha256").update(subject).digest("base64url")}`, ttlSeconds);
   }
 
   // A short lock per session, so one request at a time refreshes its tokens. Returns a release
   // function, or null when another request holds it.
-  async lock(sessionId: string, name: string, ttlSeconds = 15): Promise<(() => Promise<void>) | null> {
-    const key = `${this.sessionKey(sessionId)}:lock:${name}`;
-    const ok = await this.kv.set(key, randomBytes(8).toString("base64url"), ttlSeconds, "nx");
-    return ok ? () => this.kv.del(key) : null;
+  async lock(sessionId: string, name: string, ttlSeconds = 15): Promise<Release | null> {
+    return this.hold(`${this.sessionKey(sessionId)}:lock:${name}`, ttlSeconds);
+  }
+
+  private async hold(key: string, ttlSeconds: number): Promise<Release | null> {
+    const mine = randomBytes(16).toString("base64url");
+    if (!(await this.kv.set(key, mine, ttlSeconds, "nx"))) return null;
+    return async () => {
+      await this.kv.delIfEquals(key, mine);
+    };
   }
 
   // Re-reads the stored session's tokens into this copy (after another request refreshed them).
@@ -258,16 +277,22 @@ export class SessionStore {
   }
 
   // Dynamic client registration happens once per app (per redirect URL), not per user.
+  // Read on every sign-in and refresh. Each read keeps it from expiring, and one sealed with an
+  // older key is sealed again with the current one, so rotating keys never loses it.
   async clientInformation(redirectUrl: string): Promise<OAuthClientInformationMixed | undefined> {
     const key = this.clientKey(redirectUrl);
     const sealed = await this.kv.get(key);
     const plain = sealed ? this.sealer.open(key, sealed) : undefined;
-    if (!plain) return undefined;
+    if (!plain || !sealed) return undefined;
+    let info: OAuthClientInformationMixed;
     try {
-      return JSON.parse(plain) as OAuthClientInformationMixed;
+      info = JSON.parse(plain) as OAuthClientInformationMixed;
     } catch {
       return undefined;
     }
+    if (this.sealer.isStale(sealed)) await this.saveClientInformation(redirectUrl, info);
+    else await this.kv.expire(key, Math.ceil(this.clientTtlMs / 1000));
+    return info;
   }
 
   async saveClientInformation(redirectUrl: string, info: OAuthClientInformationMixed): Promise<void> {
@@ -275,8 +300,19 @@ export class SessionStore {
     await this.kv.set(key, this.sealer.seal(key, JSON.stringify(info)), Math.ceil(this.clientTtlMs / 1000));
   }
 
+  // Called by the shared provider when one sign-in was refused with invalid_client or
+  // unauthorized_client. The registration is app-wide, and every signed-in user's refresh token
+  // is bound to it, so one request's refusal doesn't drop it: only CLIENT_REJECTIONS of them
+  // within an hour do (the registration really is gone), after which the next sign-in
+  // registers again.
+  //
+  // Refusals are counted per client id, so those of a registration already replaced never
+  // count against the new one.
   async forgetClient(redirectUrl: string): Promise<void> {
-    await this.kv.del(this.clientKey(redirectUrl));
+    const current = await this.clientInformation(redirectUrl);
+    if (!current?.client_id) return;
+    const rejections = await this.count("client-rejected", `${redirectUrl}\n${current.client_id}`, 60 * 60);
+    if (rejections >= CLIENT_REJECTIONS) await this.kv.del(this.clientKey(redirectUrl));
   }
 
   private lifetime(s: Session): number {
@@ -317,9 +353,9 @@ export class MemoryKeyValue implements KeyValue {
     return this.live(key)?.value ?? null;
   }
 
-  async set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx"): Promise<boolean> {
-    const exists = this.live(key) !== undefined;
-    if ((only === "nx" && exists) || (only === "xx" && !exists)) return false;
+  // Every write goes through here: expired entries are dropped, and when full, the soonest to
+  // expire goes (counters included).
+  private put(key: string, value: string, expiresAt: number): void {
     const t = this.now();
     this.entries.delete(key);
     for (const [k, e] of this.entries) if (e.expiresAt <= t) this.entries.delete(k);
@@ -330,7 +366,13 @@ export class MemoryKeyValue implements KeyValue {
       if (victim === undefined) break;
       this.entries.delete(victim);
     }
-    this.entries.set(key, { value, expiresAt: t + ttlSeconds * 1000 });
+    this.entries.set(key, { value, expiresAt });
+  }
+
+  async set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx"): Promise<boolean> {
+    const exists = this.live(key) !== undefined;
+    if ((only === "nx" && exists) || (only === "xx" && !exists)) return false;
+    this.put(key, value, this.now() + ttlSeconds * 1000);
     return true;
   }
 
@@ -338,10 +380,21 @@ export class MemoryKeyValue implements KeyValue {
     this.entries.delete(key);
   }
 
+  async delIfEquals(key: string, value: string): Promise<boolean> {
+    if (this.live(key)?.value !== value) return false;
+    this.entries.delete(key);
+    return true;
+  }
+
+  async expire(key: string, ttlSeconds: number): Promise<void> {
+    const e = this.live(key);
+    if (e) e.expiresAt = this.now() + ttlSeconds * 1000;
+  }
+
   async incr(key: string, ttlSeconds: number): Promise<number> {
     const e = this.live(key);
     const n = (e ? Number(e.value) : 0) + 1;
-    this.entries.set(key, { value: String(n), expiresAt: e?.expiresAt ?? this.now() + ttlSeconds * 1000 });
+    this.put(key, String(n), e?.expiresAt ?? this.now() + ttlSeconds * 1000);
     return n;
   }
 
@@ -355,9 +408,19 @@ export interface RedisLike {
   get(key: string): Promise<unknown>;
   set(key: string, value: string, opts: { ex: number; nx?: true; xx?: true }): Promise<unknown>;
   del(key: string): Promise<unknown>;
-  incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<unknown>;
+  eval(script: string, keys: string[], args: unknown[]): Promise<unknown>;
 }
+
+// The real client's eval must fit the shape the store calls (checked when type-checking, so an
+// @upstash/redis upgrade that changes it fails the build rather than the store).
+type RedisEvalFits = Redis["eval"] extends RedisLike["eval"] ? true : false;
+const redisEvalFits: RedisEvalFits = true;
+void redisEvalFits;
+
+// Run inside Redis, so each is one atomic step.
+export const INCR_WITH_EXPIRY = "local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return n";
+export const DEL_IF_EQUALS = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
 
 export class RedisKeyValue implements KeyValue {
   constructor(private redis: RedisLike) {}
@@ -377,10 +440,16 @@ export class RedisKeyValue implements KeyValue {
     await this.redis.del(key);
   }
 
+  async delIfEquals(key: string, value: string): Promise<boolean> {
+    return Number(await this.redis.eval(DEL_IF_EQUALS, [key], [value])) === 1;
+  }
+
+  async expire(key: string, ttlSeconds: number): Promise<void> {
+    await this.redis.expire(key, Math.max(1, ttlSeconds));
+  }
+
   async incr(key: string, ttlSeconds: number): Promise<number> {
-    const n = await this.redis.incr(key);
-    if (n === 1) await this.redis.expire(key, Math.max(1, ttlSeconds));
-    return n;
+    return Number(await this.redis.eval(INCR_WITH_EXPIRY, [key], [Math.max(1, ttlSeconds)]));
   }
 }
 

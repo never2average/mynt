@@ -191,7 +191,7 @@ workspaces/<agent>/  ──copied into──►  sandbox (boat.dev or Freestyle 
 
 | Agent | Workspace | What Mynt checks afterwards | Code |
 |---|---|---|---|
-| Coding team | `coding-build/` | Fresh sandbox, no secrets: tests, lint, types, `gitleaks`, dependency audit, `syft` SBOM, disclosures, then an audit-only run (`build-audit/`) and a re-hash of the source. Mynt opens the PR. | `src/builds.ts`, `src/verify-script.ts`, `src/boat.ts`, `src/freestyle-sandboxes.ts` |
+| Coding team | `coding-build/` | Fresh sandbox, no secrets: tests, lint, types, `gitleaks`, dependency audit, `syft` SBOM, disclosures, then an audit-only run (`build-audit/`) and a re-hash of the source. Mynt opens the PR. | `src/builds.ts`, `src/verify-script.ts`, `src/sandbox-host.ts`, `src/sandbox-providers/` |
 | Product desk | `product-desk/` | Mynt runs the agent's model code itself, in a clean sandbox, and keeps only its own numbers | `src/desk.ts`, `src/desk-runner.ts` |
 | Algorithm explorers | `algorithm-explorer/` | Mynt scores every kept variant on a holdout only it sees | `src/explore*.ts` |
 | Governance desk | `governance-review/` | Mynt re-fetches every cited page, checks each quote, and computes the recommendation | `src/review.ts`, `src/evidence.ts` |

@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
 import { agentState, launchAgent, WORKSPACES_ROOT } from "./agent-host.js";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import type { DeskConfig, DeskService } from "./desk.js";
 import { DATASET_SIZE, datasetInputs, generateDataset, jsonl, newDatasetSecret, splitKeys, type Economics, type GeneratorParams } from "./explore-data.js";
@@ -198,16 +198,16 @@ export class ExploreService {
   private constructor(
     private readonly db: Db,
     private readonly store: Store,
-    readonly boat: BoatClient | null,
+    readonly sandboxes: SandboxHost | null,
     readonly repos: RepoAccess | null,
     readonly config: ExploreConfig,
     private readonly desk: DeskService,
     private readonly review: ReviewService | null,
   ) {}
 
-  static async open(db: Db, store: Store, boat: BoatClient | null, repos: RepoAccess | null, config: ExploreConfig, desk: DeskService, review: ReviewService | null = null) {
+  static async open(db: Db, store: Store, sandboxes: SandboxHost | null, repos: RepoAccess | null, config: ExploreConfig, desk: DeskService, review: ReviewService | null = null) {
     await db.exec(TABLES);
-    const s = new ExploreService(db, store, boat, repos, config, desk, review);
+    const s = new ExploreService(db, store, sandboxes, repos, config, desk, review);
     // Explorations share the firm's monthly desk budget, both ways.
     desk.alsoCommitted = (entityId) => s.monthCommitted(entityId);
     return s;
@@ -410,7 +410,7 @@ export class ExploreService {
   }
 
   private async end(j: Row, status: string, f: Row = {}) {
-    if (this.boat) for (const v of await this.variants(j.id as string)) for (const s of [v.sandbox_id, v.score_sandbox_id]) if (s) await this.boat.stop(s as string).catch(() => {});
+    if (this.sandboxes) for (const v of await this.variants(j.id as string)) for (const s of [v.sandbox_id, v.score_sandbox_id]) if (s) await this.sandboxes.stop(s as string).catch(() => {});
     await this.update(j.id as string, { ...f, status });
   }
 
@@ -422,11 +422,11 @@ export class ExploreService {
   }
 
   private async newSandbox(j: Row, role: string, env: Record<string, string> = {}) {
-    return (await this.boat!.createSandbox({ name: `mynt-explore-${role}-${j.id}`, type: this.config.sandboxType, ttlSeconds: 3 * 3600, labels: { mynt_explore: j.id as string, mynt_role: role }, env })).id;
+    return (await this.sandboxes!.createSandbox({ name: `mynt-explore-${role}-${j.id}`, type: this.config.sandboxType, ttlSeconds: 3 * 3600, labels: { mynt_explore: j.id as string, mynt_role: role }, env })).id;
   }
 
   private async ready(sandbox: string) {
-    const s = await this.boat!.getSandbox(sandbox);
+    const s = await this.sandboxes!.getSandbox(sandbox);
     if (s.state === "error" || s.state === "cancelled") throw new Error(`Sandbox ${s.state}`);
     return ["ready", "idle", "running"].includes(s.state);
   }
@@ -461,12 +461,12 @@ export class ExploreService {
   private async writeToken(j: Row, v: Row) {
     const ws = await this.workspaceOf(j);
     const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
-    await this.boat!.writeFile(v.sandbox_id as string, TOKEN_FILE, token);
+    await this.sandboxes!.writeFile(v.sandbox_id as string, TOKEN_FILE, token);
     await this.updateVariant(j.id as string, Number(v.k), { token_minted_at: new Date().toISOString() });
   }
 
   private async advance(j: Row) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     const id = j.id as string;
     let vs = await this.variants(id);
     const explorers = vs.filter((v) => Number(v.k) > 0);
@@ -486,10 +486,10 @@ export class ExploreService {
 
     // Spend: every sandbox's machine time plus the explorers' model calls (metered at the proxy, all on one key).
     let cost = 0;
-    for (const v of vs) for (const s of [v.sandbox_id, v.score_sandbox_id]) if (s) cost += await boat.costDollars(s as string);
+    for (const v of vs) for (const s of [v.sandbox_id, v.score_sandbox_id]) if (s) cost += await sandboxes.costDollars(s as string);
     for (const v of explorers) {
       if (v.status !== "exploring" || !v.process_id) continue;
-      const c = (await agentState(boat, v.sandbox_id as string, v.process_id as string)).cost;
+      const c = (await agentState(sandboxes, v.sandbox_id as string, v.process_id as string)).cost;
       if (c !== Number(v.agent_cost_usd)) await this.updateVariant(id, Number(v.k), { agent_cost_usd: c });
       v.agent_cost_usd = c;
     }
@@ -506,7 +506,7 @@ export class ExploreService {
           await this.writeToken(j, v);
           const token = `mynt_explore_${randomBytes(24).toString("base64url")}`;
           await this.updateVariant(id, k, { token_hash: hash(token) });
-          const pid = await launchAgent(boat, this.desk.config, v.sandbox_id as string, {
+          const pid = await launchAgent(sandboxes, this.desk.config, v.sandbox_id as string, {
             prompt: "Explore the algorithm in job/explore.json, following CLAUDE.md and its skills.",
             budgetUsd: (Number(j.cap_usd) * 0.9) / explorers.length,
             token,
@@ -515,7 +515,7 @@ export class ExploreService {
           });
           await this.updateVariant(id, k, { status: "exploring", process_id: pid, started_at: new Date().toISOString() });
         } else if (v.status === "exploring") {
-          const agent = await agentState(boat, v.sandbox_id as string, v.process_id as string);
+          const agent = await agentState(sandboxes, v.sandbox_id as string, v.process_id as string);
           // A margin past the explorer's own time limit; whatever it pushed by then is still scored.
           const overtime = Date.now() - new Date(v.started_at as string).getTime() > (this.config.maxMinutes + 15) * 60_000;
           if (agent.running && !overtime) {
@@ -532,7 +532,7 @@ export class ExploreService {
             summary: agent.state?.summary?.slice(0, 4000) ?? null,
             error: agent.ok ? null : overtime && agent.running ? "Over the time limit" : `Explorer ${agent.state?.error ?? agent.state?.last_subtype ?? "exited"}`,
           });
-          await boat.stop(v.sandbox_id as string).catch(() => {});
+          await sandboxes.stop(v.sandbox_id as string).catch(() => {});
           v.status = "finishing";
         }
         if (v.status === "finishing") {
@@ -565,7 +565,7 @@ export class ExploreService {
           holdout ??= this.split(j, "holdout");
           const ws = await this.workspaceOf(j);
           // Exactly the pinned commit, and only the holdout's features; the truth stays in Mynt.
-          const pid = await startRepoRun(boat, this.repos!, sandbox, {
+          const pid = await startRepoRun(sandboxes, this.repos!, sandbox, {
             repository: ws.repository,
             installationId: ws.installation_id,
             ref: v.commit_sha as string,
@@ -578,19 +578,19 @@ export class ExploreService {
           await this.updateVariant(id, k, { score_process_id: pid });
           continue;
         }
-        if ((await boat.commandStatus(sandbox, Number(v.score_process_id))).running) continue;
-        const o = parse<RunOutcome>(await boat.readFile(sandbox, `${JOB}/outcome.json`)) ?? { outcome: "error" as const, error: "The run produced no outcome", log: "" };
+        if ((await sandboxes.commandStatus(sandbox, Number(v.score_process_id))).running) continue;
+        const o = parse<RunOutcome>(await sandboxes.readFile(sandbox, `${JOB}/outcome.json`)) ?? { outcome: "error" as const, error: "The run produced no outcome", log: "" };
         if (o.outcome !== "ran") {
           await this.updateVariant(id, k, { status: "unscorable", error: o.error });
         } else if (o.commit !== v.commit_sha) {
           await this.updateVariant(id, k, { status: "unscorable", error: `Ran ${String(o.commit).slice(0, 7)}, not the pinned commit ${String(v.commit_sha).slice(0, 7)}` });
         } else {
           holdout ??= this.split(j, "holdout");
-          const decisions = readJsonl(await boat.readFile(sandbox, `${JOB}/decisions.jsonl`));
+          const decisions = readJsonl(await sandboxes.readFile(sandbox, `${JOB}/decisions.jsonl`));
           const score = scoreWithStability(holdout.applicants, holdout.truth, decisions, this.scoringSpec(j));
           await this.updateVariant(id, k, { status: "scored", score });
         }
-        await boat.stop(sandbox).catch(() => {});
+        await sandboxes.stop(sandbox).catch(() => {});
       }
       vs = await this.variants(id);
       if (vs.some((v) => v.status === "scoring")) return;

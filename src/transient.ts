@@ -11,7 +11,7 @@ export const QUOTA_MESSAGE = "The sandbox provider has used up this account's al
 export function isTransient(e: unknown): boolean {
   if (isQuotaExhausted(e)) return false;
   const m = String((e as Error)?.message ?? e);
-  // "boat: 503 ..." from the sandbox clients, "GitHub couldn't resolve x (502)" from the GitHub App.
+  // "<provider>: 503 ..." from the sandbox clients, "couldn't resolve x (502)" from the repository host.
   return /: (429|5\d\d)\b|\((429|5\d\d)\)|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|UND_ERR_/i.test(m);
 }
 

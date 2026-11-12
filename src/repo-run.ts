@@ -1,4 +1,4 @@
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import type { RepoAccess } from "./github.js";
 
 // Runs code from a repository (e.g. a firm's desk repo) in a sandbox: Mynt clones the repo (at `ref`, or its default
@@ -10,7 +10,7 @@ export const REPO_DIR = "/home/user/workspace";
 const CREDENTIALS = "/home/user/.mynt-git-credentials";
 
 export async function startRepoRun(
-  boat: BoatClient,
+  sandboxes: SandboxHost,
   repos: RepoAccess,
   sandbox: string,
   o: {
@@ -25,9 +25,9 @@ export async function startRepoRun(
   },
 ) {
   const { token } = await repos.tokenFor(o.repository, o.installationId);
-  for (const [path, content] of Object.entries(o.files)) await boat.writeFile(sandbox, path, content);
-  await boat.writeFile(sandbox, `${o.dir}/clone-failed.json`, JSON.stringify(o.cloneFailure));
-  await boat.writeFile(sandbox, CREDENTIALS, `https://x-access-token:${token}@github.com\n`);
+  for (const [path, content] of Object.entries(o.files)) await sandboxes.writeFile(sandbox, path, content);
+  await sandboxes.writeFile(sandbox, `${o.dir}/clone-failed.json`, JSON.stringify(o.cloneFailure));
+  await sandboxes.writeFile(sandbox, CREDENTIALS, `https://x-access-token:${token}@github.com\n`);
   // A full commit SHA can't be cloned with --branch: clone, then fetch that exact commit and check it out.
   const sha = o.ref && /^[0-9a-f]{40}$/.test(o.ref) ? o.ref : null;
   const branch = o.ref && !sha ? `--branch '${o.ref.replace(/[^\w./-]/g, "")}' ` : "";
@@ -44,8 +44,8 @@ export async function startRepoRun(
     `if [ $status -ne 0 ]; then cp ${o.dir}/clone-failed.json ${o.outcome}; exit 0; fi`,
     o.command,
   ].join("\n");
-  await boat.writeFile(sandbox, `${o.dir}/run.sh`, script);
-  const r = await boat.exec(sandbox, `bash ${o.dir}/run.sh > ${o.dir}/run.log 2>&1`, { detached: true });
+  await sandboxes.writeFile(sandbox, `${o.dir}/run.sh`, script);
+  const r = await sandboxes.exec(sandbox, `bash ${o.dir}/run.sh > ${o.dir}/run.log 2>&1`, { detached: true });
   if (r.processId === undefined) throw new Error("Couldn't start the run");
   return String(r.processId);
 }

@@ -918,7 +918,7 @@ test("builds: Mynt reads back the programs its verification built, hashes them i
     "/home/user/mynt-verify/solana/programs.json": JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME" }]),
     "/home/user/mynt-verify/solana/mynt_program.idl.json": JSON.stringify({ address: "EsUb9wdVWZrVkDSxYzLAAnBzdLhTLqVtuS4aULB87FME", events: [] }),
   };
-  const boat = {
+  const sandboxes = {
     async readFile(_id, path) {
       return files[path] ?? null;
     },
@@ -930,7 +930,7 @@ test("builds: Mynt reads back the programs its verification built, hashes them i
       return { exitCode: 0, stdout: Buffer.from(code.subarray(start, start + Number(m[3]))).toString("base64"), stderr: "" };
     },
   };
-  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  const builds = await BuildService.open(w.db, w.store, sandboxes, null, buildConfigFromEnv({}));
   builds.solana = w.solana;
   const id = await w.build();
   await builds.collectPrograms(await builds.get(id), "vm-verify");
@@ -1381,7 +1381,7 @@ test("verification: the Solana build runs alone, everything it started is killed
   let rehash = sha;
   let solanaChecks = JSON.stringify({ name: "solana_build", status: "pass", detail: "1 program(s) built verifiably" });
   let report = null;
-  const boat = {
+  const sandboxes = {
     async getSandbox() {
       return { state: "ready" };
     },
@@ -1412,7 +1412,7 @@ test("verification: the Solana build runs alone, everything it started is killed
       return { exitCode: 0, stdout: "", stderr: "", ...(opts.detached ? { processId: commands.length } : {}) };
     },
   };
-  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  const builds = await BuildService.open(w.db, w.store, sandboxes, null, buildConfigFromEnv({}));
   builds.solana = w.solana;
   const run = async (step) => {
     const id = await w.build();
@@ -1604,7 +1604,7 @@ test("only the server process recovers stale operations: another process sharing
 // Mynt's read-back, with a verify sandbox whose program file is whatever `file` says.
 async function readBack(w, file) {
   const code = file.code;
-  const boat = {
+  const sandboxes = {
     async readFile(_id, path) {
       if (path.endsWith("/solana/programs.json")) return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null }]);
       if (path.endsWith("/solana/checks.jsonl")) return JSON.stringify({ name: "solana_build", status: "pass", detail: "built" });
@@ -1619,7 +1619,7 @@ async function readBack(w, file) {
       return { exitCode: 0, stdout: Buffer.from(code.subarray(start, start + Number(m[3]))).toString("base64"), stderr: "" };
     },
   };
-  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  const builds = await BuildService.open(w.db, w.store, sandboxes, null, buildConfigFromEnv({}));
   builds.solana = w.solana;
   const id = await w.build();
   await builds.collectPrograms(await builds.get(id), "vm-verify");
@@ -2186,7 +2186,7 @@ test("the Cargo.lock each build compiled with is hashed, kept with its program, 
   const w = await world();
   const LOCK = "c".repeat(64);
   const code = w.program(2000);
-  const boat = {
+  const sandboxes = {
     async readFile(_id, path) {
       if (path.endsWith("/solana/programs.json"))
         return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null, cargo_lock_sha256: LOCK, cargo_lock_committed: false }]);
@@ -2198,7 +2198,7 @@ test("the Cargo.lock each build compiled with is hashed, kept with its program, 
       return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
     },
   };
-  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  const builds = await BuildService.open(w.db, w.store, sandboxes, null, buildConfigFromEnv({}));
   builds.solana = w.solana;
   const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
   const id = await w.build();
@@ -2237,7 +2237,7 @@ test("the exact toolchain each program was built with is kept with it, its deplo
   const { toolchainRecord, TOOLCHAIN_PINS_SHA256 } = await import("../dist/solana/toolchain.js");
   const w = await world();
   const code = w.program(2000, 3);
-  const boat = {
+  const sandboxes = {
     async readFile(_id, path) {
       if (path.endsWith("/solana/programs.json")) return JSON.stringify([{ name: "mynt_program", size: code.length, sha256: executableHash(code), declared_id: null }]);
       if (path.endsWith("/solana/checks.jsonl")) return JSON.stringify({ name: "solana_build", status: "pass", detail: "built" });
@@ -2248,7 +2248,7 @@ test("the exact toolchain each program was built with is kept with it, its deplo
       return { exitCode: 0, stdout: Buffer.from(code.subarray(Number(m[1]) - 1, Number(m[1]) - 1 + Number(m[2]))).toString("base64"), stderr: "" };
     },
   };
-  const builds = await BuildService.open(w.db, w.store, boat, null, buildConfigFromEnv({}));
+  const builds = await BuildService.open(w.db, w.store, sandboxes, null, buildConfigFromEnv({}));
   builds.solana = w.solana;
   const { program_id } = await w.ok(w.dev, "reserve_program_id", { name: "mynt_program", cluster: "devnet" });
   const id = await w.build();

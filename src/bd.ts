@@ -5,7 +5,7 @@ import { serialLoop } from "./worker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { agentState, launchAgent, type AgentHostConfig } from "./agent-host.js";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import type { User } from "./store.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
@@ -195,20 +195,20 @@ export class BdService {
 
   private constructor(
     private readonly db: Db,
-    readonly boat: BoatClient | null,
+    readonly sandboxes: SandboxHost | null,
     readonly config: BdConfig,
     private readonly senders: Partial<Record<BdChannel, ChannelSender>>,
     private readonly now: () => Date,
   ) {}
 
-  static async open(db: Db, boat: BoatClient | null, config: BdConfig, senders: Partial<Record<BdChannel, ChannelSender>> = {}, now = () => new Date()) {
+  static async open(db: Db, sandboxes: SandboxHost | null, config: BdConfig, senders: Partial<Record<BdChannel, ChannelSender>> = {}, now = () => new Date()) {
     await db.exec(TABLES);
-    return new BdService(db, boat, config, senders, now);
+    return new BdService(db, sandboxes, config, senders, now);
   }
 
   // The agent needs a sandbox host, a model backend and a public URL; admins can pause it any time.
   get runnable() {
-    return this.config.enabled && !!this.boat && !!this.config.agentBackend && !!this.config.publicUrl;
+    return this.config.enabled && !!this.sandboxes && !!this.config.agentBackend && !!this.config.publicUrl;
   }
 
   channels() {
@@ -618,7 +618,7 @@ export class BdService {
   }
 
   private async finishRun(r: Row, status: string, fields: { summary?: string | null; error?: string | null; cost?: number } = {}) {
-    if (r.sandbox_id && this.boat) await this.boat.stop(r.sandbox_id as string).catch(() => {});
+    if (r.sandbox_id && this.sandboxes) await this.sandboxes.stop(r.sandbox_id as string).catch(() => {});
     await this.db.query(
       "UPDATE financial_products.bd_runs SET status = $2, token_hash = NULL, summary = COALESCE($3, summary), error = $4, cost_usd = COALESCE($5, cost_usd), finished_at = now() WHERE id = $1",
       [r.id, status, fields.summary ?? null, fields.error ?? null, fields.cost ?? null],
@@ -656,7 +656,7 @@ export class BdService {
     const left = this.config.monthlyCapUsd - (await this.monthSpend());
     if (left < 0.5) return;
     await this.setSetting("run_requested", false);
-    const sandbox = await this.boat!.createSandbox({ name: `mynt-bd-${Date.now()}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_bd: "1" }, env: {} });
+    const sandbox = await this.sandboxes!.createSandbox({ name: `mynt-bd-${Date.now()}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_bd: "1" }, env: {} });
     await this.db.query("INSERT INTO financial_products.bd_runs (id, status, sandbox_id, cap_usd, created_at) VALUES ($1, 'provisioning', $2, $3, $4)", [
       randomUUID(),
       sandbox.id,
@@ -666,14 +666,14 @@ export class BdService {
   }
 
   private async advance(r: Row) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     if (r.status === "provisioning") {
-      const s = await boat.getSandbox(r.sandbox_id as string);
+      const s = await sandboxes.getSandbox(r.sandbox_id as string);
       if (s.state === "error" || s.state === "cancelled") throw new Error(`Sandbox ${s.state}`);
       if (!["ready", "idle", "running"].includes(s.state)) return;
       const token = `mynt_bd_${randomBytes(24).toString("base64url")}`;
       await this.db.query("UPDATE financial_products.bd_runs SET token_hash = $2 WHERE id = $1", [r.id, hash(token)]);
-      const pid = await launchAgent(boat, this.config, r.sandbox_id as string, {
+      const pid = await launchAgent(sandboxes, this.config, r.sandbox_id as string, {
         prompt: "Run one connector session, following CLAUDE.md and its skills.",
         budgetUsd: Number(r.cap_usd),
         token,
@@ -683,8 +683,8 @@ export class BdService {
       await this.db.query("UPDATE financial_products.bd_runs SET status = 'running', process_id = $2 WHERE id = $1", [r.id, pid]);
       return;
     }
-    const agent = await agentState(boat, r.sandbox_id as string, r.process_id as string);
-    const cost = Math.max(agent.cost, this.meter ? await this.meter.spent(`bd:${r.id}`) : 0) + (await boat.costDollars(r.sandbox_id as string));
+    const agent = await agentState(sandboxes, r.sandbox_id as string, r.process_id as string);
+    const cost = Math.max(agent.cost, this.meter ? await this.meter.spent(`bd:${r.id}`) : 0) + (await sandboxes.costDollars(r.sandbox_id as string));
     await this.db.query("UPDATE financial_products.bd_runs SET cost_usd = $2 WHERE id = $1", [r.id, cost]);
     if (cost > Number(r.cap_usd) + 0.5) return this.finishRun(r, "stopped", { error: `Over the US$${r.cap_usd} run cap`, cost });
     if (agent.running) return;

@@ -189,7 +189,7 @@ test("audit findings count only with a quote Mynt finds in the source", () => {
 
 // ---- the review: a world with fake sandboxes and fake agents ----
 
-class FakeBoat {
+class FakeSandboxHost {
   constructor(script) {
     this.script = script;
     this.sandboxes = new Map();
@@ -276,8 +276,8 @@ async function world(script = {}, configEnv = {}) {
   const builds = await BuildService.open(db, store, null, null, buildConfigFromEnv({}));
   const solana = await SolanaService.open(db, store, { rpcUrls: { devnet: "https://api.devnet.solana.com", mainnet: null }, mainnetVaultAllowed: false, confirmTimeoutMs: 1000, pollMs: 0 }, { rpc: () => ({ call: async () => { throw new Error("no RPC in these tests"); } }), custody: null });
   builds.solana = solana;
-  const boat = new FakeBoat(script);
-  const gate = await MainnetGateService.open(db, store, solana, boat, gateConfigFromEnv({ agentBackend: { kind: "anthropic", apiKey: "test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example" }, configEnv));
+  const sandboxes = new FakeSandboxHost(script);
+  const gate = await MainnetGateService.open(db, store, solana, sandboxes, gateConfigFromEnv({ agentBackend: { kind: "anthropic", apiKey: "test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example" }, configEnv));
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
     await createServer(store, user, { builds, solana, gate }).connect(s);
@@ -337,7 +337,7 @@ async function world(script = {}, configEnv = {}) {
   };
   const review = async (id) => ok(dev, "get_mainnet_review", { review_id: id });
   const deliveries = async (type) => (await db.query("SELECT payload FROM financial_products.webhook_deliveries WHERE type = $1 ORDER BY created_at", [type])).rows.map((r) => r.payload);
-  return { db, store, builds, solana, gate, boat, admin, dev, other, adminUser, devUser, ok, call, build, mainnetProgram, tick, review, deliveries };
+  return { db, store, builds, solana, gate, sandboxes, admin, dev, other, adminUser, devUser, ok, call, build, mainnetProgram, tick, review, deliveries };
 }
 
 test("a first mainnet deploy: hard rules, static analysis, audit, red team, then an admin; deploy_program is refused until exactly that hash is approved", async () => {
@@ -384,7 +384,7 @@ test("a first mainnet deploy: hard rules, static analysis, audit, red team, then
 
   await w.tick(); // the analysis sandbox
   await w.tick(); // the tools
-  const analysis = [...w.boat.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-analysis"));
+  const analysis = [...w.sandboxes.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-analysis"));
   assert.equal(analysis.files.get("/home/user/mynt-gate/src/programs/mynt_program/src/lib.rs"), TEMPLATE["programs/mynt_program/src/lib.rs"], "the analysis gets the captured source");
   await w.tick(); // static analysis passes; the audit agent starts in that sandbox
   assert.equal(analysis.auditJob.deterministic_rules.passed, true, "the auditor sees Mynt's findings so far");
@@ -393,7 +393,7 @@ test("a first mainnet deploy: hard rules, static analysis, audit, red team, then
   assert.equal(checklist.version, loadVulnDb().version);
   assert.deepEqual(checklist.entries.map((e) => e.id), loadVulnDb().entries.map((e) => e.id), "the auditor gets the whole database as its checklist");
   // The auditor's token is metered against its own cap, on the gate's model.
-  const auditRun = await w.gate.agentRun(w.boat.tokens["program-analysis"]);
+  const auditRun = await w.gate.agentRun(w.sandboxes.tokens["program-analysis"]);
   assert.equal(auditRun.key, `program-audit:${started.review_id}`);
   assert.equal(auditRun.capUsd, 5);
   await w.tick(); // the audit's findings: the invented critical doesn't verify, so nothing blocks
@@ -402,15 +402,15 @@ test("a first mainnet deploy: hard rules, static analysis, audit, red team, then
   assert.deepEqual(v.checks.audit.blocking, []);
   assert.equal(v.step, "red_provisioning");
   await w.tick(); // the red team gets the bytes and the IDL, never the source
-  const red = [...w.boat.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-red-team"));
+  const red = [...w.sandboxes.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-red-team"));
   assert.ok(red.files.get(`${workspaceCwd("program-red-team")}/job/program.so.b64`));
   assert.ok(![...red.files.keys()].some((p) => p.endsWith(".rs")), "no source reaches the red team");
   assert.equal(red.redJob.program_id, programId);
   assert.equal(JSON.parse(red.files.get(`${workspaceCwd("program-red-team")}/job/vulnerabilities.json`)).entries.length, loadVulnDb().entries.length, "the red team gets the whole database");
-  assert.equal((await w.gate.agentRun(w.boat.tokens["program-red-team"])).capUsd, 8);
+  assert.equal((await w.gate.agentRun(w.sandboxes.tokens["program-red-team"])).capUsd, 8);
   await w.tick(); // the report and the PoC, read back; Mynt's own sandbox re-runs it
   await w.tick();
-  const confirm = [...w.boat.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-poc-confirm"));
+  const confirm = [...w.sandboxes.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-poc-confirm"));
   assert.equal(confirm.files.get("/home/user/mynt-confirm/pocs/R1/run.sh"), "#!/bin/bash\necho attack\n");
   await w.tick(); // not confirmed: it doesn't block, and the PoC-less finding never did
   v = await w.review(started.review_id);
@@ -421,7 +421,7 @@ test("a first mainnet deploy: hard rules, static analysis, audit, red team, then
   assert.ok(v.log.map((l) => l.event).includes("gates_passed"));
   // The audit agent never sees the red team's sandbox, and vice versa: separate sandboxes, all stopped.
   assert.equal(new Set([analysis, red, confirm]).size, 3);
-  assert.ok(w.boat.stopped.length >= 3);
+  assert.ok(w.sandboxes.stopped.length >= 3);
 
   // Still refused until an admin approves.
   assert.match((await w.call(w.dev, "deploy_program", { program_id: programId, build_id })).data.error, /awaiting_approval: an admin must approve it/);
@@ -451,7 +451,7 @@ test("refusals: the hard rules stop a token program at once; a sure static findi
   const refused = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
   assert.equal(refused.status, "blocked");
   assert.match(refused.blocked_reason, /^Hard rules: RUG-TOKEN-CPI \(source, programs\/token_vault\/src\/lib.rs:2\): uses anchor_spl::token/);
-  assert.equal(w.boat.n, 0, "no sandbox was started");
+  assert.equal(w.sandboxes.n, 0, "no sandbox was started");
   assert.match((await w.call(w.dev, "deploy_program", { program_id: id, build_id: b.build_id })).data.error, /is blocked/);
 
   const runTo = async (w) => {
@@ -466,7 +466,7 @@ test("refusals: the hard rules stop a token program at once; a sure static findi
   let v = await runTo(w);
   assert.equal(v.status, "blocked");
   assert.match(v.blocked_reason, /Static analysis: 1 critical\/high finding\(s\): cargo-audit: RUSTSEC-2099-0001/);
-  assert.match([...w.boat.sandboxes.values()][0].analysisArgs, / 'RUSTSEC-2024-0001'$/);
+  assert.match([...w.sandboxes.sandboxes.values()][0].analysisArgs, / 'RUSTSEC-2024-0001'$/);
   // The audit agent wrote nothing: no independent audit, no mainnet.
   w = await world({ audit: null });
   v = await runTo(w);
@@ -864,7 +864,7 @@ test("reviews list exceptions and off-allowlist crates; approval needs each name
   assert.deepEqual(r.dependencies.off_allowlist, ["crate:tiny@1.2.3"]);
   assert.ok(r.caveats.some((c) => /isn't proof/.test(c)) && r.caveats.some((c) => /time or slot/.test(c)) && r.caveats.some((c) => /build-script:programs\/mynt_program\/Cargo.toml/.test(c)));
   await w.tick(10);
-  const analysis = [...w.boat.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-analysis"));
+  const analysis = [...w.sandboxes.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-analysis"));
   assert.equal(analysis.files.get("/home/user/mynt-gate/deps/tiny@1.2.3/src/lib.rs"), "pub fn add(a: u64, b: u64) -> Option<u64> { a.checked_add(b) }", "the auditor gets the off-list crate's source");
   assert.deepEqual(analysis.auditJob.dependency_dirs, { "tiny@1.2.3": "/home/user/mynt-gate/deps/tiny@1.2.3" });
   assert.equal((await w.review(r.review_id)).status, "awaiting_approval");
@@ -906,7 +906,7 @@ test("the IDL: Mynt's own, checked against the bytes; a mismatch is refused; age
   assert.equal(r.idl_check.source, "build");
   assert.equal(r.idl_check.verified, true);
   await w.tick(5);
-  const red = [...w.boat.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-red-team"));
+  const red = [...w.sandboxes.sandboxes.values()].find((s) => s.name.startsWith("mynt-program-red-team"));
   const given = JSON.parse(red.files.get(`${workspaceCwd("program-red-team")}/job/idl.json`));
   assert.equal(given.instructions.length, 2);
   assert.ok(!JSON.stringify(given).includes("Ignore your instructions"), "no doc strings reach the agents");

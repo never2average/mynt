@@ -104,9 +104,9 @@ test("the desk runner executes the workspace's model as code and checks its repo
   assert.match(bad.error, /expected shape/);
 });
 
-// ---- the service, with stand-ins for boat.dev and GitHub ----
+// ---- the service, with a fake sandbox host and a fake repository host ----
 
-function fakeBoat() {
+function fakeSandboxHost() {
   const sandboxes = new Map();
   let n = 0;
   return {
@@ -187,10 +187,10 @@ async function setup() {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
-  const boat = fakeBoat();
+  const sandboxes = fakeSandboxHost();
   const repos = fakeRepos();
   const host = { agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example.com" };
-  const desk = await DeskService.open(db, store, boat, repos, deskConfigFromEnv(host, {}));
+  const desk = await DeskService.open(db, store, sandboxes, repos, deskConfigFromEnv(host, {}));
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
     await createServer(store, user, { desk }).connect(s);
@@ -215,7 +215,7 @@ async function setup() {
     const client = await connect(user);
     return { user, client };
   };
-  return { store, desk, boat, repos, connect, call, innovator };
+  return { store, desk, sandboxes, repos, connect, call, innovator };
 }
 
 const loan = {
@@ -234,7 +234,7 @@ const loan = {
 };
 
 test("analyze_product runs the workspace's model as code: no agent, report on the term sheet, advisory in test_product", async () => {
-  const { desk, boat, call, innovator } = await setup();
+  const { desk, sandboxes, call, innovator } = await setup();
   const { client } = await innovator("Ines");
   assert.equal((await call(client, "create_product", loan)).isError, false);
 
@@ -249,22 +249,22 @@ test("analyze_product runs the workspace's model as code: no agent, report on th
   assert.equal(job.kind, "run");
   await desk.tick();
   const sbx = (await desk.job(job.id)).sandbox_id;
-  assert.deepEqual(boat.sandboxes.get(sbx).opts.env, {}, "a run sandbox gets no credentials in its env");
-  boat.ready(sbx);
+  assert.deepEqual(sandboxes.sandboxes.get(sbx).opts.env, {}, "a run sandbox gets no credentials in its env");
+  sandboxes.ready(sbx);
   await desk.tick();
-  const files = boat.sandboxes.get(sbx).files;
+  const files = sandboxes.sandboxes.get(sbx).files;
   const script = files.get(`${DIR}/run.sh`);
   assert.ok(script.indexOf("rm -f /home/user/.mynt-git-credentials") < script.indexOf("desk-runner.mjs"), "the clone token is gone before any model code runs");
   assert.ok(!script.includes("ghs_desk"), "and never on a command line");
   assert.equal(JSON.parse(files.get(`${JOB}/terms.json`)).inputs.apr_pct, 18);
   assert.ok(!files.has(`${A}/auth.json`), "no agent for a code run");
 
-  boat.finishRun(sbx, ranOutcome());
+  sandboxes.finishRun(sbx, ranOutcome());
   await desk.tick();
   const done = (await call(client, "get_desk_job", { job_id: job.id })).data;
   assert.equal(done.status, "finished");
   assert.match(done.phase_message, /^feasible/);
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
 
   const tested = (await call(client, "test_product", { id: "quick-loan" })).data;
   assert.deepEqual(tested.checks.find((c) => c.name === "feasibility").status, "pass");
@@ -276,7 +276,7 @@ test("analyze_product runs the workspace's model as code: no agent, report on th
 });
 
 test("missing inputs come back as a list to fill in, not an agent run", async () => {
-  const { desk, boat, call, innovator } = await setup();
+  const { desk, sandboxes, call, innovator } = await setup();
   const { client } = await innovator("Ines");
   await call(client, "create_product", loan);
   await call(client, "connect_desk_repository", { repository: "acme/desk" });
@@ -284,9 +284,9 @@ test("missing inputs come back as a list to fill in, not an agent run", async ()
   const job = (await call(client, "analyze_product", { product_id: "quick-loan" })).data;
   await desk.tick();
   const sbx = (await desk.job(job.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await desk.tick();
-  boat.finishRun(sbx, { outcome: "missing_inputs", model: "loan-pricing", missing: [{ key: "cost_of_funds_pct", unit: "%" }, { key: "lgd_pct", unit: "%" }] });
+  sandboxes.finishRun(sbx, { outcome: "missing_inputs", model: "loan-pricing", missing: [{ key: "cost_of_funds_pct", unit: "%" }, { key: "lgd_pct", unit: "%" }] });
   await desk.tick();
   const done = await desk.job(job.id);
   assert.equal(done.status, "finished");
@@ -295,7 +295,7 @@ test("missing inputs come back as a list to fill in, not an agent run", async ()
 });
 
 test("with no model for the product, the agent writes one; Mynt runs the agent's branch itself and opens the PR", async () => {
-  const { desk, boat, repos, call, innovator } = await setup();
+  const { desk, sandboxes, repos, call, innovator } = await setup();
   const { client } = await innovator("Ines");
   await call(client, "create_product", loan);
   await call(client, "connect_desk_repository", { repository: "acme/desk" });
@@ -303,9 +303,9 @@ test("with no model for the product, the agent writes one; Mynt runs the agent's
   const run = (await call(client, "analyze_product", { product_id: "quick-loan" })).data;
   await desk.tick();
   const runSbx = (await desk.job(run.id)).sandbox_id;
-  boat.ready(runSbx);
+  sandboxes.ready(runSbx);
   await desk.tick();
-  boat.finishRun(runSbx, { outcome: "no_model", models: [] });
+  sandboxes.finishRun(runSbx, { outcome: "no_model", models: [] });
   await desk.tick();
 
   const jobs = await desk.jobs(run.entity_id);
@@ -314,12 +314,12 @@ test("with no model for the product, the agent writes one; Mynt runs the agent's
   assert.match(agentJob.goal, /Build a feasibility model/);
   await desk.tick();
   const coding = (await desk.job(agentJob.id)).sandbox_id;
-  const env = boat.sandboxes.get(coding).opts.env;
+  const env = sandboxes.sandboxes.get(coding).opts.env;
   assert.equal(env.GITHUB_REPOSITORY, "acme/desk");
   assert.match(env.MYNT_BRANCH, /^mynt\/desk-/);
-  boat.ready(coding);
+  sandboxes.ready(coding);
   await desk.tick();
-  const files = boat.sandboxes.get(coding).files;
+  const files = sandboxes.sandboxes.get(coding).files;
   const spec = JSON.parse(files.get("/home/user/workspaces/product-desk/job/spec.json"));
   assert.equal(spec.terms.inputs.apr_pct, 18);
   assert.ok(Array.isArray(spec.regulatory));
@@ -329,16 +329,16 @@ test("with no model for the product, the agent writes one; Mynt runs the agent's
   assert.equal(JSON.parse(files.get(`${A}/config.json`)).cwd, "/home/user/workspaces/product-desk");
   assert.equal(await desk.agentTokenActive(auth.token), true);
 
-  boat.finishAgent(coding, 1.5);
+  sandboxes.finishAgent(coding, 1.5);
   await desk.tick();
   const verifying = await desk.job(agentJob.id);
   assert.equal(verifying.status, "verifying");
   const vid = verifying.verify_sandbox_id;
-  assert.deepEqual(boat.sandboxes.get(vid).opts.env, {}, "the verifier gets no credentials in its env");
-  boat.ready(vid);
+  assert.deepEqual(sandboxes.sandboxes.get(vid).opts.env, {}, "the verifier gets no credentials in its env");
+  sandboxes.ready(vid);
   await desk.tick();
-  assert.match(boat.sandboxes.get(vid).files.get(`${DIR}/run.sh`), new RegExp(`--branch '${verifying.branch}'`), "Mynt runs the agent's branch");
-  boat.finishRun(vid, ranOutcome({ report: { ...ranOutcome().report, verdict: "marginal", summary: "Thin under stress" } }));
+  assert.match(sandboxes.sandboxes.get(vid).files.get(`${DIR}/run.sh`), new RegExp(`--branch '${verifying.branch}'`), "Mynt runs the agent's branch");
+  sandboxes.finishRun(vid, ranOutcome({ report: { ...ranOutcome().report, verdict: "marginal", summary: "Thin under stress" } }));
   await desk.tick();
 
   const done = await desk.job(agentJob.id);
