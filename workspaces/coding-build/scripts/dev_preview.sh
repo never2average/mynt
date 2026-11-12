@@ -24,9 +24,10 @@ alive() { [ -f "$STATE/$1.pid" ] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null
 # Each part runs in its own process group (setsid), so stopping it takes everything it started.
 end() { if alive "$1"; then kill -- "-$(cat "$STATE/$1.pid")" 2>/dev/null || kill "$(cat "$STATE/$1.pid")" 2>/dev/null; fi; rm -f "$STATE/$1.pid"; }
 # Any HTTP answer at all counts (an error page from the app is still the app); 000 means nothing answered.
-answers() { [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$PORT_WEB/" 2>/dev/null)" != "000" ]; }
+answers() { [ "$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 1 --max-time 1 "http://127.0.0.1:$PORT_WEB/" 2>/dev/null)" != "000" ]; }
 # Up to $1 seconds for the dev server to answer.
-wait_answer() { for _ in $(seq 1 "$(($1 * 2))"); do answers && return 0; alive web || return 1; sleep 0.5; done; return 1; }
+# Bounded by the clock, not by tries: a server that accepts connections but never answers costs each try a second.
+wait_answer() { local end=$((SECONDS + $1)); while [ "$SECONDS" -lt "$end" ]; do answers && return 0; alive web || return 1; sleep 0.5; done; return 1; }
 
 if [ "$STOP" = 1 ]; then
   end web
@@ -66,5 +67,6 @@ MYNT_LIVE_PREVIEW=1 setsid bash -c 'echo $$ > "$0/web.pid"; cd web; exec npm run
 
 # The pid files are written by the processes themselves; then Vite has a little while to answer.
 for _ in 1 2 3 4 5 6 7 8 9 10; do alive web && break; sleep 0.5; done
-# Well under the 45 s Mynt gives this script: a slow first start says `starting`, and the next check finds it up.
+# At most about 27 s in all (5 s for the pid file, 20 s for an answer, plus one last 1 s try): well under the 45 s
+# Mynt gives this script. A slow first start says `starting`, and a later check finds it up.
 if wait_answer 20; then echo started; else echo starting; fi

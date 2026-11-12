@@ -1457,9 +1457,12 @@ test("dev_preview.sh: any package manager's install record counts, a shell that 
     assert.equal(run(), "waiting", "nothing installed yet");
     mkdirSync(join(app, "node_modules"));
     writeFileSync(join(app, "node_modules", ".modules.yaml"), "x"); // pnpm's record
-    // A shell whose command line merely mentions an install (like a CI step's) doesn't count as one running.
-    const decoy = spawn("bash", ["-c", "sleep 30 # then npm ci"], { stdio: "ignore" });
+    // A shell whose command line merely mentions an install (like a CI step's) doesn't count as one running. Two
+    // commands, so bash stays the parent and keeps that command line (with one, it would exec sleep in its place).
+    const decoy = spawn("bash", ["-c", "sleep 30; true # then npm ci"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
     try {
+      assert.ok(execFileSync("pgrep", ["-f", "then npm ci"], { encoding: "utf8" }).trim(), "the decoy's command line is there to match");
       assert.equal(run(), "starting", "installed: it starts the dev server, which here never answers");
     } finally {
       decoy.kill();
@@ -1473,6 +1476,13 @@ test("dev_preview.sh: any package manager's install record counts, a shell that 
     } finally {
       install.kill();
     }
+    // A dev server that accepts connections but never answers: the start path is still bounded by the clock.
+    writeFileSync(join(app, "web", "silent.js"), 'require("net").createServer(() => {}).listen(5173, "127.0.0.1");');
+    writeFileSync(join(app, "web", "package.json"), JSON.stringify({ name: "web", scripts: { dev: "node silent.js" } }));
+    const started = Date.now();
+    assert.equal(run(), "starting");
+    const took = (Date.now() - started) / 1000;
+    assert.ok(took < 32, `the start path took ${took.toFixed(1)} s`);
   } finally {
     execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
   }

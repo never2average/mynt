@@ -194,7 +194,7 @@ The script never installs anything itself, so it never races the agents. How the
 - Once Vite answers with any HTTP response, Mynt serves port 5173 at a private link, `live_preview_url` on `get_build`, shown while the build is `coding`. On boat.dev the link forwards to the sandbox's 127.0.0.1 (`localhost: true`), as the editor's does.
 - The link is a credential: it's never written to the timeline, and admins' listing leaves it out.
 - While waiting for the install, Mynt retries every tick. Once the preview is up, while its dev server is up but not answering yet, or while the app has no `web/` yet, it retries every 6th tick. A retry also restarts a dev server that died, behind the same link.
-- The script bounds its own waits (about 25 seconds), well under the 45 seconds Mynt gives it.
+- The script bounds its own waits by the clock (about 27 seconds at most, even when a server accepts connections but never answers), well under the 45 seconds Mynt gives it.
 - The preview never fails a build.
 
 When coding ends, Mynt stops both dev servers before it packages the source, and dependencies at any depth (`node_modules`) stay out of the package. The template's `web/vite.config.ts` accepts the forwarder's host name, sends hot reload over port 443 and keeps Vite's cache outside the app, but only when the script starts it (`MYNT_LIVE_PREVIEW=1`); a developer's own `npm run dev` keeps Vite's localhost-only defaults. After the build ships, `preview_url` is the verified Compose preview.
