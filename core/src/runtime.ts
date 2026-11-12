@@ -6,6 +6,7 @@ import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceChec
 import { DuplicateError, type AccessRequest, type App, type Handoff, type ProductRecord, type Store, type User } from "./store.js";
 import { open } from "./vault.js";
 import { isBlockedAddress, resolveVendorUrl, safePost, type VendorCallOptions } from "./vendor-call.js";
+import { monthlyBuildCapUsd } from "./builds.js";
 
 // The runtime layer: what a developer's shipped app talks to. Per-app API keys for the REST API
 // (src/runtime-api.ts), webhooks, a sandbox, app releases and analytics.
@@ -688,6 +689,89 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
         totals: byProduct.totals,
         by_product: byProduct.groups.map(([product_id, c]) => ({ product_id, ...c })),
         by_day: byDay.groups.map(([d, c]) => ({ day: d, ...c })),
+      });
+    },
+  );
+  // A developer's whole picture, across every app they own, in the shape the studio reads. Live (not sandbox) only;
+  // null means Mynt doesn't measure it, never a 0 standing in.
+  server.registerTool(
+    "get_developer_dashboard",
+    {
+      title: "Your dashboard",
+      description:
+        "Developer: across all your apps, for the last 7, 30 or 90 days (default 30): live money moved (settled, in US dollars), hand-offs and how many converted, this month's build spend against your cap, money moved per day, and each app's figures, status and last build. Live (not sandbox) only. A figure Mynt doesn't measure is null, never 0: active enrollments per app and your earnings aren't tracked yet.",
+      inputSchema: z.object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional() }).strict(),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ days = 30 }) => {
+      const to = new Date().toISOString().slice(0, 10);
+      const from = new Date(Date.parse(to) - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+      const toExclusive = new Date(Date.parse(to) + 86_400_000).toISOString();
+      const apps = await store.appsByOwner(user.id);
+      const ids = apps.map((a) => a.id);
+      // A table this Mynt doesn't have (no money rails, no builds): not measured, so null.
+      const optional = async <T>(sql: string, params: unknown[]): Promise<T[] | null> => {
+        try {
+          return (await store.db.query(sql, params)).rows as T[];
+        } catch (e) {
+          if ((e as { code?: string }).code === "42P01") return null;
+          throw e;
+        }
+      };
+      const money = await optional<{ app_id: string; day: string; cents: string }>(
+        `SELECT app_id::text AS app_id, to_char(COALESCE(settled_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+           SUM(COALESCE(settled_amount_cents, amount_cents))::text AS cents
+         FROM financial_products.money_movements
+         WHERE app_id::text = ANY($1) AND status = 'settled' AND NOT sandbox
+           AND COALESCE(settled_at, updated_at) >= $2::timestamptz AND COALESCE(settled_at, updated_at) < $3::timestamptz
+         GROUP BY 1, 2`,
+        [ids, from, toExclusive],
+      );
+      const lastBuilds = await optional<{ app_id: string; id: string; status: string; created_at: string }>(
+        `SELECT DISTINCT ON (app_id) app_id::text AS app_id, id::text AS id, status, created_at FROM financial_products.build_runs
+         WHERE app_id::text = ANY($1) ORDER BY app_id, created_at DESC`,
+        [ids],
+      );
+      const spend = await optional<{ cents: string }>(
+        "SELECT round(COALESCE(SUM(cost_usd), 0) * 100)::bigint::text AS cents FROM financial_products.build_runs WHERE developer_id = $1 AND created_at >= date_trunc('month', now())",
+        [user.id],
+      );
+      const counts = ids.length ? await store.runtimeCounts({ app_ids: ids, from, to: toExclusive, include_sandbox: false }) : [];
+      const traffic = rollUp(counts, (r: { app_id: string }) => r.app_id);
+      const trafficOf = new Map(traffic.groups);
+      // Dollars from whole cents, with no float drift on the way.
+      const cents = (rows: { cents: string }[]) => rows.reduce((t, r) => t + BigInt(r.cents), 0n);
+      const usd = (c: bigint) => Number(`${c / 100n}.${(c % 100n).toString().padStart(2, "0")}`);
+      const perDay = new Map<string, bigint>();
+      for (const r of money ?? []) perDay.set(r.day, (perDay.get(r.day) ?? 0n) + BigInt(r.cents));
+      const daily = [];
+      if (money !== null) for (let t = Date.parse(from); t <= Date.parse(to); t += 86_400_000) {
+        const d = new Date(t).toISOString().slice(0, 10);
+        daily.push({ date: d, money_moved_usd: usd(perDay.get(d) ?? 0n) });
+      }
+      const handoffs = traffic.totals;
+      return json({
+        currency: "USD",
+        period: { from, to, days },
+        money_moved: { settled_usd: money === null ? null : usd(cents(money)), live: true },
+        // Enrollments aren't linked to the app that brought them, so Mynt can't count them per developer yet.
+        customers: { active_enrollments: null },
+        handoffs: { total: handoffs.handoffs_started, converted: handoffs.handoffs_completed, conversion_rate: handoffs.handoff_completion_rate },
+        build_spend: { month_usd: spend === null ? null : usd(BigInt(spend[0].cents)), monthly_cap_usd: spend === null ? null : monthlyBuildCapUsd() },
+        earnings: { usd: null, tracked: false },
+        daily,
+        apps: apps.map((a) => {
+          const b = lastBuilds?.find((x) => x.app_id === a.id);
+          return {
+            app_id: a.id,
+            name: a.name,
+            status: a.status,
+            money_moved_usd: money === null ? null : usd(cents(money.filter((m) => m.app_id === a.id))),
+            customers: null,
+            conversion_rate: trafficOf.get(a.id)?.handoff_completion_rate ?? null,
+            last_build: b ? { id: b.id, status: b.status, at: new Date(b.created_at).toISOString() } : null,
+          };
+        }),
       });
     },
   );

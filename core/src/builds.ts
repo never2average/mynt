@@ -100,10 +100,13 @@ export interface BuildConfig {
   sessionIdleMs?: number;
 }
 
+// Each developer's build budget per calendar month (BUILD_MONTHLY_CAP_USD, default 100).
+export const monthlyBuildCapUsd = (env = process.env) => Number(env.BUILD_MONTHLY_CAP_USD ?? 100);
+
 export function buildConfigFromEnv(env = process.env): BuildConfig {
   return {
     capUsd: Number(env.BUILD_CAP_USD ?? 10),
-    monthlyCapUsd: Number(env.BUILD_MONTHLY_CAP_USD ?? 100),
+    monthlyCapUsd: monthlyBuildCapUsd(env),
     agentBackend: agentBackendFromEnv(env),
     model: env.BUILD_AGENT_MODEL ?? "claude-opus-5-5",
     sandboxType: env.BUILD_SANDBOX_TYPE ?? "default",
