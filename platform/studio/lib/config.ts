@@ -42,3 +42,21 @@ export function mcpClientInfo(): { name: string; version: string } {
 export function oauthScope(): string {
   return process.env.MYNT_OAUTH_SCOPE?.trim() || "openid profile email";
 }
+
+// Optional: the studio's client id at Mynt's authorization server, registered ahead of time
+// (for example as a first-party client, which signs in without a consent screen). Unset, the
+// studio registers itself on first sign-in.
+export function oauthClientId(): string | undefined {
+  return process.env.MYNT_OAUTH_CLIENT_ID?.trim() || undefined;
+}
+
+// Every page needs a signed-in user, so a failed sign-in and a sign-out land on pages that don't
+// (app/signin-error, app/signed-out): no loop when sign-in fails, and no silent sign-in straight
+// after signing out.
+export function authErrorPath(): string {
+  return "/signin-error";
+}
+
+export function signedOutPath(): string {
+  return "/signed-out";
+}

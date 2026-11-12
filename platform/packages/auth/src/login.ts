@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { NextRequest } from "next/server";
+import { safeReturnPath } from "./return-path";
 import type { RouteDeps } from "./routes";
 import type { AuthSession } from "./types";
 
@@ -9,10 +11,15 @@ import type { AuthSession } from "./types";
 //
 // A GET, so another site can link here; it never signs anyone out. Someone already signed in
 // just goes back to the app (to switch accounts, sign out first).
+//
+// ?next=<path> is where to go back to after sign-in: a relative path on this app only
+// (safeReturnPath), kept in the session until the callback.
 export function loginRoute<S extends AuthSession>({ config, sessions, sessionStore }: RouteDeps<S>) {
-  return async function GET() {
+  return async function GET(req?: NextRequest | Request) {
+    const next = safeReturnPath(req ? new URL(req.url).searchParams.get("next") : null, config.appUrl());
     const { session } = await sessions.currentOrNewSession();
-    if (session.tokens) return NextResponse.redirect(new URL("/", config.appUrl()));
+    if (session.tokens) return NextResponse.redirect(new URL(next, config.appUrl()));
+    session.returnTo = next;
     const provider = sessions.oauthProviderFor(session);
     let res: NextResponse;
     try {
@@ -20,10 +27,10 @@ export function loginRoute<S extends AuthSession>({ config, sessions, sessionSto
       res =
         result === "REDIRECT" && provider.authorizationUrl
           ? NextResponse.redirect(provider.authorizationUrl)
-          : NextResponse.redirect(new URL("/", config.appUrl()));
+          : NextResponse.redirect(new URL(next, config.appUrl()));
     } catch (err) {
       console.error("sign-in could not start:", err instanceof Error ? err.message : err);
-      res = NextResponse.redirect(new URL("/?auth_error=start", config.appUrl()));
+      res = NextResponse.redirect(new URL(`${config.authErrorPath?.() ?? "/"}?auth_error=start`, config.appUrl()));
     }
     sessions.setSessionCookie(res, session);
     await sessionStore().save(session); // its PKCE verifier and state, for the callback

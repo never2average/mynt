@@ -8,7 +8,7 @@ export function logoutRoute<S extends AuthSession>({ config, sessions, sessionSt
     if (!sessions.fromOwnOrigin(req)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
     const session = await sessions.currentSession();
     await sessionStore().destroy(session?.id);
-    const res = NextResponse.redirect(new URL("/", config.appUrl()), 303);
+    const res = NextResponse.redirect(new URL(config.signedOutPath?.() ?? "/", config.appUrl()), 303);
     sessions.clearSessionCookie(res);
     return res;
   };

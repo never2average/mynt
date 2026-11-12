@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { WorkspaceFrame } from "./workspace-frame";
-import { SignInGate } from "@/components/sign-in-gate";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -32,9 +31,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} h-full overflow-hidden overscroll-none antialiased`}
       >
-        <SignInGate>
-          <WorkspaceFrame>{children}</WorkspaceFrame>
-        </SignInGate>
+        {/* Every page but /signin-error and /signed-out needs a signed-in user; proxy.ts sends
+            anyone else straight to sign-in. */}
+        <TooltipProvider delayDuration={0}>{children}</TooltipProvider>
       </body>
     </html>
   );

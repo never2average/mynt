@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  AssistantRuntimeProvider,
-  useAuiState,
-  useExternalStoreRuntime,
-  type ThreadMessageLike,
-} from "@assistant-ui/react";
+import { AssistantRuntimeProvider, useAuiState } from "@assistant-ui/react";
 import {
   useAISDKRuntime,
   AssistantChatTransport,
@@ -28,30 +23,19 @@ const EMPTY_MESSAGES: UIMessage[] = [];
 // Mynt Studio: Adorable's chat panel, talking to Mynt's coding agent. Adorable's /api/chat ran
 // its own model; the studio's sends each message to Mynt, which steers the app's running build
 // or starts one, and streams back what the agent does. Each build is one conversation.
-//
-// With no app open there's nothing to build on yet, so the panel is shown read-only.
 export const Assistant = ({
   initialMessages,
-  selectedProjectId = null,
+  selectedProjectId,
   selectedConversationId = null,
   onThreadStateChange,
   welcome,
 }: {
   initialMessages?: UIMessage[];
-  selectedProjectId?: string | null;
+  selectedProjectId: string;
   selectedConversationId?: string | null;
   onThreadStateChange?: (next: ThreadState) => void;
   welcome?: ReactNode;
 }) => {
-  if (!selectedProjectId) {
-    return (
-      <ReadOnlyAssistant
-        onThreadStateChange={onThreadStateChange}
-        welcome={welcome}
-        note="Open one of your apps to chat with its coding agent."
-      />
-    );
-  }
   return (
     <ProjectAssistant
       key={`${selectedProjectId}:${selectedConversationId ?? "new"}`}
@@ -141,38 +125,6 @@ function ProjectAssistant({
         onThreadStateChange={onThreadStateChange}
       />
       <Thread welcome={welcome} />
-    </AssistantRuntimeProvider>
-  );
-}
-
-const NO_MESSAGES: ThreadMessageLike[] = [];
-
-function ReadOnlyAssistant({
-  onThreadStateChange,
-  welcome,
-  note,
-}: {
-  onThreadStateChange?: (next: ThreadState) => void;
-  welcome?: ReactNode;
-  note: string;
-}) {
-  const runtime = useExternalStoreRuntime<ThreadMessageLike>({
-    messages: NO_MESSAGES,
-    convertMessage: (message) => message,
-    isDisabled: true,
-    isRunning: false,
-    onNew: async () => {
-      throw new Error(note);
-    },
-  });
-
-  return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ThreadStateBridge
-        projectId={null}
-        onThreadStateChange={onThreadStateChange}
-      />
-      <Thread welcome={welcome} disabledNote={note} />
     </AssistantRuntimeProvider>
   );
 }

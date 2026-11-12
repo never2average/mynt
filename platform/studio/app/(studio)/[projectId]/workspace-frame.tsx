@@ -2,8 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
-import { ProjectWorkspaceShell } from "./[projectId]/project-workspace-shell";
-import { SignOutButton } from "@/components/sign-in-gate";
+import { ProjectWorkspaceShell } from "./project-workspace-shell";
 
 type ActiveConversationDetail = {
   projectId: string;
@@ -109,10 +108,6 @@ export function WorkspaceFrame({ children }: { children: React.ReactNode }) {
       selectedConversationIdOverride={effectiveConversationId}
     >
       {children}
-      {/* Sign out */}
-      <div className="fixed bottom-3 left-3 z-50 md:right-3 md:left-auto">
-        <SignOutButton />
-      </div>
     </ProjectWorkspaceShell>
   );
 }

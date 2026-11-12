@@ -70,10 +70,12 @@ export async function callStudioTool(client: Client, tool: string, args: Record<
 
 // Asks Mynt who the session's user is and remembers their roles (and id) on the session.
 export async function refreshRoles(session: Session, client: Client): Promise<string[]> {
-  const data = (await callStudioTool(client, "whoami")) as { id?: unknown } | null;
+  const data = (await callStudioTool(client, "whoami")) as { id?: unknown; name?: unknown; email?: unknown } | null;
   session.roles = rolesFrom(data);
   session.rolesAt = Date.now();
   if (typeof data?.id === "string" && data.id) session.userId = data.id;
+  if (typeof data?.name === "string" && data.name) session.name = data.name.slice(0, 200);
+  if (typeof data?.email === "string" && data.email) session.email = data.email.slice(0, 320);
   return session.roles;
 }
 

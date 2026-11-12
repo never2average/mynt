@@ -1,4 +1,4 @@
-import { Assistant } from "../../assistant";
+import { Assistant } from "../assistant";
 import { ProjectWelcome } from "@/components/assistant-ui/project-welcome";
 import { loadConversation } from "@/lib/conversation";
 
