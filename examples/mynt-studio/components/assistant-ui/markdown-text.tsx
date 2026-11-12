@@ -130,15 +130,19 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  a: ({ className, ...props }) => (
-    <a
-      className={cn(
-        "aui-md-a font-medium text-primary underline underline-offset-4",
-        className,
-      )}
-      {...props}
-    />
-  ),
+  // The agent's text is not trusted to link anywhere: a link is shown as its text and, when
+  // they differ, the address it would go to, and nothing is clickable.
+  a: ({ className, children, href }) => {
+    const text = typeof children === "string" ? children : null;
+    return (
+      <span className={cn("aui-md-a font-medium", className)}>
+        {children}
+        {href && href !== text && (
+          <span className="font-normal text-muted-foreground"> ({href})</span>
+        )}
+      </span>
+    );
+  },
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn("aui-md-blockquote border-l-2 pl-6 italic", className)}

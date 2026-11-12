@@ -219,6 +219,21 @@ export class SessionStore {
     if (id && SESSION_ID.test(id)) await this.kv.del(this.sessionKey(id));
   }
 
+  // Claims something once for a while (true the first time, false on repeats until it
+  // expires); used so a message sent twice doesn't start two builds.
+  async claim(name: string, subject: string, ttlSeconds: number): Promise<boolean> {
+    return this.kv.set(this.claimKey(name, subject), "1", ttlSeconds, "nx");
+  }
+
+  // Gives a claim back (nothing was done with it).
+  async unclaim(name: string, subject: string): Promise<void> {
+    await this.kv.del(this.claimKey(name, subject));
+  }
+
+  private claimKey(name: string, subject: string): string {
+    return `${this.prefix}:claim:${name}:${createHash("sha256").update(subject).digest("base64url")}`;
+  }
+
   // A short lock per session, so one request at a time refreshes its tokens. Returns a release
   // function, or null when another request holds it.
   async lock(sessionId: string, name: string, ttlSeconds = 15): Promise<(() => Promise<void>) | null> {
