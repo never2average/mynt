@@ -60,8 +60,18 @@ export function ProjectWorkspaceShell({
     project.conversations.some((build) => ACTIVE_BUILD.test(build.status)),
   );
 
-  // The signed-in developer's Mynt apps and their builds, read from Mynt.
-  const loadProjects = useCallback(async () => {
+  // The signed-in developer's Mynt apps and their builds, read from Mynt. One load at a time:
+  // a call while one is running shares it, so mounting, polling and events never send
+  // overlapping requests (each one may refresh the session's sign-in).
+  const inFlightRef = useRef<Promise<void> | null>(null);
+  const loadProjects = useCallback(() => {
+    inFlightRef.current ??= fetchProjects().finally(() => {
+      inFlightRef.current = null;
+    });
+    return inFlightRef.current;
+  }, []);
+
+  const fetchProjects = async () => {
     try {
       const response = await fetch("/api/projects", { cache: "no-store" });
       const data = (await response.json().catch(() => null)) as {
@@ -81,15 +91,11 @@ export function ProjectWorkspaceShell({
       setProjectsError("Couldn't reach the studio. Check your connection.");
     }
     setProjectsLoading(false);
-  }, []);
+  };
 
+  // On mount, and again when another app is opened.
   useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
-
-  useEffect(() => {
-    if (!projectId) return;
-    loadProjects();
+    void loadProjects();
   }, [loadProjects, projectId]);
 
   useEffect(() => {
