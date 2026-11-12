@@ -2,11 +2,12 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { withoutPort } from "@/lib/rate-limit";
 import { addressBucket, clientAddress, LOGIN_LIMIT, LOGIN_WINDOW_SECONDS, loginAllowed, SHARED_LOGIN_LIMIT } from "@/lib/rate-limit";
 import { MemoryKeyValue, Sealer, SessionStore } from "@/lib/session-store";
 import { ensureRoles, isAuthError, ROLES_MAX_AGE_MS } from "@/lib/studio-server";
 import { NotSignedInError } from "@/lib/mynt-client";
-import { ensureFreshTokens, expiresSoon, RefreshFailedError, refreshWithMynt } from "@/lib/tokens";
+import { deadlineFetch, ensureFreshTokens, expiresSoon, RefreshFailedError, refreshWithMynt } from "@/lib/tokens";
 import { oauthRedirectUrl } from "@/lib/config";
 import { InvalidClientError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
@@ -97,6 +98,55 @@ describe("refreshing with Mynt's authorization server", () => {
     }
   });
 
+  it("won't send the refresh token to an authorization server other than the one that issued it", async () => {
+    const { store, s } = await signedIn();
+    s.tokens = { ...token("old"), issuer: "https://auth.example.com" } as typeof s.tokens;
+    let sent = false;
+    const elsewhere = { ...server, authorizationServerUrl: "https://elsewhere.example" };
+    const refreshAuth = async () => {
+      sent = true;
+      return token("x");
+    };
+    await expect(refreshWithMynt(s, store, { discover: async () => elsewhere as typeof server, refreshAuth })).rejects.toBeInstanceOf(NotSignedInError);
+    expect(sent).toBe(false);
+    expect(s.tokens).toBeUndefined();
+  });
+
+  it("nor with a client registered at another one", async () => {
+    const { store, s } = await signedIn();
+    await store.saveClientInformation(oauthRedirectUrl(), { client_id: "c1", issuer: "https://elsewhere.example" } as never);
+    let sent = false;
+    const refreshAuth = async () => {
+      sent = true;
+      return token("x");
+    };
+    await expect(refreshWithMynt(s, store, { discover: async () => server, refreshAuth })).rejects.toBeInstanceOf(NotSignedInError);
+    expect(sent).toBe(false);
+  });
+
+  it("binds new tokens and the registration to the issuing server", async () => {
+    const { store, s } = await signedIn();
+    await refreshWithMynt(s, store, { discover: async () => server, refreshAuth: (async () => token("new")) as never });
+    expect((s.tokens as { issuer?: string }).issuer).toBe("https://auth.example.com");
+    expect(await store.clientInformation(oauthRedirectUrl())).toEqual({ client_id: "c1", issuer: "https://auth.example.com" });
+  });
+
+  it("gives the whole refresh (discovery and token request) one deadline", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const base = (async (_input: unknown, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined);
+      return new Response("{}");
+    }) as typeof fetch;
+    const f = deadlineFetch(30, base);
+    await f("https://auth.example.com/.well-known/x");
+    await tick(10);
+    await f("https://auth.example.com/token");
+    expect(signals[0]).toBe(signals[1]);
+    expect(signals[0]?.aborted).toBe(false);
+    await tick(40);
+    expect(signals[0]?.aborted).toBe(true); // 30 ms after the refresh began, not after each request
+  });
+
   it("stores the new tokens, refreshing with the registered client", async () => {
     const { store, s } = await signedIn();
     let used: unknown;
@@ -129,6 +179,18 @@ describe("sign-in rate limit", () => {
   it("elsewhere, trusts only a configured proxy header; without one the caller is unknown", () => {
     expect(clientAddress(new Headers({ "x-forwarded-for": "forged" }), {})).toBeNull();
     expect(clientAddress(new Headers({ "x-real-ip": "client-d", "x-forwarded-for": "forged" }), { TRUSTED_PROXY_HEADER: "X-Real-IP" })).toBe("client-d");
+  });
+
+  it("takes the trusted header's last value: what the proxy appended, after anything the caller sent", () => {
+    const env = { TRUSTED_PROXY_HEADER: "x-forwarded-for" };
+    expect(clientAddress(new Headers({ "x-forwarded-for": "forged-1, forged-2, client-f" }), env)).toBe("client-f");
+  });
+
+  it("drops ports before counting", () => {
+    const v4 = [192, 0, 2, 9].join(".");
+    expect(addressBucket(`${v4}:51234`)).toBe(v4);
+    expect(addressBucket("[2001:db8:1:2::9]:443")).toBe("2001:db8:1:2::/64");
+    expect(withoutPort("client-g")).toBe("client-g");
   });
 
   it("counts IPv6 callers per /64", () => {

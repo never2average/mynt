@@ -33,6 +33,12 @@ export interface Session extends AppState {
 
 const SESSION_ID = /^[A-Za-z0-9_-]{43}$/; // 32 random bytes, base64url
 
+// How many refused sign-ins within an hour it takes to drop the app's client registration.
+export const CLIENT_REJECTIONS = 3;
+
+// Gives back a claim or lock (only while it's still the caller's).
+export type Release = () => Promise<void>;
+
 // The few key-value operations the store needs, with expiry in seconds. `only` makes a write
 // conditional: "nx" only creates, "xx" only replaces. It returns whether it wrote.
 export interface KeyValue {
@@ -233,33 +239,26 @@ export class SessionStore {
     if (id && SESSION_ID.test(id)) await this.kv.del(this.sessionKey(id));
   }
 
-  // Claims something once for a while (true the first time, false on repeats until it
-  // expires); used so a message sent twice doesn't start two builds.
-  async claim(name: string, subject: string, ttlSeconds: number): Promise<boolean> {
-    return this.kv.set(this.claimKey(name, subject), "1", ttlSeconds, "nx");
-  }
-
-  // Gives a claim back (nothing was done with it).
-  async unclaim(name: string, subject: string): Promise<void> {
-    await this.kv.del(this.claimKey(name, subject));
-  }
-
-  private claimKey(name: string, subject: string): string {
-    return `${this.prefix}:claim:${name}:${createHash("sha256").update(subject).digest("base64url")}`;
+  // Claims something once for a while: a message sent, a build being started. Returns a release
+  // function, or null when it's already claimed. Releasing removes the claim only while it's
+  // still this one (after its TTL another request may hold it), so a late release can't free
+  // someone else's.
+  async claim(name: string, subject: string, ttlSeconds: number): Promise<Release | null> {
+    return this.hold(`${this.prefix}:claim:${name}:${createHash("sha256").update(subject).digest("base64url")}`, ttlSeconds);
   }
 
   // A short lock per session, so one request at a time refreshes its tokens. Returns a release
   // function, or null when another request holds it.
-  async lock(sessionId: string, name: string, ttlSeconds = 15): Promise<(() => Promise<void>) | null> {
-    const key = `${this.sessionKey(sessionId)}:lock:${name}`;
+  async lock(sessionId: string, name: string, ttlSeconds = 15): Promise<Release | null> {
+    return this.hold(`${this.sessionKey(sessionId)}:lock:${name}`, ttlSeconds);
+  }
+
+  private async hold(key: string, ttlSeconds: number): Promise<Release | null> {
     const mine = randomBytes(16).toString("base64url");
-    const ok = await this.kv.set(key, mine, ttlSeconds, "nx");
-    // Released only while it's still ours: after its TTL another request may hold it.
-    return ok
-      ? async () => {
-          await this.kv.delIfEquals(key, mine);
-        }
-      : null;
+    if (!(await this.kv.set(key, mine, ttlSeconds, "nx"))) return null;
+    return async () => {
+      await this.kv.delIfEquals(key, mine);
+    };
   }
 
   // Re-reads the stored session's tokens into this copy (after another request refreshed them).
@@ -301,8 +300,14 @@ export class SessionStore {
     await this.kv.set(key, this.sealer.seal(key, JSON.stringify(info)), Math.ceil(this.clientTtlMs / 1000));
   }
 
+  // Called by the shared provider when one sign-in was refused with invalid_client or
+  // unauthorized_client. The registration is app-wide, and every signed-in user's refresh token
+  // is bound to it, so one request's refusal doesn't drop it: only CLIENT_REJECTIONS of them
+  // within an hour do (the registration really is gone), after which the next sign-in
+  // registers again.
   async forgetClient(redirectUrl: string): Promise<void> {
-    await this.kv.del(this.clientKey(redirectUrl));
+    const rejections = await this.count("client-rejected", redirectUrl, 60 * 60);
+    if (rejections >= CLIENT_REJECTIONS) await this.kv.del(this.clientKey(redirectUrl));
   }
 
   private lifetime(s: Session): number {
@@ -401,6 +406,12 @@ export interface RedisLike {
   expire(key: string, seconds: number): Promise<unknown>;
   eval(script: string, keys: string[], args: unknown[]): Promise<unknown>;
 }
+
+// The real client's eval must fit the shape the store calls (checked when type-checking, so an
+// @upstash/redis upgrade that changes it fails the build rather than the store).
+type RedisEvalFits = Redis["eval"] extends RedisLike["eval"] ? true : false;
+const redisEvalFits: RedisEvalFits = true;
+void redisEvalFits;
 
 // Run inside Redis, so each is one atomic step.
 export const INCR_WITH_EXPIRY = "local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return n";

@@ -12,6 +12,7 @@ import {
   storeFromEnv,
   type KeyValue,
   type RedisLike,
+  CLIENT_REJECTIONS,
   DEL_IF_EQUALS,
   INCR_WITH_EXPIRY,
 } from "@/lib/session-store";
@@ -274,6 +275,16 @@ describe("concurrent requests on one session", () => {
     expect(await store.lock(s.id, "refresh", 15)).not.toBeNull();
   });
 
+  it("a late release of a lapsed claim doesn't free the claim another request took since", async () => {
+    const { kv, store } = setup();
+    const first = await store.claim("start-lock", "user\napp", 10);
+    kv.clock.now = 11_000;
+    const second = await store.claim("start-lock", "user\napp", 10);
+    expect(second).not.toBeNull();
+    await first!();
+    expect(await store.claim("start-lock", "user\napp", 10)).toBeNull();
+  });
+
   it("only one request at a time holds the refresh lock; it frees on release or after its TTL", async () => {
     const { kv, store } = setup();
     const s = store.create();
@@ -367,9 +378,24 @@ describe("SessionOAuthProvider over the key-value store", () => {
     expect(s1.tokens?.access_token).toBe("t");
     expect(p2.tokens()).toBeUndefined();
 
+    // One refused sign-in clears that session's tokens, not the app-wide registration.
     await p1.invalidateCredentials("all");
     expect(s1.tokens).toBeUndefined();
+    expect(await p2.clientInformation()).toEqual({ client_id: "client-1", client_secret: "client-secret" });
+    // Repeated refusals mean the registration really is gone: then it's dropped.
+    for (let i = 1; i < CLIENT_REJECTIONS; i++) await p1.invalidateCredentials("client");
     expect(await p2.clientInformation()).toBeUndefined();
+  });
+
+  it("a refusal more than an hour after the last doesn't add up to dropping the registration", async () => {
+    const { kv, store } = setup();
+    const p = new SessionOAuthProvider(store.create(), store, REDIRECT, "openid");
+    await p.saveClientInformation({ client_id: "c" });
+    for (let i = 0; i < CLIENT_REJECTIONS; i++) {
+      kv.clock.now = i * 61 * MIN;
+      await p.invalidateCredentials("all");
+    }
+    expect(await p.clientInformation()).toEqual({ client_id: "c" });
   });
 });
 

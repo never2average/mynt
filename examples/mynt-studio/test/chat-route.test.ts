@@ -10,6 +10,8 @@ const fake = {
   calls: [] as { name: string; args: Record<string, unknown> }[],
   saved: 0,
   startFails: 0, // start_build refuses this many times
+  startThrows: 0, // start_build's reply is lost (a transport error) this many times
+  listDelays: [] as number[], // per list_builds call: answer with the builds as they were, this much later
   startDelayMs: 0,
   refreshOnConnect: false, // connecting refreshes the session's tokens
 };
@@ -22,7 +24,9 @@ vi.mock("@/lib/session", () => ({
   },
 }));
 
-const claimed = new Set<string>();
+// Claims as the store keeps them: key -> owner token; a release frees only its own claim.
+const claimed = new Map<string, number>();
+let claimToken = 0;
 vi.mock("@/lib/session-store", () => ({
   sessionStore: () => ({
     save: async () => {
@@ -31,13 +35,16 @@ vi.mock("@/lib/session-store", () => ({
     },
     claim: async (name: string, subject: string) => {
       const key = `${name}\n${subject}`;
-      if (claimed.has(key)) return false;
-      claimed.add(key);
-      return true;
+      if (claimed.has(key)) return null;
+      const mine = ++claimToken;
+      claimed.set(key, mine);
+      return async () => {
+        if (claimed.get(key) === mine) claimed.delete(key);
+      };
     },
-    unclaim: async (name: string, subject: string) => void claimed.delete(`${name}\n${subject}`),
   }),
 }));
+const startLocks = () => [...claimed.keys()].filter((k) => k.startsWith("start-lock"));
 
 vi.mock("@/lib/mynt-client", () => {
   class NotSignedInError extends Error {}
@@ -58,14 +65,24 @@ vi.mock("@/lib/mynt-client", () => {
       switch (name) {
         case "whoami":
           return reply({ id: "u1", effective_roles: ["developer"] });
-        case "list_builds":
-          return reply({ builds: fake.builds });
+        case "list_builds": {
+          const snapshot = [...fake.builds];
+          const delay = fake.listDelays.shift() ?? 0;
+          if (delay) await new Promise((r) => setTimeout(r, delay));
+          return reply({ builds: snapshot });
+        }
         case "start_build":
           if (fake.startDelayMs) await new Promise((r) => setTimeout(r, fake.startDelayMs));
           if (fake.startFails > 0) {
             fake.startFails--;
             return { isError: true, text: JSON.stringify({ error: "Monthly build budget reached" }) };
           }
+          if (fake.startThrows > 0) {
+            fake.startThrows--;
+            throw new Error("socket hang up");
+          }
+          // Mynt lists the new build from now on.
+          fake.builds.push({ id: "new-build", app_id: args.app_id, status: "queued", updated_at: "2026-11-12" });
           return reply({ id: "new-build", status: "queued" });
         case "steer_build":
           return reply({ build_id: args.build_id, steered: true });
@@ -105,6 +122,8 @@ beforeEach(() => {
   fake.calls = [];
   fake.saved = 0;
   fake.startFails = 0;
+  fake.startThrows = 0;
+  fake.listDelays = [];
   fake.startDelayMs = 0;
   fake.refreshOnConnect = false;
   claimed.clear();
@@ -204,6 +223,7 @@ describe("/api/chat", () => {
     fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
     const body = { projectId: "app1", messages: [{ id: "m1", ...userMessage("Build a savings goal screen") }] };
     await chunks(await post(body));
+    fake.builds = []; // as if Mynt didn't list the new build yet: the duplicate check is what stops it
     const second = await chunks(await post(body));
     expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
     expect(second.find((c) => c.type === "text-delta")?.delta).toMatch(/just sent that/);
@@ -266,6 +286,7 @@ describe("/api/chat follow-ups", () => {
     fake.activity = [{ status: "failed", activity: [] }];
     fake.session = { id: "a", createdAt: 0, lastSeen: 0, tokens: { access_token: "a", token_type: "Bearer" } } as Session;
     await chunks(await post(statements()));
+    fake.builds = []; // as if Mynt didn't list the new build yet: the duplicate check is what stops it
     fake.session = { id: "b", createdAt: 0, lastSeen: 0, tokens: { access_token: "b", token_type: "Bearer" } } as Session;
     const again = await chunks(await post(statements()));
     expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
@@ -298,4 +319,48 @@ describe("/api/chat follow-ups", () => {
     const out = await chunks(await post({ projectId: "app1", conversationId: "live", messages: [userMessage("Make it green")] }));
     expect(out.filter((c) => c.type === "text-delta").map((c) => c.delta).join("\n")).toMatch(/may not have reached the agent/);
   }, 15_000);
+});
+
+describe("/api/chat start races", () => {
+  const deviceA = () => ({ id: "a", createdAt: 0, lastSeen: 0, tokens: { access_token: "a", token_type: "Bearer" } }) as Session;
+  const deviceB = () => ({ id: "b", createdAt: 0, lastSeen: 0, tokens: { access_token: "b", token_type: "Bearer" } }) as Session;
+
+  it("B's list_builds answered before A's start, but arriving after it: still one build", async () => {
+    fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
+    // B asks first; its (stale, empty) answer arrives only after A has started and finished.
+    fake.listDelays = [150];
+    fake.session = deviceB();
+    const b = post({ projectId: "app1", messages: [userMessage("Build a budgeting screen instead")] });
+    await new Promise((r) => setTimeout(r, 20));
+    fake.session = deviceA();
+    await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    const out = await chunks(await b);
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+    expect(out.find((c) => c.type === "text-delta")?.delta).toMatch(/being started right now/); // A's lock is still held
+  });
+
+  it("once A's lock has lapsed, B decides again under its own lock and follows A's build", async () => {
+    fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
+    fake.listDelays = [150];
+    fake.session = deviceB();
+    const b = post({ projectId: "app1", messages: [userMessage("Build a budgeting screen instead")] });
+    await new Promise((r) => setTimeout(r, 20));
+    fake.session = deviceA();
+    await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    expect(startLocks()).toHaveLength(1); // kept after a successful start
+    for (const k of startLocks()) claimed.delete(k); // its 10 s TTL lapses
+    const out = await chunks(await b);
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "new-build", started: false } }));
+    expect(startLocks()).toHaveLength(0); // B gave its lock back: it started nothing
+  });
+
+  it("keeps the claims when start_build's reply is lost, so a retry can't start a second build", async () => {
+    fake.startThrows = 1;
+    const first = await chunks(await post({ projectId: "app1", messages: [userMessage("Add a statements page")] }));
+    expect(first).toContainEqual(expect.objectContaining({ type: "error" }));
+    const again = await chunks(await post({ projectId: "app1", messages: [userMessage("Add a statements page")] }));
+    expect(again.find((c) => c.type === "text-delta")?.delta).toMatch(/just sent that/);
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+  });
 });

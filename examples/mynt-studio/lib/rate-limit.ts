@@ -13,17 +13,27 @@ type Env = Record<string, string | undefined>;
 // The caller's address, from a header only a trusted proxy can set: on Vercel its own
 // x-vercel-forwarded-for (callers can't forge it; x-forwarded-for they can), elsewhere only the
 // header named in TRUSTED_PROXY_HEADER. Without either, null: the caller isn't known.
+//
+// TRUSTED_PROXY_HEADER's last value is used: a proxy that appends (as with x-forwarded-for)
+// adds the address it saw at the end, after anything the caller sent.
 export function clientAddress(headers: Headers, env: Env = process.env): string | null {
-  const name = env.VERCEL ? "x-vercel-forwarded-for" : env.TRUSTED_PROXY_HEADER?.trim().toLowerCase();
-  if (!name) return null;
-  const value = headers.get(name)?.split(",")[0]?.trim();
+  const values = (name: string) => (headers.get(name) ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+  const value = env.VERCEL ? values("x-vercel-forwarded-for")[0] : env.TRUSTED_PROXY_HEADER?.trim() ? values(env.TRUSTED_PROXY_HEADER.trim().toLowerCase()).at(-1) : undefined;
   return value ? addressBucket(value) : null;
+}
+
+// An address without its port: an IPv4 address with ":443" after it, or a bracketed IPv6 one.
+export function withoutPort(address: string): string {
+  const bracketed = address.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+  const v4 = address.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  return v4 ? v4[1] : address;
 }
 
 // One bucket per IPv4 address, and per /64 for IPv6 (one home or host usually has a whole /64,
 // so counting single IPv6 addresses would let it rotate past the limit).
 export function addressBucket(address: string): string {
-  const a = address.replace(/^\[|\]$/g, "").replace(/%.*$/, "").toLowerCase();
+  const a = withoutPort(address.trim()).replace(/%.*$/, "").toLowerCase();
   if (!a.includes(":")) return a;
   const v4 = a.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (v4) return v4[1];

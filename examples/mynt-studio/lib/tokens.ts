@@ -63,42 +63,67 @@ export async function ensureFreshTokens(
   // Nobody finished refreshing in time: carry on; Mynt answers 401 if the token is stale.
 }
 
-// A fetch that gives up after REFRESH_TIMEOUT_MS.
-const timedFetch: typeof fetch = (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS) });
+// A fetch for one refresh: all of its requests (discovery and the token request) share one
+// deadline, so the whole refresh ends within REFRESH_TIMEOUT_MS, inside the lock's TTL.
+export function deadlineFetch(ms = REFRESH_TIMEOUT_MS, base: typeof fetch = fetch): typeof fetch {
+  const signal = AbortSignal.timeout(ms);
+  return (input, init) => base(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
+}
+
+type WithIssuer = { issuer?: unknown };
+const issuerOf = (v: unknown): string | undefined => {
+  const i = (v as WithIssuer | undefined)?.issuer;
+  return typeof i === "string" && i ? i : undefined;
+};
 
 // One refresh with the stored refresh token, straight against the authorization server.
+//
+// Tokens and the client registration are bound to the authorization server that issued them:
+// if discovery now names another one, the refresh token isn't sent there, and the user signs in
+// again.
 export async function refreshWithMynt(
   session: Session,
   store: SessionStore,
-  deps: { discover?: typeof discoverOAuthServerInfo; refreshAuth?: typeof refreshAuthorization } = {},
+  deps: { discover?: typeof discoverOAuthServerInfo; refreshAuth?: typeof refreshAuthorization; fetchFn?: typeof fetch } = {},
 ): Promise<void> {
   const refreshToken = session.tokens?.refresh_token;
   if (!refreshToken) return;
   const discover = deps.discover ?? discoverOAuthServerInfo;
   const refreshAuth = deps.refreshAuth ?? refreshAuthorization;
+  const fetchFn = deps.fetchFn ?? deadlineFetch();
   const client = await store.clientInformation(oauthRedirectUrl());
   if (!client) {
     session.tokens = undefined; // no registration to refresh with: sign in again
     throw new NotSignedInError();
   }
+  let issuer: string;
   try {
-    const server = await discover(myntMcpUrl(), { fetchFn: timedFetch });
+    const server = await discover(myntMcpUrl(), { fetchFn });
+    issuer = String(server.authorizationServerUrl);
+    const boundTo = issuerOf(session.tokens) ?? issuerOf(client);
+    if (boundTo && boundTo !== issuer) {
+      session.tokens = undefined;
+      throw new NotSignedInError();
+    }
     const resource = server.resourceMetadata?.resource ? new URL(server.resourceMetadata.resource) : resourceUrlFromServerUrl(myntMcpUrl());
     const tokens = await refreshAuth(server.authorizationServerUrl, {
       metadata: server.authorizationServerMetadata,
       clientInformation: client,
       refreshToken,
       resource,
-      fetchFn: timedFetch,
+      fetchFn,
     });
-    session.tokens = tokens;
+    session.tokens = { ...tokens, issuer } as typeof tokens;
   } catch (err) {
+    if (err instanceof NotSignedInError) throw err;
     if (err instanceof InvalidGrantError || err instanceof InvalidClientError) {
       session.tokens = undefined;
       throw new NotSignedInError();
     }
     throw new RefreshFailedError(err instanceof Error ? err.name : "refresh failed");
   }
+  // The registration learns which server it belongs to the first time it's used.
+  if (!issuerOf(client)) await store.saveClientInformation(oauthRedirectUrl(), { ...client, issuer } as typeof client).catch(() => undefined);
 }
 
 // Connects to Mynt as the session's user, with fresh tokens.
