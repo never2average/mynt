@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { safeReturnPath } from "./return-path";
+import { appUrlWithPath, safeReturnPath } from "./return-path";
 import type { RouteDeps } from "./routes";
 import type { AuthSession } from "./types";
 
@@ -17,7 +17,7 @@ function sameState(a: string | undefined, b: string | null): boolean {
 // server-side session.
 export function callbackRoute<S extends AuthSession>({ config, sessions, sessionStore }: RouteDeps<S>) {
   return async function GET(req: NextRequest) {
-    const fail = (reason: string) => NextResponse.redirect(new URL(`${config.authErrorPath?.() ?? "/"}?auth_error=${reason}`, config.appUrl()));
+    const fail = (reason: string) => NextResponse.redirect(appUrlWithPath(config.appUrl(), `${config.authErrorPath?.() ?? "/"}?auth_error=${encodeURIComponent(reason)}`));
     const session = await sessions.currentSession();
     if (!session) return fail("session");
 
@@ -44,7 +44,7 @@ export function callbackRoute<S extends AuthSession>({ config, sessions, session
     // sign-in stops working, and nobody inherits what an earlier user left on this device.
     const back = safeReturnPath(session.returnTo, config.appUrl()); // checked again: it came from the store
     const signedIn = await sessionStore().rotate(session);
-    const res = NextResponse.redirect(new URL(back, config.appUrl()));
+    const res = NextResponse.redirect(appUrlWithPath(config.appUrl(), back));
     sessions.setSessionCookie(res, signedIn);
     return res;
   };

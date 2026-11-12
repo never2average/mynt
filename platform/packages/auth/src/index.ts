@@ -7,4 +7,4 @@ export { SessionOAuthProvider } from "./oauth-provider";
 export { createSessions, type Sessions } from "./session";
 export { createConnectMynt, callMyntTool, NotAllowedError, NotSignedInError, type ToolOutcome } from "./mynt-client";
 export { loginRoute, callbackRoute, logoutRoute, type RouteDeps } from "./routes";
-export { safeReturnPath } from "./return-path";
+export { appUrlWithPath, safeReturnPath } from "./return-path";

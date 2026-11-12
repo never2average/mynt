@@ -20,7 +20,7 @@ vi.mock("@modelcontextprotocol/sdk/client/auth.js", async (importOriginal) => ({
   },
 }));
 
-const { callbackRoute, loginRoute, safeReturnPath, SessionOAuthProvider } = await import("@mynt/auth");
+const { appUrlWithPath, callbackRoute, loginRoute, safeReturnPath, SessionOAuthProvider } = await import("@mynt/auth");
 const { pageNeedsSignIn, signInPathFor } = await import("@/lib/page-gate");
 const { MemoryKeyValue, Sealer, SessionStore } = await import("@/lib/session-store");
 type Session = import("@/lib/session-store").Session;
@@ -43,6 +43,20 @@ describe("the return path", () => {
       "javascript:alert(1)",
       "evil.example.com",
       "/x\nSet-Cookie: a=b",
+      // Dot segments a URL parser collapses into a leading "//" (a host), raw or encoded.
+      "/.//evil.example/x",
+      "/..//evil.example",
+      "/x/..//evil.example",
+      "/%2e//evil.example",
+      "/%2E%2E//evil.example",
+      "/x/%2e%2E/y",
+      "/.%2F/evil",
+      "/x%2f%2fevil.example",
+      "/x%5Cevil",
+      // A tab or newline, which a URL parser drops.
+      "/\t/evil.example",
+      "/x\n/evil.example",
+      "/a\tb",
       "",
       null,
       undefined,
@@ -50,6 +64,33 @@ describe("the return path", () => {
     ]) {
       expect(safeReturnPath(bad, APP), String(bad)).toBe("/");
     }
+  });
+});
+
+describe("redirects after sign-in", () => {
+  const evil = [
+    "/.//evil.example/x",
+    "/..//evil.example",
+    "/x/..//evil.example",
+    "/%2e//evil.example",
+    "/%2E%2E//evil.example",
+    "/.%2F/evil",
+    "/\t/evil.example",
+    "//evil.example",
+    "https://evil.example/",
+  ];
+
+  it("always stay on the app, whatever the path asked for", () => {
+    for (const next of evil) {
+      const to = appUrlWithPath(APP, next);
+      expect(to.origin, next).toBe(APP.origin);
+      expect(to.pathname, next).toBe("/");
+    }
+  });
+
+  it("keep a good path, its query and its hash, built on the app's own URL", () => {
+    expect(appUrlWithPath(APP, "/app-1/build-2?tab=x#chat").toString()).toBe("https://mynt.example.com/app-1/build-2?tab=x#chat");
+    expect(appUrlWithPath(new URL("https://mynt.example.com/base"), "/new").toString()).toBe("https://mynt.example.com/new");
   });
 });
 
@@ -134,6 +175,23 @@ describe("login and callback", () => {
     const state = h.current!.oauthState!;
     const back = await callbackRoute(h.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/callback?code=c&state=${state}`));
     expect(back.headers.get("location")).toBe("https://mynt.example.com/app-1/build-2?tab=x");
+  });
+
+  it("never leaves the app through dot segments, encoded or not", async () => {
+    for (const next of ["/.//evil.example/x", "/..//evil.example", "/x/..//evil.example", "/%2e//evil.example"]) {
+      const h = harness();
+      const login = await loginRoute(h.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/login?next=${encodeURIComponent(next)}`));
+      expect(login.headers.get("location")).toBe("https://auth.example.com/authorize?x=1");
+      const state = h.current!.oauthState!;
+      const back = await callbackRoute(h.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/callback?code=c&state=${state}`));
+      expect(back.headers.get("location"), next).toBe("https://mynt.example.com/");
+
+      const signedIn = harness();
+      signedIn.current = signedIn.store.create();
+      signedIn.current.tokens = { access_token: "t", token_type: "Bearer" };
+      const direct = await loginRoute(signedIn.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/login?next=${encodeURIComponent(next)}`));
+      expect(direct.headers.get("location"), next).toBe("https://mynt.example.com/");
+    }
   });
 
   it("goes home instead of to another site", async () => {

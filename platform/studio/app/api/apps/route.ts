@@ -2,7 +2,7 @@ import { capabilitiesFrom } from "@/lib/chat";
 import { appFieldsFromPrompt, NewAppRequest } from "@/lib/new-app";
 import { fromOwnOrigin } from "@/lib/session";
 import { sessionStore } from "@/lib/session-store";
-import { callStudioTool, GENERIC_REFUSAL, listMyntTools, ToolRefusedError } from "@/lib/studio-server";
+import { callStudioTool, certainlyNotDone, GENERIC_REFUSAL, listMyntTools, ToolRefusedError } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +27,10 @@ export async function POST(req: Request) {
       if (typeof app?.id !== "string") throw new Error("create_app returned no app id");
       appId = app.id;
     } catch (err) {
-      await release(); // nothing was created; trying again is fine
+      // Given back only when the app certainly wasn't created (Mynt refused it before creating
+      // anything, or it was never sent). After a timeout or a lost reply it may exist, so the
+      // claim stays: a retry can't create a second app.
+      if (certainlyNotDone(err)) await release();
       throw err;
     }
 

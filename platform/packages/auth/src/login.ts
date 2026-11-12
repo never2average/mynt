@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { NextRequest } from "next/server";
-import { safeReturnPath } from "./return-path";
+import { appUrlWithPath, safeReturnPath } from "./return-path";
 import type { RouteDeps } from "./routes";
 import type { AuthSession } from "./types";
 
@@ -18,7 +18,7 @@ export function loginRoute<S extends AuthSession>({ config, sessions, sessionSto
   return async function GET(req?: NextRequest | Request) {
     const next = safeReturnPath(req ? new URL(req.url).searchParams.get("next") : null, config.appUrl());
     const { session } = await sessions.currentOrNewSession();
-    if (session.tokens) return NextResponse.redirect(new URL(next, config.appUrl()));
+    if (session.tokens) return NextResponse.redirect(appUrlWithPath(config.appUrl(), next));
     session.returnTo = next;
     const provider = sessions.oauthProviderFor(session);
     let res: NextResponse;
@@ -27,10 +27,10 @@ export function loginRoute<S extends AuthSession>({ config, sessions, sessionSto
       res =
         result === "REDIRECT" && provider.authorizationUrl
           ? NextResponse.redirect(provider.authorizationUrl)
-          : NextResponse.redirect(new URL(next, config.appUrl()));
+          : NextResponse.redirect(appUrlWithPath(config.appUrl(), next));
     } catch (err) {
       console.error("sign-in could not start:", err instanceof Error ? err.message : err);
-      res = NextResponse.redirect(new URL(`${config.authErrorPath?.() ?? "/"}?auth_error=start`, config.appUrl()));
+      res = NextResponse.redirect(appUrlWithPath(config.appUrl(), `${config.authErrorPath?.() ?? "/"}?auth_error=start`));
     }
     sessions.setSessionCookie(res, session);
     await sessionStore().save(session); // its PKCE verifier and state, for the callback

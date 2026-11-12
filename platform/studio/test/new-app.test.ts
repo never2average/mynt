@@ -8,6 +8,7 @@ const fake = {
   calls: [] as { name: string; args: Record<string, unknown> }[],
   tools: [{ name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {} } } }] as { name: string; inputSchema?: unknown }[],
   createFails: false,
+  createLost: false, // create_app's reply is lost (a transport error)
   startFails: false,
 };
 const claimed = new Set<string>();
@@ -39,7 +40,10 @@ vi.mock("@/lib/tokens", () => ({
       const ok = (data: unknown) => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
       const refused = (error: string) => ({ isError: true, content: [{ type: "text", text: JSON.stringify({ error }) }] });
       if (name === "whoami") return ok({ id: "u1", name: "Ines", email: "ines@example.com", effective_roles: ["developer"] });
-      if (name === "create_app") return fake.createFails ? refused("Products not available: p9") : ok({ id: "app-1", name: args.name });
+      if (name === "create_app") {
+        if (fake.createLost) throw new Error("socket hang up");
+        return fake.createFails ? refused("Products not available: p9") : ok({ id: "app-1", name: args.name });
+      }
       if (name === "start_build") return fake.startFails ? refused("Monthly build budget used up (US$100.00 of US$100 spent this month)") : ok({ id: "build-1", status: "queued" });
       return refused(`unexpected ${name}`);
     },
@@ -59,6 +63,7 @@ beforeEach(() => {
   fake.calls = [];
   fake.tools = [{ name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {} } } }];
   fake.createFails = false;
+  fake.createLost = false;
   fake.startFails = false;
   claimed.clear();
 });
@@ -107,6 +112,15 @@ describe("/api/apps", () => {
     expect((await res.json()).message).toBe("Products not available: p9");
     fake.createFails = false;
     expect((await post({ prompt, product_ids: ["p9"] })).status).toBe(201);
+  });
+
+  it("keeps the claim when create_app's reply is lost (the app may exist), so a retry can't create a second", async () => {
+    fake.createLost = true;
+    expect((await post({ prompt, product_ids: ["p1"] })).status).toBe(502);
+    fake.createLost = false;
+    const again = await post({ prompt, product_ids: ["p1"] });
+    expect(again.status).toBe(409);
+    expect(fake.calls.filter((c) => c.name === "create_app")).toHaveLength(1);
   });
 
   it("creates one app for a double submit", async () => {

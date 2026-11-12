@@ -3,7 +3,7 @@
 // New app: what to build, and the products it builds on. Submitting creates the app and its
 // first build, and opens its workspace (lib/new-app.ts).
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Check, Loader2, Search } from "lucide-react";
 
 import { SiteHeader } from "@/components/site-header";
@@ -42,13 +42,19 @@ export default function NewAppPage() {
   const known = useMemo(() => new Map((products ?? []).map((p) => [p.id, p])), [products]);
   const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
 
+  // One request at a time: the button is disabled while it runs, and a second submit (a double
+  // click before the re-render) is ignored.
+  const inFlight = useRef(false);
   const submit = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     const failed = await submitNewApp({ prompt, product_ids: picked }, { fetch, navigate: (path) => router.push(path) });
     if (failed) {
       setError(failed);
       setBusy(false);
+      inFlight.current = false;
     }
   };
 

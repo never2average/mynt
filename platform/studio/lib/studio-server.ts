@@ -30,6 +30,7 @@ export const MYNT_REFUSALS_BEFORE_ANY_CHANGE = [
   /is more than this month's remaining build budget/,
   /Repository '[^']*' isn't connected/,
   /Build is [a-z_]+; only a running agent can be steered/,
+  /Products not available: /, // create_app, checked before the app is created
 ];
 
 // The MCP server rejecting a call's arguments, before the tool runs.
