@@ -25,7 +25,7 @@ const DEVELOPER_TOOLS = [
   // runtime layer: keys, webhooks, sandbox, releases, metrics
   "create_api_key", "list_api_keys", "revoke_api_key", "rotate_api_key",
   "create_webhook", "delete_webhook", "list_webhook_deliveries", "list_webhooks", "rotate_webhook_secret",
-  "create_test_consumer", "simulate_handoff", "list_app_releases", "release_app", "rollback_app", "get_app_metrics",
+  "create_test_consumer", "simulate_handoff", "list_app_releases", "release_app", "rollback_app", "get_app_metrics", "get_developer_dashboard",
   // SDKs and experiences
   "create_sdk", "generate_sdk_release", "get_sdk_release", "list_sdk_releases", "list_sdks",
   "render_experience_preview", "set_experience",

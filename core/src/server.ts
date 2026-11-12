@@ -784,14 +784,16 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
       description:
         "Developer: create a draft app experience (e.g. a retirement planner or first-salary starter kit) on published products. Declare what it does (actions) and the disclosures it shows; check_experience tells you whether it meets each product's terms.",
       inputSchema: {
-        name: z.string().min(1),
-        description: z.string().min(1),
-        audience: z.string().min(1).describe("Who the experience is for, e.g. 'first-time investors in India'"),
-        product_ids: z.array(z.string()).min(1),
+        name: z.string().trim().min(1).max(200),
+        description: z.string().trim().min(1).max(4000),
+        audience: z.string().trim().min(1).max(500).describe("Who the experience is for, e.g. 'first-time investors in India'"),
+        product_ids: z.array(z.string().trim().min(1)).min(1),
         ...experienceFields,
       },
     },
     async (fields) => {
+      // A product named twice is one product (the studio's picker may send repeats).
+      fields = { ...fields, product_ids: [...new Set(fields.product_ids)] };
       const bad = await unusable(fields.product_ids, null);
       if (bad.length) return fail(`Products not available: ${bad.join(", ")}`);
       return json(await store.createApp(user.id, fields));
