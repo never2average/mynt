@@ -53,11 +53,11 @@ const TABLES = `
     token_sealed text NOT NULL,
     refresh_sealed text,
     expires_at timestamptz,
+    -- The host's own id for the person, always known: one host account links to one Mynt account.
+    provider_user_id text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   );
-  -- The host's own id for the person: one host account links to one Mynt account.
-  ALTER TABLE financial_products.git_accounts ADD COLUMN IF NOT EXISTS provider_user_id text;
   CREATE UNIQUE INDEX IF NOT EXISTS git_accounts_provider_user ON financial_products.git_accounts (provider, provider_user_id);
   -- Sign-ins in flight: ten minutes each, a few per person. The PKCE verifier and, once the host has answered, the
   -- person's token wait here, sealed, until the Mynt account that started it confirms the code shown to them.
@@ -75,6 +75,8 @@ const TABLES = `
 export const GIT_START_PATH = "/oauth/git/start";
 export const GIT_CALLBACK_PATH = "/oauth/git/callback";
 export const GIT_STATE_COOKIE = "__Host-mynt-git";
+// One cookie per sign-in (named by its state), so two sign-ins in one browser don't overwrite each other.
+export const stateCookieName = (state: string) => `${GIT_STATE_COOKIE}-${createHash("sha256").update(`name:${state}`).digest("hex").slice(0, 16)}`;
 const STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 3; // sign-ins in flight per person
 const MAX_ATTEMPTS = 5; // wrong codes before a sign-in is dropped
@@ -169,20 +171,30 @@ export class RepoOwnershipService {
     const r = await this.pending(state);
     if (r.token_sealed) throw new Error("This sign-in was already completed; start again with connect_git_account");
     const challenge = b64url(createHash("sha256").update(openToken(String(r.verifier_sealed))).digest());
-    return { location: this.provider!.authorizeUrl(state, this.redirectUri, challenge), cookie: sha256(state) };
+    return { location: this.provider!.authorizeUrl(state, this.redirectUri, challenge), cookieName: stateCookieName(state), cookie: sha256(state) };
   }
 
   // The host's callback, in the browser that opened the start link. Nothing is linked yet: the token waits, sealed,
   // for the Mynt account that started the sign-in to confirm the code returned here (shown only in this browser).
   async callback(state: string, code: string, cookie: string | null) {
     this.ready();
-    if (!cookie || !sameHex(cookie, sha256(state))) throw new Error("This sign-in didn't start in this browser; start again with connect_git_account");
+    if (!cookie || !sameHex(cookie, sha256(state))) {
+      // Dropped, so whatever reached this callback can't be replayed.
+      await this.db.query("DELETE FROM financial_products.git_account_states WHERE state = $1", [state]);
+      throw new Error("This sign-in didn't start in this browser, so it was cancelled; start again with connect_git_account");
+    }
     const r = await this.pending(state);
     if (r.token_sealed) throw new Error("This sign-in was already completed; start again with connect_git_account");
     const token = await this.provider!.exchange(code, this.redirectUri, openToken(String(r.verifier_sealed)));
     const confirm = confirmCode();
+    if (!token.user_id) throw new Error("The git host didn't say which account signed in, so nothing was linked; start again with connect_git_account");
     await this.db.query("UPDATE financial_products.git_account_states SET token_sealed = $2, code_hash = $3 WHERE state = $1", [state, sealToken(JSON.stringify(token)), sha256(confirm)]);
-    return { confirm_code: confirm, login: token.login };
+    // Who started it, for the page to say: the Mynt account (and its firm) the host account would be linked to.
+    const who = (await this.db.query(
+      "SELECT u.name, e.name AS firm FROM financial_products.users u LEFT JOIN financial_products.entities e ON e.id = u.entity_id WHERE u.id = $1",
+      [r.user_id],
+    )).rows[0] as Row | undefined;
+    return { confirm_code: confirm, login: token.login, mynt_account: { name: (who?.name as string) ?? "unknown", firm: (who?.firm as string | null) ?? null } };
   }
 
   // The last step, over the person's own authenticated Mynt session: links the host account to the Mynt account that
@@ -200,25 +212,39 @@ export class RepoOwnershipService {
       const other = (await this.db.query("DELETE FROM financial_products.git_account_states WHERE code_hash = $1 AND user_id <> $2 RETURNING state", [hash, userId])).rows;
       if (other.length) throw new Error("That sign-in was started from another Mynt account, so nothing was linked. If you didn't start it, someone tried to link your git account to theirs");
       for (const r of mine) {
-        const n = Number(r.attempts) + 1;
-        if (n >= MAX_ATTEMPTS) await this.db.query("DELETE FROM financial_products.git_account_states WHERE state = $1", [r.state]);
-        else await this.db.query("UPDATE financial_products.git_account_states SET attempts = $2 WHERE state = $1", [r.state, n]);
+        const n = (await this.db.query("UPDATE financial_products.git_account_states SET attempts = attempts + 1 WHERE state = $1 RETURNING attempts", [r.state])).rows[0] as Row | undefined;
+        if (n && Number(n.attempts) >= MAX_ATTEMPTS) await this.db.query("DELETE FROM financial_products.git_account_states WHERE state = $1", [r.state]);
       }
       throw new Error("That code doesn't match a sign-in of yours; check it, or start again with connect_git_account");
     }
     const token = JSON.parse(openToken(String(hit.token_sealed))) as GitUserToken;
     await this.db.query("DELETE FROM financial_products.git_account_states WHERE state = $1", [hit.state]);
-    if (token.user_id) {
-      const taken = (await this.db.query("SELECT user_id FROM financial_products.git_accounts WHERE provider = $1 AND provider_user_id = $2 AND user_id <> $3", [
-        this.provider!.name,
-        token.user_id,
-        userId,
-      ])).rows;
-      if (taken.length) throw new Error(`That git account${token.login ? ` (${token.login})` : ""} is already linked to another Mynt account`);
-    }
+    if (!token.user_id) throw new Error("The git host didn't say which account signed in, so nothing was linked");
+    const taken = (await this.db.query("SELECT user_id FROM financial_products.git_accounts WHERE provider = $1 AND provider_user_id = $2 AND user_id <> $3", [
+      this.provider!.name,
+      token.user_id,
+      userId,
+    ])).rows;
+    if (taken.length) throw new Error(`That git account${token.login ? ` (${token.login})` : ""} is already linked to another Mynt account`);
     await this.store(userId, token);
     this.forget(userId);
-    return { login: token.login };
+    return { login: token.login, provider_user_id: token.user_id };
+  }
+
+  // Admins: every link, and who it belongs to.
+  async links() {
+    const rows = (await this.db.query(
+      `SELECT g.user_id, u.name, g.provider, g.login, g.provider_user_id, g.created_at, g.updated_at
+       FROM financial_products.git_accounts g JOIN financial_products.users u ON u.id = g.user_id ORDER BY g.created_at`,
+    )).rows as Row[];
+    return rows.map((r) => ({
+      user_id: String(r.user_id),
+      name: r.name as string,
+      provider: r.provider as string,
+      login: (r.login as string | null) ?? null,
+      provider_user_id: r.provider_user_id as string,
+      linked_at: new Date(String(r.created_at)).toISOString(),
+    }));
   }
 
   private async store(userId: string, t: GitUserToken) {
@@ -327,7 +353,9 @@ export async function requirePush(ownership: RepoOwnershipService | null | undef
 
 // connect_git_account, confirm_git_account and git_account: for anyone who connects repositories (developers, and
 // innovators' desks).
-export function registerGitAccountTools(server: McpServer, userId: string, ownership: RepoOwnershipService) {
+type Audit = (actorId: string, action: string, target: string, details?: unknown) => Promise<void>;
+
+export function registerGitAccountTools(server: McpServer, userId: string, ownership: RepoOwnershipService, audit: Audit) {
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
   const fail = (error: string) => ({ ...json({ error }), isError: true });
   const attempt = async (f: () => Promise<unknown>) => {
@@ -354,7 +382,12 @@ export function registerGitAccountTools(server: McpServer, userId: string, owner
       description: "The code shown after you approved Mynt on your git host (connect_git_account). Only the Mynt account that started that sign-in can finish it.",
       inputSchema: { code: z.string().min(4).max(20) },
     },
-    async ({ code }) => attempt(async () => ({ connected: await ownership.confirm(userId, code) })),
+    async ({ code }) =>
+      attempt(async () => {
+        const linked = await ownership.confirm(userId, code);
+        await audit(userId, "confirm_git_account", userId, { provider: ownership.provider?.name ?? null, login: linked.login, provider_user_id: linked.provider_user_id });
+        return { connected: { login: linked.login } };
+      }),
   );
   server.registerTool(
     "git_account",
@@ -365,8 +398,43 @@ export function registerGitAccountTools(server: McpServer, userId: string, owner
     },
     async ({ disconnect }) =>
       attempt(async () => {
-        if (disconnect) await ownership.disconnect(userId);
+        if (disconnect) {
+          const was = await ownership.account(userId);
+          await ownership.disconnect(userId);
+          if (was) await audit(userId, "disconnect_git_account", userId, { provider: was.provider, login: was.login });
+        }
         return { connected: await ownership.account(userId) };
       }),
+  );
+}
+
+// Admins: see every git-account link, and unlink one (its grant withdrawn at the host), on the audit log.
+export function registerGitAccountAdminTools(server: McpServer, adminId: string, ownership: RepoOwnershipService, audit: Audit) {
+  const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
+  server.registerTool(
+    "list_git_account_links",
+    {
+      title: "People's git-account links",
+      description: "Admin: every Mynt account's linked git-host account (who, which host account, since when). Tokens are never shown.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => json(await ownership.links()),
+  );
+  server.registerTool(
+    "unlink_git_account",
+    {
+      title: "Unlink a person's git account",
+      description: "Admin: remove a Mynt account's git-host link (its grant withdrawn at the host). They can link again with connect_git_account. Recorded in the audit log.",
+      inputSchema: { user_id: z.string().uuid(), reason: z.string().min(3).max(500) },
+      annotations: { destructiveHint: true },
+    },
+    async ({ user_id, reason }) => {
+      const was = await ownership.account(user_id);
+      if (!was) return { ...json({ error: `No git account is linked to '${user_id}'` }), isError: true };
+      await ownership.disconnect(user_id);
+      await audit(adminId, "unlink_git_account", user_id, { provider: was.provider, login: was.login, reason });
+      return json({ unlinked: true, user_id, login: was.login });
+    },
   );
 }

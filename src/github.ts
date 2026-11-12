@@ -227,12 +227,14 @@ export class GitHubUserAuth implements RepoOwnershipProvider {
     const token = data.access_token;
     const user = await fetch(`${this.api}/user`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mynt" } });
     const who = user.ok ? ((await user.json()) as { login?: string; id?: number }) : {};
+    // Fails closed: without GitHub's id for the person, a link can't be kept one-to-one.
+    if (who.id == null) throw new Error(`GitHub didn't say which account this is (${user.status}); try again`);
     return {
       access_token: token,
       refresh_token: typeof data.refresh_token === "string" ? data.refresh_token : null,
       expires_at: typeof data.expires_in === "number" ? new Date(Date.now() + data.expires_in * 1000).toISOString() : null,
       login: who.login ?? null,
-      user_id: who.id != null ? String(who.id) : null,
+      user_id: String(who.id),
     };
   }
 
@@ -255,7 +257,7 @@ export class GitHubUserAuth implements RepoOwnershipProvider {
       if (res.headers.get("x-github-sso"))
         throw new Error(`The organization that owns ${repository} requires single sign-on: authorise Mynt's GitHub App for it (GitHub's SSO prompt), then try again`);
       if (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.get("retry-after"))
-        throw new Error(`GitHub's rate limit is spent for your account; try again in a few minutes`);
+        throw new Error(`GitHub's rate limit is spent for your account (429); try again in a few minutes`);
       return false;
     }
     if (!res.ok) throw new Error(`GitHub couldn't say who can push to ${repository} (${res.status}); try again in a moment`);

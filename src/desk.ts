@@ -368,6 +368,8 @@ export class DeskService {
       let env: Record<string, string> = {};
       if (j.kind === "agent") {
         const ws = (await this.workspace(j.entity_id as string))!;
+        // At mint time too: the person who asked for the job must still be able to push to the workspace.
+        await requirePush(this.ownership, String(j.user_id), ws.repository);
         const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
         env = { GITHUB_REPOSITORY: ws.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/desk-${String(j.id).slice(0, 8)}` };
       }

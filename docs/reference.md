@@ -236,17 +236,19 @@ When coding ends, Mynt stops both dev servers before it packages the source, and
 **Proof of push access.** The App being installed on a repository only says Mynt can reach it, not that the person asking may use it. So, before Mynt gives out any token for a repository named by a person, it asks the git host, as that person, whether they can push there (`src/repo-ownership.ts`; the GitHub adapter is `GitHubUserAuth` in `src/github.ts`, which reads `permissions.push` from `GET /repos/{owner}/{repo}` with the person's user token).
 - **Linking, once per person, bound to their Mynt account.**
   - `connect_git_account` gives a Mynt link (`/oauth/git/start`), valid for ten minutes, single use, at most three in flight per person.
-  - Opening it sets a host-only, `HttpOnly`, `Secure`, `SameSite=Lax` cookie holding a hash of the state, and sends the browser to the host with a PKCE (S256) challenge.
-  - The host's callback (`/oauth/git/callback`) needs that cookie, exchanges the code with the PKCE verifier, and shows a one-time code.
+  - Opening it sets a cookie for that sign-in alone (host-only, `HttpOnly`, `Secure`, `SameSite=Lax`, holding a hash of the state), and sends the browser to the host with a PKCE (S256) challenge.
+  - The host's callback (`/oauth/git/callback`) needs that cookie: without it, the sign-in is cancelled. The callback exchanges the code with the PKCE verifier and clears the cookie.
+  - The callback page says which host account signed in and which Mynt account (and firm) it would be linked to, and shows a one-time code with "Never share this code; Mynt never asks for it".
   - The person finishes with `confirm_git_account <code>` in their own Mynt session. Only the Mynt account that started the sign-in can confirm it, and a few wrong codes drop it.
   - Mynt's server has no browser session of its own (people reach it through MCP clients), so this confirmation over the authenticated MCP channel is what binds the host account to the right Mynt account. Someone who sends you their link gets nothing: you can't confirm their sign-in, and they never see your code.
-  - One host account links to one Mynt account.
+  - One host account links to one Mynt account. The host's id for the person is required; without it, nothing is linked.
 - **The token.** It's sealed at rest with a key derived from `MYNT_VAULT_KEY` for this purpose only. It's refreshed when it expires (one refresh at a time, compare-and-swap across processes) and never shown. `git_account` says whether it's connected; disconnecting also withdraws the grant at the host.
+- **Audit and admins.** Linking (`confirm_git_account`) and disconnecting are on the audit log. Admins see every link with `list_git_account_links`, and can remove one with `unlink_git_account` (a reason is required, and it's audited).
 - **Checked on every path that uses a repository by name**, after the App's installation is confirmed (a missing installation answers with where to install):
   - `connect_repository` and `set_app_repository`;
-  - every build naming a repository, at start and again in the worker right before the push token, so revoked access stops queued builds too; connections made before this check existed are checked as well;
+  - every build naming a repository, at start and again in the worker before anything is created for it (its sandbox key, its sandbox, the push token), so revoked access stops queued builds too, while a host that can't be reached or is rate limited is waited out; connections made before this check existed are checked as well;
   - `reopen_sandbox`, which gives a push token;
-  - a firm's desk workspace (`connect_desk_repository`), and each desk job, exploration and adoption on it.
+  - a firm's desk workspace (`connect_desk_repository`), and each desk job, exploration and adoption on it, again when a job or explorer is given a write token.
 - **Exempt: Mynt's managed repositories.** Mynt created them for the app, and only that app's builds reach them.
 - **Hosting.** `deploy_app` fetches source only through a connection whose push access Mynt has verified, or a managed repository.
 - **Caching.** A "can push" is reused for five minutes. A "can't" never is, so access granted on the host works at once.

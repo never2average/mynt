@@ -1288,21 +1288,36 @@ test("linking a git account is bound to the Mynt account that started it: a vict
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
-    // The victim's browser opens the attacker's link: Mynt sets its cookie and sends it to the host, with PKCE.
-    const go = await fetch(`${base}/oauth/git/start?state=${state}`, { redirect: "manual" });
+    // A callback without the sign-in's cookie (a browser that didn't open the start link) is refused, and cancels
+    // that sign-in, so nothing that reached it can be replayed.
+    const g0 = await fetch(`${base}/oauth/git/start?state=${state}`, { redirect: "manual" });
+    assert.equal(g0.status, 302);
+    const lost = await fetch(`${base}/oauth/git/callback?state=${state}&code=Victim`);
+    assert.equal(lost.status, 400);
+    assert.match(await lost.text(), /didn't start in this browser, so it was cancelled/);
+    const c0 = g0.headers.get("set-cookie").split(";")[0];
+    assert.equal((await fetch(`${base}/oauth/git/callback?state=${state}&code=Victim`, { headers: { cookie: c0 } })).status, 400, "cancelled for good");
+
+    // The attacker sends a fresh link; the victim's browser opens it: Mynt sets that sign-in's own cookie and sends
+    // the browser to the host, with PKCE.
+    const state2 = new URL((await call(attackerClient, "connect_git_account")).data.link).searchParams.get("state");
+    const go = await fetch(`${base}/oauth/git/start?state=${state2}`, { redirect: "manual" });
     assert.equal(go.status, 302);
     const to = new URL(go.headers.get("location"));
     assert.equal(to.searchParams.get("code_challenge_method"), "S256");
     assert.match(to.searchParams.get("code_challenge"), /^[\w-]{43}$/);
     const cookie = go.headers.get("set-cookie");
-    assert.match(cookie, /^__Host-mynt-git=[0-9a-f]{64}; Path=\/; Max-Age=600; HttpOnly; Secure; SameSite=Lax$/);
-    // Without that cookie (a browser that didn't start the sign-in), the callback refuses.
-    assert.equal((await fetch(`${base}/oauth/git/callback?state=${state}&code=Victim`)).status, 400);
-    // The victim approves on the host; the callback, in their browser, shows a code. Nothing is linked yet.
-    const back = await fetch(`${base}/oauth/git/callback?state=${state}&code=Victim`, { headers: { cookie: cookie.split(";")[0] } });
+    assert.match(cookie, /^__Host-mynt-git-[0-9a-f]{16}=[0-9a-f]{64}; Path=\/; Max-Age=600; HttpOnly; Secure; SameSite=Lax$/);
+    // The victim approves on the host; the callback, in their browser, says which Mynt account this would link their
+    // git account to, and shows a code. Nothing is linked yet, and the cookie is spent.
+    const back = await fetch(`${base}/oauth/git/callback?state=${state2}&code=Victim`, { headers: { cookie: cookie.split(";")[0] } });
     assert.equal(back.status, 200);
     assert.equal(back.headers.get("cache-control"), "no-store");
+    assert.match(back.headers.get("set-cookie"), /^__Host-mynt-git-[0-9a-f]{16}=; Path=\/; Max-Age=0;/);
     const page = await back.text();
+    assert.match(page, /signed in on your git host as Victim\./);
+    assert.match(page, /links that git account to the Mynt account Attacker\./);
+    assert.match(page, /Never share this code: Mynt never asks for it/);
     const code = page.match(/confirm_git_account ([A-Z2-9]{4}-[A-Z2-9]{4})/)[1];
     assert.ok(gitHost.lastVerifier, "the code was exchanged with the PKCE verifier");
     assert.equal(await ownership.account(attacker.id), null);
@@ -1314,7 +1329,7 @@ test("linking a git account is bound to the Mynt account that started it: a vict
     assert.match((await call(attackerClient, "confirm_git_account", { code })).data.error, /doesn't match/);
     assert.equal(await ownership.account(attacker.id), null, "the victim's git account is linked to no one");
     // A state is used once.
-    assert.equal((await fetch(`${base}/oauth/git/start?state=${state}`, { redirect: "manual" })).status, 400);
+    assert.equal((await fetch(`${base}/oauth/git/start?state=${state2}`, { redirect: "manual" })).status, 400);
   } finally {
     server.close();
   }
@@ -1412,9 +1427,11 @@ test("GitHubUserAuth: PKCE on the authorize link; 401, 403 and 404 mean what the
   const realFetch = globalThis.fetch;
   let answer;
   const sent = [];
+  let user = { status: 200, body: { login: "octo", id: 583231 } }; // GitHub's GET /user
   globalThis.fetch = async (u, init = {}) => {
     sent.push({ url: String(u), init });
-    return new Response(JSON.stringify(answer.body ?? {}), { status: answer.status, headers: answer.headers ?? {} });
+    const a = String(u).endsWith("/user") ? user : answer;
+    return new Response(JSON.stringify(a.body ?? {}), { status: a.status, headers: a.headers ?? {} });
   };
   try {
     answer = { status: 200, body: { permissions: { push: true } } };
@@ -1442,6 +1459,12 @@ test("GitHubUserAuth: PKCE on the authorize link; 401, 403 and 404 mean what the
     const t = await gh.exchange("code", "https://mynt.example.com/oauth/git/callback", "verifier123");
     assert.equal(JSON.parse(sent.find((s) => s.url.endsWith("/login/oauth/access_token") && s.init.body.includes("code_verifier")).init.body).code_verifier, "verifier123");
     assert.ok(Date.parse(t.expires_at) > Date.now() + 7.9 * 3600e3);
+    assert.deepEqual([t.login, t.user_id], ["octo", "583231"]);
+    // Fails closed: without GitHub's id for the person, no token comes back (so no link can be made).
+    user = { status: 200, body: { login: "octo" } };
+    await assert.rejects(gh.exchange("code", "https://mynt.example.com/oauth/git/callback", "v"), /didn't say which account/);
+    user = { status: 502 };
+    await assert.rejects(gh.exchange("code", "https://mynt.example.com/oauth/git/callback", "v"), /\(502\)/);
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -1453,6 +1476,67 @@ test("the sign-ins a person can have in flight are capped", async () => {
   for (let i = 0; i < 6; i++) await ctx.ownership.begin(user.id);
   const n = (await ctx.pg.query("SELECT count(*)::int AS n FROM financial_products.git_account_states WHERE user_id = $1", [user.id])).rows[0].n;
   assert.equal(n, 3);
+});
+
+test("linking and unlinking git accounts are on the audit log; admins can see and unlink a link", async () => {
+  const ctx = await setup({ git: false });
+  const { as, connect, call, store, link, ownership } = ctx;
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const admin = await connect(await as("Ada", ["admin"]));
+  // Linking through the tool (the last step, confirm_git_account) is audited.
+  const { link: start } = (await call(dev, "connect_git_account")).data;
+  const state = new URL(start).searchParams.get("state");
+  const { cookie } = await ownership.startRedirect(state);
+  const { confirm_code, mynt_account } = await ownership.callback(state, "Dev", cookie);
+  assert.deepEqual(mynt_account, { name: "Dev", firm: null });
+  assert.equal((await call(dev, "confirm_git_account", { code: confirm_code })).data.connected.login, "Dev");
+  const links = (await call(admin, "list_git_account_links")).data;
+  assert.deepEqual(links.map((l) => [l.name, l.login, l.provider_user_id]), [["Dev", "Dev", "id-Dev"]]);
+  assert.ok(!JSON.stringify(links).includes("user-token"), "never a token");
+  assert.equal((await call(admin, "unlink_git_account", { user_id: devUser.id, reason: "test" })).data.unlinked, true);
+  assert.equal(await ownership.account(devUser.id), null);
+  assert.match((await call(admin, "unlink_git_account", { user_id: devUser.id, reason: "again" })).data.error, /No git account/);
+  // The developer's own disconnect is audited too.
+  await link(devUser);
+  await call(dev, "git_account", { disconnect: true });
+  const actions = (await store.db.query("SELECT action, target FROM financial_products.audit_log WHERE action LIKE '%git_account%' ORDER BY created_at")).rows.map((r) => r.action);
+  assert.deepEqual(actions, ["confirm_git_account", "unlink_git_account", "disconnect_git_account"]);
+  // Developers don't get the admin tools.
+  assert.ok(!(await dev.listTools()).tools.some((t) => t.name === "unlink_git_account"));
+});
+
+test("the build worker rides out a git host it can't reach, and creates nothing for a build it refuses", async () => {
+  const ctx = await setup();
+  const { builds, as, connect, call, gitHost, store } = ctx;
+  const { RepoOwnershipService } = await import("../dist/repo-ownership.js");
+  const ttl = RepoOwnershipService.CHECK_TTL_MS;
+  try {
+    const devUser = await as("Dev", ["developer"]);
+    const dev = await connect(devUser);
+    const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+    await call(dev, "connect_repository", { repository: "acme/savings-app" });
+    const b = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id, repository: "acme/savings-app" })).data;
+    RepoOwnershipService.CHECK_TTL_MS = 0;
+    // The host can't be reached: the build waits for a later tick, with nothing created for it yet.
+    gitHost.push = () => {
+      throw new Error("fetch failed");
+    };
+    await builds.tick();
+    let now = await builds.get(b.id);
+    assert.deepEqual([now.status, now.sandbox_id, now.sandbox_key_id], ["queued", null, null]);
+    // The developer's access is gone: the build fails, still with no sandbox key made for it.
+    gitHost.push = () => false;
+    await builds.tick();
+    now = await builds.get(b.id);
+    assert.equal(now.status, "failed");
+    assert.match(now.error, /can't push/);
+    assert.equal(now.sandbox_key_id, null);
+    const keys = (await store.db.query("SELECT count(*)::int AS n FROM financial_products.api_keys WHERE app_id = $1", [app.id])).rows[0].n;
+    assert.equal(keys, 0);
+  } finally {
+    RepoOwnershipService.CHECK_TTL_MS = ttl;
+  }
 });
 
 

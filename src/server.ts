@@ -13,7 +13,7 @@ import {
 import { attributionFor, offersFor, registerGtmTools } from "./gtm.js";
 import { registerAdminTools, type AdminContext } from "./admin.js";
 import { registerCodingAgentAdminTools, registerCodingAgentTools } from "./builds.js";
-import { registerGitAccountTools } from "./repo-ownership.js";
+import { registerGitAccountAdminTools, registerGitAccountTools } from "./repo-ownership.js";
 import { registerBdAdminTools, registerBdAgentTools, registerConnectTools } from "./bd.js";
 import { feasibilityCheck, registerDeskTools, type DeskService } from "./desk.js";
 import { registerReviewTools } from "./review.js";
@@ -169,7 +169,9 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
   // Anyone who connects repositories (developers' builds, innovators' desk workspaces) proves they can push there.
-  if (user && ctx.ownership && (has("developer") || has("innovator"))) registerGitAccountTools(server, user.id, ctx.ownership);
+  const auditGit = (actorId: string, action: string, target: string, details?: unknown) => store.audit(actorId, action, target, details);
+  if (user && ctx.ownership && (has("developer") || has("innovator"))) registerGitAccountTools(server, user.id, ctx.ownership, auditGit);
+  if (user && ctx.ownership && has("admin")) registerGitAccountAdminTools(server, user.id, ctx.ownership, auditGit);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
   if (has("admin")) {

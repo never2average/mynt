@@ -463,6 +463,8 @@ export class ExploreService {
   // A fresh push token into an explorer's sandbox, for its credential helper to read.
   private async writeToken(j: Row, v: Row) {
     const ws = await this.workspaceOf(j);
+    // At mint time too: the person who started the exploration must still be able to push to the workspace.
+    await requirePush(this.desk.ownership, String(j.user_id), ws.repository);
     const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
     await this.sandboxes!.writeFile(v.sandbox_id as string, TOKEN_FILE, token);
     await this.updateVariant(j.id as string, Number(v.k), { token_minted_at: new Date().toISOString() });

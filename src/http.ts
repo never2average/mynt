@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
-import { GIT_CALLBACK_PATH, GIT_START_PATH, GIT_STATE_COOKIE } from "./repo-ownership.js";
+import { GIT_CALLBACK_PATH, GIT_START_PATH, stateCookieName } from "./repo-ownership.js";
 import type { ClerkAuth } from "./auth.js";
 import { RAMP_ADAPTER_WEBHOOK_PATH, rampAdapterWebhook } from "./ramp-adapters/index.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
@@ -126,38 +126,48 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   // Nothing about the token is ever shown.
   if (ctx.ownership && req.method === "GET" && (url.pathname === GIT_START_PATH || url.pathname === GIT_CALLBACK_PATH)) {
     const headers = { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY" };
-    const page = (status: number, text: string) => void res.writeHead(status, headers).end(text);
     const state = url.searchParams.get("state") ?? "";
+    // The sign-in's cookie is spent at the callback, whatever happens there.
+    const clear = state && url.pathname === GIT_CALLBACK_PATH ? { "set-cookie": `${stateCookieName(state)}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` } : {};
+    const page = (status: number, text: string) => void res.writeHead(status, { ...headers, ...clear }).end(text);
     try {
       if (url.pathname === GIT_START_PATH) {
         if (!state) return page(400, "This link is incomplete. Start again with connect_git_account.");
         const go = await ctx.ownership.startRedirect(state);
         return void res
-          .writeHead(302, { ...headers, location: go.location, "set-cookie": `${GIT_STATE_COOKIE}=${go.cookie}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax` })
+          .writeHead(302, { ...headers, location: go.location, "set-cookie": `${go.cookieName}=${go.cookie}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax` })
           .end();
       }
       const code = url.searchParams.get("code") ?? "";
       if (!state || !code) return page(400, "This link is incomplete, or the sign-in was declined. Start again with connect_git_account.");
+      const name = stateCookieName(state);
       const cookie = (req.headers.cookie ?? "")
         .split(";")
         .map((c) => c.trim().split("="))
-        .find(([k]) => k === GIT_STATE_COOKIE)?.[1];
+        .find(([k]) => k === name)?.[1];
       const done = await ctx.ownership.callback(state, code, cookie ?? null);
+      const account = `${done.mynt_account.name}${done.mynt_account.firm ? ` (${done.mynt_account.firm})` : ""}`;
       return page(
         200,
         [
-          `Signed in on your git host${done.login ? ` as ${done.login}` : ""}. One step left, in the Mynt assistant you started from:`,
+          `You signed in on your git host as ${done.login ?? "(unknown)"}.`,
+          `Confirming links that git account to the Mynt account ${account}.`,
+          "",
+          "If that isn't your Mynt account, or you didn't start this yourself, stop here: close this tab, and nothing is linked.",
+          "",
+          "Otherwise, one step left, in the Mynt assistant you started from:",
           "",
           `    confirm_git_account ${done.confirm_code}`,
           "",
-          "It expires in ten minutes. Only the Mynt account that started this sign-in can confirm it.",
-          "If you didn't start it yourself, don't confirm anything: close this tab, and nothing is linked.",
+          "It expires in ten minutes, and only that Mynt account can confirm it.",
+          "Never share this code: Mynt never asks for it, and no one else needs it.",
         ].join("\n"),
       );
     } catch (e) {
       return page(400, (e as Error).message);
     }
   }
+
   // Build agents reach Anthropic through Mynt with a per-build token (see agent-proxy.ts).
   if (ctx.builds && url.pathname.startsWith("/agent/")) {
     const builds = ctx.builds;

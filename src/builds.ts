@@ -1144,6 +1144,11 @@ export class BuildService {
   private async advance(b: Build) {
     const sandboxes = this.sandboxes!;
     if (b.status === "queued") {
+      // Again here, before anything is created for the build (its sandbox key, its sandbox, the push token): it may
+      // have been queued before this check existed, or the developer's access revoked since (a recent "yes" is reused
+      // for a few minutes). A refusal fails the build; the host being unreachable or rate limited is a passing error,
+      // ridden out on later ticks like any other.
+      if (b.repository && this.repos) await this.checkPush(b.developer_id, b.repository);
       const env: Record<string, string> = { MYNT_BUILD_ID: b.id };
       // A sandbox key for the app, so the agent tests against Mynt's sandbox (simulated hand-offs).
       let sandboxKeyId: string | null = null;
@@ -1158,9 +1163,6 @@ export class BuildService {
         Object.assign(env, { MYNT_SANDBOX_KEY: secret, ...(this.config.publicUrl ? { MYNT_API_BASE: `${this.config.publicUrl}/v1` } : {}) });
       }
       if (b.repository && this.repos) {
-        // Again here, right before the push token: the build may have been queued before this check existed, or the
-        // developer's access revoked since (a recent "yes" is reused for a few minutes).
-        await this.checkPush(b.developer_id, b.repository);
         const installation = await this.installation(b.developer_id, b.repository);
         const { token } = await this.repos.tokenFor(b.repository, installation!);
         Object.assign(env, { GITHUB_REPOSITORY: b.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/build-${b.id.slice(0, 8)}` });
