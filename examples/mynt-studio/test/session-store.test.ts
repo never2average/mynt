@@ -387,6 +387,17 @@ describe("SessionOAuthProvider over the key-value store", () => {
     expect(await p2.clientInformation()).toBeUndefined();
   });
 
+  it("counts refusals per client: three drop c1, and one more refusal doesn't drop its replacement c2", async () => {
+    const { store } = setup();
+    const p = new SessionOAuthProvider(store.create(), store, REDIRECT, "openid");
+    await p.saveClientInformation({ client_id: "c1" });
+    for (let i = 0; i < CLIENT_REJECTIONS; i++) await p.invalidateCredentials("client");
+    expect(await p.clientInformation()).toBeUndefined();
+    await p.saveClientInformation({ client_id: "c2" }); // the next sign-in registers again
+    await p.invalidateCredentials("client");
+    expect(await p.clientInformation()).toEqual({ client_id: "c2" });
+  });
+
   it("a refusal more than an hour after the last doesn't add up to dropping the registration", async () => {
     const { kv, store } = setup();
     const p = new SessionOAuthProvider(store.create(), store, REDIRECT, "openid");

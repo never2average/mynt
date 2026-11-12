@@ -305,8 +305,13 @@ export class SessionStore {
   // is bound to it, so one request's refusal doesn't drop it: only CLIENT_REJECTIONS of them
   // within an hour do (the registration really is gone), after which the next sign-in
   // registers again.
+  //
+  // Refusals are counted per client id, so those of a registration already replaced never
+  // count against the new one.
   async forgetClient(redirectUrl: string): Promise<void> {
-    const rejections = await this.count("client-rejected", redirectUrl, 60 * 60);
+    const current = await this.clientInformation(redirectUrl);
+    if (!current?.client_id) return;
+    const rejections = await this.count("client-rejected", `${redirectUrl}\n${current.client_id}`, 60 * 60);
     if (rejections >= CLIENT_REJECTIONS) await this.kv.del(this.clientKey(redirectUrl));
   }
 
