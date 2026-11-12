@@ -250,7 +250,7 @@ for line in open(os.environ["MYNT_APPLICANTS"]):
 
 // ---- the exploration, end to end, with stand-ins for the sandbox host and GitHub ----
 
-function fakeBoat() {
+function fakeSandboxHost() {
   const sandboxes = new Map();
   let n = 0;
   return {
@@ -363,12 +363,12 @@ async function setup() {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
-  const boat = fakeBoat();
+  const sandboxes = fakeSandboxHost();
   const repos = fakeRepos();
   const host = { agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example.com" };
   const deskConfig = deskConfigFromEnv(host, {});
-  const desk = await DeskService.open(db, store, boat, repos, deskConfig);
-  const explore = await ExploreService.open(db, store, boat, repos, exploreConfigFromEnv(deskConfig, {}), desk);
+  const desk = await DeskService.open(db, store, sandboxes, repos, deskConfig);
+  const explore = await ExploreService.open(db, store, sandboxes, repos, exploreConfigFromEnv(deskConfig, {}), desk);
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
     await createServer(store, user, { desk, explore }).connect(s);
@@ -399,7 +399,7 @@ async function setup() {
     await call(client, "set_product_terms", { product_id: "quick-loan", inputs: { apr_pct: 18, apr_cap_pct: 24, expected_pd_pct: 5, lgd_pct: 65, cost_of_funds_pct: 9, opex_pct: 3 } });
     return { user, client };
   };
-  return { db, store, desk, explore, boat, repos, connect, call, innovator, ready };
+  return { db, store, desk, explore, sandboxes, repos, connect, call, innovator, ready };
 }
 
 // A fixed dataset secret for the exploration test. On its holdout the knockout at 650 is within every constraint
@@ -427,7 +427,7 @@ const variants = async (explore, id) => (await explore.get(id)).variants;
 const sandboxOf = async (db, id, k, column = "sandbox_id") => (await db.query(`SELECT ${column} FROM financial_products.explore_variants WHERE job_id = $1 AND k = $2`, [id, k])).rows[0][column];
 
 test("an exploration: explorers on different angles with the dev set only; Mynt scores every pushed variant and the baseline on the holdout; adopt opens a PR", async () => {
-  const { db, store, explore, desk, boat, repos, call, ready } = await setup();
+  const { db, store, explore, desk, sandboxes, repos, call, ready } = await setup();
   const { client } = await ready();
 
   assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "nope" })).data.error, /no core algorithm 'nope' \(it has: uw, interest\)/);
@@ -454,24 +454,24 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   // Explorer sandboxes: each with the firm's repo and its own hard-to-guess branch; no token in the environment.
   await explore.tick();
   await explore.tick(); // a second tick before they're ready creates nothing new
-  assert.equal(boat.sandboxes.size, 3);
+  assert.equal(sandboxes.sandboxes.size, 3);
   const explorerSbx = [];
   const branches = {};
   for (const k of [1, 2, 3]) {
     const id = await sandboxOf(db, job.id, k);
     explorerSbx.push(id);
-    const env = boat.sandboxes.get(id).opts.env;
+    const env = sandboxes.sandboxes.get(id).opts.env;
     branches[k] = env.MYNT_BRANCH;
     assert.match(env.MYNT_BRANCH, new RegExp(`^mynt/explore-${job.id.slice(0, 8)}-${k}-[0-9a-f]{12}$`));
     assert.equal(env.GITHUB_REPOSITORY, "acme/desk");
     assert.ok(!("GITHUB_TOKEN" in env), "the push token isn't in the environment");
-    assert.ok(!boat.sandboxes.get(id).files.has(TOKEN_FILE), "nor minted before the explorer starts");
-    boat.ready(id);
+    assert.ok(!sandboxes.sandboxes.get(id).files.has(TOKEN_FILE), "nor minted before the explorer starts");
+    sandboxes.ready(id);
   }
   await explore.tick();
   // Minted just before launch, as a file for the credential helper.
-  assert.match(boat.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE), /^ghs_explore_\d+$/);
-  const specs = explorerSbx.map((id) => JSON.parse(boat.sandboxes.get(id).files.get(`${WS}/job/explore.json`)));
+  assert.match(sandboxes.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE), /^ghs_explore_\d+$/);
+  const specs = explorerSbx.map((id) => JSON.parse(sandboxes.sandboxes.get(id).files.get(`${WS}/job/explore.json`)));
   const angles = explorationAngles().map((a) => a.id);
   assert.deepEqual(specs.map((s) => s.angle.id), angles.slice(0, 3), "a different angle each");
   for (const s of specs) {
@@ -485,7 +485,7 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   const holdout = generateDataset(stored.params, splitKeys(stored.secret).holdout, "h");
   assert.ok(!JSON.stringify(job).includes(stored.secret), "the dataset secret is never shown");
   for (const id of explorerSbx) {
-    const files = boat.sandboxes.get(id).files;
+    const files = sandboxes.sandboxes.get(id).files;
     assert.ok(files.get(`${WS}/CLAUDE.md`).includes("autoresearch"));
     assert.ok(files.has(`${WS}/.claude/skills/model-contract/SKILL.md`));
     assert.equal(files.get(`${WS}/scripts/score.mjs`), SCORER_SCRIPT);
@@ -502,11 +502,11 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
     assert.ok(!everything.includes(stored.secret), "nor the secret that would rebuild it");
   }
   // Tokens last an hour: Mynt replaces an explorer's well before then.
-  const before = boat.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE);
+  const before = sandboxes.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE);
   await db.query("UPDATE financial_products.explore_variants SET token_minted_at = now() - interval '41 minutes' WHERE job_id = $1 AND k = 1", [job.id]);
   await explore.tick();
-  assert.notEqual(boat.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE), before, "a fresh token for late pushes");
-  const auth = JSON.parse(boat.sandboxes.get(explorerSbx[0]).files.get(`${A}/auth.json`));
+  assert.notEqual(sandboxes.sandboxes.get(explorerSbx[0]).files.get(TOKEN_FILE), before, "a fresh token for late pushes");
+  const auth = JSON.parse(sandboxes.sandboxes.get(explorerSbx[0]).files.get(`${A}/auth.json`));
   assert.deepEqual(await explore.agentRun(auth.token), { key: `explore:${job.id}`, capUsd: 20 }, "every explorer spends against the job's one key and cap");
   assert.equal((await explore.get(job.id)).status, "exploring");
 
@@ -515,15 +515,15 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   const C2 = "2".repeat(40);
   repos.refs.set(branches[1], C1);
   repos.refs.set(branches[2], C2);
-  boat.finishAgent(explorerSbx[0], 1, "Added a bureau-score knockout at 650");
-  boat.finishAgent(explorerSbx[1], 1, "Priced riskier grades higher");
+  sandboxes.finishAgent(explorerSbx[0], 1, "Added a bureau-score knockout at 650");
+  sandboxes.finishAgent(explorerSbx[1], 1, "Priced riskier grades higher");
   await explore.tick();
   assert.equal((await explore.get(job.id)).status, "exploring", "waits for every explorer");
-  boat.finishAgent(explorerSbx[2], 1, "Couldn't find an improvement");
+  sandboxes.finishAgent(explorerSbx[2], 1, "Couldn't find an improvement");
   await explore.tick();
   assert.equal((await explore.get(job.id)).status, "scoring");
   assert.equal(await explore.agentTokenActive(auth.token), false, "explorer tokens die when they finish");
-  for (const id of explorerSbx) assert.ok(boat.sandboxes.get(id).stopped);
+  for (const id of explorerSbx) assert.ok(sandboxes.sandboxes.get(id).stopped);
   // A push after the explorer finished (by it, or another explorer with the same repository access) changes nothing.
   repos.refs.set(branches[1], "f".repeat(40));
   repos.refs.set("v1.0.0", "e".repeat(40));
@@ -534,13 +534,13 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   assert.equal(await sandboxOf(db, job.id, 3, "score_sandbox_id"), null, "nothing pushed, nothing to run");
   for (const k of [0, 1, 2]) {
     scoreSbx[k] = await sandboxOf(db, job.id, k, "score_sandbox_id");
-    assert.deepEqual(boat.sandboxes.get(scoreSbx[k]).opts.env, {}, "the scorer gets no credentials in its env");
-    boat.ready(scoreSbx[k]);
+    assert.deepEqual(sandboxes.sandboxes.get(scoreSbx[k]).opts.env, {}, "the scorer gets no credentials in its env");
+    sandboxes.ready(scoreSbx[k]);
   }
   await explore.tick();
   const pinned = { 0: BASE, 1: C1, 2: C2 };
   for (const k of [0, 1, 2]) {
-    const s = boat.sandboxes.get(scoreSbx[k]).files;
+    const s = sandboxes.sandboxes.get(scoreSbx[k]).files;
     assert.ok(s.get(`${DIR}/run.sh`).includes(`fetch -q --depth 1 origin ${pinned[k]}`), "exactly the commit pinned when the explorer finished");
     assert.ok(!s.get(`${DIR}/run.sh`).includes("--branch"));
     assert.ok(s.get(`${DIR}/run.sh`).indexOf("rm -f /home/user/.mynt-git-credentials") < s.get(`${DIR}/run.sh`).indexOf("run-decide.mjs"), "the clone token is gone before any algorithm code runs");
@@ -551,9 +551,9 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   // Baseline approves everyone at 18%; explorer 1 adds a knockout (better, within every constraint); explorer 2 prices
   // over the APR cap (more margin, but ineligible); explorer 3 never pushed.
   const knockout = (a) => ((a.bureau_score ?? 0) >= 650 ? { approve: true, grade: "A", reason_codes: [] } : { approve: false, reason_codes: ["LOW_BUREAU_SCORE"] });
-  boat.finishDecide(scoreSbx[0], () => ({ approve: true, apr_pct: 18, reason_codes: [] }), BASE);
-  boat.finishDecide(scoreSbx[1], knockout, C1);
-  boat.finishDecide(scoreSbx[2], (a) => ({ ...knockout(a), ...((a.bureau_score ?? 0) >= 650 ? { apr_pct: 30 } : {}) }), C2);
+  sandboxes.finishDecide(scoreSbx[0], () => ({ approve: true, apr_pct: 18, reason_codes: [] }), BASE);
+  sandboxes.finishDecide(scoreSbx[1], knockout, C1);
+  sandboxes.finishDecide(scoreSbx[2], (a) => ({ ...knockout(a), ...((a.bureau_score ?? 0) >= 650 ? { apr_pct: 30 } : {}) }), C2);
   await explore.tick();
 
   const done = await explore.get(job.id);
@@ -586,7 +586,7 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
   assert.ok(typeof first.metrics.expected_loss_rate_pct === "number", "Mynt holds the latent probability, so expected loss is measured on the holdout");
   assert.match(done.phase_message, /^Best: explorer 1/);
   assert.ok(Number(done.cost_usd) >= 3, "the explorers' spend is counted");
-  for (const k of [0, 1, 2]) assert.ok(boat.sandboxes.get(scoreSbx[k]).stopped);
+  for (const k of [0, 1, 2]) assert.ok(sandboxes.sandboxes.get(scoreSbx[k]).stopped);
   assert.equal(first.commit, C1);
   const got = (await call(client, "get_exploration", { job_id: job.id })).data;
   assert.equal(got.leaderboard[0].k, 1);
@@ -627,24 +627,24 @@ test("an exploration: explorers on different angles with the dev set only; Mynt 
 });
 
 test("the budget is shared and enforced: over the cap, everything stops", async () => {
-  const { db, explore, boat, call, ready } = await setup();
+  const { db, explore, sandboxes, call, ready } = await setup();
   const { client } = await ready();
   const job = (await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", explorers: 2, cap_usd: 5 })).data;
   await explore.tick();
   const ids = [await sandboxOf(db, job.id, 1), await sandboxOf(db, job.id, 2)];
-  for (const id of ids) boat.ready(id);
+  for (const id of ids) sandboxes.ready(id);
   await explore.tick();
-  const cfg = JSON.parse(boat.sandboxes.get(ids[0]).files.get(`${A}/config.json`));
+  const cfg = JSON.parse(sandboxes.sandboxes.get(ids[0]).files.get(`${A}/config.json`));
   assert.equal(cfg.budgetUsd, 2.25, "each explorer gets its share of the cap");
   // Two explorers, each under its own share, together over the job's cap.
-  for (const id of ids) boat.sandboxes.get(id).files.set(`${A}/state.json`, JSON.stringify({ done: false, cost_usd: 2.6 }));
+  for (const id of ids) sandboxes.sandboxes.get(id).files.set(`${A}/state.json`, JSON.stringify({ done: false, cost_usd: 2.6 }));
   await explore.tick();
   const stopped = await explore.get(job.id);
   assert.equal(stopped.status, "over_budget");
   assert.match(stopped.error, /over the US\$5 cap/);
   assert.match((await opsStatus(db)).attention.join("\n"), /explorers: 1 failed/, "over-cap stops show up for admins");
-  for (const id of ids) assert.ok(boat.sandboxes.get(id).stopped);
-  const auth = JSON.parse(boat.sandboxes.get(ids[0]).files.get(`${A}/auth.json`));
+  for (const id of ids) assert.ok(sandboxes.sandboxes.get(id).stopped);
+  const auth = JSON.parse(sandboxes.sandboxes.get(ids[0]).files.get(`${A}/auth.json`));
   assert.equal(await explore.agentTokenActive(auth.token), false);
 });
 
@@ -687,13 +687,13 @@ test("starting: an APR cap is required, one exploration at a time even when two 
 });
 
 test("a passing provider error doesn't fail an exploration; a lasting one does", async () => {
-  const { explore, boat, call, ready } = await setup();
+  const { explore, sandboxes, call, ready } = await setup();
   const { client } = await ready();
   const job = (await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", explorers: 1 })).data;
   await explore.tick();
-  const cost = boat.costDollars;
-  boat.costDollars = async () => {
-    throw new Error("boat: 503 Service Unavailable");
+  const cost = sandboxes.costDollars;
+  sandboxes.costDollars = async () => {
+    throw new Error("sandboxes: 503 Service Unavailable");
   };
   await explore.tick();
   assert.equal((await explore.get(job.id)).status, "exploring", "ridden out");
@@ -704,20 +704,20 @@ test("a passing provider error doesn't fail an exploration; a lasting one does",
   const failed = await explore.get(job.id);
   assert.equal(failed.status, "failed", "past the grace period it fails");
   assert.match(failed.error, /503/);
-  boat.costDollars = cost;
+  sandboxes.costDollars = cost;
 });
 
 test("an explorer's end is recorded before its sandbox stops, so a GitHub hiccup reading its branch is retried", async () => {
-  const { db, explore, boat, repos, call, ready } = await setup();
+  const { db, explore, sandboxes, repos, call, ready } = await setup();
   const { client } = await ready();
   const job = (await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", explorers: 1 })).data;
   await explore.tick();
   const sbx = await sandboxOf(db, job.id, 1);
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await explore.tick();
-  const branch = boat.sandboxes.get(sbx).opts.env.MYNT_BRANCH;
+  const branch = sandboxes.sandboxes.get(sbx).opts.env.MYNT_BRANCH;
   repos.refs.set(branch, "1".repeat(40));
-  boat.finishAgent(sbx, 1, "Re-cut the grades");
+  sandboxes.finishAgent(sbx, 1, "Re-cut the grades");
   const resolve = repos.resolveRef;
   repos.resolveRef = async () => {
     throw new Error("GitHub couldn't resolve the branch (502)");
@@ -727,9 +727,9 @@ test("an explorer's end is recorded before its sandbox stops, so a GitHub hiccup
   const v = (await variants(explore, job.id)).find((x) => x.k === 1);
   assert.equal(v.status, "finishing");
   assert.equal(v.summary, "Re-cut the grades", "the agent's result is kept");
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
   // The sandbox is gone now; reading the agent again would fail. The next tick only asks GitHub.
-  boat.sandboxes.get(sbx).files.delete(`${A}/state.json`);
+  sandboxes.sandboxes.get(sbx).files.delete(`${A}/state.json`);
   repos.resolveRef = resolve;
   await explore.tick();
   const after = (await variants(explore, job.id)).find((x) => x.k === 1);
@@ -751,9 +751,9 @@ test("Mynt's checkout of a pinned commit works on a real repository (a SHA can't
   git(origin, "commit", "-q", "-am", "later");
   // Capture the script Mynt writes, then run it against the local repository instead of GitHub.
   const files = new Map();
-  const boat = { writeFile: async (_s, path, content) => void files.set(path, content), exec: async () => ({ processId: 1 }) };
+  const sandboxes = { writeFile: async (_s, path, content) => void files.set(path, content), exec: async () => ({ processId: 1 }) };
   const base = mkdtempSync(join(tmpdir(), "mynt-explore-run-"));
-  await startRepoRun(boat, { tokenFor: async () => ({ token: "t" }) }, "s", {
+  await startRepoRun(sandboxes, { tokenFor: async () => ({ token: "t" }) }, "s", {
     repository: "acme/desk",
     installationId: 7,
     ref: pinned,

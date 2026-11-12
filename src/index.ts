@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { AgentMeter } from "./agent-meter.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ClerkAdmin, ClerkAuth, clerkConfigFromEnv } from "./auth.js";
-import { sandboxesFromEnv } from "./freestyle-sandboxes.js";
+import { sandboxesFromEnv } from "./sandbox-providers/index.js";
 import { BdService, bdConfigFromEnv } from "./bd.js";
 import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./hosting.js";
 import { egressFor } from "./hosting-tools.js";
@@ -99,22 +99,22 @@ const openStore = () => Store.open(openDb());
 const openServices = async () => {
   const db = openDb();
   const store = await Store.open(db);
-  const boat = sandboxesFromEnv();
+  const sandboxes = sandboxesFromEnv();
   const buildConfig = buildConfigFromEnv();
   const github = GitHubApp.fromEnv();
-  const builds = await BuildService.open(db, store, boat, github, buildConfig);
+  const builds = await BuildService.open(db, store, sandboxes, github, buildConfig);
   // Each app's managed repository, when Mynt has an organization for them (BUILD_MANAGED_REPO_OWNER).
   builds.managedHost = GitHubRepoHost.fromEnv(github);
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
   const deskConfig = deskConfigFromEnv(buildConfig);
-  const desk = await DeskService.open(db, store, boat, github, deskConfig);
+  const desk = await DeskService.open(db, store, sandboxes, github, deskConfig);
   desk.managedHost = builds.managedHost; // never a firm's workspace (so never an exploration's either)
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
-  const bd = await BdService.open(db, boat, bdConfigFromEnv(buildConfig));
+  const bd = await BdService.open(db, sandboxes, bdConfigFromEnv(buildConfig));
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.
-  const review = await ReviewService.open(db, store, boat, reviewConfigFromEnv(buildConfig), desk);
+  const review = await ReviewService.open(db, store, sandboxes, reviewConfigFromEnv(buildConfig), desk);
   // The desk's algorithm explorations: explorer agents steered by workspaces/algorithm-explorer; Mynt scores.
-  const explore = await ExploreService.open(db, store, boat, github, exploreConfigFromEnv(deskConfig), desk, review);
+  const explore = await ExploreService.open(db, store, sandboxes, github, exploreConfigFromEnv(deskConfig), desk, review);
   // Developers' hosting: a VM each, fetching their verified commits with a read-only GitHub token.
   const hosting = await HostingService.open(db, hostingProviderFromEnv(), hostingConfigFromEnv(), async (developerId, repository) => {
     if (!github) return null;
@@ -127,7 +127,7 @@ const openServices = async () => {
   const solana = await SolanaService.open(db, store);
   builds.solana = solana;
   // The mainnet program gate: every mainnet deploy and upgrade needs its approved review (solana.gate).
-  const gate = await MainnetGateService.open(db, store, solana, boat, gateConfigFromEnv(buildConfig));
+  const gate = await MainnetGateService.open(db, store, solana, sandboxes, gateConfigFromEnv(buildConfig));
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
