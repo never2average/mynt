@@ -51,7 +51,12 @@ export const SESSION_IDLE_MS = 15 * 60 * 1000;
 // Mynt finishes a session itself this long before its sandbox's time limit, or once it has spent this share of its
 // cap, so the work is shipped rather than lost when the sandbox ends or the build goes over budget.
 export const SESSION_TTL_MARGIN_S = 30 * 60;
-export const SESSION_CAP_SHARE = 0.8;
+// The cap auto-finish leaves room for the finish turn itself (review, checks, preview, push): it starts at 70% of the
+// cap, or earlier when the cap is small, so at least SESSION_FINISH_RESERVE_USD is left. The reserve is an estimate
+// of one finish turn, not a measured figure.
+export const SESSION_CAP_SHARE = 0.7;
+export const SESSION_FINISH_RESERVE_USD = 2;
+export const sessionCapThreshold = (cap: number) => Math.max(0, Math.min(SESSION_CAP_SHARE * cap, cap - SESSION_FINISH_RESERVE_USD));
 const sessionIdleMs = (v: string | undefined) => {
   const n = Number(v);
   return v !== undefined && Number.isFinite(n) && n >= 60_000 && n <= 24 * 3600 * 1000 ? n : SESSION_IDLE_MS;
@@ -160,6 +165,9 @@ export interface Build {
   // finish_build (or SESSION_IDLE_MS idle), then ships.
   mode: "once" | "session";
   finish_requested_at: string | null;
+  finish_reason: string | null; // "developer", "idle", "ttl" or "cap"
+  finish_delivered_at: string | null; // when the finish item reached the agent's inbox (or the runner started it)
+  sandbox_started_at: string | null; // when Mynt asked for the build's sandbox: its time limit counts from here
   // continue_from: the earlier build whose pushed branch this one starts from.
   continued_from: string | null;
   base_branch: string | null;
@@ -212,6 +220,9 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'once';
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_requested_at timestamptz;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_reason text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_delivered_at timestamptz;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS sandbox_started_at timestamptz;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS continued_from uuid;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_branch text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_commit text;
@@ -257,6 +268,9 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   box_until: iso(r.box_until),
   mode: r.mode === "session" ? "session" : "once",
   finish_requested_at: iso(r.finish_requested_at),
+  finish_reason: (r.finish_reason as string | null) ?? null,
+  finish_delivered_at: iso(r.finish_delivered_at),
+  sandbox_started_at: iso(r.sandbox_started_at),
   continued_from: (r.continued_from as string | null) ?? null,
   base_branch: (r.base_branch as string | null) ?? null,
   base_commit: (r.base_commit as string | null) ?? null,
@@ -544,6 +558,12 @@ export class BuildService {
       opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: prev.repository, solana: opts.solana ?? (prev.solana || undefined) };
     }
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
+    // A session finishes itself while SESSION_FINISH_RESERVE_USD is still left for shipping: a cap no bigger than that
+    // would finish it as soon as it starts.
+    if (opts.mode === "session" && cap <= SESSION_FINISH_RESERVE_USD)
+      throw new Error(
+        `A session build needs a cap above US$${SESSION_FINISH_RESERVE_USD} (it keeps that much to ship the work when it finishes); start it with a bigger cap_usd, or as a one-off build`,
+      );
     const spent = await this.monthSpend(developer.id);
     // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
     // what's left (and how much a smaller cap may be).
@@ -585,19 +605,22 @@ export class BuildService {
       if (now?.finish_requested_at) return { finishing: true, since: now.finish_requested_at };
       throw new Error(`Build is ${now?.status ?? "gone"}; only a running session can be finished`);
     }
-    try {
-      await this.toInbox(build.sandbox_id, { finish: true, reason, message: SESSION_FINISH_PROMPT }, "-finish");
-    } catch (e) {
-      await this.db.query("UPDATE financial_products.build_runs SET finish_requested_at = NULL WHERE id = $1", [build.id]);
-      throw e;
-    }
+    await this.db.query("UPDATE financial_products.build_runs SET finish_reason = $2 WHERE id = $1", [build.id, reason]);
     const why = {
       developer: "The developer finished the session",
       ttl: "The session is near its sandbox's time limit, so Mynt finished it",
       cap: "The session has spent most of its cap, so Mynt finished it",
     }[reason];
     await this.event(build.id, build.status, `${why}: the agent ships the work, then Mynt verifies it`);
+    // The claim stands even if the agent can't be reached right now: the finish is what everyone now relies on, and
+    // the worker writes the item on its next ticks until it's delivered.
+    await this.deliverFinish(build.id, build.sandbox_id, reason).catch((e) => console.error(`Build ${build.id} finish: ${(e as Error).message}; retrying`));
     return { finishing: true, since: iso(claimed.finish_requested_at)! };
+  }
+
+  private async deliverFinish(buildId: string, sandbox: string, reason: string) {
+    await this.toInbox(sandbox, { finish: true, reason, message: SESSION_FINISH_PROMPT }, "-finish");
+    await this.db.query("UPDATE financial_products.build_runs SET finish_delivered_at = now() WHERE id = $1", [buildId]);
   }
 
   // A running session: record a finish the runner started itself (idle), so steering stops; finish it before the
@@ -606,20 +629,36 @@ export class BuildService {
   private async followSession(b: Build, state: AgentState | null, running: boolean, cost: number) {
     if (state?.finish && !b.finish_requested_at) {
       const set = await this.one(
-        "UPDATE financial_products.build_runs SET finish_requested_at = now(), updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL RETURNING id",
-        [b.id],
+        "UPDATE financial_products.build_runs SET finish_requested_at = now(), finish_reason = $2, finish_delivered_at = now(), updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL RETURNING id",
+        [b.id, state.finish],
       );
       if (set)
         await this.event(b.id, b.status, state.finish === "idle" ? "The session was idle too long: the agent ships the work, then Mynt verifies it" : `The session is finishing (${state.finish})`);
       b = { ...b, finish_requested_at: new Date().toISOString() };
+    } else if (b.finish_requested_at && !b.finish_delivered_at) {
+      // Claimed but not yet in the agent's inbox (it couldn't be reached then): deliver it now, unless the runner is
+      // already finishing anyway.
+      if (state?.finish) await this.db.query("UPDATE financial_products.build_runs SET finish_delivered_at = now() WHERE id = $1", [b.id]);
+      else if (running) await this.deliverFinish(b.id, b.sandbox_id!, b.finish_reason ?? "developer").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}; retrying`));
     }
     if (running && !b.finish_requested_at && !state?.finish) {
-      const nearTtl = Date.now() - Date.parse(b.created_at) > Math.max(0, this.config.ttlSeconds - SESSION_TTL_MARGIN_S) * 1000;
+      // The sandbox's own clock, from when Mynt asked for it, not the build's queueing time.
+      const since = Date.parse(b.sandbox_started_at ?? b.created_at);
+      const nearTtl = Date.now() - since > Math.max(0, this.config.ttlSeconds - SESSION_TTL_MARGIN_S) * 1000;
       if (nearTtl) await this.finish(b, "ttl").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
-      else if (cost >= SESSION_CAP_SHARE * b.cap_usd) await this.finish(b, "cap").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
+      else if (cost >= sessionCapThreshold(b.cap_usd)) await this.finish(b, "cap").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
     }
-    if (!running && (state?.undelivered ?? 0) > 0)
-      await this.event(b.id, b.status, `${state!.undelivered} message(s) arrived while the session was finishing and weren't delivered; send them in a new build with continue_from`);
+    // Once per build, even if moving on to verification is retried over several ticks.
+    if (!running && (state?.undelivered ?? 0) > 0) {
+      const said = await this.one("SELECT 1 FROM financial_products.build_events WHERE build_id = $1 AND data->>'undelivered' IS NOT NULL", [b.id]);
+      if (!said)
+        await this.event(
+          b.id,
+          b.status,
+          `${state!.undelivered} message(s) arrived while the session was finishing and weren't delivered; send them in a new build with continue_from`,
+          { undelivered: state!.undelivered },
+        );
+    }
   }
 
   // An item for the runner's inbox, written under a dot-name and renamed into place, so the runner never reads half
@@ -950,6 +989,7 @@ export class BuildService {
       await this.update(b.id, {
         status: "provisioning",
         sandbox_id: sandbox.id,
+        sandbox_started_at: new Date().toISOString(),
         sandbox_key_id: sandboxKeyId,
         branch: env.MYNT_BRANCH ?? null,
         ...(base ? { solana_env: { ...b.solana_env, build: base } } : {}),
@@ -1659,7 +1699,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     "steer_build",
     {
       title: "Steer a running build",
-      description: "Developer: send the coding agent an instruction mid-build (e.g. 'use the existing design system').",
+      description:
+        "Developer: send the coding agent an instruction mid-build (e.g. 'use the existing design system'). It interrupts the agent's current turn and becomes the next one. In a session it's your next request; once the session is finishing it's refused, and one sent at the very moment it starts finishing is held back: the build's timeline then says it wasn't delivered (steered: true means Mynt queued it, not that the agent read it).",
       inputSchema: { build_id: z.string(), message: z.string().min(3) },
     },
     async ({ build_id, message }) => {
