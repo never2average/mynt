@@ -10,6 +10,7 @@ import type { Db } from "./db.js";
 import { DESK_RUNNER, type DeskOutcome, type DeskReport } from "./desk-runner.js";
 import type { RepoAccess } from "./github.js";
 import { requirePush, type RepoOwnershipService } from "./repo-ownership.js";
+import { refuseManagedRepository, type GitRepoHost } from "./git-host.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import { findLicenses, normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, User } from "./store.js";
@@ -157,15 +158,18 @@ export class DeskService {
 
   // ---- workspace and term sheets ----
 
-  // Who may push where (src/repo-ownership.ts): a firm's workspace, and each exploration on it, need someone who can.
+  // Who may push where (src/repo-ownership.ts): a firm's workspace, and each job and exploration on it, need someone who can.
   ownership: RepoOwnershipService | null = null;
+  // Mynt's managed repositories (src/git-host.ts): never a firm's workspace.
+  managedHost: GitRepoHost | null = null;
 
   async connectWorkspace(entityId: string, userId: string, repository: string) {
     if (!this.repos) throw new Error("The product desk isn't enabled on this Mynt yet");
-    // The App being installed there only says Mynt can reach it: the person connecting it must be able to push there.
-    await requirePush(this.ownership, userId, repository);
+    await refuseManagedRepository(this.db, this.managedHost, repository);
     const installation = await this.repos.installationFor(repository);
     if (!installation) throw new Error(`Install the Mynt GitHub App on ${repository} first: ${this.repos.installUrl()}`);
+    // The App being installed there only says Mynt can reach it: the person connecting it must be able to push there.
+    await requirePush(this.ownership, userId, repository);
     await this.db.query(
       `INSERT INTO financial_products.desk_workspaces (entity_id, repository, installation_id, connected_by) VALUES ($1, $2, $3, $4)
        ON CONFLICT (entity_id) DO UPDATE SET repository = EXCLUDED.repository, installation_id = EXCLUDED.installation_id, connected_by = EXCLUDED.connected_by`,

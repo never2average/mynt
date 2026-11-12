@@ -17,7 +17,7 @@ import { ReviewService, reviewConfigFromEnv } from "./review.js";
 import { BuildService, buildConfigFromEnv } from "./builds.js";
 import { connectPostgres } from "./db.js";
 import { createMcpHttpServer } from "./http.js";
-import { GitHubApp, GitHubUserAuth } from "./github.js";
+import { GitHubApp, GitHubRepoHost, GitHubUserAuth } from "./github.js";
 import { RepoOwnershipService } from "./repo-ownership.js";
 import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
@@ -106,6 +106,8 @@ const openServices = async () => {
   const buildConfig = buildConfigFromEnv();
   const github = GitHubApp.fromEnv();
   const builds = await BuildService.open(db, store, sandboxes, github, buildConfig);
+  // Each app's managed repository, when Mynt has an organization for them (BUILD_MANAGED_REPO_OWNER).
+  builds.managedHost = GitHubRepoHost.fromEnv(github);
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
   const deskConfig = deskConfigFromEnv(buildConfig);
   const desk = await DeskService.open(db, store, sandboxes, github, deskConfig);
@@ -113,6 +115,7 @@ const openServices = async () => {
   const ownership = await RepoOwnershipService.open(db, GitHubUserAuth.fromEnv(), process.env.PUBLIC_URL ?? "");
   builds.ownership = ownership;
   desk.ownership = ownership;
+  desk.managedHost = builds.managedHost; // never a firm's workspace (so never an exploration's either)
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
   const bd = await BdService.open(db, sandboxes, bdConfigFromEnv(buildConfig));
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.
@@ -122,9 +125,9 @@ const openServices = async () => {
   // Developers' hosting: a VM each, fetching their verified commits with a read-only GitHub token.
   const hosting = await HostingService.open(db, hostingProviderFromEnv(), hostingConfigFromEnv(), async (developerId, repository) => {
     if (!github) return null;
-    const r = await db.query("SELECT installation_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2", [developerId, repository.toLowerCase()]);
-    const installation = (r.rows[0] as { installation_id?: number } | undefined)?.installation_id;
-    return installation ? github.readTokenFor(repository, Number(installation)).catch(() => null) : null;
+    // Only through a connection whose push access Mynt verified (or a managed repository Mynt created).
+    const installation = await builds.sourceInstallation(developerId, repository);
+    return installation ? github.readTokenFor(repository, installation).catch(() => null) : null;
   });
   const modules = await ModuleRegistry.open(db);
   // Developers' Solana programs; builds hand it the programs Mynt built while verifying.

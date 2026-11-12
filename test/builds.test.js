@@ -42,7 +42,9 @@ function fakeSandboxHost() {
     async readFile(id, path) {
       return sandboxes.get(id).files.get(path) ?? null;
     },
+    hosted: [],
     async host(id, port) {
+      host.hosted.push({ id, port });
       return { url: `https://${id}-${port}.preview.example?_token=t` };
     },
     async costDollars(id) {
@@ -57,6 +59,7 @@ function fakeSandboxHost() {
       // Mynt puts inbox items in place with a rename.
       const mv = command.match(/^mv -f '([^']+)' '([^']+)'$/);
       if (mv) {
+        if (host.failMv) return { exitCode: 1, stdout: "", stderr: "sandbox unreachable" };
         if (!s.files.has(mv[1])) return { exitCode: 1, stdout: "", stderr: "no such file" };
         s.files.set(mv[2], s.files.get(mv[1]));
         s.files.delete(mv[1]);
@@ -69,6 +72,8 @@ function fakeSandboxHost() {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("verify.sh")) return { processId: 7, exitCode: null, stdout: "", stderr: "" };
+      // Mynt's live-preview script says what it did: no-web, waiting, running or started (the test sets it).
+      if (command.includes("scripts/dev_preview.sh")) return { exitCode: 0, stdout: `${s.devPreview ?? "no-web"}\n`, stderr: "" };
       if (command.includes("runner.mjs")) {
         s.agentRunning = true;
         return { processId: 99, exitCode: null, stdout: "", stderr: "" };
@@ -135,14 +140,38 @@ function fakeRepos() {
   };
 }
 
+// A stand-in for the git host Mynt keeps apps' managed repositories on (src/git-host.ts).
+function fakeManagedHost() {
+  return {
+    name: "fake",
+    created: [],
+    reachable: true,
+    owns: (r) => r.toLowerCase().startsWith("mynt-apps/"),
+    async access() {
+      return this.reachable ? 77 : null;
+    },
+    async create(name) {
+      if (!this.reachable) throw new Error("the host's app isn't installed");
+      this.created.push(name);
+      await this.onCreate?.(); // a test's concurrent request, landing while the repository is being created
+      return { repository: `mynt-apps/${name}`, access: 77 };
+    },
+    async readCredentials() {
+      return { username: "x-access-token", password: "ghs_readonly_short_lived" };
+    },
+    cloneUrl: (r) => `https://git.example/${r}.git`,
+  };
+}
+
 // `git`: people's git accounts are linked as they're created (true), or left for the test to link (false).
-async function setup({ sandboxes = fakeSandboxHost(), config = {}, refuse = null, git = true, push } = {}) {
+async function setup({ sandboxes = fakeSandboxHost(), config = {}, managed = null, refuse = null, git = true, push } = {}) {
   const pg = new PGlite();
   // `refuse`: stands in for a database that rejects some statements (those it returns true for).
   const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
   const builds = await BuildService.open(db, store, sandboxes, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
+  builds.managedHost = managed;
   const { ownership, host: gitHost, link } = await gitOwnership(db, fakeGitHost(push));
   builds.ownership = ownership;
   const as = async (name, roles) => {
@@ -414,6 +443,137 @@ test("developers track, steer and stop their own builds; admins see all", async 
   assert.match((await call(dev, "steer_build", { build_id: started.id, message: "go on" })).data.error, /only a running agent/);
 });
 
+test("while the agents code, Mynt starts the app's dev server itself and serves port 5173 at a private link", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  assert.equal(started.live_preview_url, null);
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick(); // agent started
+  const s = sandboxes.sandboxes.get(sbx);
+  const get = async () => (await call(dev, "get_build", { build_id: started.id })).data;
+
+  // Mynt's script, from the coding workspace it wrote, on the app's directory.
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /--host 127\.0\.0\.1 --port '"\$PORT_WEB"' --strictPort/);
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /never installs anything itself/);
+  const scriptRuns = () => s.commands.filter((c) => c.command === `bash ${BUILD}/scripts/dev_preview.sh /home/user/workspace/app`).length;
+  // No web/ yet: tried again only every 6th tick.
+  s.devPreview = "no-web";
+  await builds.tick();
+  assert.equal(scriptRuns(), 1);
+  s.devPreview = "waiting";
+  for (let i = 0; i < 4; i++) await builds.tick();
+  assert.equal(scriptRuns(), 1, "backs off after no-web");
+  await builds.tick();
+  assert.equal(scriptRuns(), 2);
+  assert.equal((await get()).live_preview_url, null, "no link while the script says waiting");
+  // Waiting for the agents' install: every tick.
+  await builds.tick();
+  assert.equal(scriptRuns(), 3);
+  // The dev server is up but doesn't answer yet: every 6th tick again.
+  s.devPreview = "starting";
+  await builds.tick();
+  assert.equal(scriptRuns(), 4);
+  for (let i = 0; i < 3; i++) await builds.tick();
+  assert.equal(scriptRuns(), 4, "backs off while starting");
+  assert.deepEqual(sandboxes.hosted, []);
+  s.devPreview = "started"; // Vite answers by the next try
+  await builds.tick(); // the 12th: tried again
+  assert.equal(scriptRuns(), 5);
+  assert.equal(s.commands.filter((c) => c.command.includes("dev_preview.sh /home")).at(-1).timeoutSeconds, 45);
+
+  s.devPreview = "started";
+  await builds.tick();
+  let b = await get();
+  assert.equal(b.live_preview_url, `https://${sbx}-5173.preview.example?_token=t`);
+  assert.deepEqual(sandboxes.hosted, [{ id: sbx, port: 5173 }]);
+  const event = b.timeline.find((e) => /Live preview started/.test(e.message));
+  assert.ok(event, "on the timeline");
+  assert.ok(!JSON.stringify(b.timeline).includes("5173.preview"), "the link itself is never on the timeline");
+
+  // Once up, the script runs every 6th tick (restarting a dev server that died), behind the same link.
+  const runs = scriptRuns();
+  for (let i = 0; i < 6; i++) await builds.tick();
+  assert.equal(scriptRuns(), runs + 1);
+  assert.equal(sandboxes.hosted.length, 1, "never another link");
+  s.devPreview = "waiting"; // the dev server is down for now: the link stays, and the next check restarts it
+  for (let i = 0; i < 6; i++) await builds.tick();
+  assert.equal((await get()).live_preview_url, `https://${sbx}-5173.preview.example?_token=t`);
+
+  // A script that fails, or a host that errors, never fails the build.
+  const other = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
+  await builds.tick();
+  const sbx2 = (await builds.get(other.id)).sandbox_id;
+  sandboxes.ready(sbx2);
+  await builds.tick();
+  const host = sandboxes.host;
+  sandboxes.host = async () => {
+    throw new Error("host API down");
+  };
+  sandboxes.sandboxes.get(sbx2).devPreview = "started";
+  await builds.tick();
+  sandboxes.host = host;
+  assert.equal((await builds.get(other.id)).status, "coding");
+  assert.equal((await builds.get(other.id)).live_preview_url, null);
+  // Only while the agents code: once they've moved on to auditing, it isn't started.
+  sandboxes.write(sbx2, `${BUILD}/job/status.json`, { phase: "auditing", message: "Reviewing" });
+  await builds.tick();
+  assert.equal((await builds.get(other.id)).status, "auditing");
+  assert.equal((await builds.get(other.id)).live_preview_url, null);
+  assert.equal(sandboxes.hosted.length, 1);
+
+  // Gone from a stopped build.
+  await call(dev, "stop_build", { build_id: started.id });
+  b = await get();
+  assert.equal(b.live_preview_url, null);
+});
+
+test("Mynt's live preview: the template's Vite config is behind the forwarder only when Mynt starts it", async () => {
+  const files = workspaceFiles("coding-build");
+  const vite = files["templates/mynt-app/web/vite.config.ts"];
+  assert.match(vite, /const live = process\.env\.MYNT_LIVE_PREVIEW === "1"/);
+  assert.match(vite, /allowedHosts: true/);
+  assert.match(vite, /hmr: \{ protocol: "wss", clientPort: 443 \}/);
+  assert.match(vite, /\.\.\.\(live \? \{/, "a developer's own dev server keeps Vite's localhost-only defaults");
+  assert.match(vite, /host: "127\.0\.0\.1"/);
+  assert.match(vite, /cacheDir: process\.env\.MYNT_VITE_CACHE/, "Vite's cache stays out of the app's source");
+  assert.match(files["scripts/dev_preview.sh"], /MYNT_LIVE_PREVIEW=1/);
+  assert.match(files["scripts/dev_preview.sh"], /export MYNT_VITE_CACHE="\$STATE\/vite-cache"/);
+  assert.equal(JSON.parse(files["templates/mynt-app/api/package.json"]).scripts.dev, "tsx watch src/server.ts", "the api's dev server comes from the app's own dependencies");
+  assert.ok(JSON.parse(files["templates/mynt-app/api/package.json"]).devDependencies.tsx);
+  assert.match(files["CLAUDE.md"], /live preview/i);
+  assert.match(files["CLAUDE.md"], /5173/);
+});
+
+test("when coding ends Mynt stops the live preview, then packages the source without any node_modules, at any depth", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const ctx = await setup();
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const { sbx, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" } });
+  assert.equal(build.status, "succeeded");
+  assert.equal(build.live_preview_url, null, "no live link once coding is over");
+  const commands = ctx.sandboxes.sandboxes.get(sbx).commands.map((c) => c.command);
+  const stop = commands.findIndex((c) => c.includes("scripts/dev_preview.sh --stop"));
+  const pack = commands.findIndex((c) => c.includes("tar --exclude"));
+  assert.ok(stop >= 0 && stop < pack, "the dev servers stop before the source is packaged");
+
+  // Mynt's own packaging command, run for real on an app with dependencies and Vite's cache nested in web/.
+  const root = mkdtempSync(join(tmpdir(), "mynt-pack-"));
+  const app = join(root, "app");
+  for (const d of ["node_modules/x", "web/node_modules/.vite/deps", "web/src", "packages/mynt-sdk/node_modules/y"]) mkdirSync(join(app, d), { recursive: true });
+  for (const f of ["node_modules/x/i.js", "web/node_modules/.vite/deps/react.js", "web/src/App.tsx", "packages/mynt-sdk/node_modules/y/i.js", "package.json"]) writeFileSync(join(app, f), "x");
+  const command = commands[pack].replaceAll("/home/user/workspace/app", app).replaceAll("/home/user/mynt-out", join(root, "out"));
+  execFileSync("bash", ["-c", command]);
+  const listed = execFileSync("tar", ["-tzf", join(root, "out", "app.tgz")], { encoding: "utf8" }).split("\n").filter(Boolean);
+  assert.ok(listed.includes("./web/src/App.tsx") && listed.includes("./package.json"), listed.join(" "));
+  assert.deepEqual(listed.filter((p) => p.includes("node_modules")), []);
+});
+
 const say = (text) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
 const run = (command) => ({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command } }] } });
 
@@ -649,16 +809,170 @@ test("a session build stays open for the developer's requests; finish_build ship
 test("a session's idle machine time counts against its cap", async () => {
   const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
-  const started = (await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2 })).data;
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 3 })).data;
   await builds.tick();
   const sbx = (await builds.get(started.id)).sandbox_id;
   sandboxes.ready(sbx);
   await builds.tick();
-  sandboxes.sandboxes.get(sbx).cost = 2.5; // the sandbox sat waiting; no model spend at all
+  sandboxes.sandboxes.get(sbx).cost = 3.5; // the sandbox sat waiting; no model spend at all
   await builds.tick();
   const b = await builds.get(started.id);
   assert.equal(b.status, "over_budget");
   assert.ok(sandboxes.sandboxes.get(sbx).stopped);
+});
+
+test("by default an app's builds push to a private repository Mynt creates and manages for it: PRs, continue_from and hosting's source token work", async () => {
+  const managed = fakeManagedHost();
+  const ctx = await setup({ managed });
+  const { builds, sandboxes, as, connect, call, repos, pg } = ctx;
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const expected = `mynt-apps/mynt-app-${app.id}`;
+  assert.equal((await call(dev, "get_app_repository", { app_id: app.id })).data.repository, null, "none until the first build");
+
+  // No repository named, no GitHub of the developer's: Mynt's own, named by the app's id only.
+  const { started, sbx, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings comparison page", app_id: app.id } });
+  assert.equal(started.repository, expected);
+  assert.deepEqual(managed.created, [`mynt-app-${app.id}`]);
+  const coding = sandboxes.sandboxes.get(sbx);
+  assert.equal(coding.opts.env.GITHUB_REPOSITORY, expected);
+  assert.equal(coding.opts.env.GITHUB_TOKEN, "ghs_short_lived");
+  const spec = JSON.parse(coding.files.get(`${BUILD}/job/build.json`)).build;
+  assert.equal(spec.managed_repository, true);
+  assert.match(coding.files.get(`${BUILD}/CLAUDE.md`), /build\.managed_repository/);
+  // Verified, then Mynt opens the PR there, as for any repository, with the managed repositories' access.
+  assert.equal(build.status, "succeeded");
+  assert.equal(build.commit_sha, COMMIT);
+  assert.deepEqual([repos.prs[0].repo, repos.prs[0].installation], [expected, 77]);
+  // Hosting fetches a verified commit with a read token found through the developer's repository connections.
+  const conn = (await pg.query("SELECT installation_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2", [devUser.id, expected])).rows;
+  assert.equal(Number(conn[0].installation_id), 77);
+  assert.deepEqual((await call(dev, "list_repositories")).data.map((r) => [r.repository, r.managed]), [[expected, true]]);
+
+  // The app's next builds reuse it; continue_from carries on in it.
+  const next = (await call(dev, "start_build", { goal: "Now add a rates table to it", app_id: app.id, continue_from: started.id })).data;
+  assert.equal(next.repository, expected);
+  const again = (await call(dev, "start_build", { goal: "Another change to the same app", app_id: app.id })).data;
+  assert.equal(again.repository, expected);
+  assert.equal(managed.created.length, 1, "created once per app");
+
+  // The developer can clone their code with a short-lived, read-only token.
+  const repo = (await call(dev, "get_app_repository", { app_id: app.id })).data;
+  assert.equal(repo.managed, true);
+  assert.deepEqual([repo.clone.url, repo.clone.username, repo.clone.password, repo.clone.expires_in_minutes], [`https://git.example/${expected}.git`, "x-access-token", "ghs_readonly_short_lived", 60]);
+
+  // After moving the app to their own repository: continuing a managed build says what to do, and the managed
+  // repository can still be cloned to carry its branch over.
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" });
+  for (const b of (await call(dev, "list_builds", {})).data.builds) await call(dev, "stop_build", { build_id: b.id });
+  assert.match(
+    (await call(dev, "start_build", { goal: "Carry on in my own repository", continue_from: started.id })).data.error,
+    /in the app's previous managed repository .*push its branch .* to your own repository first/,
+  );
+  const after = (await call(dev, "get_app_repository", { app_id: app.id })).data;
+  assert.deepEqual([after.repository, after.managed, after.clone.repository], ["acme/savings-app", false, expected]);
+});
+
+test("a managed repository created while the developer set their own keeps the developer's choice, and never gets the managed access", async () => {
+  const managed = fakeManagedHost();
+  const { builds, as, connect, call, pg } = await setup({ managed });
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  managed.onCreate = () => builds.setAppRepository(devUser, app.id, "acme/savings-app");
+  const b = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  assert.equal(b.repository, "acme/savings-app");
+  const conns = (await pg.query("SELECT repository, installation_id FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [devUser.id])).rows;
+  assert.deepEqual(conns.map((r) => [r.repository, Number(r.installation_id)]), [["acme/savings-app", 42]], "the developer's own repository keeps its own installation");
+  // The managed one is still recorded as Mynt's: never connectable by name.
+  assert.equal((await builds.appRepository(app.id)).managed_repository, `mynt-apps/mynt-app-${app.id}`);
+});
+
+test("managed repositories belong to their app: never connected by name, never used by another app or developer; developers can switch to their own", async () => {
+  const managed = fakeManagedHost();
+  const { builds, as, connect, call, pg } = await setup({ managed });
+  const dev = await connect(await as("Dev", ["developer"]));
+  const other = await connect(await as("Other", ["developer"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const app2 = (await call(dev, "create_app", { name: "Other", description: "Other ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const first = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  const repo = first.repository;
+
+  assert.match((await call(dev, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+  assert.match((await call(other, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+  assert.match((await call(dev, "start_build", { goal: "Push into another app's repository", app_id: app2.id, repository: repo })).data.error, /isn't this app's/);
+  assert.match((await call(other, "get_app_repository", { app_id: app.id })).data.error, /No app of yours/);
+  assert.match((await call(other, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data.error, /No app of yours/);
+
+  // Their own repository, later: it must be connected, and it can't be a managed one.
+  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data.error, /isn't connected/);
+  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "mynt-apps/mynt-app-someone-else" })).data.error, /of your own/);
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  const set = (await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data;
+  assert.deepEqual([set.repository, set.managed, set.previous], ["acme/savings-app", false, repo]);
+  assert.equal((await call(dev, "start_build", { goal: "Build the next version please", app_id: app.id })).data.repository, "acme/savings-app");
+  // And back to its own managed repository (the only managed one it can name), then to theirs again.
+  const back = (await call(dev, "set_app_repository", { app_id: app.id, repository: repo })).data;
+  assert.deepEqual([back.repository, back.managed, back.previous], [repo, true, "acme/savings-app"]);
+  assert.equal((await call(dev, "start_build", { goal: "Build in the managed one again", app_id: app.id })).data.repository, repo);
+  await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" });
+  assert.deepEqual((await call(dev, "get_app_repository", { app_id: app.id })).data.managed, false);
+
+  // A host that can't create one says what to do instead; without managed repositories, builds work as before.
+  managed.reachable = false;
+  assert.match((await call(dev, "start_build", { goal: "Build the second app please", app_id: app2.id })).data.error, /connect your own with connect_repository/);
+  builds.managedHost = null;
+  assert.equal((await call(dev, "start_build", { goal: "Build the second app please", app_id: app2.id })).data.repository, null);
+
+  // remove_app drops the app's repository record (the repository itself stays on the host).
+  const admin = await connect(await as("Ada", ["admin"]));
+  await call(dev, "stop_build", { build_id: first.id });
+  for (const b of (await call(dev, "list_builds", {})).data.builds) await call(dev, "stop_build", { build_id: b.id });
+  const removed = await call(admin, "remove_app", { app_id: app.id, confirm: true, reason: "test" });
+  assert.equal(removed.isError, false, JSON.stringify(removed.data));
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.app_repositories WHERE app_id = $1", [app.id])).rows[0].n, 0);
+  // And the developer's access to its managed repository; their own repository stays connected.
+  const left = (await pg.query("SELECT repository FROM financial_products.repo_connections ORDER BY repository")).rows.map((r) => r.repository);
+  assert.ok(!left.includes(repo) && left.includes("acme/savings-app"), left.join(", "));
+  // Its name stays refused, even with the managed organization no longer configured (as after a rename).
+  assert.equal(builds.managedHost, null);
+  assert.match((await call(other, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+});
+
+test("the managed-repository guard fails closed: only a missing table means none recorded", async () => {
+  const { isManagedRepository } = await import("../dist/git-host.js");
+  const failing = (code) => ({ query: async () => Promise.reject(Object.assign(new Error("db"), { code })) });
+  assert.equal(await isManagedRepository(failing("42P01"), null, "acme/x"), false);
+  await assert.rejects(isManagedRepository(failing("57P01"), null, "acme/x"), /db/);
+  await assert.rejects(isManagedRepository(failing(undefined), null, "acme/x"), /db/);
+});
+
+test("scaffold_app.py starts an app in a fresh clone that holds only a README", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const root = mkdtempSync(join(tmpdir(), "mynt-scaffold-"));
+  const sdk = join(root, "sdk");
+  mkdirSync(join(sdk, "typescript"), { recursive: true });
+  writeFileSync(join(sdk, "typescript", "package.json"), JSON.stringify({ name: "x" }));
+  writeFileSync(join(sdk, "openapi.json"), "{}");
+  const clone = join(root, "app");
+  mkdirSync(join(clone, ".git"), { recursive: true });
+  writeFileSync(join(clone, "README.md"), "# mynt-app-x\n");
+  const script = new URL("../workspaces/coding-build/scripts/scaffold_app.py", import.meta.url).pathname;
+  execFileSync("python3", [script, clone, "--sdk", sdk, "--no-mobile"]);
+  assert.ok(existsSync(join(clone, "web", "package.json")) && existsSync(join(clone, ".git")));
+  assert.match(readFileSync(join(clone, "README.md"), "utf8"), /One Docker Compose project/);
+  // Anything else in it is the developer's work: refused.
+  writeFileSync(join(root, "keep.txt"), "x");
+  const other = join(root, "other");
+  mkdirSync(other);
+  writeFileSync(join(other, "server.js"), "x");
+  assert.throws(() => execFileSync("python3", [script, other, "--sdk", sdk, "--no-mobile"], { stdio: "pipe" }), /isn't empty/);
 });
 
 // A session build with its agent running, for the tests below.
@@ -671,7 +985,8 @@ async function runningSession(ctx, args = {}) {
   await ctx.builds.tick();
   return { dev, started, sbx, s: ctx.sandboxes.sandboxes.get(sbx) };
 }
-const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
+// Finish items in place in the runner's inbox (a dot-name is one still being written, which the runner skips).
+const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && !p.startsWith(`${A}/inbox/.`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
 
 test("a session the runner finished on its own (idle) takes no more steers; nor does one finished after the steer loaded it", async () => {
   const ctx = await setup();
@@ -704,9 +1019,22 @@ test("a session the runner finished on its own (idle) takes no more steers; nor 
   sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
   sandboxes.finishAgent(sbx);
   sandboxes.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 3, sent: 3, last_subtype: "success", done: true, exit_code: 0, error: null, summary: "shipped", finish: "idle", undelivered: 2 });
+  // Moving on to verification fails once (a provider's passing 503), so the tick is retried: the report is made once.
+  const exec = sandboxes.exec;
+  let failed = false;
+  sandboxes.exec = async (id, command, opts) => {
+    if (!failed && command.includes("tar --exclude")) {
+      failed = true;
+      throw new Error('Freestyle POST /vms/vm-1/exec-await: 503 {"code":"INTERNAL_ERROR"}');
+    }
+    return exec(id, command, opts);
+  };
   await builds.tick();
+  assert.equal((await builds.get(started.id)).status, "coding", "a passing 503 is ridden out");
+  await builds.tick();
+  sandboxes.exec = exec;
   const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline;
-  assert.ok(timeline.some((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)));
+  assert.equal(timeline.filter((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)).length, 1);
   assert.equal((await builds.get(started.id)).status, "verifying", "and Mynt verifies the work as usual");
 });
 
@@ -718,18 +1046,60 @@ test("Mynt finishes a session itself before its sandbox's time limit or its cap 
   assert.deepEqual(finishItems(s).map((f) => f.reason), ["ttl"]);
   assert.ok((await ctx.builds.get(started.id)).finish_requested_at);
 
-  // Cap: at 80% of it.
+  // Cap: at 70% of it, or earlier so US$2 is left for the finish turn (on a US$5 cap: at US$3).
   const c2 = await setup();
   const second = await runningSession(c2, { cap_usd: 5 });
-  second.s.cost = 3.9;
+  second.s.cost = 2.9;
   await c2.builds.tick();
   assert.deepEqual(finishItems(second.s), []);
-  second.s.cost = 4.1;
+  second.s.cost = 3.1;
   await c2.builds.tick();
   assert.deepEqual(finishItems(second.s).map((f) => f.reason), ["cap"]);
   await c2.builds.tick();
   assert.equal(finishItems(second.s).length, 1, "once");
   assert.ok((await c2.call(second.dev, "get_build", { build_id: second.started.id })).data.timeline.some((e) => /spent most of its cap/.test(e.message)));
+  const { sessionCapThreshold } = await import("../dist/builds.js");
+  assert.deepEqual([sessionCapThreshold(10), sessionCapThreshold(5), sessionCapThreshold(1)], [7, 3, 0]);
+
+  // The time limit counts from the sandbox, not from when the build was queued.
+  const c3 = await setup({ config: { ttlSeconds: 7200 } });
+  const third = await runningSession(c3);
+  await c3.pg.query("UPDATE financial_products.build_runs SET created_at = now() - interval '3 hours' WHERE id = $1", [third.started.id]);
+  await c3.builds.tick();
+  assert.deepEqual(finishItems(third.s), [], "an old build in a new sandbox has its sandbox's full time");
+  await c3.pg.query("UPDATE financial_products.build_runs SET sandbox_started_at = now() - interval '91 minutes' WHERE id = $1", [third.started.id]);
+  await c3.builds.tick();
+  assert.deepEqual(finishItems(third.s).map((f) => f.reason), ["ttl"]);
+});
+
+test("a finish stands even when the agent can't be reached at that moment: Mynt delivers it on the next tick", async () => {
+  const ctx = await setup();
+  const { started, s, dev } = await runningSession(ctx);
+  ctx.sandboxes.failMv = true;
+  const r = (await ctx.call(dev, "finish_build", { build_id: started.id })).data;
+  assert.equal(r.finishing, true);
+  assert.deepEqual(finishItems(s), []);
+  let b = await ctx.builds.get(started.id);
+  assert.ok(b.finish_requested_at && !b.finish_delivered_at, "claimed, not yet delivered");
+  assert.match((await ctx.call(dev, "steer_build", { build_id: started.id, message: "One more" })).data.error, /finishing/);
+  await ctx.builds.tick();
+  assert.deepEqual(finishItems(s), [], "still unreachable: still pending");
+  ctx.sandboxes.failMv = false;
+  await ctx.builds.tick();
+  assert.deepEqual(finishItems(s).map((f) => f.reason), ["developer"]);
+  b = await ctx.builds.get(started.id);
+  assert.ok(b.finish_delivered_at);
+  await ctx.builds.tick();
+  assert.equal(finishItems(s).length, 1, "delivered once");
+});
+
+test("a session build needs a cap above the finish reserve; a one-off build doesn't", async () => {
+  const { as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  assert.match((await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2 })).data.error, /cap above US\$2/);
+  assert.match((await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 1.5 })).data.error, /cap above US\$2/);
+  assert.equal((await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2.5 })).isError, false);
+  assert.equal((await call(dev, "start_build", { goal: "Build a savings page please", cap_usd: 2 })).isError, false);
 });
 
 test("BUILD_SESSION_IDLE_MS must be a sensible number of milliseconds, or the 15-minute default applies", () => {
@@ -870,18 +1240,20 @@ test("a finished build's sandbox reopens on its branch for the developer, with t
 test("connect_repository needs proof the developer can push there, not just the App's installation", async () => {
   const allowed = new Set(["Owner|acme/savings-app"]);
   const ctx = await setup({ push: (login, repo) => allowed.has(`${login}|${repo}`) });
-  const { as, connect, call, pg, link } = ctx;
+  const { as, connect, call, pg, gitHost } = ctx;
   // The App is installed on acme/savings-app (fakeRepos), so the installation alone would let anyone in.
   const mallory = await connect(await as("Mallory", ["developer"]));
   assert.match((await call(mallory, "connect_repository", { repository: "acme/savings-app" })).data.error, /can't push to acme\/savings-app/);
   assert.match((await call(mallory, "start_build", { goal: "Build something in their repository", repository: "acme/savings-app" })).data.error, /isn't connected/);
-  // Someone who hasn't connected their git account is told how.
+  // A missing installation is said first, with where to install, before any push check.
+  const noApp = (await call(mallory, "connect_repository", { repository: "acme/not-installed" })).data;
+  assert.deepEqual([noApp.connected, noApp.install_url], [false, "https://github.com/apps/mynt-builder/installations/new"]);
+  // Someone who hasn't connected their git account is told how; Mynt's start link is on Mynt.
   const ctx2 = await setup({ git: false });
   const newcomer = await ctx2.connect(await ctx2.as("New", ["developer"]));
   assert.match((await ctx2.call(newcomer, "connect_repository", { repository: "acme/savings-app" })).data.error, /connect_git_account/);
   const started = (await ctx2.call(newcomer, "connect_git_account")).data;
-  const auth = new URL(started.authorize_url);
-  assert.equal(auth.searchParams.get("redirect_uri"), "https://mynt.example.com/oauth/git/callback");
+  assert.match(started.link, /^https:\/\/mynt\.example\.com\/oauth\/git\/start\?state=[\w-]{20,}$/);
   assert.equal(started.expires_in_minutes, 10);
 
   // The repository's owner, who can push, connects it and builds on it.
@@ -889,75 +1261,200 @@ test("connect_repository needs proof the developer can push there, not just the 
   assert.equal((await call(owner, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
   assert.equal((await call(owner, "start_build", { goal: "Build a savings comparison page", repository: "acme/savings-app" })).isError, false);
   assert.equal((await call(owner, "git_account")).data.connected.login, "Owner");
-  // The token is kept sealed, never in the clear.
-  const stored = (await pg.query("SELECT token_sealed FROM financial_products.git_accounts")).rows.map((r) => r.token_sealed);
-  assert.ok(stored.length >= 2 && stored.every((t) => t.startsWith("v1:") && !t.includes("user-token")));
+  // The token is kept sealed with its own derived key, never in the clear.
+  const stored = (await pg.query("SELECT token_sealed, refresh_sealed FROM financial_products.git_accounts")).rows;
+  assert.ok(stored.length >= 2 && stored.every((r) => r.token_sealed.startsWith("g1:") && !r.token_sealed.includes("user-token") && r.refresh_sealed.startsWith("g1:")));
+  // A "can't push" is never reused: access granted on the host takes effect at once.
+  allowed.add("Mallory|acme/savings-app");
+  assert.equal((await call(mallory, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
+  // Disconnecting withdraws the grant at the host too.
+  assert.equal((await call(owner, "git_account", { disconnect: true })).data.connected, null);
+  assert.deepEqual(gitHost.revokedGrants, ["user-token-Owner"]);
 });
 
-test("revoked push access stops the next build; connections made before the check must be verified; a dead token says so", async () => {
+test("linking a git account is bound to the Mynt account that started it: a victim completing an attacker's link links nothing", async () => {
+  const ctx = await setup({ git: false });
+  const { ownership, as, connect, call, builds, store, gitHost } = ctx;
+  const attacker = await as("Attacker", ["developer"]);
+  const victim = await as("Victim", ["developer"]);
+  const attackerClient = await connect(attacker);
+  const victimClient = await connect(victim);
+  const { link } = (await call(attackerClient, "connect_git_account")).data;
+  const state = new URL(link).searchParams.get("state");
+
+  // Through Mynt's HTTP server, as a browser would go.
+  const { createMcpHttpServer } = await import("../dist/http.js");
+  const server = createMcpHttpServer(store, null, { builds, ownership });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    // The victim's browser opens the attacker's link: Mynt sets its cookie and sends it to the host, with PKCE.
+    const go = await fetch(`${base}/oauth/git/start?state=${state}`, { redirect: "manual" });
+    assert.equal(go.status, 302);
+    const to = new URL(go.headers.get("location"));
+    assert.equal(to.searchParams.get("code_challenge_method"), "S256");
+    assert.match(to.searchParams.get("code_challenge"), /^[\w-]{43}$/);
+    const cookie = go.headers.get("set-cookie");
+    assert.match(cookie, /^__Host-mynt-git=[0-9a-f]{64}; Path=\/; Max-Age=600; HttpOnly; Secure; SameSite=Lax$/);
+    // Without that cookie (a browser that didn't start the sign-in), the callback refuses.
+    assert.equal((await fetch(`${base}/oauth/git/callback?state=${state}&code=Victim`)).status, 400);
+    // The victim approves on the host; the callback, in their browser, shows a code. Nothing is linked yet.
+    const back = await fetch(`${base}/oauth/git/callback?state=${state}&code=Victim`, { headers: { cookie: cookie.split(";")[0] } });
+    assert.equal(back.status, 200);
+    assert.equal(back.headers.get("cache-control"), "no-store");
+    const page = await back.text();
+    const code = page.match(/confirm_git_account ([A-Z2-9]{4}-[A-Z2-9]{4})/)[1];
+    assert.ok(gitHost.lastVerifier, "the code was exchanged with the PKCE verifier");
+    assert.equal(await ownership.account(attacker.id), null);
+    assert.equal(await ownership.account(victim.id), null);
+    // The victim, tricked into confirming in their own Mynt session: refused, and the sign-in dropped.
+    assert.match((await call(victimClient, "confirm_git_account", { code })).data.error, /started from another Mynt account, so nothing was linked/);
+    // The attacker never saw the code; guessing gets a few tries, then nothing; and the sign-in is gone anyway.
+    assert.match((await call(attackerClient, "confirm_git_account", { code: "AAAA-AAAA" })).data.error, /doesn't match/);
+    assert.match((await call(attackerClient, "confirm_git_account", { code })).data.error, /doesn't match/);
+    assert.equal(await ownership.account(attacker.id), null, "the victim's git account is linked to no one");
+    // A state is used once.
+    assert.equal((await fetch(`${base}/oauth/git/start?state=${state}`, { redirect: "manual" })).status, 400);
+  } finally {
+    server.close();
+  }
+
+  // Linked properly, the victim's host account can't then be linked to a second Mynt account.
+  await ctx.link(victim, "Victim");
+  assert.equal((await ownership.account(victim.id)).login, "Victim");
+  await assert.rejects(ctx.link(attacker, "Victim"), /already linked to another Mynt account/);
+  // Without the set-up, nothing connects.
+  builds.ownership = null;
+  assert.match((await call(victimClient, "connect_repository", { repository: "acme/savings-app" })).data.error, /an operator's step/);
+});
+
+test("revoked push access stops the next build, in the worker too; old connections must be verified; tokens refresh, once", async () => {
   const allowed = new Set(["Owner|acme/savings-app"]);
   const ctx = await setup({ push: (login, repo) => allowed.has(`${login}|${repo}`) });
-  const { builds, as, connect, call, gitHost } = ctx;
-  const { RepoOwnershipService } = await import("../dist/repo-ownership.js");
+  const { builds, as, connect, call, gitHost, pg } = ctx;
+  const { RepoOwnershipService, GitAuthorizationEnded } = await import("../dist/repo-ownership.js");
   const ttl = RepoOwnershipService.CHECK_TTL_MS;
   try {
-    const owner = await connect(await as("Owner", ["developer"]));
+    const ownerUser = await as("Owner", ["developer"]);
+    const owner = await connect(ownerUser);
     await call(owner, "connect_repository", { repository: "acme/savings-app" });
-    assert.equal((await call(owner, "start_build", { goal: "Build a savings comparison page", repository: "acme/savings-app" })).isError, false);
-    // Within a few minutes the answer is reused; after that, access revoked on the host stops the next build.
+    assert.equal(await builds.sourceInstallation(ownerUser.id, "acme/savings-app"), 42, "a verified connection can deploy");
+    const queued = (await call(owner, "start_build", { goal: "Build a savings comparison page", repository: "acme/savings-app" })).data;
+    // Within a few minutes a "yes" is reused; after that, access revoked on the host stops the next build...
     allowed.delete("Owner|acme/savings-app");
     assert.equal((await call(owner, "start_build", { goal: "Build another page while still cached", repository: "acme/savings-app" })).isError, false);
     RepoOwnershipService.CHECK_TTL_MS = 0;
     assert.match((await call(owner, "start_build", { goal: "Build after access was revoked", repository: "acme/savings-app" })).data.error, /can't push to acme\/savings-app/);
+    // ...and a build already queued fails in the worker before it gets a push token.
+    await builds.tick();
+    const b = await builds.get(queued.id);
+    assert.equal(b.status, "failed");
+    assert.match(b.error, /can't push/);
+    assert.equal(b.sandbox_id, null, "no sandbox, no token");
     // The reopened sandbox (a push token) is refused too.
-    const last = (await builds.listFor(null))[0];
-    await assert.rejects(builds.reopen({ ...last, status: "succeeded", branch: "mynt/build-x" }), /can't push/);
+    await assert.rejects(builds.reopen({ ...b, status: "succeeded", branch: "mynt/build-x" }), /can't push/);
+    allowed.add("Owner|acme/savings-app");
 
-    // A connection made before this check existed, by someone who never connected their git account: refused at build.
+    // A connection made before this check existed, never verified: no build, and hosting can't deploy from it.
     const legacyUser = (await ctx.store.createUser("Legacy", ["developer"])).user;
     await builds.connectRepository(legacyUser.id, "acme/savings-app", 42);
+    assert.equal(await builds.sourceInstallation(legacyUser.id, "acme/savings-app"), null);
     const legacy = await connect(legacyUser);
     assert.match((await call(legacy, "start_build", { goal: "Build with an old connection", repository: "acme/savings-app" })).data.error, /connect_git_account/);
 
-    // A token the host no longer accepts (revoked there, no refresh): connect again.
-    allowed.add("Owner|acme/savings-app");
+    // An 8-hour token that has expired is refreshed (once, for two checks at the same moment), and the new one used.
+    await pg.query("UPDATE financial_products.git_accounts SET expires_at = now() - interval '1 minute' WHERE user_id = $1", [ownerUser.id]);
+    gitHost.refreshes.length = 0;
+    await Promise.all([builds.ownership.requirePush(ownerUser.id, "acme/savings-app"), builds.ownership.requirePush(ownerUser.id, "acme/savings-app")]);
+    assert.deepEqual(gitHost.refreshes, ["refresh-Owner"], "one refresh for both");
+    const after = (await pg.query("SELECT expires_at FROM financial_products.git_accounts WHERE user_id = $1", [ownerUser.id])).rows[0];
+    assert.ok(Date.parse(after.expires_at) > Date.now() + 7 * 3600e3);
+    // A refresh the host refuses (expired or revoked) asks to connect again; a passing failure says so instead.
+    await pg.query("UPDATE financial_products.git_accounts SET expires_at = now() - interval '1 minute' WHERE user_id = $1", [ownerUser.id]);
+    gitHost.refreshWith = new Error("socket hang up");
+    await assert.rejects(builds.ownership.requirePush(ownerUser.id, "acme/savings-app"), /couldn't reach the git host .*try again in a moment/);
+    gitHost.refreshWith = new GitAuthorizationEnded("bad_refresh_token");
+    await assert.rejects(builds.ownership.requirePush(ownerUser.id, "acme/savings-app"), /expired or was revoked; connect it again/);
+    gitHost.refreshWith = null;
+    // A token the host stops accepting, with no working refresh: connect again.
+    await ctx.link(ownerUser);
     gitHost.revoked.add("Owner");
+    gitHost.refreshWith = new GitAuthorizationEnded("bad_refresh_token");
     assert.match((await call(owner, "start_build", { goal: "Build with a revoked token", repository: "acme/savings-app" })).data.error, /connect it again with connect_git_account/);
   } finally {
     RepoOwnershipService.CHECK_TTL_MS = ttl;
   }
 });
 
-test("the git host's callback: the state is single use and names who started it; without the set-up, nothing connects", async () => {
-  const ctx = await setup({ git: false });
-  const { ownership, as, connect, call, builds, store } = ctx;
-  const user = await as("Dev", ["developer"]);
-  const { authorize_url } = await ownership.begin(user.id);
-  const state = new URL(authorize_url).searchParams.get("state");
-  // Through Mynt's HTTP server, as the browser comes back.
-  const { createMcpHttpServer } = await import("../dist/http.js");
-  const server = createMcpHttpServer(store, null, { builds, ownership });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const ok = await fetch(`${base}/oauth/git/callback?state=${state}&code=Dev`);
-    assert.equal(ok.status, 200);
-    assert.match(await ok.text(), /\(Dev\) is connected/);
-    assert.equal(ok.headers.get("cache-control"), "no-store");
-    const again = await fetch(`${base}/oauth/git/callback?state=${state}&code=Mallory`);
-    assert.equal(again.status, 400, "a state is used once");
-    assert.match(await again.text(), /expired or was already used/);
-    assert.equal((await fetch(`${base}/oauth/git/callback?state=made-up&code=Mallory`)).status, 400);
-  } finally {
-    server.close();
-  }
-  assert.equal((await ownership.account(user.id)).login, "Dev");
-  const dev = await connect(user);
-  assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
-  // A Mynt without the git host's user authorization set up refuses to connect anything.
-  builds.ownership = null;
-  assert.match((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.error, /an operator's step/);
+test("Mynt's managed repositories need no push check; moving an app to the developer's own repository does", async () => {
+  const managed = fakeManagedHost();
+  const ctx = await setup({ managed, push: () => false }); // nobody can push anywhere of their own
+  const { builds, as, connect, call } = ctx;
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const b = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  assert.equal(b.repository, `mynt-apps/mynt-app-${app.id}`);
+  assert.equal(await builds.sourceInstallation(devUser.id, b.repository), 77, "Mynt created it: deployable");
+  // Their own repository needs push access, at set_app_repository too.
+  await builds.connectRepository(devUser.id, "acme/savings-app", 42);
+  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data.error, /can't push to acme\/savings-app/);
 });
+
+test("GitHubUserAuth: PKCE on the authorize link; 401, 403 and 404 mean what they say", async () => {
+  const { GitHubUserAuth } = await import("../dist/github.js");
+  const gh = new GitHubUserAuth("Iv1.client", "secret", "https://gh.example", "https://api.gh.example");
+  const url = new URL(gh.authorizeUrl("st", "https://mynt.example.com/oauth/git/callback", "challenge123"));
+  assert.deepEqual(
+    ["client_id", "state", "redirect_uri", "code_challenge", "code_challenge_method"].map((k) => url.searchParams.get(k)),
+    ["Iv1.client", "st", "https://mynt.example.com/oauth/git/callback", "challenge123", "S256"],
+  );
+  const realFetch = globalThis.fetch;
+  let answer;
+  const sent = [];
+  globalThis.fetch = async (u, init = {}) => {
+    sent.push({ url: String(u), init });
+    return new Response(JSON.stringify(answer.body ?? {}), { status: answer.status, headers: answer.headers ?? {} });
+  };
+  try {
+    answer = { status: 200, body: { permissions: { push: true } } };
+    assert.equal(await gh.canPush("t", "acme/app"), true);
+    assert.equal(sent.at(-1).url, "https://api.gh.example/repos/acme/app");
+    assert.equal(sent.at(-1).init.headers.Authorization, "Bearer t");
+    answer = { status: 200, body: { permissions: { push: false, pull: true } } };
+    assert.equal(await gh.canPush("t", "acme/app"), false);
+    answer = { status: 404 };
+    assert.equal(await gh.canPush("t", "acme/app"), false);
+    answer = { status: 401 };
+    assert.equal(await gh.canPush("t", "acme/app"), "unauthorized");
+    answer = { status: 403 };
+    assert.equal(await gh.canPush("t", "acme/app"), false);
+    answer = { status: 403, headers: { "x-github-sso": "required; url=https://gh.example/orgs/acme/sso" } };
+    await assert.rejects(gh.canPush("t", "acme/app"), /requires single sign-on/);
+    answer = { status: 403, headers: { "x-ratelimit-remaining": "0" } };
+    await assert.rejects(gh.canPush("t", "acme/app"), /rate limit/);
+    answer = { status: 502 };
+    await assert.rejects(gh.canPush("t", "acme/app"), /try again/);
+    // A refresh GitHub won't take ends the authorization; the exchange sends the PKCE verifier.
+    answer = { status: 200, body: { error: "bad_refresh_token" } };
+    await assert.rejects(gh.refresh("r"), (e) => e.constructor.name === "GitAuthorizationEnded");
+    answer = { status: 200, body: { access_token: "tok", refresh_token: "ref", expires_in: 28800 } };
+    const t = await gh.exchange("code", "https://mynt.example.com/oauth/git/callback", "verifier123");
+    assert.equal(JSON.parse(sent.find((s) => s.url.endsWith("/login/oauth/access_token") && s.init.body.includes("code_verifier")).init.body).code_verifier, "verifier123");
+    assert.ok(Date.parse(t.expires_at) > Date.now() + 7.9 * 3600e3);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("the sign-ins a person can have in flight are capped", async () => {
+  const ctx = await setup({ git: false });
+  const user = await ctx.as("Dev", ["developer"]);
+  for (let i = 0; i < 6; i++) await ctx.ownership.begin(user.id);
+  const n = (await ctx.pg.query("SELECT count(*)::int AS n FROM financial_products.git_account_states WHERE user_id = $1", [user.id])).rows[0].n;
+  assert.equal(n, 3);
+});
+
 
 test("builds stay off without a model backend for the proxy", async () => {
   const { as, connect, call } = await setup({ config: { agentBackend: null } });
@@ -1319,6 +1816,16 @@ test("once a session is finishing, a steer never interrupts the finish turn: it 
   assert.deepEqual([s.finish, s.undelivered, s.last_subtype, s.summary], ["developer", 1, "success", "did: Finish the session now (shipping)"]);
 });
 
+test("a session runner holds an idle setting beyond setTimeout's range to its maximum, rather than finishing at once", async () => {
+  const r = await sessionRunner({ env: { MYNT_AGENT_IDLE_MS: "99999999999" } });
+  await r.until(() => r.state().turns === 1);
+  await new Promise((res) => setTimeout(res, 1500));
+  assert.equal(r.isExited(), false);
+  assert.equal(r.state().finish, null);
+  r.inbox({ finish: true, message: "Finish" });
+  assert.equal(await r.exit, 0);
+});
+
 test("a session runner ignores a non-numeric idle setting, skips dot-files and retries an inbox file it can't parse yet", async () => {
   const r = await sessionRunner({ env: { MYNT_AGENT_IDLE_MS: "soon" } });
   await r.until(() => r.state().turns === 1);
@@ -1386,6 +1893,70 @@ test("boat.dev's file API: a file that isn't there yet reads as null, other erro
     await assert.rejects(sandboxes.readFile("sbx", "/root/x"), /Path must resolve/);
   } finally {
     globalThis.fetch = realFetch;
+  }
+});
+
+test("boat.dev's host forwards to the sandbox's 127.0.0.1, where previews and the editor listen", async () => {
+  const { BoatDevSandboxes } = await import("../dist/sandbox-providers/boatdev.js");
+  const sandboxes = new BoatDevSandboxes("boat_test", "https://boat.example/api/v1");
+  const realFetch = globalThis.fetch;
+  let sent;
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), body: JSON.parse(init.body) };
+    return new Response(JSON.stringify({ url: "https://sbx-5173.boat.example?_token=t" }), { status: 200 });
+  };
+  try {
+    assert.equal((await sandboxes.host("sbx", 5173)).url, "https://sbx-5173.boat.example?_token=t");
+    assert.deepEqual(sent.body, { port: 5173, public: false, localhost: true });
+    assert.match(sent.url, /\/sandboxes\/sbx\/host$/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("dev_preview.sh: any package manager's install record counts, a shell that merely mentions an install doesn't hold it up, a running install does", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync, spawn } = await import("node:child_process");
+  const script = new URL("../workspaces/coding-build/scripts/dev_preview.sh", import.meta.url).pathname;
+  const root = mkdtempSync(join(tmpdir(), "mynt-preview-"));
+  const app = join(root, "app");
+  mkdirSync(join(app, "web"), { recursive: true });
+  writeFileSync(join(app, "web", "package.json"), JSON.stringify({ name: "web", scripts: {} })); // no dev script: Vite never answers
+  const run = () => execFileSync("bash", [script, app], { env: { ...process.env, HOME: root }, encoding: "utf8" }).trim().split("\n").at(-1);
+  try {
+    assert.equal(run(), "waiting", "nothing installed yet");
+    mkdirSync(join(app, "node_modules"));
+    writeFileSync(join(app, "node_modules", ".modules.yaml"), "x"); // pnpm's record
+    // A shell whose command line merely mentions an install (like a CI step's) doesn't count as one running. Two
+    // commands, so bash stays the parent and keeps that command line (with one, it would exec sleep in its place).
+    const decoy = spawn("bash", ["-c", "sleep 30; true # then npm ci"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      assert.ok(execFileSync("pgrep", ["-f", "then npm ci"], { encoding: "utf8" }).trim(), "the decoy's command line is there to match");
+      assert.equal(run(), "starting", "installed: it starts the dev server, which here never answers");
+    } finally {
+      decoy.kill();
+    }
+    execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
+    // An install that is running (its command line starts with it) holds the preview back.
+    const install = spawn("bash", ["-c", 'exec -a "npm install" sleep 30'], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      assert.equal(run(), "waiting");
+    } finally {
+      install.kill();
+    }
+    // A dev server that accepts connections but never answers: the start path is still bounded by the clock.
+    writeFileSync(join(app, "web", "silent.js"), 'require("net").createServer(() => {}).listen(5173, "127.0.0.1");');
+    writeFileSync(join(app, "web", "package.json"), JSON.stringify({ name: "web", scripts: { dev: "node silent.js" } }));
+    const started = Date.now();
+    assert.equal(run(), "starting");
+    const took = (Date.now() - started) / 1000;
+    assert.ok(took < 32, `the start path took ${took.toFixed(1)} s`);
+  } finally {
+    execFileSync("bash", [script, "--stop", app], { env: { ...process.env, HOME: root } });
   }
 });
 

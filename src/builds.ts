@@ -12,6 +12,7 @@ import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_POR
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
 import { requirePush, type RepoOwnershipService } from "./repo-ownership.js";
+import { isManagedRepository, refuseManagedRepository, type GitRepoHost } from "./git-host.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
@@ -52,7 +53,12 @@ export const SESSION_IDLE_MS = 15 * 60 * 1000;
 // Mynt finishes a session itself this long before its sandbox's time limit, or once it has spent this share of its
 // cap, so the work is shipped rather than lost when the sandbox ends or the build goes over budget.
 export const SESSION_TTL_MARGIN_S = 30 * 60;
-export const SESSION_CAP_SHARE = 0.8;
+// The cap auto-finish leaves room for the finish turn itself (review, checks, preview, push): it starts at 70% of the
+// cap, or earlier when the cap is small, so at least SESSION_FINISH_RESERVE_USD is left. The reserve is an estimate
+// of one finish turn, not a measured figure.
+export const SESSION_CAP_SHARE = 0.7;
+export const SESSION_FINISH_RESERVE_USD = 2;
+export const sessionCapThreshold = (cap: number) => Math.max(0, Math.min(SESSION_CAP_SHARE * cap, cap - SESSION_FINISH_RESERVE_USD));
 const sessionIdleMs = (v: string | undefined) => {
   const n = Number(v);
   return v !== undefined && Number.isFinite(n) && n >= 60_000 && n <= 24 * 3600 * 1000 ? n : SESSION_IDLE_MS;
@@ -137,6 +143,7 @@ export interface Build {
   agent_report: unknown; // the coding agent's own report: advisory only
   prompt_id: string | null; // the coding agent's runner process in the build sandbox
   preview_url: string | null;
+  live_preview_url: string | null; // the app's dev server while the agents code (a private link)
   pr_url: string | null;
   branch: string | null;
   commit_sha: string | null;
@@ -161,11 +168,34 @@ export interface Build {
   // finish_build (or SESSION_IDLE_MS idle), then ships.
   mode: "once" | "session";
   finish_requested_at: string | null;
+  finish_reason: string | null; // "developer", "idle", "ttl" or "cap"
+  finish_delivered_at: string | null; // when the finish item reached the agent's inbox (or the runner started it)
+  sandbox_started_at: string | null; // when Mynt asked for the build's sandbox: its time limit counts from here
   // continue_from: the earlier build whose pushed branch this one starts from.
   continued_from: string | null;
   base_branch: string | null;
   base_commit: string | null;
 }
+
+// Apps' repositories and the managed repositories' names (exported so other services' tests build the same tables).
+export const APP_REPOSITORIES_DDL = `
+  -- Each app's repository: the private one Mynt created for it (managed), or the developer's own they chose.
+  CREATE TABLE IF NOT EXISTS financial_products.app_repositories (
+    app_id uuid PRIMARY KEY REFERENCES financial_products.apps(id),
+    repository text NOT NULL,
+    managed boolean NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- The managed repository Mynt created for the app, kept when the app moves to the developer's own: it stays one of
+  -- Mynt's (never connectable by name), and the developer can still clone it or switch back to it.
+  ALTER TABLE financial_products.app_repositories ADD COLUMN IF NOT EXISTS managed_repository text;
+  -- Every name Mynt created a managed repository under: only the name, kept after its app is removed, so the
+  -- repository (still on the host, its old name perhaps redirected) is never connectable by name.
+  CREATE TABLE IF NOT EXISTS financial_products.managed_repository_names (
+    repository text PRIMARY KEY,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+`;
 
 const TABLES = `
   CREATE TABLE IF NOT EXISTS financial_products.build_runs (
@@ -211,8 +241,12 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_check jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_env jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS live_preview_url text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'once';
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_requested_at timestamptz;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_reason text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_delivered_at timestamptz;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS sandbox_started_at timestamptz;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS continued_from uuid;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_branch text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_commit text;
@@ -226,6 +260,7 @@ const TABLES = `
     data jsonb NOT NULL DEFAULT '{}'
   );
   CREATE INDEX IF NOT EXISTS build_events_build_idx ON financial_products.build_events (build_id, at);
+${APP_REPOSITORIES_DDL}
   -- The coding agent's activity (its messages, commands and edits), summarised by Mynt as the build runs and kept
   -- after the sandbox goes. seq orders it within the build and is the cursor developers page with.
   CREATE TABLE IF NOT EXISTS financial_products.build_activity (
@@ -243,6 +278,9 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (developer_id, repository)
   );
+  -- When Mynt last confirmed, as the developer, that they can push there (repo-ownership.ts), or created it for them
+  -- (a managed repository). Hosting fetches source only through a verified connection.
+  ALTER TABLE financial_products.repo_connections ADD COLUMN IF NOT EXISTS push_verified_at timestamptz;
 `;
 
 const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
@@ -258,6 +296,9 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   box_until: iso(r.box_until),
   mode: r.mode === "session" ? "session" : "once",
   finish_requested_at: iso(r.finish_requested_at),
+  finish_reason: (r.finish_reason as string | null) ?? null,
+  finish_delivered_at: iso(r.finish_delivered_at),
+  sandbox_started_at: iso(r.sandbox_started_at),
   continued_from: (r.continued_from as string | null) ?? null,
   base_branch: (r.base_branch as string | null) ?? null,
   base_commit: (r.base_commit as string | null) ?? null,
@@ -309,6 +350,10 @@ const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 const BUILD_JOB = `${workspaceCwd("coding-build")}/job`;
 const FILES = { spec: `${BUILD_JOB}/build.json`, status: `${BUILD_JOB}/status.json`, result: `${BUILD_JOB}/result.json`, sdk: `${BUILD_JOB}/sdk` };
 const WORKSPACE = "/home/user/workspace/app";
+// Mynt's live preview of the app while the agents code: its script, in the coding workspace, and Vite's port.
+const DEV_PREVIEW = `${workspaceCwd("coding-build")}/scripts/dev_preview.sh`;
+export const LIVE_PREVIEW_PORT = 5173;
+export const LIVE_PREVIEW_BACKOFF = 6;
 // What a failed audit left behind, kept on the build before its sandbox is deleted.
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
@@ -506,17 +551,41 @@ export class BuildService {
     return Number(r?.s ?? 0);
   }
 
-  async connectRepository(developerId: string, repository: string, installationId: number) {
+  // `verified`: Mynt has just confirmed the developer can push there (or created it for them).
+  async connectRepository(developerId: string, repository: string, installationId: number, verified = false) {
     await this.db.query(
-      `INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id) VALUES ($1, $2, $3)
-       ON CONFLICT (developer_id, repository) DO UPDATE SET installation_id = EXCLUDED.installation_id`,
-      [developerId, repository.toLowerCase(), installationId],
+      `INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id, push_verified_at) VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END)
+       ON CONFLICT (developer_id, repository) DO UPDATE SET installation_id = EXCLUDED.installation_id,
+         push_verified_at = COALESCE(EXCLUDED.push_verified_at, repo_connections.push_verified_at)`,
+      [developerId, repository.toLowerCase(), installationId, verified],
     );
   }
 
+  // The developer can push to `repository` (asked of the git host, as them), recorded on their connection. A managed
+  // repository is exempt: Mynt created it for the developer's app, and only that app's builds reach it.
+  async checkPush(developerId: string, repository: string) {
+    if (await this.managedRepository(repository)) return;
+    await requirePush(this.ownership, developerId, repository);
+    await this.db.query("UPDATE financial_products.repo_connections SET push_verified_at = now() WHERE developer_id = $1 AND repository = $2", [
+      developerId,
+      repository.toLowerCase(),
+    ]);
+  }
+
+  // The installation hosting may fetch the developer's source with: only through a connection whose push access Mynt
+  // has verified (so a connection made before that check, to someone else's repository, deploys nothing).
+  async sourceInstallation(developerId: string, repository: string) {
+    const r = await this.one("SELECT installation_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2 AND push_verified_at IS NOT NULL", [
+      developerId,
+      repository.toLowerCase(),
+    ]);
+    return r ? Number(r.installation_id) : null;
+  }
+
   async repositories(developerId: string) {
-    return (await this.db.query("SELECT repository, created_at FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [developerId]))
+    const rows = (await this.db.query("SELECT repository, created_at FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [developerId]))
       .rows as { repository: string; created_at: string }[];
+    return rows.map((r) => ({ ...r, managed: this.isManaged(r.repository) }));
   }
 
   private async installation(developerId: string, repository: string) {
@@ -525,6 +594,102 @@ export class BuildService {
       repository.toLowerCase(),
     ]);
     return r ? Number(r.installation_id) : null;
+  }
+
+  // ---- the app's repository: Mynt-managed by default, or the developer's own ----
+
+  // Mynt keeps a private repository per app on its git host (src/git-host.ts), so builds push, pull requests open,
+  // deploy_app fetches and continue_from works with no account of the developer's there. A developer can use their
+  // own repository instead, from the start or later.
+  managedHost: GitRepoHost | null = null;
+
+  isManaged(repository: string | null) {
+    return !!this.managedHost && !!repository && this.managedHost.owns(repository);
+  }
+
+  // Also recognises an app's recorded managed repository by its stored name.
+  managedRepository(repository: string | null) {
+    return repository ? isManagedRepository(this.db, this.managedHost, repository) : Promise.resolve(false);
+  }
+
+  // The guard every connect-by-name path uses (src/git-host.ts).
+  refuseManaged(repository: string) {
+    return refuseManagedRepository(this.db, this.managedHost, repository);
+  }
+
+  async appRepository(appId: string) {
+    const r = await this.one("SELECT repository, managed, managed_repository, created_at FROM financial_products.app_repositories WHERE app_id = $1", [appId]);
+    return r
+      ? { repository: r.repository as string, managed: !!r.managed, managed_repository: (r.managed_repository as string | null) ?? null, created_at: iso(r.created_at)! }
+      : null;
+  }
+
+  // The repository an app's builds push to when none is named: the one set for the app, or else a private one Mynt
+  // creates for it the first time. null when Mynt has no managed repositories and the app has none set.
+  async repositoryForApp(developer: User, appId: string): Promise<string | null> {
+    const set = await this.appRepository(appId);
+    if (set) {
+      if (set.managed && !(await this.installation(developer.id, set.repository))) await this.connectManaged(developer.id, set.repository);
+      return set.repository;
+    }
+    if (!this.managedHost || !this.repos) return null;
+    let created: { repository: string; access: number };
+    try {
+      // Named by the app's id only: nothing about the app or its developer is in the name.
+      created = await this.managedHost.create(`mynt-app-${appId}`, "An app built with Mynt");
+    } catch (e) {
+      throw new Error(`Mynt couldn't create the app's repository (${(e as Error).message}); connect your own with connect_repository and pass it as repository`);
+    }
+    await this.db.query("INSERT INTO financial_products.managed_repository_names (repository) VALUES ($1) ON CONFLICT DO NOTHING", [created.repository]);
+    // If the developer set their own repository meanwhile, that choice stands; the managed one is still recorded.
+    await this.db.query(
+      `INSERT INTO financial_products.app_repositories (app_id, repository, managed, managed_repository) VALUES ($1, $2, true, $2)
+       ON CONFLICT (app_id) DO UPDATE SET managed_repository = COALESCE(app_repositories.managed_repository, EXCLUDED.managed_repository)`,
+      [appId, created.repository],
+    );
+    // Another request may have set the app's repository first (even the developer's own, with set_app_repository):
+    // the managed access is only ever recorded for the managed repository itself.
+    const stored = (await this.appRepository(appId))!;
+    if (stored.managed && stored.repository === created.repository) await this.connectRepository(developer.id, stored.repository, created.access, true);
+    else if (stored.managed && !(await this.installation(developer.id, stored.repository))) await this.connectManaged(developer.id, stored.repository);
+    return stored.repository;
+  }
+
+  private async connectManaged(developerId: string, repository: string) {
+    const access = await this.managedHost?.access();
+    if (!access) throw new Error("Mynt's managed repositories aren't available right now");
+    await this.connectRepository(developerId, repository, access, true);
+  }
+
+  // The developer's own connected repository for the app's next builds, instead of the managed one.
+  // Or back to the app's own managed repository, the one exception to the guard here.
+  async setAppRepository(developer: User, appId: string, repository: string) {
+    const repo = repository.toLowerCase();
+    const before = await this.appRepository(appId);
+    if (before?.managed_repository && before.managed_repository === repo) {
+      await this.db.query("UPDATE financial_products.app_repositories SET repository = $2, managed = true, created_at = now() WHERE app_id = $1", [appId, repo]);
+      if (!(await this.installation(developer.id, repo))) await this.connectManaged(developer.id, repo);
+      return { app_id: appId, repository: repo, managed: true, previous: before.repository };
+    }
+    await this.refuseManaged(repo);
+    if (!(await this.installation(developer.id, repo))) throw new Error(`Repository '${repository}' isn't connected; run connect_repository first`);
+    // The app's builds will push there: only if the developer can.
+    await this.checkPush(developer.id, repo);
+    await this.db.query(
+      `INSERT INTO financial_products.app_repositories (app_id, repository, managed) VALUES ($1, $2, false)
+       ON CONFLICT (app_id) DO UPDATE SET repository = EXCLUDED.repository, managed = false, created_at = now()`,
+      [appId, repo],
+    );
+    return { app_id: appId, repository: repo, managed: false, previous: before?.repository ?? null };
+  }
+
+  // A short-lived, read-only token for the app's managed repository, so the developer can clone their code
+  // (to keep it, or to move it to a repository of their own).
+  async managedReadToken(appId: string) {
+    // Also after the app moved to the developer's own repository: that's how they carry its branches over.
+    const set = await this.appRepository(appId);
+    if (!set?.managed_repository || !this.managedHost) return null;
+    return { repository: set.managed_repository, ...(await this.managedHost.readCredentials(set.managed_repository)), expires_in_minutes: 60 };
   }
 
   // ---- lifecycle ----
@@ -542,11 +707,24 @@ export class BuildService {
       // Only a build whose push Mynt confirmed: it verified the pushed commit (commit_sha) and opened its pull request.
       if (!prev.repository || !prev.branch || !(prev.commit_sha || prev.pr_url)) throw new Error(`Build ${prev.id} pushed no verified branch, so there's nothing to continue from`);
       if (opts.app_id && prev.app_id && opts.app_id !== prev.app_id) throw new Error(`Build ${prev.id} is for another app`);
+      // The app moved to the developer's own repository since: that build's branch is in the managed one.
+      const now = prev.app_id ? await this.appRepository(prev.app_id) : null;
+      const moved = (opts.repository && opts.repository.toLowerCase() !== prev.repository) || (now && !now.managed && now.repository !== prev.repository);
+      if (moved && (await this.managedRepository(prev.repository)))
+        throw new Error(
+          `Build ${prev.id} is in the app's previous managed repository (${prev.repository}); push its branch (${prev.branch}) to your own repository first (get_app_repository gives a clone credential), then start the build there`,
+        );
       if (opts.repository && opts.repository.toLowerCase() !== prev.repository) throw new Error(`Build ${prev.id} pushed to ${prev.repository}, not ${opts.repository}`);
       base = prev;
       opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: prev.repository, solana: opts.solana ?? (prev.solana || undefined) };
     }
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
+    // A session finishes itself while SESSION_FINISH_RESERVE_USD is still left for shipping: a cap no bigger than that
+    // would finish it as soon as it starts.
+    if (opts.mode === "session" && cap <= SESSION_FINISH_RESERVE_USD)
+      throw new Error(
+        `A session build needs a cap above US$${SESSION_FINISH_RESERVE_USD} (it keeps that much to ship the work when it finishes); start it with a bigger cap_usd, or as a one-off build`,
+      );
     const spent = await this.monthSpend(developer.id);
     // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
     // what's left (and how much a smaller cap may be).
@@ -556,11 +734,23 @@ export class BuildService {
       throw new Error(
         `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
       );
+    // No repository named: the app's own (Mynt-managed unless the developer chose theirs).
+    if (!opts.repository && opts.app_id) {
+      const repository = await this.repositoryForApp(developer, opts.app_id);
+      if (repository) opts = { ...opts, repository };
+    }
+    if (opts.repository && (await this.managedRepository(opts.repository))) {
+      // The one exception to the guard (refuseManagedRepository): the caller's own app's managed repository, in a build
+      // of that app. Never another app's.
+      const set = opts.app_id ? await this.appRepository(opts.app_id) : null;
+      if (!set?.managed || set.repository !== opts.repository.toLowerCase()) throw new Error(`Repository '${opts.repository}' isn't this app's`);
+      if (!(await this.installation(developer.id, opts.repository))) await this.connectManaged(developer.id, opts.repository);
+    }
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
     // Checked again at every build, connections made before this check existed included: a developer who can no
-    // longer push there (or never could) gets no push token for it.
-    if (opts.repository) await requirePush(this.ownership, developer.id, opts.repository);
+    // longer push there (or never could) gets no push token for it. The app's own managed repository is exempt.
+    if (opts.repository) await this.checkPush(developer.id, opts.repository);
     const id = randomUUID();
     // The Solana toolchain when asked for, or when the app has programs reserved.
     const solana = opts.solana ?? (!!opts.app_id && !!this.solana && (await this.solana.programsForApp(opts.app_id)).length > 0);
@@ -591,19 +781,22 @@ export class BuildService {
       if (now?.finish_requested_at) return { finishing: true, since: now.finish_requested_at };
       throw new Error(`Build is ${now?.status ?? "gone"}; only a running session can be finished`);
     }
-    try {
-      await this.toInbox(build.sandbox_id, { finish: true, reason, message: SESSION_FINISH_PROMPT }, "-finish");
-    } catch (e) {
-      await this.db.query("UPDATE financial_products.build_runs SET finish_requested_at = NULL WHERE id = $1", [build.id]);
-      throw e;
-    }
+    await this.db.query("UPDATE financial_products.build_runs SET finish_reason = $2 WHERE id = $1", [build.id, reason]);
     const why = {
       developer: "The developer finished the session",
       ttl: "The session is near its sandbox's time limit, so Mynt finished it",
       cap: "The session has spent most of its cap, so Mynt finished it",
     }[reason];
     await this.event(build.id, build.status, `${why}: the agent ships the work, then Mynt verifies it`);
+    // The claim stands even if the agent can't be reached right now: the finish is what everyone now relies on, and
+    // the worker writes the item on its next ticks until it's delivered.
+    await this.deliverFinish(build.id, build.sandbox_id, reason).catch((e) => console.error(`Build ${build.id} finish: ${(e as Error).message}; retrying`));
     return { finishing: true, since: iso(claimed.finish_requested_at)! };
+  }
+
+  private async deliverFinish(buildId: string, sandbox: string, reason: string) {
+    await this.toInbox(sandbox, { finish: true, reason, message: SESSION_FINISH_PROMPT }, "-finish");
+    await this.db.query("UPDATE financial_products.build_runs SET finish_delivered_at = now() WHERE id = $1", [buildId]);
   }
 
   // A running session: record a finish the runner started itself (idle), so steering stops; finish it before the
@@ -612,20 +805,36 @@ export class BuildService {
   private async followSession(b: Build, state: AgentState | null, running: boolean, cost: number) {
     if (state?.finish && !b.finish_requested_at) {
       const set = await this.one(
-        "UPDATE financial_products.build_runs SET finish_requested_at = now(), updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL RETURNING id",
-        [b.id],
+        "UPDATE financial_products.build_runs SET finish_requested_at = now(), finish_reason = $2, finish_delivered_at = now(), updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL RETURNING id",
+        [b.id, state.finish],
       );
       if (set)
         await this.event(b.id, b.status, state.finish === "idle" ? "The session was idle too long: the agent ships the work, then Mynt verifies it" : `The session is finishing (${state.finish})`);
       b = { ...b, finish_requested_at: new Date().toISOString() };
+    } else if (b.finish_requested_at && !b.finish_delivered_at) {
+      // Claimed but not yet in the agent's inbox (it couldn't be reached then): deliver it now, unless the runner is
+      // already finishing anyway.
+      if (state?.finish) await this.db.query("UPDATE financial_products.build_runs SET finish_delivered_at = now() WHERE id = $1", [b.id]);
+      else if (running) await this.deliverFinish(b.id, b.sandbox_id!, b.finish_reason ?? "developer").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}; retrying`));
     }
     if (running && !b.finish_requested_at && !state?.finish) {
-      const nearTtl = Date.now() - Date.parse(b.created_at) > Math.max(0, this.config.ttlSeconds - SESSION_TTL_MARGIN_S) * 1000;
+      // The sandbox's own clock, from when Mynt asked for it, not the build's queueing time.
+      const since = Date.parse(b.sandbox_started_at ?? b.created_at);
+      const nearTtl = Date.now() - since > Math.max(0, this.config.ttlSeconds - SESSION_TTL_MARGIN_S) * 1000;
       if (nearTtl) await this.finish(b, "ttl").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
-      else if (cost >= SESSION_CAP_SHARE * b.cap_usd) await this.finish(b, "cap").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
+      else if (cost >= sessionCapThreshold(b.cap_usd)) await this.finish(b, "cap").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
     }
-    if (!running && (state?.undelivered ?? 0) > 0)
-      await this.event(b.id, b.status, `${state!.undelivered} message(s) arrived while the session was finishing and weren't delivered; send them in a new build with continue_from`);
+    // Once per build, even if moving on to verification is retried over several ticks.
+    if (!running && (state?.undelivered ?? 0) > 0) {
+      const said = await this.one("SELECT 1 FROM financial_products.build_events WHERE build_id = $1 AND data->>'undelivered' IS NOT NULL", [b.id]);
+      if (!said)
+        await this.event(
+          b.id,
+          b.status,
+          `${state!.undelivered} message(s) arrived while the session was finishing and weren't delivered; send them in a new build with continue_from`,
+          { undelivered: state!.undelivered },
+        );
+    }
   }
 
   // An item for the runner's inbox, written under a dot-name and renamed into place, so the runner never reads half
@@ -646,6 +855,7 @@ export class BuildService {
   async stop(build: Build, reason: string, status: BuildStatus = "stopped") {
     if (TERMINAL.includes(build.status)) return build;
     await this.retireKey(build);
+    this.previewTicks.delete(build.id); // stopped, or over budget (stop is how a build goes over budget)
     // What the agent did last, read before its sandbox goes, briefly: a stuck sandbox mustn't hold up a stop.
     if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, { maxChunks: 4, timeoutSeconds: 10, toEnd: true });
     if (build.sandbox_id && this.sandboxes) {
@@ -839,7 +1049,7 @@ export class BuildService {
     const installation = await this.installation(build.developer_id, build.repository);
     if (!installation) throw new Error(`Mynt's GitHub App can't reach ${build.repository} any more`);
     // The reopened sandbox gets a push token: only for a developer who can still push there.
-    await requirePush(this.ownership, build.developer_id, build.repository);
+    await this.checkPush(build.developer_id, build.repository);
     const { token } = await this.repos.tokenFor(build.repository, installation);
     const ttl = Math.round(Math.max(1, Math.min(8, hours)) * 3600);
     const s = await this.sandboxes.createSandbox({
@@ -919,6 +1129,7 @@ export class BuildService {
         // build keeps the status it ended with.
         if (TERMINAL.includes(current.status)) continue;
         await this.retireKey(current);
+        this.previewTicks.delete(build.id);
         // What the agent did up to the failure, read before its sandbox goes.
         if (AGENT_PHASES.includes(current.status)) await this.collectActivitySafely(current, { maxChunks: ACTIVITY_CHUNKS_AT_END, timeoutSeconds: 30, toEnd: true });
         // Don't leave a failed build's machines running until their TTL.
@@ -947,6 +1158,9 @@ export class BuildService {
         Object.assign(env, { MYNT_SANDBOX_KEY: secret, ...(this.config.publicUrl ? { MYNT_API_BASE: `${this.config.publicUrl}/v1` } : {}) });
       }
       if (b.repository && this.repos) {
+        // Again here, right before the push token: the build may have been queued before this check existed, or the
+        // developer's access revoked since (a recent "yes" is reused for a few minutes).
+        await this.checkPush(b.developer_id, b.repository);
         const installation = await this.installation(b.developer_id, b.repository);
         const { token } = await this.repos.tokenFor(b.repository, installation!);
         Object.assign(env, { GITHUB_REPOSITORY: b.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/build-${b.id.slice(0, 8)}` });
@@ -958,6 +1172,7 @@ export class BuildService {
       await this.update(b.id, {
         status: "provisioning",
         sandbox_id: sandbox.id,
+        sandbox_started_at: new Date().toISOString(),
         sandbox_key_id: sandboxKeyId,
         branch: env.MYNT_BRANCH ?? null,
         ...(base ? { solana_env: { ...b.solana_env, build: base } } : {}),
@@ -1013,6 +1228,8 @@ export class BuildService {
       await this.update(b.id, { status: phase, phase_message: status?.message ?? null });
       await this.event(b.id, phase, status?.message ?? phase);
     }
+    const now = phase && AGENT_PHASES.includes(phase) ? phase : b.status;
+    if (agent.running && now === "coding") await this.ensureLivePreview(b);
     if (b.mode === "session") await this.followSession(b, agent.state, agent.running, cost);
     // Once the agent has exited, its log is read to the end before the build moves on.
     await this.collectActivitySafely(b, agent.running ? {} : { maxChunks: ACTIVITY_CHUNKS_AT_END, toEnd: true });
@@ -1021,14 +1238,51 @@ export class BuildService {
     await this.startVerification(b);
   }
 
+  // The live preview while the agents code: once they've installed the app, Mynt starts its dev servers itself
+  // (scripts/dev_preview.sh: the api on 3000, Vite on 5173 with hot reload) and serves 5173 at a private link,
+  // once; the link works as long as the sandbox does. A preview that won't start never fails or holds up a build:
+  // it's tried again on the next tick.
+  // The script is cheap while it waits for the agents' install, so it runs every tick until the preview is up; once
+  // it is up (to restart a dev server that died), while its dev server is up but not answering yet ("starting"), or
+  // when the app has no web/ yet, every LIVE_PREVIEW_BACKOFF ticks. Entries go when the build leaves coding.
+  private previewTicks = new Map<string, { n: number; slow: boolean }>();
+  async ensureLivePreview(b: Build) {
+    if (!this.sandboxes || !b.sandbox_id) return null;
+    const seen = this.previewTicks.get(b.id) ?? { n: 0, slow: false };
+    seen.n++;
+    this.previewTicks.set(b.id, seen);
+    if ((b.live_preview_url || seen.slow) && seen.n % LIVE_PREVIEW_BACKOFF !== 0) return b.live_preview_url;
+    try {
+      // The script bounds its own waits well under this.
+      const r = await this.sandboxes.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 45 });
+      const said = r.stdout.trim().split("\n").at(-1);
+      seen.slow = said === "no-web" || said === "starting";
+      // started and running both mean the dev server answered on 5173.
+      if (r.exitCode !== 0 || (said !== "started" && said !== "running")) return b.live_preview_url;
+      if (b.live_preview_url) return b.live_preview_url; // restarted behind the link it already has
+      const { url } = await this.sandboxes.host(b.sandbox_id, LIVE_PREVIEW_PORT);
+      await this.update(b.id, { live_preview_url: url });
+      // The link is a credential: it goes on the build, never on the timeline.
+      await this.event(b.id, b.status, "Live preview started: the app as the agents write it, with hot reload");
+      return url;
+    } catch (e) {
+      console.error(`Build ${b.id} live preview: ${(e as Error).message}`);
+      return b.live_preview_url;
+    }
+  }
+
   // The coding agent doesn't grade its own work: Mynt packages the source and verifies it in a fresh
   // sandbox the agent never touched. The agent's report is kept, but only as advice.
   private async startVerification(b: Build) {
     const sandboxes = this.sandboxes!;
     const report = parseJson<AgentResult>(await sandboxes.readFile(b.sandbox_id!, FILES.result));
+    // Coding is over: the live preview's dev servers stop first, so nothing rewrites files while they're packaged.
+    this.previewTicks.delete(b.id);
+    await sandboxes.exec(b.sandbox_id!, `bash ${DEV_PREVIEW} --stop >/dev/null 2>&1; true`, { timeoutSeconds: 60 }).catch(() => undefined);
+    // Dependencies at any depth stay out of the source (web/node_modules and its caches among them).
     const pack = await sandboxes.exec(
       b.sandbox_id!,
-      `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=./node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
+      `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
       { timeoutSeconds: 300 },
     );
     const sha = pack.stdout.trim().split(/\s+/)[0];
@@ -1415,6 +1669,8 @@ export class BuildService {
         repository: b.repository,
         branch: b.branch,
         mode: b.mode,
+        // Mynt's own repository for this app: it starts with only a README.
+        managed_repository: this.isManaged(b.repository),
         base: b.base_branch ? { branch: b.base_branch, commit_sha: b.base_commit, build_id: b.continued_from } : null,
       },
       goal: b.goal,
@@ -1522,6 +1778,8 @@ export function developerBuild(b: Build) {
     status: b.status,
     phase_message: b.phase_message,
     preview_url: b.preview_url,
+    // Only while the agents code: Mynt stops the dev servers when coding ends (after shipping, preview_url).
+    live_preview_url: b.status === "coding" ? (b.live_preview_url ?? null) : null,
     pr_url: b.pr_url,
     commit_sha: b.commit_sha,
     readiness: b.readiness,
@@ -1557,15 +1815,21 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     },
     async ({ repository }) => {
       if (!builds.repos) return fail("Pushing to repositories isn't set up on this Mynt yet; builds still run and give you a preview");
+      // Mynt's managed repositories are reached through each app (start_build, get_app_repository), never by name.
+      try {
+        await builds.refuseManaged(repository);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+      const installation = await builds.repos.installationFor(repository);
+      if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
       // The App being installed there only says Mynt can reach it: the developer must be able to push there themselves.
       try {
         await requirePush(builds.ownership, user.id, repository);
       } catch (e) {
         return fail((e as Error).message);
       }
-      const installation = await builds.repos.installationFor(repository);
-      if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
-      await builds.connectRepository(user.id, repository, installation);
+      await builds.connectRepository(user.id, repository, installation, true);
       await store.audit(user.id, "connect_repository", repository);
       return json({ connected: true, repository });
     },
@@ -1573,8 +1837,85 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
 
   server.registerTool(
     "list_repositories",
-    { title: "My connected repositories", description: "Developer: repositories builds can push to.", inputSchema: {}, annotations: { readOnlyHint: true } },
+    {
+      title: "My connected repositories",
+      description: "Developer: repositories builds can push to: your own connected ones, and your apps' Mynt-managed ones (managed: true).",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
     async () => json(await builds.repositories(user.id)),
+  );
+
+  const ownApp = async (appId: string) => {
+    const app = await store.getApp(appId);
+    return app && app.owner_id === user.id ? app : undefined;
+  };
+
+  server.registerTool(
+    "get_app_repository",
+    {
+      title: "Where an app's code lives",
+      description:
+        "Developer: the repository an app's builds push to. By default Mynt keeps a private one for each app (managed: true), created on its first build, so you need no repository of your own; the result includes a read-only token, valid for an hour, to clone your code with. Or it's your own repository, set with set_app_repository.",
+      inputSchema: { app_id: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ app_id }) => {
+      if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
+      const set = await builds.appRepository(app_id);
+      if (!set)
+        return json({
+          app_id,
+          repository: null,
+          managed: builds.managedHost ? "created on the app's first build" : false,
+          next: builds.managedHost ? "start_build with this app_id" : "connect_repository, then set_app_repository",
+        });
+      if (!set.managed_repository) return json({ app_id, ...set });
+      try {
+        // The managed repository's clone credential: the app's current repository, or the one it had before it
+        // moved to the developer's own (to carry its branches over).
+        const read = await builds.managedReadToken(app_id);
+        await store.audit(user.id, "get_app_repository", app_id, { repository: set.managed_repository, read_token: !!read });
+        return json({
+          app_id,
+          ...set,
+          ...(read
+            ? {
+                clone: {
+                  repository: read.repository,
+                  url: builds.managedHost!.cloneUrl(read.repository),
+                  username: read.username,
+                  password: read.password,
+                  expires_in_minutes: read.expires_in_minutes,
+                  note: "Read-only. Use it as git's password (a credential helper), not in the URL. To move to your own repository: clone, push to yours, connect_repository, then set_app_repository.",
+                },
+              }
+            : {}),
+        });
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_app_repository",
+    {
+      title: "Use your own repository for an app",
+      description:
+        "Developer: from now on, the app's builds push to one of your own connected repositories instead of the one Mynt manages for it; or, given the app's own managed repository (get_app_repository names it), back to that. Builds already made stay where they are (continue_from works within one repository: push the managed repository's branch to yours first if you want to carry on from it).",
+      inputSchema: { app_id: z.string(), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name") },
+    },
+    async ({ app_id, repository }) => {
+      if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
+      try {
+        const r = await builds.setAppRepository(user, app_id, repository);
+        await store.audit(user.id, "set_app_repository", app_id, { repository: r.repository, previous: r.previous });
+        return json(r);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
   );
 
   server.registerTool(
@@ -1586,7 +1927,10 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       inputSchema: {
         goal: z.string().min(10).describe("What to build or change, in plain words"),
         app_id: z.string().optional().describe("The experience to build (its products, terms and screens are given to the agent)"),
-        repository: z.string().optional().describe("A connected repository (owner/name) to push to"),
+        repository: z
+          .string()
+          .optional()
+          .describe("A connected repository (owner/name) to push to. Default: the app's own repository, which Mynt creates and manages for it unless you chose yours with set_app_repository"),
         cap_usd: z.number().positive().optional().describe("Spend cap for this build, up to the platform maximum"),
         solana: z
           .boolean()
@@ -1673,7 +2017,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     "steer_build",
     {
       title: "Steer a running build",
-      description: "Developer: send the coding agent an instruction mid-build (e.g. 'use the existing design system').",
+      description:
+        "Developer: send the coding agent an instruction mid-build (e.g. 'use the existing design system'). It interrupts the agent's current turn and becomes the next one. In a session it's your next request; once the session is finishing it's refused, and one sent at the very moment it starts finishing is held back: the build's timeline then says it wasn't delivered (steered: true means Mynt queued it, not that the agent read it).",
       inputSchema: { build_id: z.string(), message: z.string().min(3) },
     },
     async ({ build_id, message }) => {
@@ -1819,7 +2164,8 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
     },
     async ({ status }) => {
       const all = await builds.listFor(null, status);
-      return json({ builds: all.map(({ source_url, agent_report, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
+      // Preview links are credentials for the build's developer only.
+      return json({ builds: all.map(({ source_url, agent_report, live_preview_url, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
     },
   );
 

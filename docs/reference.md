@@ -182,6 +182,23 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **The developer works in the same box.** While a build runs, and after it ships for as long as its preview is up, `open_sandbox_editor` opens VS Code in the browser on the sandbox (a private, token-gated link plus a password), with a terminal next to the agents. `sandbox_run`, `sandbox_files` and `sandbox_diff` do the same from any MCP client. Output is capped and scrubbed of credentials, and everything the developer does is on the build's timeline. After a build ends, `reopen_sandbox` brings back a fresh sandbox on its pushed branch (with the coding team's workspace and a short-lived GitHub token to push with) for a few hours, so the same tools keep working; `close_sandbox` ends it.
 
+**Live preview while the agents code.** Once the agents' install has finished and the SDK is built, Mynt itself starts the app's dev servers with `workspaces/coding-build/scripts/dev_preview.sh`:
+- Vite (`npm run dev` in `web/`) on 127.0.0.1:5173, with hot reload;
+- the api (`npm run dev` in `api/`, the template's `tsx watch` from the app's own dev dependencies) on port 3000, on the build's sandbox key.
+
+"Finished" means the package manager's own record is in `node_modules` and no install is running:
+- the record is npm's `.package-lock.json`, pnpm's `.modules.yaml`, or yarn's `.yarn-integrity` or `.yarn-state.yml`;
+- a running install is a process whose command line starts with `npm`, `pnpm` or `yarn` followed by `install`, `i`, `ci` or `add`.
+
+The script never installs anything itself, so it never races the agents. How the link works:
+- Once Vite answers with any HTTP response, Mynt serves port 5173 at a private link, `live_preview_url` on `get_build`, shown while the build is `coding`. On boat.dev the link forwards to the sandbox's 127.0.0.1 (`localhost: true`), as the editor's does.
+- The link is a credential: it's never written to the timeline, and admins' listing leaves it out.
+- While waiting for the install, Mynt retries every tick. Once the preview is up, while its dev server is up but not answering yet, or while the app has no `web/` yet, it retries every 6th tick. A retry also restarts a dev server that died, behind the same link.
+- The script bounds its own waits by the clock (about 27 seconds at most, even when a server accepts connections but never answers), well under the 45 seconds Mynt gives it.
+- The preview never fails a build.
+
+When coding ends, Mynt stops both dev servers before it packages the source, and dependencies at any depth (`node_modules`) stay out of the package. The template's `web/vite.config.ts` accepts the forwarder's host name, sends hot reload over port 443 and keeps Vite's cache outside the app, but only when the script starts it (`MYNT_LIVE_PREVIEW=1`); a developer's own `npm run dev` keeps Vite's localhost-only defaults. After the build ships, `preview_url` is the verified Compose preview.
+
 **The agent doesn't grade its own work.** When it finishes, Mynt verifies the build itself, in a **fresh sandbox the agent never touched**, with no secrets:
 1. **Package.** Mynt packages the workspace source (without dependencies), records its SHA-256, and the verifier downloads it and checks the checksum.
 2. **Mynt's own checks** (`src/verify-script.ts`): tests; lint and types; a secrets scan with `gitleaks`; a dependency audit; a CycloneDX SBOM with `syft`; and every required disclosure present in the source. `gitleaks` and `syft` are pinned versions, checked against their releases' published checksums.
@@ -202,7 +219,11 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 - `finish_build` ends the session. Once its current request is done, the agent reviews, checks, previews and pushes the work, then exits. Mynt then verifies the build in a clean sandbox exactly as any other; the agent never grades its own work.
 - Finishing never interrupts the current request, and once a session is finishing it takes no more steers. A message that slips in as it starts finishing isn't delivered, and the build's timeline says so.
 - A session that has been idle (nothing running, nothing waiting) for `BUILD_SESSION_IDLE_MS` (default 15 minutes; from 1 minute to 24 hours) finishes the same way, so its work is shipped, not lost.
-- Mynt also finishes a session itself 30 minutes before its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours), and once it has spent 80% of its cap, so neither ends it with the work unshipped.
+- Mynt also finishes a session itself, so neither the time limit nor the cap ends it with the work unshipped:
+  - 30 minutes before its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours, counted from when Mynt asked for the sandbox);
+  - once it has spent 70% of its cap, or earlier on a small cap, so that at least US$2 is left for the finish turn. That US$2 is an estimate of one finish turn, not a measured figure. A session build therefore needs a cap above US$2; `start_build` refuses a smaller one.
+- A finish is recorded first and then put in the agent's inbox. If the sandbox can't be reached at that moment, the finish still stands and Mynt delivers it on its next ticks.
+- `steer_build`'s `steered: true` means Mynt queued the message, not that the agent read it. A message held back because the session was finishing shows on the timeline as not delivered.
 - The sandbox is billed while it waits, so idle time counts against the build's cap.
 - Mynt runs the agent's runner with `MYNT_AGENT_HOLD=1` and `MYNT_AGENT_IDLE_MS`, and writes its inbox items whole (a temporary name, then a rename).
 
@@ -213,22 +234,53 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.
 
 **Proof of push access.** The App being installed on a repository only says Mynt can reach it, not that the person asking may use it. So, before Mynt gives out any token for a repository named by a person, it asks the git host, as that person, whether they can push there (`src/repo-ownership.ts`; the GitHub adapter is `GitHubUserAuth` in `src/github.ts`, which reads `permissions.push` from `GET /repos/{owner}/{repo}` with the person's user token).
-- **Once per person.** `connect_git_account` gives a link where they authorise the App as themselves; it expires in ten minutes, and its state is single use. The host sends them back to `/oauth/git/callback`. Their user token is sealed at rest with `MYNT_VAULT_KEY`, refreshed when it expires, and never shown. `git_account` says whether it's connected, and can disconnect it.
-- **Checked on every path that uses a repository by name:**
-  - `connect_repository`;
-  - every build naming a repository, re-checked at each build start, so revoked access stops the next build; connections made before this check existed are checked too;
+- **Linking, once per person, bound to their Mynt account.**
+  - `connect_git_account` gives a Mynt link (`/oauth/git/start`), valid for ten minutes, single use, at most three in flight per person.
+  - Opening it sets a host-only, `HttpOnly`, `Secure`, `SameSite=Lax` cookie holding a hash of the state, and sends the browser to the host with a PKCE (S256) challenge.
+  - The host's callback (`/oauth/git/callback`) needs that cookie, exchanges the code with the PKCE verifier, and shows a one-time code.
+  - The person finishes with `confirm_git_account <code>` in their own Mynt session. Only the Mynt account that started the sign-in can confirm it, and a few wrong codes drop it.
+  - Mynt's server has no browser session of its own (people reach it through MCP clients), so this confirmation over the authenticated MCP channel is what binds the host account to the right Mynt account. Someone who sends you their link gets nothing: you can't confirm their sign-in, and they never see your code.
+  - One host account links to one Mynt account.
+- **The token.** It's sealed at rest with a key derived from `MYNT_VAULT_KEY` for this purpose only. It's refreshed when it expires (one refresh at a time, compare-and-swap across processes) and never shown. `git_account` says whether it's connected; disconnecting also withdraws the grant at the host.
+- **Checked on every path that uses a repository by name**, after the App's installation is confirmed (a missing installation answers with where to install):
+  - `connect_repository` and `set_app_repository`;
+  - every build naming a repository, at start and again in the worker right before the push token, so revoked access stops queued builds too; connections made before this check existed are checked as well;
   - `reopen_sandbox`, which gives a push token;
-  - a firm's desk workspace (`connect_desk_repository`), and each desk job and exploration on it.
-- **Caching.** An answer is reused for five minutes.
-- **Error messages.**
-  - Someone who hasn't connected their git account is told to run `connect_git_account`.
-  - A token the host no longer accepts asks them to connect it again.
-  - Without this set up, Mynt connects no repository at all.
+  - a firm's desk workspace (`connect_desk_repository`), and each desk job, exploration and adoption on it.
+- **Exempt: Mynt's managed repositories.** Mynt created them for the app, and only that app's builds reach them.
+- **Hosting.** `deploy_app` fetches source only through a connection whose push access Mynt has verified, or a managed repository.
+- **Caching.** A "can push" is reused for five minutes. A "can't" never is, so access granted on the host works at once.
+- **What the host can't decide.** A 403 for single sign-on or an exhausted rate limit says so and isn't taken as "can't push"; neither is a host that can't be reached.
+- **Messages.**
+  - Someone who hasn't linked their git account is told to run `connect_git_account`.
+  - A token the host no longer accepts (refresh refused) asks them to connect again.
+  - A host that can't be reached while renewing says to try again.
+  - Without the set-up, Mynt connects, builds on and uses as a desk workspace no repository at all, and says it's an operator's step.
 
 Operator setup, in the GitHub App's settings (the domain is a placeholder for this server's `PUBLIC_URL`):
 1. Under **Identifying and authorizing users**, set **Callback URL** to `https://<your-mynt-domain>/oauth/git/callback`.
-2. Tick **Request user authorization (OAuth) during installation**. Keep **Expire user authorization tokens** on: Mynt refreshes them.
+2. Leave **Request user authorization (OAuth) during installation** unticked: linking always starts from `connect_git_account`, and a callback without Mynt's state is refused. Keep **Expire user authorization tokens** on, since Mynt refreshes them. **Enable Device Flow** isn't needed.
 3. Generate a client secret. Set `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` on the server, beside `PUBLIC_URL` and `MYNT_VAULT_KEY`.
+
+**Managed repositories (the default).** A developer needs no repository of their own. When a build names no `repository`, its app's builds push to the app's repository:
+- **Created by Mynt.** On the app's first build, Mynt creates a private repository on its git host (`src/git-host.ts`), named by the app's id only (`mynt-app-<app_id>`), with a first commit so pull requests have a base.
+- **Works like a connected repository.** Builds push their branch there, Mynt opens the verified pull request there, `deploy_app` fetches the verified commit from it, and `continue_from` carries on in it.
+- **Reachable only through its app.** One guard covers every path that connects a repository by name: `connect_repository`, `set_app_repository`, a firm's desk workspace (`connect_desk_repository`, and so the desk's explorations), and a build naming a repository. It refuses any managed repository, except the caller's own app's in a build of that app.
+  - A repository counts as managed if it's in the managed organization by name, or if Mynt ever created one under that name. Mynt keeps every name it creates in `managed_repository_names`: the name only, kept after the app is removed. That covers a name the host still redirects after the organization was renamed.
+  - The check fails closed: a database error refuses the connection. Only a table that doesn't exist yet counts as "none recorded".
+  - `list_repositories` marks a managed repository `managed`.
+- **Cloning.** `get_app_repository` says where an app's code lives and, for a managed repository, gives a read-only token (one hour) to clone it.
+
+`set_app_repository` switches an app's next builds to one of the developer's own connected repositories. It also switches back to the app's own managed repository: that's the only managed repository it accepts. It works whether or not managed repositories are on: with them off, it's how an app gets a default repository.
+- Builds already made stay in the managed repository. `get_app_repository` still gives its clone credential, and `continue_from` on one of those builds says to push its branch to your own repository first.
+- `remove_app` drops the app's repository record and the developer's access to its managed repository. The repository itself is left on the host.
+
+Setup, on the host's side (the GitHub adapter, `GitHubRepoHost` in `src/github.ts`):
+1. Create a GitHub organization for managed repositories.
+2. Install Mynt's GitHub App on it for all repositories, with Administration (write) as well as contents and pull requests (write).
+3. Set `BUILD_MANAGED_REPO_OWNER` to the organization's name.
+
+Without `BUILD_MANAGED_REPO_OWNER`, builds without a repository work as before: a preview, and no push.
 
 **Configuration:** `BOAT_API_KEY`, `PUBLIC_URL` and a model backend for the agent proxy (builds are disabled without them): either `GOOGLE_APPLICATION_CREDENTIALS` (a service account key file with Vertex AI User on a project where the Claude models are enabled; optional `VERTEX_PROJECT_ID`, `VERTEX_REGION`, default `global`) or `ANTHROPIC_API_KEY` (a dedicated key with a spend limit); `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_SLUG` (pushing is disabled without them); optional `BUILD_AGENT_MODEL` (default `claude-opus-5-5`), `BUILD_SANDBOX_TYPE` and `BUILD_SANDBOX_TTL_SECONDS`.
 

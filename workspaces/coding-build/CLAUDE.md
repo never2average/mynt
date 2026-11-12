@@ -110,8 +110,16 @@ The developer works with you one request at a time, as in a chat, and you keep y
    - If `build.base` is set, this build continues an earlier one: create `build.branch` from `build.base.branch`
      (at `build.base.commit_sha` when it's set), not from the default branch. That earlier work is the starting
      point; build on it. If that branch isn't there, stop and say so in `job/result.json`'s `notes`.
+   - If `build.managed_repository` is true, the repository is the one Mynt keeps for this app. The first time, it
+     holds only a README: scaffold into the clone (`scaffold_app.py` accepts it) and commit on `build.branch`.
    - Otherwise start from `templates/mynt-app/` in `~/workspace/app` (`python3 scripts/scaffold_app.py ~/workspace/app`, then the `scaffold` skill).
    - `architect` plans; the engineers build their parts with tests; `compliance-reviewer` reviews until clean.
+   - **Live preview.** Once your `npm install` has finished (and the SDK is built), Mynt starts the app's dev
+     servers itself with `scripts/dev_preview.sh`: `npm run dev` in `web/` (Vite on port 5173, with hot reload) and
+     in `api/` (port 3000). The developer watches the app there as you write it. Don't stop or restart them, and
+     don't use ports 3000 or 5173 for anything else: run your own test servers on other ports. Keep the
+     `MYNT_LIVE_PREVIEW` block in `web/vite.config.ts`, and keep both `dev` scripts working. Mynt stops them when
+     you finish.
 2. **Security self-review** (phase `auditing`): `compliance-reviewer`, and the `secure` skill over the code. Fix
    every critical and high finding. Don't install or run Maxwell: Mynt runs it once, independently, when it
    verifies the build, and only that audit decides.

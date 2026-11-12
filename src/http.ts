@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
-import { GIT_CALLBACK_PATH } from "./repo-ownership.js";
+import { GIT_CALLBACK_PATH, GIT_START_PATH, GIT_STATE_COOKIE } from "./repo-ownership.js";
 import type { ClerkAuth } from "./auth.js";
 import { RAMP_ADAPTER_WEBHOOK_PATH, rampAdapterWebhook } from "./ramp-adapters/index.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
@@ -120,19 +120,40 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return runtime(req, res, url);
   // The Mynt Ramp's sandbox endpoint: answers only requests Mynt signed for a ramp offering pointed at it.
   if (url.pathname.startsWith(`${RAMP_SANDBOX_PATH}/`)) return rampSandbox(store, req, res, url);
-  // The git host sends a person back here after they authorise Mynt's app as themselves (repo-ownership.ts). The
-  // single-use state names who started it; nothing about the token is ever shown.
-  if (ctx.ownership && req.method === "GET" && url.pathname === GIT_CALLBACK_PATH) {
-    const page = (status: number, text: string) =>
-      void res
-        .writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" })
-        .end(text);
+  // Linking a person's git account (repo-ownership.ts). The start link (from connect_git_account) sets a host-only
+  // cookie with a hash of the state and sends the browser to the host; the host sends it back to the callback, which
+  // needs that cookie, and shows a one-time code that only the Mynt account that started the sign-in can confirm.
+  // Nothing about the token is ever shown.
+  if (ctx.ownership && req.method === "GET" && (url.pathname === GIT_START_PATH || url.pathname === GIT_CALLBACK_PATH)) {
+    const headers = { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY" };
+    const page = (status: number, text: string) => void res.writeHead(status, headers).end(text);
     const state = url.searchParams.get("state") ?? "";
-    const code = url.searchParams.get("code") ?? "";
-    if (!state || !code) return page(400, "This link is incomplete. Start again with connect_git_account.");
     try {
-      const done = await ctx.ownership.complete(state, code);
-      return page(200, `Your git account${done.login ? ` (${done.login})` : ""} is connected to Mynt. You can close this tab and go back.`);
+      if (url.pathname === GIT_START_PATH) {
+        if (!state) return page(400, "This link is incomplete. Start again with connect_git_account.");
+        const go = await ctx.ownership.startRedirect(state);
+        return void res
+          .writeHead(302, { ...headers, location: go.location, "set-cookie": `${GIT_STATE_COOKIE}=${go.cookie}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax` })
+          .end();
+      }
+      const code = url.searchParams.get("code") ?? "";
+      if (!state || !code) return page(400, "This link is incomplete, or the sign-in was declined. Start again with connect_git_account.");
+      const cookie = (req.headers.cookie ?? "")
+        .split(";")
+        .map((c) => c.trim().split("="))
+        .find(([k]) => k === GIT_STATE_COOKIE)?.[1];
+      const done = await ctx.ownership.callback(state, code, cookie ?? null);
+      return page(
+        200,
+        [
+          `Signed in on your git host${done.login ? ` as ${done.login}` : ""}. One step left, in the Mynt assistant you started from:`,
+          "",
+          `    confirm_git_account ${done.confirm_code}`,
+          "",
+          "It expires in ten minutes. Only the Mynt account that started this sign-in can confirm it.",
+          "If you didn't start it yourself, don't confirm anything: close this tab, and nothing is linked.",
+        ].join("\n"),
+      );
     } catch (e) {
       return page(400, (e as Error).message);
     }

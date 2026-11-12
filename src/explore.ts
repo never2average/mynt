@@ -680,6 +680,8 @@ export class ExploreService {
     const entry = ((j.leaderboard as ReturnType<ExploreService["leaderboard"]>) ?? []).find((e) => e.k === k)!;
     const baseline = ((j.leaderboard as ReturnType<ExploreService["leaderboard"]>) ?? []).find((e) => e.k === 0);
     const ws = await this.workspaceOf(j);
+    // Adopting creates a branch and opens a pull request on the firm's workspace: only for someone who can push there.
+    await requirePush(this.desk.ownership, user.id, ws.repository);
     const s = v.score as ReturnType<typeof scoreWithStability>;
     const body = [
       `Explorer ${k} (${v.angle}) on \`${j.model_dir}\` for product \`${j.product_id}\`, algorithm \`${j.algorithm_id}\`.`,

@@ -16,30 +16,47 @@ export function fakeGitHost(push = () => true) {
     name: "fake",
     push,
     revoked: new Set(),
+    revokedGrants: [],
     checks: [],
-    authorizeUrl: (state, redirect) => `https://git.example/authorize?state=${state}&redirect_uri=${encodeURIComponent(redirect)}`,
-    async exchange(code) {
-      return { access_token: `user-token-${code}`, refresh_token: null, expires_at: null, login: code };
+    refreshes: [],
+    // The host's answer to a refresh: a new token (default), or an error to throw.
+    refreshWith: null,
+    authorizeUrl: (state, redirect, challenge) =>
+      `https://git.example/authorize?state=${state}&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+    // The code a person comes back with is their login; the verifier is kept to check PKCE.
+    async exchange(code, redirect, verifier) {
+      host.lastVerifier = verifier;
+      return { access_token: `user-token-${code}`, refresh_token: `refresh-${code}`, expires_at: null, login: code, user_id: `id-${code}` };
     },
-    async refresh() {
-      throw new Error("no refresh");
+    async refresh(refreshToken) {
+      host.refreshes.push(refreshToken);
+      if (host.refreshWith instanceof Error) throw host.refreshWith;
+      const login = refreshToken.replace(/^refresh-/, "").replace(/-\d+$/, "");
+      return { access_token: `user-token-${login}`, refresh_token: `refresh-${login}-${host.refreshes.length}`, expires_at: new Date(Date.now() + 8 * 3600e3).toISOString(), login, user_id: `id-${login}` };
     },
     async canPush(token, repository) {
       const login = token.replace(/^user-token-/, "");
-      host.checks.push({ login, repository });
+      host.checks.push({ login, repository, token });
       if (host.revoked.has(login)) return "unauthorized";
       return host.push(login, repository);
+    },
+    async revoke(token) {
+      host.revokedGrants.push(token);
     },
   };
   return host;
 }
 
-// Who may push where, on `db`, with a fake git host; `link(user)` connects the user's git account as their name.
+// Who may push where, on `db`, with a fake git host; `link(user)` links the user's git account (as their name) the
+// way a person does: Mynt's start link, the host's callback in the same browser, then their own confirmation.
 export async function gitOwnership(db, host = fakeGitHost()) {
   const ownership = await RepoOwnershipService.open(db, host, "https://mynt.example.com");
   const link = async (user, login = user.name) => {
-    const { authorize_url } = await ownership.begin(user.id);
-    await ownership.complete(new URL(authorize_url).searchParams.get("state"), login);
+    const { link: start } = await ownership.begin(user.id);
+    const state = new URL(start).searchParams.get("state");
+    const { cookie } = await ownership.startRedirect(state);
+    const { confirm_code } = await ownership.callback(state, login, cookie);
+    await ownership.confirm(user.id, confirm_code);
   };
   return { ownership, host, link };
 }
