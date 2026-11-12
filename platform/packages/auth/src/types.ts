@@ -36,10 +36,6 @@ export interface AuthConfig {
   oauthClientName(): string;
   mcpClientInfo(): { name: string; version: string };
   oauthScope(): string;
-  // Optional. A client id registered with the authorization server ahead of time (for example a
-  // first-party client that skips the consent screen). Without one, the app registers itself
-  // dynamically on first sign-in.
-  oauthClientId?(): string | undefined;
   // Optional. Where a failed sign-in lands (with ?auth_error=<reason>), and where sign-out lands.
   // Both default to "/". An app that sends signed-out visitors straight to sign-in points them at
   // pages that don't, so a failure can't loop and signing out doesn't sign straight back in.

@@ -26,7 +26,6 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
     readonly redirectUrl: string,
     private scope: string,
     private clientName: string, // how the app names itself on the consent screen
-    private staticClientId?: string, // a client registered ahead of time; then nothing is registered
   ) {}
 
   get clientMetadata(): OAuthClientMetadata {
@@ -48,12 +47,10 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
   // The client registration is app-wide, so it lives in the store, not the session. These return
   // whatever the app's store returns: a value from an in-memory store, a promise from a remote one.
   clientInformation() {
-    if (this.staticClientId) return { client_id: this.staticClientId };
     return this.store.clientInformation(this.redirectUrl);
   }
 
   saveClientInformation(info: OAuthClientInformationMixed) {
-    if (this.staticClientId) return;
     return this.store.saveClientInformation(this.redirectUrl, info);
   }
 
@@ -81,6 +78,6 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
   invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery") {
     if (scope === "all" || scope === "tokens") this.session.tokens = undefined;
     if (scope === "all" || scope === "verifier") this.session.codeVerifier = undefined;
-    if ((scope === "all" || scope === "client") && !this.staticClientId) return this.store.forgetClient(this.redirectUrl);
+    if (scope === "all" || scope === "client") return this.store.forgetClient(this.redirectUrl);
   }
 }

@@ -47,14 +47,7 @@ export function createSessions<S extends AuthSession>(app: AuthApp<S>) {
   }
 
   function oauthProviderFor(session: S): SessionOAuthProvider<S> {
-    return new SessionOAuthProvider(
-      session,
-      app.sessionStore(),
-      config.oauthRedirectUrl(),
-      config.oauthScope(),
-      config.oauthClientName(),
-      config.oauthClientId?.() || undefined,
-    );
+    return new SessionOAuthProvider(session, app.sessionStore(), config.oauthRedirectUrl(), config.oauthScope(), config.oauthClientName());
   }
 
   return { sessionCookieName, currentSession, currentOrNewSession, setSessionCookie, clearSessionCookie, fromOwnOrigin, oauthProviderFor };

@@ -52,6 +52,31 @@ describe("dashboard model", () => {
   });
 });
 
+describe("Mynt's dashboard reply (#153)", () => {
+  // As Mynt answers for a developer with an app and no money moved yet.
+  const empty = {
+    period: { from: "2026-10-14", to: "2026-11-12", days: 30 },
+    money_moved: { settled_usd: 0, live: true },
+    customers: { active_enrollments: null },
+    handoffs: { total: 0, converted: 0, conversion_rate: null },
+    build_spend: { month_usd: null, monthly_cap_usd: null },
+    earnings: { usd: null, tracked: false },
+    daily: [{ date: "2026-11-12", money_moved_usd: 0 }],
+    apps: [{ app_id: "a1", name: "Cards", status: "draft", money_moved_usd: 0, customers: null, conversion_rate: null, last_build: null }],
+  };
+
+  it("shows a measured zero as $0.00, and customers (not linked to apps yet) as not measured", () => {
+    const d = fromDashboardTool(empty);
+    const [money, customers, handoffs, spend, earnings] = kpis(d).map((k) => k.value);
+    expect(money).toBe(usd(0));
+    expect(customers).toBe(NOT_MEASURED);
+    expect(handoffs).toBe(`0 · ${NOT_MEASURED}`);
+    expect(spend).toBe(NOT_MEASURED);
+    expect(earnings).toBe(NOT_TRACKED);
+    expect(d.apps[0].customers).toBeNull();
+  });
+});
+
 describe("dashboard page", () => {
   it("shows measured figures, the chart and the apps table", () => {
     const html = render(fromDashboardTool(measured));

@@ -61,7 +61,7 @@ The sidebar, the dashboard and its cards, chart and table are [shadcn/ui](https:
 | `TRUSTED_PROXY_HEADER` | Off Vercel only: the header your proxy sets to the caller's address (for example `x-real-ip`), for the sign-in rate limit. Its last value is used (what the proxy appended), so it must be a header the proxy sets or appends to. |
 | `SESSION_STORE` | Optional: `memory` allows the in-memory store with `NODE_ENV=production` (one local process only, never on Vercel). |
 | `MYNT_OAUTH_SCOPE` | Optional: the scopes to ask for. |
-| `MYNT_OAUTH_CLIENT_ID` | Optional: the studio's client id at Mynt's authorization server, registered ahead of time (for example as a first-party client, which signs in without a consent screen). Its redirect URL must be `$APP_URL/api/auth/callback`. Unset, the studio registers itself on first sign-in. |
+| `MYNT_OAUTH_CLIENT_ID`, `MYNT_OAUTH_CLIENT_SECRET` | Coming with `@mynt/auth`'s confidential-client support (a separate PR): the studio's first-party client at Mynt's authorization server (`mynt clerk first-party`), which signs in without a consent screen. Both are needed, and they stay server-side: the secret is never sent to the browser. Until that support lands, leave both unset; the studio then registers itself on first sign-in (dynamic registration). |
 
 The Redis client is [`@upstash/redis`](https://github.com/upstash/redis-js), Upstash's official client, which talks to Redis over HTTPS and so works from serverless functions. Without Redis settings, sessions stay in the server's memory, which is fine for `npm run dev`. On Vercel the studio refuses to start that way, because its function instances share no memory, and in production it refuses too unless `SESSION_STORE=memory` says it's wanted.
 

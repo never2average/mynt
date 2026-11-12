@@ -2,7 +2,7 @@ import { discoverOAuthServerInfo, refreshAuthorization } from "@modelcontextprot
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { InvalidClientError, InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { myntMcpUrl, oauthClientId, oauthRedirectUrl } from "./config";
+import { myntMcpUrl, oauthRedirectUrl } from "./config";
 import { connectMynt, NotSignedInError } from "./mynt-client";
 import { sessionStore, type Session, type SessionStore } from "./session-store";
 
@@ -100,8 +100,7 @@ export async function refreshWithMynt(
   const discover = deps.discover ?? discoverOAuthServerInfo;
   const refreshAuth = deps.refreshAuth ?? refreshAuthorization;
   const fetchFn = deps.fetchFn ?? deadlineFetch();
-  const staticId = oauthClientId();
-  const client = staticId ? { client_id: staticId } : await store.clientInformation(oauthRedirectUrl());
+  const client = await store.clientInformation(oauthRedirectUrl());
   if (!client) {
     session.tokens = undefined; // no registration to refresh with: sign in again
     throw new NotSignedInError();
@@ -133,7 +132,7 @@ export async function refreshWithMynt(
     throw new RefreshFailedError(err instanceof Error ? err.name : "refresh failed");
   }
   // The registration learns which server it belongs to the first time it's used.
-  if (!staticId && !issuerOf(client)) await store.saveClientInformation(oauthRedirectUrl(), { ...client, issuer } as typeof client).catch(() => undefined);
+  if (!issuerOf(client)) await store.saveClientInformation(oauthRedirectUrl(), { ...client, issuer } as typeof client).catch(() => undefined);
 }
 
 // Connects to Mynt as the session's user, with fresh tokens.
