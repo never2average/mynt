@@ -51,3 +51,14 @@ export function oauthScope(): string {
 export function oauthClient(): PreRegisteredClient | null {
   return preRegisteredClientFromEnv();
 }
+
+// Every page needs a signed-in user, so a failed sign-in and a sign-out land on pages that don't
+// (app/signin-error, app/signed-out): no loop when sign-in fails, and no silent sign-in straight
+// after signing out.
+export function authErrorPath(): string {
+  return "/signin-error";
+}
+
+export function signedOutPath(): string {
+  return "/signed-out";
+}

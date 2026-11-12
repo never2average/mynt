@@ -1,4 +1,4 @@
-import { Assistant } from "../assistant";
+import { Assistant } from "./assistant";
 import { ProjectWelcome } from "@/components/assistant-ui/project-welcome";
 
 export default async function RepoPage({

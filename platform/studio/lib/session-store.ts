@@ -28,6 +28,9 @@ export interface Session extends AppState {
   busy?: boolean; // one state-changing request at a time per session
   userId?: string; // the signed-in Mynt user (from whoami)
   roles?: string[]; // their effective Mynt roles (from whoami)
+  name?: string; // their name and email (from whoami), for the account menu
+  email?: string;
+  returnTo?: string; // the page to go back to after sign-in
   rolesAt?: number; // when the roles were last read from Mynt
 }
 

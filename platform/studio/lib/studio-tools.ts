@@ -22,6 +22,17 @@ export const STUDIO_TOOLS = {
     .object({ product_line: z.string().max(80).optional(), query: z.string().max(200).optional(), access_mode: z.string().max(40).optional() })
     .strict(),
   get_product: z.object({ id }).strict(),
+  // New app: a draft app on the products picked, then a build for it.
+  create_app: z
+    .object({
+      name: z.string().trim().min(1).max(80),
+      description: z.string().trim().min(1).max(4000),
+      audience: z.string().trim().min(1).max(500),
+      product_ids: z.array(id).min(1).max(20),
+    })
+    .strict(),
+  // The dashboard: money moved, customers, hand-offs and build spend across the user's apps.
+  get_developer_dashboard: z.object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional() }).strict(),
   // repositories
   list_repositories: z.object({}).strict(),
   // builds
