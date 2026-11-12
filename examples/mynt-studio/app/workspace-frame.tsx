@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ProjectWorkspaceShell } from "./[projectId]/project-workspace-shell";
-import { ApiKeySettingsDialog } from "@/components/api-key-gate";
+import { SignOutButton } from "@/components/sign-in-gate";
 
 type ActiveConversationDetail = {
   projectId: string;
@@ -109,9 +109,9 @@ export function WorkspaceFrame({ children }: { children: React.ReactNode }) {
       selectedConversationIdOverride={effectiveConversationId}
     >
       {children}
-      {/* Settings button */}
+      {/* Sign out */}
       <div className="fixed bottom-3 left-3 z-50 md:right-3 md:left-auto">
-        <ApiKeySettingsDialog />
+        <SignOutButton />
       </div>
     </ProjectWorkspaceShell>
   );

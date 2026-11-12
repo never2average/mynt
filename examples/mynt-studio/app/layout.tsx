@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { WorkspaceFrame } from "./workspace-frame";
-import { ApiKeyGate } from "@/components/api-key-gate";
+import { SignInGate } from "@/components/sign-in-gate";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Adorable",
-  description: "Build beautiful apps with AI",
+  title: "Mynt Studio",
+  description: "Build apps on Mynt with Mynt's coding agent",
 };
 
 export default function RootLayout({
@@ -29,9 +29,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} h-full overflow-hidden overscroll-none antialiased`}
       >
-        <ApiKeyGate>
+        <SignInGate>
           <WorkspaceFrame>{children}</WorkspaceFrame>
-        </ApiKeyGate>
+        </SignInGate>
       </body>
     </html>
   );

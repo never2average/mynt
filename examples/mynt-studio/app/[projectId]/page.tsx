@@ -9,7 +9,6 @@ export default async function RepoPage({
   const { projectId } = await params;
   return (
     <Assistant
-      initialMessages={[]}
       selectedProjectId={projectId}
       selectedConversationId={null}
       welcome={<ProjectWelcome />}

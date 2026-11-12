@@ -4,10 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import type { ProjectItem } from "@/lib/project-types";
-import { VmTerminal } from "@/components/assistant-ui/vm-terminal";
 import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { ProjectsProvider } from "@/lib/projects-context";
-import { PublishDialog } from "@/components/assistant-ui/publish-dialog";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -15,29 +13,23 @@ import {
   CodeIcon,
   Loader2Icon,
   MonitorIcon,
-  PlusIcon,
   RotateCwIcon,
-  XIcon,
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 
-type TerminalTab = {
-  id: string;
-  label: string;
-  /** The named PTY session on the VM this tab is attached to. */
-  session: string;
-  closable: boolean;
-};
+/** Build statuses that are still changing, so the list refreshes while one runs. */
+const ACTIVE_BUILD = /^(queued|provisioning|coding|auditing|checking|previewing|pushing|verifying)$/;
 
-/** The session the project's app server runs in. Matches APP_SESSION in lib/vars.ts. */
-const APP_SESSION = "dev";
-
-type OptimisticMetadataDetail = {
-  projectId: string;
-  conversationId: string;
-  projectName: string;
-  conversationTitle: string;
-};
+/** Keeps the preview URL's query (a token-gated preview needs it) on every path. */
+function withPreviewQuery(previewUrl: string, next: string): string {
+  try {
+    const url = new URL(next);
+    url.search = new URL(previewUrl).search;
+    return url.toString();
+  } catch {
+    return previewUrl;
+  }
+}
 
 type ThreadStateDetail = {
   projectId: string | null;
@@ -62,16 +54,31 @@ export function ProjectWorkspaceShell({
 
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
   const [threadIsRunning, setThreadIsRunning] = useState(false);
-  const hasPublishingProject = projects.some((project) =>
-    project.releases.some((release) => release.state === "publishing"),
+  const hasActiveBuild = projects.some((project) =>
+    project.conversations.some((build) => ACTIVE_BUILD.test(build.status)),
   );
 
+  // The signed-in developer's Mynt apps and their builds, read from Mynt.
   const loadProjects = useCallback(async () => {
-    const response = await fetch("/api/projects", { cache: "no-store" });
-    if (response.ok) {
-      const data = (await response.json()) as { projects?: ProjectItem[] };
-      setProjects(data.projects ?? []);
+    try {
+      const response = await fetch("/api/projects", { cache: "no-store" });
+      const data = (await response.json().catch(() => null)) as {
+        projects?: ProjectItem[];
+        error?: string;
+        message?: string;
+      } | null;
+      if (response.ok) {
+        setProjects(data?.projects ?? []);
+        setProjectsError(null);
+      } else if (response.status === 401) {
+        window.dispatchEvent(new Event("mynt:signed-out"));
+      } else {
+        setProjectsError(data?.message ?? "Couldn't load your apps.");
+      }
+    } catch {
+      setProjectsError("Couldn't reach the studio. Check your connection.");
     }
     setProjectsLoading(false);
   }, []);
@@ -86,14 +93,14 @@ export function ProjectWorkspaceShell({
   }, [loadProjects, projectId]);
 
   useEffect(() => {
-    if (!threadIsRunning && !hasPublishingProject) return;
+    if (!threadIsRunning && !hasActiveBuild) return;
     const interval = window.setInterval(() => {
       void loadProjects();
     }, 10000);
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadProjects, threadIsRunning, hasPublishingProject]);
+  }, [loadProjects, threadIsRunning, hasActiveBuild]);
 
   useEffect(() => {
     const handleProjectsUpdated = () => {
@@ -131,66 +138,6 @@ export function ProjectWorkspaceShell({
     };
   }, [projectId]);
 
-  useEffect(() => {
-    const handleOptimisticMetadata = (event: Event) => {
-      const customEvent = event as CustomEvent<OptimisticMetadataDetail>;
-      const detail = customEvent.detail;
-      if (!detail?.projectId || !detail?.conversationId) return;
-
-      const now = new Date().toISOString();
-
-      setProjects((previous) =>
-        previous.map((project) => {
-          if (project.id !== detail.projectId) return project;
-
-          const hasConversation = project.conversations.some(
-            (conversation) => conversation.id === detail.conversationId,
-          );
-
-          const nextConversations = hasConversation
-            ? project.conversations.map((conversation) =>
-                conversation.id === detail.conversationId
-                  ? {
-                      ...conversation,
-                      title: detail.conversationTitle,
-                      updatedAt: now,
-                    }
-                  : conversation,
-              )
-            : [
-                {
-                  id: detail.conversationId,
-                  title: detail.conversationTitle,
-                  createdAt: now,
-                  updatedAt: now,
-                },
-                ...project.conversations,
-              ];
-
-          return {
-            ...project,
-            name:
-              project.name === "Untitled Project"
-                ? detail.projectName
-                : project.name,
-            conversations: nextConversations,
-          };
-        }),
-      );
-    };
-
-    window.addEventListener(
-      "adorable:metadata-optimistic",
-      handleOptimisticMetadata as EventListener,
-    );
-    return () => {
-      window.removeEventListener(
-        "adorable:metadata-optimistic",
-        handleOptimisticMetadata as EventListener,
-      );
-    };
-  }, []);
-
   const handleSelectProject = useCallback(
     (nextProjectId: string) => {
       router.push(`/${nextProjectId}`);
@@ -201,6 +148,13 @@ export function ProjectWorkspaceShell({
   const selectedProject = projectId
     ? (projects.find((project) => project.id === projectId) ?? null)
     : null;
+  const selectedBuild =
+    selectedProject?.conversations.find(
+      (build) => build.id === selectedConversationId,
+    ) ?? null;
+  const previewUrl = selectedConversationId
+    ? (selectedBuild?.previewUrl ?? null)
+    : (selectedProject?.previewUrl ?? null);
   const showWorkspacePanel = Boolean(projectId);
   const isMobile = useIsMobile();
   const [mobileView, setMobileView] = useState<"chat" | "preview">("chat");
@@ -230,78 +184,14 @@ export function ProjectWorkspaceShell({
     [projectId, selectedProject?.conversations, router],
   );
 
-  const onSetProductionDomain = useCallback(
-    async (nextProjectId: string, domain: string) => {
-      const response = await fetch(
-        `/api/projects/${nextProjectId}/production-domain`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ domain }),
-        },
-      );
-
-      if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(data?.error ?? "Failed to configure production domain");
-      }
-
-      await loadProjects();
-    },
-    [loadProjects],
-  );
-
-  /** Build the current dev code onto the project's production VM. */
-  const onPublish = useCallback(
-    async (nextProjectId: string, message: string) => {
-      const response = await fetch(`/api/projects/${nextProjectId}/publish`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
-      });
-
-      if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(data?.error ?? "Failed to publish");
-      }
-
-      await loadProjects();
-    },
-    [loadProjects],
-  );
-
-  /** Put production back on an earlier release. */
-  const onRollback = useCallback(
-    async (nextProjectId: string, releaseId: string) => {
-      const response = await fetch(`/api/projects/${nextProjectId}/rollback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ releaseId }),
-      });
-
-      if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(data?.error ?? "Failed to roll back");
-      }
-
-      await loadProjects();
-    },
-    [loadProjects],
-  );
-
   const projectsContextValue = useMemo(
     () => ({
       projects,
       isLoading: projectsLoading,
+      error: projectsError,
       onSelectProject: handleSelectProject,
     }),
-    [projects, projectsLoading, handleSelectProject],
+    [projects, projectsLoading, projectsError, handleSelectProject],
   );
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -341,14 +231,12 @@ export function ProjectWorkspaceShell({
                     }}
                     className="flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                     title={
-                      selectedConversationId ? "All conversations" : "All apps"
+                      selectedConversationId ? "All builds" : "All apps"
                     }
                   >
                     <ChevronLeftIcon className="size-3.5" />
                     <span className="text-sm font-medium">
-                      {selectedConversationId
-                        ? "All Conversations"
-                        : "All Apps"}
+                      {selectedConversationId ? "All Builds" : "All Apps"}
                     </span>
                   </button>
                 </div>
@@ -365,16 +253,6 @@ export function ProjectWorkspaceShell({
                     <ChevronLeftIcon className="size-3.5" />
                     <span className="text-sm font-medium">Chat</span>
                   </button>
-                  <div className="ml-auto">
-                    {selectedProject.previewUrl && (
-                      <PublishDialog
-                        project={selectedProject}
-                        onSetProductionDomain={onSetProductionDomain}
-                        onPublish={onPublish}
-                        onRollback={onRollback}
-                      />
-                    )}
-                  </div>
                 </div>
               )}
 
@@ -388,14 +266,10 @@ export function ProjectWorkspaceShell({
                       : "pointer-events-none opacity-0",
                   )}
                 >
-                  {showWorkspacePanel && selectedProject.previewUrl && (
+                  {showWorkspacePanel && previewUrl && (
                     <BrowserControls
-                      previewUrl={selectedProject.previewUrl}
+                      previewUrl={previewUrl}
                       iframeRef={iframeRef}
-                      project={selectedProject}
-                      onSetProductionDomain={onSetProductionDomain}
-                      onPublish={onPublish}
-                      onRollback={onRollback}
                     />
                   )}
                 </div>
@@ -431,8 +305,8 @@ export function ProjectWorkspaceShell({
               )}
             >
               {showWorkspacePanel &&
-                (selectedProject?.previewUrl ? (
-                  <AppPreview project={selectedProject} iframeRef={iframeRef} />
+                (previewUrl ? (
+                  <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} />
                 ) : (
                   <PreviewPlaceholder />
                 ))}
@@ -472,7 +346,11 @@ function PreviewPlaceholder() {
         <div className="ml-1 h-7 flex-1 rounded-md bg-muted/50" />
       </div>
 
-      <div className="h-[70%] overflow-hidden p-8">
+      <p className="px-8 pt-6 text-center text-sm text-muted-foreground/60">
+        No preview yet. A build&apos;s preview shows here once Mynt&apos;s
+        coding agent has one running.
+      </p>
+      <div className="flex-1 overflow-hidden p-8">
         <div className="mx-auto max-w-md space-y-8">
           <div className="flex items-center justify-between">
             <div className="h-4 w-20 animate-pulse rounded bg-muted/60" />
@@ -504,159 +382,49 @@ function PreviewPlaceholder() {
         </div>
       </div>
 
-      <div className="flex h-[30%] min-h-0 flex-col border-t">
-        <div className="flex h-8 shrink-0 items-center bg-muted/20 px-3">
-          <div className="h-3.5 w-20 animate-pulse rounded bg-muted-foreground/10" />
-        </div>
-        <div className="flex-1 p-3">
-          <div className="space-y-2">
-            <div className="h-2.5 w-48 animate-pulse rounded bg-muted-foreground/8" />
-            <div className="h-2.5 w-32 animate-pulse rounded bg-muted-foreground/6" />
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
 
 function AppPreview({
-  project,
+  previewUrl,
   iframeRef,
 }: {
-  project: ProjectItem;
+  previewUrl: string;
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
 }) {
-  const [extraTerminals, setExtraTerminals] = useState<TerminalTab[]>([]);
-  const [activeTab, setActiveTab] = useState("dev-server");
-  const [counter, setCounter] = useState(1);
   const [iframeLoaded, setIframeLoaded] = useState(false);
 
   useEffect(() => {
     setIframeLoaded(false);
-  }, [project.previewUrl]);
-
-  /**
-   * Terminal sessions are named on the VM, so a tab's name is all the state a
-   * new terminal needs: the guest creates the shell on first connect and keeps
-   * it alive afterwards.
-   */
-  const addTerminal = useCallback(() => {
-    const id = `terminal-${counter}`;
-    setExtraTerminals((previous) => [
-      ...previous,
-      {
-        id,
-        label: `Terminal ${counter}`,
-        session: `shell-${counter}`,
-        closable: true,
-      },
-    ]);
-    setActiveTab(id);
-    setCounter((current) => current + 1);
-  }, [counter]);
-
-  const closeTerminal = useCallback(
-    (id: string) => {
-      setExtraTerminals((previous) => previous.filter((tab) => tab.id !== id));
-      if (activeTab === id) setActiveTab("dev-server");
-    },
-    [activeTab],
-  );
-
-  const allTabs: TerminalTab[] = [
-    {
-      id: "dev-server",
-      label: "Dev Server",
-      session: APP_SESSION,
-      closable: false,
-    },
-    ...extraTerminals,
-  ];
+  }, [previewUrl]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <div className="relative flex h-[70%] min-h-0 flex-col">
-        <div className="relative min-h-0 flex-1 bg-muted/30">
-          {!iframeLoaded && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
-              <div className="flex flex-col items-center gap-3">
-                <Loader2Icon className="size-6 animate-spin text-muted-foreground/40" />
-                <p className="text-sm text-muted-foreground/40">
-                  Loading preview…
-                </p>
-              </div>
+      <div className="relative min-h-0 flex-1 bg-muted/30">
+        {!iframeLoaded && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
+            <div className="flex flex-col items-center gap-3">
+              <Loader2Icon className="size-6 animate-spin text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground/40">
+                Loading preview…
+              </p>
             </div>
+          </div>
+        )}
+        {/* The preview runs on its own origin, never the studio's. No top navigation. */}
+        <iframe
+          ref={iframeRef}
+          src={previewUrl}
+          title="App preview"
+          sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+          referrerPolicy="no-referrer"
+          className={cn(
+            "h-full w-full transition-opacity duration-300",
+            iframeLoaded ? "opacity-100" : "opacity-0",
           )}
-          <iframe
-            ref={iframeRef}
-            src={project.previewUrl}
-            className={cn(
-              "h-full w-full transition-opacity duration-300",
-              iframeLoaded ? "opacity-100" : "opacity-0",
-            )}
-            onLoad={() => setIframeLoaded(true)}
-          />
-        </div>
-      </div>
-
-      <div className="flex h-[30%] min-h-0 flex-col">
-        <div className="flex shrink-0 items-center gap-0 border-y bg-[rgb(43,43,43)] px-1">
-          {allTabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`group flex items-center gap-1 px-2 py-1.5 text-xs transition-colors ${
-                activeTab === tab.id
-                  ? "border-b-2 border-foreground bg-[rgb(43,43,43)] text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <span>{tab.label}</span>
-              {tab.closable && (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeTerminal(tab.id);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.stopPropagation();
-                      closeTerminal(tab.id);
-                    }
-                  }}
-                  className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted"
-                >
-                  <XIcon className="size-3" />
-                </span>
-              )}
-            </button>
-          ))}
-
-          <button
-            type="button"
-            onClick={addTerminal}
-            className="ml-1 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            title="New terminal"
-          >
-            <PlusIcon className="size-3.5" />
-          </button>
-        </div>
-
-        <div className="relative min-h-0 flex-1 bg-[rgb(30,30,30)]">
-          {allTabs.map((tab) => (
-            <VmTerminal
-              key={tab.id}
-              projectId={project.id}
-              session={tab.session}
-              className="absolute inset-0 h-full w-full p-1"
-              // Kept mounted so a background terminal keeps receiving output.
-              style={{ display: activeTab === tab.id ? "block" : "none" }}
-            />
-          ))}
-        </div>
+          onLoad={() => setIframeLoaded(true)}
+        />
       </div>
     </div>
   );
@@ -665,17 +433,9 @@ function AppPreview({
 function BrowserControls({
   previewUrl,
   iframeRef,
-  project,
-  onSetProductionDomain,
-  onPublish,
-  onRollback,
 }: {
   previewUrl: string;
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
-  project: ProjectItem;
-  onSetProductionDomain: (projectId: string, domain: string) => Promise<void>;
-  onPublish: (projectId: string, message: string) => Promise<void>;
-  onRollback: (projectId: string, releaseId: string) => Promise<void>;
 }) {
   const [urlValue, setUrlValue] = useState(() => {
     try {
@@ -707,7 +467,7 @@ function BrowserControls({
     if (!iframe) return;
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
     setUrlValue(normalizedPath);
-    iframe.src = `${baseUrl}${normalizedPath}`;
+    iframe.src = withPreviewQuery(previewUrl, `${baseUrl}${normalizedPath}`);
   };
 
   const handleReload = () => {
@@ -769,14 +529,6 @@ function BrowserControls({
           aria-label="URL path"
         />
       </form>
-      <div className="ml-1.5">
-        <PublishDialog
-          project={project}
-          onSetProductionDomain={onSetProductionDomain}
-          onPublish={onPublish}
-          onRollback={onRollback}
-        />
-      </div>
     </>
   );
 }

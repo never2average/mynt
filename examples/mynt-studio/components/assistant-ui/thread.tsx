@@ -53,7 +53,10 @@ import {
 } from "lucide-react";
 import type { FC, ReactNode } from "react";
 
-export const Thread: FC<{ welcome?: ReactNode }> = ({ welcome }) => {
+export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string }> = ({
+  welcome,
+  disabledNote,
+}) => {
   return (
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
@@ -79,6 +82,11 @@ export const Thread: FC<{ welcome?: ReactNode }> = ({ welcome }) => {
         <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4 md:pb-6">
           <ThreadScrollToBottom />
           <Composer />
+          {disabledNote && (
+            <p className="aui-composer-disabled-note -mt-2 text-center text-xs text-muted-foreground">
+              {disabledNote}
+            </p>
+          )}
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
@@ -100,7 +108,7 @@ const ThreadScrollToBottom: FC = () => {
 };
 const Composer: FC = () => {
   return (
-    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
+    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col has-[textarea:disabled]:opacity-60">
       <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-2xl border border-input bg-background px-1 pt-2 transition-shadow outline-none has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-ring/20 data-[dragging=true]:border-dashed data-[dragging=true]:border-ring data-[dragging=true]:bg-accent/50">
         <ComposerAttachments />
         <ComposerPrimitive.Input

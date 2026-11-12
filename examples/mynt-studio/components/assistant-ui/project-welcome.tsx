@@ -16,12 +16,17 @@ export const ProjectWelcome: FC = () => {
           <h1 className="aui-thread-welcome-message-inner animate-in text-2xl font-semibold tracking-tight duration-300 fade-in slide-in-from-bottom-2 md:text-3xl">
             {""}
           </h1>
+          {projectId && !hasConversations && (
+            <p className="text-sm text-muted-foreground/60">
+              No builds for this app yet.
+            </p>
+          )}
         </div>
 
         {hasConversations && (
           <div className="mt-8 w-full max-w-(--thread-max-width) animate-in delay-100 duration-300 fade-in slide-in-from-bottom-2">
             <p className="mb-2 px-3 text-xs font-medium text-muted-foreground/50">
-              Previous conversations
+              Builds
             </p>
             <div className="divide-y divide-border/50">
               {conversations.map((conversation) => {
@@ -34,7 +39,10 @@ export const ProjectWelcome: FC = () => {
                     className="flex w-full items-center rounded-md px-3 py-2.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
                   >
                     <span className="truncate">
-                      {title || "Untitled conversation"}
+                      {title || "Untitled build"}
+                    </span>
+                    <span className="ml-auto shrink-0 pl-3 text-xs text-muted-foreground/50">
+                      {conversation.status}
                     </span>
                   </button>
                 );

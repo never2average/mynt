@@ -1,51 +1,23 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useProjects } from "@/lib/projects-context";
 import type { ProjectItem } from "@/lib/project-types";
-import { type FC, useState } from "react";
-import { GithubIcon } from "lucide-react";
+import type { FC } from "react";
 
-/** Show what a visitor would see: production once published, dev otherwise. */
-function getPreviewUrl(project: ProjectItem): string | null {
-  if (project.liveReleaseId) return project.productionUrl;
-  return project.previewUrl || null;
+/** Green once a build succeeded, amber while one runs, grey otherwise. */
+function statusDot(project: ProjectItem): string {
+  const latest = project.conversations[0]?.status;
+  if (project.conversations.some((build) => build.status === "succeeded"))
+    return "bg-emerald-500";
+  if (latest && !/^(succeeded|failed|blocked|stopped)$/.test(latest))
+    return "bg-amber-500";
+  return "bg-muted-foreground/30";
 }
 
 export const HomeWelcome: FC = () => {
-  const { projects, isLoading, onSelectProject } = useProjects();
-  const [githubDialogOpen, setGithubDialogOpen] = useState(false);
-  const [githubRepoInput, setGithubRepoInput] = useState("");
-  const [githubRepoError, setGithubRepoError] = useState<string | null>(null);
-
-  const handleUseGithubRepo = () => {
-    const githubRepoName = githubRepoInput.trim();
-    if (!githubRepoName.includes("/")) {
-      setGithubRepoError("Repository must be in owner/repo format");
-      return;
-    }
-
-    setGithubRepoError(null);
-    window.dispatchEvent(
-      new CustomEvent("adorable:create-from-github", {
-        detail: { githubRepoName },
-      }),
-    );
-    setGithubDialogOpen(false);
-    setGithubRepoInput("");
-  };
-
+  const { projects, isLoading, error, onSelectProject } = useProjects();
   const hasProjects = projects.length > 0;
   const showProjects = isLoading || hasProjects;
 
@@ -54,37 +26,22 @@ export const HomeWelcome: FC = () => {
       <div className="flex w-full flex-col gap-8 px-2">
         {/* Hero */}
         <div className="flex animate-in flex-col items-center gap-2 pt-8 text-center duration-500 fill-mode-both fade-in">
-          <svg
-            viewBox="0 0 347 280"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-            className="mb-2 h-10 w-auto"
-          >
-            <path
-              d="M70 267V235.793C37.4932 229.296 13 200.594 13 166.177C13 134.93 33.1885 108.399 61.2324 98.9148C61.9277 51.3467 100.705 13 148.438 13C183.979 13 214.554 34.2582 228.143 64.7527C234.182 63.4301 240.454 62.733 246.89 62.733C295.058 62.733 334.105 101.781 334.105 149.949C334.105 182.845 315.893 211.488 289 226.343V267"
-              className="stroke-foreground/15"
-              strokeWidth="25"
-              strokeLinecap="round"
-            />
-            <path
-              d="M146 237V267"
-              className="stroke-foreground/15"
-              strokeWidth="25"
-              strokeLinecap="round"
-            />
-            <path
-              d="M215 237V267"
-              className="stroke-foreground/15"
-              strokeWidth="25"
-              strokeLinecap="round"
-            />
-          </svg>
           <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
             What do you want to build?
           </h1>
           <p className="text-sm text-muted-foreground/60">
-            Describe an app or pick up where you left off
+            Open one of your Mynt apps to see its latest build
           </p>
+          {error && (
+            <p role="alert" className="mt-2 text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          {!isLoading && !error && !hasProjects && (
+            <p className="mt-2 text-sm text-muted-foreground/60">
+              You have no Mynt apps yet.
+            </p>
+          )}
         </div>
 
         {/* Project cards with previews */}
@@ -113,7 +70,7 @@ export const HomeWelcome: FC = () => {
             <>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 {projects.map((project, index) => {
-                  const previewUrl = getPreviewUrl(project);
+                  const previewUrl = project.previewUrl;
                   return (
                     <button
                       key={project.id}
@@ -137,6 +94,7 @@ export const HomeWelcome: FC = () => {
                             tabIndex={-1}
                             loading="lazy"
                             sandbox="allow-scripts allow-same-origin"
+                            referrerPolicy="no-referrer"
                           />
                         ) : (
                           <div className="flex h-full items-center justify-center">
@@ -150,14 +108,7 @@ export const HomeWelcome: FC = () => {
                           <div
                             className={cn(
                               "h-2 w-2 rounded-full ring-2 ring-card/80",
-                              project.liveReleaseId
-                                ? "bg-emerald-500"
-                                : project.releases.some(
-                                      (release) =>
-                                        release.state === "publishing",
-                                    )
-                                  ? "bg-amber-500"
-                                  : "bg-muted-foreground/30",
+                              statusDot(project),
                             )}
                           />
                         </div>
@@ -168,91 +119,20 @@ export const HomeWelcome: FC = () => {
                           {project.name}
                         </p>
                         <p className="mt-0.5 text-xs text-muted-foreground/50">
-                          {project.conversations.length} chat
+                          {project.conversations.length} build
                           {project.conversations.length !== 1 ? "s" : ""}
-                          {project.releases.length > 0 && (
-                            <>
-                              {" · "}
-                              {project.releases.length} release
-                              {project.releases.length !== 1 ? "s" : ""}
-                            </>
-                          )}
+                          {" · "}
+                          {project.status}
                         </p>
                       </div>
                     </button>
                   );
                 })}
               </div>
-              {/* Import from GitHub — subtle link below the grid */}
-              <button
-                type="button"
-                onClick={() => setGithubDialogOpen(true)}
-                className="mx-auto flex animate-in items-center gap-2 rounded-lg px-3 py-1.5 text-xs text-muted-foreground/40 transition-colors fill-mode-both fade-in hover:text-muted-foreground"
-                style={
-                  {
-                    "--tw-animation-delay": `${projects.length * 75}ms`,
-                    "--tw-animation-duration": "400ms",
-                  } as React.CSSProperties
-                }
-              >
-                <GithubIcon className="h-3 w-3" />
-                Import from GitHub
-              </button>
             </>
           ) : null}
         </div>
       </div>
-
-      <Dialog open={githubDialogOpen} onOpenChange={setGithubDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Use GitHub Project</DialogTitle>
-            <DialogDescription>
-              Enter a repository in owner/repo format. If you haven't installed
-              the GitHub App yet, install it first.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <Input
-              value={githubRepoInput}
-              onChange={(event) => {
-                setGithubRepoInput(event.target.value);
-                setGithubRepoError(null);
-              }}
-              placeholder="owner/repo"
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  handleUseGithubRepo();
-                }
-              }}
-            />
-            {githubRepoError && (
-              <p className="text-[13px] text-destructive">{githubRepoError}</p>
-            )}
-            <a
-              href="https://dash.freestyle.sh/"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-block text-xs text-muted-foreground underline-offset-2 hover:underline"
-            >
-              Install GitHub App (Dashboard → Git → Sync)
-            </a>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => setGithubDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="button" onClick={handleUseGithubRepo}>
-              Create Project
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };
