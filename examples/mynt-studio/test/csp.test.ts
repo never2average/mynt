@@ -10,6 +10,14 @@ describe("Content-Security-Policy", () => {
     expect(csp).not.toContain("unsafe-eval");
   });
 
+  it("allows scripts only by the request's nonce, never inline scripts in general", () => {
+    const csp = contentSecurityPolicy(undefined, false, "AAAAAAAAAAAAAAAAAAAAAA==");
+    expect(csp).toContain("script-src 'self' 'nonce-AAAAAAAAAAAAAAAAAAAAAA==' 'strict-dynamic'");
+    expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
+    expect(contentSecurityPolicy(undefined)).not.toMatch(/script-src[^;]*unsafe-inline/);
+    expect(() => contentSecurityPolicy(undefined, false, "x' 'unsafe-inline")).toThrow(/nonce/);
+  });
+
   it("frames nothing when PREVIEW_FRAME_SRC is unset", () => {
     expect(contentSecurityPolicy(undefined)).toContain("frame-src 'none'");
     expect(contentSecurityPolicy("  ")).toContain("frame-src 'none'");

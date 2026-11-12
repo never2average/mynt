@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { BuildService, buildConfigFromEnv } from "../dist/builds.js";
 import { workspaceFiles } from "../dist/agent-host.js";
+import { redact } from "../dist/boxes.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { CATALOG } from "./helpers.js";
@@ -1617,4 +1618,147 @@ test("by default a build ships on Mynt's own checks, with no agent audit; a fail
     assert.ok(!boat.sandboxes.get(vid).files.has(`${A}/auth.json`), "no auditor was started");
     if (status === "failed") assert.match(b.error, /Not production-ready: static_scan/);
   }
+});
+
+test("redact scrubs every token Mynt mints, provider keys, URL passwords and secret-named values", () => {
+  const b64 = "Zm9vYmFyYmF6cXV4LXF1dXhfY29yZ2U-"; // base64url, ending in a dash
+  for (const kind of ["live", "test", "agent", "bd", "explore", "desk", "review", "paudit", "predteam"]) {
+    assert.equal(redact(`token mynt_${kind}_${b64} end`), "token [redacted] end", kind);
+  }
+  assert.equal(redact(`ANTHROPIC_BASE_URL=https://mynt.example/agent/t/mynt_agent_${b64}/v1`), "ANTHROPIC_BASE_URL=https://mynt.example/agent/t/[redacted]/v1");
+
+  // NAME=value, where the name says it's secret.
+  assert.equal(redact("STRIPE_SECRET_KEY=sk_live_51Habcdefghijklmnop"), "STRIPE_SECRET_KEY=[redacted]");
+  assert.equal(redact("STRIPE_SECRET_KEY=whatever123"), "STRIPE_SECRET_KEY=[redacted]");
+  assert.equal(redact("OPENAI_API_KEY=abcdef123456 next"), "OPENAI_API_KEY=[redacted] next");
+  assert.equal(redact("SIGNING_PRIVATE_KEY=abcdef123456"), "SIGNING_PRIVATE_KEY=[redacted]");
+  assert.equal(redact("SENDGRID_KEY=abcdef123456"), "SENDGRID_KEY=[redacted]");
+  assert.equal(redact("DB_PASS='hunter2hunter2'"), "DB_PASS='[redacted]'");
+  assert.equal(redact("db_pass=hunter2hunter2"), "db_pass=[redacted]");
+  // Quoted values go whole, spaces and all, whatever their length.
+  assert.equal(redact("DB_PASSWORD='correct horse battery staple' next"), "DB_PASSWORD='[redacted]' next");
+  assert.equal(redact(`DB_PASSWORD="a b c"`), `DB_PASSWORD="[redacted]"`);
+  assert.equal(redact(`SENDGRID_KEY="abc def"`), `SENDGRID_KEY="[redacted]"`);
+  assert.equal(redact(`db:\n  password: "a b c"\n  user: demo`), `db:\n  password: "[redacted]"\n  user: demo`);
+  assert.equal(redact("PASSWORD=hunter2hunter2\r\nnext"), "PASSWORD=[redacted]\r\nnext");
+  assert.equal(redact("env:GITHUB_TOKEN=abcdef123456"), "env:GITHUB_TOKEN=[redacted]", "an assignment inside another value");
+  // Authorization headers and bare JWTs.
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+  assert.equal(redact("Authorization: Bearer abc123def456"), "Authorization: Bearer [redacted]");
+  assert.equal(redact(`curl -H "Authorization: Basic dXNlcjpwYXNz" https://x`), `curl -H "Authorization: Basic [redacted]" https://x`);
+  assert.equal(redact(`{"authorization": "Bearer abc123def456"}`), `{"authorization": "Bearer [redacted]"}`);
+  assert.equal(redact(`authorization: Bearer ${jwt}`), "authorization: Bearer [redacted]");
+  assert.equal(redact(`session ${jwt} ok`), "session [redacted] ok");
+  // Long quoted values go whole: a service account's private key in JSON, long passwords and API keys.
+  const pemBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(60);
+  const account = `{"type": "service_account", "private_key": "-----BEGIN PRIVATE KEY-----\\n${pemBody}\\n-----END PRIVATE KEY-----\\n", "client_email": "x@y"}`;
+  assert.ok(account.length > 2000);
+  assert.equal(redact(account), `{"type": "service_account", "private_key": "[redacted]", "client_email": "x@y"}`);
+  assert.equal(redact(`{"password": "${"p".repeat(600)}"}`), `{"password": "[redacted]"}`);
+  assert.equal(redact(`api_key: '${"k".repeat(600)}' done`), "api_key: '[redacted]' done");
+  assert.equal(redact(`PASSWORD="${"x ".repeat(300)}`), `PASSWORD="[redacted]`, "an unclosed quote goes to the end of the line");
+  // Secret, API, access, auth and private keys are redacted even when they look like paths.
+  assert.equal(redact("SECRET_KEY=/abcdefghij"), "SECRET_KEY=[redacted]");
+  assert.equal(redact("API_KEY=./abcdefghij"), "API_KEY=[redacted]");
+  assert.equal(redact("SSH_PRIVATE_KEY=~/.ssh/id_ed25519"), "SSH_PRIVATE_KEY=[redacted]");
+  assert.equal(redact("SIGNING_KEY=/AbCdEfGh/IjKl+MnOp=="), "SIGNING_KEY=[redacted]", "base64, not a path");
+  assert.equal(redact("PASS=hunter2hunter2"), "PASS=[redacted]");
+  assert.equal(redact("DB_PASSWORD=hunter2hunter2"), "DB_PASSWORD=[redacted]");
+  assert.equal(redact("aws_secret_access_key = wJalrXUtnFEMIK7MDENG"), "aws_secret_access_key = [redacted]");
+
+  // Provider key shapes, wherever they appear.
+  for (const key of [
+    "sk_live_51Habcdefghijklmnop", "sk_test_51Habcdefghijklmnop", "rk_live_51Habcdefghijklmnop",
+    "ghp_abcdefghijklmnopqrstuvwxyz0123", "gho_abcdefghijklmnopqrstuvwxyz0123", "ghu_abcdefghijklmnopqrstuvwxyz0123",
+    "ghr_abcdefghijklmnopqrstuvwxyz0123", "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+    "xoxb-123456789012-abcdefghijkl", "xoxp-123456789012-abcdefghijkl", "AKIAIOSFODNN7EXAMPLE",
+    "sk-ant-api03-abcdefghijkl", "whsec_abcdefghijkl",
+    // Stripe keys with _ in the body, OpenAI, npm, Google and Slack app tokens (assembled so no scanner takes them for real).
+    "sk_live_" + "51H_abc_defghijklmnop", "sk-" + "proj-abcdefghij_klmnopqrst-uvwxyz012345", "sk-" + "a".repeat(20) + "0123456789AB",
+    "npm_" + "aB3".repeat(12), "AIza" + "Sy" + "b".repeat(33), "xapp-" + "1-A0123456789-0123456789-abcdef",
+  ]) assert.equal(redact(`using ${key} now`), "using [redacted] now", key);
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\nabcd==\n-----END RSA PRIVATE KEY-----";
+  assert.equal(redact(`key:\n${pem}\ndone`), "key:\n[redacted]\ndone");
+  assert.equal(redact("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg"), "[redacted]", "a key cut off mid-way");
+  assert.equal(redact("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1r\n-----END OPENSSH PRIVATE KEY-----"), "[redacted]");
+  assert.equal(redact("x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBGRk\n=abcd\n-----END PGP PRIVATE KEY BLOCK-----\ny"), "x\n[redacted]\ny");
+
+  // Passwords in URLs keep the user (even an empty one) and host.
+  assert.equal(redact("DATABASE_URL=postgres://mynt:s3cr3tpw@db.internal:5432/mynt"), "DATABASE_URL=postgres://mynt:[redacted]@db.internal:5432/mynt");
+  assert.equal(redact("git clone https://x-access-token:abc123@github.com/o/r"), "git clone https://x-access-token:[redacted]@github.com/o/r");
+  assert.equal(redact("REDIS_URL=redis://:s3cr3tpw@cache:6379"), "REDIS_URL=redis://:[redacted]@cache:6379");
+
+  // JSON and YAML.
+  assert.equal(redact(`{"api_key": "abcdef123456", "name": "demo"}`), `{"api_key": "[redacted]", "name": "demo"}`);
+  assert.equal(redact(`{"password":"hunter2hunter2"}`), `{"password":"[redacted]"}`);
+  assert.equal(redact(`{'clientSecret': 'abcdef123456'}`), `{'clientSecret': '[redacted]'}`);
+  assert.equal(redact(`{"accessToken": "abc\\"def123"}`), `{"accessToken": "[redacted]"}`);
+  assert.equal(redact("auth:\n  token: abcdef123456\n  user: demo"), "auth:\n  token: [redacted]\n  user: demo");
+});
+
+test("redact leaves ordinary text alone", () => {
+  for (const text of [
+    "Enter your password to continue",
+    "The token is valid and the secret is safe",
+    "password:\nEnter something here",
+    `{"password": ""}`,
+    "password: ",
+    `{"bypass": "everything ok", "primary": "abcdef123456"}`,
+    "SOLANA_PUBLIC_KEY=7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    "SSH_KEY=~/.ssh/id_ed25519",
+    "SIGNING_KEY=/run/secrets/signing.pem",
+    "pass: 1234567 fail: 0",
+    "authorization: required",
+    "GOOGLE_APPLICATION_CREDENTIALS=./service-account.json",
+    `if (pem.startsWith("-----BEGIN PRIVATE KEY-----")) return pem;\nconst rest = 1;`,
+    "Authorization: Bearer $TOKEN",
+    "sk-loading-spinner-component",
+    "PASSWORD=short",
+    "API_KEY=",
+    "BYPASS_MODE=enabled",
+    "COMPASS=northward",
+    "PWD=/home/user/workspace/app",
+    "mynt_gave_up and mynt_conformance_unknown_ab12cd34",
+    "https://example.com:8443/path@v2",
+    "see https://user@example.com/docs",
+    "sk_live_ abc ghp_short AKIA123",
+    "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----",
+    "ready on 8080",
+  ]) assert.equal(redact(text), text, text);
+});
+
+// redact() runs synchronously on uncapped sandbox output: a pattern that backtracks quadratically stalls Mynt for
+// everyone. Each input is 100 KB, built to make a careless pattern retry a long run from every position inside it.
+test("redact stays linear on adversarial output", () => {
+  const N = 100_000;
+  const rep = (s) => s.repeat(Math.ceil(N / s.length)).slice(0, N);
+  const inputs = [
+    "a+", "a-", "a.", "some-kebab-case-words-here ", "a://a:", "a://", ":", "a:", "key:", "token=", 'token="', "password: 'x ",
+    '"password":"\\', "A_", "A_ ", "AAAA_KEY", "db_pass", "x".repeat(47) + " ", "eyJ-", "eyJabcde.eyJabcde.", "-ghp_",
+    "-sk_live_", "sk-", "xoxb-", "-mynt_agent_", "Authorization: Bearer ", "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n", "-----BEGIN A ",
+  ].map(rep);
+  inputs.push(`x://u:${"p".repeat(N)}`, '"'.repeat(N / 2) + "a".repeat(N / 2), "-----BEGIN " + rep("A "));
+  // Values skipped or already redacted, with names hiding inside them.
+  inputs.push("PRIVATE_KEY=" + rep("/A_KEY="), "private_key=" + rep("/private_key="), rep("token=[redacted]"), "token=" + rep("[redacted]token="));
+  inputs.push(rep("SSH_KEY=/a.b "), rep('password="'), rep("password: 'x\n"));
+  for (const text of inputs) redact(text.slice(0, 10_000)); // warm up the regex engine and JIT on a tenth of each
+  // CPU time, not wall time, so a busy machine doesn't fail the test.
+  const cpuMs = (start) => {
+    const d = process.cpuUsage(start);
+    return (d.user + d.system) / 1000;
+  };
+  const slowest = [];
+  const started = process.cpuUsage();
+  for (const text of inputs) {
+    const t = process.cpuUsage();
+    redact(text);
+    slowest.push([cpuMs(t), JSON.stringify(text.slice(0, 24))]);
+  }
+  const total = cpuMs(started);
+  slowest.sort((a, b) => b[0] - a[0]);
+  // Linear patterns take a few ms per input (about 100-250 ms of CPU for all of them on a busy 4-core machine); the
+  // quadratic ones this replaced took 3 to 60 seconds on a single input. The bounds leave room for slow CI runners.
+  assert.ok(slowest[0][0] < 150, `redact took ${slowest[0][0].toFixed(0)} ms of CPU on ${slowest[0][1]}`);
+  assert.ok(total < 1000, `redact took ${total.toFixed(0)} ms of CPU over ${inputs.length} inputs; slowest: ${slowest.slice(0, 3).map(([ms, s]) => `${s} ${ms.toFixed(0)} ms`).join(", ")}`);
 });

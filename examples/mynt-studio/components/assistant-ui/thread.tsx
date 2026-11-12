@@ -1,8 +1,4 @@
-import {
-  ComposerAddAttachment,
-  ComposerAttachments,
-  UserMessageAttachments,
-} from "@/components/assistant-ui/attachment";
+import { UserMessageAttachments } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
 import {
@@ -48,7 +44,6 @@ import {
   DownloadIcon,
   MoreHorizontalIcon,
   PencilIcon,
-  RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
 import type { FC, ReactNode } from "react";
@@ -110,9 +105,8 @@ const Composer: FC = () => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col has-[textarea:disabled]:opacity-60">
       <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-2xl border border-input bg-background px-1 pt-2 transition-shadow outline-none has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-ring/20 data-[dragging=true]:border-dashed data-[dragging=true]:border-ring data-[dragging=true]:bg-accent/50">
-        <ComposerAttachments />
         <ComposerPrimitive.Input
-          placeholder="Send a message..."
+          placeholder="Tell the coding agent what to build or change..."
           className="aui-composer-input mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
           rows={1}
           aria-label="Message input"
@@ -126,7 +120,8 @@ const Composer: FC = () => {
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
-      <ComposerAddAttachment />
+      {/* Mynt's coding agent takes text; attachments aren't sent. */}
+      <span />
 
       <AssistantIf condition={({ thread }) => !thread.isRunning}>
         <ComposerPrimitive.Send asChild>
@@ -207,8 +202,8 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
+      {/* No reload, edit or branches: each would send a message to the agent again. */}
       <div className="aui-assistant-message-footer mt-1 ml-2 flex">
-        <BranchPicker />
         <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
@@ -233,11 +228,6 @@ const AssistantActionBar: FC = () => {
           </AssistantIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="Refresh">
-          <RefreshCwIcon />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
@@ -276,12 +266,8 @@ const UserMessage: FC = () => {
         <div className="aui-user-message-content rounded-2xl bg-muted px-4 py-2.5 wrap-break-word text-foreground">
           <MessagePrimitive.Parts />
         </div>
-        <div className="aui-user-action-bar-wrapper absolute top-1/2 left-0 -translate-x-full -translate-y-1/2 pr-2">
-          <UserActionBar />
-        </div>
       </div>
 
-      <BranchPicker className="aui-user-branch-picker col-span-full col-start-1 row-start-3 -mr-1 justify-end" />
     </MessagePrimitive.Root>
   );
 };
