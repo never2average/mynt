@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
   const expected = session.oauthState;
   session.oauthState = undefined; // single use
+  await sessionStore().save(session);
   if (params.get("error")) return fail("denied");
   if (!sameState(expected, params.get("state"))) return fail("state");
   const code = params.get("code");
@@ -39,9 +40,9 @@ export async function GET(req: NextRequest) {
   } finally {
     session.codeVerifier = undefined;
   }
-  // A fresh session id and an empty chat for the signed-in user: a cookie planted before
-  // sign-in stops working, and nobody inherits an earlier user's conversation on this device.
-  const signedIn = sessionStore().rotate(session);
+  // A fresh session id and fresh app state for the signed-in user: a cookie planted before
+  // sign-in stops working, and nobody inherits what an earlier user left on this device.
+  const signedIn = await sessionStore().rotate(session);
   const res = NextResponse.redirect(new URL("/", appUrl()));
   setSessionCookie(res, signedIn);
   return res;

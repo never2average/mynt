@@ -27,6 +27,16 @@ export function secureCookies(): boolean {
   return !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname));
 }
 
+// How this app names itself to Mynt: in dynamic client registration (shown on the consent
+// screen) and as an MCP client.
+export function oauthClientName(): string {
+  return "Mynt chat (sample)";
+}
+
+export function mcpClientInfo(): { name: string; version: string } {
+  return { name: "mynt-chat", version: "0.1.0" };
+}
+
 export function oauthScope(): string {
   return process.env.MYNT_OAUTH_SCOPE?.trim() || "openid profile email";
 }
