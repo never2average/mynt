@@ -196,6 +196,18 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **Activity.** As a build runs, Mynt reads the agent's output from the sandbox on every tick and stores it, summarised, in `build_activity`: the agent's messages, the commands it runs and the files it edits, each with a `seq` and a time. The history stays after the sandbox stops, and each build keeps its latest 5,000 entries. `get_build_activity` without `after` returns the latest entries, newest first. To follow a build, pass the `cursor` from the last call as `after`: the result holds only newer entries, oldest first, and a new `cursor`, which stays the same while nothing new has arrived. `first_seq` is the oldest entry still kept: a follower whose cursor is below it has missed entries trimmed by the limit. Summaries are scrubbed of credentials (as `sandbox_run` output is) before they're cut to length, and control characters are dropped. Activity is the agent's own account, shown to the developer and never used to decide anything.
 
+**Session builds.** `start_build` with `mode: "session"` works like a chat with the coding agent:
+- The agent does the first request (`goal`), reports `coding` "Waiting for your next message", and stays open, keeping its context.
+- Each `steer_build` message is the next request. Sent while a request is still running, it interrupts that request and becomes the next one.
+- `finish_build` ends the session. Once its current request is done, the agent reviews, checks, previews and pushes the work, then exits. Mynt then verifies the build in a clean sandbox exactly as any other; the agent never grades its own work.
+- Finishing never interrupts the current request, and once a session is finishing it takes no more steers. A message that slips in as it starts finishing isn't delivered, and the build's timeline says so.
+- A session that has been idle (nothing running, nothing waiting) for `BUILD_SESSION_IDLE_MS` (default 15 minutes; from 1 minute to 24 hours) finishes the same way, so its work is shipped, not lost.
+- Mynt also finishes a session itself 30 minutes before its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours), and once it has spent 80% of its cap, so neither ends it with the work unshipped.
+- The sandbox is billed while it waits, so idle time counts against the build's cap.
+- Mynt runs the agent's runner with `MYNT_AGENT_HOLD=1` and `MYNT_AGENT_IDLE_MS`, and writes its inbox items whole (a temporary name, then a rename).
+
+**Continuing a build.** `start_build` with `continue_from: <build_id>` starts from the branch an earlier finished build of yours pushed, on the same app and repository. Mynt must have confirmed that push: the build has a verified commit, or Mynt opened its pull request. If it shipped, it starts at its verified commit. Use it after a session ends, or to change a shipped app.
+
 **Spend** is capped per build (`BUILD_CAP_USD`, default 10) and per developer per month (`BUILD_MONTHLY_CAP_USD`, default 100). Mynt reads the sandbox's machine and model cost as it runs, and stops a build that passes its cap.
 
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.

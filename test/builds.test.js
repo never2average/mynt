@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
@@ -52,6 +53,14 @@ function fakeBoat() {
     async exec(id, command, opts = {}) {
       const s = sandboxes.get(id);
       s.commands.push({ command, ...opts });
+      // Mynt puts inbox items in place with a rename.
+      const mv = command.match(/^mv -f '([^']+)' '([^']+)'$/);
+      if (mv) {
+        if (!s.files.has(mv[1])) return { exitCode: 1, stdout: "", stderr: "no such file" };
+        s.files.set(mv[2], s.files.get(mv[1]));
+        s.files.delete(mv[1]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       if (command.includes("tar --exclude")) return { exitCode: 0, stdout: `${SHA}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
       if (command.includes("verify.sh --rehash")) {
         s.files.set(`${V}/after.sha`, boat.tamperDuringAudit ? "changed\n" : s.files.get(`${V}/before.sha`));
@@ -564,6 +573,201 @@ test("list_builds filters by app", async () => {
   assert.deepEqual((await call(dev, "list_builds", { app_id: "00000000-0000-0000-0000-000000000000" })).data.builds, []);
 });
 
+test("a session build stays open for the developer's requests; finish_build ships it and Mynt verifies it as usual", async () => {
+  const ctx = await setup();
+  const { builds, boat, as, connect, call, repos } = ctx;
+  const dev = await connect(await as("Dev", ["developer"]));
+  const other = await connect(await as("Other", ["developer"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  const started = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id, repository: "acme/savings-app", mode: "session" })).data;
+  assert.equal(started.mode, "session");
+  assert.equal(started.finish_requested_at, null);
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const s = boat.sandboxes.get(sbx);
+
+  // The runner is held open, with the 15-minute idle default, and knows how to finish; the agent is told it's a session.
+  const launch = s.commands.find((c) => c.command.includes("runner.mjs")).command;
+  assert.match(launch, /^MYNT_AGENT_HOLD=1 MYNT_AGENT_IDLE_MS=900000 node /);
+  assert.match(boat.agentConfig(sbx).finishPrompt, /steps 2 to 6/);
+  assert.match(boat.agentConfig(sbx).prompt, /session mode/);
+  assert.equal(JSON.parse(s.files.get(`${BUILD}/job/build.json`)).build.mode, "session");
+  assert.match(s.files.get(`${BUILD}/CLAUDE.md`), /## Session mode/);
+  assert.match(s.files.get(`${BUILD}/CLAUDE.md`), /Waiting for your next message/);
+
+  // Between requests the agent waits (still coding); each request is a steer.
+  boat.write(sbx, `${BUILD}/job/status.json`, { phase: "coding", message: "Waiting for your next message" });
+  await builds.tick();
+  assert.equal((await builds.get(started.id)).phase_message, "Waiting for your next message");
+  assert.equal((await call(dev, "steer_build", { build_id: started.id, message: "Add a rates table" })).data.steered, true);
+
+  // Only the owner, only a session, and only once.
+  assert.match((await call(other, "finish_build", { build_id: started.id })).data.error, /No build of yours/);
+  const once = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
+  assert.match((await call(dev, "finish_build", { build_id: once.id })).data.error, /Only a session build/);
+  const fin = (await call(dev, "finish_build", { build_id: started.id })).data;
+  assert.equal(fin.finishing, true);
+  const finishes = [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
+  assert.deepEqual(finishes.map((f) => f.finish), [true]);
+  assert.match(finishes[0].message, /Finish the session/);
+  assert.equal((await call(dev, "finish_build", { build_id: started.id })).data.since, fin.since, "finishing twice is a no-op");
+  assert.match((await call(dev, "steer_build", { build_id: started.id, message: "One more" })).data.error, /finishing/);
+  assert.ok((await call(dev, "get_build", { build_id: started.id })).data.finish_requested_at);
+
+  // The agent ships and exits; Mynt verifies in a clean sandbox exactly as for any build.
+  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  boat.finishAgent(sbx);
+  await builds.tick();
+  const vid = (await builds.get(started.id)).verify_sandbox_id;
+  assert.ok(vid, "verification started");
+  boat.ready(vid);
+  await builds.tick();
+  boat.sandboxes.get(vid).checksRunning = false;
+  boat.write(vid, `${V}/before.sha`, "tree\n");
+  boat.write(vid, `${V}/report.json`, { checks: passingChecks });
+  await builds.tick();
+  boat.write(vid, `${V}/maxwell.json`, cleanAudit);
+  boat.finishAgent(vid);
+  await builds.tick();
+  const done = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(done.status, "succeeded");
+  assert.equal(repos.prs.length, 1);
+  assert.match((await call(dev, "finish_build", { build_id: started.id })).data.error, /succeeded/);
+});
+
+test("a session's idle machine time counts against its cap", async () => {
+  const { builds, boat, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please", mode: "session", cap_usd: 2 })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  boat.sandboxes.get(sbx).cost = 2.5; // the sandbox sat waiting; no model spend at all
+  await builds.tick();
+  const b = await builds.get(started.id);
+  assert.equal(b.status, "over_budget");
+  assert.ok(boat.sandboxes.get(sbx).stopped);
+});
+
+// A session build with its agent running, for the tests below.
+async function runningSession(ctx, args = {}) {
+  const dev = await ctx.connect(await ctx.as(`Dev ${randomUUID().slice(0, 6)}`, ["developer"]));
+  const started = (await ctx.call(dev, "start_build", { goal: "Build a savings page please", mode: "session", ...args })).data;
+  await ctx.builds.tick();
+  const sbx = (await ctx.builds.get(started.id)).sandbox_id;
+  ctx.boat.ready(sbx);
+  await ctx.builds.tick();
+  return { dev, started, sbx, s: ctx.boat.sandboxes.get(sbx) };
+}
+const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
+
+test("a session the runner finished on its own (idle) takes no more steers; nor does one finished after the steer loaded it", async () => {
+  const ctx = await setup();
+  const { builds, boat, call } = ctx;
+  const { dev, started, sbx, s } = await runningSession(ctx);
+  // The runner went idle and sent the finish prompt itself: Mynt records it on the next tick.
+  boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 2, sent: 2, last_subtype: "success", done: false, exit_code: null, error: null, summary: null, finish: "idle", undelivered: 0 });
+  await builds.tick();
+  const b = await builds.get(started.id);
+  assert.ok(b.finish_requested_at);
+  assert.ok((await call(dev, "get_build", { build_id: started.id })).data.timeline.some((e) => /idle too long/.test(e.message)));
+  assert.match((await call(dev, "steer_build", { build_id: started.id, message: "One more thing" })).data.error, /finishing/);
+  assert.equal((await call(dev, "finish_build", { build_id: started.id })).data.finishing, true);
+  assert.deepEqual(finishItems(s), [], "the runner is already finishing: no second finish item");
+
+  // The race: a steer that loaded the build before finish_build recorded the finish is still refused.
+  const second = await runningSession(ctx);
+  const stale = await builds.get(second.started.id);
+  await builds.finish(stale);
+  await assert.rejects(builds.steer(stale, "Sneak this in"), /finishing/);
+  // And concurrent finishes write one finish item.
+  const third = await runningSession(ctx);
+  const t = await builds.get(third.started.id);
+  await Promise.all([builds.finish(t), builds.finish(t), builds.finish(t)]);
+  assert.equal(finishItems(third.s).length, 1);
+  // Inbox items are put in place whole, by a rename.
+  assert.ok(third.s.commands.some((c) => /^mv -f '\/home\/user\/mynt-agent\/inbox\/\.[^']+-finish\.json' '\/home\/user\/mynt-agent\/inbox\/[^.][^']+-finish\.json'$/.test(c.command)));
+
+  // Messages the runner held back while finishing are reported when it exits.
+  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  boat.finishAgent(sbx);
+  boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 3, sent: 3, last_subtype: "success", done: true, exit_code: 0, error: null, summary: "shipped", finish: "idle", undelivered: 2 });
+  await builds.tick();
+  const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline;
+  assert.ok(timeline.some((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)));
+  assert.equal((await builds.get(started.id)).status, "verifying", "and Mynt verifies the work as usual");
+});
+
+test("Mynt finishes a session itself before its sandbox's time limit or its cap would end it unshipped", async () => {
+  // Time limit: with a 30-minute sandbox the margin has already passed.
+  const ctx = await setup({ config: { ttlSeconds: 1800 } });
+  const { started, s } = await runningSession(ctx);
+  await ctx.builds.tick();
+  assert.deepEqual(finishItems(s).map((f) => f.reason), ["ttl"]);
+  assert.ok((await ctx.builds.get(started.id)).finish_requested_at);
+
+  // Cap: at 80% of it.
+  const c2 = await setup();
+  const second = await runningSession(c2, { cap_usd: 5 });
+  second.s.cost = 3.9;
+  await c2.builds.tick();
+  assert.deepEqual(finishItems(second.s), []);
+  second.s.cost = 4.1;
+  await c2.builds.tick();
+  assert.deepEqual(finishItems(second.s).map((f) => f.reason), ["cap"]);
+  await c2.builds.tick();
+  assert.equal(finishItems(second.s).length, 1, "once");
+  assert.ok((await c2.call(second.dev, "get_build", { build_id: second.started.id })).data.timeline.some((e) => /spent most of its cap/.test(e.message)));
+});
+
+test("BUILD_SESSION_IDLE_MS must be a sensible number of milliseconds, or the 15-minute default applies", () => {
+  for (const [v, want] of [[undefined, 900000], ["120000", 120000], ["abc", 900000], ["5", 900000], ["1e12", 900000], ["Infinity", 900000]])
+    assert.equal(buildConfigFromEnv(v === undefined ? {} : { BUILD_SESSION_IDLE_MS: v }).sessionIdleMs, want, String(v));
+});
+
+test("continue_from starts a build from an earlier build's pushed branch, on the same app and repository", async () => {
+  const ctx = await setup();
+  const { builds, boat, as, connect, call } = ctx;
+  const dev = await connect(await as("Dev", ["developer"]));
+  const other = await connect(await as("Other", ["developer"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  const { started: first, build: shipped } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings comparison page", app_id: app.id, repository: "acme/savings-app" } });
+  assert.equal(shipped.status, "succeeded");
+
+  const next = (await call(dev, "start_build", { goal: "Now add a rates table to it", continue_from: first.id, mode: "session" })).data;
+  assert.equal(next.continued_from, first.id);
+  assert.equal(next.app_id, app.id, "the app is carried over");
+  assert.equal(next.repository, "acme/savings-app", "and the repository");
+  await builds.tick();
+  const sbx = (await builds.get(next.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const spec = JSON.parse(boat.sandboxes.get(sbx).files.get(`${BUILD}/job/build.json`)).build;
+  assert.deepEqual(spec.base, { branch: shipped.branch, commit_sha: COMMIT, build_id: first.id });
+  assert.notEqual(spec.branch, shipped.branch, "it pushes a branch of its own");
+  assert.match(boat.sandboxes.get(sbx).files.get(`${BUILD}/CLAUDE.md`), /build\.base\.branch/);
+
+  // Only the developer's own, finished builds that pushed a branch, on the same app and repository.
+  assert.match((await call(other, "start_build", { goal: "Continue someone else's work", continue_from: first.id })).data.error, /No build of yours/);
+  assert.match((await call(dev, "start_build", { goal: "Continue a running build", continue_from: next.id })).data.error, /still coding/);
+  const plain = (await call(dev, "start_build", { goal: "Build without a repository" })).data;
+  await call(dev, "stop_build", { build_id: plain.id });
+  assert.match((await call(dev, "start_build", { goal: "Continue a build with no branch", continue_from: plain.id })).data.error, /pushed no verified branch/);
+  // A branch name alone isn't enough: Mynt must have confirmed the push (a verified commit or its pull request).
+  const unpushed = (await call(dev, "start_build", { goal: "Build that never pushed", app_id: app.id, repository: "acme/savings-app" })).data;
+  await builds.tick();
+  await call(dev, "stop_build", { build_id: unpushed.id });
+  assert.ok((await builds.get(unpushed.id)).branch, "it had a branch name");
+  assert.match((await call(dev, "start_build", { goal: "Continue a build that never pushed", continue_from: unpushed.id })).data.error, /pushed no verified branch/);
+  const app2 = (await call(dev, "create_app", { name: "Other", description: "Other ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  assert.match((await call(dev, "start_build", { goal: "Continue on another app", continue_from: first.id, app_id: app2.id })).data.error, /another app/);
+});
+
 test("developers work in their build's sandbox: VS Code, commands, files and the diff, scrubbed and on the timeline", async () => {
   const { builds, boat, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
@@ -882,6 +1086,153 @@ process.stdin.once("data", () => {
   assert.equal(state.cost_usd, 3);
   assert.equal(state.exit_code, 0);
   assert.match(readFileSync(join(dir, "agent.jsonl"), "utf8"), /sub-agent step 15/);
+});
+
+// A held session runner against a stand-in Claude Code that takes `turnMs` per user message and records every
+// message it receives (interrupts too). Returns the runner's process and helpers to drive and read it.
+async function sessionRunner({ turnMs = 100, env = {} } = {}) {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+  const { AGENT_RUNNER } = await import("../dist/agent-runner.js");
+  const home = mkdtempSync(join(tmpdir(), "mynt-runner-"));
+  const dir = join(home, "mynt-agent");
+  mkdirSync(join(home, ".mynt-claude", "node_modules", ".bin"), { recursive: true });
+  const fake = join(home, ".mynt-claude", "node_modules", ".bin", "claude");
+  writeFileSync(
+    fake,
+    `#!/usr/bin/env node
+const fs = require("fs");
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "sess_s" }));
+// One turn at a time, as Claude Code does; an interrupt ends the running turn at once with error_during_execution.
+let turns = 0, buf = "", queue = [], current = null;
+const result = (subtype, text) => {
+  turns++;
+  console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } }));
+  console.log(JSON.stringify({ type: "result", subtype, total_cost_usd: 0.1 * turns, result: text }));
+};
+const next = () => {
+  if (current || !queue.length) return;
+  const content = queue.shift();
+  current = { content, timer: setTimeout(() => { current = null; result("success", "did: " + content); next(); }, ${turnMs}) };
+};
+process.stdin.on("data", (d) => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf("\\n")) >= 0) {
+    const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+    fs.appendFileSync(process.env.HOME + "/received.jsonl", JSON.stringify(m) + "\\n");
+    if (m.type === "control_request" && m.request && m.request.subtype === "interrupt" && current) {
+      clearTimeout(current.timer);
+      const c = current.content;
+      current = null;
+      result("error_during_execution", "interrupted: " + c);
+      next();
+    }
+    if (m.type !== "user") continue;
+    queue.push(m.message.content);
+    next();
+  }
+});
+`,
+  );
+  chmodSync(fake, 0o755);
+  mkdirSync(join(dir, "inbox"), { recursive: true });
+  writeFileSync(join(dir, "runner.mjs"), AGENT_RUNNER);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ prompt: "First request", cwd: join(home, "work"), budgetUsd: 4, version: "0.0.0", finishPrompt: "Finish the session now" }));
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ token: "t", env: {} }));
+  const child = spawn(process.execPath, [join(dir, "runner.mjs"), dir], { env: { ...process.env, HOME: home, MYNT_AGENT_HOLD: "1", ...env }, stdio: "ignore" });
+  let exited = false;
+  const exit = new Promise((r) => child.on("exit", (code) => ((exited = true), r(code))));
+  const state = () => (existsSync(join(dir, "state.json")) ? JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) : {});
+  const until = async (f, ms = 15000) => {
+    const end = Date.now() + ms;
+    while (!f()) {
+      if (Date.now() > end) throw new Error("timed out waiting");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+  let n = 0;
+  // An inbox item (a string is written as it is), under `name` if given; rewrite() replaces its contents.
+  const inbox = (item, name) => {
+    const path = join(dir, "inbox", name ?? `${Date.now()}-${++n}.json`);
+    const write = (v) => writeFileSync(path, typeof v === "string" ? v : JSON.stringify(v));
+    write(item);
+    return { rewrite: write };
+  };
+  const received = () => (existsSync(join(home, "received.jsonl")) ? readFileSync(join(home, "received.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
+  return { child, exit, isExited: () => exited, state, until, inbox, received };
+}
+
+test("a session runner stays open between messages and finishes, without interrupting, when the developer ships", async () => {
+  const r = await sessionRunner({ turnMs: 1500 });
+  await r.until(() => r.state().turns === 1);
+  await new Promise((res) => setTimeout(res, 2500));
+  assert.equal(r.isExited(), false, "held open after the first request's turn, with nothing to do");
+  assert.equal(r.state().finish, null);
+  r.inbox({ message: "Second request" });
+  await r.until(() => r.received().filter((m) => m.type === "user").length === 2);
+  // Shipping while that turn runs: the finish message waits for it, and never interrupts it.
+  r.inbox({ finish: true, message: "Finish the session now (shipping)" });
+  const code = await r.exit;
+  assert.equal(code, 0);
+  const got = r.received();
+  assert.deepEqual(got.filter((m) => m.type === "user").map((m) => m.message.content), ["First request", "Second request", "Finish the session now (shipping)"]);
+  assert.ok(!got.some((m) => m.type === "control_request"), "finishing never interrupts a turn");
+  const s = r.state();
+  assert.deepEqual([s.finish, s.turns, s.last_subtype, s.done, s.summary], ["developer", 3, "success", true, "did: Finish the session now (shipping)"]);
+});
+
+test("a session runner finishes on its own once idle, with the finish prompt as its last message", async () => {
+  const r = await sessionRunner({ env: { MYNT_AGENT_IDLE_MS: "800" } });
+  await r.until(() => r.state().turns === 1);
+  // A message before the idle window ends resets it.
+  r.inbox({ message: "One more thing" });
+  const code = await r.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(r.received().filter((m) => m.type === "user").map((m) => m.message.content), ["First request", "One more thing", "Finish the session now"]);
+  assert.equal(r.state().finish, "idle");
+  assert.equal(r.state().last_subtype, "success");
+});
+
+test("once a session is finishing, a steer never interrupts the finish turn: it is held back and counted as undelivered", async () => {
+  const r = await sessionRunner({ turnMs: 3000 });
+  await r.until(() => r.state().turns === 1);
+  // A steer during an ordinary request interrupts it (the stand-in honours interrupts).
+  r.inbox({ message: "Second request" });
+  await r.until(() => r.received().filter((m) => m.type === "user").length === 2);
+  r.inbox({ message: "Change of plan" });
+  await r.until(() => r.received().some((m) => m.type === "control_request"));
+  await r.until(() => r.state().turns === 3, 20000);
+  // Now finish, then steer while the finish turn runs.
+  r.inbox({ finish: true, message: "Finish the session now (shipping)" });
+  await r.until(() => r.state().finish === "developer");
+  r.inbox({ message: "One more tweak" });
+  r.inbox({ finish: true, message: "Finish again" });
+  const code = await r.exit;
+  assert.equal(code, 0);
+  const got = r.received();
+  assert.deepEqual(got.filter((m) => m.type === "user").map((m) => m.message.content), ["First request", "Second request", "Change of plan", "Finish the session now (shipping)"]);
+  assert.equal(got.filter((m) => m.type === "control_request").length, 1, "only the ordinary steer interrupted");
+  const s = r.state();
+  assert.deepEqual([s.finish, s.undelivered, s.last_subtype, s.summary], ["developer", 1, "success", "did: Finish the session now (shipping)"]);
+});
+
+test("a session runner ignores a non-numeric idle setting, skips dot-files and retries an inbox file it can't parse yet", async () => {
+  const r = await sessionRunner({ env: { MYNT_AGENT_IDLE_MS: "soon" } });
+  await r.until(() => r.state().turns === 1);
+  await new Promise((res) => setTimeout(res, 1500));
+  assert.equal(r.isExited(), false, "NaN falls back to the 15-minute default rather than finishing at once");
+  r.inbox({ message: "Never read: still being written" }, ".partial.json");
+  const half = r.inbox('{"message": "Half');
+  await new Promise((res) => setTimeout(res, 2500));
+  assert.equal(r.received().filter((m) => m.type === "user").length, 1);
+  half.rewrite({ message: "Now whole" });
+  await r.until(() => r.received().some((m) => m.type === "user" && m.message.content === "Now whole"));
+  r.inbox({ finish: true, message: "Finish" });
+  assert.equal(await r.exit, 0);
+  assert.ok(!r.received().some((m) => m.type === "user" && /Never read/.test(m.message.content)));
 });
 
 test("without a boat.dev key builds are disabled cleanly, and agents never connect outside services", async () => {
