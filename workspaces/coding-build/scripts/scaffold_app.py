@@ -62,7 +62,9 @@ def main():
     if a.sdk:
         SDK = os.path.abspath(a.sdk)
 
-    if os.path.exists(a.dest) and os.listdir(a.dest):
+    # A fresh clone of a new repository (only its git folder and the first commit's README) counts as empty: the
+    # template's README replaces that one.
+    if os.path.exists(a.dest) and set(os.listdir(a.dest)) - {".git", "README.md"}:
         sys.exit(f"{a.dest} isn't empty")
     shutil.copytree(TEMPLATE, a.dest, dirs_exist_ok=True)
     packages = os.path.join(a.dest, "packages")

@@ -140,13 +140,37 @@ function fakeRepos() {
   };
 }
 
-async function setup({ sandboxes = fakeSandboxHost(), config = {}, refuse = null } = {}) {
+// A stand-in for the git host Mynt keeps apps' managed repositories on (src/git-host.ts).
+function fakeManagedHost() {
+  return {
+    name: "fake",
+    created: [],
+    reachable: true,
+    owns: (r) => r.toLowerCase().startsWith("mynt-apps/"),
+    async access() {
+      return this.reachable ? 77 : null;
+    },
+    async create(name) {
+      if (!this.reachable) throw new Error("the host's app isn't installed");
+      this.created.push(name);
+      await this.onCreate?.(); // a test's concurrent request, landing while the repository is being created
+      return { repository: `mynt-apps/${name}`, access: 77 };
+    },
+    async readCredentials() {
+      return { username: "x-access-token", password: "ghs_readonly_short_lived" };
+    },
+    cloneUrl: (r) => `https://git.example/${r}.git`,
+  };
+}
+
+async function setup({ sandboxes = fakeSandboxHost(), config = {}, managed = null, refuse = null } = {}) {
   const pg = new PGlite();
   // `refuse`: stands in for a database that rejects some statements (those it returns true for).
   const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
   const builds = await BuildService.open(db, store, sandboxes, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
+  builds.managedHost = managed;
   const as = async (name, roles) => (await store.createUser(name, roles)).user;
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -788,6 +812,160 @@ test("a session's idle machine time counts against its cap", async () => {
   const b = await builds.get(started.id);
   assert.equal(b.status, "over_budget");
   assert.ok(sandboxes.sandboxes.get(sbx).stopped);
+});
+
+test("by default an app's builds push to a private repository Mynt creates and manages for it: PRs, continue_from and hosting's source token work", async () => {
+  const managed = fakeManagedHost();
+  const ctx = await setup({ managed });
+  const { builds, sandboxes, as, connect, call, repos, pg } = ctx;
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const expected = `mynt-apps/mynt-app-${app.id}`;
+  assert.equal((await call(dev, "get_app_repository", { app_id: app.id })).data.repository, null, "none until the first build");
+
+  // No repository named, no GitHub of the developer's: Mynt's own, named by the app's id only.
+  const { started, sbx, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings comparison page", app_id: app.id } });
+  assert.equal(started.repository, expected);
+  assert.deepEqual(managed.created, [`mynt-app-${app.id}`]);
+  const coding = sandboxes.sandboxes.get(sbx);
+  assert.equal(coding.opts.env.GITHUB_REPOSITORY, expected);
+  assert.equal(coding.opts.env.GITHUB_TOKEN, "ghs_short_lived");
+  const spec = JSON.parse(coding.files.get(`${BUILD}/job/build.json`)).build;
+  assert.equal(spec.managed_repository, true);
+  assert.match(coding.files.get(`${BUILD}/CLAUDE.md`), /build\.managed_repository/);
+  // Verified, then Mynt opens the PR there, as for any repository, with the managed repositories' access.
+  assert.equal(build.status, "succeeded");
+  assert.equal(build.commit_sha, COMMIT);
+  assert.deepEqual([repos.prs[0].repo, repos.prs[0].installation], [expected, 77]);
+  // Hosting fetches a verified commit with a read token found through the developer's repository connections.
+  const conn = (await pg.query("SELECT installation_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2", [devUser.id, expected])).rows;
+  assert.equal(Number(conn[0].installation_id), 77);
+  assert.deepEqual((await call(dev, "list_repositories")).data.map((r) => [r.repository, r.managed]), [[expected, true]]);
+
+  // The app's next builds reuse it; continue_from carries on in it.
+  const next = (await call(dev, "start_build", { goal: "Now add a rates table to it", app_id: app.id, continue_from: started.id })).data;
+  assert.equal(next.repository, expected);
+  const again = (await call(dev, "start_build", { goal: "Another change to the same app", app_id: app.id })).data;
+  assert.equal(again.repository, expected);
+  assert.equal(managed.created.length, 1, "created once per app");
+
+  // The developer can clone their code with a short-lived, read-only token.
+  const repo = (await call(dev, "get_app_repository", { app_id: app.id })).data;
+  assert.equal(repo.managed, true);
+  assert.deepEqual([repo.clone.url, repo.clone.username, repo.clone.password, repo.clone.expires_in_minutes], [`https://git.example/${expected}.git`, "x-access-token", "ghs_readonly_short_lived", 60]);
+
+  // After moving the app to their own repository: continuing a managed build says what to do, and the managed
+  // repository can still be cloned to carry its branch over.
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" });
+  for (const b of (await call(dev, "list_builds", {})).data.builds) await call(dev, "stop_build", { build_id: b.id });
+  assert.match(
+    (await call(dev, "start_build", { goal: "Carry on in my own repository", continue_from: started.id })).data.error,
+    /in the app's previous managed repository .*push its branch .* to your own repository first/,
+  );
+  const after = (await call(dev, "get_app_repository", { app_id: app.id })).data;
+  assert.deepEqual([after.repository, after.managed, after.clone.repository], ["acme/savings-app", false, expected]);
+});
+
+test("a managed repository created while the developer set their own keeps the developer's choice, and never gets the managed access", async () => {
+  const managed = fakeManagedHost();
+  const { builds, as, connect, call, pg } = await setup({ managed });
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  managed.onCreate = () => builds.setAppRepository(devUser, app.id, "acme/savings-app");
+  const b = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  assert.equal(b.repository, "acme/savings-app");
+  const conns = (await pg.query("SELECT repository, installation_id FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [devUser.id])).rows;
+  assert.deepEqual(conns.map((r) => [r.repository, Number(r.installation_id)]), [["acme/savings-app", 42]], "the developer's own repository keeps its own installation");
+  // The managed one is still recorded as Mynt's: never connectable by name.
+  assert.equal((await builds.appRepository(app.id)).managed_repository, `mynt-apps/mynt-app-${app.id}`);
+});
+
+test("managed repositories belong to their app: never connected by name, never used by another app or developer; developers can switch to their own", async () => {
+  const managed = fakeManagedHost();
+  const { builds, as, connect, call, pg } = await setup({ managed });
+  const dev = await connect(await as("Dev", ["developer"]));
+  const other = await connect(await as("Other", ["developer"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const app2 = (await call(dev, "create_app", { name: "Other", description: "Other ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const first = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  const repo = first.repository;
+
+  assert.match((await call(dev, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+  assert.match((await call(other, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+  assert.match((await call(dev, "start_build", { goal: "Push into another app's repository", app_id: app2.id, repository: repo })).data.error, /isn't this app's/);
+  assert.match((await call(other, "get_app_repository", { app_id: app.id })).data.error, /No app of yours/);
+  assert.match((await call(other, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data.error, /No app of yours/);
+
+  // Their own repository, later: it must be connected, and it can't be a managed one.
+  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data.error, /isn't connected/);
+  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "mynt-apps/mynt-app-someone-else" })).data.error, /of your own/);
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  const set = (await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data;
+  assert.deepEqual([set.repository, set.managed, set.previous], ["acme/savings-app", false, repo]);
+  assert.equal((await call(dev, "start_build", { goal: "Build the next version please", app_id: app.id })).data.repository, "acme/savings-app");
+  // And back to its own managed repository (the only managed one it can name), then to theirs again.
+  const back = (await call(dev, "set_app_repository", { app_id: app.id, repository: repo })).data;
+  assert.deepEqual([back.repository, back.managed, back.previous], [repo, true, "acme/savings-app"]);
+  assert.equal((await call(dev, "start_build", { goal: "Build in the managed one again", app_id: app.id })).data.repository, repo);
+  await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" });
+  assert.deepEqual((await call(dev, "get_app_repository", { app_id: app.id })).data.managed, false);
+
+  // A host that can't create one says what to do instead; without managed repositories, builds work as before.
+  managed.reachable = false;
+  assert.match((await call(dev, "start_build", { goal: "Build the second app please", app_id: app2.id })).data.error, /connect your own with connect_repository/);
+  builds.managedHost = null;
+  assert.equal((await call(dev, "start_build", { goal: "Build the second app please", app_id: app2.id })).data.repository, null);
+
+  // remove_app drops the app's repository record (the repository itself stays on the host).
+  const admin = await connect(await as("Ada", ["admin"]));
+  await call(dev, "stop_build", { build_id: first.id });
+  for (const b of (await call(dev, "list_builds", {})).data.builds) await call(dev, "stop_build", { build_id: b.id });
+  const removed = await call(admin, "remove_app", { app_id: app.id, confirm: true, reason: "test" });
+  assert.equal(removed.isError, false, JSON.stringify(removed.data));
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.app_repositories WHERE app_id = $1", [app.id])).rows[0].n, 0);
+  // And the developer's access to its managed repository; their own repository stays connected.
+  const left = (await pg.query("SELECT repository FROM financial_products.repo_connections ORDER BY repository")).rows.map((r) => r.repository);
+  assert.ok(!left.includes(repo) && left.includes("acme/savings-app"), left.join(", "));
+  // Its name stays refused, even with the managed organization no longer configured (as after a rename).
+  assert.equal(builds.managedHost, null);
+  assert.match((await call(other, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+});
+
+test("the managed-repository guard fails closed: only a missing table means none recorded", async () => {
+  const { isManagedRepository } = await import("../dist/git-host.js");
+  const failing = (code) => ({ query: async () => Promise.reject(Object.assign(new Error("db"), { code })) });
+  assert.equal(await isManagedRepository(failing("42P01"), null, "acme/x"), false);
+  await assert.rejects(isManagedRepository(failing("57P01"), null, "acme/x"), /db/);
+  await assert.rejects(isManagedRepository(failing(undefined), null, "acme/x"), /db/);
+});
+
+test("scaffold_app.py starts an app in a fresh clone that holds only a README", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const root = mkdtempSync(join(tmpdir(), "mynt-scaffold-"));
+  const sdk = join(root, "sdk");
+  mkdirSync(join(sdk, "typescript"), { recursive: true });
+  writeFileSync(join(sdk, "typescript", "package.json"), JSON.stringify({ name: "x" }));
+  writeFileSync(join(sdk, "openapi.json"), "{}");
+  const clone = join(root, "app");
+  mkdirSync(join(clone, ".git"), { recursive: true });
+  writeFileSync(join(clone, "README.md"), "# mynt-app-x\n");
+  const script = new URL("../workspaces/coding-build/scripts/scaffold_app.py", import.meta.url).pathname;
+  execFileSync("python3", [script, clone, "--sdk", sdk, "--no-mobile"]);
+  assert.ok(existsSync(join(clone, "web", "package.json")) && existsSync(join(clone, ".git")));
+  assert.match(readFileSync(join(clone, "README.md"), "utf8"), /One Docker Compose project/);
+  // Anything else in it is the developer's work: refused.
+  writeFileSync(join(root, "keep.txt"), "x");
+  const other = join(root, "other");
+  mkdirSync(other);
+  writeFileSync(join(other, "server.js"), "x");
+  assert.throws(() => execFileSync("python3", [script, other, "--sdk", sdk, "--no-mobile"], { stdio: "pipe" }), /isn't empty/);
 });
 
 // A session build with its agent running, for the tests below.

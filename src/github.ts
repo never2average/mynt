@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import type { GitRepoHost } from "./git-host.js";
 
 // Pushes from builds go through a GitHub App the developer installs on their repository. For each build
 // Mynt mints an installation token limited to that one repository, with contents and pull-request write
@@ -14,6 +15,46 @@ export interface RepoAccess {
   resolveRef(repo: string, installationId: number, ref: string): Promise<string | null>;
   // A branch Mynt creates itself at a commit it checked (e.g. to propose exactly what it scored).
   createBranch(repo: string, installationId: number, branch: string, sha: string): Promise<void>;
+}
+
+// Mynt's managed repositories on GitHub: private repositories in an organization Mynt owns
+// (BUILD_MANAGED_REPO_OWNER), created and reached through the same GitHub App, installed on that organization with
+// Administration (write) as well as contents and pull requests.
+export class GitHubRepoHost implements GitRepoHost {
+  readonly name = "github";
+  constructor(
+    private readonly app: GitHubApp,
+    private readonly org: string,
+  ) {}
+
+  static fromEnv(app: GitHubApp | null, env = process.env): GitHubRepoHost | null {
+    const org = env.BUILD_MANAGED_REPO_OWNER?.trim();
+    return app && org ? new GitHubRepoHost(app, org) : null;
+  }
+
+  owns(repository: string) {
+    return repository.toLowerCase().startsWith(`${this.org.toLowerCase()}/`);
+  }
+
+  access() {
+    return this.app.orgInstallation(this.org);
+  }
+
+  async create(name: string, description: string) {
+    const access = await this.access();
+    if (!access) throw new Error("Mynt's GitHub App isn't installed on its managed-repository organization");
+    return { repository: (await this.app.createRepository(this.org, access, name, description)).toLowerCase(), access };
+  }
+
+  cloneUrl(repository: string) {
+    return `https://github.com/${repository}.git`;
+  }
+
+  async readCredentials(repository: string) {
+    const access = await this.access();
+    if (!access) throw new Error("Mynt's GitHub App isn't installed on its managed-repository organization");
+    return { username: "x-access-token", password: await this.app.readTokenFor(repository, access) };
+  }
 }
 
 const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -68,6 +109,43 @@ export class GitHubApp implements RepoAccess {
     const r = await this.call("POST", `/app/installations/${installationId}/access_tokens`, { repositories: [repo.split("/")[1]], permissions: { contents: "read" } });
     if (r.status !== 201) throw new Error(`GitHub refused a token for ${repo} (${r.status})`);
     return (r.data as { token: string }).token;
+  }
+
+  async orgInstallation(org: string) {
+    const r = await this.call("GET", `/orgs/${encodeURIComponent(org)}/installation`);
+    return r.status === 200 ? (r.data as { id: number }).id : null;
+  }
+
+  // A private repository in Mynt's organization, with a first commit (so it has a default branch for pull
+  // requests). Needs the App's Administration (write) permission on that installation. Creating one that already
+  // exists returns it, so a retry after a lost response is safe.
+  async createRepository(org: string, installationId: number, name: string, description: string) {
+    const r = await this.call("POST", `/app/installations/${installationId}/access_tokens`, { permissions: { administration: "write", contents: "read" } });
+    if (r.status !== 201) throw new Error(`GitHub refused a token to create repositories in ${org} (${r.status})`);
+    const token = (r.data as { token: string }).token;
+    const call = async (method: string, path: string, body?: unknown) => {
+      const res = await fetch(`${this.api}${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mynt", "X-GitHub-Api-Version": "2022-11-28" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: res.status, data: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+    };
+    const created = await call("POST", `/orgs/${encodeURIComponent(org)}/repos`, { name, description, private: true, auto_init: true, has_issues: false, has_wiki: false, has_projects: false });
+    if (created.status === 201) return created.data.full_name as string;
+    if (created.status === 422) {
+      // It exists (a retry after a lost response, or a concurrent create): read it back, giving a just-created
+      // repository a moment to become readable.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, 500 * attempt));
+        const existing = await call("GET", `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`);
+        if (existing.status === 200) {
+          if (existing.data.private === true) return existing.data.full_name as string;
+          break; // never use a public repository of that name
+        }
+      }
+    }
+    throw new Error(`GitHub refused to create ${org}/${name} (${created.status})`);
   }
 
   installUrl() {

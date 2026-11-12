@@ -11,6 +11,7 @@ import type { SandboxHost } from "./sandbox-host.js";
 import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, redact, shellQuote } from "./boxes.js";
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
+import { isManagedRepository, refuseManagedRepository, type GitRepoHost } from "./git-host.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
@@ -175,6 +176,26 @@ export interface Build {
   base_commit: string | null;
 }
 
+// Apps' repositories and the managed repositories' names (exported so other services' tests build the same tables).
+export const APP_REPOSITORIES_DDL = `
+  -- Each app's repository: the private one Mynt created for it (managed), or the developer's own they chose.
+  CREATE TABLE IF NOT EXISTS financial_products.app_repositories (
+    app_id uuid PRIMARY KEY REFERENCES financial_products.apps(id),
+    repository text NOT NULL,
+    managed boolean NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- The managed repository Mynt created for the app, kept when the app moves to the developer's own: it stays one of
+  -- Mynt's (never connectable by name), and the developer can still clone it or switch back to it.
+  ALTER TABLE financial_products.app_repositories ADD COLUMN IF NOT EXISTS managed_repository text;
+  -- Every name Mynt created a managed repository under: only the name, kept after its app is removed, so the
+  -- repository (still on the host, its old name perhaps redirected) is never connectable by name.
+  CREATE TABLE IF NOT EXISTS financial_products.managed_repository_names (
+    repository text PRIMARY KEY,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+`;
+
 const TABLES = `
   CREATE TABLE IF NOT EXISTS financial_products.build_runs (
     id uuid PRIMARY KEY,
@@ -238,6 +259,7 @@ const TABLES = `
     data jsonb NOT NULL DEFAULT '{}'
   );
   CREATE INDEX IF NOT EXISTS build_events_build_idx ON financial_products.build_events (build_id, at);
+${APP_REPOSITORIES_DDL}
   -- The coding agent's activity (its messages, commands and edits), summarised by Mynt as the build runs and kept
   -- after the sandbox goes. seq orders it within the build and is the cursor developers page with.
   CREATE TABLE IF NOT EXISTS financial_products.build_activity (
@@ -532,8 +554,9 @@ export class BuildService {
   }
 
   async repositories(developerId: string) {
-    return (await this.db.query("SELECT repository, created_at FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [developerId]))
+    const rows = (await this.db.query("SELECT repository, created_at FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [developerId]))
       .rows as { repository: string; created_at: string }[];
+    return rows.map((r) => ({ ...r, managed: this.isManaged(r.repository) }));
   }
 
   private async installation(developerId: string, repository: string) {
@@ -542,6 +565,100 @@ export class BuildService {
       repository.toLowerCase(),
     ]);
     return r ? Number(r.installation_id) : null;
+  }
+
+  // ---- the app's repository: Mynt-managed by default, or the developer's own ----
+
+  // Mynt keeps a private repository per app on its git host (src/git-host.ts), so builds push, pull requests open,
+  // deploy_app fetches and continue_from works with no account of the developer's there. A developer can use their
+  // own repository instead, from the start or later.
+  managedHost: GitRepoHost | null = null;
+
+  isManaged(repository: string | null) {
+    return !!this.managedHost && !!repository && this.managedHost.owns(repository);
+  }
+
+  // Also recognises an app's recorded managed repository by its stored name.
+  managedRepository(repository: string | null) {
+    return repository ? isManagedRepository(this.db, this.managedHost, repository) : Promise.resolve(false);
+  }
+
+  // The guard every connect-by-name path uses (src/git-host.ts).
+  refuseManaged(repository: string) {
+    return refuseManagedRepository(this.db, this.managedHost, repository);
+  }
+
+  async appRepository(appId: string) {
+    const r = await this.one("SELECT repository, managed, managed_repository, created_at FROM financial_products.app_repositories WHERE app_id = $1", [appId]);
+    return r
+      ? { repository: r.repository as string, managed: !!r.managed, managed_repository: (r.managed_repository as string | null) ?? null, created_at: iso(r.created_at)! }
+      : null;
+  }
+
+  // The repository an app's builds push to when none is named: the one set for the app, or else a private one Mynt
+  // creates for it the first time. null when Mynt has no managed repositories and the app has none set.
+  async repositoryForApp(developer: User, appId: string): Promise<string | null> {
+    const set = await this.appRepository(appId);
+    if (set) {
+      if (set.managed && !(await this.installation(developer.id, set.repository))) await this.connectManaged(developer.id, set.repository);
+      return set.repository;
+    }
+    if (!this.managedHost || !this.repos) return null;
+    let created: { repository: string; access: number };
+    try {
+      // Named by the app's id only: nothing about the app or its developer is in the name.
+      created = await this.managedHost.create(`mynt-app-${appId}`, "An app built with Mynt");
+    } catch (e) {
+      throw new Error(`Mynt couldn't create the app's repository (${(e as Error).message}); connect your own with connect_repository and pass it as repository`);
+    }
+    await this.db.query("INSERT INTO financial_products.managed_repository_names (repository) VALUES ($1) ON CONFLICT DO NOTHING", [created.repository]);
+    // If the developer set their own repository meanwhile, that choice stands; the managed one is still recorded.
+    await this.db.query(
+      `INSERT INTO financial_products.app_repositories (app_id, repository, managed, managed_repository) VALUES ($1, $2, true, $2)
+       ON CONFLICT (app_id) DO UPDATE SET managed_repository = COALESCE(app_repositories.managed_repository, EXCLUDED.managed_repository)`,
+      [appId, created.repository],
+    );
+    // Another request may have set the app's repository first (even the developer's own, with set_app_repository):
+    // the managed access is only ever recorded for the managed repository itself.
+    const stored = (await this.appRepository(appId))!;
+    if (stored.managed && stored.repository === created.repository) await this.connectRepository(developer.id, stored.repository, created.access);
+    else if (stored.managed && !(await this.installation(developer.id, stored.repository))) await this.connectManaged(developer.id, stored.repository);
+    return stored.repository;
+  }
+
+  private async connectManaged(developerId: string, repository: string) {
+    const access = await this.managedHost?.access();
+    if (!access) throw new Error("Mynt's managed repositories aren't available right now");
+    await this.connectRepository(developerId, repository, access);
+  }
+
+  // The developer's own connected repository for the app's next builds, instead of the managed one.
+  // Or back to the app's own managed repository, the one exception to the guard here.
+  async setAppRepository(developer: User, appId: string, repository: string) {
+    const repo = repository.toLowerCase();
+    const before = await this.appRepository(appId);
+    if (before?.managed_repository && before.managed_repository === repo) {
+      await this.db.query("UPDATE financial_products.app_repositories SET repository = $2, managed = true, created_at = now() WHERE app_id = $1", [appId, repo]);
+      if (!(await this.installation(developer.id, repo))) await this.connectManaged(developer.id, repo);
+      return { app_id: appId, repository: repo, managed: true, previous: before.repository };
+    }
+    await this.refuseManaged(repo);
+    if (!(await this.installation(developer.id, repo))) throw new Error(`Repository '${repository}' isn't connected; run connect_repository first`);
+    await this.db.query(
+      `INSERT INTO financial_products.app_repositories (app_id, repository, managed) VALUES ($1, $2, false)
+       ON CONFLICT (app_id) DO UPDATE SET repository = EXCLUDED.repository, managed = false, created_at = now()`,
+      [appId, repo],
+    );
+    return { app_id: appId, repository: repo, managed: false, previous: before?.repository ?? null };
+  }
+
+  // A short-lived, read-only token for the app's managed repository, so the developer can clone their code
+  // (to keep it, or to move it to a repository of their own).
+  async managedReadToken(appId: string) {
+    // Also after the app moved to the developer's own repository: that's how they carry its branches over.
+    const set = await this.appRepository(appId);
+    if (!set?.managed_repository || !this.managedHost) return null;
+    return { repository: set.managed_repository, ...(await this.managedHost.readCredentials(set.managed_repository)), expires_in_minutes: 60 };
   }
 
   // ---- lifecycle ----
@@ -559,6 +676,13 @@ export class BuildService {
       // Only a build whose push Mynt confirmed: it verified the pushed commit (commit_sha) and opened its pull request.
       if (!prev.repository || !prev.branch || !(prev.commit_sha || prev.pr_url)) throw new Error(`Build ${prev.id} pushed no verified branch, so there's nothing to continue from`);
       if (opts.app_id && prev.app_id && opts.app_id !== prev.app_id) throw new Error(`Build ${prev.id} is for another app`);
+      // The app moved to the developer's own repository since: that build's branch is in the managed one.
+      const now = prev.app_id ? await this.appRepository(prev.app_id) : null;
+      const moved = (opts.repository && opts.repository.toLowerCase() !== prev.repository) || (now && !now.managed && now.repository !== prev.repository);
+      if (moved && (await this.managedRepository(prev.repository)))
+        throw new Error(
+          `Build ${prev.id} is in the app's previous managed repository (${prev.repository}); push its branch (${prev.branch}) to your own repository first (get_app_repository gives a clone credential), then start the build there`,
+        );
       if (opts.repository && opts.repository.toLowerCase() !== prev.repository) throw new Error(`Build ${prev.id} pushed to ${prev.repository}, not ${opts.repository}`);
       base = prev;
       opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: prev.repository, solana: opts.solana ?? (prev.solana || undefined) };
@@ -579,6 +703,18 @@ export class BuildService {
       throw new Error(
         `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
       );
+    // No repository named: the app's own (Mynt-managed unless the developer chose theirs).
+    if (!opts.repository && opts.app_id) {
+      const repository = await this.repositoryForApp(developer, opts.app_id);
+      if (repository) opts = { ...opts, repository };
+    }
+    if (opts.repository && (await this.managedRepository(opts.repository))) {
+      // The one exception to the guard (refuseManagedRepository): the caller's own app's managed repository, in a build
+      // of that app. Never another app's.
+      const set = opts.app_id ? await this.appRepository(opts.app_id) : null;
+      if (!set?.managed || set.repository !== opts.repository.toLowerCase()) throw new Error(`Repository '${opts.repository}' isn't this app's`);
+      if (!(await this.installation(developer.id, opts.repository))) await this.connectManaged(developer.id, opts.repository);
+    }
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
     const id = randomUUID();
@@ -1494,6 +1630,8 @@ export class BuildService {
         repository: b.repository,
         branch: b.branch,
         mode: b.mode,
+        // Mynt's own repository for this app: it starts with only a README.
+        managed_repository: this.isManaged(b.repository),
         base: b.base_branch ? { branch: b.base_branch, commit_sha: b.base_commit, build_id: b.continued_from } : null,
       },
       goal: b.goal,
@@ -1638,6 +1776,12 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     },
     async ({ repository }) => {
       if (!builds.repos) return fail("Pushing to repositories isn't set up on this Mynt yet; builds still run and give you a preview");
+      // Mynt's managed repositories are reached through each app (start_build, get_app_repository), never by name.
+      try {
+        await builds.refuseManaged(repository);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
       const installation = await builds.repos.installationFor(repository);
       if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
       await builds.connectRepository(user.id, repository, installation);
@@ -1648,8 +1792,85 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
 
   server.registerTool(
     "list_repositories",
-    { title: "My connected repositories", description: "Developer: repositories builds can push to.", inputSchema: {}, annotations: { readOnlyHint: true } },
+    {
+      title: "My connected repositories",
+      description: "Developer: repositories builds can push to: your own connected ones, and your apps' Mynt-managed ones (managed: true).",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
     async () => json(await builds.repositories(user.id)),
+  );
+
+  const ownApp = async (appId: string) => {
+    const app = await store.getApp(appId);
+    return app && app.owner_id === user.id ? app : undefined;
+  };
+
+  server.registerTool(
+    "get_app_repository",
+    {
+      title: "Where an app's code lives",
+      description:
+        "Developer: the repository an app's builds push to. By default Mynt keeps a private one for each app (managed: true), created on its first build, so you need no repository of your own; the result includes a read-only token, valid for an hour, to clone your code with. Or it's your own repository, set with set_app_repository.",
+      inputSchema: { app_id: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ app_id }) => {
+      if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
+      const set = await builds.appRepository(app_id);
+      if (!set)
+        return json({
+          app_id,
+          repository: null,
+          managed: builds.managedHost ? "created on the app's first build" : false,
+          next: builds.managedHost ? "start_build with this app_id" : "connect_repository, then set_app_repository",
+        });
+      if (!set.managed_repository) return json({ app_id, ...set });
+      try {
+        // The managed repository's clone credential: the app's current repository, or the one it had before it
+        // moved to the developer's own (to carry its branches over).
+        const read = await builds.managedReadToken(app_id);
+        await store.audit(user.id, "get_app_repository", app_id, { repository: set.managed_repository, read_token: !!read });
+        return json({
+          app_id,
+          ...set,
+          ...(read
+            ? {
+                clone: {
+                  repository: read.repository,
+                  url: builds.managedHost!.cloneUrl(read.repository),
+                  username: read.username,
+                  password: read.password,
+                  expires_in_minutes: read.expires_in_minutes,
+                  note: "Read-only. Use it as git's password (a credential helper), not in the URL. To move to your own repository: clone, push to yours, connect_repository, then set_app_repository.",
+                },
+              }
+            : {}),
+        });
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_app_repository",
+    {
+      title: "Use your own repository for an app",
+      description:
+        "Developer: from now on, the app's builds push to one of your own connected repositories instead of the one Mynt manages for it; or, given the app's own managed repository (get_app_repository names it), back to that. Builds already made stay where they are (continue_from works within one repository: push the managed repository's branch to yours first if you want to carry on from it).",
+      inputSchema: { app_id: z.string(), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name") },
+    },
+    async ({ app_id, repository }) => {
+      if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
+      try {
+        const r = await builds.setAppRepository(user, app_id, repository);
+        await store.audit(user.id, "set_app_repository", app_id, { repository: r.repository, previous: r.previous });
+        return json(r);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
   );
 
   server.registerTool(
@@ -1661,7 +1882,10 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       inputSchema: {
         goal: z.string().min(10).describe("What to build or change, in plain words"),
         app_id: z.string().optional().describe("The experience to build (its products, terms and screens are given to the agent)"),
-        repository: z.string().optional().describe("A connected repository (owner/name) to push to"),
+        repository: z
+          .string()
+          .optional()
+          .describe("A connected repository (owner/name) to push to. Default: the app's own repository, which Mynt creates and manages for it unless you chose yours with set_app_repository"),
         cap_usd: z.number().positive().optional().describe("Spend cap for this build, up to the platform maximum"),
         solana: z
           .boolean()
