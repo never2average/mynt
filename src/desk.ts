@@ -9,6 +9,7 @@ import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import { DESK_RUNNER, type DeskOutcome, type DeskReport } from "./desk-runner.js";
 import type { RepoAccess } from "./github.js";
+import { requirePush, type RepoOwnershipService } from "./repo-ownership.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import { findLicenses, normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, User } from "./store.js";
@@ -156,8 +157,13 @@ export class DeskService {
 
   // ---- workspace and term sheets ----
 
+  // Who may push where (src/repo-ownership.ts): a firm's workspace, and each exploration on it, need someone who can.
+  ownership: RepoOwnershipService | null = null;
+
   async connectWorkspace(entityId: string, userId: string, repository: string) {
     if (!this.repos) throw new Error("The product desk isn't enabled on this Mynt yet");
+    // The App being installed there only says Mynt can reach it: the person connecting it must be able to push there.
+    await requirePush(this.ownership, userId, repository);
     const installation = await this.repos.installationFor(repository);
     if (!installation) throw new Error(`Install the Mynt GitHub App on ${repository} first: ${this.repos.installUrl()}`);
     await this.db.query(
@@ -244,7 +250,10 @@ export class DeskService {
     if (!this.enabled) throw new Error("The product desk isn't enabled on this Mynt yet");
     if (o.kind === "agent" && !this.agentsEnabled) throw new Error("Desk agents aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    if (!(await this.workspace(user.entity_id))) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    const ws = await this.workspace(user.entity_id);
+    if (!ws) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    // Desk jobs clone the workspace (and agents propose pull requests to it): only for someone who can push there.
+    await requirePush(this.ownership, user.id, ws.repository);
     let termsH: string | null = null;
     if (o.product_id) {
       const p = await this.store.getProduct(o.product_id);

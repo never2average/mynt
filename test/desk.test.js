@@ -11,7 +11,7 @@ import { DESK_RUNNER } from "../dist/desk-runner.js";
 import { DeskService, deskConfigFromEnv, termsHash } from "../dist/desk.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, gitOwnership, licensed } from "./helpers.js";
 
 const DIR = "/home/user/mynt-desk";
 const JOB = `${DIR}/job`;
@@ -191,9 +191,12 @@ async function setup() {
   const repos = fakeRepos();
   const host = { agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example.com" };
   const desk = await DeskService.open(db, store, sandboxes, repos, deskConfigFromEnv(host, {}));
+  // Everyone's git account is linked and can push everywhere unless a test says otherwise (owners.host.push).
+  const owners = await gitOwnership(db);
+  desk.ownership = owners.ownership;
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
-    await createServer(store, user, { desk }).connect(s);
+    await createServer(store, user, { desk, ownership: owners.ownership }).connect(s);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(c);
     return client;
@@ -209,13 +212,14 @@ async function setup() {
     }
     return { isError: res.isError ?? false, data };
   };
-  const innovator = async (name) => {
+  const innovator = async (name, { linked = true } = {}) => {
     const { user } = await store.createUser(name, ["innovator"]);
     await licensed(store, user, { region: "IN", category: "personal-loans", action: "issuance" });
+    if (linked) await owners.link(user);
     const client = await connect(user);
     return { user, client };
   };
-  return { store, desk, sandboxes, repos, connect, call, innovator };
+  return { store, desk, sandboxes, repos, connect, call, innovator, owners };
 }
 
 const loan = {
@@ -377,4 +381,28 @@ test("the desk is the firm's: other firms can't use your products or jobs, and b
   assert.match((await call(client, "desk_task", { goal: "One task too many for this month" })).data.error, /monthly desk budget/);
   assert.equal((await call(client, "stop_desk_job", { job_id: job.id })).data.stopped, job.id);
   assert.equal((await desk.job(job.id)).status, "stopped");
+});
+
+test("a firm's desk workspace needs someone who can push there; desk jobs stop once they can't", async () => {
+  const { call, innovator, owners } = await setup();
+  const { RepoOwnershipService } = await import("../dist/repo-ownership.js");
+  const allowed = new Set(["Ines|acme/desk"]);
+  owners.host.push = (login, repo) => allowed.has(`${login}|${repo}`);
+  // The App is installed on acme/desk (fakeRepos): another firm's member who can't push there can't attach it.
+  const { client: mallory } = await innovator("Mallory");
+  assert.match((await call(mallory, "connect_desk_repository", { repository: "acme/desk" })).data.error, /can't push to acme\/desk/);
+  const { client: newcomer } = await innovator("New", { linked: false });
+  assert.match((await call(newcomer, "connect_desk_repository", { repository: "acme/desk" })).data.error, /connect_git_account/);
+  const { client } = await innovator("Ines");
+  assert.equal((await call(client, "connect_desk_repository", { repository: "acme/desk" })).data.connected, "acme/desk");
+  assert.equal((await call(client, "create_product", loan)).isError, false);
+  await call(client, "set_product_terms", { product_id: "quick-loan", inputs: loanTerms.inputs });
+  const ttl = RepoOwnershipService.CHECK_TTL_MS;
+  RepoOwnershipService.CHECK_TTL_MS = 0;
+  try {
+    allowed.delete("Ines|acme/desk");
+    assert.match((await call(client, "analyze_product", { product_id: "quick-loan" })).data.error, /can't push to acme\/desk/);
+  } finally {
+    RepoOwnershipService.CHECK_TTL_MS = ttl;
+  }
 });

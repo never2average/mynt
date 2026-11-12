@@ -212,6 +212,24 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.
 
+**Proof of push access.** The App being installed on a repository only says Mynt can reach it, not that the person asking may use it. So, before Mynt gives out any token for a repository named by a person, it asks the git host, as that person, whether they can push there (`src/repo-ownership.ts`; the GitHub adapter is `GitHubUserAuth` in `src/github.ts`, which reads `permissions.push` from `GET /repos/{owner}/{repo}` with the person's user token).
+- **Once per person.** `connect_git_account` gives a link where they authorise the App as themselves; it expires in ten minutes, and its state is single use. The host sends them back to `/oauth/git/callback`. Their user token is sealed at rest with `MYNT_VAULT_KEY`, refreshed when it expires, and never shown. `git_account` says whether it's connected, and can disconnect it.
+- **Checked on every path that uses a repository by name:**
+  - `connect_repository`;
+  - every build naming a repository, re-checked at each build start, so revoked access stops the next build; connections made before this check existed are checked too;
+  - `reopen_sandbox`, which gives a push token;
+  - a firm's desk workspace (`connect_desk_repository`), and each desk job and exploration on it.
+- **Caching.** An answer is reused for five minutes.
+- **Error messages.**
+  - Someone who hasn't connected their git account is told to run `connect_git_account`.
+  - A token the host no longer accepts asks them to connect it again.
+  - Without this set up, Mynt connects no repository at all.
+
+Operator setup, in the GitHub App's settings (the domain is a placeholder for this server's `PUBLIC_URL`):
+1. Under **Identifying and authorizing users**, set **Callback URL** to `https://<your-mynt-domain>/oauth/git/callback`.
+2. Tick **Request user authorization (OAuth) during installation**. Keep **Expire user authorization tokens** on: Mynt refreshes them.
+3. Generate a client secret. Set `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` on the server, beside `PUBLIC_URL` and `MYNT_VAULT_KEY`.
+
 **Configuration:** `BOAT_API_KEY`, `PUBLIC_URL` and a model backend for the agent proxy (builds are disabled without them): either `GOOGLE_APPLICATION_CREDENTIALS` (a service account key file with Vertex AI User on a project where the Claude models are enabled; optional `VERTEX_PROJECT_ID`, `VERTEX_REGION`, default `global`) or `ANTHROPIC_API_KEY` (a dedicated key with a spend limit); `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_SLUG` (pushing is disabled without them); optional `BUILD_AGENT_MODEL` (default `claude-opus-5-5`), `BUILD_SANDBOX_TYPE` and `BUILD_SANDBOX_TTL_SECONDS`.
 
 ### Solana programs (developers)

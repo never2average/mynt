@@ -12,6 +12,7 @@ import type { DeskConfig, DeskService } from "./desk.js";
 import { DATASET_SIZE, datasetInputs, generateDataset, jsonl, newDatasetSecret, splitKeys, type Economics, type GeneratorParams } from "./explore-data.js";
 import { OBJECTIVES, SCORER_SCRIPT, scoreWithStability, type Objective, type ScoringSpec } from "./explore-score.js";
 import type { RepoAccess } from "./github.js";
+import { requirePush } from "./repo-ownership.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import type { ReviewService } from "./review.js";
 import type { Store, User } from "./store.js";
@@ -251,6 +252,8 @@ export class ExploreService {
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
     const ws = await this.desk.workspace(user.entity_id);
     if (!ws) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    // Explorers get a token that writes to the whole workspace: only for someone who can push there themselves.
+    await requirePush(this.desk.ownership, user.id, ws.repository);
     const p = await this.store.getProduct(o.product_id);
     // The firm's product (or, for a product with no firm, the caller's own): the workspace and budget are the firm's.
     if (!p || (p.entity_id ? p.entity_id !== user.entity_id : p.owner_id !== user.id)) throw new Error(`No product of your firm's with id '${o.product_id}'`);

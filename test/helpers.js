@@ -1,8 +1,48 @@
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { normalizeModel } from "../dist/regulatory.js";
+import { RepoOwnershipService } from "../dist/repo-ownership.js";
 
 // Mynt ships no catalogue; tests seed this fixture (with the regions and categories it implies).
 export const CATALOG = JSON.parse(readFileSync(new URL("./fixtures/catalog.json", import.meta.url), "utf8"));
+
+// People's git-host tokens are sealed with the vault key.
+process.env.MYNT_VAULT_KEY ??= randomBytes(32).toString("base64");
+
+// A stand-in git host for people's own authorization: the code a person comes back with is their login, and who can
+// push where is `push(login, repository)` (everyone everywhere by default). `revoked` logins' tokens stop working.
+export function fakeGitHost(push = () => true) {
+  const host = {
+    name: "fake",
+    push,
+    revoked: new Set(),
+    checks: [],
+    authorizeUrl: (state, redirect) => `https://git.example/authorize?state=${state}&redirect_uri=${encodeURIComponent(redirect)}`,
+    async exchange(code) {
+      return { access_token: `user-token-${code}`, refresh_token: null, expires_at: null, login: code };
+    },
+    async refresh() {
+      throw new Error("no refresh");
+    },
+    async canPush(token, repository) {
+      const login = token.replace(/^user-token-/, "");
+      host.checks.push({ login, repository });
+      if (host.revoked.has(login)) return "unauthorized";
+      return host.push(login, repository);
+    },
+  };
+  return host;
+}
+
+// Who may push where, on `db`, with a fake git host; `link(user)` connects the user's git account as their name.
+export async function gitOwnership(db, host = fakeGitHost()) {
+  const ownership = await RepoOwnershipService.open(db, host, "https://mynt.example.com");
+  const link = async (user, login = user.name) => {
+    const { authorize_url } = await ownership.begin(user.id);
+    await ownership.complete(new URL(authorize_url).searchParams.get("state"), login);
+  };
+  return { ownership, host, link };
+}
 
 // Gives `user` a firm holding a verified licence for `action` on `category` in `region`, with a
 // matching licence type in the regulatory model. Mutates `user.entity_id` so servers built for that

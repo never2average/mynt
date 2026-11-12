@@ -17,7 +17,8 @@ import { ReviewService, reviewConfigFromEnv } from "./review.js";
 import { BuildService, buildConfigFromEnv } from "./builds.js";
 import { connectPostgres } from "./db.js";
 import { createMcpHttpServer } from "./http.js";
-import { GitHubApp } from "./github.js";
+import { GitHubApp, GitHubUserAuth } from "./github.js";
+import { RepoOwnershipService } from "./repo-ownership.js";
 import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
@@ -66,6 +67,8 @@ Environment:
   BD_ENABLED=1              Runs Mynt's connector agent (business development) on the same harness (BD_DAILY_CAP, BD_RUN_CAP_USD, ...)
   ANTHROPIC_API_KEY         Otherwise, build agents use the Anthropic API. Either way the credentials stay on Mynt's server
   GITHUB_APP_ID             With GITHUB_APP_PRIVATE_KEY and GITHUB_APP_SLUG: builds push branches and open PRs
+  GITHUB_APP_CLIENT_ID      With GITHUB_APP_CLIENT_SECRET, PUBLIC_URL and MYNT_VAULT_KEY: people authorise the App as themselves
+                            (connect_git_account); no repository is connected or built on unless they can push there
   SOLANA_RPC_URL_DEVNET     Solana programs: devnet RPC (default the public devnet endpoint); keys sealed with MYNT_VAULT_KEY
   SOLANA_RPC_URL_MAINNET    Mainnet RPC (no default). Mainnet also needs an admin's configure_solana_signer, and for
                             the mainnet-vault backend SOLANA_MAINNET_VAULT_SIGNER=enabled
@@ -106,6 +109,10 @@ const openServices = async () => {
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
   const deskConfig = deskConfigFromEnv(buildConfig);
   const desk = await DeskService.open(db, store, sandboxes, github, deskConfig);
+  // Who may push where: each person authorises the GitHub App as themselves, and every repository connect checks it.
+  const ownership = await RepoOwnershipService.open(db, GitHubUserAuth.fromEnv(), process.env.PUBLIC_URL ?? "");
+  builds.ownership = ownership;
+  desk.ownership = ownership;
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
   const bd = await BdService.open(db, sandboxes, bdConfigFromEnv(buildConfig));
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.
@@ -146,7 +153,7 @@ const openServices = async () => {
   const liquidity = new LiquidityWorker(store, productHealth, liquidityConfigFromEnv(process.env, healthConfig.intervalMs));
   // Licence providers' rules on those records: evaluated on each snapshot and on their own timer.
   const covenants = await CovenantService.open(db, store, productHealth);
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants };
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, ownership };
 };
 
 const parseRoles = (): Role[] => {
@@ -169,13 +176,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, ownership } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, ownership }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, ownership } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -189,7 +196,7 @@ if (values.help) {
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, ownership }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Sends queued webhook deliveries (events from any process sharing the database).

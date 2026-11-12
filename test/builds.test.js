@@ -9,7 +9,7 @@ import { workspaceFiles } from "../dist/agent-host.js";
 import { redact } from "../dist/boxes.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
-import { CATALOG } from "./helpers.js";
+import { CATALOG, fakeGitHost, gitOwnership } from "./helpers.js";
 
 const SHA = "a".repeat(64);
 const COMMIT = "c".repeat(40);
@@ -135,17 +135,24 @@ function fakeRepos() {
   };
 }
 
-async function setup({ sandboxes = fakeSandboxHost(), config = {}, refuse = null } = {}) {
+// `git`: people's git accounts are linked as they're created (true), or left for the test to link (false).
+async function setup({ sandboxes = fakeSandboxHost(), config = {}, refuse = null, git = true, push } = {}) {
   const pg = new PGlite();
   // `refuse`: stands in for a database that rejects some statements (those it returns true for).
   const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
   const builds = await BuildService.open(db, store, sandboxes, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
-  const as = async (name, roles) => (await store.createUser(name, roles)).user;
+  const { ownership, host: gitHost, link } = await gitOwnership(db, fakeGitHost(push));
+  builds.ownership = ownership;
+  const as = async (name, roles) => {
+    const user = (await store.createUser(name, roles)).user;
+    if (git) await link(user);
+    return user;
+  };
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
-    await createServer(store, user, { builds }).connect(s);
+    await createServer(store, user, { builds, ownership }).connect(s);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(c);
     return client;
@@ -161,7 +168,7 @@ async function setup({ sandboxes = fakeSandboxHost(), config = {}, refuse = null
     }
     return { isError: res.isError ?? false, data };
   };
-  return { pg, store, builds, sandboxes, repos, as, connect, call };
+  return { pg, store, builds, sandboxes, repos, as, connect, call, ownership, gitHost, link };
 }
 
 const passingChecks = [
@@ -858,6 +865,98 @@ test("a finished build's sandbox reopens on its branch for the developer, with t
   assert.ok(box.stopped);
   const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline.filter((e) => e.phase === "box").map((e) => e.message);
   assert.ok(timeline.includes("The developer reopened the build's sandbox on its branch") && timeline.includes("The developer closed the reopened sandbox"));
+});
+
+test("connect_repository needs proof the developer can push there, not just the App's installation", async () => {
+  const allowed = new Set(["Owner|acme/savings-app"]);
+  const ctx = await setup({ push: (login, repo) => allowed.has(`${login}|${repo}`) });
+  const { as, connect, call, pg, link } = ctx;
+  // The App is installed on acme/savings-app (fakeRepos), so the installation alone would let anyone in.
+  const mallory = await connect(await as("Mallory", ["developer"]));
+  assert.match((await call(mallory, "connect_repository", { repository: "acme/savings-app" })).data.error, /can't push to acme\/savings-app/);
+  assert.match((await call(mallory, "start_build", { goal: "Build something in their repository", repository: "acme/savings-app" })).data.error, /isn't connected/);
+  // Someone who hasn't connected their git account is told how.
+  const ctx2 = await setup({ git: false });
+  const newcomer = await ctx2.connect(await ctx2.as("New", ["developer"]));
+  assert.match((await ctx2.call(newcomer, "connect_repository", { repository: "acme/savings-app" })).data.error, /connect_git_account/);
+  const started = (await ctx2.call(newcomer, "connect_git_account")).data;
+  const auth = new URL(started.authorize_url);
+  assert.equal(auth.searchParams.get("redirect_uri"), "https://mynt.example.com/oauth/git/callback");
+  assert.equal(started.expires_in_minutes, 10);
+
+  // The repository's owner, who can push, connects it and builds on it.
+  const owner = await connect(await as("Owner", ["developer"]));
+  assert.equal((await call(owner, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
+  assert.equal((await call(owner, "start_build", { goal: "Build a savings comparison page", repository: "acme/savings-app" })).isError, false);
+  assert.equal((await call(owner, "git_account")).data.connected.login, "Owner");
+  // The token is kept sealed, never in the clear.
+  const stored = (await pg.query("SELECT token_sealed FROM financial_products.git_accounts")).rows.map((r) => r.token_sealed);
+  assert.ok(stored.length >= 2 && stored.every((t) => t.startsWith("v1:") && !t.includes("user-token")));
+});
+
+test("revoked push access stops the next build; connections made before the check must be verified; a dead token says so", async () => {
+  const allowed = new Set(["Owner|acme/savings-app"]);
+  const ctx = await setup({ push: (login, repo) => allowed.has(`${login}|${repo}`) });
+  const { builds, as, connect, call, gitHost } = ctx;
+  const { RepoOwnershipService } = await import("../dist/repo-ownership.js");
+  const ttl = RepoOwnershipService.CHECK_TTL_MS;
+  try {
+    const owner = await connect(await as("Owner", ["developer"]));
+    await call(owner, "connect_repository", { repository: "acme/savings-app" });
+    assert.equal((await call(owner, "start_build", { goal: "Build a savings comparison page", repository: "acme/savings-app" })).isError, false);
+    // Within a few minutes the answer is reused; after that, access revoked on the host stops the next build.
+    allowed.delete("Owner|acme/savings-app");
+    assert.equal((await call(owner, "start_build", { goal: "Build another page while still cached", repository: "acme/savings-app" })).isError, false);
+    RepoOwnershipService.CHECK_TTL_MS = 0;
+    assert.match((await call(owner, "start_build", { goal: "Build after access was revoked", repository: "acme/savings-app" })).data.error, /can't push to acme\/savings-app/);
+    // The reopened sandbox (a push token) is refused too.
+    const last = (await builds.listFor(null))[0];
+    await assert.rejects(builds.reopen({ ...last, status: "succeeded", branch: "mynt/build-x" }), /can't push/);
+
+    // A connection made before this check existed, by someone who never connected their git account: refused at build.
+    const legacyUser = (await ctx.store.createUser("Legacy", ["developer"])).user;
+    await builds.connectRepository(legacyUser.id, "acme/savings-app", 42);
+    const legacy = await connect(legacyUser);
+    assert.match((await call(legacy, "start_build", { goal: "Build with an old connection", repository: "acme/savings-app" })).data.error, /connect_git_account/);
+
+    // A token the host no longer accepts (revoked there, no refresh): connect again.
+    allowed.add("Owner|acme/savings-app");
+    gitHost.revoked.add("Owner");
+    assert.match((await call(owner, "start_build", { goal: "Build with a revoked token", repository: "acme/savings-app" })).data.error, /connect it again with connect_git_account/);
+  } finally {
+    RepoOwnershipService.CHECK_TTL_MS = ttl;
+  }
+});
+
+test("the git host's callback: the state is single use and names who started it; without the set-up, nothing connects", async () => {
+  const ctx = await setup({ git: false });
+  const { ownership, as, connect, call, builds, store } = ctx;
+  const user = await as("Dev", ["developer"]);
+  const { authorize_url } = await ownership.begin(user.id);
+  const state = new URL(authorize_url).searchParams.get("state");
+  // Through Mynt's HTTP server, as the browser comes back.
+  const { createMcpHttpServer } = await import("../dist/http.js");
+  const server = createMcpHttpServer(store, null, { builds, ownership });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const ok = await fetch(`${base}/oauth/git/callback?state=${state}&code=Dev`);
+    assert.equal(ok.status, 200);
+    assert.match(await ok.text(), /\(Dev\) is connected/);
+    assert.equal(ok.headers.get("cache-control"), "no-store");
+    const again = await fetch(`${base}/oauth/git/callback?state=${state}&code=Mallory`);
+    assert.equal(again.status, 400, "a state is used once");
+    assert.match(await again.text(), /expired or was already used/);
+    assert.equal((await fetch(`${base}/oauth/git/callback?state=made-up&code=Mallory`)).status, 400);
+  } finally {
+    server.close();
+  }
+  assert.equal((await ownership.account(user.id)).login, "Dev");
+  const dev = await connect(user);
+  assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.connected, true);
+  // A Mynt without the git host's user authorization set up refuses to connect anything.
+  builds.ownership = null;
+  assert.match((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.error, /an operator's step/);
 });
 
 test("builds stay off without a model backend for the proxy", async () => {

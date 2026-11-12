@@ -2,6 +2,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
+import { GIT_CALLBACK_PATH } from "./repo-ownership.js";
 import type { ClerkAuth } from "./auth.js";
 import { RAMP_ADAPTER_WEBHOOK_PATH, rampAdapterWebhook } from "./ramp-adapters/index.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
@@ -119,6 +120,23 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return runtime(req, res, url);
   // The Mynt Ramp's sandbox endpoint: answers only requests Mynt signed for a ramp offering pointed at it.
   if (url.pathname.startsWith(`${RAMP_SANDBOX_PATH}/`)) return rampSandbox(store, req, res, url);
+  // The git host sends a person back here after they authorise Mynt's app as themselves (repo-ownership.ts). The
+  // single-use state names who started it; nothing about the token is ever shown.
+  if (ctx.ownership && req.method === "GET" && url.pathname === GIT_CALLBACK_PATH) {
+    const page = (status: number, text: string) =>
+      void res
+        .writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" })
+        .end(text);
+    const state = url.searchParams.get("state") ?? "";
+    const code = url.searchParams.get("code") ?? "";
+    if (!state || !code) return page(400, "This link is incomplete. Start again with connect_git_account.");
+    try {
+      const done = await ctx.ownership.complete(state, code);
+      return page(200, `Your git account${done.login ? ` (${done.login})` : ""} is connected to Mynt. You can close this tab and go back.`);
+    } catch (e) {
+      return page(400, (e as Error).message);
+    }
+  }
   // Build agents reach Anthropic through Mynt with a per-build token (see agent-proxy.ts).
   if (ctx.builds && url.pathname.startsWith("/agent/")) {
     const builds = ctx.builds;

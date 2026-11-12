@@ -11,6 +11,7 @@ import type { SandboxHost } from "./sandbox-host.js";
 import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, redact, shellQuote } from "./boxes.js";
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
+import { requirePush, type RepoOwnershipService } from "./repo-ownership.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
@@ -348,6 +349,8 @@ const SOLANA_INSTALLER = ENV_FILES.installer;
 export class BuildService {
   private timer: NodeJS.Timeout | null = null;
   solana: BuildSolanaHooks | null = null;
+  // Who may push where (src/repo-ownership.ts): checked on every repository a developer connects or builds on.
+  ownership: RepoOwnershipService | null = null;
 
   private constructor(
     private readonly db: Db,
@@ -555,6 +558,9 @@ export class BuildService {
       );
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
+    // Checked again at every build, connections made before this check existed included: a developer who can no
+    // longer push there (or never could) gets no push token for it.
+    if (opts.repository) await requirePush(this.ownership, developer.id, opts.repository);
     const id = randomUUID();
     // The Solana toolchain when asked for, or when the app has programs reserved.
     const solana = opts.solana ?? (!!opts.app_id && !!this.solana && (await this.solana.programsForApp(opts.app_id)).length > 0);
@@ -832,6 +838,8 @@ export class BuildService {
     if (build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) return { sandbox: "already open", until: build.box_until };
     const installation = await this.installation(build.developer_id, build.repository);
     if (!installation) throw new Error(`Mynt's GitHub App can't reach ${build.repository} any more`);
+    // The reopened sandbox gets a push token: only for a developer who can still push there.
+    await requirePush(this.ownership, build.developer_id, build.repository);
     const { token } = await this.repos.tokenFor(build.repository, installation);
     const ttl = Math.round(Math.max(1, Math.min(8, hours)) * 3600);
     const s = await this.sandboxes.createSandbox({
@@ -1549,6 +1557,12 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     },
     async ({ repository }) => {
       if (!builds.repos) return fail("Pushing to repositories isn't set up on this Mynt yet; builds still run and give you a preview");
+      // The App being installed there only says Mynt can reach it: the developer must be able to push there themselves.
+      try {
+        await requirePush(builds.ownership, user.id, repository);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
       const installation = await builds.repos.installationFor(repository);
       if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
       await builds.connectRepository(user.id, repository, installation);

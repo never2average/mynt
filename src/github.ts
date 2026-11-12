@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import type { GitUserToken, RepoOwnershipProvider } from "./repo-ownership.js";
 
 // Pushes from builds go through a GitHub App the developer installs on their repository. For each build
 // Mynt mints an installation token limited to that one repository, with contents and pull-request write
@@ -109,5 +110,65 @@ export class GitHubApp implements RepoAccess {
     const created = await call("POST", `/repos/${repo}/pulls`, { head: pr.head, base, title: pr.title, body: pr.body });
     if (created.status !== 201) throw new Error(`GitHub refused the pull request (${created.status})`);
     return created.data.html_url as string;
+  }
+}
+
+// The GitHub App's user-to-server authorization (OAuth): a person authorises the App as themselves, and Mynt asks
+// GitHub, with their user token, whether they can push to a repository (GET /repos/{owner}/{repo}: permissions.push).
+// GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET are the App's own; the secret stays on the server.
+export class GitHubUserAuth implements RepoOwnershipProvider {
+  readonly name = "github";
+  constructor(
+    private readonly clientId: string,
+    private readonly clientSecret: string,
+    private readonly web = "https://github.com",
+    private readonly api = "https://api.github.com",
+  ) {}
+
+  static fromEnv(env = process.env): GitHubUserAuth | null {
+    return env.GITHUB_APP_CLIENT_ID && env.GITHUB_APP_CLIENT_SECRET ? new GitHubUserAuth(env.GITHUB_APP_CLIENT_ID, env.GITHUB_APP_CLIENT_SECRET) : null;
+  }
+
+  authorizeUrl(state: string, redirectUri: string) {
+    const q = new URLSearchParams({ client_id: this.clientId, redirect_uri: redirectUri, state });
+    return `${this.web}/login/oauth/authorize?${q}`;
+  }
+
+  private async tokenCall(body: Record<string, string>): Promise<GitUserToken> {
+    const res = await fetch(`${this.web}/login/oauth/access_token`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "mynt" },
+      body: JSON.stringify({ client_id: this.clientId, client_secret: this.clientSecret, ...body }),
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok || typeof data.access_token !== "string") throw new Error(`GitHub refused the authorization (${String(data.error ?? res.status)})`);
+    const token = data.access_token;
+    const user = await fetch(`${this.api}/user`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mynt" } });
+    const login = user.ok ? (((await user.json()) as { login?: string }).login ?? null) : null;
+    return {
+      access_token: token,
+      refresh_token: typeof data.refresh_token === "string" ? data.refresh_token : null,
+      expires_at: typeof data.expires_in === "number" ? new Date(Date.now() + data.expires_in * 1000).toISOString() : null,
+      login,
+    };
+  }
+
+  exchange(code: string, redirectUri: string) {
+    return this.tokenCall({ code, redirect_uri: redirectUri });
+  }
+
+  refresh(refreshToken: string) {
+    return this.tokenCall({ grant_type: "refresh_token", refresh_token: refreshToken });
+  }
+
+  async canPush(accessToken: string, repository: string): Promise<boolean | "unauthorized"> {
+    const res = await fetch(`${this.api}/repos/${repository}`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/vnd.github+json", "User-Agent": "mynt", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (res.status === 401) return "unauthorized";
+    if (res.status === 404 || res.status === 403) return false;
+    if (!res.ok) throw new Error(`GitHub couldn't say who can push to ${repository} (${res.status})`);
+    const data = (await res.json()) as { permissions?: { push?: boolean } };
+    return data.permissions?.push === true;
   }
 }

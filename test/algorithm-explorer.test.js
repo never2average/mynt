@@ -17,7 +17,7 @@ import { startRepoRun } from "../dist/repo-run.js";
 import { opsStatus } from "../dist/ops.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, gitOwnership, licensed } from "./helpers.js";
 
 const DIR = "/home/user/mynt-explore";
 const JOB = `${DIR}/job`;
@@ -369,9 +369,12 @@ async function setup() {
   const deskConfig = deskConfigFromEnv(host, {});
   const desk = await DeskService.open(db, store, sandboxes, repos, deskConfig);
   const explore = await ExploreService.open(db, store, sandboxes, repos, exploreConfigFromEnv(deskConfig, {}), desk);
+  // Everyone's git account is linked and can push everywhere unless a test says otherwise (owners.host.push).
+  const owners = await gitOwnership(db);
+  desk.ownership = owners.ownership;
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
-    await createServer(store, user, { desk, explore }).connect(s);
+    await createServer(store, user, { desk, explore, ownership: owners.ownership }).connect(s);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(c);
     return client;
@@ -389,6 +392,7 @@ async function setup() {
   const innovator = async (name) => {
     const { user } = await store.createUser(name, ["innovator"]);
     await licensed(store, user, { region: "IN", category: "personal-loans", action: "issuance" });
+    await owners.link(user);
     return { user, client: await connect(user) };
   };
   const ready = async () => {
@@ -399,7 +403,7 @@ async function setup() {
     await call(client, "set_product_terms", { product_id: "quick-loan", inputs: { apr_pct: 18, apr_cap_pct: 24, expected_pd_pct: 5, lgd_pct: 65, cost_of_funds_pct: 9, opex_pct: 3 } });
     return { user, client };
   };
-  return { db, store, desk, explore, sandboxes, repos, connect, call, innovator, ready };
+  return { db, store, desk, explore, sandboxes, repos, connect, call, innovator, ready, owners };
 }
 
 // A fixed dataset secret for the exploration test. On its holdout the knockout at 650 is within every constraint
@@ -421,6 +425,20 @@ test("the scenario holds on the pinned holdout: the knockout is eligible and bea
   assert.ok(k.objective.value > base.objective.value);
   assert.equal(pricey.eligible, false);
   assert.ok(pricey.objective.value > k.objective.value);
+});
+
+test("an exploration (explorers get a token that writes to the workspace) needs someone who can push there now", async () => {
+  const { call, ready, owners } = await setup();
+  const { client } = await ready();
+  const { RepoOwnershipService } = await import("../dist/repo-ownership.js");
+  const ttl = RepoOwnershipService.CHECK_TTL_MS;
+  RepoOwnershipService.CHECK_TTL_MS = 0;
+  owners.host.push = () => false; // Ines's push access to acme/desk was revoked on the host
+  try {
+    assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", objective: "net_margin", explorers: 3 })).data.error, /can't push to acme\/desk/);
+  } finally {
+    RepoOwnershipService.CHECK_TTL_MS = ttl;
+  }
 });
 
 const variants = async (explore, id) => (await explore.get(id)).variants;
