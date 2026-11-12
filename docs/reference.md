@@ -182,11 +182,17 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **The developer works in the same box.** While a build runs, and after it ships for as long as its preview is up, `open_sandbox_editor` opens VS Code in the browser on the sandbox (a private, token-gated link plus a password), with a terminal next to the agents. `sandbox_run`, `sandbox_files` and `sandbox_diff` do the same from any MCP client. Output is capped and scrubbed of credentials, and everything the developer does is on the build's timeline. After a build ends, `reopen_sandbox` brings back a fresh sandbox on its pushed branch (with the coding team's workspace and a short-lived GitHub token to push with) for a few hours, so the same tools keep working; `close_sandbox` ends it.
 
-**Live preview while the agents code.** Once the agents have installed the app (`node_modules`, and the SDK built), Mynt itself starts its dev servers with `workspaces/coding-build/scripts/dev_preview.sh`:
-- the api on port 3000, on the build's sandbox key;
-- Vite on port 5173, with hot reload.
+**Live preview while the agents code.** Once the agents' `npm install` has finished (npm's lockfile is written and no install is running) and the SDK is built, Mynt itself starts the app's dev servers with `workspaces/coding-build/scripts/dev_preview.sh`:
+- Vite (`npm run dev` in `web/`) on 127.0.0.1:5173, with hot reload;
+- the api (`npm run dev` in `api/`, the template's `tsx watch` from the app's own dev dependencies) on port 3000, on the build's sandbox key.
 
-Mynt then serves port 5173 at a private link, `live_preview_url` on `get_build`. It's started once, never fails a build, and is shown until the build is stopped, fails or goes over budget. The link is a credential: it's never written to the timeline. The script installs nothing, so it never races the agents' own `npm`. The template's `web/vite.config.ts` accepts the forwarder's host name and sends hot reload over port 443 only when the script starts it (`MYNT_LIVE_PREVIEW=1`); a developer's own `npm run dev` keeps Vite's localhost-only defaults. After the build ships, `preview_url` is the verified Compose preview.
+The script never runs `npm install` itself, so it never races the agents. How the link works:
+- Once Vite answers, Mynt serves port 5173 at a private link, `live_preview_url` on `get_build`, shown while the build is `coding`.
+- The link is a credential: it's never written to the timeline, and admins' listing leaves it out.
+- While waiting for the install, Mynt retries every tick. Once the preview is up, or while the app has no `web/` yet, it retries every 6th tick, which also restarts a dev server that died, behind the same link.
+- The preview never fails a build.
+
+When coding ends, Mynt stops both dev servers before it packages the source, and dependencies at any depth (`node_modules`) stay out of the package. The template's `web/vite.config.ts` accepts the forwarder's host name, sends hot reload over port 443 and keeps Vite's cache outside the app, but only when the script starts it (`MYNT_LIVE_PREVIEW=1`); a developer's own `npm run dev` keeps Vite's localhost-only defaults. After the build ships, `preview_url` is the verified Compose preview.
 
 **The agent doesn't grade its own work.** When it finishes, Mynt verifies the build itself, in a **fresh sandbox the agent never touched**, with no secrets:
 1. **Package.** Mynt packages the workspace source (without dependencies), records its SHA-256, and the verifier downloads it and checks the checksum.

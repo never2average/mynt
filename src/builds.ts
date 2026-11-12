@@ -264,6 +264,7 @@ const WORKSPACE = "/home/user/workspace/app";
 // Mynt's live preview of the app while the agents code: its script, in the coding workspace, and Vite's port.
 const DEV_PREVIEW = `${workspaceCwd("coding-build")}/scripts/dev_preview.sh`;
 export const LIVE_PREVIEW_PORT = 5173;
+export const LIVE_PREVIEW_BACKOFF = 6;
 // What a failed audit left behind, kept on the build before its sandbox is deleted.
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
@@ -733,7 +734,7 @@ export class BuildService {
       await this.event(b.id, phase, status?.message ?? phase);
     }
     const now = phase && AGENT_PHASES.includes(phase) ? phase : b.status;
-    if (agent.running && now === "coding" && !b.live_preview_url) await this.ensureLivePreview(b);
+    if (agent.running && now === "coding") await this.ensureLivePreview(b);
     if (agent.running) return;
     if (!agent.ok) throw new Error(`Coding agent ${agent.state?.error ?? agent.state?.last_subtype ?? `exited with code ${agent.state?.exit_code ?? "unknown"}`}`);
     await this.startVerification(b);
@@ -743,12 +744,22 @@ export class BuildService {
   // (scripts/dev_preview.sh: the api on 3000, Vite on 5173 with hot reload) and serves 5173 at a private link,
   // once; the link works as long as the sandbox does. A preview that won't start never fails or holds up a build:
   // it's tried again on the next tick.
+  // The script is cheap while it waits for the agents' install, so it runs every tick until the preview is up; once
+  // it is up (to restart a dev server that died) or when the app has no web/ yet, every LIVE_PREVIEW_BACKOFF ticks.
+  private previewTicks = new Map<string, { n: number; noWeb: boolean }>();
   async ensureLivePreview(b: Build) {
-    if (!this.boat || !b.sandbox_id || b.live_preview_url) return b.live_preview_url;
+    if (!this.boat || !b.sandbox_id) return null;
+    const seen = this.previewTicks.get(b.id) ?? { n: 0, noWeb: false };
+    seen.n++;
+    this.previewTicks.set(b.id, seen);
+    if ((b.live_preview_url || seen.noWeb) && seen.n % LIVE_PREVIEW_BACKOFF !== 0) return b.live_preview_url;
     try {
-      const r = await this.boat.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 60 });
+      const r = await this.boat.exec(b.sandbox_id, `bash ${DEV_PREVIEW} ${WORKSPACE}`, { timeoutSeconds: 90 });
       const said = r.stdout.trim().split("\n").at(-1);
-      if (r.exitCode !== 0 || (said !== "started" && said !== "running")) return null;
+      seen.noWeb = said === "no-web";
+      // started and running both mean the dev server answered on 5173.
+      if (r.exitCode !== 0 || (said !== "started" && said !== "running")) return b.live_preview_url;
+      if (b.live_preview_url) return b.live_preview_url; // restarted behind the link it already has
       const { url } = await this.boat.host(b.sandbox_id, LIVE_PREVIEW_PORT);
       await this.update(b.id, { live_preview_url: url });
       // The link is a credential: it goes on the build, never on the timeline.
@@ -756,7 +767,7 @@ export class BuildService {
       return url;
     } catch (e) {
       console.error(`Build ${b.id} live preview: ${(e as Error).message}`);
-      return null;
+      return b.live_preview_url;
     }
   }
 
@@ -765,9 +776,13 @@ export class BuildService {
   private async startVerification(b: Build) {
     const boat = this.boat!;
     const report = parseJson<AgentResult>(await boat.readFile(b.sandbox_id!, FILES.result));
+    // Coding is over: the live preview's dev servers stop first, so nothing rewrites files while they're packaged.
+    this.previewTicks.delete(b.id);
+    await boat.exec(b.sandbox_id!, `bash ${DEV_PREVIEW} --stop >/dev/null 2>&1; true`, { timeoutSeconds: 60 }).catch(() => undefined);
+    // Dependencies at any depth stay out of the source (web/node_modules and its caches among them).
     const pack = await boat.exec(
       b.sandbox_id!,
-      `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=./node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
+      `set -e; mkdir -p ${OUT}; cd ${WORKSPACE}; tar --exclude=node_modules -czf ${OUT}/app.tgz .; sha256sum ${OUT}/app.tgz`,
       { timeoutSeconds: 300 },
     );
     const sha = pack.stdout.trim().split(/\s+/)[0];
@@ -1253,8 +1268,8 @@ export function developerBuild(b: Build) {
     status: b.status,
     phase_message: b.phase_message,
     preview_url: b.preview_url,
-    // Only while the build's sandbox is up: a stopped or failed build's sandbox is gone.
-    live_preview_url: ["stopped", "failed", "over_budget"].includes(b.status) ? null : (b.live_preview_url ?? null),
+    // Only while the agents code: Mynt stops the dev servers when coding ends (after shipping, preview_url).
+    live_preview_url: b.status === "coding" ? (b.live_preview_url ?? null) : null,
     pr_url: b.pr_url,
     commit_sha: b.commit_sha,
     readiness: b.readiness,
@@ -1509,7 +1524,8 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
     },
     async ({ status }) => {
       const all = await builds.listFor(null, status);
-      return json({ builds: all.map(({ source_url, agent_report, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
+      // Preview links are credentials for the build's developer only.
+      return json({ builds: all.map(({ source_url, agent_report, live_preview_url, ...b }) => b), total_cost_usd: all.reduce((s, b) => s + b.cost_usd, 0) });
     },
   );
 

@@ -403,14 +403,22 @@ test("while the agents code, Mynt starts the app's dev server itself and serves 
   const get = async () => (await call(dev, "get_build", { build_id: started.id })).data;
 
   // Mynt's script, from the coding workspace it wrote, on the app's directory.
-  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /--port 5173 --strictPort/);
-  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /installs nothing/);
-  for (const state of ["no-web", "waiting"]) {
-    s.devPreview = state;
-    await builds.tick();
-    assert.equal((await get()).live_preview_url, null, `no link while the script says ${state}`);
-  }
-  assert.ok(s.commands.some((c) => c.command === `bash ${BUILD}/scripts/dev_preview.sh /home/user/workspace/app`));
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /--host 127\.0\.0\.1 --port '"\$PORT_WEB"' --strictPort/);
+  assert.match(s.files.get(`${BUILD}/scripts/dev_preview.sh`), /never runs npm install itself/);
+  const scriptRuns = () => s.commands.filter((c) => c.command === `bash ${BUILD}/scripts/dev_preview.sh /home/user/workspace/app`).length;
+  // No web/ yet: tried again only every 6th tick.
+  s.devPreview = "no-web";
+  await builds.tick();
+  assert.equal(scriptRuns(), 1);
+  s.devPreview = "waiting";
+  for (let i = 0; i < 4; i++) await builds.tick();
+  assert.equal(scriptRuns(), 1, "backs off after no-web");
+  await builds.tick();
+  assert.equal(scriptRuns(), 2);
+  assert.equal((await get()).live_preview_url, null, "no link while the script says waiting");
+  // Waiting for the agents' install (or for Vite to answer): every tick.
+  await builds.tick();
+  assert.equal(scriptRuns(), 3);
   assert.deepEqual(boat.hosted, []);
 
   s.devPreview = "started";
@@ -422,12 +430,14 @@ test("while the agents code, Mynt starts the app's dev server itself and serves 
   assert.ok(event, "on the timeline");
   assert.ok(!JSON.stringify(b.timeline).includes("5173.preview"), "the link itself is never on the timeline");
 
-  // Started once: later ticks neither run the script again nor ask for another link.
-  const runs = s.commands.filter((c) => c.command.includes("dev_preview.sh")).length;
-  await builds.tick();
-  await builds.tick();
-  assert.equal(s.commands.filter((c) => c.command.includes("dev_preview.sh")).length, runs);
-  assert.equal(boat.hosted.length, 1);
+  // Once up, the script runs every 6th tick (restarting a dev server that died), behind the same link.
+  const runs = scriptRuns();
+  for (let i = 0; i < 6; i++) await builds.tick();
+  assert.equal(scriptRuns(), runs + 1);
+  assert.equal(boat.hosted.length, 1, "never another link");
+  s.devPreview = "waiting"; // the dev server is down for now: the link stays, and the next check restarts it
+  for (let i = 0; i < 6; i++) await builds.tick();
+  assert.equal((await get()).live_preview_url, `https://${sbx}-5173.preview.example?_token=t`);
 
   // A script that fails, or a host that errors, never fails the build.
   const other = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
@@ -464,9 +474,41 @@ test("Mynt's live preview: the template's Vite config is behind the forwarder on
   assert.match(vite, /allowedHosts: true/);
   assert.match(vite, /hmr: \{ protocol: "wss", clientPort: 443 \}/);
   assert.match(vite, /\.\.\.\(live \? \{/, "a developer's own dev server keeps Vite's localhost-only defaults");
+  assert.match(vite, /host: "127\.0\.0\.1"/);
+  assert.match(vite, /cacheDir: process\.env\.MYNT_VITE_CACHE/, "Vite's cache stays out of the app's source");
   assert.match(files["scripts/dev_preview.sh"], /MYNT_LIVE_PREVIEW=1/);
+  assert.match(files["scripts/dev_preview.sh"], /export MYNT_VITE_CACHE="\$STATE\/vite-cache"/);
+  assert.equal(JSON.parse(files["templates/mynt-app/api/package.json"]).scripts.dev, "tsx watch src/server.ts", "the api's dev server comes from the app's own dependencies");
+  assert.ok(JSON.parse(files["templates/mynt-app/api/package.json"]).devDependencies.tsx);
   assert.match(files["CLAUDE.md"], /live preview/i);
   assert.match(files["CLAUDE.md"], /5173/);
+});
+
+test("when coding ends Mynt stops the live preview, then packages the source without any node_modules, at any depth", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const ctx = await setup();
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const { sbx, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" } });
+  assert.equal(build.status, "succeeded");
+  assert.equal(build.live_preview_url, null, "no live link once coding is over");
+  const commands = ctx.boat.sandboxes.get(sbx).commands.map((c) => c.command);
+  const stop = commands.findIndex((c) => c.includes("scripts/dev_preview.sh --stop"));
+  const pack = commands.findIndex((c) => c.includes("tar --exclude"));
+  assert.ok(stop >= 0 && stop < pack, "the dev servers stop before the source is packaged");
+
+  // Mynt's own packaging command, run for real on an app with dependencies and Vite's cache nested in web/.
+  const root = mkdtempSync(join(tmpdir(), "mynt-pack-"));
+  const app = join(root, "app");
+  for (const d of ["node_modules/x", "web/node_modules/.vite/deps", "web/src", "packages/mynt-sdk/node_modules/y"]) mkdirSync(join(app, d), { recursive: true });
+  for (const f of ["node_modules/x/i.js", "web/node_modules/.vite/deps/react.js", "web/src/App.tsx", "packages/mynt-sdk/node_modules/y/i.js", "package.json"]) writeFileSync(join(app, f), "x");
+  const command = commands[pack].replaceAll("/home/user/workspace/app", app).replaceAll("/home/user/mynt-out", join(root, "out"));
+  execFileSync("bash", ["-c", command]);
+  const listed = execFileSync("tar", ["-tzf", join(root, "out", "app.tgz")], { encoding: "utf8" }).split("\n").filter(Boolean);
+  assert.ok(listed.includes("./web/src/App.tsx") && listed.includes("./package.json"), listed.join(" "));
+  assert.deepEqual(listed.filter((p) => p.includes("node_modules")), []);
 });
 
 test("developers work in their build's sandbox: VS Code, commands, files and the diff, scrubbed and on the timeline", async () => {
