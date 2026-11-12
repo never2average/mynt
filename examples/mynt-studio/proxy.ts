@@ -10,16 +10,14 @@ import { sessionStore } from "./lib/session-store";
 //   without it. The other security headers are static (next.config.ts);
 // - limits how often one address may start sign-in (lib/rate-limit.ts);
 // - when the studio is served on Mynt's domain through Mynt's server (TRUSTED_EDGE_IPS is set),
-//   sends anyone reaching its own deployment address directly to that domain: sign-in only
-//   works on APP_URL, where its callback and cookie are. Requests through the edge carry its
-//   X-Mynt-Client-IP; that header only decides this redirect (a caller adding it just stays on
-//   the deployment address), never whom the rate limit counts, so a wrong TRUSTED_EDGE_IPS can't
-//   turn every visit into a redirect loop.
+//   is reachable only through that server: every other caller is sent to APP_URL, for every
+//   path (lib/rate-limit.ts, shouldGoToAppUrl).
 export async function proxy(req: NextRequest) {
+  // Before the redirect, so a server address missing from TRUSTED_EDGE_IPS is named in the logs.
+  warnUntrustedEdgeOnce(req.headers);
   if (shouldGoToAppUrl(req.headers, req.nextUrl.host)) {
     return NextResponse.redirect(appUrlFor(req.nextUrl.pathname, req.nextUrl.search), 308);
   }
-  warnUntrustedEdgeOnce(req.headers);
 
   if (req.nextUrl.pathname === "/api/auth/login" && !(await loginAllowed(sessionStore(), clientAddress(req.headers)))) {
     return new NextResponse("Too many sign-in attempts. Please wait a few minutes and try again.", {
@@ -38,7 +36,8 @@ export async function proxy(req: NextRequest) {
   return res;
 }
 
+// Every path, Next's own assets included, so the deployment address serves nothing directly
+// once the studio is on Mynt's domain.
 export const config = {
-  // Pages and API routes; not Next's static assets.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/:path*"],
 };

@@ -85,15 +85,26 @@ describe("visits to the studio's own deployment address", () => {
   });
 
   const app = "mynt.example.com";
-  it("go to APP_URL once the studio is served through Mynt's server", () => {
-    expect(shouldGoToAppUrl(h({}), "studio-abc.example.com", vercel, app)).toBe(true);
+  const host = "studio-abc.example.com";
+  it("go to APP_URL from any caller that isn't a trusted edge", () => {
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), host, vercel, app)).toBe(true);
+    expect(shouldGoToAppUrl(h({}), host, vercel, app)).toBe(true); // no connecting address at all
   });
 
-  it("don't when they came through the edge, are already on APP_URL, or no edge is configured", () => {
-    expect(shouldGoToAppUrl(h({ "x-mynt-client-ip": "client-x" }), "studio-abc.example.com", vercel, app)).toBe(false);
-    expect(shouldGoToAppUrl(h({}), "Mynt.Example.com", vercel, app)).toBe(false);
-    expect(shouldGoToAppUrl(h({}), "studio-abc.example.com", { VERCEL: "1" }, app)).toBe(false);
-    expect(shouldGoToAppUrl(h({}), "studio-abc.example.com", { TRUSTED_EDGE_IPS: "edge-a" }, app)).toBe(false); // not on Vercel
+  it("go to APP_URL even with a forged X-Mynt-Client-IP", () => {
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone", "x-mynt-client-ip": "edge-a" }), host, vercel, app)).toBe(true);
+    expect(shouldGoToAppUrl(h({ "x-forwarded-for": "edge-a", "x-mynt-client-ip": "client-x" }), host, vercel, app)).toBe(true); // x-forwarded-for isn't trusted
+  });
+
+  it("pass from a trusted edge, with or without its header (so the edge's own requests never loop)", () => {
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "edge-a", "x-mynt-client-ip": "client-x" }), host, vercel, app)).toBe(false);
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "edge-b" }), host, vercel, app)).toBe(false);
+  });
+
+  it("don't when already on APP_URL's host, or no edge is configured, or not on Vercel", () => {
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), "Mynt.Example.com", vercel, app)).toBe(false);
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), host, { VERCEL: "1" }, app)).toBe(false);
+    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), host, { TRUSTED_EDGE_IPS: "edge-a" }, app)).toBe(false);
   });
 });
 

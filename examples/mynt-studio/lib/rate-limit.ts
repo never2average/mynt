@@ -89,11 +89,16 @@ export function resetUntrustedEdgeWarning(): void {
   warnedUntrustedEdge = false;
 }
 
-// Whether a request reached the studio's own deployment address directly while the studio is
-// served on Mynt's domain (TRUSTED_EDGE_IPS set, on Vercel), so it should go to APP_URL instead.
+// Whether a request should go to APP_URL instead: once the studio is served on Mynt's domain
+// (TRUSTED_EDGE_IPS set, on Vercel), only Mynt's server may reach it directly. Every other
+// caller, for any path (pages, API routes, assets), and whatever headers it sends, is sent to
+// APP_URL. Requests from a trusted edge are never redirected, which is what keeps the edge's
+// own requests from looping; so TRUSTED_EDGE_IPS must list all of the server's outbound
+// addresses (a missing one loops the users coming through it). A request already on APP_URL's
+// host isn't redirected either (APP_URL pointing at the deployment itself would loop).
 export function shouldGoToAppUrl(headers: Headers, requestHost: string, env: Env = process.env, appHost = appUrl().host): boolean {
   if (!env.VERCEL || trustedEdges(env).size === 0) return false;
-  if (headers.has("x-mynt-client-ip")) return false; // came through the edge (or says so)
+  if (viaTrustedEdge(headers, env)) return false;
   return requestHost.toLowerCase() !== appHost.toLowerCase();
 }
 
