@@ -12,7 +12,7 @@ const A = "/home/user/mynt-agent";
 // A Monday, 11:00 in India.
 const MONDAY_IST = new Date("2026-11-02T05:30:00Z");
 
-function fakeBoat() {
+function fakeSandboxHost() {
   const sandboxes = new Map();
   let n = 0;
   return {
@@ -47,13 +47,13 @@ function fakeBoat() {
   };
 }
 
-async function setup({ senders = {}, config = {}, boat = fakeBoat() } = {}) {
+async function setup({ senders = {}, config = {}, sandboxes = fakeSandboxHost() } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const clock = { now: MONDAY_IST };
   const host = { agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example.com" };
-  const bd = await BdService.open(db, boat, { ...bdConfigFromEnv(host, { BD_ENABLED: "1" }), ...config }, senders, () => clock.now);
+  const bd = await BdService.open(db, sandboxes, { ...bdConfigFromEnv(host, { BD_ENABLED: "1" }), ...config }, senders, () => clock.now);
   const connect = async (user, ctx = {}) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
     await createServer(store, user, { bd, ...ctx }).connect(s);
@@ -72,7 +72,7 @@ async function setup({ senders = {}, config = {}, boat = fakeBoat() } = {}) {
     }
     return { isError: res.isError ?? false, data };
   };
-  return { db, pg, store, bd, boat, clock, connect, call };
+  return { db, pg, store, bd, sandboxes, clock, connect, call };
 }
 
 const prospect = (bd, over = {}) =>
@@ -217,12 +217,12 @@ test("an agent run sees only its own tools; people get connect tools; admins ove
 });
 
 test("runs: the agent gets Mynt's MCP server and the proxy with one run token, which dies with the run", async () => {
-  const { bd, boat, clock } = await setup();
+  const { bd, sandboxes, clock } = await setup();
   await bd.tick();
-  const [sbx] = [...boat.sandboxes.keys()];
-  boat.sandboxes.get(sbx).state = "ready";
+  const [sbx] = [...sandboxes.sandboxes.keys()];
+  sandboxes.sandboxes.get(sbx).state = "ready";
   await bd.tick();
-  const files = boat.sandboxes.get(sbx).files;
+  const files = sandboxes.sandboxes.get(sbx).files;
   const auth = JSON.parse(files.get(`${A}/auth.json`));
   assert.deepEqual(auth.mcp, { url: "https://mynt.example.com/mcp", token: auth.token });
   assert.match(auth.token, /^mynt_bd_/);
@@ -231,7 +231,7 @@ test("runs: the agent gets Mynt's MCP server and the proxy with one run token, w
   assert.equal(JSON.parse(files.get(`${A}/config.json`)).cwd, "/home/user/workspaces/connector");
   assert.equal(await bd.agentTokenActive(auth.token), true);
 
-  boat.sandboxes.get(sbx).running = false;
+  sandboxes.sandboxes.get(sbx).running = false;
   files.set(`${A}/state.json`, JSON.stringify({ done: true, last_subtype: "success", cost_usd: 1.2, summary: "Contacted 5 distributors" }));
   await bd.tick();
   const [run] = await bd.runs();
@@ -239,32 +239,32 @@ test("runs: the agent gets Mynt's MCP server and the proxy with one run token, w
   assert.equal(run.summary, "Contacted 5 distributors");
   assert.ok(Number(run.cost_usd) > 1.2);
   assert.equal(await bd.agentTokenActive(auth.token), false);
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
 
   await bd.tick();
-  assert.equal(boat.sandboxes.size, 1, "not due again for hours");
+  assert.equal(sandboxes.sandboxes.size, 1, "not due again for hours");
   clock.now = new Date(MONDAY_IST.getTime() + 7 * 3600e3);
   await bd.requestRun();
   await bd.tick();
-  assert.equal(boat.sandboxes.size, 2, "an admin or a new reply can ask for a run sooner");
+  assert.equal(sandboxes.sandboxes.size, 2, "an admin or a new reply can ask for a run sooner");
 });
 
 test("the connector stays off unless enabled", async () => {
-  const { bd, boat } = await setup({ config: { enabled: false } });
+  const { bd, sandboxes } = await setup({ config: { enabled: false } });
   await bd.tick();
-  assert.equal(boat.sandboxes.size, 0);
+  assert.equal(sandboxes.sandboxes.size, 0);
   assert.equal(bd.runnable, false);
 });
 
 test("over HTTP: a run token gets the agent's MCP tools, a dead one 401, and unsubscribe links work", async () => {
   const { createMcpHttpServer } = await import("../dist/http.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-  const { store, bd, boat } = await setup();
+  const { store, bd, sandboxes } = await setup();
   await bd.tick();
-  const [sbx] = [...boat.sandboxes.keys()];
-  boat.sandboxes.get(sbx).state = "ready";
+  const [sbx] = [...sandboxes.sandboxes.keys()];
+  sandboxes.sandboxes.get(sbx).state = "ready";
   await bd.tick();
-  const { token } = JSON.parse(boat.sandboxes.get(sbx).files.get(`${A}/auth.json`));
+  const { token } = JSON.parse(sandboxes.sandboxes.get(sbx).files.get(`${A}/auth.json`));
   const http = createMcpHttpServer(store, null, { bd });
   await new Promise((r) => http.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${http.address().port}`;
@@ -372,17 +372,17 @@ test("people can have the connector forget them; the agent erases on request onl
 });
 
 test("a provider's passing 5xx doesn't fail a connector run; a persistent one, quota exhaustion or a real error does", async () => {
-  const { bd, boat, clock } = await setup();
-  const real = boat.getSandbox;
+  const { bd, sandboxes, clock } = await setup();
+  const real = sandboxes.getSandbox;
   const failWith = (msg) => {
-    boat.getSandbox = async () => {
+    sandboxes.getSandbox = async () => {
       throw new Error(msg);
     };
   };
   const heal = () => {
-    boat.getSandbox = real;
+    sandboxes.getSandbox = real;
   };
-  const outage = 'boat GET /sandboxes/sbx: 503 {"code":"INTERNAL_ERROR"}';
+  const outage = 'sandboxes GET /sandboxes/sbx: 503 {"code":"INTERNAL_ERROR"}';
   const latest = async () => (await bd.runs())[0];
   const start = async () => {
     clock.now = new Date(clock.now.getTime() + 60e3); // runs are ordered by their start
@@ -398,7 +398,7 @@ test("a provider's passing 5xx doesn't fail a connector run; a persistent one, q
   await bd.tick();
   assert.equal((await latest()).status, a.status, "a passing outage is ridden out");
   heal();
-  boat.sandboxes.get([...boat.sandboxes.keys()].at(-1)).state = "ready";
+  sandboxes.sandboxes.get([...sandboxes.sandboxes.keys()].at(-1)).state = "ready";
   await bd.tick();
   assert.notEqual((await latest()).status, "failed");
   assert.notEqual((await latest()).status, a.status, "the run carried on");
@@ -420,7 +420,7 @@ test("a provider's passing 5xx doesn't fail a connector run; a persistent one, q
 
   // A provider out of allowance fails at once, saying what to do.
   await start();
-  failWith("boat: LIMIT_EXCEEDED: allowance for sandboxes has been used");
+  failWith("sandboxes: LIMIT_EXCEEDED: allowance for sandboxes has been used");
   await bd.tick();
   heal();
   assert.equal((await latest()).status, "failed", "quota exhaustion fails at once");
@@ -428,7 +428,7 @@ test("a provider's passing 5xx doesn't fail a connector run; a persistent one, q
 
   // Any other error fails at once.
   await start();
-  failWith("boat GET /sandboxes/sbx: 400 bad request");
+  failWith("sandboxes GET /sandboxes/sbx: 400 bad request");
   await bd.tick();
   heal();
   assert.equal((await latest()).status, "failed", "a real error fails at once");

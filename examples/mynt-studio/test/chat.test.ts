@@ -111,11 +111,12 @@ describe("steering a running build", () => {
   });
 
   it("consumeTurnEnds skips across polls and stops on a finished build", () => {
-    expect(consumeTurnEnds([finished], 1, "coding")).toEqual({ over: false, skip: 0 });
-    expect(consumeTurnEnds([say("answer"), finished], 0, "coding")).toEqual({ over: true, skip: 0 });
-    expect(consumeTurnEnds([finished, say("a"), finished], 1, "coding")).toEqual({ over: true, skip: 0 });
-    expect(consumeTurnEnds([], 1, "failed")).toEqual({ over: true, skip: 1 });
-    expect(consumeTurnEnds([], 0, "coding")).toEqual({ over: false, skip: 0 });
+    expect(consumeTurnEnds([finished], 1, "coding")).toEqual({ over: false, skip: 0, answered: false });
+    expect(consumeTurnEnds([say("answer"), finished], 0, "coding")).toEqual({ over: true, skip: 0, answered: true });
+    expect(consumeTurnEnds([say("old"), finished, say("a"), finished], 1, "coding")).toEqual({ over: true, skip: 0, answered: true });
+    expect(consumeTurnEnds([say("old"), finished], 1, "coding")).toEqual({ over: false, skip: 0, answered: false });
+    expect(consumeTurnEnds([], 1, "failed")).toEqual({ over: true, skip: 1, answered: false });
+    expect(consumeTurnEnds([], 0, "coding")).toEqual({ over: false, skip: 0, answered: false });
   });
 });
 

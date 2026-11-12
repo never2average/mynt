@@ -91,7 +91,7 @@ test("evidence: quotes must be on the page (or in the case), and only public htt
   await assert.rejects(fetchPublic("http://example.com/"), /only https/);
 });
 
-function fakeBoat() {
+function fakeSandboxHost() {
   const sandboxes = new Map();
   let n = 0;
   return {
@@ -139,11 +139,11 @@ async function setup() {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
-  const boat = fakeBoat();
+  const sandboxes = fakeSandboxHost();
   const pages = { [REGISTER]: REGISTER_PAGE };
   const fetcher = async (url) => (pages[url] ? { ok: true, status: 200, contentType: "text/html", text: pages[url] } : { ok: false, status: 404, contentType: "text/html", text: "" });
   const host = { agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, model: "claude-opus-5-5", publicUrl: "https://mynt.example.com" };
-  const review = await ReviewService.open(db, store, boat, reviewConfigFromEnv(host, {}), null, fetcher);
+  const review = await ReviewService.open(db, store, sandboxes, reviewConfigFromEnv(host, {}), null, fetcher);
   const connect = async (user) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
     await createServer(store, user, { review }).connect(s);
@@ -161,11 +161,11 @@ async function setup() {
     }
     return { isError: res.isError ?? false, data };
   };
-  return { pg, store, review, boat, connect, call };
+  return { pg, store, review, sandboxes, connect, call };
 }
 
 test("a licence review: the agent works in its workspace, Mynt verifies its evidence and recommends, the admin decides", async () => {
-  const { pg, store, review, boat, connect, call } = await setup();
+  const { pg, store, review, sandboxes, connect, call } = await setup();
   const { user: inno } = await store.createUser("Ines", ["innovator"]);
   await licensed(store, inno, { region: "IN", category: "deposits", action: "issuance" });
   const pending = await store.registerLicense(inno.id, { entity_id: inno.entity_id, region: "IN", regulator_id: "test_deposits_issuance", license_id: "lic", registration_number: "N-14.03268", valid_from: null, valid_to: null }).catch(async () => {
@@ -182,10 +182,10 @@ test("a licence review: the agent works in its workspace, Mynt verifies its evid
 
   await review.tick();
   const sbx = (await review.get(opened.case_id)).sandbox_id;
-  assert.deepEqual(boat.sandboxes.get(sbx).opts.env, {}, "no credentials in the review sandbox");
-  boat.ready(sbx);
+  assert.deepEqual(sandboxes.sandboxes.get(sbx).opts.env, {}, "no credentials in the review sandbox");
+  sandboxes.ready(sbx);
   await review.tick();
-  const files = boat.sandboxes.get(sbx).files;
+  const files = sandboxes.sandboxes.get(sbx).files;
   assert.ok(files.get(`${CWD}/CLAUDE.md`).includes("Mynt governance review"), "the workspace is the agent's working directory");
   assert.ok(files.has(`${CWD}/.claude/skills/review-licence/SKILL.md`) && files.has(`${CWD}/scripts/check_review.py`));
   const kase = JSON.parse(files.get(`${CWD}/job/case.json`));
@@ -195,7 +195,7 @@ test("a licence review: the agent works in its workspace, Mynt verifies its evid
   const { token } = JSON.parse(files.get(`${A}/auth.json`));
   assert.equal(await review.agentTokenActive(token), true);
 
-  boat.finish(sbx, {
+  sandboxes.finish(sbx, {
     items: [
       { id: "register_entry", status: "met", evidence: [{ source_url: REGISTER, quote: "N-14.03268 Sunrise Finance Private Limited" }] },
       { id: "holder_matches", status: "met", evidence: [{ source_url: REGISTER, quote: "Holder: Sunrise Finance Private Limited (active)" }] },
@@ -222,7 +222,7 @@ test("a licence review: the agent works in its workspace, Mynt verifies its evid
   assert.match(ready.recommendation.reason, /In force/);
   assert.deepEqual(ready.suggestions, ["Add a script for the regulator's register search"]);
   assert.equal(await review.agentTokenActive(token), false, "the token dies with the run");
-  assert.ok(boat.sandboxes.get(sbx).stopped);
+  assert.ok(sandboxes.sandboxes.get(sbx).stopped);
 
   const decided = (await call(admin, "decide_review_case", { case_id: opened.case_id, decision: "reject", note: "Register shows the registration cancelled" })).data;
   assert.deepEqual(decided, { decision: "reject", applied: "licence rejected" });
@@ -233,16 +233,16 @@ test("a licence review: the agent works in its workspace, Mynt verifies its evid
 });
 
 test("a product review: Mynt decides coverage, tests and segments itself; the agent may quote the case", async () => {
-  const { store, review, boat } = await setup();
+  const { store, review, sandboxes } = await setup();
   const { user: adminUser } = await store.createUser("Ada", ["admin"]);
   const c = await review.openCase("product", CATALOG.find((p) => p.region === "IN").id, adminUser.id);
   await review.tick();
   const sbx = (await review.get(c.id)).sandbox_id;
-  boat.ready(sbx);
+  sandboxes.ready(sbx);
   await review.tick();
-  const kase = JSON.parse(boat.sandboxes.get(sbx).files.get(`${CWD}/job/case.json`));
+  const kase = JSON.parse(sandboxes.sandboxes.get(sbx).files.get(`${CWD}/job/case.json`));
   const quote = kase.subject.product.description.slice(0, 40);
-  boat.finish(sbx, {
+  sandboxes.finish(sbx, {
     items: [
       { id: "regulatory_limits", status: "silent", searched_for: "Recorded law for this product: none sets limits" },
       { id: "claims_not_misleading", status: "met", evidence: [{ source_url: "mynt://case", quote }] },
@@ -269,19 +269,19 @@ test("only admins get the governance desk", async () => {
 });
 
 test("a provider's passing 5xx doesn't fail a review; a persistent one, quota exhaustion or a real error does", async () => {
-  const { store, review, boat } = await setup();
+  const { store, review, sandboxes } = await setup();
   const { user: adminUser } = await store.createUser("Ada", ["admin"]);
   const product = CATALOG.find((p) => p.region === "IN").id;
-  const real = boat.getSandbox;
+  const real = sandboxes.getSandbox;
   const failWith = (msg) => {
-    boat.getSandbox = async () => {
+    sandboxes.getSandbox = async () => {
       throw new Error(msg);
     };
   };
   const heal = () => {
-    boat.getSandbox = real;
+    sandboxes.getSandbox = real;
   };
-  const outage = 'boat GET /sandboxes/sbx: 503 {"code":"INTERNAL_ERROR"}';
+  const outage = 'sandboxes GET /sandboxes/sbx: 503 {"code":"INTERNAL_ERROR"}';
   const open = async () => {
     const c = await review.openCase("product", product, adminUser.id);
     await review.tick(); // sandbox requested
@@ -295,7 +295,7 @@ test("a provider's passing 5xx doesn't fail a review; a persistent one, quota ex
   await review.tick();
   assert.equal((await review.get(a.id)).status, "provisioning", "a passing outage is ridden out");
   heal();
-  boat.ready((await review.get(a.id)).sandbox_id);
+  sandboxes.ready((await review.get(a.id)).sandbox_id);
   await review.tick();
   assert.equal((await review.get(a.id)).status, "reviewing");
   await review.stop(a.id, "done with it");
@@ -316,7 +316,7 @@ test("a provider's passing 5xx doesn't fail a review; a persistent one, quota ex
 
   // A provider out of allowance fails at once, saying what to do.
   const q = await open();
-  failWith("boat: LIMIT_EXCEEDED: allowance for sandboxes has been used");
+  failWith("sandboxes: LIMIT_EXCEEDED: allowance for sandboxes has been used");
   await review.tick();
   heal();
   assert.equal((await review.get(q.id)).status, "failed", "quota exhaustion fails at once");
@@ -324,7 +324,7 @@ test("a provider's passing 5xx doesn't fail a review; a persistent one, quota ex
 
   // Any other error fails at once.
   const bad = await open();
-  failWith("boat GET /sandboxes/sbx: 400 bad request");
+  failWith("sandboxes GET /sandboxes/sbx: 400 bad request");
   await review.tick();
   heal();
   assert.equal((await review.get(bad.id)).status, "failed", "a real error fails at once");

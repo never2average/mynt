@@ -5,7 +5,7 @@ import { serialLoop } from "./worker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { agentState, launchAgent, type AgentHostConfig } from "./agent-host.js";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import { DESK_RUNNER, type DeskOutcome, type DeskReport } from "./desk-runner.js";
 import type { RepoAccess } from "./github.js";
@@ -127,19 +127,19 @@ export class DeskService {
   private constructor(
     private readonly db: Db,
     private readonly store: Store,
-    readonly boat: BoatClient | null,
+    readonly sandboxes: SandboxHost | null,
     readonly repos: RepoAccess | null,
     readonly config: DeskConfig,
   ) {}
 
-  static async open(db: Db, store: Store, boat: BoatClient | null, repos: RepoAccess | null, config: DeskConfig) {
+  static async open(db: Db, store: Store, sandboxes: SandboxHost | null, repos: RepoAccess | null, config: DeskConfig) {
     await db.exec(TABLES);
-    return new DeskService(db, store, boat, repos, config);
+    return new DeskService(db, store, sandboxes, repos, config);
   }
 
   // Code runs need a sandbox host and the GitHub App; agent tasks also need a model backend.
   get enabled() {
-    return !!this.boat && !!this.repos;
+    return !!this.sandboxes && !!this.repos;
   }
 
   get agentsEnabled() {
@@ -274,7 +274,7 @@ export class DeskService {
   }
 
   private async end(j: Row, status: string, f: Row = {}) {
-    for (const s of [j.sandbox_id, j.verify_sandbox_id]) if (s && this.boat) await this.boat.stop(s as string).catch(() => {});
+    for (const s of [j.sandbox_id, j.verify_sandbox_id]) if (s && this.sandboxes) await this.sandboxes.stop(s as string).catch(() => {});
     await this.update(j.id as string, { ...f, status });
   }
 
@@ -299,7 +299,7 @@ export class DeskService {
     const ws = (await this.workspace(j.entity_id as string))!;
     const p = (await this.store.getProduct(j.product_id as string))!;
     const t = (await this.terms(j.product_id as string))!;
-    return startRepoRun(this.boat!, this.repos!, sandbox, {
+    return startRepoRun(this.sandboxes!, this.repos!, sandbox, {
       repository: ws.repository,
       installationId: ws.installation_id,
       ref,
@@ -317,8 +317,8 @@ export class DeskService {
   }
 
   private async runOutcome(sandbox: string, processId: string) {
-    if ((await this.boat!.commandStatus(sandbox, Number(processId))).running) return null;
-    return parse<DeskOutcome>(await this.boat!.readFile(sandbox, `${JOB}/outcome.json`)) ?? { outcome: "error", model: null, error: "The run produced no outcome", log: "" };
+    if ((await this.sandboxes!.commandStatus(sandbox, Number(processId))).running) return null;
+    return parse<DeskOutcome>(await this.sandboxes!.readFile(sandbox, `${JOB}/outcome.json`)) ?? { outcome: "error", model: null, error: "The run produced no outcome", log: "" };
   }
 
   private async saveReport(j: Row, o: Extract<DeskOutcome, { outcome: "ran" }>, ref: string) {
@@ -329,11 +329,11 @@ export class DeskService {
   }
 
   private async newSandbox(j: Row, role: string, env: Record<string, string> = {}) {
-    return (await this.boat!.createSandbox({ name: `mynt-desk-${role}-${j.id}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_desk: j.id as string, mynt_role: role }, env })).id;
+    return (await this.sandboxes!.createSandbox({ name: `mynt-desk-${role}-${j.id}`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_desk: j.id as string, mynt_role: role }, env })).id;
   }
 
   private async ready(sandbox: string) {
-    const s = await this.boat!.getSandbox(sandbox);
+    const s = await this.sandboxes!.getSandbox(sandbox);
     if (s.state === "error" || s.state === "cancelled") throw new Error(`Sandbox ${s.state}`);
     return ["ready", "idle", "running"].includes(s.state);
   }
@@ -350,7 +350,7 @@ export class DeskService {
   }
 
   private async advance(j: Row) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     if (j.status === "queued") {
       let env: Record<string, string> = {};
       if (j.kind === "agent") {
@@ -363,8 +363,8 @@ export class DeskService {
       return;
     }
 
-    const cost = (await boat.costDollars(j.sandbox_id as string)) + (j.verify_sandbox_id ? await boat.costDollars(j.verify_sandbox_id as string) : 0);
-    const agentCost = j.kind === "agent" && j.process_id ? (await agentState(boat, j.sandbox_id as string, j.process_id as string)).cost : 0;
+    const cost = (await sandboxes.costDollars(j.sandbox_id as string)) + (j.verify_sandbox_id ? await sandboxes.costDollars(j.verify_sandbox_id as string) : 0);
+    const agentCost = j.kind === "agent" && j.process_id ? (await agentState(sandboxes, j.sandbox_id as string, j.process_id as string)).cost : 0;
     const total = cost + Math.max(agentCost, this.meter ? await this.meter.spent(`desk:${j.id}`) : 0);
     if (total !== Number(j.cost_usd)) await this.update(j.id as string, { cost_usd: total });
     if (total > Number(j.cap_usd)) return this.end(j, "stopped", { error: `Stopped at US$${total.toFixed(2)}: over the US$${j.cap_usd} cap`, cost_usd: total });
@@ -377,8 +377,8 @@ export class DeskService {
       } else {
         const token = `mynt_desk_${randomBytes(24).toString("base64url")}`;
         await this.update(j.id as string, { token_hash: hash(token) });
-        await boat.writeFile(j.sandbox_id as string, `${DIR}/desk-runner.mjs`, DESK_RUNNER);
-        const pid = await launchAgent(boat, this.config, j.sandbox_id as string, {
+        await sandboxes.writeFile(j.sandbox_id as string, `${DIR}/desk-runner.mjs`, DESK_RUNNER);
+        const pid = await launchAgent(sandboxes, this.config, j.sandbox_id as string, {
           prompt: "Do the job in job/spec.json, following CLAUDE.md and its skills.",
           budgetUsd: Number(j.cap_usd) - total,
           token,
@@ -414,7 +414,7 @@ export class DeskService {
     }
 
     if (j.status === "coding") {
-      const agent = await agentState(boat, j.sandbox_id as string, j.process_id as string);
+      const agent = await agentState(sandboxes, j.sandbox_id as string, j.process_id as string);
       if (agent.running) return;
       if (!agent.ok) throw new Error(`Desk agent ${agent.state?.error ?? agent.state?.last_subtype ?? "exited"}`);
       if (!j.product_id) {
@@ -441,7 +441,7 @@ export class DeskService {
         return this.end(j, "failed", { outcome: o, error: `Mynt couldn't run the agent's model: ${o.outcome === "missing_inputs" ? `missing ${o.missing.map((m) => m.key).join(", ")}` : o.outcome === "error" ? o.error : "no model applies"}` });
       }
       await this.saveReport(j, o, j.branch as string);
-      const pr = await this.openPr(j, (await agentState(boat, j.sandbox_id as string, j.process_id as string)).state?.summary ?? "", o);
+      const pr = await this.openPr(j, (await agentState(sandboxes, j.sandbox_id as string, j.process_id as string)).state?.summary ?? "", o);
       return this.end(j, "finished", { outcome: o, model: o.model, pr_url: pr, phase_message: `${o.report.verdict}: ${o.report.summary}`.slice(0, 500) });
     }
   }
