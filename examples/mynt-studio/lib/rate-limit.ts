@@ -80,7 +80,9 @@ let warnedUntrustedEdge = false;
 export function warnUntrustedEdgeOnce(headers: Headers, env: Env = process.env, log: (msg: string) => void = console.warn): boolean {
   if (warnedUntrustedEdge || trustedEdges(env).size === 0 || !headers.has("x-mynt-client-ip") || viaTrustedEdge(headers, env)) return false;
   warnedUntrustedEdge = true;
-  log(`X-Mynt-Client-IP came from ${connectingAddress(headers, env) ?? "an unknown address"}, which isn't in TRUSTED_EDGE_IPS. If that's Mynt's server, add it (IPv4 and IPv6); until then its callers share one sign-in rate limit.`);
+  log(
+    `X-Mynt-Client-IP came from ${connectingAddress(headers, env) ?? "an unknown address"}, which isn't in TRUSTED_EDGE_IPS, so the header is ignored. If that's Mynt's server, every caller coming through it now shares one sign-in rate-limit bucket (429 for all after 20 sign-in starts in 10 minutes): add this address to TRUSTED_EDGE_IPS and redeploy.`,
+  );
   return true;
 }
 
@@ -89,12 +91,31 @@ export function resetUntrustedEdgeWarning(): void {
   warnedUntrustedEdge = false;
 }
 
-// Whether a request reached the studio's own deployment address directly while the studio is
-// served on Mynt's domain (TRUSTED_EDGE_IPS set, on Vercel), so it should go to APP_URL instead.
-export function shouldGoToAppUrl(headers: Headers, requestHost: string, env: Env = process.env, appHost = appUrl().host): boolean {
+// The host a request was made to: on Vercel the x-forwarded-host its edge sets, else Host.
+// (Next's req.nextUrl.host isn't the request's Host under next start.)
+export function requestHost(headers: Headers, env: Env = process.env): string {
+  const forwarded = env.VERCEL ? headers.get("x-forwarded-host")?.split(",")[0]?.trim() : undefined;
+  return (forwarded || headers.get("host") || "").toLowerCase();
+}
+
+// Whether a request should go to APP_URL instead: once the studio is served on Mynt's domain
+// (TRUSTED_EDGE_IPS set, on Vercel), people reach it only through Mynt's server. A request from
+// any other address without X-Mynt-Client-IP (a browser on the deployment address, for any
+// path) is sent to APP_URL.
+//
+// Not redirected:
+// - requests from a trusted edge;
+// - requests carrying X-Mynt-Client-IP from an untrusted address. That's what a server address
+//   missing from TRUSTED_EDGE_IPS looks like, and redirecting it would loop every user coming
+//   through it. They're served instead, with a warning (warnUntrustedEdgeOnce), and their callers
+//   share one rate-limit bucket. A forger gains nothing: sign-in, its callback and the session
+//   cookie only work on APP_URL, and the rate limit counts untrusted callers by their own address;
+// - requests already on APP_URL's host (APP_URL pointing at the deployment itself would loop).
+export function shouldGoToAppUrl(headers: Headers, env: Env = process.env, appHost = appUrl().host): boolean {
   if (!env.VERCEL || trustedEdges(env).size === 0) return false;
-  if (headers.has("x-mynt-client-ip")) return false; // came through the edge (or says so)
-  return requestHost.toLowerCase() !== appHost.toLowerCase();
+  if (viaTrustedEdge(headers, env)) return false;
+  if (headers.has("x-mynt-client-ip")) return false;
+  return requestHost(headers, env) !== appHost.toLowerCase();
 }
 
 // Where a direct visit goes: the same path and query on APP_URL (set field by field, never by
