@@ -35,7 +35,7 @@ function fakeServers(authMethods: string[]) {
   return { calls, fetchFn };
 }
 
-const ENV = ["MYNT_OAUTH_CLIENT_ID", "MYNT_OAUTH_CLIENT_SECRET"] as const;
+const ENV = ["MYNT_OAUTH_CLIENT_ID", "MYNT_OAUTH_CLIENT_SECRET", "MYNT_OAUTH_ISSUER"] as const;
 afterEach(() => {
   for (const name of ENV) delete process.env[name];
 });
@@ -49,6 +49,18 @@ describe("the pre-registered client setting", () => {
     });
     expect(() => preRegisteredClientFromEnv({ MYNT_OAUTH_CLIENT_ID: "id" })).toThrow(/both/);
     expect(() => preRegisteredClientFromEnv({ MYNT_OAUTH_CLIENT_SECRET: "secret" })).toThrow(/both/);
+  });
+
+  it("takes an optional issuer, as a normalised https URL, only with the client", () => {
+    const both = { MYNT_OAUTH_CLIENT_ID: "id", MYNT_OAUTH_CLIENT_SECRET: "secret" };
+    expect(preRegisteredClientFromEnv({ ...both, MYNT_OAUTH_ISSUER: "https://Auth.example.com" })).toEqual({
+      client_id: "id",
+      client_secret: "secret",
+      issuer: "https://auth.example.com/",
+    });
+    expect(() => preRegisteredClientFromEnv({ ...both, MYNT_OAUTH_ISSUER: "http://auth.example.com" })).toThrow(/https/);
+    expect(() => preRegisteredClientFromEnv({ ...both, MYNT_OAUTH_ISSUER: "auth.example.com" })).toThrow(/https/);
+    expect(() => preRegisteredClientFromEnv({ MYNT_OAUTH_ISSUER: "https://auth.example.com" })).toThrow(/without/);
   });
 
   it("the error names the settings, never the value", () => {
@@ -76,8 +88,8 @@ describe("signing in with a pre-registered client", () => {
     expect(p.clientInformation()).toEqual(CLIENT);
     expect(p.clientMetadata.token_endpoint_auth_method).toBe("client_secret_basic");
 
-    p.saveClientInformation({ client_id: "dynamic-id" });
-    expect(store.clientInformation(REDIRECT)).toBeUndefined();
+    // No save hook at all: the SDK can't swap it for a dynamic registration.
+    expect(p.saveClientInformation).toBeUndefined();
 
     store.saveClientInformation(REDIRECT, { client_id: "left-over" });
     p.saveTokens({ access_token: "t", token_type: "Bearer" });
@@ -118,6 +130,35 @@ describe("signing in with a pre-registered client", () => {
     const form = new URLSearchParams(token.body);
     expect(form.get("client_id")).toBe(CLIENT.client_id);
     expect(form.get("client_secret")).toBe(CLIENT.client_secret);
+  });
+});
+
+describe("a pre-registered client bound to its authorization server (MYNT_OAUTH_ISSUER)", () => {
+  it("signs in when Mynt names that server", async () => {
+    const { calls, fetchFn } = fakeServers(["client_secret_basic"]);
+    const store = new SessionStore();
+    const s = store.create();
+    const bound = { ...CLIENT, issuer: "https://auth.example.com/" };
+    const p = new SessionOAuthProvider(s, store, REDIRECT, "openid", oauthClientName(), bound);
+    expect(p.clientInformation()).toEqual(bound);
+    expect(await auth(p, { serverUrl: MCP, fetchFn })).toBe("REDIRECT");
+    expect(await auth(p, { serverUrl: MCP, fetchFn, authorizationCode: "code" })).toBe("AUTHORIZED");
+    expect(calls.some((c) => c.url.endsWith("/register"))).toBe(false);
+    expect(s.tokens?.access_token).toBe("access");
+  });
+
+  it("refuses, without registering or sending the secret, when Mynt names another server", async () => {
+    const { calls, fetchFn } = fakeServers(["client_secret_basic", "client_secret_post"]);
+    const store = new SessionStore();
+    const s = store.create();
+    const p = new SessionOAuthProvider(s, store, REDIRECT, "openid", oauthClientName(), { ...CLIENT, issuer: "https://elsewhere.example/" });
+    await expect(auth(p, { serverUrl: MCP, fetchFn })).rejects.toThrow(/bound to authorization server/);
+    s.codeVerifier = "v";
+    await expect(auth(p, { serverUrl: MCP, fetchFn, authorizationCode: "code" })).rejects.toThrow(/bound to authorization server/);
+    expect(calls.some((c) => c.url.endsWith("/register") || c.url.endsWith("/token"))).toBe(false);
+    expect(calls.every((c) => !c.body.includes(CLIENT.client_secret) && !c.headers.get("authorization"))).toBe(true);
+    expect(p.authorizationUrl).toBeUndefined();
+    expect(s.tokens).toBeUndefined();
   });
 });
 

@@ -1383,7 +1383,7 @@ node dist/index.js users list
 
 **Mynt's own apps sign in without a consent screen.** People signing in to the studio or the chat app (Mynt's own apps) aren't asked to "allow Mynt to access Mynt". How it works:
 - Each first-party app is a pre-registered Clerk OAuth application. It's a confidential client (its secret stays on that app's server), with PKCE required and its consent screen off.
-- Only an operator creates one, naming the app's exact redirect URI: https (http only for localhost), no wildcard (`*`) in the host, no user name or password, no query or fragment (not even a bare `?` or `#`), written in its normal form (lower-case host, no default port). Anything else is refused before Clerk is asked.
+- Only an operator creates one, naming the app's exact redirect URI: https (http only for localhost), no wildcard (`*`) anywhere, host or path, no user name or password, no query or fragment (not even a bare `?` or `#`), written in its normal form (lower-case host, no default port). Anything else is refused before Clerk is asked.
 - Every client that registers itself (MCP clients such as Claude, and any third party) still gets Clerk's consent screen. Clerk doesn't let a dynamically registered application turn it off, and Mynt never changes that.
 
 Operator steps, once per app (the domain is a placeholder for that app's own):

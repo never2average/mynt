@@ -310,13 +310,16 @@ test("Mynt's own apps are registered with Clerk with no consent screen: confiden
   }
 });
 
-test("first-party redirect URIs are one exact address: no wildcard host, credentials, query or fragment; sent as normalised", async () => {
+test("first-party redirect URIs are one exact address: no wildcard anywhere, credentials, query or fragment; sent as normalised", async () => {
   const { ClerkAdmin, firstPartyRedirectUri } = await import("../dist/auth.js");
   assert.equal(firstPartyRedirectUri("https://studio.example/api/auth/callback"), "https://studio.example/api/auth/callback");
   assert.equal(firstPartyRedirectUri("http://localhost:3000/api/auth/callback"), "http://localhost:3000/api/auth/callback");
   for (const [uri, why] of [
     ["https://*.studio.example/api/auth/callback", /wildcard/],
     ["https://%2A.studio.example/api/auth/callback", /wildcard/],
+    ["https://studio.example/api/*/callback", /wildcard/],
+    ["https://studio.example/api/auth/callback*", /wildcard/],
+    ["https://studio.example/api/%2a/callback", /wildcard/],
     ["https://user:pass@studio.example/api/auth/callback", /user name or password/],
     ["https://user@studio.example/api/auth/callback", /user name or password/],
     ["https://studio.example/api/auth/callback?", /must be exact/],

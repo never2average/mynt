@@ -47,6 +47,7 @@ All configuration is through environment variables. Copy `.env.example` to `.env
 | `CHAT_FALLBACK_MODEL` | no | Vertex only: the model to retry on if a request is declined by Claude's safety classifiers. Default `claude-opus-4-8`. (On the Claude API the fallback happens server side.) |
 | `MYNT_OAUTH_SCOPE` | no | Scopes to request. Default `openid profile email`. |
 | `MYNT_OAUTH_CLIENT_ID`, `MYNT_OAUTH_CLIENT_SECRET` | no (both or neither) | The OAuth client registered for this app with `mynt clerk first-party`, so users see no consent screen. Unset, the app registers itself. |
+| `MYNT_OAUTH_ISSUER` | no (only with the client) | The only authorization server the client's secret may be sent to. |
 | `CHAT_DAILY_MESSAGES` | no | Messages each Mynt user may send per day (UTC). Default `50`; `0` turns the cap off. Counted in memory, so run a single instance. |
 
 On Mynt's side, the authorization server (Clerk) must allow dynamic client registration, unless the app has a pre-registered client (below). Mynt itself needs no change: the user signs in as an ordinary Mynt user, and what they can do follows their Mynt roles.
@@ -78,7 +79,7 @@ It prints the client id. The id and its secret are written to that file, which o
 
 **3. Restart the chat.** It reads the file only when it starts (for example `sudo systemctl restart <the chat's service>`). Sign out and in again to check: there's no consent screen. Then delete the registration file: `rm ~/.mynt/oauth-mynt-chat.json`.
 
-The secret stays on the chat's server. It's sent only to the authorization server's token endpoint (HTTP Basic, or the form body if that's all the server accepts), and never to a browser or a log. Set both settings or neither: one without the other stops the chat from starting a sign-in. Without them, it registers itself as before. If `APP_URL` changes, register again under a new name with the new callback address, and replace both values. To replace the secret, rotate it in Clerk's dashboard.
+The secret stays on the chat's server. It's sent only to the authorization server's token endpoint (HTTP Basic, or the form body if that's all the server accepts), and never to a browser or a log. Set both settings or neither: one without the other stops the chat from starting a sign-in. Without them, it registers itself as before. Also set `MYNT_OAUTH_ISSUER` to Clerk's address, exactly as Mynt's `/.well-known/oauth-protected-resource` lists it under `authorization_servers` (open that address on Mynt's domain to see it). The secret is then only ever sent there: if Mynt's settings ever named another sign-in server, sign-in and token refresh would stop rather than hand the secret to it. If `APP_URL` changes, register again under a new name with the new callback address, and replace both values. To replace the secret, rotate it in Clerk's dashboard.
 
 ## Run locally
 

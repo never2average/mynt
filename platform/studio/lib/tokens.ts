@@ -112,7 +112,9 @@ export async function refreshWithMynt(
     const server = await discover(myntMcpUrl(), { fetchFn });
     issuer = normalIssuer(String(server.authorizationServerUrl));
     const boundTo = issuerOf(session.tokens) ?? issuerOf(client);
-    if (boundTo && normalIssuer(boundTo) !== issuer) {
+    // A pre-registered client bound to an authorization server (MYNT_OAUTH_ISSUER) never sends its secret elsewhere.
+    const clientBound = issuerOf(client);
+    if ((boundTo && normalIssuer(boundTo) !== issuer) || (preRegistered && clientBound && normalIssuer(clientBound) !== issuer)) {
       session.tokens = undefined;
       throw new NotSignedInError();
     }

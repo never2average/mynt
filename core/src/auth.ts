@@ -253,7 +253,7 @@ export class ClerkAdmin {
 }
 
 // A first-party app's redirect URI, checked to be exactly one address Clerk will match as given: https (http only for
-// localhost), no wildcard host, no credentials, no query or fragment (not even an empty "?" or "#"), and already in
+// localhost), no wildcard (*) anywhere, no credentials, no query or fragment (not even an empty "?" or "#"), and already in
 // its normal form, so what's registered is what the operator typed.
 export function firstPartyRedirectUri(redirectUri: string): string {
   let u: URL;
@@ -264,7 +264,8 @@ export function firstPartyRedirectUri(redirectUri: string): string {
   }
   const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
   if (u.protocol !== "https:" && !(local && u.protocol === "http:")) throw new Error("The redirect URI must be https (http only for localhost)");
-  if (u.hostname.includes("*")) throw new Error("The redirect URI's host can't contain a wildcard (*)");
+  // Anywhere, path included, written or percent-encoded: some servers would treat it as a pattern.
+  if (/\*|%2a/i.test(redirectUri) || /\*|%2a/i.test(u.href)) throw new Error("The redirect URI can't contain a wildcard (*), in its host or anywhere else");
   if (u.username || u.password) throw new Error("The redirect URI can't contain a user name or password");
   if (u.search || u.hash || u.href.includes("?") || u.href.includes("#")) throw new Error("The redirect URI must be exact: no query or fragment");
   if (u.href !== redirectUri) throw new Error(`The redirect URI must be exact; did you mean ${u.href}?`);

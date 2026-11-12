@@ -22,6 +22,11 @@ import type { AuthSession, AuthSessionStore } from "./types";
 export class SessionOAuthProvider<S extends AuthSession = AuthSession> implements OAuthClientProvider {
   authorizationUrl?: URL;
 
+  // Only for a client that registers itself. A pre-registered client has none: the SDK then can't replace it with a
+  // dynamic registration, so a client bound (MYNT_OAUTH_ISSUER) to another authorization server than the one Mynt's
+  // metadata names is refused outright, and its secret isn't sent.
+  saveClientInformation?: (info: OAuthClientInformationMixed) => void | Promise<void>;
+
   constructor(
     private session: S,
     private store: AuthSessionStore<S>,
@@ -31,7 +36,9 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
     // A client registered ahead of time by an operator. When set, the app never registers itself
     // dynamically and the store's registration is neither read, written nor forgotten.
     private preRegistered: PreRegisteredClient | null = null,
-  ) {}
+  ) {
+    if (!preRegistered) this.saveClientInformation = (info) => store.saveClientInformation(redirectUrl, info);
+  }
 
   get clientMetadata(): OAuthClientMetadata {
     return {
@@ -55,15 +62,11 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
   // whatever the app's store returns: a value from an in-memory store, a promise from a remote one.
   clientInformation() {
     if (this.preRegistered) {
-      const { client_id, client_secret } = this.preRegistered;
-      return { client_id, client_secret };
+      const { client_id, client_secret, issuer } = this.preRegistered;
+      // `issuer` is the SDK's binding: it presents the client only to that authorization server.
+      return issuer ? { client_id, client_secret, issuer } : { client_id, client_secret };
     }
     return this.store.clientInformation(this.redirectUrl);
-  }
-
-  saveClientInformation(info: OAuthClientInformationMixed) {
-    if (this.preRegistered) return; // never registers dynamically, so there's nothing to keep
-    return this.store.saveClientInformation(this.redirectUrl, info);
   }
 
   tokens(): OAuthTokens | undefined {

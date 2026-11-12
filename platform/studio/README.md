@@ -53,6 +53,7 @@ Mynt Studio is built on [Adorable](https://github.com/freestyle-sh/Adorable) by 
 | `SESSION_STORE` | Optional: `memory` allows the in-memory store with `NODE_ENV=production` (one local process only, never on Vercel). |
 | `MYNT_OAUTH_SCOPE` | Optional: the scopes to ask for. |
 | `MYNT_OAUTH_CLIENT_ID`, `MYNT_OAUTH_CLIENT_SECRET` | Optional, both or neither: the OAuth client registered for the studio with `mynt clerk first-party`, so users see no consent screen (see *Sign in without a consent screen*). Unset, the studio registers itself. Server-only. |
+| `MYNT_OAUTH_ISSUER` | Optional, with the client above: the only authorization server its secret may be sent to. |
 
 The Redis client is [`@upstash/redis`](https://github.com/upstash/redis-js), Upstash's official client, which talks to Redis over HTTPS and so works from serverless functions. Without Redis settings, sessions stay in the server's memory, which is fine for `npm run dev`. On Vercel the studio refuses to start that way, because its function instances share no memory, and in production it refuses too unless `SESSION_STORE=memory` says it's wanted.
 
@@ -82,7 +83,7 @@ It prints the client id. The id and its secret are written to that file, which o
 
 **3. Redeploy the studio.** In Vercel, open **Deployments**, then the latest one's menu, then **Redeploy**. Sign out and in again to check: there's no consent screen. Then delete the registration file: `rm ~/.mynt/oauth-mynt-studio.json`.
 
-The secret stays on the studio's server. It's sent only to the authorization server's token endpoint (HTTP Basic, or the form body if that's all the server accepts), and never to a browser or a log. Set both settings or neither: one without the other stops the studio from starting a sign-in. Without them, it registers itself as before. If `APP_URL` changes, register again under a new name with the new callback address, and replace both values. To replace the secret, rotate it in Clerk's dashboard.
+The secret stays on the studio's server. It's sent only to the authorization server's token endpoint (HTTP Basic, or the form body if that's all the server accepts), and never to a browser or a log. Set both settings or neither: one without the other stops the studio from starting a sign-in. Without them, it registers itself as before. Also set `MYNT_OAUTH_ISSUER` to Clerk's address, exactly as Mynt's `/.well-known/oauth-protected-resource` lists it under `authorization_servers` (open that address on Mynt's domain to see it). The secret is then only ever sent there: if Mynt's settings ever named another sign-in server, sign-in and token refresh would stop rather than hand the secret to it. If `APP_URL` changes, register again under a new name with the new callback address, and replace both values. To replace the secret, rotate it in Clerk's dashboard.
 
 ## Run it locally
 

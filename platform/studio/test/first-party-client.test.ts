@@ -40,7 +40,7 @@ function fakeServers() {
   return { calls, fetchFn };
 }
 
-const ENV = ["MYNT_OAUTH_CLIENT_ID", "MYNT_OAUTH_CLIENT_SECRET"] as const;
+const ENV = ["MYNT_OAUTH_CLIENT_ID", "MYNT_OAUTH_CLIENT_SECRET", "MYNT_OAUTH_ISSUER"] as const;
 afterEach(() => {
   for (const name of ENV) delete process.env[name];
 });
@@ -93,6 +93,34 @@ describe("the studio's pre-registered client", () => {
     expect(usedClient).toEqual(CLIENT);
     expect(s.tokens?.access_token).toBe("new");
     expect(await store.clientInformation(oauthRedirectUrl())).toBeUndefined();
+  });
+
+  it("bound to an authorization server (MYNT_OAUTH_ISSUER), it refreshes only there", async () => {
+    process.env.MYNT_MCP_URL = MCP.href;
+    process.env.MYNT_OAUTH_CLIENT_ID = CLIENT.client_id;
+    process.env.MYNT_OAUTH_CLIENT_SECRET = CLIENT.client_secret;
+    process.env.MYNT_OAUTH_ISSUER = "https://auth.example.com";
+    const server = (url: string) =>
+      ({ authorizationServerUrl: url, authorizationServerMetadata: undefined }) as unknown as Awaited<ReturnType<typeof discoverOAuthServerInfo>>;
+    let sent = 0;
+    const refreshAuth = (async () => {
+      sent++;
+      return { access_token: "new", refresh_token: "r-new", token_type: "Bearer" };
+    }) as typeof refreshAuthorization;
+    const store = memoryStore();
+
+    // Tokens with no issuer stamp (as an older sign-in left them): the client's binding still decides.
+    const s = store.create();
+    s.tokens = { access_token: "old", refresh_token: "r-old", token_type: "Bearer", expires_in: 3600 };
+    await expect(refreshWithMynt(s, store, { discover: async () => server("https://elsewhere.example"), refreshAuth })).rejects.toThrow();
+    expect(sent).toBe(0);
+    expect(s.tokens).toBeUndefined(); // signed out: sign in again
+
+    const t = store.create();
+    t.tokens = { access_token: "old", refresh_token: "r-old", token_type: "Bearer", expires_in: 3600 };
+    await refreshWithMynt(t, store, { discover: async () => server("https://auth.example.com"), refreshAuth });
+    expect(sent).toBe(1);
+    expect(t.tokens?.access_token).toBe("new");
   });
 
   it("without it, refreshing still needs the stored dynamic registration", async () => {
