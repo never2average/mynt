@@ -335,6 +335,53 @@ jobs:
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done
+  # The example apps under examples/ (mynt-chat's chat and developer console, and Mynt Studio): each one's tests,
+  # type check and production build, from its own lockfile. For the studio, also: its sign-in files are still
+  # byte-for-byte mynt-chat's, and it names no real host or IP address and none of the wording Mynt doesn't use.
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [mynt-chat, mynt-studio]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: examples/${{ matrix.app }}/package-lock.json
+      - name: Sign-in files are shared with mynt-chat, unchanged
+        if: matrix.app == 'mynt-studio'
+        run: |
+          for f in lib/oauth-provider.ts lib/session.ts lib/mynt-client.ts \
+                   app/api/auth/login/route.ts app/api/auth/callback/route.ts app/api/auth/logout/route.ts; do
+            diff -u "../mynt-chat/$f" "$f" || { echo "::error file=examples/mynt-studio/$f::differs from examples/mynt-chat/$f; change both"; exit 1; }
+          done
+      - name: No real hosts, IP addresses or banned wording
+        if: matrix.app == 'mynt-studio'
+        run: |
+          files=$(git ls-files . | grep -v '^package-lock.json$')
+          fail=0
+          if grep -IinwE 'merchants?' $files; then echo "::error::Mynt's users are never framed as merchants"; fail=1; fi
+          if grep -IEn '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' $files | grep -Ev '\b(127\.0\.0\.1|0\.0\.0\.0)\b'; then
+            echo "::error::IP address found"; fail=1
+          fi
+          allowed='^([a-z0-9*-]+\.)*(example|example\.com|example\.org|localhost|github\.com|shadcn\.com|modelcontextprotocol\.io)$'
+          hosts=$(grep -IhoE '\b([a-z0-9*-]+\.)+(com|net|org|io|ai|dev|app|sh|co|cloud|xyz|me|tech|site|so|in)\b' $files \
+            | tr 'A-Z' 'a-z' | sort -u | grep -Ev "$allowed" || true)
+          if [ -n "$hosts" ]; then echo "$hosts"; echo "::error::hostnames found; use example placeholders"; fail=1; fi
+          exit $fail
+      - run: npm ci
+      - run: npx vitest run
+      - run: npx tsc --noEmit
+      - run: npx next build
   # The starter app the coding agents scaffold (api, web, Expo mobile) compiles against a freshly generated SDK,
   # and its Compose images build.
   starter-app:

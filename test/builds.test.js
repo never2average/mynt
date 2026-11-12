@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
@@ -52,6 +53,14 @@ function fakeBoat() {
     async exec(id, command, opts = {}) {
       const s = sandboxes.get(id);
       s.commands.push({ command, ...opts });
+      // Mynt puts inbox items in place with a rename.
+      const mv = command.match(/^mv -f '([^']+)' '([^']+)'$/);
+      if (mv) {
+        if (!s.files.has(mv[1])) return { exitCode: 1, stdout: "", stderr: "no such file" };
+        s.files.set(mv[2], s.files.get(mv[1]));
+        s.files.delete(mv[1]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       if (command.includes("tar --exclude")) return { exitCode: 0, stdout: `${SHA}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
       if (command.includes("verify.sh --rehash")) {
         s.files.set(`${V}/after.sha`, boat.tamperDuringAudit ? "changed\n" : s.files.get(`${V}/before.sha`));
@@ -63,9 +72,13 @@ function fakeBoat() {
         s.agentRunning = true;
         return { processId: 99, exitCode: null, stdout: "", stderr: "" };
       }
-      if (command.startsWith("tail -n")) {
-        const line = { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } };
-        return { exitCode: 0, stdout: `${JSON.stringify(line)}\n`, stderr: "" };
+      // Mynt reading the agent's stream-json log from a byte offset, base64-encoded.
+      const read = command.match(/agent\.jsonl; if \[ -f "\$f" \]; then tail -c \+(\d+) "\$f" \| head -c (\d+) \| base64 -w0; fi$/);
+      if (read) {
+        if (s.stopped) throw new Error("sandbox stopped");
+        const log = s.files.get(`${A}/agent.jsonl`);
+        const from = Number(read[1]) - 1;
+        return { exitCode: 0, stdout: log == null ? "" : Buffer.from(log).subarray(from, from + Number(read[2])).toString("base64"), stderr: "" };
       }
       if (command.includes("git rev-parse")) return boat.branchMatches ? { exitCode: 0, stdout: `${COMMIT}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
@@ -84,6 +97,11 @@ function fakeBoat() {
     },
     write(id, path, value) {
       sandboxes.get(id).files.set(path, typeof value === "string" ? value : JSON.stringify(value));
+    },
+    // The runner appending Claude Code's output to agent.jsonl: objects become lines, strings go as they are.
+    log(id, ...items) {
+      const files = sandboxes.get(id).files;
+      files.set(`${A}/agent.jsonl`, (files.get(`${A}/agent.jsonl`) ?? "") + items.map((i) => (typeof i === "string" ? i : `${JSON.stringify(i)}\n`)).join(""));
     },
     // What the runner records when Claude Code exits: "success" or an error subtype, and its spend.
     finishAgent(id, subtype = "success", cost = 0) {
@@ -116,9 +134,10 @@ function fakeRepos() {
   };
 }
 
-async function setup({ boat = fakeBoat(), config = {} } = {}) {
+async function setup({ boat = fakeBoat(), config = {}, refuse = null } = {}) {
   const pg = new PGlite();
-  const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
+  // `refuse`: stands in for a database that rejects some statements (those it returns true for).
+  const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
   const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
@@ -364,11 +383,12 @@ test("developers track, steer and stop their own builds; admins see all", async 
   boat.ready(sbx);
   await builds.tick();
   boat.write(sbx, `${BUILD}/job/status.json`, { phase: "auditing", message: "Running Maxwell" });
+  boat.log(sbx, { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } });
   await builds.tick();
   let b = (await call(dev, "get_build", { build_id: started.id })).data;
   assert.equal(b.status, "auditing");
   const activity = (await call(dev, "get_build_activity", { build_id: started.id })).data.activity;
-  assert.deepEqual(activity[0], { type: "tool_use", summary: 'Bash {"command":"npm test"}' });
+  assert.deepEqual({ type: activity[0].type, summary: activity[0].summary }, { type: "tool_use", summary: 'Bash {"command":"npm test"}' });
   assert.equal((await call(dev, "steer_build", { build_id: started.id, message: "Use the existing design system" })).data.steered, true);
   const inbox = [...boat.sandboxes.get(sbx).files].filter(([path]) => path.startsWith(`${A}/inbox/`));
   assert.deepEqual(inbox.map(([, v]) => JSON.parse(v)), [{ message: "Use the existing design system" }], "steering goes to the runner's inbox");
@@ -384,6 +404,173 @@ test("developers track, steer and stop their own builds; admins see all", async 
   assert.equal(all.builds.length, 1);
   assert.equal(all.builds[0].source_url, undefined);
   assert.match((await call(dev, "steer_build", { build_id: started.id, message: "go on" })).data.error, /only a running agent/);
+});
+
+const say = (text) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
+const run = (command) => ({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command } }] } });
+
+test("the agent's activity is stored as the build runs: paged with a cursor, and kept after the sandbox stops", async () => {
+  const { builds, boat, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const other = await connect(await as("Other", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  const activity = async (args = {}) => (await call(dev, "get_build_activity", { build_id: started.id, ...args })).data;
+  assert.deepEqual((await activity()).activity, [], "nothing before the agent starts");
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+
+  // Complete lines only: a line still being written waits for its newline. Lines Mynt doesn't show (tool results)
+  // are read past.
+  boat.log(sbx, say("Reading the spec"), { type: "user", message: { content: [{ type: "tool_result", content: "x".repeat(500) }] } }, run("npm test"), '{"type":"assistant","message":{"content":[{"type":"text","text":"Half');
+  await builds.tick();
+  let all = await activity({ after: 0 });
+  assert.deepEqual(all.activity.map((a) => [a.seq, a.type, a.summary]), [[1, "message", "Reading the spec"], [2, "tool_use", 'Bash {"command":"npm test"}']]);
+  assert.equal(all.cursor, 2);
+  assert.ok(all.activity.every((a) => !Number.isNaN(Date.parse(a.at))));
+  boat.log(sbx, ' written"}]}}\n', { type: "result", subtype: "success", total_cost_usd: 0.42 });
+  await builds.tick();
+  await builds.tick(); // nothing new: nothing stored twice
+
+  // Paging: oldest first after a cursor, a new cursor each time; it stays put when there's nothing new.
+  const page1 = await activity({ after: 0, limit: 2 });
+  assert.deepEqual(page1.activity.map((a) => a.seq), [1, 2]);
+  const page2 = await activity({ after: page1.cursor, limit: 2 });
+  assert.deepEqual(page2.activity.map((a) => [a.seq, a.summary]), [[3, "Half written"], [4, "success, US$0.42"]]);
+  assert.deepEqual(await activity({ after: page2.cursor }).then((r) => [r.activity, r.cursor]), [[], 4]);
+  // Without a cursor: the latest, newest first.
+  assert.deepEqual((await activity({ limit: 2 })).activity.map((a) => a.seq), [4, 3]);
+  assert.equal((await activity()).cursor, 4);
+
+  // What the agent did just before the developer stopped it is kept, and all of it outlives the sandbox.
+  boat.log(sbx, run("git status"));
+  await call(dev, "stop_build", { build_id: started.id });
+  assert.ok(boat.sandboxes.get(sbx).stopped);
+  all = await activity({ after: 0 });
+  assert.deepEqual(all.activity.map((a) => a.summary), ["Reading the spec", 'Bash {"command":"npm test"}', "Half written", "success, US$0.42", 'Bash {"command":"git status"}']);
+  assert.equal(all.status, "stopped");
+  assert.match((await call(other, "get_build_activity", { build_id: started.id })).data.error, /No build of yours/);
+});
+
+test("a line too long to keep is skipped, across reads, without losing the lines around it; each build keeps its latest entries", async () => {
+  const { builds, boat, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  // A 600 KB tool result (more than two reads), with multi-byte text before and after it.
+  boat.log(sbx, say("Café – first"), { type: "user", message: { content: [{ type: "tool_result", content: "é".repeat(300_000) }] } }, say("naïve – after"));
+  await builds.tick();
+  const got = (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity;
+  assert.deepEqual(got.map((a) => a.summary), ["Café – first", "naïve – after"]);
+  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(boat.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
+
+  // Over the per-build limit, the oldest entries go; seq keeps counting.
+  boat.log(sbx, ...Array.from({ length: 5003 }, (_, i) => say(`step ${i}`)));
+  for (let i = 0; i < 3; i++) await builds.tick();
+  const { ACTIVITY_KEEP } = await import("../dist/builds.js");
+  const count = (await builds.activity({ id: started.id }, { after: 0, limit: 200 })).activity;
+  assert.equal(count[0].seq, 2 + 5003 - ACTIVITY_KEEP + 1);
+  const latest = (await call(dev, "get_build_activity", { build_id: started.id, limit: 1 })).data;
+  assert.deepEqual([latest.activity[0].seq, latest.activity[0].summary, latest.cursor], [5005, "step 5002", 5005]);
+  assert.equal(latest.first_seq, count[0].seq, "first_seq says where the kept entries start, so a follower can tell some were trimmed");
+});
+
+test("one bad line never stalls activity: NULs are stripped, and an entry the database refuses is dropped, not retried forever", async () => {
+  let poisoned = 0;
+  const refuse = (sql, params) => sql.includes("INSERT INTO financial_products.build_activity") && (params ?? []).some((p) => typeof p === "string" && p.includes("POISON") && ++poisoned);
+  const { builds, boat, as, connect, call } = await setup({ refuse });
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const summaries = async () => (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity.map((a) => a.summary);
+
+  // A NUL (which Postgres text refuses) between good lines: all three are kept, the NUL gone.
+  boat.log(sbx, say("before"), say("bad\u0000text"), say("after"));
+  await builds.tick();
+  assert.deepEqual(await summaries(), ["before", "bad text", "after"]);
+
+  // An entry the database refuses for any other reason: the rest of its chunk is kept, and the offset moves on.
+  boat.log(sbx, say("good one"), say("POISON"), say("good two"));
+  await builds.tick();
+  assert.ok(poisoned >= 2, "the batch, then the entry on its own, were refused");
+  boat.log(sbx, say("later"));
+  await builds.tick();
+  assert.deepEqual(await summaries(), ["before", "bad text", "after", "good one", "good two", "later"]);
+  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(boat.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
+});
+
+test("activity is scrubbed of secrets before it is cut to length", async () => {
+  const { activitySummary } = await import("../dist/builds.js");
+  const { builds, boat, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const gh = "ghs_abcdefghijklmnopqrstuvwxyz0123456789";
+  boat.log(sbx, say(`the token is ${gh}, don't share it`), run("GITHUB_TOKEN=supersecretvalue123 git push"), say(`${"x".repeat(385)} ${gh}`));
+  await builds.tick();
+  const got = (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity.map((a) => a.summary);
+  assert.equal(got[0], "the token is [redacted], don't share it");
+  assert.equal(got[1], 'Bash {"command":"GITHUB_TOKEN=[redacted] git push"}');
+  // The token straddles the 400-character cut: scrubbed first, so no prefix of it survives.
+  assert.ok(!got[2].includes("ghs_") && got[2].length <= 400, got[2]);
+  assert.ok(got.every((s) => !s.includes("supersecret") && !s.includes("abcdefghij")));
+  // A cut never leaves half a surrogate pair.
+  assert.equal(activitySummary("a".repeat(399) + "😀"), "a".repeat(399));
+});
+
+test("remove_app deletes a removed app's stored build activity", async () => {
+  const { builds, boat, as, connect, call, pg } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const admin = await connect(await as("Ada", ["admin"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  boat.log(sbx, say("hello"));
+  await builds.tick();
+  await call(dev, "stop_build", { build_id: started.id });
+  const rows = async () => (await pg.query("SELECT count(*)::int AS n FROM financial_products.build_activity WHERE build_id = $1", [started.id])).rows[0].n;
+  assert.equal(await rows(), 1);
+  const dry = (await call(admin, "remove_app", { app_id: app.id })).data;
+  assert.equal(dry.would_remove.rows.build_activity, 1, JSON.stringify(dry));
+  const done = await call(admin, "remove_app", { app_id: app.id, confirm: true, reason: "test" });
+  assert.equal(done.isError, false, JSON.stringify(done.data));
+  assert.equal(await rows(), 0);
+});
+
+test("activityLines: complete lines only, a line being skipped is dropped to its end, an over-long one is skipped", async () => {
+  const { activityLines } = await import("../dist/builds.js");
+  const b = (s) => Buffer.from(s);
+  assert.deepEqual(activityLines(b('{"a":1}\n{"b":'), false, 100), { consumed: 8, lines: ['{"a":1}'] });
+  assert.deepEqual(activityLines(b('\n{"b":2}\n'), true, 100), { consumed: 8, lines: ['{"b":2}'] });
+  assert.deepEqual(activityLines(b('\n{"b":'), true, 100), { consumed: 0, lines: [] }, "a short partial line waits");
+  assert.deepEqual(activityLines(b("x".repeat(10)), false, 10), { consumed: 10, lines: [] }, "a line longer than a read is skipped");
+  assert.deepEqual(activityLines(b('xxxx\n{"c":3}\n'), true, 100), { consumed: 12, lines: ['{"c":3}'] }, "the rest of a skipped line is dropped");
+  assert.deepEqual(activityLines(b("xxxx"), true, 100), { consumed: 3, lines: [] }, "still inside the skipped line");
+  assert.deepEqual(activityLines(b(""), true, 100), { consumed: 0, lines: [] });
+});
+
+test("list_builds filters by app", async () => {
+  const { as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const mine = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id })).data;
+  await call(dev, "start_build", { goal: "Build something unrelated please" });
+  assert.equal((await call(dev, "list_builds", {})).data.builds.length, 2);
+  assert.deepEqual((await call(dev, "list_builds", { app_id: app.id })).data.builds.map((b) => b.id), [mine.id]);
+  assert.deepEqual((await call(dev, "list_builds", { app_id: "00000000-0000-0000-0000-000000000000" })).data.builds, []);
 });
 
 test("a session build stays open for the developer's requests; finish_build ships it and Mynt verifies it as usual", async () => {
@@ -466,6 +653,82 @@ test("a session's idle machine time counts against its cap", async () => {
   assert.ok(boat.sandboxes.get(sbx).stopped);
 });
 
+// A session build with its agent running, for the tests below.
+async function runningSession(ctx, args = {}) {
+  const dev = await ctx.connect(await ctx.as(`Dev ${randomUUID().slice(0, 6)}`, ["developer"]));
+  const started = (await ctx.call(dev, "start_build", { goal: "Build a savings page please", mode: "session", ...args })).data;
+  await ctx.builds.tick();
+  const sbx = (await ctx.builds.get(started.id)).sandbox_id;
+  ctx.boat.ready(sbx);
+  await ctx.builds.tick();
+  return { dev, started, sbx, s: ctx.boat.sandboxes.get(sbx) };
+}
+const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
+
+test("a session the runner finished on its own (idle) takes no more steers; nor does one finished after the steer loaded it", async () => {
+  const ctx = await setup();
+  const { builds, boat, call } = ctx;
+  const { dev, started, sbx, s } = await runningSession(ctx);
+  // The runner went idle and sent the finish prompt itself: Mynt records it on the next tick.
+  boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 2, sent: 2, last_subtype: "success", done: false, exit_code: null, error: null, summary: null, finish: "idle", undelivered: 0 });
+  await builds.tick();
+  const b = await builds.get(started.id);
+  assert.ok(b.finish_requested_at);
+  assert.ok((await call(dev, "get_build", { build_id: started.id })).data.timeline.some((e) => /idle too long/.test(e.message)));
+  assert.match((await call(dev, "steer_build", { build_id: started.id, message: "One more thing" })).data.error, /finishing/);
+  assert.equal((await call(dev, "finish_build", { build_id: started.id })).data.finishing, true);
+  assert.deepEqual(finishItems(s), [], "the runner is already finishing: no second finish item");
+
+  // The race: a steer that loaded the build before finish_build recorded the finish is still refused.
+  const second = await runningSession(ctx);
+  const stale = await builds.get(second.started.id);
+  await builds.finish(stale);
+  await assert.rejects(builds.steer(stale, "Sneak this in"), /finishing/);
+  // And concurrent finishes write one finish item.
+  const third = await runningSession(ctx);
+  const t = await builds.get(third.started.id);
+  await Promise.all([builds.finish(t), builds.finish(t), builds.finish(t)]);
+  assert.equal(finishItems(third.s).length, 1);
+  // Inbox items are put in place whole, by a rename.
+  assert.ok(third.s.commands.some((c) => /^mv -f '\/home\/user\/mynt-agent\/inbox\/\.[^']+-finish\.json' '\/home\/user\/mynt-agent\/inbox\/[^.][^']+-finish\.json'$/.test(c.command)));
+
+  // Messages the runner held back while finishing are reported when it exits.
+  boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  boat.finishAgent(sbx);
+  boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 3, sent: 3, last_subtype: "success", done: true, exit_code: 0, error: null, summary: "shipped", finish: "idle", undelivered: 2 });
+  await builds.tick();
+  const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline;
+  assert.ok(timeline.some((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)));
+  assert.equal((await builds.get(started.id)).status, "verifying", "and Mynt verifies the work as usual");
+});
+
+test("Mynt finishes a session itself before its sandbox's time limit or its cap would end it unshipped", async () => {
+  // Time limit: with a 30-minute sandbox the margin has already passed.
+  const ctx = await setup({ config: { ttlSeconds: 1800 } });
+  const { started, s } = await runningSession(ctx);
+  await ctx.builds.tick();
+  assert.deepEqual(finishItems(s).map((f) => f.reason), ["ttl"]);
+  assert.ok((await ctx.builds.get(started.id)).finish_requested_at);
+
+  // Cap: at 80% of it.
+  const c2 = await setup();
+  const second = await runningSession(c2, { cap_usd: 5 });
+  second.s.cost = 3.9;
+  await c2.builds.tick();
+  assert.deepEqual(finishItems(second.s), []);
+  second.s.cost = 4.1;
+  await c2.builds.tick();
+  assert.deepEqual(finishItems(second.s).map((f) => f.reason), ["cap"]);
+  await c2.builds.tick();
+  assert.equal(finishItems(second.s).length, 1, "once");
+  assert.ok((await c2.call(second.dev, "get_build", { build_id: second.started.id })).data.timeline.some((e) => /spent most of its cap/.test(e.message)));
+});
+
+test("BUILD_SESSION_IDLE_MS must be a sensible number of milliseconds, or the 15-minute default applies", () => {
+  for (const [v, want] of [[undefined, 900000], ["120000", 120000], ["abc", 900000], ["5", 900000], ["1e12", 900000], ["Infinity", 900000]])
+    assert.equal(buildConfigFromEnv(v === undefined ? {} : { BUILD_SESSION_IDLE_MS: v }).sessionIdleMs, want, String(v));
+});
+
 test("continue_from starts a build from an earlier build's pushed branch, on the same app and repository", async () => {
   const ctx = await setup();
   const { builds, boat, as, connect, call } = ctx;
@@ -494,7 +757,13 @@ test("continue_from starts a build from an earlier build's pushed branch, on the
   assert.match((await call(dev, "start_build", { goal: "Continue a running build", continue_from: next.id })).data.error, /still coding/);
   const plain = (await call(dev, "start_build", { goal: "Build without a repository" })).data;
   await call(dev, "stop_build", { build_id: plain.id });
-  assert.match((await call(dev, "start_build", { goal: "Continue a build with no branch", continue_from: plain.id })).data.error, /pushed no branch/);
+  assert.match((await call(dev, "start_build", { goal: "Continue a build with no branch", continue_from: plain.id })).data.error, /pushed no verified branch/);
+  // A branch name alone isn't enough: Mynt must have confirmed the push (a verified commit or its pull request).
+  const unpushed = (await call(dev, "start_build", { goal: "Build that never pushed", app_id: app.id, repository: "acme/savings-app" })).data;
+  await builds.tick();
+  await call(dev, "stop_build", { build_id: unpushed.id });
+  assert.ok((await builds.get(unpushed.id)).branch, "it had a branch name");
+  assert.match((await call(dev, "start_build", { goal: "Continue a build that never pushed", continue_from: unpushed.id })).data.error, /pushed no verified branch/);
   const app2 = (await call(dev, "create_app", { name: "Other", description: "Other ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
   assert.match((await call(dev, "start_build", { goal: "Continue on another app", continue_from: first.id, app_id: app2.id })).data.error, /another app/);
 });
@@ -836,20 +1105,34 @@ async function sessionRunner({ turnMs = 100, env = {} } = {}) {
     `#!/usr/bin/env node
 const fs = require("fs");
 console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "sess_s" }));
-let turns = 0, buf = "", queue = Promise.resolve();
+// One turn at a time, as Claude Code does; an interrupt ends the running turn at once with error_during_execution.
+let turns = 0, buf = "", queue = [], current = null;
+const result = (subtype, text) => {
+  turns++;
+  console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } }));
+  console.log(JSON.stringify({ type: "result", subtype, total_cost_usd: 0.1 * turns, result: text }));
+};
+const next = () => {
+  if (current || !queue.length) return;
+  const content = queue.shift();
+  current = { content, timer: setTimeout(() => { current = null; result("success", "did: " + content); next(); }, ${turnMs}) };
+};
 process.stdin.on("data", (d) => {
   buf += d;
   let i;
   while ((i = buf.indexOf("\\n")) >= 0) {
     const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
     fs.appendFileSync(process.env.HOME + "/received.jsonl", JSON.stringify(m) + "\\n");
+    if (m.type === "control_request" && m.request && m.request.subtype === "interrupt" && current) {
+      clearTimeout(current.timer);
+      const c = current.content;
+      current = null;
+      result("error_during_execution", "interrupted: " + c);
+      next();
+    }
     if (m.type !== "user") continue;
-    queue = queue.then(() => new Promise((r) => setTimeout(() => {
-      turns++;
-      console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "did: " + m.message.content }] } }));
-      console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.1 * turns, result: "did: " + m.message.content }));
-      r();
-    }, ${turnMs})));
+    queue.push(m.message.content);
+    next();
   }
 });
 `,
@@ -871,7 +1154,13 @@ process.stdin.on("data", (d) => {
     }
   };
   let n = 0;
-  const inbox = (item) => writeFileSync(join(dir, "inbox", `${Date.now()}-${++n}.json`), JSON.stringify(item));
+  // An inbox item (a string is written as it is), under `name` if given; rewrite() replaces its contents.
+  const inbox = (item, name) => {
+    const path = join(dir, "inbox", name ?? `${Date.now()}-${++n}.json`);
+    const write = (v) => writeFileSync(path, typeof v === "string" ? v : JSON.stringify(v));
+    write(item);
+    return { rewrite: write };
+  };
   const received = () => (existsSync(join(home, "received.jsonl")) ? readFileSync(join(home, "received.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
   return { child, exit, isExited: () => exited, state, until, inbox, received };
 }
@@ -905,6 +1194,45 @@ test("a session runner finishes on its own once idle, with the finish prompt as 
   assert.deepEqual(r.received().filter((m) => m.type === "user").map((m) => m.message.content), ["First request", "One more thing", "Finish the session now"]);
   assert.equal(r.state().finish, "idle");
   assert.equal(r.state().last_subtype, "success");
+});
+
+test("once a session is finishing, a steer never interrupts the finish turn: it is held back and counted as undelivered", async () => {
+  const r = await sessionRunner({ turnMs: 3000 });
+  await r.until(() => r.state().turns === 1);
+  // A steer during an ordinary request interrupts it (the stand-in honours interrupts).
+  r.inbox({ message: "Second request" });
+  await r.until(() => r.received().filter((m) => m.type === "user").length === 2);
+  r.inbox({ message: "Change of plan" });
+  await r.until(() => r.received().some((m) => m.type === "control_request"));
+  await r.until(() => r.state().turns === 3, 20000);
+  // Now finish, then steer while the finish turn runs.
+  r.inbox({ finish: true, message: "Finish the session now (shipping)" });
+  await r.until(() => r.state().finish === "developer");
+  r.inbox({ message: "One more tweak" });
+  r.inbox({ finish: true, message: "Finish again" });
+  const code = await r.exit;
+  assert.equal(code, 0);
+  const got = r.received();
+  assert.deepEqual(got.filter((m) => m.type === "user").map((m) => m.message.content), ["First request", "Second request", "Change of plan", "Finish the session now (shipping)"]);
+  assert.equal(got.filter((m) => m.type === "control_request").length, 1, "only the ordinary steer interrupted");
+  const s = r.state();
+  assert.deepEqual([s.finish, s.undelivered, s.last_subtype, s.summary], ["developer", 1, "success", "did: Finish the session now (shipping)"]);
+});
+
+test("a session runner ignores a non-numeric idle setting, skips dot-files and retries an inbox file it can't parse yet", async () => {
+  const r = await sessionRunner({ env: { MYNT_AGENT_IDLE_MS: "soon" } });
+  await r.until(() => r.state().turns === 1);
+  await new Promise((res) => setTimeout(res, 1500));
+  assert.equal(r.isExited(), false, "NaN falls back to the 15-minute default rather than finishing at once");
+  r.inbox({ message: "Never read: still being written" }, ".partial.json");
+  const half = r.inbox('{"message": "Half');
+  await new Promise((res) => setTimeout(res, 2500));
+  assert.equal(r.received().filter((m) => m.type === "user").length, 1);
+  half.rewrite({ message: "Now whole" });
+  await r.until(() => r.received().some((m) => m.type === "user" && m.message.content === "Now whole"));
+  r.inbox({ finish: true, message: "Finish" });
+  assert.equal(await r.exit, 0);
+  assert.ok(!r.received().some((m) => m.type === "user" && /Never read/.test(m.message.content)));
 });
 
 test("without a boat.dev key builds are disabled cleanly, and agents never connect outside services", async () => {

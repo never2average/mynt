@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { callMyntTool, connectMynt, NotSignedInError } from "@/lib/mynt";
-import { currentSession, fromOwnOrigin, queueAppEvent } from "@/lib/session";
+import { queueAppEvent } from "@/lib/app-session";
+import { currentSession, fromOwnOrigin } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
