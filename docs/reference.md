@@ -208,6 +208,21 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.
 
+**Managed repositories (the default).** A developer needs no repository of their own. When a build names no `repository`, its app's builds push to the app's repository:
+- **Created by Mynt.** On the app's first build, Mynt creates a private repository on its git host (`src/git-host.ts`), named by the app's id only (`mynt-app-<app_id>`), with a first commit so pull requests have a base.
+- **Works like a connected repository.** Builds push their branch there, Mynt opens the verified pull request there, `deploy_app` fetches the verified commit from it, and `continue_from` carries on in it.
+- **Reachable only through its app.** It can't be connected by name, nor named by another app's build. `list_repositories` marks it `managed`.
+- **Cloning.** `get_app_repository` says where an app's code lives and, for a managed repository, gives a read-only token (one hour) to clone it.
+
+`set_app_repository` switches an app's next builds to one of the developer's own connected repositories. Builds already made stay in the managed one; to carry on from them, push its branch to your repository first. `remove_app` drops the app's repository record, and the repository itself is left on the host.
+
+Setup, on the host's side (the GitHub adapter, `GitHubRepoHost` in `src/github.ts`):
+1. Create a GitHub organization for managed repositories.
+2. Install Mynt's GitHub App on it for all repositories, with Administration (write) as well as contents and pull requests (write).
+3. Set `BUILD_MANAGED_REPO_OWNER` to the organization's name.
+
+Without `BUILD_MANAGED_REPO_OWNER`, builds without a repository work as before: a preview, and no push.
+
 **Configuration:** `BOAT_API_KEY`, `PUBLIC_URL` and a model backend for the agent proxy (builds are disabled without them): either `GOOGLE_APPLICATION_CREDENTIALS` (a service account key file with Vertex AI User on a project where the Claude models are enabled; optional `VERTEX_PROJECT_ID`, `VERTEX_REGION`, default `global`) or `ANTHROPIC_API_KEY` (a dedicated key with a spend limit); `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_SLUG` (pushing is disabled without them); optional `BUILD_AGENT_MODEL` (default `claude-opus-5-5`), `BUILD_SANDBOX_TYPE` and `BUILD_SANDBOX_TTL_SECONDS`.
 
 ### Solana programs (developers)

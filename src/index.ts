@@ -17,7 +17,7 @@ import { ReviewService, reviewConfigFromEnv } from "./review.js";
 import { BuildService, buildConfigFromEnv } from "./builds.js";
 import { connectPostgres } from "./db.js";
 import { createMcpHttpServer } from "./http.js";
-import { GitHubApp } from "./github.js";
+import { GitHubApp, GitHubRepoHost } from "./github.js";
 import { startWebhookWorker } from "./runtime.js";
 import { pollRampAdapterTransfers } from "./ramp-adapters/index.js";
 import { sweepVendorActionRuns } from "./vendors.js";
@@ -103,6 +103,8 @@ const openServices = async () => {
   const buildConfig = buildConfigFromEnv();
   const github = GitHubApp.fromEnv();
   const builds = await BuildService.open(db, store, boat, github, buildConfig);
+  // Each app's managed repository, when Mynt has an organization for them (BUILD_MANAGED_REPO_OWNER).
+  builds.managedHost = GitHubRepoHost.fromEnv(github);
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
   const deskConfig = deskConfigFromEnv(buildConfig);
   const desk = await DeskService.open(db, store, boat, github, deskConfig);

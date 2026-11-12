@@ -55,6 +55,8 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   // What each build's agents spent on models (the meter's run key).
   { table: "agent_spend", where: `t.run_key IN (SELECT 'build:' || id::text FROM ${T}.build_runs WHERE app_id = $1)` },
   { table: "build_runs", where: "t.app_id = $1", list: "id" },
+  // Which repository the app's builds pushed to. The repository itself (and its code) stays where it is.
+  { table: "app_repositories", where: "t.app_id = $1", list: "repository" },
   { table: "apps", where: "t.id = $1", list: "id" },
 ];
 
