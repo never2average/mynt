@@ -46,42 +46,67 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   ],
   // scheme://user:password@host keeps the user (which may be empty) and host.
   [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:@/]*:)[^\s@/]+@/gi, `$1${R}@`],
-  // Authorization: Bearer … (a header, curl -H, or JSON).
-  [new RegExp(String.raw`\b(authorization["']?${SP}[:=]${SP}["']?(?:(?:bearer|basic|token)[ \t]+)?)(?!(?:bearer|basic|token)\b)[A-Za-z0-9._~+/=-]{6,}`, "gi"), `$1${R}`],
+  // Authorization: Bearer … (a header, curl -H, or JSON), but not prose such as "authorization: required".
+  [new RegExp(String.raw`\b(authorization["']?${SP}[:=]${SP}["']?(?:(?:bearer|basic|token)[ \t]+)?)(?!(?:bearer|basic|token|required|optional|missing|invalid|denied|failed|expired|enabled|disabled|header|none|null|true|false)\b)[A-Za-z0-9._~+/=-]{6,}`, "gi"), `$1${R}`],
 ];
 
 // NAME=value, `name: value` and "name": "value": a name that says it's secret (any case; db_pass and PASS included),
-// then its value: the whole quoted span (any length) or an unquoted run of at least 6 characters. The scan looks for
-// the end of such a name (a secret word and a separator), then walks back at most 64 characters to the name's start,
-// so ordinary `name: value` pairs cost nothing and no text is read more than a bounded number of times.
+// then its value: the whole quoted span (any length; an unclosed quote runs to the end of its line) or an unquoted run
+// of at least 6 characters. The scan looks for the end of such a name (a secret word and a separator), then walks back
+// to the name's start.
+//
+// Linearity: every value the scan reads is consumed (redacted or passed over as a whole), and the checks that skip a
+// value look only at its first characters, or at a bounded run, before reading it. So no text is read more than a
+// bounded number of times, however many names hide inside a value.
 const NAME_END = new RegExp(String.raw`(token|secret|pass(?:wd|word|phrase)?|key|credentials?)["']?${SP}[=:]${SP}`, "gi");
+// Names are at most 64 characters, which bounds the walk back. Longer runs are identifiers or data, not names.
 const NAME_MAX = 64;
 const isNameChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 46 || c === 45; // [A-Za-z0-9_.-]
-const VALUE = /"(?:[^"\\\n]|\\.){1,512}"|'(?:[^'\\\n]|\\.){1,512}'|[^\s"']{6,}/y;
+const VALUE = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|["'][^\n]*|[^\s"']{6,}/y;
 const SECRET_NAME = /(?:token|secret|password|passwd|passphrase|api[_-]?key|private[_-]?key|secret[_-]?key|access[_-]?key|auth[_-]?key|credentials?)$|(?:^|[_.])pass$/i;
 // Upper-case names ending in _KEY (SENDGRID_KEY=…) are secret too, except public keys.
 const isSecretName = (name: string) => SECRET_NAME.test(name) || (/^[A-Z0-9_]*[A-Z0-9]_KEY$/.test(name) && !/PUB(?:LIC)?_KEY$/.test(name));
-// A key or credentials file's path isn't the key.
-const isKeyPath = (name: string, value: string) => /(?:key|credentials?)$/i.test(name) && /^["']?(?:~\/|\/|\.\/)/.test(value);
+// A path given for a key or credentials file isn't the key (SSH_KEY=~/.ssh/id_ed25519), but secret, API, access, auth
+// and private keys are always redacted. A path starts with ~/ or ./, or is an absolute path with a . - or _ in it
+// (base64 has none of those), and holds no + or = (which base64 does).
+const mayNameKeyFile = (name: string) => /(?:key|credentials?)$/i.test(name) && !/(?:secret|api|access|auth|private)[_-]?key$/i.test(name);
+const KEY_FILE_PATH = /["']?(?:~\/|\.\.?\/|\/(?=[A-Za-z0-9_/]{0,256}[._-]))[A-Za-z0-9_./-]{1,256}["']?(?=[\s,;]|$)/y;
 
 function scrubAssignments(text: string): string {
   let out = "";
   let last = 0;
   NAME_END.lastIndex = 0;
   for (let m; (m = NAME_END.exec(text)); ) {
-    // The scan resumes right after the separator, so a value can hold another assignment (env:GITHUB_TOKEN=…).
+    // An ordinary name resumes the scan right after its separator, so a value can hold an assignment (env:GITHUB_TOKEN=…).
     const at = m.index + m[0].length;
     const nameEnd = m.index + m[1].length;
     let start = m.index;
     while (start > 0 && nameEnd - start < NAME_MAX && isNameChar(text.charCodeAt(start - 1))) start--;
-    if (start > 0 && isNameChar(text.charCodeAt(start - 1))) continue; // a name too long to be one
+    if (start > 0 && isNameChar(text.charCodeAt(start - 1))) continue; // longer than a name
     const name = text.slice(start, nameEnd);
     if (!isSecretName(name)) continue;
+    // Already redacted by a pattern above (a URL password, a token).
+    if (text.startsWith(R, at)) {
+      NAME_END.lastIndex = at + R.length;
+      continue;
+    }
+    if (mayNameKeyFile(name)) {
+      KEY_FILE_PATH.lastIndex = at;
+      const path = KEY_FILE_PATH.exec(text);
+      if (path) {
+        NAME_END.lastIndex = at + path[0].length;
+        continue;
+      }
+    }
     VALUE.lastIndex = at;
     const value = VALUE.exec(text)?.[0];
-    if (!value || value.startsWith(R) || isKeyPath(name, value)) continue;
-    out += text.slice(last, at) + (value[0] === '"' || value[0] === "'" ? `${value[0]}${R}${value[0]}` : R);
-    last = NAME_END.lastIndex = at + value.length;
+    if (!value) continue; // an unquoted value under 6 characters
+    NAME_END.lastIndex = at + value.length;
+    const q = value[0] === '"' || value[0] === "'" ? value[0] : "";
+    if (q && value.length === 2 && value[1] === q) continue; // empty
+    if (/^pass$/i.test(name) && /^\d+$/.test(value)) continue; // a test count (pass: 12)
+    out += text.slice(last, at) + (!q ? R : value.length > 1 && value.endsWith(q) ? `${q}${R}${q}` : `${q}${R}`);
+    last = at + value.length;
   }
   return out + text.slice(last);
 }

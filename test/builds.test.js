@@ -1168,6 +1168,19 @@ test("redact scrubs every token Mynt mints, provider keys, URL passwords and sec
   assert.equal(redact(`{"authorization": "Bearer abc123def456"}`), `{"authorization": "Bearer [redacted]"}`);
   assert.equal(redact(`authorization: Bearer ${jwt}`), "authorization: Bearer [redacted]");
   assert.equal(redact(`session ${jwt} ok`), "session [redacted] ok");
+  // Long quoted values go whole: a service account's private key in JSON, long passwords and API keys.
+  const pemBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(60);
+  const account = `{"type": "service_account", "private_key": "-----BEGIN PRIVATE KEY-----\\n${pemBody}\\n-----END PRIVATE KEY-----\\n", "client_email": "x@y"}`;
+  assert.ok(account.length > 2000);
+  assert.equal(redact(account), `{"type": "service_account", "private_key": "[redacted]", "client_email": "x@y"}`);
+  assert.equal(redact(`{"password": "${"p".repeat(600)}"}`), `{"password": "[redacted]"}`);
+  assert.equal(redact(`api_key: '${"k".repeat(600)}' done`), "api_key: '[redacted]' done");
+  assert.equal(redact(`PASSWORD="${"x ".repeat(300)}`), `PASSWORD="[redacted]`, "an unclosed quote goes to the end of the line");
+  // Secret, API, access, auth and private keys are redacted even when they look like paths.
+  assert.equal(redact("SECRET_KEY=/abcdefghij"), "SECRET_KEY=[redacted]");
+  assert.equal(redact("API_KEY=./abcdefghij"), "API_KEY=[redacted]");
+  assert.equal(redact("SSH_PRIVATE_KEY=~/.ssh/id_ed25519"), "SSH_PRIVATE_KEY=[redacted]");
+  assert.equal(redact("SIGNING_KEY=/AbCdEfGh/IjKl+MnOp=="), "SIGNING_KEY=[redacted]", "base64, not a path");
   assert.equal(redact("PASS=hunter2hunter2"), "PASS=[redacted]");
   assert.equal(redact("DB_PASSWORD=hunter2hunter2"), "DB_PASSWORD=[redacted]");
   assert.equal(redact("aws_secret_access_key = wJalrXUtnFEMIK7MDENG"), "aws_secret_access_key = [redacted]");
@@ -1211,8 +1224,10 @@ test("redact leaves ordinary text alone", () => {
     "password: ",
     `{"bypass": "everything ok", "primary": "abcdef123456"}`,
     "SOLANA_PUBLIC_KEY=7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-    "SSH_PRIVATE_KEY=~/.ssh/id_ed25519",
+    "SSH_KEY=~/.ssh/id_ed25519",
     "SIGNING_KEY=/run/secrets/signing.pem",
+    "pass: 1234567 fail: 0",
+    "authorization: required",
     "GOOGLE_APPLICATION_CREDENTIALS=./service-account.json",
     `if (pem.startsWith("-----BEGIN PRIVATE KEY-----")) return pem;\nconst rest = 1;`,
     "Authorization: Bearer $TOKEN",
@@ -1243,6 +1258,9 @@ test("redact stays linear on adversarial output", () => {
     "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n", "-----BEGIN A ",
   ].map(rep);
   inputs.push(`x://u:${"p".repeat(N)}`, '"'.repeat(N / 2) + "a".repeat(N / 2), "-----BEGIN " + rep("A "));
+  // Values skipped or already redacted, with names hiding inside them.
+  inputs.push("PRIVATE_KEY=" + rep("/A_KEY="), "private_key=" + rep("/private_key="), rep("token=[redacted]"), "token=" + rep("[redacted]token="));
+  inputs.push(rep("SSH_KEY=/a.b "), rep('password="'), rep("password: 'x\n"));
   for (const text of inputs) redact(text.slice(0, 10_000)); // warm up the regex engine and JIT on a tenth of each
   // CPU time, not wall time, so a busy machine doesn't fail the test.
   const cpuMs = (start) => {
