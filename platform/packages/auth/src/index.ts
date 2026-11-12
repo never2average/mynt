@@ -4,6 +4,7 @@
 // store in its lib/session.ts and lib/mynt-client.ts.
 export type { AuthApp, AuthConfig, AuthSession, AuthSessionStore } from "./types";
 export { SessionOAuthProvider } from "./oauth-provider";
+export { preRegisteredClientFromEnv, type PreRegisteredClient } from "./first-party-client";
 export { createSessions, type Sessions } from "./session";
 export { createConnectMynt, callMyntTool, NotAllowedError, NotSignedInError, type ToolOutcome } from "./mynt-client";
 export { loginRoute, callbackRoute, logoutRoute, type RouteDeps } from "./routes";

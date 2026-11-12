@@ -2,6 +2,8 @@
 // of its own: no model keys and no hosting-provider keys. Everything goes through Mynt as the
 // signed-in user.
 
+import { preRegisteredClientFromEnv, type PreRegisteredClient } from "@mynt/auth/first-party-client";
+
 function required(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is not set (see .env.example)`);
@@ -41,4 +43,11 @@ export function mcpClientInfo(): { name: string; version: string } {
 
 export function oauthScope(): string {
   return process.env.MYNT_OAUTH_SCOPE?.trim() || "openid profile email";
+}
+
+// The OAuth client an operator registered for this app with `mynt clerk first-party`
+// (MYNT_OAUTH_CLIENT_ID and MYNT_OAUTH_CLIENT_SECRET), so users aren't shown a consent screen.
+// Unset, the app registers itself dynamically. Read on the server only.
+export function oauthClient(): PreRegisteredClient | null {
+  return preRegisteredClientFromEnv();
 }
