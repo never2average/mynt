@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, TOOLCHAIN_PINS_SHA256 } from "./solana/toolchain.js";
 import { isTransient } from "./transient.js";
@@ -21,7 +21,7 @@ import { isTransient } from "./transient.js";
 //
 // The snapshot is keyed by the toolchain pins, the scripts that build and check it, the sandbox host's own setup
 // and the sandbox type, and is rebuilt when it is older than SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS (default 7), so
-// the base system's security updates aren't frozen in it. Hosts without snapshots (boat.dev) install in each
+// the base system's security updates aren't frozen in it. Hosts without snapshots install in each
 // sandbox, as before.
 //
 // A VM booted from a memory snapshot starts with the snapshot's kernel random state. Freestyle documents no VM
@@ -213,18 +213,18 @@ const hash = (s: string) => (/^[0-9a-f]{64}$/.test(s) ? s : "invalid");
 export class SolanaBuildEnv {
   private constructor(
     private readonly db: Db,
-    private readonly boat: BoatClient | null,
+    private readonly sandboxes: SandboxHost | null,
     private readonly opts: { enabled: boolean; sandboxType: string; key: string; maxAgeMs: number },
   ) {}
 
-  static async open(db: Db, boat: BoatClient | null, opts: { enabled?: boolean; sandboxType?: string; key?: string; maxAgeDays?: number } = {}) {
+  static async open(db: Db, sandboxes: SandboxHost | null, opts: { enabled?: boolean; sandboxType?: string; key?: string; maxAgeDays?: number } = {}) {
     await db.exec(TABLE);
     const sandboxType = opts.sandboxType ?? "default";
     const maxAgeDays = Number.isFinite(opts.maxAgeDays) && opts.maxAgeDays! > 0 ? opts.maxAgeDays! : 7;
-    return new SolanaBuildEnv(db, boat, {
+    return new SolanaBuildEnv(db, sandboxes, {
       enabled: opts.enabled ?? true,
       sandboxType,
-      key: opts.key ?? solanaEnvKey(boat?.setupFingerprint ?? "", sandboxType),
+      key: opts.key ?? solanaEnvKey(sandboxes?.setupFingerprint ?? "", sandboxType),
       maxAgeMs: maxAgeDays * 86_400_000,
     });
   }
@@ -235,7 +235,7 @@ export class SolanaBuildEnv {
 
   // Snapshots need a host that takes them, and can be turned off (SOLANA_BUILD_SNAPSHOT=off).
   get supported() {
-    return this.opts.enabled && !!this.boat?.snapshot && !!this.boat?.deleteSnapshot;
+    return this.opts.enabled && !!this.sandboxes?.snapshot && !!this.sandboxes?.deleteSnapshot;
   }
 
   private async row(key = this.key) {
@@ -261,7 +261,7 @@ export class SolanaBuildEnv {
         [r.key, r.snapshot_id],
       );
       if (claimed.rows.length) {
-        await this.boat!.deleteSnapshot!(r.snapshot_id).catch(() => undefined);
+        await this.sandboxes!.deleteSnapshot!(r.snapshot_id).catch(() => undefined);
         this.preparing = this.prepare().catch(() => null);
       }
       return null;
@@ -281,7 +281,7 @@ export class SolanaBuildEnv {
       "UPDATE financial_products.solana_build_envs SET status = 'failed', snapshot_id = NULL, error = $2, updated_at = now() WHERE key = $1 AND snapshot_id = $3 AND status = 'ready' RETURNING key",
       [env.key, reason.slice(0, 500), env.snapshot_id],
     );
-    if (r.rows.length) await this.boat?.deleteSnapshot?.(env.snapshot_id).catch(() => undefined);
+    if (r.rows.length) await this.sandboxes?.deleteSnapshot?.(env.snapshot_id).catch(() => undefined);
   }
 
   // Creating a sandbox from the environment. A transient error from the host (a 5xx, a dropped connection) is
@@ -307,11 +307,11 @@ export class SolanaBuildEnv {
     );
     if (!claimed.rows.length) return (await this.row())!;
     // What the claim replaced goes now that this server owns the row.
-    if (current?.builder_sandbox) await this.boat!.stop(current.builder_sandbox).catch(() => undefined);
-    if (current?.snapshot_id) await this.boat!.deleteSnapshot!(current.snapshot_id).catch(() => undefined);
+    if (current?.builder_sandbox) await this.sandboxes!.stop(current.builder_sandbox).catch(() => undefined);
+    if (current?.snapshot_id) await this.sandboxes!.deleteSnapshot!(current.snapshot_id).catch(() => undefined);
     try {
       // Nothing of any developer's: no env, no secrets, only Mynt's scripts ever run on it.
-      const s = await this.boat!.createSandbox({
+      const s = await this.sandboxes!.createSandbox({
         name: `mynt-solana-env-${this.key}-${randomBytes(3).toString("hex")}`,
         type: this.opts.sandboxType,
         ttlSeconds: 3 * 3600,
@@ -334,8 +334,8 @@ export class SolanaBuildEnv {
   // Called by the build worker: moves the environment's build along, and retires other keys' environments once
   // nothing uses them.
   async tick() {
-    if (!this.boat) return;
-    const boat = this.boat;
+    if (!this.sandboxes) return;
+    const sandboxes = this.sandboxes;
     const others = (
       await this.db.query(
         `SELECT * FROM financial_products.solana_build_envs WHERE key <> $1 AND (
@@ -350,8 +350,8 @@ export class SolanaBuildEnv {
         [o.key, o.status, o.updated_at],
       );
       if (!claimed.rows.length) continue;
-      if (o.builder_sandbox) await boat.stop(o.builder_sandbox).catch(() => undefined);
-      if (o.snapshot_id) await boat.deleteSnapshot?.(o.snapshot_id).catch(() => undefined);
+      if (o.builder_sandbox) await sandboxes.stop(o.builder_sandbox).catch(() => undefined);
+      if (o.snapshot_id) await sandboxes.deleteSnapshot?.(o.snapshot_id).catch(() => undefined);
     }
     const r = await this.row();
     if (!r || r.status !== "building" || !r.builder_sandbox) return;
@@ -360,11 +360,11 @@ export class SolanaBuildEnv {
         "UPDATE financial_products.solana_build_envs SET status = 'failed', error = $2, updated_at = now() WHERE key = $1 AND status IN ('building', 'snapshotting') AND builder_sandbox = $3 RETURNING key",
         [r.key, error.slice(0, 1500), r.builder_sandbox],
       );
-      if (done.rows.length) await boat.stop(r.builder_sandbox!).catch(() => undefined);
+      if (done.rows.length) await sandboxes.stop(r.builder_sandbox!).catch(() => undefined);
     };
     if (Date.now() - Date.parse(r.created_at) > BUILD_LIMIT_MS) return fail("the environment took too long to build");
     if (r.builder_process == null) {
-      const state = (await boat.getSandbox(r.builder_sandbox)).state;
+      const state = (await sandboxes.getSandbox(r.builder_sandbox)).state;
       if (state === "error" || state === "cancelled") return fail(`the builder sandbox is ${state}`);
       if (!["ready", "idle", "running"].includes(state)) return;
       // Claimed before it starts (-1), so two servers never both start the prep.
@@ -373,10 +373,10 @@ export class SolanaBuildEnv {
         [r.key, r.builder_sandbox],
       );
       if (!claim.rows.length) return;
-      await boat.writeFile(r.builder_sandbox, ENV_FILES.installer, SOLANA_TOOLCHAIN_SCRIPT);
-      await boat.writeFile(r.builder_sandbox, ENV_FILES.state, SOLANA_ENV_STATE_SCRIPT);
-      await boat.writeFile(r.builder_sandbox, ENV_FILES.prep, SOLANA_ENV_PREP_SCRIPT);
-      const run = await boat.exec(r.builder_sandbox, `bash ${ENV_FILES.prep}`, { detached: true });
+      await sandboxes.writeFile(r.builder_sandbox, ENV_FILES.installer, SOLANA_TOOLCHAIN_SCRIPT);
+      await sandboxes.writeFile(r.builder_sandbox, ENV_FILES.state, SOLANA_ENV_STATE_SCRIPT);
+      await sandboxes.writeFile(r.builder_sandbox, ENV_FILES.prep, SOLANA_ENV_PREP_SCRIPT);
+      const run = await sandboxes.exec(r.builder_sandbox, `bash ${ENV_FILES.prep}`, { detached: true });
       if (run.processId === undefined) return fail("couldn't start the environment's build");
       await this.set({ builder_process: run.processId });
       return;
@@ -386,10 +386,10 @@ export class SolanaBuildEnv {
       if (Date.now() - Date.parse(r.updated_at) > 10 * 60_000) return fail("the environment's build never started");
       return;
     }
-    if ((await boat.commandStatus(r.builder_sandbox, r.builder_process)).running) return;
+    if ((await sandboxes.commandStatus(r.builder_sandbox, r.builder_process)).running) return;
     let result: { ok?: boolean; state_sha256?: string; install_seconds?: number; error?: string } | null = null;
     try {
-      result = JSON.parse((await boat.readFile(r.builder_sandbox, ENV_FILES.result)) ?? "null");
+      result = JSON.parse((await sandboxes.readFile(r.builder_sandbox, ENV_FILES.result)) ?? "null");
     } catch {
       result = null;
     }
@@ -403,7 +403,7 @@ export class SolanaBuildEnv {
     let snapshotId: string;
     try {
       // Snapshot the builder as it stands: the toolchain installed and checked, the image pulled.
-      ({ snapshotId } = await boat.snapshot!(r.builder_sandbox, {
+      ({ snapshotId } = await sandboxes.snapshot!(r.builder_sandbox, {
         slug: `mynt-solana-${this.key}-${randomBytes(3).toString("hex")}`,
         displayName: `Mynt Solana build environment: Agave ${SOLANA_TOOLCHAIN.agave.version}, Anchor ${SOLANA_TOOLCHAIN.anchor.version}, Rust ${SOLANA_TOOLCHAIN.rust.version}`,
       }));
@@ -414,14 +414,14 @@ export class SolanaBuildEnv {
       "UPDATE financial_products.solana_build_envs SET status = 'ready', snapshot_id = $2, state_sha256 = $3, install_seconds = $4, ready_at = now(), updated_at = now() WHERE key = $1 AND status = 'snapshotting'",
       [r.key, snapshotId, result.state_sha256, Number.isFinite(result.install_seconds) ? Math.round(result.install_seconds!) : null],
     );
-    await boat.stop(r.builder_sandbox).catch(() => undefined);
+    await sandboxes.stop(r.builder_sandbox).catch(() => undefined);
   }
 
   // A sandbox booted from the environment runs these first: Mynt's own copies of the state and check scripts, then
   // the check against the hash Mynt kept, with a fresh nonce for the VM's randomness.
   async writeCheck(sandbox: string) {
-    await this.boat!.writeFile(sandbox, ENV_FILES.state, SOLANA_ENV_STATE_SCRIPT);
-    await this.boat!.writeFile(sandbox, ENV_FILES.check, SOLANA_ENV_CHECK_SCRIPT);
+    await this.sandboxes!.writeFile(sandbox, ENV_FILES.state, SOLANA_ENV_STATE_SCRIPT);
+    await this.sandboxes!.writeFile(sandbox, ENV_FILES.check, SOLANA_ENV_CHECK_SCRIPT);
   }
   checkCommand(env: SolanaEnvSnapshot) {
     return `bash ${ENV_FILES.check} ${hash(env.state_sha256)} ${randomBytes(32).toString("hex")}`;

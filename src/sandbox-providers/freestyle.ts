@@ -1,11 +1,11 @@
-// Agent sandboxes on Freestyle: the same BoatClient the builds, reviews, the product desk and the connector use,
+// Agent sandboxes on Freestyle: the same SandboxHost the builds, reviews, the product desk and the connector use,
 // backed by a Freestyle VM per sandbox. Everything runs as a `user` account (home /home/user, the paths agents
 // expect), with the sandbox's env loaded from a 0600 file. Previews and downloads are served at unguessable
 // style.dev names, so a URL is its own credential, like boat's token-gated links.
 import { createHash, randomBytes } from "node:crypto";
-import { HttpBoatClient, type BoatClient, type SandboxState } from "./boat.js";
-import { shellQuote } from "./boxes.js";
-import { FreestyleProvider } from "./freestyle.js";
+import type { SandboxHost, SandboxState } from "../sandbox-host.js";
+import { shellQuote } from "../boxes.js";
+import { FreestyleProvider } from "../freestyle.js";
 
 const USER = "user";
 const NODE_VERSION = "22.11.0";
@@ -59,7 +59,7 @@ const STATES: Record<string, SandboxState> = {
   deleted: "cancelled",
 };
 
-export class FreestyleSandboxes implements BoatClient {
+export class FreestyleSandboxes implements SandboxHost {
   // What every machine's first boot installs: part of the key of any snapshot taken of one.
   readonly setupFingerprint = createHash("sha256").update([SETUP, NODE_VERSION, SOPS_VERSION].join("\n\0")).digest("hex");
   constructor(
@@ -214,12 +214,3 @@ export class FreestyleSandboxes implements BoatClient {
     return `https://${domain}/${token}`;
   }
 }
-
-// Agent sandboxes (builds, the product desk, governance review, the connector): boat.dev, or Freestyle VMs with
-// SANDBOX_PROVIDER=freestyle (also the default when only a Freestyle key is configured).
-export function sandboxesFromEnv(env = process.env): BoatClient | null {
-  const freestyle = env.FREESTYLE_API_KEY && (env.SANDBOX_PROVIDER === "freestyle" || (!env.SANDBOX_PROVIDER && !env.BOAT_API_KEY));
-  if (freestyle) return new FreestyleSandboxes(new FreestyleProvider(env.FREESTYLE_API_KEY!), { usdPerHour: Number(env.FREESTYLE_USD_PER_HOUR ?? 0.2) });
-  return env.BOAT_API_KEY && env.SANDBOX_PROVIDER !== "freestyle" ? new HttpBoatClient(env.BOAT_API_KEY) : null;
-}
-

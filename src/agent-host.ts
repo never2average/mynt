@@ -2,9 +2,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_RUNNER, CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
-import type { BoatClient } from "./boat.js";
+import type { SandboxHost } from "./sandbox-host.js";
 
-// Runs Claude Code (through Mynt's runner) in a boat sandbox. Shared by coding-agent builds and the
+// Runs Claude Code (through Mynt's runner) in a sandbox. Shared by coding-agent builds and the
 // business-development agent: both reach the model only through Mynt's agent proxy with a token
 // their caller mints, and optionally reach Mynt's own MCP server with that token as their only tools.
 
@@ -78,7 +78,7 @@ export function agentAuth(config: AgentHostConfig, token: string, opts: { mcp?: 
 
 // Starts Claude Code in `sandbox` through the runner; returns the runner's process id.
 export async function launchAgent(
-  boat: BoatClient,
+  sandboxes: SandboxHost,
   config: AgentHostConfig,
   sandbox: string,
   o: {
@@ -99,24 +99,24 @@ export async function launchAgent(
   if (o.workspace) {
     cwd = workspaceCwd(o.workspace);
     const files = Object.fromEntries(Object.entries({ ...workspaceFiles(o.workspace), ...(o.jobFiles ?? {}) }).map(([path, content]) => [`${cwd}/${path}`, content]));
-    if (boat.writeFiles) await boat.writeFiles(sandbox, files);
-    else for (const [path, content] of Object.entries(files)) await boat.writeFile(sandbox, path, content);
+    if (sandboxes.writeFiles) await sandboxes.writeFiles(sandbox, files);
+    else for (const [path, content] of Object.entries(files)) await sandboxes.writeFile(sandbox, path, content);
   }
   const run = { prompt: o.prompt, cwd, model: o.model ?? config.model, budgetUsd, version: CLAUDE_CODE_VERSION, ...(o.finishPrompt ? { finishPrompt: o.finishPrompt } : {}) };
-  await boat.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, AGENT_RUNNER);
-  await boat.writeFile(sandbox, `${AGENT_DIR}/config.json`, JSON.stringify(run));
-  await boat.writeFile(sandbox, `${AGENT_DIR}/auth.json`, JSON.stringify(agentAuth(config, o.token, { mcp: o.mcp })));
+  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, AGENT_RUNNER);
+  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/config.json`, JSON.stringify(run));
+  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/auth.json`, JSON.stringify(agentAuth(config, o.token, { mcp: o.mcp })));
   const env = Object.entries(o.runnerEnv ?? {})
     .filter(([k, v]) => /^MYNT_AGENT_[A-Z_]+$/.test(k) && /^[\w.-]*$/.test(v))
     .map(([k, v]) => `${k}=${v} `)
     .join("");
-  const started = await boat.exec(sandbox, `${env}node ${AGENT_DIR}/runner.mjs ${AGENT_DIR} >${AGENT_DIR}/runner.log 2>&1`, { detached: true });
+  const started = await sandboxes.exec(sandbox, `${env}node ${AGENT_DIR}/runner.mjs ${AGENT_DIR} >${AGENT_DIR}/runner.log 2>&1`, { detached: true });
   if (started.processId === undefined) throw new Error("Couldn't start the agent");
   return String(started.processId);
 }
 
-export async function agentState(boat: BoatClient, sandbox: string, processId: string) {
-  const state = parse<AgentState>(await boat.readFile(sandbox, `${AGENT_DIR}/state.json`));
-  const running = state?.done ? false : (await boat.commandStatus(sandbox, Number(processId))).running;
+export async function agentState(sandboxes: SandboxHost, sandbox: string, processId: string) {
+  const state = parse<AgentState>(await sandboxes.readFile(sandbox, `${AGENT_DIR}/state.json`));
+  const running = state?.done ? false : (await sandboxes.commandStatus(sandbox, Number(processId))).running;
   return { state, running, cost: state?.cost_usd ?? 0, ok: !running && state?.last_subtype === "success" };
 }

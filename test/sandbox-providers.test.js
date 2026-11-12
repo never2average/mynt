@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { HttpBoatClient } from "../dist/boat.js";
-import { envFile, FreestyleSandboxes, sandboxesFromEnv } from "../dist/freestyle-sandboxes.js";
+import { BoatDevSandboxes } from "../dist/sandbox-providers/boatdev.js";
+import { envFile, FreestyleSandboxes } from "../dist/sandbox-providers/freestyle.js";
+import { sandboxesFromEnv } from "../dist/sandbox-providers/index.js";
 
 // Records what the adapter asks of Freestyle; answers exec like a shell would for the protocol's commands.
 function fakeFreestyle() {
@@ -36,13 +37,13 @@ function fakeFreestyle() {
   };
 }
 
-test("agent sandboxes: boat by default, Freestyle when asked or when it's the only key", () => {
+test("agent sandboxes: boat.dev by default, Freestyle when asked or when it's the only key", () => {
   assert.equal(sandboxesFromEnv({}), null);
-  assert.ok(sandboxesFromEnv({ BOAT_API_KEY: "b" }) instanceof HttpBoatClient);
-  assert.ok(sandboxesFromEnv({ BOAT_API_KEY: "b", FREESTYLE_API_KEY: "f" }) instanceof HttpBoatClient, "hosting on Freestyle doesn't move the agents");
+  assert.ok(sandboxesFromEnv({ BOAT_API_KEY: "b" }) instanceof BoatDevSandboxes);
+  assert.ok(sandboxesFromEnv({ BOAT_API_KEY: "b", FREESTYLE_API_KEY: "f" }) instanceof BoatDevSandboxes, "hosting on Freestyle doesn't move the agents");
   assert.ok(sandboxesFromEnv({ BOAT_API_KEY: "b", FREESTYLE_API_KEY: "f", SANDBOX_PROVIDER: "freestyle" }) instanceof FreestyleSandboxes);
   assert.ok(sandboxesFromEnv({ FREESTYLE_API_KEY: "f" }) instanceof FreestyleSandboxes);
-  assert.equal(sandboxesFromEnv({ BOAT_API_KEY: "b", SANDBOX_PROVIDER: "freestyle" }), null, "asked for Freestyle without its key: none, not boat");
+  assert.equal(sandboxesFromEnv({ BOAT_API_KEY: "b", SANDBOX_PROVIDER: "freestyle" }), null, "asked for Freestyle without its key: none, not boat.dev");
 });
 
 test("Freestyle sandboxes write a workspace in a few batched commands, with big files on their own", async () => {
