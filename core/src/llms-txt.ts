@@ -121,7 +121,7 @@ ${started}
 ## Machine-readable
 
 - [OAuth protected resource metadata](${base}/.well-known/oauth-protected-resource/mcp)
-- MCP resource \`${DEFINITION_SCHEMA_URI}\`: the JSON Schema of product definitions ([source](${repo}/blob/main/schemas/financial-product.v2.schema.json))
+- MCP resource \`${DEFINITION_SCHEMA_URI}\`: the JSON Schema of product definitions ([source](${repo}/blob/main/core/schemas/financial-product.v2.schema.json))
 - MCP resource \`mynt://catalog\`: the published catalogue
 
 ## Optional
@@ -234,9 +234,9 @@ ${VENDOR_CONTRACT}
 
 ## SDKs and schemas
 
-- Generated SDKs for each app: ${SDK_LANGUAGES.join(", ")} (developer tools \`create_sdk\`, \`generate_sdk_release\`, \`get_sdk_release\`); templates in ${REPO_URL}/tree/main/sdk-templates
-- Product definition JSON Schema: MCP resource \`${DEFINITION_SCHEMA_URI}\`, source ${REPO_URL}/blob/main/schemas/financial-product.v2.schema.json
-- Service type examples (JSON): ${REPO_URL}/tree/main/schemas/service-types
+- Generated SDKs for each app: ${SDK_LANGUAGES.join(", ")} (developer tools \`create_sdk\`, \`generate_sdk_release\`, \`get_sdk_release\`); templates in ${REPO_URL}/tree/main/core/sdk-templates
+- Product definition JSON Schema: MCP resource \`${DEFINITION_SCHEMA_URI}\`, source ${REPO_URL}/blob/main/core/schemas/financial-product.v2.schema.json
+- Service type examples (JSON): ${REPO_URL}/tree/main/core/schemas/service-types
 `;
 }
 

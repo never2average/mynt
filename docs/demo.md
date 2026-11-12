@@ -12,7 +12,7 @@ You need a copy of this repository and Node.js 22 or newer.
 2. Install and build (once, takes a minute or two):
 
    ```
-   npm ci --workspaces=false && npm run build
+   npm ci && npm run build
    ```
 
 3. Do a practice run, so you know what the screen will show:

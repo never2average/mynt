@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -87,6 +88,17 @@ test("/.well-known/llms.txt serves the same document", async () => {
   assert.equal(b.status, 200);
   assert.equal(b.text, a.text);
   assert.equal(b.headers.get("content-type"), "text/plain; charset=utf-8");
+});
+
+test("every link into the repository (blob/main, tree/main) names a path that exists in it", async () => {
+  const root = new URL("../../", import.meta.url); // the repository root, above core/
+  const links = [];
+  for (const path of ["/llms.txt", "/llms-full.txt"]) {
+    const { text } = await get(path);
+    for (const m of text.matchAll(/https:\/\/github\.com\/never2average\/mynt\/(?:blob|tree)\/main\/([^\s)#]+)/g)) links.push(m[1]);
+  }
+  assert.ok(links.some((l) => l.startsWith("core/schemas/")), "links into core/ are checked");
+  for (const l of new Set(links)) assert.ok(existsSync(new URL(l, root)), `${l} exists in the repository`);
 });
 
 test("llms-full.txt lists every tool of each role exactly once, from the live registry", async () => {

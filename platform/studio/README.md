@@ -64,7 +64,7 @@ The Redis client is [`@upstash/redis`](https://github.com/upstash/redis-js), Ups
 ```bash
 cd platform/studio
 cp .env.example .env.local   # then fill in MYNT_MCP_URL
-npm ci                       # installs the whole repository's workspaces, from its root
+npm ci -w .                  # the studio and @mynt/auth, from the repository's root lockfile
 npm run dev
 ```
 
@@ -76,7 +76,7 @@ Checks: `npx vitest run`, `npx tsc --noEmit` and `npx next build`. CI runs them 
 
 No `vercel.json` is needed: Vercel builds it as a standard Next.js app.
 
-1. Import the repository into Vercel and set the project's **Root Directory** to `platform/studio`. Vercel installs from the repository root (npm workspaces), so the shared `@mynt/auth` package is linked in; leave "Include files outside the root directory" on.
+1. Import the repository into Vercel and set the project's **Root Directory** to `platform/studio`, and leave "Include files outside the root directory" on. `vercel.json` sets the install command to `npm ci -w .`: from the repository's root lockfile it installs only the studio and the sign-in package it imports (`@mynt/auth`, `platform/packages/auth`), not the chat app and never the server in `core/`.
 2. In the project's **Storage** tab, connect a Redis database. That sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
 3. In **Settings → Environment Variables**, add `MYNT_MCP_URL`, `APP_URL` (the studio's own URL), `PREVIEW_FRAME_SRC` and `SESSION_ENCRYPTION_KEY`.
 4. Deploy.

@@ -56,7 +56,7 @@ On Mynt's side, the authorization server (Clerk) must allow dynamic client regis
 
 ```bash
 cd platform/chat
-npm ci                       # installs the whole repository's workspaces, from its root
+npm ci -w .                  # the chat and @mynt/auth, from the repository's root lockfile
 cp .env.example .env.local   # then edit
 npm run dev                  # http://localhost:3000
 ```
@@ -75,10 +75,10 @@ npm run build
 
 ## Deploy behind a reverse proxy
 
-Build once and run the Node server:
+Build once and run the Node server, from `platform/chat` in a full checkout of the repository (it needs `platform/packages/auth` and the root lockfile, so the folder can't be copied out on its own):
 
 ```bash
-npm ci && npm run build
+npm ci -w . && npm run build
 APP_URL=https://chat.example.com MYNT_MCP_URL=https://mynt.example.com/mcp VERTEX_PROJECT_ID=... \
   npm start -- -p 3000
 ```

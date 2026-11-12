@@ -2,20 +2,19 @@
   "name": "mynt-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Mynt: the MCP server (core/) and the apps built on it (platform/), as npm workspaces",
+  "description": "Mynt: the MCP server (core/, installed on its own from its own lockfile) and the apps built on it (platform/, npm workspaces)",
   "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.13"
   },
   "workspaces": [
-    "core",
     "platform/*",
     "platform/packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w core",
-    "test": "npm test -w core"
+    "build": "npm --prefix core run build",
+    "test": "npm --prefix core test"
   },
   "overrides": {
     "@assistant-ui/core": "0.1.1",

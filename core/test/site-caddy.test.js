@@ -134,6 +134,61 @@ test("the host runs the server from the release's core/ folder", () => {
   assert.match(gateway, /MYNT_JS=\/opt\/mynt\/current\/core\/dist\/index\.js\n\[ -f "\$MYNT_JS" \] \|\| MYNT_JS=\/opt\/mynt\/current\/dist\/index\.js/);
 });
 
+// The installer's release step, run for real against a local repository: an old-layout commit is
+// refused before anything is deleted, the live release is never deleted, and a built new-layout
+// release is reused and linked.
+test("install-host.sh refuses old-layout commits and never deletes the live release", () => {
+  const script = readFileSync(join(HOST, "install-host.sh"), "utf8");
+  const start = script.indexOf('mkdir -p "$BASE/releases"');
+  const end = script.indexOf('chown -R root:root "$REL"');
+  assert.ok(start > 0 && end > start);
+  const step = script.slice(start, end);
+  const dir = mkdtempSync(join(tmpdir(), "mynt-release-"));
+  const git = (...a) => {
+    const r = spawnSync("git", ["-C", join(dir, "repo"), ...a], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  spawnSync("git", ["init", "-q", "-b", "main", join(dir, "repo")]);
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "t");
+  writeFileSync(join(dir, "repo", "package.json"), "{}\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "old layout");
+  const oldSha = git("rev-parse", "--short", "HEAD");
+  const run = (ref) => {
+    const r = spawnSync("bash", ["-c", `set -euo pipefail\nBASE=${dir}/opt\nREPO=${dir}/repo\nREF=${ref}\n${step}\necho installed`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe"] });
+    return { status: r.status, out: (r.stdout ?? "") + (r.output?.[3] ?? "") };
+  };
+  // Old layout: refused, and the live release (pointed to by current) is untouched.
+  spawnSync("mkdir", ["-p", `${dir}/opt/releases/live/core/dist`]);
+  writeFileSync(`${dir}/opt/releases/live/core/dist/index.js`, "");
+  spawnSync("ln", ["-s", `${dir}/opt/releases/live`, `${dir}/opt/current`]);
+  const old = run("main");
+  assert.equal(old.status, 1);
+  assert.match(old.out, new RegExp(`${oldSha} uses the old layout; run that commit's own installer`));
+  assert.ok(spawnSync("test", ["-f", `${dir}/opt/releases/live/core/dist/index.js`]).status === 0, "live release kept");
+  assert.notEqual(spawnSync("test", ["-e", `${dir}/opt/releases/${oldSha}`]).status, 0, "no release made for it");
+  // New layout, already built: reused (no npm), and linked for the old path.
+  spawnSync("mkdir", ["-p", join(dir, "repo", "core")]);
+  writeFileSync(join(dir, "repo", "core", "package.json"), "{}\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "new layout");
+  const newSha = git("rev-parse", "--short", "HEAD");
+  spawnSync("mkdir", ["-p", `${dir}/opt/releases/${newSha}/core/dist`]);
+  writeFileSync(`${dir}/opt/releases/${newSha}/core/dist/index.js`, "");
+  const fresh = run("main");
+  assert.equal(fresh.status, 0, fresh.out);
+  assert.equal(spawnSync("readlink", [`${dir}/opt/releases/${newSha}/dist`], { encoding: "utf8" }).stdout.trim(), "core/dist");
+  // New layout, live but not built: refused rather than deleted.
+  spawnSync("rm", ["-rf", `${dir}/opt/releases/${newSha}/core/dist`, `${dir}/opt/current`]);
+  spawnSync("ln", ["-s", `${dir}/opt/releases/${newSha}`, `${dir}/opt/current`]);
+  const live = run("main");
+  assert.equal(live.status, 1);
+  assert.match(live.out, /is the live release but isn't built/);
+  assert.ok(spawnSync("test", ["-d", `${dir}/opt/releases/${newSha}/core`]).status === 0, "live release kept");
+});
+
 // --- where a path goes -------------------------------------------------------------------------
 
 const glob = (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")}$`);

@@ -6,12 +6,12 @@ Instructions for any coding agent working in this repository, on any machine.
 
 Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, Postgres) where licensed firms compose financial products from regulated primitives, admins keep the regulatory model, and developers build apps on those products with coding agents that Mynt verifies and hosts. Its hosted agents (the coding team, the product desk, the governance desk, the business-development agent) are steered by folders under `core/workspaces/`, not by prompts in code.
 
-The repository is npm workspaces. `core/` is the MCP server (its `src/`, `test/`, `schemas/`, `workspaces/`, `programs/`, `sdk-templates/`, `scripts/` and `Dockerfile`, with its own lockfile). `platform/` holds the apps built on it: `platform/studio` (Mynt Studio), `platform/chat` (the sample chat and developer console) and `platform/packages/auth` (`@mynt/auth`, the sign-in code both import). `deploy/`, `docs/` and `.github/` stay at the root. Paths below are from the root.
+`core/` is the MCP server (its `src/`, `test/`, `schemas/`, `workspaces/`, `programs/`, `sdk-templates/`, `scripts/` and `Dockerfile`), installed on its own from its own lockfile, `core/package-lock.json`. `platform/` holds the apps built on it, which are the repository's npm workspaces (root `package.json` and `package-lock.json`): `platform/studio` (Mynt Studio), `platform/chat` (the sample chat and developer console) and `platform/packages/auth` (`@mynt/auth`, the sign-in code both import). `core/` is deliberately not a workspace, so the server's dependencies are locked in exactly one place. `deploy/`, `docs/` and `.github/` stay at the root. Paths below are from the root.
 
 ## Start here
 
 1. If `AGENTS.local.md` exists next to this file, read it. It holds this machine's and this operator's own rules (git-ignored, never committed) and wins over this file where they differ.
-2. For the server: `cd core && npm ci --workspaces=false && npm run build` (core's own lockfile, as production installs it). For the apps: `npm ci` at the root, which installs every workspace. The build must be clean before anything else.
+2. For the server: `cd core && npm ci && npm run build` (core's own lockfile, as production installs it). For the apps: `npm ci` at the root, which installs the `platform/` workspaces and never touches `core/`. The build must be clean before anything else.
 3. Read what the job needs: `README.md` explains the product, `docs/reference.md` the tools, the runtime API, hosting and deployment, and `docs/architecture.md` how the parts fit together.
 4. Then do what was asked, using the map below.
 
@@ -38,7 +38,7 @@ The repository is npm workspaces. `core/` is the MCP server (its `src/`, `test/`
 ## How to check your work
 
 - Run the test files for what you changed: in `core/`, `node --test test/<file>.test.js` after `npm run build`. The full suite (`npm test`) runs in CI on every push, with the client-SDK and starter-app jobs; run it locally only on a machine with memory to spare.
-- A dependency change to the server updates both lockfiles: `core/package-lock.json` (`cd core && npm install --workspaces=false …`, what production and CI's core jobs install from) and the root `package-lock.json` (`npm install` at the root). `npm ci` fails on either one if it's out of step.
+- Server dependencies change only in `core/` (`cd core && npm install …`, which updates `core/package-lock.json`); app dependencies at the root (`npm install -w platform/studio …`). `core/test/workspace-layout.test.js` fails if `core` becomes a root workspace or the root lockfile picks up anything of core's.
 - Report what was measured, never what was hoped. Never edit a test to make it pass; fix the code, or say plainly that the test is wrong and why.
 - A figure that can't be measured says so. Never show it as 0.
 

@@ -1206,9 +1206,9 @@ This checks the four definitions against the server and changes nothing. It take
    cd mynt/core
    ```
    If `git` isn't installed, download the ZIP from the repository's green **Code** button instead, unzip it, and `cd` into its `core` folder.
-3. Install what the script needs (only the server's part of the repository):
+3. Install what the script needs:
    ```sh
-   npm ci --workspaces=false
+   npm ci
    ```
 4. Run the check, putting the server's MCP address in place of `<Mynt MCP URL>`:
    ```sh
@@ -1267,12 +1267,12 @@ Bundled catalog products are read-only and pass the same checks.
 
 You need Node.js 22.13+ and a Postgres database. [Supabase](https://supabase.com) (self-hosted or cloud) is the intended backend; any Postgres 15+ works.
 
-The server is the repository's `core/` folder; the apps built on it (Mynt Studio, the sample chat) are under `platform/`. The repository is a set of npm workspaces: `npm ci` at its root installs all of them, and `npm ci --workspaces=false` in `core/` installs only the server, from core's own lockfile (as the host installer does).
+The server is the repository's `core/` folder, installed on its own from its own lockfile. The apps built on it (Mynt Studio, the sample chat, and the sign-in code they share) are under `platform/` and are the repository's npm workspaces: `npm ci` at the root installs them, never the server.
 
 ```bash
 git clone https://github.com/never2average/mynt.git
 cd mynt/core
-npm ci --workspaces=false
+npm ci
 npm run build
 ```
 
@@ -1394,6 +1394,8 @@ docker compose -f /opt/mynt/src/deploy/docker-compose.yml exec mcp \
 ### On a server that already runs Caddy
 
 [`deploy/host/install-host.sh`](../deploy/host/install-host.sh) installs Mynt without Docker for Mynt itself (Supabase still runs in Docker): `bash install-host.sh <domain> [git-ref] [--studio-upstream <studio host> | --no-studio]`. Each deploy unpacks the commit into `/opt/mynt/releases/<commit>`, installs and builds the server in that release's `core/` folder from core's own lockfile, points `/opt/mynt/current` at it and restarts `mynt.service`, which runs `node dist/index.js serve-http` in `/opt/mynt/current/core`. Releases from before the repository was split into `core/` and `platform/` ran from the release's root; deploying one of them again (a rollback) runs that commit's own installer, which puts back its own unit file. Each new release also links `dist` to `core/dist`, so `/opt/mynt/current/dist/index.js` still works for anything that runs it.
+
+The installer refuses a commit from before `core/` existed ("uses the old layout; run that commit's own installer") before it deletes or changes anything, and never deletes the live release. To go back to such a commit, run that commit's own `deploy/host/install-host.sh`. Where the hosting gateway is set up (`hosting-gateway.sh`, legacy gateway mode), every deploy now also replaces its installed sync script (`/usr/local/sbin/mynt-gateway-sync`) with this release's `hosting-gateway.sh`, which its timer runs within a minute: a change to that script goes live with the deploy, not only when the gateway is set up again.
 
 ### Mynt Studio on Mynt's domain
 

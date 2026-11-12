@@ -64,10 +64,21 @@ git -C "$BASE/src" fetch -q origin "$REF"
 SHA=$(git -C "$BASE/src" rev-parse --short FETCH_HEAD)
 REL=$BASE/releases/$SHA
 # Each release is the whole repository; the server is its core/ folder, installed from core's own
-# lockfile. --workspaces=false keeps npm in core/ rather than installing every workspace from the
-# repository root (the studio and chat apps aren't needed here). npm ci builds dist/ (prepare).
+# lockfile (core isn't one of the root's npm workspaces; --workspaces=false keeps npm in core/ even if
+# it were, so the apps under platform/ are never installed here). npm ci builds dist/ (prepare).
 APP=$REL/core
+# A commit from before core/ existed is installed by its own installer, never by this one: refuse
+# before anything is deleted or changed.
+if ! git -C "$BASE/src" cat-file -e FETCH_HEAD:core/package.json 2>/dev/null; then
+  echo "install-host.sh: $SHA uses the old layout; run that commit's own installer" | tee /dev/fd/3
+  exit 1
+fi
 if [ ! -f "$APP/dist/index.js" ]; then
+  # Never delete the release that is live (a half-built one is rebuilt only while it isn't).
+  if [ "$(readlink -f "$BASE/current" 2>/dev/null)" = "$(readlink -f "$REL")" ]; then
+    echo "install-host.sh: $SHA is the live release but isn't built; deploy another commit first" | tee /dev/fd/3
+    exit 1
+  fi
   rm -rf "$REL"
   mkdir -p "$REL"
   git -C "$BASE/src" archive FETCH_HEAD | tar -x -C "$REL"

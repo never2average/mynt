@@ -48,6 +48,9 @@ jobs:
           node-version: 22
       - run: docker pull --quiet "$CADDY_DOCKER_IMAGE"
       - run: node --test test/site-caddy.test.js
+      # The server is locked only in core/package-lock.json: core is no root workspace, and the root lockfile holds
+      # nothing of it (npm test in the test job runs this too).
+      - run: node --test test/workspace-layout.test.js
   # The partner walkthrough (docs/demo.md) as a presenter runs it, so its narrated output is in the log. npm test
   # runs it too (test/partner-walkthrough.test.js), with its checks and that it leaves nothing behind.
   partner-demo:
@@ -369,8 +372,8 @@ jobs:
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done
-  # The apps under platform/ (chat: mynt-chat's chat and developer console; studio: Mynt Studio), installed as the
-  # repository's npm workspaces from the root lockfile, with the sign-in code both import (@mynt/auth,
+  # The apps under platform/ (chat: mynt-chat's chat and developer console; studio: Mynt Studio), the repository's npm
+  # workspaces, each installed on its own from the root lockfile with the sign-in code both import (@mynt/auth,
   # platform/packages/auth): each app's tests, type check and production build. For the studio, also: it and the
   # sign-in code name no real host or IP address and none of the wording Mynt doesn't use.
   platform:
@@ -406,8 +409,11 @@ jobs:
             | tr 'A-Z' 'a-z' | sort -u | grep -Ev "$allowed" || true)
           if [ -n "$hosts" ]; then echo "$hosts"; echo "::error::hostnames found; use example placeholders"; fail=1; fi
           exit $fail
-      - run: npm ci
-        working-directory: .
+      # Installed as Vercel installs the studio (its vercel.json): this app and @mynt/auth only, from the root
+      # lockfile; never the server in core/.
+      - run: npm ci -w .
+      - name: Nothing of the server was installed
+        run: test ! -e ../../core/node_modules && test ! -e ../../node_modules/pg && test ! -e ../../core/dist
       - name: The shared sign-in package type-checks
         run: npx tsc --noEmit -p ../packages/auth
       - run: npx vitest run

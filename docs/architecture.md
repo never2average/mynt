@@ -254,7 +254,7 @@ Mynt itself **never holds customer funds or assets**. Money moves in the license
 
 ## 11. Deployment
 
-- **Image:** `core/Dockerfile` builds the server; `npm run build` (in `core/`) compiles `core/src/` to `core/dist/`. The repository is npm workspaces: the server in `core/`, and the apps on it in `platform/` (Mynt Studio, the sample chat, and the sign-in code they share, `platform/packages/auth`).
+- **Image:** `core/Dockerfile` builds the server; `npm run build` (in `core/`) compiles `core/src/` to `core/dist/`. The server is installed on its own from `core/package-lock.json`; the apps on it in `platform/` (Mynt Studio, the sample chat, and the sign-in code they share, `platform/packages/auth`) are the repository's npm workspaces.
 - **One host:** `deploy/docker-compose.yml` runs the server behind Caddy (automatic HTTPS), joined to a self-hosted Supabase Postgres (`deploy/supabase.override.yml`). `deploy/setup-vm.sh` and `deploy/host/install-host.sh` set a host up; `deploy/host/backup.sh`, `restore.sh` and their systemd timers handle backups and their verification.
 - **Configuration** is environment variables only, listed in `mynt --help` (`core/src/index.ts`) and [`docs/reference.md`](reference.md). Each feature turns on when its keys are present and stays off otherwise.
 - **CI** builds, runs `npm test` (in `core/`), tests and builds the `platform/` apps, compiles every generated SDK language, and scaffolds, builds and runs the starter app hardened.
