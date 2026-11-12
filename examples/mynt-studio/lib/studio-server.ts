@@ -29,6 +29,18 @@ export async function refreshRoles(session: Session, client: Client): Promise<st
 
 export const sessionIsDeveloper = (session: Session) => isDeveloper(session.roles ?? []);
 
+// Every tool this user's Mynt lists (names and input schemas), to see what it offers.
+export async function listMyntTools(client: Client): Promise<{ name: string; inputSchema?: unknown }[]> {
+  const tools: { name: string; inputSchema?: unknown }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await client.listTools(cursor ? { cursor } : undefined);
+    tools.push(...page.tools.map((t) => ({ name: t.name, inputSchema: t.inputSchema })));
+    cursor = page.nextCursor;
+  } while (cursor);
+  return tools;
+}
+
 // A line for the server log about a failed call: never the reply or arguments (preview URLs
 // in a reply are capabilities).
 export function logLine(what: string, err: unknown): string {
