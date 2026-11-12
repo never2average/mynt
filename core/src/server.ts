@@ -13,6 +13,7 @@ import {
 import { attributionFor, offersFor, registerGtmTools } from "./gtm.js";
 import { registerAdminTools, type AdminContext } from "./admin.js";
 import { registerCodingAgentAdminTools, registerCodingAgentTools } from "./builds.js";
+import { registerRepoAccessNoticeTools, registerRepoApprovalAdminTools } from "./repo-approvals.js";
 import { registerBdAdminTools, registerBdAgentTools, registerConnectTools } from "./bd.js";
 import { feasibilityCheck, registerDeskTools, type DeskService } from "./desk.js";
 import { registerReviewTools } from "./review.js";
@@ -167,6 +168,9 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
+  // Repository connections wait for an admin's approval (repo-approvals.ts): who asked sees the decisions; admins decide.
+  if (user && (ctx.builds || ctx.desk) && (has("developer") || has("innovator"))) registerRepoAccessNoticeTools(server, store, user.id);
+  if (user && (ctx.builds || ctx.desk) && has("admin")) registerRepoApprovalAdminTools(server, store, user.id, ctx.builds?.repos ?? ctx.desk?.repos ?? null);
   if (has("developer") && ctx.solana) registerSolanaTools(server, store, user!, ctx.solana);
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
   if (has("admin")) {

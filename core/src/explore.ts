@@ -12,6 +12,7 @@ import type { DeskConfig, DeskService } from "./desk.js";
 import { DATASET_SIZE, datasetInputs, generateDataset, jsonl, newDatasetSecret, splitKeys, type Economics, type GeneratorParams } from "./explore-data.js";
 import { OBJECTIVES, SCORER_SCRIPT, scoreWithStability, type Objective, type ScoringSpec } from "./explore-score.js";
 import type { RepoAccess } from "./github.js";
+import { requireApproved } from "./repo-approvals.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import type { ReviewService } from "./review.js";
 import type { Store, User } from "./store.js";
@@ -249,8 +250,7 @@ export class ExploreService {
   ) {
     if (!this.enabled) throw new Error("Algorithm explorations aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    const ws = await this.desk.workspace(user.entity_id);
-    if (!ws) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    const ws = await this.desk.approvedWorkspace(user.entity_id);
     const p = await this.store.getProduct(o.product_id);
     // The firm's product (or, for a product with no firm, the caller's own): the workspace and budget are the firm's.
     if (!p || (p.entity_id ? p.entity_id !== user.entity_id : p.owner_id !== user.id)) throw new Error(`No product of your firm's with id '${o.product_id}'`);
@@ -452,8 +452,10 @@ export class ExploreService {
   }
 
   private async workspaceOf(j: Row) {
+    // Every use of the workspace (reading it, explorers' tokens, adopting) needs an admin's approval of it.
     const ws = await this.desk.workspace(j.entity_id as string);
     if (!ws) throw new Error("The firm's workspace repository is no longer connected");
+    requireApproved(ws.approval, ws.repository);
     return ws;
   }
 

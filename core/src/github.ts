@@ -9,6 +9,8 @@ export interface RepoAccess {
   installationFor(repo: string): Promise<number | null>;
   tokenFor(repo: string, installationId: number): Promise<{ token: string; expires_at: string }>;
   installUrl(): string;
+  // Whose account an installation is on (its login, and "User" or "Organization"), for admins judging ownership.
+  installationAccount?(installationId: number): Promise<{ login: string; type: string } | null>;
   // Opened by Mynt, only after a build passes its gates.
   openPullRequest(repo: string, installationId: number, pr: { head: string; title: string; body: string }): Promise<string>;
   // The commit a branch, tag or SHA points at now (null when it doesn't exist), so Mynt can pin what it checks.
@@ -150,6 +152,12 @@ export class GitHubApp implements RepoAccess {
 
   installUrl() {
     return `https://github.com/apps/${this.slug}/installations/new`;
+  }
+
+  async installationAccount(installationId: number) {
+    const r = await this.call("GET", `/app/installations/${installationId}`);
+    const account = (r.data as { account?: { login?: string; type?: string } }).account;
+    return r.status === 200 && account?.login ? { login: account.login, type: account.type ?? "unknown" } : null;
   }
 
   // Calls as the installation, with a token limited to the one repository.
