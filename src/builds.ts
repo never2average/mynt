@@ -12,6 +12,7 @@ import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_POR
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
 import { isManagedRepository, refuseManagedRepository, type GitRepoHost } from "./git-host.js";
+import { APPROVED, PENDING, approvalColumns, connectionApproval, reapprovalOnConflict, requireApproved } from "./repo-approvals.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
@@ -277,6 +278,11 @@ ${APP_REPOSITORIES_DDL}
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (developer_id, repository)
   );
+  ${approvalColumns("repo_connections")}
+  -- Mynt's own managed repositories need no admin: their connections are approved (connectManaged approves new ones).
+  UPDATE financial_products.repo_connections SET approval = '${APPROVED}'
+  WHERE approval <> '${APPROVED}' AND (repository IN (SELECT repository FROM financial_products.managed_repository_names)
+    OR repository IN (SELECT managed_repository FROM financial_products.app_repositories WHERE managed_repository IS NOT NULL));
 `;
 
 const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
@@ -545,17 +551,37 @@ export class BuildService {
     return Number(r?.s ?? 0);
   }
 
-  async connectRepository(developerId: string, repository: string, installationId: number) {
+  // A developer's connection waits for an admin's approval (repo-approvals.ts), unless it's one of Mynt's managed
+  // repositories, which Mynt created for their app (`managed`).
+  async connectRepository(developerId: string, repository: string, installationId: number, managed = false) {
     await this.db.query(
-      `INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id) VALUES ($1, $2, $3)
-       ON CONFLICT (developer_id, repository) DO UPDATE SET installation_id = EXCLUDED.installation_id`,
-      [developerId, repository.toLowerCase(), installationId],
+      `INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id, approval) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (developer_id, repository) DO UPDATE SET installation_id = EXCLUDED.installation_id,
+         ${managed ? `approval = '${APPROVED}'` : reapprovalOnConflict("repo_connections")}`,
+      [developerId, repository.toLowerCase(), installationId, managed ? APPROVED : PENDING],
     );
   }
 
+  // Throws ("waiting for an admin to approve access to …") unless the developer's connection is approved.
+  async requireApprovedConnection(developerId: string, repository: string) {
+    requireApproved(await connectionApproval(this.db, developerId, repository), repository);
+  }
+
+  // The installation hosting may fetch the developer's source with: only through an approved connection.
+  async sourceInstallation(developerId: string, repository: string) {
+    const r = await this.one("SELECT installation_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2 AND approval = $3", [
+      developerId,
+      repository.toLowerCase(),
+      APPROVED,
+    ]);
+    return r ? Number(r.installation_id) : null;
+  }
+
   async repositories(developerId: string) {
-    const rows = (await this.db.query("SELECT repository, created_at FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [developerId]))
-      .rows as { repository: string; created_at: string }[];
+    const rows = (await this.db.query(
+      "SELECT repository, approval, approval_note, created_at FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository",
+      [developerId],
+    )).rows as { repository: string; approval: string; approval_note: string | null; created_at: string }[];
     return rows.map((r) => ({ ...r, managed: this.isManaged(r.repository) }));
   }
 
@@ -621,7 +647,7 @@ export class BuildService {
     // Another request may have set the app's repository first (even the developer's own, with set_app_repository):
     // the managed access is only ever recorded for the managed repository itself.
     const stored = (await this.appRepository(appId))!;
-    if (stored.managed && stored.repository === created.repository) await this.connectRepository(developer.id, stored.repository, created.access);
+    if (stored.managed && stored.repository === created.repository) await this.connectRepository(developer.id, stored.repository, created.access, true);
     else if (stored.managed && !(await this.installation(developer.id, stored.repository))) await this.connectManaged(developer.id, stored.repository);
     return stored.repository;
   }
@@ -629,7 +655,7 @@ export class BuildService {
   private async connectManaged(developerId: string, repository: string) {
     const access = await this.managedHost?.access();
     if (!access) throw new Error("Mynt's managed repositories aren't available right now");
-    await this.connectRepository(developerId, repository, access);
+    await this.connectRepository(developerId, repository, access, true);
   }
 
   // The developer's own connected repository for the app's next builds, instead of the managed one.
@@ -717,6 +743,7 @@ export class BuildService {
     }
     if (opts.repository && !(await this.installation(developer.id, opts.repository)))
       throw new Error(`Repository '${opts.repository}' isn't connected; run connect_repository first`);
+    if (opts.repository) await this.requireApprovedConnection(developer.id, opts.repository);
     const id = randomUUID();
     // The Solana toolchain when asked for, or when the app has programs reserved.
     const solana = opts.solana ?? (!!opts.app_id && !!this.solana && (await this.solana.programsForApp(opts.app_id)).length > 0);
@@ -1014,6 +1041,7 @@ export class BuildService {
     if (build.box_sandbox_id && build.box_until && Date.parse(build.box_until) > Date.now()) return { sandbox: "already open", until: build.box_until };
     const installation = await this.installation(build.developer_id, build.repository);
     if (!installation) throw new Error(`Mynt's GitHub App can't reach ${build.repository} any more`);
+    await this.requireApprovedConnection(build.developer_id, build.repository);
     const { token } = await this.repos.tokenFor(build.repository, installation);
     const ttl = Math.round(Math.max(1, Math.min(8, hours)) * 3600);
     const s = await this.sandboxes.createSandbox({
@@ -1122,6 +1150,9 @@ export class BuildService {
         Object.assign(env, { MYNT_SANDBOX_KEY: secret, ...(this.config.publicUrl ? { MYNT_API_BASE: `${this.config.publicUrl}/v1` } : {}) });
       }
       if (b.repository && this.repos) {
+        // Again right before the push token: the build may have been queued before approvals existed, or the
+        // connection rejected since.
+        await this.requireApprovedConnection(b.developer_id, b.repository);
         const installation = await this.installation(b.developer_id, b.repository);
         const { token } = await this.repos.tokenFor(b.repository, installation!);
         Object.assign(env, { GITHUB_REPOSITORY: b.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/build-${b.id.slice(0, 8)}` });
@@ -1786,7 +1817,14 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
       await builds.connectRepository(user.id, repository, installation);
       await store.audit(user.id, "connect_repository", repository);
-      return json({ connected: true, repository });
+      // Until an admin approves it, Mynt gives out no token for it (repo-approvals.ts).
+      const approval = await connectionApproval(store.db, user.id, repository);
+      return json({
+        connected: true,
+        repository,
+        approval,
+        ...(approval !== APPROVED ? { next: "An admin approves access to it before builds can use it; repository_access_notices shows the decision" } : {}),
+      });
     },
   );
 

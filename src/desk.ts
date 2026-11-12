@@ -10,6 +10,7 @@ import type { Db } from "./db.js";
 import { DESK_RUNNER, type DeskOutcome, type DeskReport } from "./desk-runner.js";
 import type { RepoAccess } from "./github.js";
 import { refuseManagedRepository, type GitRepoHost } from "./git-host.js";
+import { approvalColumns, reapprovalOnConflict, requireApproved } from "./repo-approvals.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import { findLicenses, normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, User } from "./store.js";
@@ -49,6 +50,7 @@ const TABLES = `
     connected_by uuid NOT NULL REFERENCES financial_products.users(id),
     created_at timestamptz NOT NULL DEFAULT now()
   );
+  ${approvalColumns("desk_workspaces")}
   CREATE TABLE IF NOT EXISTS financial_products.product_terms (
     product_id text PRIMARY KEY,
     terms jsonb NOT NULL,
@@ -166,15 +168,25 @@ export class DeskService {
     const installation = await this.repos.installationFor(repository);
     if (!installation) throw new Error(`Install the Mynt GitHub App on ${repository} first: ${this.repos.installUrl()}`);
     await this.db.query(
+      // The firm's workspace waits for an admin's approval (repo-approvals.ts); reconnecting the same, approved one keeps it.
       `INSERT INTO financial_products.desk_workspaces (entity_id, repository, installation_id, connected_by) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (entity_id) DO UPDATE SET repository = EXCLUDED.repository, installation_id = EXCLUDED.installation_id, connected_by = EXCLUDED.connected_by`,
+       ON CONFLICT (entity_id) DO UPDATE SET installation_id = EXCLUDED.installation_id, connected_by = EXCLUDED.connected_by,
+         ${reapprovalOnConflict("desk_workspaces", "desk_workspaces.repository = EXCLUDED.repository")}, repository = EXCLUDED.repository`,
       [entityId, repository.toLowerCase(), installation, userId],
     );
   }
 
   async workspace(entityId: string) {
-    const r = await this.one("SELECT repository, installation_id, created_at FROM financial_products.desk_workspaces WHERE entity_id = $1", [entityId]);
-    return r ? { repository: r.repository as string, installation_id: Number(r.installation_id), created_at: r.created_at } : null;
+    const r = await this.one("SELECT repository, installation_id, approval, created_at FROM financial_products.desk_workspaces WHERE entity_id = $1", [entityId]);
+    return r ? { repository: r.repository as string, installation_id: Number(r.installation_id), approval: r.approval as string, created_at: r.created_at } : null;
+  }
+
+  // The firm's workspace, only once an admin has approved it: no job, exploration or token without that.
+  async approvedWorkspace(entityId: string) {
+    const ws = await this.workspace(entityId);
+    if (!ws) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    requireApproved(ws.approval, ws.repository);
+    return ws;
   }
 
   async setTerms(productId: string, userId: string, terms: Terms) {
@@ -249,7 +261,7 @@ export class DeskService {
     if (!this.enabled) throw new Error("The product desk isn't enabled on this Mynt yet");
     if (o.kind === "agent" && !this.agentsEnabled) throw new Error("Desk agents aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    if (!(await this.workspace(user.entity_id))) throw new Error("Connect your firm's workspace repository first (connect_desk_repository)");
+    await this.approvedWorkspace(user.entity_id);
     let termsH: string | null = null;
     if (o.product_id) {
       const p = await this.store.getProduct(o.product_id);
@@ -359,7 +371,7 @@ export class DeskService {
     if (j.status === "queued") {
       let env: Record<string, string> = {};
       if (j.kind === "agent") {
-        const ws = (await this.workspace(j.entity_id as string))!;
+        const ws = await this.approvedWorkspace(j.entity_id as string);
         const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
         env = { GITHUB_REPOSITORY: ws.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/desk-${String(j.id).slice(0, 8)}` };
       }

@@ -233,6 +233,18 @@ When coding ends, Mynt stops both dev servers before it packages the source, and
 
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.
 
+**Admin approval of repository connections (a stopgap).** The App being installed on a repository only says Mynt can reach it, not that the person asking may use it. Until people prove push access themselves (the git-account check, coming), an admin approves each connection before Mynt gives out any token for it (`src/repo-approvals.ts`).
+- **What waits for approval.** A developer's `connect_repository` (per developer and repository), and a firm's desk workspace (`connect_desk_repository`, per firm and repository), start `pending_approval`. Approving one never covers another developer's or firm's connection to the same repository. `set_app_repository` uses the developer's connection, so it needs that connection approved too.
+- **Exempt.** Mynt's managed repositories (each app's own) are approved as Mynt creates them.
+- **Refused until approved**, with "Waiting for an admin to approve access to `<repo>`" (or "An admin rejected access to `<repo>`"):
+  - `start_build` with a repository, `continue_from` and `reopen_sandbox`;
+  - the build worker, right before the push token;
+  - desk jobs, explorations and their adoption;
+  - `deploy_app`, and hosting's source fetch.
+- **Admins** use `list_repository_requests` (pending by default). Each request shows who asked, their firm, the repository, and the account the App's installation is on (login, and user or organization). They decide with `approve_repository_connection` (with a note) or `reject_repository_connection` (with a reason).
+- **Notices and audit.** Every decision is audited, and the person who asked sees it with `repository_access_notices`. Connecting the same repository again keeps an approval, while a new repository, or one rejected or pending, is a new request.
+- **Existing connections.** Those made before this check became `pending_approval` (fail closed). Builds without a repository, and Mynt's managed repositories, keep working.
+
 **Managed repositories (the default).** A developer needs no repository of their own. When a build names no `repository`, its app's builds push to the app's repository:
 - **Created by Mynt.** On the app's first build, Mynt creates a private repository on its git host (`src/git-host.ts`), named by the app's id only (`mynt-app-<app_id>`), with a first commit so pull requests have a base.
 - **Works like a connected repository.** Builds push their branch there, Mynt opens the verified pull request there, `deploy_app` fetches the verified commit from it, and `continue_from` carries on in it.

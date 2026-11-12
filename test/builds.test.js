@@ -133,6 +133,9 @@ function fakeRepos() {
       return { token: "ghs_short_lived", expires_at: new Date(Date.now() + 3600e3).toISOString() };
     },
     installUrl: () => "https://github.com/apps/mynt-builder/installations/new",
+    async installationAccount(id) {
+      return id === 42 ? { login: "acme", type: "Organization" } : null;
+    },
     async openPullRequest(repo, installation, pr) {
       prs.push({ repo, installation, ...pr });
       return `https://github.com/${repo}/pull/7`;
@@ -163,7 +166,8 @@ function fakeManagedHost() {
   };
 }
 
-async function setup({ sandboxes = fakeSandboxHost(), config = {}, managed = null, refuse = null } = {}) {
+// `approve`: tests that aren't about repository approvals act as if an admin approved each connection as it's made.
+async function setup({ sandboxes = fakeSandboxHost(), config = {}, managed = null, refuse = null, approve = true } = {}) {
   const pg = new PGlite();
   // `refuse`: stands in for a database that rejects some statements (those it returns true for).
   const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
@@ -188,6 +192,8 @@ async function setup({ sandboxes = fakeSandboxHost(), config = {}, managed = nul
     } catch {
       data = { error: text };
     }
+    if (approve && name === "connect_repository" && data.connected === true)
+      await pg.query("UPDATE financial_products.repo_connections SET approval = 'approved' WHERE repository = $1", [args.repository.toLowerCase()]);
     return { isError: res.isError ?? false, data };
   };
   return { pg, store, builds, sandboxes, repos, as, connect, call };
@@ -1228,6 +1234,85 @@ test("a finished build's sandbox reopens on its branch for the developer, with t
   assert.ok(box.stopped);
   const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline.filter((e) => e.phase === "box").map((e) => e.message);
   assert.ok(timeline.includes("The developer reopened the build's sandbox on its branch") && timeline.includes("The developer closed the reopened sandbox"));
+});
+
+test("a repository connection waits for an admin's approval, per developer; until then no path gives out a token", async () => {
+  const ctx = await setup({ approve: false });
+  const { builds, as, connect, call, store } = ctx;
+  const aliceUser = await as("Alice", ["developer"]);
+  const alice = await connect(aliceUser);
+  const bob = await connect(await as("Bob", ["developer"]));
+  const admin = await connect(await as("Ada", ["admin"]));
+
+  const connected = (await call(alice, "connect_repository", { repository: "acme/savings-app" })).data;
+  assert.deepEqual([connected.connected, connected.approval], [true, "pending_approval"]);
+  assert.match((await call(alice, "start_build", { goal: "Build a savings comparison page", repository: "acme/savings-app" })).data.error, /Waiting for an admin to approve access to acme\/savings-app/);
+  assert.equal(await builds.sourceInstallation(aliceUser.id, "acme/savings-app"), null, "hosting can't fetch through it either");
+
+  // The admin sees who asked, their firm, the repository and whose account the App's installation is on.
+  const [req] = (await call(admin, "list_repository_requests")).data;
+  assert.deepEqual([req.kind, req.repository, req.status, req.requested_by.name, req.installation_account], ["developer", "acme/savings-app", "pending_approval", "Alice", { login: "acme", type: "Organization" }]);
+  assert.ok(!(await alice.listTools()).tools.some((t) => t.name === "list_repository_requests"), "admins only");
+  assert.equal((await call(admin, "approve_repository_connection", { id: req.id, note: "acme is Alice's firm" })).data.status, "approved");
+  const { build: shipped, started } = await runBuild(ctx, { dev: alice, startArgs: { goal: "Build a savings comparison page", repository: "acme/savings-app" } });
+  assert.equal(shipped.status, "succeeded");
+  assert.equal(await builds.sourceInstallation(aliceUser.id, "acme/savings-app"), 42);
+  assert.deepEqual((await call(alice, "repository_access_notices")).data.map((n) => [n.repository, n.decision]), [["acme/savings-app", "approved"]]);
+
+  // Bob's connection to the same repository is his own request: Alice's approval doesn't cover it.
+  await call(bob, "connect_repository", { repository: "acme/savings-app" });
+  assert.match((await call(bob, "start_build", { goal: "Build in the same repository", repository: "acme/savings-app" })).data.error, /Waiting for an admin/);
+  const bobs = (await call(admin, "list_repository_requests")).data;
+  assert.deepEqual(bobs.map((r) => r.requested_by.name), ["Bob"]);
+  await call(admin, "reject_repository_connection", { id: bobs[0].id, reason: "Bob isn't at acme" });
+  assert.match((await call(bob, "start_build", { goal: "Build in the same repository", repository: "acme/savings-app" })).data.error, /An admin rejected access to acme\/savings-app/);
+  assert.equal((await call(bob, "repository_access_notices")).data[0].decision, "rejected");
+
+  // A build queued while approved, then rejected: the worker refuses it before the push token.
+  const queued = (await call(alice, "start_build", { goal: "Build another page while approved", repository: "acme/savings-app" })).data;
+  const all = (await call(admin, "list_repository_requests", { status: "approved" })).data;
+  await call(admin, "reject_repository_connection", { id: all.find((r) => r.requested_by.name === "Alice").id, reason: "ownership in doubt" });
+  await builds.tick();
+  const failed = await builds.get(queued.id);
+  assert.equal(failed.status, "failed");
+  assert.match(failed.error, /rejected access to acme\/savings-app/);
+  assert.equal(failed.sandbox_id, null, "no sandbox, no token");
+  // continue_from, reopen_sandbox and hosting refuse it too.
+  assert.match((await call(alice, "start_build", { goal: "Carry on from the shipped build", continue_from: started.id })).data.error, /rejected access/);
+  assert.match((await call(alice, "reopen_sandbox", { build_id: started.id })).data.error, /rejected access/);
+  assert.equal(await builds.sourceInstallation(aliceUser.id, "acme/savings-app"), null);
+  // Reconnecting asks again.
+  assert.equal((await call(alice, "connect_repository", { repository: "acme/savings-app" })).data.approval, "pending_approval");
+  // Every decision is audited.
+  const actions = (await store.db.query("SELECT action FROM financial_products.audit_log WHERE action LIKE '%repository_connection' ORDER BY created_at")).rows.map((r) => r.action);
+  assert.deepEqual(actions, ["approve_repository_connection", "reject_repository_connection", "reject_repository_connection"]);
+});
+
+test("existing repository connections become pending when the check arrives; Mynt's managed ones stay usable", async () => {
+  const pg = new PGlite();
+  const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
+  const store = await Store.open(db, CATALOG);
+  const { user } = await store.createUser("Old", ["developer"]);
+  // As a deployment from before approvals has them.
+  await pg.exec(`CREATE TABLE financial_products.repo_connections (developer_id uuid NOT NULL, repository text NOT NULL, installation_id bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (developer_id, repository))`);
+  await pg.exec(`CREATE TABLE financial_products.managed_repository_names (repository text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now())`);
+  await pg.query("INSERT INTO financial_products.managed_repository_names (repository) VALUES ('mynt-apps/mynt-app-old')");
+  await pg.query("INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id) VALUES ($1, 'someone/else', 42), ($1, 'mynt-apps/mynt-app-old', 77)", [user.id]);
+  const builds = await BuildService.open(db, store, fakeSandboxHost(), fakeRepos(), { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com" });
+  const rows = (await pg.query("SELECT repository, approval FROM financial_products.repo_connections ORDER BY repository")).rows.map((r) => [r.repository, r.approval]);
+  assert.deepEqual(rows, [["mynt-apps/mynt-app-old", "approved"], ["someone/else", "pending_approval"]]);
+  await assert.rejects(builds.requireApprovedConnection(user.id, "someone/else"), /Waiting for an admin/);
+});
+
+test("Mynt's managed repositories need no approval", async () => {
+  const ctx = await setup({ managed: fakeManagedHost(), approve: false });
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const b = (await ctx.call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  assert.equal(b.repository, `mynt-apps/mynt-app-${app.id}`);
+  await ctx.builds.tick();
+  assert.equal((await ctx.builds.get(b.id)).status, "provisioning");
 });
 
 test("builds stay off without a model backend for the proxy", async () => {

@@ -183,7 +183,8 @@ const ranOutcome = (over = {}) => ({
   ...over,
 });
 
-async function setup() {
+// `approve`: tests that aren't about repository approvals act as if an admin approved each workspace as it's connected.
+async function setup({ approve = true } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
@@ -207,6 +208,8 @@ async function setup() {
     } catch {
       data = { error: text };
     }
+    if (approve && name === "connect_desk_repository" && data.connected)
+      await store.db.query("UPDATE financial_products.desk_workspaces SET approval = 'approved' WHERE repository = $1", [data.connected]);
     return { isError: res.isError ?? false, data };
   };
   const innovator = async (name) => {
@@ -395,4 +398,27 @@ test("a firm can't make an app's Mynt-managed repository its desk workspace, tho
   assert.match((await call(client, "connect_desk_repository", { repository: "old-org/mynt-app-x" })).data.error, /Mynt's managed repositories/);
   // The firm's own repository still connects.
   assert.equal((await call(client, "connect_desk_repository", { repository: "acme/desk" })).data.connected, "acme/desk");
+});
+
+test("a firm's desk workspace waits for an admin's approval, per firm; jobs refuse it until then", async () => {
+  const { store, connect, call, innovator } = await setup({ approve: false });
+  const admin = await connect((await store.createUser("Ada", ["admin"])).user);
+  const { client } = await innovator("Ines");
+  assert.equal((await call(client, "connect_desk_repository", { repository: "acme/desk" })).data.connected, "acme/desk");
+  assert.equal((await call(client, "create_product", loan)).isError, false);
+  await call(client, "set_product_terms", { product_id: "quick-loan", inputs: loanTerms.inputs });
+  assert.match((await call(client, "analyze_product", { product_id: "quick-loan" })).data.error, /Waiting for an admin to approve access to acme\/desk/);
+  const [req] = (await call(admin, "list_repository_requests")).data;
+  assert.deepEqual([req.kind, req.repository, req.requested_by.name, req.requested_by.firm], ["desk_workspace", "acme/desk", "Ines", "Ines Ltd"]);
+  await call(admin, "approve_repository_connection", { id: req.id, note: "acme is Ines Ltd" });
+  assert.equal((await call(client, "analyze_product", { product_id: "quick-loan" })).isError, false);
+  assert.deepEqual((await call(client, "repository_access_notices")).data.map((n) => n.decision), ["approved"]);
+  // Another firm's workspace on the same repository is its own request.
+  const { client: other } = await innovator("Otto");
+  await call(other, "connect_desk_repository", { repository: "acme/desk" });
+  assert.deepEqual((await call(admin, "list_repository_requests")).data.map((r) => r.requested_by.firm), ["Otto Ltd"]);
+  // Rejected: jobs stop.
+  const approved = (await call(admin, "list_repository_requests", { status: "approved" })).data[0];
+  await call(admin, "reject_repository_connection", { id: approved.id, reason: "ownership in doubt" });
+  assert.match((await call(client, "analyze_product", { product_id: "quick-loan" })).data.error, /An admin rejected access to acme\/desk/);
 });
