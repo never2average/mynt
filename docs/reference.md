@@ -1403,9 +1403,9 @@ bash install-host.sh <domain> [git-ref] --studio-upstream <studio host>
 1. **Deploy the edge first:** run `install-host.sh <domain> --studio-upstream <studio host>`. The studio keeps working at its own address meanwhile.
 2. **Then set the studio's settings and redeploy it:**
    - `APP_URL`: `https://<domain>`. Sign-in then returns to Mynt's domain, and everyone signs in once more.
-   - `TRUSTED_EDGE_IPS`: every public outbound address of this server, IPv4 and IPv6. Only these reach the studio directly; a missing one sends the users coming through it round a redirect loop. The studio logs a warning naming the address it saw.
+   - `TRUSTED_EDGE_IPS`: every public outbound address of this server, IPv4 and IPv6. A missing one doesn't break the studio. Requests from it are still served, because they carry `X-Mynt-Client-IP`, but every user coming through it shares one sign-in rate-limit bucket (429 after 20 starts in 10 minutes). The studio logs a warning naming the address to add.
 
-From then on the studio is reachable only through Mynt's domain. Every request to its own deployment address from anywhere but this server, for any path, gets a 308 to the same path on `APP_URL`.
+From then on, people reach the studio only through Mynt's domain. A request to its own deployment address from anywhere but this server, without `X-Mynt-Client-IP` (a browser, for any path), gets a 308 to the same path on `APP_URL`.
 
 ### Backups
 

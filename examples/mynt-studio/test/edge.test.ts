@@ -5,6 +5,7 @@ import {
   appUrlFor,
   clientAddress,
   connectingAddress,
+  requestHost,
   resetUntrustedEdgeWarning,
   shouldGoToAppUrl,
   trustedEdges,
@@ -63,7 +64,8 @@ describe("an edge missing from TRUSTED_EDGE_IPS", () => {
     expect(warnUntrustedEdgeOnce(fromV6, vercel, log)).toBe(false); // once
     expect(said).toHaveLength(1);
     expect(said[0]).toContain("edge-a-v6");
-    expect(said[0]).toMatch(/IPv4 and IPv6/);
+    expect(said[0]).toMatch(/shares one sign-in rate-limit bucket/);
+    expect(said[0]).toMatch(/add this address to TRUSTED_EDGE_IPS/);
   });
 
   it("isn't warned about for trusted edges, requests without the header, or when no edges are set", () => {
@@ -85,26 +87,34 @@ describe("visits to the studio's own deployment address", () => {
   });
 
   const app = "mynt.example.com";
-  const host = "studio-abc.example.com";
-  it("go to APP_URL from any caller that isn't a trusted edge", () => {
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), host, vercel, app)).toBe(true);
-    expect(shouldGoToAppUrl(h({}), host, vercel, app)).toBe(true); // no connecting address at all
+  const at = (o: Record<string, string>) => h({ host: "studio-abc.example.com", "x-forwarded-host": "studio-abc.example.com", ...o });
+  it("without X-Mynt-Client-IP, from any address that isn't a trusted edge: go to APP_URL", () => {
+    expect(shouldGoToAppUrl(at({ "x-vercel-forwarded-for": "someone" }), vercel, app)).toBe(true);
+    expect(shouldGoToAppUrl(at({}), vercel, app)).toBe(true); // no connecting address at all
+    expect(shouldGoToAppUrl(at({ "x-forwarded-for": "edge-a" }), vercel, app)).toBe(true); // x-forwarded-for isn't trusted
   });
 
-  it("go to APP_URL even with a forged X-Mynt-Client-IP", () => {
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone", "x-mynt-client-ip": "edge-a" }), host, vercel, app)).toBe(true);
-    expect(shouldGoToAppUrl(h({ "x-forwarded-for": "edge-a", "x-mynt-client-ip": "client-x" }), host, vercel, app)).toBe(true); // x-forwarded-for isn't trusted
+  it("with X-Mynt-Client-IP from an untrusted address (a server address missing from the list, or a forger): served, so it can't loop", () => {
+    expect(shouldGoToAppUrl(at({ "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-x" }), vercel, app)).toBe(false);
+    // ...and its callers are counted by the connecting address, not the header
+    expect(clientAddress(at({ "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-x" }), vercel)).toBe("edge-a-v6");
   });
 
-  it("pass from a trusted edge, with or without its header (so the edge's own requests never loop)", () => {
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "edge-a", "x-mynt-client-ip": "client-x" }), host, vercel, app)).toBe(false);
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "edge-b" }), host, vercel, app)).toBe(false);
+  it("from a trusted edge, with or without its header: pass", () => {
+    expect(shouldGoToAppUrl(at({ "x-vercel-forwarded-for": "edge-a", "x-mynt-client-ip": "client-x" }), vercel, app)).toBe(false);
+    expect(shouldGoToAppUrl(at({ "x-vercel-forwarded-for": "edge-b" }), vercel, app)).toBe(false);
   });
 
-  it("don't when already on APP_URL's host, or no edge is configured, or not on Vercel", () => {
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), "Mynt.Example.com", vercel, app)).toBe(false);
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), host, { VERCEL: "1" }, app)).toBe(false);
-    expect(shouldGoToAppUrl(h({ "x-vercel-forwarded-for": "someone" }), host, { TRUSTED_EDGE_IPS: "edge-a" }, app)).toBe(false);
+  it("already on APP_URL's host (read from x-forwarded-host on Vercel, else Host): pass", () => {
+    expect(shouldGoToAppUrl(h({ "x-forwarded-host": "Mynt.Example.com", host: "internal", "x-vercel-forwarded-for": "someone" }), vercel, app)).toBe(false);
+    expect(requestHost(h({ host: "mynt.example.com:443" }), {})).toBe("mynt.example.com:443");
+    expect(requestHost(h({ host: "a.example.com", "x-forwarded-host": "b.example.com" }), {})).toBe("a.example.com"); // x-forwarded-host only on Vercel
+    expect(requestHost(h({ host: "a.example.com", "x-forwarded-host": "b.example.com" }), { VERCEL: "1" })).toBe("b.example.com");
+  });
+
+  it("without edges configured, or off Vercel: never", () => {
+    expect(shouldGoToAppUrl(at({ "x-vercel-forwarded-for": "someone" }), { VERCEL: "1" }, app)).toBe(false);
+    expect(shouldGoToAppUrl(at({ "x-vercel-forwarded-for": "someone" }), { TRUSTED_EDGE_IPS: "edge-a" }, app)).toBe(false);
   });
 });
 

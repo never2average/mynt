@@ -11,11 +11,13 @@ import { sessionStore } from "./lib/session-store";
 // - limits how often one address may start sign-in (lib/rate-limit.ts);
 // - when the studio is served on Mynt's domain through Mynt's server (TRUSTED_EDGE_IPS is set),
 //   is reachable only through that server: every other caller is sent to APP_URL, for every
-//   path (lib/rate-limit.ts, shouldGoToAppUrl).
+//   path (lib/rate-limit.ts, shouldGoToAppUrl); a request carrying X-Mynt-Client-IP from an
+//   address not in TRUSTED_EDGE_IPS is served with a warning instead, so a missing server
+//   address can't loop its users.
 export async function proxy(req: NextRequest) {
   // Before the redirect, so a server address missing from TRUSTED_EDGE_IPS is named in the logs.
   warnUntrustedEdgeOnce(req.headers);
-  if (shouldGoToAppUrl(req.headers, req.nextUrl.host)) {
+  if (shouldGoToAppUrl(req.headers)) {
     return NextResponse.redirect(appUrlFor(req.nextUrl.pathname, req.nextUrl.search), 308);
   }
 
