@@ -8,7 +8,8 @@
 // optionally Mynt's MCP server as the agent's tools; read once, then deleted), then runs `node <dir>/runner.mjs <dir>` detached. The
 // runner keeps <dir>/state.json up to date and copies Claude Code's stream-json output to
 // <dir>/agent.jsonl. To steer, Mynt drops a file into <dir>/inbox/: the runner interrupts the current
-// turn and sends the message as the next one.
+// turn and sends the message as the next one. A file with `finish: true` ends a held session (see HOLD below) once
+// the current turn is over, without interrupting it.
 
 export const CLAUDE_CODE_VERSION = "2.1.314";
 
@@ -102,11 +103,33 @@ const settle = () => {
     setTimeout(() => child.kill("SIGKILL"), 10000).unref();
   }, SETTLE_MS);
 };
+// A session (MYNT_AGENT_HOLD=1) stays open between the developer's messages: Claude Code keeps its context and
+// waits on the inbox, until a finish message (Mynt writes one when the developer ships) or until it has been idle,
+// with nothing running and nothing waiting, for MYNT_AGENT_IDLE_MS. Idle ends it the same way finishing does: the
+// finish prompt (config.json's finishPrompt) is its last message, so the work is shipped, not lost. The machine's
+// idle time still counts against the build's cap.
+const HOLD = process.env.MYNT_AGENT_HOLD === "1";
+const IDLE_MS = Number(process.env.MYNT_AGENT_IDLE_MS || 900000);
+let finishing = !HOLD;
+let idleTimer = null;
+if (HOLD) state.finish = null; // "developer" or "idle", once the session is finishing
+const finish = (why, message) => {
+  finishing = true;
+  clearTimeout(idleTimer);
+  state.finish = why;
+  say(message);
+};
 // Close stdin once every message has had its turn and nothing is waiting: Claude Code then exits.
 const maybeEnd = () => {
-  if (!ended && state.turns >= state.sent && pending().length === 0) {
+  const idle = state.turns >= state.sent && pending().length === 0;
+  if (!ended && idle && finishing) {
     ended = true;
     child.stdin.end();
+  } else if (!ended && idle && !idleTimer) {
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (!ended && !finishing && state.turns >= state.sent && pending().length === 0) finish("idle", cfg.finishPrompt || "Finish now.");
+    }, IDLE_MS);
   }
   if (ended) settle();
 };
@@ -144,15 +167,31 @@ child.stderr.on("data", (d) => appendFileSync(join(dir, "agent.err"), d));
 const timer = setInterval(() => {
   if (ended) return;
   for (const f of pending()) {
-    seen.add(f);
-    let message;
+    let item;
     try {
-      message = JSON.parse(readFileSync(join(inbox, f), "utf8")).message;
+      item = JSON.parse(readFileSync(join(inbox, f), "utf8"));
     } catch {
+      seen.add(f);
       continue;
     }
-    if (typeof message !== "string" || !message) continue;
-    if (state.turns < state.sent) send({ type: "control_request", request_id: "steer-" + f, request: { subtype: "interrupt" } });
+    const message = item && item.message;
+    if (typeof message !== "string" || !message) {
+      seen.add(f);
+      continue;
+    }
+    const busy = state.turns < state.sent;
+    // Finishing never interrupts: it waits for the current turn (and anything sent before it) to end.
+    if (item.finish === true) {
+      if (busy) break;
+      seen.add(f);
+      if (finishing) say(message);
+      else finish("developer", message);
+      continue;
+    }
+    seen.add(f);
+    clearTimeout(idleTimer);
+    idleTimer = null;
+    if (busy) send({ type: "control_request", request_id: "steer-" + f, request: { subtype: "interrupt" } });
     say(message);
   }
 }, 2000);

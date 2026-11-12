@@ -194,6 +194,16 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 
 **Tracking.** Developers follow builds with `get_build` (phase, timeline, cost against the cap, Maxwell summary, readiness, links), see the agent's live activity with `get_build_activity`, `steer_build` it, or `stop_build` it. `list_builds` shows this month's spend. Admins see every build and total spend with `list_all_builds`.
 
+**Session builds.** `start_build` with `mode: "session"` works like a chat with the coding agent:
+- The agent does the first request (`goal`), reports `coding` "Waiting for your next message", and stays open, keeping its context.
+- Each `steer_build` message is the next request.
+- `finish_build` ends the session. Once its current request is done, the agent reviews, checks, previews and pushes the work, then exits. Mynt then verifies the build in a clean sandbox exactly as any other; the agent never grades its own work.
+- A session that has been idle (nothing running, nothing waiting) for `BUILD_SESSION_IDLE_MS` (default 15 minutes) finishes the same way, so its work is shipped, not lost.
+- The sandbox is billed while it waits, so idle time counts against the build's cap. A session also ends with its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours).
+- Mynt runs the agent's runner with `MYNT_AGENT_HOLD=1` and `MYNT_AGENT_IDLE_MS`.
+
+**Continuing a build.** `start_build` with `continue_from: <build_id>` starts from the branch an earlier finished build of yours pushed, on the same app and repository. If that build shipped, it starts at its verified commit. Use it after a session ends, or to change a shipped app.
+
 **Spend** is capped per build (`BUILD_CAP_USD`, default 10) and per developer per month (`BUILD_MONTHLY_CAP_USD`, default 100). Mynt reads the sandbox's machine and model cost as it runs, and stops a build that passes its cap.
 
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.
