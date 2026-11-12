@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { BuildService, buildConfigFromEnv } from "../dist/builds.js";
 import { workspaceFiles } from "../dist/agent-host.js";
+import { redact } from "../dist/boxes.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { CATALOG } from "./helpers.js";
@@ -958,4 +959,69 @@ test("by default a build ships on Mynt's own checks, with no agent audit; a fail
     assert.ok(!boat.sandboxes.get(vid).files.has(`${A}/auth.json`), "no auditor was started");
     if (status === "failed") assert.match(b.error, /Not production-ready: static_scan/);
   }
+});
+
+test("redact scrubs every token Mynt mints, provider keys, URL passwords and secret-named values", () => {
+  const b64 = "Zm9vYmFyYmF6cXV4LXF1dXhfY29yZ2U-"; // base64url, ending in a dash
+  for (const kind of ["live", "test", "agent", "bd", "explore", "desk", "review", "paudit", "predteam"]) {
+    assert.equal(redact(`token mynt_${kind}_${b64} end`), "token [redacted] end", kind);
+  }
+  assert.equal(redact(`ANTHROPIC_BASE_URL=https://mynt.example/agent/t/mynt_agent_${b64}/v1`), "ANTHROPIC_BASE_URL=https://mynt.example/agent/t/[redacted]/v1");
+
+  // NAME=value, where the name says it's secret.
+  assert.equal(redact("STRIPE_SECRET_KEY=sk_live_51Habcdefghijklmnop"), "STRIPE_SECRET_KEY=[redacted]");
+  assert.equal(redact("STRIPE_SECRET_KEY=whatever123"), "STRIPE_SECRET_KEY=[redacted]");
+  assert.equal(redact("OPENAI_API_KEY=abcdef123456 next"), "OPENAI_API_KEY=[redacted] next");
+  assert.equal(redact("SIGNING_PRIVATE_KEY=abcdef123456"), "SIGNING_PRIVATE_KEY=[redacted]");
+  assert.equal(redact("SENDGRID_KEY=abcdef123456"), "SENDGRID_KEY=[redacted]");
+  assert.equal(redact("DB_PASS='hunter2hunter2'"), "DB_PASS=[redacted]");
+  assert.equal(redact("PASS=hunter2hunter2"), "PASS=[redacted]");
+  assert.equal(redact("DB_PASSWORD=hunter2hunter2"), "DB_PASSWORD=[redacted]");
+  assert.equal(redact("aws_secret_access_key = wJalrXUtnFEMIK7MDENG"), "aws_secret_access_key = [redacted]");
+
+  // Provider key shapes, wherever they appear.
+  for (const key of [
+    "sk_live_51Habcdefghijklmnop", "sk_test_51Habcdefghijklmnop", "rk_live_51Habcdefghijklmnop",
+    "ghp_abcdefghijklmnopqrstuvwxyz0123", "gho_abcdefghijklmnopqrstuvwxyz0123", "ghu_abcdefghijklmnopqrstuvwxyz0123",
+    "ghr_abcdefghijklmnopqrstuvwxyz0123", "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+    "xoxb-123456789012-abcdefghijkl", "xoxp-123456789012-abcdefghijkl", "AKIAIOSFODNN7EXAMPLE",
+    "sk-ant-api03-abcdefghijkl", "whsec_abcdefghijkl",
+  ]) assert.equal(redact(`using ${key} now`), "using [redacted] now", key);
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\nabcd==\n-----END RSA PRIVATE KEY-----";
+  assert.equal(redact(`key:\n${pem}\ndone`), "key:\n[redacted]\ndone");
+  assert.equal(redact("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg"), "[redacted]", "a key cut off mid-way");
+  assert.equal(redact("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1r\n-----END OPENSSH PRIVATE KEY-----"), "[redacted]");
+
+  // Passwords in URLs keep the user and host.
+  assert.equal(redact("DATABASE_URL=postgres://mynt:s3cr3tpw@db.internal:5432/mynt"), "DATABASE_URL=postgres://mynt:[redacted]@db.internal:5432/mynt");
+  assert.equal(redact("git clone https://x-access-token:abc123@github.com/o/r"), "git clone https://x-access-token:[redacted]@github.com/o/r");
+
+  // JSON and YAML.
+  assert.equal(redact(`{"api_key": "abcdef123456", "name": "demo"}`), `{"api_key": "[redacted]", "name": "demo"}`);
+  assert.equal(redact(`{"password":"hunter2hunter2"}`), `{"password":"[redacted]"}`);
+  assert.equal(redact(`{'clientSecret': 'abcdef123456'}`), `{'clientSecret': '[redacted]'}`);
+  assert.equal(redact(`{"accessToken": "abc\\"def123"}`), `{"accessToken": "[redacted]"}`);
+  assert.equal(redact("auth:\n  token: abcdef123456\n  user: demo"), "auth:\n  token: [redacted]\n  user: demo");
+});
+
+test("redact leaves ordinary text alone", () => {
+  for (const text of [
+    "Enter your password to continue",
+    "The token is valid and the secret is safe",
+    "password:\nEnter something here",
+    `{"password": ""}`,
+    `{"password": "short"}`,
+    `{"bypass": "everything ok", "primary": "abcdef123456"}`,
+    "PASSWORD=short",
+    "API_KEY=",
+    "BYPASS_MODE=enabled",
+    "COMPASS=northward",
+    "PWD=/home/user/workspace/app",
+    "mynt_gave_up and mynt_conformance_unknown_ab12cd34",
+    "https://example.com:8443/path@v2",
+    "see https://user@example.com/docs",
+    "sk_live_ abc ghp_short AKIA123",
+    "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----",
+    "ready on 8080",
+  ]) assert.equal(redact(text), text, text);
 });
