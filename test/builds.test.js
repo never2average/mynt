@@ -125,9 +125,10 @@ function fakeRepos() {
   };
 }
 
-async function setup({ boat = fakeBoat(), config = {} } = {}) {
+async function setup({ boat = fakeBoat(), config = {}, refuse = null } = {}) {
   const pg = new PGlite();
-  const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
+  // `refuse`: stands in for a database that rejects some statements (those it returns true for).
+  const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
   const builds = await BuildService.open(db, store, boat, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
@@ -466,6 +467,78 @@ test("a line too long to keep is skipped, across reads, without losing the lines
   assert.equal(count[0].seq, 2 + 5003 - ACTIVITY_KEEP + 1);
   const latest = (await call(dev, "get_build_activity", { build_id: started.id, limit: 1 })).data;
   assert.deepEqual([latest.activity[0].seq, latest.activity[0].summary, latest.cursor], [5005, "step 5002", 5005]);
+  assert.equal(latest.first_seq, count[0].seq, "first_seq says where the kept entries start, so a follower can tell some were trimmed");
+});
+
+test("one bad line never stalls activity: NULs are stripped, and an entry the database refuses is dropped, not retried forever", async () => {
+  let poisoned = 0;
+  const refuse = (sql, params) => sql.includes("INSERT INTO financial_products.build_activity") && (params ?? []).some((p) => typeof p === "string" && p.includes("POISON") && ++poisoned);
+  const { builds, boat, as, connect, call } = await setup({ refuse });
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const summaries = async () => (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity.map((a) => a.summary);
+
+  // A NUL (which Postgres text refuses) between good lines: all three are kept, the NUL gone.
+  boat.log(sbx, say("before"), say("bad\u0000text"), say("after"));
+  await builds.tick();
+  assert.deepEqual(await summaries(), ["before", "bad text", "after"]);
+
+  // An entry the database refuses for any other reason: the rest of its chunk is kept, and the offset moves on.
+  boat.log(sbx, say("good one"), say("POISON"), say("good two"));
+  await builds.tick();
+  assert.ok(poisoned >= 2, "the batch, then the entry on its own, were refused");
+  boat.log(sbx, say("later"));
+  await builds.tick();
+  assert.deepEqual(await summaries(), ["before", "bad text", "after", "good one", "good two", "later"]);
+  assert.equal((await builds.get(started.id)).activity_offset, Buffer.byteLength(boat.sandboxes.get(sbx).files.get(`${A}/agent.jsonl`)));
+});
+
+test("activity is scrubbed of secrets before it is cut to length", async () => {
+  const { activitySummary } = await import("../dist/builds.js");
+  const { builds, boat, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  const gh = "ghs_abcdefghijklmnopqrstuvwxyz0123456789";
+  boat.log(sbx, say(`the token is ${gh}, don't share it`), run("GITHUB_TOKEN=supersecretvalue123 git push"), say(`${"x".repeat(385)} ${gh}`));
+  await builds.tick();
+  const got = (await call(dev, "get_build_activity", { build_id: started.id, after: 0 })).data.activity.map((a) => a.summary);
+  assert.equal(got[0], "the token is [redacted], don't share it");
+  assert.equal(got[1], 'Bash {"command":"GITHUB_TOKEN=[redacted] git push"}');
+  // The token straddles the 400-character cut: scrubbed first, so no prefix of it survives.
+  assert.ok(!got[2].includes("ghs_") && got[2].length <= 400, got[2]);
+  assert.ok(got.every((s) => !s.includes("supersecret") && !s.includes("abcdefghij")));
+  // A cut never leaves half a surrogate pair.
+  assert.equal(activitySummary("a".repeat(399) + "😀"), "a".repeat(399));
+});
+
+test("remove_app deletes a removed app's stored build activity", async () => {
+  const { builds, boat, as, connect, call, pg } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const admin = await connect(await as("Ada", ["admin"]));
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please", app_id: app.id })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  boat.ready(sbx);
+  await builds.tick();
+  boat.log(sbx, say("hello"));
+  await builds.tick();
+  await call(dev, "stop_build", { build_id: started.id });
+  const rows = async () => (await pg.query("SELECT count(*)::int AS n FROM financial_products.build_activity WHERE build_id = $1", [started.id])).rows[0].n;
+  assert.equal(await rows(), 1);
+  const dry = (await call(admin, "remove_app", { app_id: app.id })).data;
+  assert.equal(dry.would_remove.rows.build_activity, 1, JSON.stringify(dry));
+  const done = await call(admin, "remove_app", { app_id: app.id, confirm: true, reason: "test" });
+  assert.equal(done.isError, false, JSON.stringify(done.data));
+  assert.equal(await rows(), 0);
 });
 
 test("activityLines: complete lines only, a line being skipped is dropped to its end, an over-long one is skipped", async () => {

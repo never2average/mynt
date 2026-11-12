@@ -8,7 +8,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { accessStatus, productEntity } from "./access.js";
 import type { BoatClient } from "./boat.js";
-import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, shellQuote } from "./boxes.js";
+import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, redact, shellQuote } from "./boxes.js";
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
 import { GoogleServiceAccount } from "./google-auth.js";
@@ -523,8 +523,8 @@ export class BuildService {
   async stop(build: Build, reason: string, status: BuildStatus = "stopped") {
     if (TERMINAL.includes(build.status)) return build;
     await this.retireKey(build);
-    // What the agent did last, read before its sandbox goes.
-    if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, 1);
+    // What the agent did last, read before its sandbox goes, briefly: a stuck sandbox mustn't hold up a stop.
+    if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, { maxChunks: 4, timeoutSeconds: 10, toEnd: true });
     if (build.sandbox_id && this.boat) {
       await this.boat.stop(build.sandbox_id).catch(() => {});
     }
@@ -552,15 +552,18 @@ export class BuildService {
         : await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 ORDER BY seq LIMIT $3", [build.id, opts.after, n])
     ).rows as Row[];
     const activity = rows.map((r) => ({ seq: Number(r.seq), at: iso(r.at)!, type: r.type as string, summary: r.summary as string }));
-    return { activity, cursor: activity.reduce((m, a) => Math.max(m, a.seq), opts.after ?? 0) };
+    // The oldest entry still kept: past the per-build limit, the oldest go, so a follower whose cursor is below
+    // first_seq - 1 has missed some.
+    const first = (await this.db.query("SELECT MIN(seq) AS m FROM financial_products.build_activity WHERE build_id = $1", [build.id])).rows[0] as Row | undefined;
+    return { activity, cursor: activity.reduce((m, a) => Math.max(m, a.seq), opts.after ?? 0), first_seq: first?.m == null ? null : Number(first.m) };
   }
 
   // Reads what the agent wrote to its stream-json log since last time into build_activity: a chunk at a time,
   // base64-encoded so byte offsets stay exact, complete lines only. The new offset is claimed in the same transaction
   // that stores the rows, so two readers never store the same lines. What the agent says is its own account: shown
   // to the developer, never trusted.
-  async collectActivity(b: Build, maxChunks = ACTIVITY_CHUNKS_PER_TICK) {
-    if (!this.boat || !b.sandbox_id) return;
+  async collectActivity(b: Build, maxChunks = ACTIVITY_CHUNKS_PER_TICK, timeoutSeconds = 60): Promise<{ complete: boolean; offset: number } | null> {
+    if (!this.boat || !b.sandbox_id) return null;
     let offset = b.activity_offset;
     for (let i = 0; i < maxChunks; i++) {
       // From one byte before the offset, so the first byte says whether the offset is at the start of a line.
@@ -569,43 +572,75 @@ export class BuildService {
       const r = await this.boat.exec(
         b.sandbox_id,
         `f=${AGENT_DIR}/agent.jsonl; if [ -f "$f" ]; then tail -c +${from + 1} "$f" | head -c ${want} | base64 -w0; fi`,
-        { timeoutSeconds: 60 },
+        { timeoutSeconds },
       );
-      if (r.exitCode !== 0) return;
+      if (r.exitCode !== 0) return { complete: false, offset };
       const buf = Buffer.from(r.stdout.trim(), "base64");
       const { consumed, lines } = activityLines(buf, offset > 0, ACTIVITY_CHUNK);
-      if (consumed === 0) return;
+      if (consumed === 0) return { complete: true, offset };
       const entries = lines
         .map((line) => parseJson<Record<string, unknown>>(line))
         .filter((m): m is Record<string, unknown> => !!m)
         .flatMap(summarizeAgentLine);
-      const claimed = await inTransaction(this.db, async (tx) => {
-        const moved = await tx.query("UPDATE financial_products.build_runs SET activity_offset = $3 WHERE id = $1 AND activity_offset = $2 RETURNING id", [
-          b.id,
-          offset,
-          offset + consumed,
-        ]);
-        if (moved.rows.length === 0) return false;
-        if (entries.length === 0) return true;
-        const top = Number(((await tx.query("SELECT COALESCE(MAX(seq), 0) AS m FROM financial_products.build_activity WHERE build_id = $1", [b.id])).rows[0] as Row).m);
-        const values = entries.map((_, k) => `($1, $${k * 3 + 2}, $${k * 3 + 3}, $${k * 3 + 4})`);
-        await tx.query(`INSERT INTO financial_products.build_activity (build_id, seq, type, summary) VALUES ${values.join(", ")}`, [
-          b.id,
-          ...entries.flatMap((e, k) => [top + k + 1, e.type, e.summary]),
-        ]);
-        // Only a build's latest ACTIVITY_KEEP entries are kept.
-        await tx.query("DELETE FROM financial_products.build_activity WHERE build_id = $1 AND seq <= $2", [b.id, top + entries.length - ACTIVITY_KEEP]);
-        return true;
-      });
-      if (!claimed) return;
+      // All of the chunk's entries in one statement; if the database refuses that, one at a time, each on its own
+      // savepoint, so an entry it won't take is dropped and the offset still moves on: one bad line never stalls it.
+      let claimed: boolean;
+      try {
+        claimed = await this.storeActivity(b.id, offset, offset + consumed, entries, false);
+      } catch (e) {
+        console.error(`Build ${b.id} activity: storing entries one by one (${(e as Error).message})`);
+        claimed = await this.storeActivity(b.id, offset, offset + consumed, entries, true);
+      }
+      if (!claimed) return { complete: true, offset };
       offset += consumed;
-      if (buf.length < want) return; // read to the end of what's there
+      if (buf.length < want) return { complete: true, offset }; // read to the end of what's there
     }
+    return { complete: false, offset };
   }
 
-  // Activity is a convenience: failing to read it never fails or holds up a build.
-  private async collectActivitySafely(b: Build, maxChunks?: number) {
-    await this.collectActivity(b, maxChunks).catch((e) => console.error(`Build ${b.id} activity: ${(e as Error).message}`));
+  private storeActivity(buildId: string, from: number, to: number, entries: { type: string; summary: string }[], oneByOne: boolean) {
+    return inTransaction(this.db, async (tx) => {
+      const moved = await tx.query("UPDATE financial_products.build_runs SET activity_offset = $3 WHERE id = $1 AND activity_offset = $2 RETURNING id", [buildId, from, to]);
+      if (moved.rows.length === 0) return false;
+      if (entries.length === 0) return true;
+      let top = Number(((await tx.query("SELECT COALESCE(MAX(seq), 0) AS m FROM financial_products.build_activity WHERE build_id = $1", [buildId])).rows[0] as Row).m);
+      const insert = "INSERT INTO financial_products.build_activity (build_id, seq, type, summary) VALUES ";
+      if (!oneByOne) {
+        const values = entries.map((_, k) => `($1, $${k * 3 + 2}, $${k * 3 + 3}, $${k * 3 + 4})`);
+        await tx.query(insert + values.join(", "), [buildId, ...entries.flatMap((e, k) => [top + k + 1, e.type, e.summary])]);
+        top += entries.length;
+      } else {
+        for (const e of entries) {
+          await tx.query("SAVEPOINT activity_entry");
+          try {
+            await tx.query(insert + "($1, $2, $3, $4)", [buildId, top + 1, e.type, e.summary]);
+            await tx.query("RELEASE SAVEPOINT activity_entry");
+            top += 1;
+          } catch (err) {
+            await tx.query("ROLLBACK TO SAVEPOINT activity_entry");
+            console.error(`Build ${buildId} activity: dropped an entry the database refused (${(err as Error).message})`);
+          }
+        }
+      }
+      // Only a build's latest ACTIVITY_KEEP entries are kept.
+      await tx.query("DELETE FROM financial_products.build_activity WHERE build_id = $1 AND seq <= $2", [buildId, top - ACTIVITY_KEEP]);
+      return true;
+    });
+  }
+
+  // Activity is a convenience: failing to read it never fails or holds up a build. When it should have been read to
+  // the end (the agent exited, or the build is ending) and wasn't, say how much was left unread.
+  private async collectActivitySafely(b: Build, opts: { maxChunks?: number; timeoutSeconds?: number; toEnd?: boolean } = {}) {
+    try {
+      const r = await this.collectActivity(b, opts.maxChunks, opts.timeoutSeconds);
+      if (r && !r.complete && opts.toEnd && this.boat && b.sandbox_id) {
+        const size = await this.boat.exec(b.sandbox_id, `stat -c %s ${AGENT_DIR}/agent.jsonl 2>/dev/null || echo 0`, { timeoutSeconds: opts.timeoutSeconds ?? 30 });
+        const left = Math.max(0, Number(size.stdout.trim()) - r.offset);
+        if (left > 0) console.error(`Build ${b.id} activity: ${left} bytes of the agent's log were left unread`);
+      }
+    } catch (e) {
+      console.error(`Build ${b.id} activity: ${(e as Error).message}`);
+    }
   }
 
   // The build's box: the sandbox the coding agents work in, for as long as it's up (during the build and, once
@@ -747,6 +782,8 @@ export class BuildService {
         // build keeps the status it ended with.
         if (TERMINAL.includes(current.status)) continue;
         await this.retireKey(current);
+        // What the agent did up to the failure, read before its sandbox goes.
+        if (AGENT_PHASES.includes(current.status)) await this.collectActivitySafely(current, { maxChunks: ACTIVITY_CHUNKS_AT_END, timeoutSeconds: 30, toEnd: true });
         // Don't leave a failed build's machines running until their TTL.
         for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.boat.stop(id).catch(() => {});
         const error = failureMessage(e);
@@ -829,7 +866,7 @@ export class BuildService {
       await this.event(b.id, phase, status?.message ?? phase);
     }
     // Once the agent has exited, its log is read to the end before the build moves on.
-    await this.collectActivitySafely(b, agent.running ? ACTIVITY_CHUNKS_PER_TICK : ACTIVITY_CHUNKS_AT_END);
+    await this.collectActivitySafely(b, agent.running ? {} : { maxChunks: ACTIVITY_CHUNKS_AT_END, toEnd: true });
     if (agent.running) return;
     if (!agent.ok) throw new Error(`Coding agent ${agent.state?.error ?? agent.state?.last_subtype ?? `exited with code ${agent.state?.exit_code ?? "unknown"}`}`);
     await this.startVerification(b);
@@ -1623,12 +1660,30 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
 }
 
 // One line of Claude Code's stream-json output, as activity a developer can follow.
+// Summaries are stored and shown: control characters (NUL among them, which Postgres text refuses) go, secrets are
+// scrubbed before the text is cut (so a cut can't leave a partial token the patterns miss), and a cut never leaves
+// half a surrogate pair.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export function activitySummary(text: string, limit = 400) {
+  const clean = redact(
+    text
+      .replace(LONE_SURROGATE, "�")
+      .replace(/[\u0000-\u001F\u007F]+/g, " ")
+      .replace(/\s+/g, " "),
+  );
+  return clean.slice(0, limit).replace(LONE_SURROGATE, "");
+}
+
 function summarizeAgentLine(m: Record<string, unknown>): { type: string; summary: string }[] {
-  const clip = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? "")).replace(/\s+/g, " ").slice(0, 400);
-  if (m.type === "result") return [{ type: "turn_finished", summary: `${clip(m.subtype)}, US$${Number(m.total_cost_usd ?? 0).toFixed(2)}` }];
+  const str = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? ""));
+  if (m.type === "result") return [{ type: "turn_finished", summary: activitySummary(`${str(m.subtype)}, US$${Number(m.total_cost_usd ?? 0).toFixed(2)}`) }];
   const content = (m.message as { content?: unknown } | undefined)?.content;
   if (m.type !== "assistant" || !Array.isArray(content)) return [];
   return content.flatMap((c: Record<string, unknown>) =>
-    c.type === "text" ? [{ type: "message", summary: clip(c.text) }] : c.type === "tool_use" ? [{ type: "tool_use", summary: `${clip(c.name)} ${clip(c.input)}` }] : [],
+    c.type === "text"
+      ? [{ type: "message", summary: activitySummary(str(c.text)) }]
+      : c.type === "tool_use"
+        ? [{ type: "tool_use", summary: activitySummary(`${str(c.name)} ${str(c.input)}`) }]
+        : [],
   );
 }
