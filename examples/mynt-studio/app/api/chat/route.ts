@@ -38,9 +38,10 @@ const POLL_MS = 2_000;
 // A message sent twice (a double click, a retry, a second device) acts once.
 const SAME_MESSAGE_SECONDS = 10 * 60;
 const SAME_TEXT_SECONDS = 30;
-// Two devices pressing send at the same moment start one build, not two. The lock outlives the
-// slowest start_build (the MCP client's 60 s timeout); it's released once the start is done.
-export const START_LOCK_SECONDS = 70;
+// Two devices pressing send at the same moment start one build, not two. The lock is held
+// through the second list_builds and start_build, each up to the MCP client's 60 s timeout, so
+// it lasts longer than both; it's released once the start is done.
+export const START_LOCK_SECONDS = 130;
 
 const id = z.string().trim().min(1).max(200);
 const Body = z.object({

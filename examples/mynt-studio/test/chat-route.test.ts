@@ -347,14 +347,14 @@ describe("/api/chat start races", () => {
     expect(startLocks()).toHaveLength(0);
   });
 
-  it("A's start outliving the old 10 s lock still keeps B from starting a second build", async () => {
-    expect(START_LOCK_SECONDS).toBeGreaterThan(60); // above the MCP client's timeout
+  it("A's start running past 70 s still keeps B from starting a second build", async () => {
+    expect(START_LOCK_SECONDS).toBeGreaterThan(120); // a second list_builds and start_build, each up to 60 s
     fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
     fake.startDelayMs = 100;
     fake.session = deviceA();
     const a = post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] });
     await new Promise((r) => setTimeout(r, 40)); // A holds the lock and waits on start_build
-    clock.now = 30_000; // 30 s into A's start
+    clock.now = 100_000; // 100 s into A's start: past the earlier 70 s lock
     fake.session = deviceB();
     const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a budgeting screen instead")] }));
     await chunks(await a);

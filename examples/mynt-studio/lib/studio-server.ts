@@ -20,18 +20,22 @@ export class MyntRefusedError extends ToolRefusedError {
   }
 }
 
-// Mynt's refusals that come before it changes anything (src/builds.ts, src/server.ts): checks
-// of permission, existence, state, arguments and budget. Any other error may have come after a
-// build was inserted or a steer was written.
-const REFUSED_BEFORE_ANY_CHANGE = [
+// Mynt's refusals that come before it changes anything: checks of permission, existence, state
+// and budget, worded as in Mynt's src/builds.ts (a test keeps them in step with it). Any other
+// error may have come after a build was inserted or a steer was written.
+export const MYNT_REFUSALS_BEFORE_ANY_CHANGE = [
   /Coding-agent builds aren't enabled/,
   /No (app|build) of yours with id/,
   /Monthly build budget used up/,
   /is more than this month's remaining build budget/,
   /Repository '[^']*' isn't connected/,
   /Build is [a-z_]+; only a running agent can be steered/,
-  /Input validation error|Invalid arguments for tool/,
 ];
+
+// The MCP server rejecting a call's arguments, before the tool runs.
+const SDK_REFUSALS = [/Input validation error|Invalid arguments for tool/];
+
+const REFUSED_BEFORE_ANY_CHANGE = [...MYNT_REFUSALS_BEFORE_ANY_CHANGE, ...SDK_REFUSALS];
 
 // Whether an error means the call certainly had no effect: the studio never sent it (the
 // arguments didn't pass the allow-list), Mynt rejected it as a JSON-RPC request (unknown tool,
