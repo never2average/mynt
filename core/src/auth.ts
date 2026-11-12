@@ -1,3 +1,6 @@
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
 import { ROLES, type Role, type Store, type User } from "./store.js";
 
@@ -163,36 +166,40 @@ export class ClerkAdmin {
     return data;
   }
 
-  // Idempotent: allowlist on, dynamic client registration (how MCP clients register), PKCE required,
-  // and audience claims so a token is bound to the resource it was issued for.
   // Mynt's own apps (the studio, the chat app) as pre-registered OAuth applications with no consent screen: a person
   // signing in to Mynt's own app isn't asked to let Mynt access Mynt. Only an operator registers one, by name and exact
   // redirect URI; each is a confidential client (its secret stays on that app's server) with PKCE required. Clients
   // that register themselves (MCP clients, any third party) always get the consent screen: Clerk doesn't let a
   // dynamically registered application turn it off, and nothing here touches them.
   // Refuses a name that's already registered (its secret can't be read back; rotate it in Clerk's dashboard).
-  async firstPartyApp(name: string, redirectUri: string): Promise<{ client_id: string; client_secret: string; consent_screen_enabled: boolean }> {
-    const u = new URL(redirectUri);
-    const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
-    if (u.protocol !== "https:" && !(local && u.protocol === "http:")) throw new Error("The redirect URI must be https (http only for localhost)");
-    if (u.hash || u.search) throw new Error("The redirect URI must be exact: no query or fragment");
+  async firstPartyApp(
+    name: string,
+    redirectUri: string,
+  ): Promise<{ id?: string; client_id: string; client_secret: string; consent_screen_enabled: boolean }> {
+    const exact = firstPartyRedirectUri(redirectUri);
     const existing = (await this.call("GET", "/oauth_applications?limit=500")) as { data?: { name?: string; client_id?: string }[] } | { name?: string }[];
     const list = Array.isArray(existing) ? existing : (existing.data ?? []);
     const same = list.find((a) => a.name === name);
     if (same) throw new Error(`An OAuth application named '${name}' already exists (${(same as { client_id?: string }).client_id ?? "client id unknown"}); rotate its secret in Clerk's dashboard, or choose another name`);
     const app = (await this.call("POST", "/oauth_applications", {
       name,
-      redirect_uris: [redirectUri],
+      redirect_uris: [exact],
       scopes: "profile email",
       public: false,
       pkce_required: true,
       consent_screen_enabled: false,
-    })) as { client_id?: string; client_secret?: string; consent_screen_enabled?: boolean };
+    })) as { id?: string; client_id?: string; client_secret?: string; consent_screen_enabled?: boolean };
     if (!app.client_id || !app.client_secret) throw new Error("Clerk didn't return a client id and secret");
     // Kept on (an older instance or plan): the caller still gets the secret, and says so.
-    return { client_id: app.client_id, client_secret: app.client_secret, consent_screen_enabled: app.consent_screen_enabled !== false };
+    return { ...(app.id ? { id: app.id } : {}), client_id: app.client_id, client_secret: app.client_secret, consent_screen_enabled: app.consent_screen_enabled !== false };
   }
 
+  async deleteOAuthApplication(id: string): Promise<void> {
+    await this.call("DELETE", `/oauth_applications/${encodeURIComponent(id)}`);
+  }
+
+  // Idempotent: allowlist on, dynamic client registration (how MCP clients register), PKCE required,
+  // and audience claims so a token is bound to the resource it was issued for.
   // Returns warnings: Clerk's allowlist is a second layer (the invites table always decides), so a plan
   // without it doesn't stop the setup.
   async setup(opts: { allowlist: boolean } = { allowlist: true }): Promise<string[]> {
@@ -243,4 +250,64 @@ export class ClerkAdmin {
   async setRoles(clerkUserId: string, roles: Role[] | null): Promise<void> {
     await this.call("PATCH", `/users/${encodeURIComponent(clerkUserId)}/metadata`, { public_metadata: { [CLERK_ROLES_KEY]: roles } });
   }
+}
+
+// A first-party app's redirect URI, checked to be exactly one address Clerk will match as given: https (http only for
+// localhost), no wildcard host, no credentials, no query or fragment (not even an empty "?" or "#"), and already in
+// its normal form, so what's registered is what the operator typed.
+export function firstPartyRedirectUri(redirectUri: string): string {
+  let u: URL;
+  try {
+    u = new URL(redirectUri);
+  } catch {
+    throw new Error("The redirect URI isn't a valid URL");
+  }
+  const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+  if (u.protocol !== "https:" && !(local && u.protocol === "http:")) throw new Error("The redirect URI must be https (http only for localhost)");
+  if (u.hostname.includes("*")) throw new Error("The redirect URI's host can't contain a wildcard (*)");
+  if (u.username || u.password) throw new Error("The redirect URI can't contain a user name or password");
+  if (u.search || u.hash || u.href.includes("?") || u.href.includes("#")) throw new Error("The redirect URI must be exact: no query or fragment");
+  if (u.href !== redirectUri) throw new Error(`The redirect URI must be exact; did you mean ${u.href}?`);
+  return u.href;
+}
+
+// `mynt clerk first-party`: registers the app with Clerk and writes its id and secret to a file only the user who
+// runs it can read (by default ~/.mynt/oauth-<name>.json, the folder kept at 700). The secret is never printed or put
+// in an error. If the file can't be written, the Clerk application is deleted again, since its secret would be lost.
+export async function registerFirstPartyApp(
+  admin: Pick<ClerkAdmin, "firstPartyApp" | "deleteOAuthApplication">,
+  name: string,
+  redirectUri: string,
+  opts: { file?: string; home?: string } = {},
+): Promise<{ client_id: string; path: string; consent_screen_enabled: boolean }> {
+  const exact = firstPartyRedirectUri(redirectUri); // before anything is created
+  const ownDir = join(opts.home ?? homedir(), ".mynt");
+  const path = opts.file ?? join(ownDir, `oauth-${name.replace(/[^\w.-]/g, "_")}.json`);
+  if (existsSync(path)) throw new Error(`${path} already exists; move it away first (it may hold another app's secret)`);
+  const app = await admin.firstPartyApp(name, exact);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // Mynt's own folder is kept private even if it was made earlier with looser permissions. A folder named with
+    // --file is the operator's, and left as it is.
+    if (dirname(path) === ownDir) chmodSync(ownDir, 0o700);
+    const body = { name, redirect_uri: exact, client_id: app.client_id, client_secret: app.client_secret };
+    writeFileSync(path, JSON.stringify(body, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    const why = (err as NodeJS.ErrnoException).code ?? "write failed";
+    let undone = false;
+    if (app.id) {
+      try {
+        await admin.deleteOAuthApplication(app.id);
+        undone = true;
+      } catch {
+        // reported below
+      }
+    }
+    throw new Error(
+      undone
+        ? `Couldn't write ${path} (${why}), so the secret would be lost: deleted the Clerk application '${name}' again. Fix the problem and run this again.`
+        : `Couldn't write ${path} (${why}), and couldn't delete the Clerk application '${name}' (client id ${app.client_id}) again: delete it in Clerk's dashboard, then run this again.`,
+    );
+  }
+  return { client_id: app.client_id, path, consent_screen_enabled: app.consent_screen_enabled };
 }

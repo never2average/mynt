@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { AgentMeter } from "./agent-meter.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ClerkAdmin, ClerkAuth, clerkConfigFromEnv } from "./auth.js";
+import { ClerkAdmin, ClerkAuth, clerkConfigFromEnv, registerFirstPartyApp } from "./auth.js";
 import { sandboxesFromEnv } from "./sandbox-providers/index.js";
 import { BdService, bdConfigFromEnv } from "./bd.js";
 import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./hosting.js";
@@ -31,9 +31,7 @@ import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, Prod
 import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
 import { CLUSTERS, type Cluster } from "./solana/rpc.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { ROLES, Store, type Role } from "./store.js";
 
 const USAGE = `Usage:
@@ -45,7 +43,8 @@ const USAGE = `Usage:
   mynt users list
   mynt clerk setup                     Turn on Clerk's allowlist and MCP client registration
   mynt clerk first-party <name> <redirect-uri> [--file <path>]   Register one of Mynt's own apps (no consent screen);
-                                       prints its client id, writes id and secret to a root-only file (never printed)
+                                       prints its client id, writes id and secret to a file readable only by the
+                                       user who runs it (the secret is never printed)
   mynt hosting wg-peers                The gateway's WireGuard peers (running tenants)
   mynt hosting egress-allowlist        Hosts tenant VMs may reach through the gateway
   mynt hosting routes                  Caddy sites for hosted apps (<app>.<HOSTING_APPS_DOMAIN> to the tenant tunnel)
@@ -317,12 +316,8 @@ if (values.help) {
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");
   const [, , name, redirectUri] = positionals;
   if (!name || !redirectUri) die("usage: mynt clerk first-party <name> <redirect-uri> [--file <path>]");
-  const path = values.file ?? join(homedir(), ".mynt", `oauth-${name.replace(/[^\w.-]/g, "_")}.json`);
-  if (existsSync(path)) die(`${path} already exists; move it away first (it may hold another app's secret)`);
-  const app = await admin.firstPartyApp(name, redirectUri).catch((e) => die((e as Error).message));
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify({ name, redirect_uri: redirectUri, client_id: app.client_id, client_secret: app.client_secret }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-  console.log(`Registered '${name}' with Clerk: client id ${app.client_id}. Its secret is in ${path} (readable only by you); give it to that app's server, then delete the file.`);
+  const app = await registerFirstPartyApp(admin, name, redirectUri, { file: values.file }).catch((e) => die((e as Error).message));
+  console.log(`Registered '${name}' with Clerk: client id ${app.client_id}. Its secret is in ${app.path} (readable only by you); give it to that app's server, then delete the file.`);
   if (app.consent_screen_enabled) console.error("warning: Clerk kept the consent screen on for it; check the application in Clerk's dashboard");
 } else if (command === "clerk" && sub === "setup") {
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");

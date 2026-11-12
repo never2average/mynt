@@ -1383,7 +1383,7 @@ node dist/index.js users list
 
 **Mynt's own apps sign in without a consent screen.** People signing in to the studio or the chat app (Mynt's own apps) aren't asked to "allow Mynt to access Mynt". How it works:
 - Each first-party app is a pre-registered Clerk OAuth application. It's a confidential client (its secret stays on that app's server), with PKCE required and its consent screen off.
-- Only an operator creates one, naming the app's exact redirect URI.
+- Only an operator creates one, naming the app's exact redirect URI: https (http only for localhost), no wildcard (`*`) in the host, no user name or password, no query or fragment (not even a bare `?` or `#`), written in its normal form (lower-case host, no default port). Anything else is refused before Clerk is asked.
 - Every client that registers itself (MCP clients such as Claude, and any third party) still gets Clerk's consent screen. Clerk doesn't let a dynamically registered application turn it off, and Mynt never changes that.
 
 Operator steps, once per app (the domain is a placeholder for that app's own):
@@ -1391,8 +1391,8 @@ Operator steps, once per app (the domain is a placeholder for that app's own):
    ```bash
    node dist/index.js clerk first-party mynt-studio https://<studio-domain>/api/auth/callback
    ```
-2. It prints the client id. The client id and its secret go to `~/.mynt/oauth-mynt-studio.json`, a file only you can read (or the path you give with `--file`). The secret is never printed.
-3. Give the client id and secret to that app's server as its OAuth client, in place of registering itself. Then delete the file.
+2. It prints the client id. The client id and its secret go to `~/.mynt/oauth-mynt-studio.json`, a file only you can read (or the path you give with `--file`); `~/.mynt` itself is kept at 700. The secret is never printed. If the file can't be written, the Clerk application is deleted again (its secret would otherwise be lost), and the error says whether that worked or which application to delete by hand.
+3. Give the client id and secret to that app's server as its OAuth client, in place of registering itself: `MYNT_OAUTH_CLIENT_ID` and `MYNT_OAUTH_CLIENT_SECRET` for Mynt Studio and mynt-chat (see their READMEs). Then delete the file.
 4. Registering the same name again is refused, because the secret can't be read back. To replace the secret, rotate it in Clerk's dashboard.
 
 Connect a client with just the URL; it will open Clerk's sign-in page:
