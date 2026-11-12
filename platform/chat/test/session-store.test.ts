@@ -104,7 +104,7 @@ describe("SessionOAuthProvider", () => {
     const p1 = new SessionOAuthProvider(s1, store, REDIRECT, "openid profile email", oauthClientName());
     const p2 = new SessionOAuthProvider(s2, store, REDIRECT, "openid profile email", oauthClientName());
 
-    p1.saveClientInformation({ client_id: "client-1" });
+    p1.saveClientInformation!({ client_id: "client-1" });
     expect(p2.clientInformation()).toEqual({ client_id: "client-1" });
 
     p1.saveCodeVerifier("verifier-1");
@@ -141,7 +141,7 @@ describe("SessionOAuthProvider", () => {
     const store = new SessionStore();
     const s = store.create();
     const p = new SessionOAuthProvider(s, store, REDIRECT, "openid", oauthClientName());
-    p.saveClientInformation({ client_id: "c" });
+    p.saveClientInformation!({ client_id: "c" });
     p.saveTokens({ access_token: "t", token_type: "Bearer" });
     p.saveCodeVerifier("v");
 

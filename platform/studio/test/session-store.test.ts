@@ -371,7 +371,7 @@ describe("SessionOAuthProvider over the key-value store", () => {
     const p1 = new SessionOAuthProvider(s1, store, REDIRECT, "openid", oauthClientName());
     const p2 = new SessionOAuthProvider(s2, store, REDIRECT, "openid", oauthClientName());
 
-    await p1.saveClientInformation({ client_id: "client-1", client_secret: "client-secret" });
+    await p1.saveClientInformation!({ client_id: "client-1", client_secret: "client-secret" });
     expect(kv.last().value).not.toContain("client-secret");
     expect(await p2.clientInformation()).toEqual({ client_id: "client-1", client_secret: "client-secret" });
 
@@ -391,10 +391,10 @@ describe("SessionOAuthProvider over the key-value store", () => {
   it("counts refusals per client: three drop c1, and one more refusal doesn't drop its replacement c2", async () => {
     const { store } = setup();
     const p = new SessionOAuthProvider(store.create(), store, REDIRECT, "openid", oauthClientName());
-    await p.saveClientInformation({ client_id: "c1" });
+    await p.saveClientInformation!({ client_id: "c1" });
     for (let i = 0; i < CLIENT_REJECTIONS; i++) await p.invalidateCredentials("client");
     expect(await p.clientInformation()).toBeUndefined();
-    await p.saveClientInformation({ client_id: "c2" }); // the next sign-in registers again
+    await p.saveClientInformation!({ client_id: "c2" }); // the next sign-in registers again
     await p.invalidateCredentials("client");
     expect(await p.clientInformation()).toEqual({ client_id: "c2" });
   });
@@ -402,7 +402,7 @@ describe("SessionOAuthProvider over the key-value store", () => {
   it("a refusal more than an hour after the last doesn't add up to dropping the registration", async () => {
     const { kv, store } = setup();
     const p = new SessionOAuthProvider(store.create(), store, REDIRECT, "openid", oauthClientName());
-    await p.saveClientInformation({ client_id: "c" });
+    await p.saveClientInformation!({ client_id: "c" });
     for (let i = 0; i < CLIENT_REJECTIONS; i++) {
       kv.clock.now = i * 61 * MIN;
       await p.invalidateCredentials("all");
