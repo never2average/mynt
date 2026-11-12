@@ -9,7 +9,7 @@ import { z } from "zod";
 import { accessStatus, productEntity } from "./access.js";
 import type { BoatClient } from "./boat.js";
 import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, shellQuote } from "./boxes.js";
-import type { Db } from "./db.js";
+import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
@@ -134,6 +134,7 @@ export interface Build {
   // The pre-built environment each of the build's sandboxes booted from, if any (build-env.ts).
   solana_env: { build?: SolanaEnvSnapshot; verify?: SolanaEnvSnapshot } | null;
   solana_toolchain: ToolchainRecord | null; // the exact toolchain Mynt's verification built the programs with
+  activity_offset: number; // bytes of the agent's stream-json log Mynt has read into build_activity
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -183,6 +184,7 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_check jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_env jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS activity_offset bigint NOT NULL DEFAULT 0;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -192,6 +194,16 @@ const TABLES = `
     data jsonb NOT NULL DEFAULT '{}'
   );
   CREATE INDEX IF NOT EXISTS build_events_build_idx ON financial_products.build_events (build_id, at);
+  -- The coding agent's activity (its messages, commands and edits), summarised by Mynt as the build runs and kept
+  -- after the sandbox goes. seq orders it within the build and is the cursor developers page with.
+  CREATE TABLE IF NOT EXISTS financial_products.build_activity (
+    build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
+    seq integer NOT NULL,
+    at timestamptz NOT NULL DEFAULT now(),
+    type text NOT NULL,
+    summary text NOT NULL,
+    PRIMARY KEY (build_id, seq)
+  );
   CREATE TABLE IF NOT EXISTS financial_products.repo_connections (
     developer_id uuid NOT NULL REFERENCES financial_products.users(id),
     repository text NOT NULL,
@@ -216,6 +228,7 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   solana: !!r.solana,
   solana_env: (r.solana_env as Build["solana_env"]) ?? null,
   solana_toolchain: (r.solana_toolchain as ToolchainRecord | null) ?? null,
+  activity_offset: Number(r.activity_offset ?? 0),
 });
 
 // What builds need of Mynt's Solana programs (src/solana/): the addresses reserved for an app, so the agent
@@ -263,6 +276,36 @@ const WORKSPACE = "/home/user/workspace/app";
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
+// The agent's activity log is read up to ACTIVITY_CHUNK bytes at a time, a few chunks a tick (more once the agent has
+// exited, to read it to the end), and each build keeps its latest ACTIVITY_KEEP entries.
+const ACTIVITY_CHUNK = 256 * 1024;
+const ACTIVITY_CHUNKS_PER_TICK = 8;
+const ACTIVITY_CHUNKS_AT_END = 64;
+export const ACTIVITY_KEEP = 5000;
+
+// The complete lines in `buf`, read from the log one byte before the offset when `prefixed` (that byte is a newline
+// when the offset is at the start of a line), and how many bytes past the offset are now dealt with. A line longer
+// than a whole chunk (a huge tool result, say) is skipped rather than waited for; a shorter one with no newline yet
+// is still being written, and waits.
+export function activityLines(buf: Buffer, prefixed: boolean, chunk: number): { consumed: number; lines: string[] } {
+  let start = 0;
+  if (prefixed) {
+    if (buf.length === 0) return { consumed: 0, lines: [] };
+    start = 1;
+    if (buf[0] !== 0x0a) {
+      // Partway through a line being skipped: drop the rest of it.
+      const nl = buf.indexOf(0x0a, 1);
+      if (nl < 0) return { consumed: buf.length - 1, lines: [] };
+      start = nl + 1;
+    }
+  }
+  const skipped = start - (prefixed ? 1 : 0);
+  const body = buf.subarray(start);
+  const last = body.lastIndexOf(0x0a);
+  if (last < 0) return { consumed: skipped + (body.length >= chunk ? body.length : 0), lines: [] };
+  const lines = body.subarray(0, last + 1).toString("utf8").split("\n").filter((l) => l.trim());
+  return { consumed: skipped + last + 1, lines };
+}
 const OUT = "/home/user/mynt-out";
 const SOLANA_INSTALLER = ENV_FILES.installer;
 
@@ -375,12 +418,13 @@ export class BuildService {
     return r && toBuild(r);
   }
 
-  async listFor(developerId: string | null, status?: string) {
+  async listFor(developerId: string | null, status?: string, appId?: string) {
     const rows = (
       await this.db.query(
         `SELECT * FROM financial_products.build_runs WHERE ($1::uuid IS NULL OR developer_id = $1) AND ($2::text IS NULL OR status = $2)
+         AND ($3::text IS NULL OR app_id::text = $3)
          ORDER BY created_at DESC LIMIT 200`,
-        [developerId, status ?? null],
+        [developerId, status ?? null, appId ?? null],
       )
     ).rows as Row[];
     return rows.map(toBuild);
@@ -479,6 +523,8 @@ export class BuildService {
   async stop(build: Build, reason: string, status: BuildStatus = "stopped") {
     if (TERMINAL.includes(build.status)) return build;
     await this.retireKey(build);
+    // What the agent did last, read before its sandbox goes.
+    if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, 1);
     if (build.sandbox_id && this.boat) {
       await this.boat.stop(build.sandbox_id).catch(() => {});
     }
@@ -495,16 +541,71 @@ export class BuildService {
     await this.event(build.id, build.status, "Steered by the developer", { message });
   }
 
-  async activity(build: Build, limit = 30) {
-    if (!build.sandbox_id || !this.boat) return [];
-    const n = Math.max(1, Math.min(200, Math.floor(limit)));
-    const tail = await this.boat.exec(build.sandbox_id, `tail -n ${n} ${AGENT_DIR}/agent.jsonl 2>/dev/null || true`, { timeoutSeconds: 30 });
-    return tail.stdout
-      .split("\n")
-      .map((line) => parseJson<Record<string, unknown>>(line))
-      .filter((m): m is Record<string, unknown> => !!m)
-      .flatMap(summarizeAgentLine)
-      .reverse();
+  // The agent's stored activity. Without `after`: the latest `limit` entries, newest first. With `after` (a cursor
+  // from an earlier call): the entries after it, oldest first. `cursor` is the newest seq returned (or already
+  // seen), to pass as `after` next time; it stays put while nothing new has arrived.
+  async activity(build: Build, opts: { limit?: number; after?: number } = {}) {
+    const n = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 30)));
+    const rows = (
+      opts.after == null
+        ? await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 ORDER BY seq DESC LIMIT $2", [build.id, n])
+        : await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 ORDER BY seq LIMIT $3", [build.id, opts.after, n])
+    ).rows as Row[];
+    const activity = rows.map((r) => ({ seq: Number(r.seq), at: iso(r.at)!, type: r.type as string, summary: r.summary as string }));
+    return { activity, cursor: activity.reduce((m, a) => Math.max(m, a.seq), opts.after ?? 0) };
+  }
+
+  // Reads what the agent wrote to its stream-json log since last time into build_activity: a chunk at a time,
+  // base64-encoded so byte offsets stay exact, complete lines only. The new offset is claimed in the same transaction
+  // that stores the rows, so two readers never store the same lines. What the agent says is its own account: shown
+  // to the developer, never trusted.
+  async collectActivity(b: Build, maxChunks = ACTIVITY_CHUNKS_PER_TICK) {
+    if (!this.boat || !b.sandbox_id) return;
+    let offset = b.activity_offset;
+    for (let i = 0; i < maxChunks; i++) {
+      // From one byte before the offset, so the first byte says whether the offset is at the start of a line.
+      const from = Math.max(0, offset - 1);
+      const want = ACTIVITY_CHUNK + (offset > 0 ? 1 : 0);
+      const r = await this.boat.exec(
+        b.sandbox_id,
+        `f=${AGENT_DIR}/agent.jsonl; if [ -f "$f" ]; then tail -c +${from + 1} "$f" | head -c ${want} | base64 -w0; fi`,
+        { timeoutSeconds: 60 },
+      );
+      if (r.exitCode !== 0) return;
+      const buf = Buffer.from(r.stdout.trim(), "base64");
+      const { consumed, lines } = activityLines(buf, offset > 0, ACTIVITY_CHUNK);
+      if (consumed === 0) return;
+      const entries = lines
+        .map((line) => parseJson<Record<string, unknown>>(line))
+        .filter((m): m is Record<string, unknown> => !!m)
+        .flatMap(summarizeAgentLine);
+      const claimed = await inTransaction(this.db, async (tx) => {
+        const moved = await tx.query("UPDATE financial_products.build_runs SET activity_offset = $3 WHERE id = $1 AND activity_offset = $2 RETURNING id", [
+          b.id,
+          offset,
+          offset + consumed,
+        ]);
+        if (moved.rows.length === 0) return false;
+        if (entries.length === 0) return true;
+        const top = Number(((await tx.query("SELECT COALESCE(MAX(seq), 0) AS m FROM financial_products.build_activity WHERE build_id = $1", [b.id])).rows[0] as Row).m);
+        const values = entries.map((_, k) => `($1, $${k * 3 + 2}, $${k * 3 + 3}, $${k * 3 + 4})`);
+        await tx.query(`INSERT INTO financial_products.build_activity (build_id, seq, type, summary) VALUES ${values.join(", ")}`, [
+          b.id,
+          ...entries.flatMap((e, k) => [top + k + 1, e.type, e.summary]),
+        ]);
+        // Only a build's latest ACTIVITY_KEEP entries are kept.
+        await tx.query("DELETE FROM financial_products.build_activity WHERE build_id = $1 AND seq <= $2", [b.id, top + entries.length - ACTIVITY_KEEP]);
+        return true;
+      });
+      if (!claimed) return;
+      offset += consumed;
+      if (buf.length < want) return; // read to the end of what's there
+    }
+  }
+
+  // Activity is a convenience: failing to read it never fails or holds up a build.
+  private async collectActivitySafely(b: Build, maxChunks?: number) {
+    await this.collectActivity(b, maxChunks).catch((e) => console.error(`Build ${b.id} activity: ${(e as Error).message}`));
   }
 
   // The build's box: the sandbox the coding agents work in, for as long as it's up (during the build and, once
@@ -727,6 +828,8 @@ export class BuildService {
       await this.update(b.id, { status: phase, phase_message: status?.message ?? null });
       await this.event(b.id, phase, status?.message ?? phase);
     }
+    // Once the agent has exited, its log is read to the end before the build moves on.
+    await this.collectActivitySafely(b, agent.running ? ACTIVITY_CHUNKS_PER_TICK : ACTIVITY_CHUNKS_AT_END);
     if (agent.running) return;
     if (!agent.ok) throw new Error(`Coding agent ${agent.state?.error ?? agent.state?.last_subtype ?? `exited with code ${agent.state?.exit_code ?? "unknown"}`}`);
     await this.startVerification(b);
@@ -1309,14 +1412,14 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     {
       title: "My builds",
       description: "Developer: your coding-agent builds, newest first, with status, cost and links; plus this month's spend against your budget.",
-      inputSchema: { status: z.enum(BUILD_STATUSES).optional() },
+      inputSchema: { status: z.enum(BUILD_STATUSES).optional(), app_id: z.string().optional().describe("Only this app's builds") },
       annotations: { readOnlyHint: true },
     },
-    async ({ status }) =>
+    async ({ status, app_id }) =>
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
-        builds: (await builds.listFor(user.id, status)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
+        builds: (await builds.listFor(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
       }),
   );
 
@@ -1340,13 +1443,19 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     "get_build_activity",
     {
       title: "What the coding agent is doing",
-      description: "Developer: the coding agent's most recent activity in the sandbox (commands, edits, messages), live.",
-      inputSchema: { build_id: z.string(), limit: z.number().int().min(1).max(200).default(30) },
+      description:
+        "Developer: what the coding agent did (its messages, commands and edits), kept after its sandbox stops. Without `after`, the latest entries, newest first. To follow a build, pass the `cursor` you got back as `after`: you get only what's new, oldest first, and a new cursor.",
+      inputSchema: {
+        build_id: z.string(),
+        limit: z.number().int().min(1).max(200).default(30),
+        after: z.number().int().min(0).optional().describe("A cursor from an earlier call: only entries after it"),
+      },
       annotations: { readOnlyHint: true },
     },
-    async ({ build_id, limit }) => {
+    async ({ build_id, limit, after }) => {
       const b = await own(build_id);
-      return b ? json({ status: b.status, phase_message: b.phase_message, activity: await builds.activity(b, limit) }) : fail(`No build of yours with id '${build_id}'`);
+      if (!b) return fail(`No build of yours with id '${build_id}'`);
+      return json({ status: b.status, phase_message: b.phase_message, ...(await builds.activity(b, { limit, after })) });
     },
   );
 
