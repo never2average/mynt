@@ -76,6 +76,9 @@ async function world({ provider = fakeProvider(), config = CONFIG } = {}) {
   const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "Daily saving", audience: "Savers", product_ids: ["everyday-rd"] })).data;
   // The builds service owns build_runs; a minimal table stands in for it here.
   await ctx.store.db.exec(`CREATE TABLE IF NOT EXISTS financial_products.build_runs (id uuid PRIMARY KEY, developer_id uuid, app_id uuid, repository text, commit_sha text, status text)`);
+  // And the developer's connection to the repository, approved by an admin (repo-approvals.ts).
+  await ctx.store.db.exec(`CREATE TABLE IF NOT EXISTS financial_products.repo_connections (developer_id uuid, repository text, approval text)`);
+  await ctx.store.db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved')", [devUser.id]);
   const build = async (status, sha = "a".repeat(40)) => {
     const id = randomUUID();
     await ctx.store.db.query("INSERT INTO financial_products.build_runs (id, developer_id, app_id, repository, commit_sha, status) VALUES ($1, $2, $3, $4, $5, $6)", [id, devUser.id, app.id, "dev/saver", sha, status]);
@@ -123,6 +126,10 @@ test("hosting: a locked-down VM per developer, apps from verified builds, a poli
     const failed = await w.build("failed");
     assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: failed })).data.error, /didn't pass Mynt's verification/);
     const ok = await w.build("succeeded");
+    // Only through a repository connection an admin approved.
+    await w.store.db.query("UPDATE financial_products.repo_connections SET approval = 'pending_approval'");
+    assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: ok })).data.error, /Waiting for an admin to approve access to dev\/saver/);
+    await w.store.db.query("UPDATE financial_products.repo_connections SET approval = 'approved'");
     const deployed = await call(dev, "deploy_app", { app_id: w.app.id, build_id: ok });
     assert.equal(deployed.isError, false, JSON.stringify(deployed.data));
     assert.equal(deployed.data.port, 9000);

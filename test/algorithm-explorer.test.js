@@ -359,7 +359,8 @@ const definition = {
   ],
 };
 
-async function setup() {
+// `approve`: tests that aren't about repository approvals act as if an admin approved each workspace as it's connected.
+async function setup({ approve = true } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
@@ -374,6 +375,7 @@ async function setup() {
     await createServer(store, user, { desk, explore }).connect(s);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(c);
+    client.user = user; // whose client it is, for the harness's auto-approval
     return client;
   };
   const call = async (client, name, args = {}) => {
@@ -384,6 +386,8 @@ async function setup() {
     } catch {
       data = { error: res.content[0].text };
     }
+    if (approve && name === "connect_desk_repository" && data.connected)
+      await store.db.query("UPDATE financial_products.desk_workspaces SET approval = 'approved' WHERE entity_id = $1 AND repository = $2", [client.user.entity_id, data.connected]);
     return { isError: res.isError ?? false, data };
   };
   const innovator = async (name) => {
@@ -425,6 +429,12 @@ test("the scenario holds on the pinned holdout: the knockout is eligible and bea
 
 const variants = async (explore, id) => (await explore.get(id)).variants;
 const sandboxOf = async (db, id, k, column = "sandbox_id") => (await db.query(`SELECT ${column} FROM financial_products.explore_variants WHERE job_id = $1 AND k = $2`, [id, k])).rows[0][column];
+
+test("an exploration needs the firm's workspace approved by an admin", async () => {
+  const { call, ready } = await setup({ approve: false });
+  const { client } = await ready();
+  assert.match((await call(client, "start_exploration", { product_id: "quick-loan", algorithm_id: "uw", objective: "net_margin", explorers: 3 })).data.error, /Waiting for an admin to approve access to acme\/desk/);
+});
 
 test("an exploration: explorers on different angles with the dev set only; Mynt scores every pushed variant and the baseline on the holdout; adopt opens a PR", async () => {
   const { db, store, explore, desk, sandboxes, repos, call, ready } = await setup();

@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { HostingCommandKind } from "./boxes.js";
 import { isDirect } from "./freestyle.js";
 import type { HostingService, Tenant } from "./hosting.js";
+import { connectionApproval, requireApproved } from "./repo-approvals.js";
 import { appProducts, buildTerms } from "./runtime.js";
 import type { Store, User } from "./store.js";
 
@@ -118,6 +119,12 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const found = await verifiedBuild(store, user.id, build_id);
       if ("error" in found) return fail(found.error!);
       if (found.build.app_id && found.build.app_id !== app_id) return fail(`Build '${build_id}' was for another app`);
+      // Hosting fetches the source through the developer's connection to the repository: only once an admin approved it.
+      try {
+        requireApproved(await connectionApproval(store.db, user.id, found.build.repository), found.build.repository);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
       const environment = app.status === "published" ? "live" : "sandbox";
       let plan;
       try {

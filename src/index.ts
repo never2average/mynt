@@ -118,9 +118,9 @@ const openServices = async () => {
   // Developers' hosting: a VM each, fetching their verified commits with a read-only GitHub token.
   const hosting = await HostingService.open(db, hostingProviderFromEnv(), hostingConfigFromEnv(), async (developerId, repository) => {
     if (!github) return null;
-    const r = await db.query("SELECT installation_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2", [developerId, repository.toLowerCase()]);
-    const installation = (r.rows[0] as { installation_id?: number } | undefined)?.installation_id;
-    return installation ? github.readTokenFor(repository, Number(installation)).catch(() => null) : null;
+    // Only through a connection an admin approved (repo-approvals.ts), or one of Mynt's managed repositories.
+    const installation = await builds.sourceInstallation(developerId, repository);
+    return installation ? github.readTokenFor(repository, installation).catch(() => null) : null;
   });
   const modules = await ModuleRegistry.open(db);
   // Developers' Solana programs; builds hand it the programs Mynt built while verifying.
