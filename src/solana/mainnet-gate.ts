@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { AgentMeter } from "../agent-meter.js";
 import type { AgentRun } from "../agent-proxy.js";
 import { agentState, launchAgent, workspaceCwd, type AgentHostConfig } from "../agent-host.js";
-import type { BoatClient } from "../boat.js";
+import type { SandboxHost } from "../sandbox-host.js";
 import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
 import type { Store, User } from "../store.js";
@@ -322,16 +322,16 @@ export class MainnetGateService implements MainnetGateCheck {
     private readonly db: Db,
     private readonly store: Store,
     private readonly solana: SolanaService,
-    readonly boat: BoatClient | null,
+    readonly sandboxes: SandboxHost | null,
     readonly config: GateConfig,
   ) {}
 
   // The vulnerability database the hard rules and the agents' checklist come from (tests swap in another version).
   vulnDb: VulnDb = loadVulnDb();
 
-  static async open(db: Db, store: Store, solana: SolanaService, boat: BoatClient | null, config: GateConfig) {
+  static async open(db: Db, store: Store, solana: SolanaService, sandboxes: SandboxHost | null, config: GateConfig) {
     await db.exec(TABLES);
-    const gate = new MainnetGateService(db, store, solana, boat, config);
+    const gate = new MainnetGateService(db, store, solana, sandboxes, config);
     solana.gate = gate;
     return gate;
   }
@@ -339,7 +339,7 @@ export class MainnetGateService implements MainnetGateCheck {
   // Sandboxes, the agents' model backend and a public URL for their proxy: without all three no review can run,
   // and so (fail closed) no mainnet deploy or upgrade can happen.
   get enabled() {
-    return !!this.boat && !!this.config.agentBackend && !!this.config.publicUrl;
+    return !!this.sandboxes && !!this.config.agentBackend && !!this.config.publicUrl;
   }
 
   private async all(sql: string, params: unknown[] = []) {
@@ -795,8 +795,8 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   private async stopSandboxes(r: Row) {
-    if (!this.boat) return;
-    for (const id of [r.analysis_sandbox_id, r.red_sandbox_id, r.confirm_sandbox_id]) if (id) await this.boat.stop(id as string).catch(() => {});
+    if (!this.sandboxes) return;
+    for (const id of [r.analysis_sandbox_id, r.red_sandbox_id, r.confirm_sandbox_id]) if (id) await this.sandboxes.stop(id as string).catch(() => {});
   }
 
   private async end(r: Row, status: ReviewStatus, f: Row = {}) {
@@ -811,16 +811,16 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   private async cost(r: Row) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     let c = 0;
-    for (const id of [r.analysis_sandbox_id, r.red_sandbox_id, r.confirm_sandbox_id]) if (id) c += await boat.costDollars(id as string).catch(() => 0);
+    for (const id of [r.analysis_sandbox_id, r.red_sandbox_id, r.confirm_sandbox_id]) if (id) c += await sandboxes.costDollars(id as string).catch(() => 0);
     if (this.meter) c += (await this.meter.spent(`program-audit:${r.id}`)) + (await this.meter.spent(`program-red-team:${r.id}`));
     if (c !== Number(r.cost_usd)) await this.update(r.id as string, { cost_usd: c });
     return c;
   }
 
   private async sandboxReady(id: string) {
-    const s = await this.boat!.getSandbox(id);
+    const s = await this.sandboxes!.getSandbox(id);
     if (s.state === "error" || s.state === "cancelled") throw new Error(`Sandbox ${s.state}`);
     return ["ready", "idle", "running"].includes(s.state);
   }
@@ -859,7 +859,7 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   private async newSandbox(r: Row, role: string) {
-    return this.boat!.createSandbox({ name: `mynt-${role}-${r.id}`, type: this.config.sandboxType, ttlSeconds: 3 * 3600, labels: { mynt_mainnet_review: r.id as string, mynt_role: role }, env: {} });
+    return this.sandboxes!.createSandbox({ name: `mynt-${role}-${r.id}`, type: this.config.sandboxType, ttlSeconds: 3 * 3600, labels: { mynt_mainnet_review: r.id as string, mynt_role: role }, env: {} });
   }
 
   private minutes(r: Row) {
@@ -867,7 +867,7 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   private async advance(r: Row) {
-    const boat = this.boat!;
+    const sandboxes = this.sandboxes!;
     const id = r.id as string;
     await this.cost(r);
 
@@ -890,7 +890,7 @@ export class MainnetGateService implements MainnetGateCheck {
         for (const [path, text] of Object.entries(m.deps?.sources[key] ?? {})) if (!path.split("/").includes("..")) files[`${GATE_DIR}/deps/${key}/${path}`] = text;
       }
       await this.writeFiles(r.analysis_sandbox_id as string, files);
-      const run = await boat.exec(r.analysis_sandbox_id as string, `bash ${GATE_DIR}/analysis.sh ${GATE_DIR}/src ${GATE_DIR}/out '${this.config.cargoAuditIgnore.join(",")}'`, { detached: true });
+      const run = await sandboxes.exec(r.analysis_sandbox_id as string, `bash ${GATE_DIR}/analysis.sh ${GATE_DIR}/src ${GATE_DIR}/out '${this.config.cargoAuditIgnore.join(",")}'`, { detached: true });
       await this.update(id, { step: "analysis", analysis_process_id: String(run.processId ?? ""), step_started_at: new Date(), phase_message: "Static analysis: cargo-audit and Radar" });
       await this.log(id, null, "analysis_started", { tools: { cargo_audit: GATE_TOOLS.cargoAudit.version, radar: GATE_TOOLS.radar.commit } });
       return;
@@ -898,8 +898,8 @@ export class MainnetGateService implements MainnetGateCheck {
 
     if (r.step === "analysis") {
       const timedOut = this.minutes(r) > this.config.analysisMinutes;
-      if (!timedOut && (await boat.commandStatus(r.analysis_sandbox_id as string, Number(r.analysis_process_id))).running) return;
-      const report = parse<{ tools?: StaticTool[] }>(await boat.readFile(r.analysis_sandbox_id as string, `${GATE_DIR}/out/static.json`));
+      if (!timedOut && (await sandboxes.commandStatus(r.analysis_sandbox_id as string, Number(r.analysis_process_id))).running) return;
+      const report = parse<{ tools?: StaticTool[] }>(await sandboxes.readFile(r.analysis_sandbox_id as string, `${GATE_DIR}/out/static.json`));
       const verdict = assessStatic(report);
       const record = { passed: verdict.passed, reasons: verdict.reasons, tools: verdict.tools, ...(timedOut ? { timed_out: true } : {}) };
       await this.update(id, { static_analysis: record });
@@ -910,7 +910,7 @@ export class MainnetGateService implements MainnetGateCheck {
       const token = `mynt_paudit_${randomBytes(24).toString("base64url")}`;
       await this.update(id, { audit_token_hash: hash(token) });
       const { p, m } = await this.material(r);
-      const pid = await launchAgent(boat, this.config, r.analysis_sandbox_id as string, {
+      const pid = await launchAgent(sandboxes, this.config, r.analysis_sandbox_id as string, {
         prompt: "Audit the Solana program described in job/review.json, following CLAUDE.md and its skills. Write job/findings.json and run scripts/check_findings.py until it passes.",
         budgetUsd: Number(r.audit_cap_usd),
         token,
@@ -941,10 +941,10 @@ export class MainnetGateService implements MainnetGateCheck {
     }
 
     if (r.step === "audit") {
-      const agent = await agentState(boat, r.analysis_sandbox_id as string, r.audit_process_id as string);
+      const agent = await agentState(sandboxes, r.analysis_sandbox_id as string, r.audit_process_id as string);
       const timedOut = agent.running && this.minutes(r) > this.config.auditMinutes;
       if (agent.running && !timedOut) return;
-      const raw = await boat.readFile(r.analysis_sandbox_id as string, `${workspaceCwd(AUDIT_WS)}/job/findings.json`);
+      const raw = await sandboxes.readFile(r.analysis_sandbox_id as string, `${workspaceCwd(AUDIT_WS)}/job/findings.json`);
       const { m } = await this.material(r);
       const a = assessAudit(raw, m.sources ?? {});
       const audit = {
@@ -953,7 +953,7 @@ export class MainnetGateService implements MainnetGateCheck {
         findings: a.findings,
         blocking: a.blocking.map((f) => f.id),
       };
-      await boat.stop(r.analysis_sandbox_id as string).catch(() => {});
+      await sandboxes.stop(r.analysis_sandbox_id as string).catch(() => {});
       await this.update(id, { audit, audit_token_hash: null });
       await this.log(id, null, "audit_finished", { finished: audit.finished, findings: a.findings.length, blocking: a.blocking.length });
       if (!audit.finished) return this.block(r, `No complete independent audit (the program-audit agent: ${audit.agent.result ?? "no result"}${a.finished ? "" : ", no valid findings.json"}); a mainnet program can't pass without one`);
@@ -971,12 +971,12 @@ export class MainnetGateService implements MainnetGateCheck {
       const job = `${workspaceCwd(RED_WS)}/job`;
       // The bytes Mynt stored and the IDL; nothing of the source.
       await this.writeFiles(sb, { [`${job}/program.so.b64`]: Buffer.from(m.program).toString("base64"), "/home/user/mynt-solana-toolchain.sh": SOLANA_TOOLCHAIN_SCRIPT });
-      const decoded = await boat.exec(sb, `base64 -d ${job}/program.so.b64 > ${job}/program.so && rm ${job}/program.so.b64 && sha256sum ${job}/program.so`, { timeoutSeconds: 120 });
+      const decoded = await sandboxes.exec(sb, `base64 -d ${job}/program.so.b64 > ${job}/program.so && rm ${job}/program.so.b64 && sha256sum ${job}/program.so`, { timeoutSeconds: 120 });
       if (decoded.exitCode !== 0) throw new Error("Couldn't place the program in the red team's sandbox");
-      await boat.exec(sb, "bash /home/user/mynt-solana-toolchain.sh > /home/user/.mynt-solana-install.log 2>&1", { detached: true });
+      await sandboxes.exec(sb, "bash /home/user/mynt-solana-toolchain.sh > /home/user/.mynt-solana-install.log 2>&1", { detached: true });
       const token = `mynt_predteam_${randomBytes(24).toString("base64url")}`;
       await this.update(id, { red_token_hash: hash(token) });
-      const pid = await launchAgent(boat, this.config, sb, {
+      const pid = await launchAgent(sandboxes, this.config, sb, {
         prompt: "Attack the Solana program described in job/target.json, following CLAUDE.md and its skills. Write job/report.json and a runnable proof of concept for every finding, and run scripts/check_report.py until it passes.",
         budgetUsd: Number(r.red_cap_usd),
         token,
@@ -1010,11 +1010,11 @@ export class MainnetGateService implements MainnetGateCheck {
 
     if (r.step === "red_team") {
       const sb = r.red_sandbox_id as string;
-      const agent = await agentState(boat, sb, r.red_process_id as string);
+      const agent = await agentState(sandboxes, sb, r.red_process_id as string);
       const timedOut = agent.running && this.minutes(r) > this.config.redTeamMinutes;
       if (agent.running && !timedOut) return;
       const job = `${workspaceCwd(RED_WS)}/job`;
-      const report = parseRedTeam(await boat.readFile(sb, `${job}/report.json`));
+      const report = parseRedTeam(await sandboxes.readFile(sb, `${job}/report.json`));
       const finished = !!report && agent.ok && !timedOut;
       // Every PoC the report names, read back as text, for Mynt to run itself.
       const pocs: Record<string, Record<string, string>> = {};
@@ -1029,7 +1029,7 @@ export class MainnetGateService implements MainnetGateCheck {
         attacks_tried: report?.attacks_tried ?? [],
         findings: (report?.findings ?? []).map((f) => ({ ...f, poc: f.poc && pocs[f.poc] ? f.poc : null, poc_files: f.poc && pocs[f.poc] ? Object.keys(pocs[f.poc]) : [] })),
       };
-      await boat.stop(sb).catch(() => {});
+      await sandboxes.stop(sb).catch(() => {});
       await this.update(id, { red_team: { ...red, pocs }, red_token_hash: null });
       await this.log(id, null, "red_team_finished", { finished, findings: red.findings.length, pocs: Object.keys(pocs).length });
       if (!finished) return this.block(r, `No complete red-team result (${red.agent.result ?? "no result"}${report ? "" : ", no valid report.json"}); a mainnet program can't pass without one`);
@@ -1053,7 +1053,7 @@ export class MainnetGateService implements MainnetGateCheck {
       };
       for (const [poc, fs] of Object.entries(pocs)) for (const [path, text] of Object.entries(fs)) files[`${CONFIRM_DIR}/pocs/${poc}/${path}`] = text;
       await this.writeFiles(sb, files);
-      const run = await boat.exec(
+      const run = await sandboxes.exec(
         sb,
         `cd ${CONFIRM_DIR} && base64 -d program.so.b64 > program.so && bash toolchain.sh > toolchain.log 2>&1 && . "$HOME/.mynt-solana/env" && python3 confirm.py job.json > confirm.log 2>&1`,
         { detached: true },
@@ -1065,9 +1065,9 @@ export class MainnetGateService implements MainnetGateCheck {
     if (r.step === "confirming") {
       const sb = r.confirm_sandbox_id as string;
       const timedOut = this.minutes(r) > 90;
-      if (!timedOut && (await boat.commandStatus(sb, Number(r.confirm_process_id))).running) return;
-      const out = parse<{ results?: Record<string, { confirmed?: boolean; reason?: string; error?: boolean }> }>(await boat.readFile(sb, `${CONFIRM_DIR}/results.json`));
-      await boat.stop(sb).catch(() => {});
+      if (!timedOut && (await sandboxes.commandStatus(sb, Number(r.confirm_process_id))).running) return;
+      const out = parse<{ results?: Record<string, { confirmed?: boolean; reason?: string; error?: boolean }> }>(await sandboxes.readFile(sb, `${CONFIRM_DIR}/results.json`));
+      await sandboxes.stop(sb).catch(() => {});
       const red = r.red_team as { findings: RedTeamFinding[] };
       const results = out?.results ?? {};
       const confirmations = Object.fromEntries(
@@ -1268,18 +1268,18 @@ export class MainnetGateService implements MainnetGateCheck {
 
 
   private async writeFiles(sandbox: string, files: Record<string, string>) {
-    if (this.boat!.writeFiles) await this.boat!.writeFiles(sandbox, files);
-    else for (const [path, content] of Object.entries(files)) await this.boat!.writeFile(sandbox, path, content);
+    if (this.sandboxes!.writeFiles) await this.sandboxes!.writeFiles(sandbox, files);
+    else for (const [path, content] of Object.entries(files)) await this.sandboxes!.writeFile(sandbox, path, content);
   }
 
   // A PoC directory's text files (no links, nothing under node_modules), within Mynt's limits.
   private async readPoc(sandbox: string, dir: string): Promise<Record<string, string> | null> {
-    const listed = await this.boat!.exec(sandbox, `cd ${dir} 2>/dev/null && find . -path ./node_modules -prune -o -type f -size -${MAX_POC_FILE_BYTES / 1024}k -print | head -${MAX_POC_FILES}`, { timeoutSeconds: 60 });
+    const listed = await this.sandboxes!.exec(sandbox, `cd ${dir} 2>/dev/null && find . -path ./node_modules -prune -o -type f -size -${MAX_POC_FILE_BYTES / 1024}k -print | head -${MAX_POC_FILES}`, { timeoutSeconds: 60 });
     if (listed.exitCode !== 0) return null;
     const out: Record<string, string> = {};
     for (const line of listed.stdout.split("\n").map((l) => l.trim().replace(/^\.\//, "")).filter(Boolean)) {
       if (!/^[A-Za-z0-9_.\/-]+$/.test(line) || line.split("/").includes("..")) continue;
-      const text = await this.boat!.readFile(sandbox, `${dir}/${line}`);
+      const text = await this.sandboxes!.readFile(sandbox, `${dir}/${line}`);
       if (text != null && !text.includes("\u0000")) out[line] = text;
     }
     return out;
