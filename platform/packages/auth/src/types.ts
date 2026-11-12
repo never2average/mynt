@@ -1,4 +1,5 @@
 import type { OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { PreRegisteredClient } from "./first-party-client";
 
 // What the sign-in code needs from an app. Each app keeps its own settings (lib/config.ts), its
 // own session cookie name (lib/app-session.ts) and its own session store (lib/session-store.ts:
@@ -41,6 +42,9 @@ export interface AuthConfig {
   // pages that don't, so a failure can't loop and signing out doesn't sign straight back in.
   authErrorPath?(): string;
   signedOutPath?(): string;
+  // A client an operator registered ahead of time (first-party-client.ts), or null to register
+  // dynamically. Server-only: the secret never leaves the app's server.
+  oauthClient?(): PreRegisteredClient | null;
 }
 
 export interface AuthApp<S extends AuthSession> {

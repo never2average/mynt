@@ -309,3 +309,105 @@ test("Mynt's own apps are registered with Clerk with no consent screen: confiden
     globalThis.fetch = realFetch;
   }
 });
+
+test("first-party redirect URIs are one exact address: no wildcard anywhere, credentials, query or fragment; sent as normalised", async () => {
+  const { ClerkAdmin, firstPartyRedirectUri } = await import("../dist/auth.js");
+  assert.equal(firstPartyRedirectUri("https://studio.example/api/auth/callback"), "https://studio.example/api/auth/callback");
+  assert.equal(firstPartyRedirectUri("http://localhost:3000/api/auth/callback"), "http://localhost:3000/api/auth/callback");
+  for (const [uri, why] of [
+    ["https://*.studio.example/api/auth/callback", /wildcard/],
+    ["https://%2A.studio.example/api/auth/callback", /wildcard/],
+    ["https://studio.example/api/*/callback", /wildcard/],
+    ["https://studio.example/api/auth/callback*", /wildcard/],
+    ["https://studio.example/api/%2a/callback", /wildcard/],
+    ["https://user:pass@studio.example/api/auth/callback", /user name or password/],
+    ["https://user@studio.example/api/auth/callback", /user name or password/],
+    ["https://studio.example/api/auth/callback?", /must be exact/],
+    ["https://studio.example/api/auth/callback#", /must be exact/],
+    ["https://studio.example/api/auth/callback?next=/", /must be exact/],
+    ["https://Studio.example/api/auth/callback", /did you mean https:\/\/studio\.example\/api\/auth\/callback\?/],
+    ["https://studio.example:443/api/auth/callback", /must be exact/],
+    ["https://studio.example", /did you mean https:\/\/studio\.example\/\?/],
+    ["http://studio.example/cb", /must be https/],
+    ["not a url", /valid URL/],
+  ]) {
+    assert.throws(() => firstPartyRedirectUri(uri), why, uri);
+  }
+
+  // Refused before anything is sent to Clerk.
+  const admin = new ClerkAdmin("sk_test_x");
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  try {
+    await assert.rejects(admin.firstPartyApp("x", "https://*.studio.example/cb"), /wildcard/);
+    await assert.rejects(admin.firstPartyApp("x", "https://a:b@studio.example/cb"), /user name or password/);
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("mynt clerk first-party writes a file only its user can read, keeps ~/.mynt at 700, and undoes the Clerk app if the write fails", async () => {
+  const { registerFirstPartyApp } = await import("../dist/auth.js");
+  const { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "mynt-first-party-"));
+  const created = [];
+  const deleted = [];
+  let failDelete = false;
+  const admin = {
+    async firstPartyApp(name, redirectUri) {
+      created.push({ name, redirectUri });
+      return { id: `oauth_app_${created.length}`, client_id: `cid_${created.length}`, client_secret: "very-secret", consent_screen_enabled: false };
+    },
+    async deleteOAuthApplication(id) {
+      if (failDelete) throw new Error("Clerk API 500");
+      deleted.push(id);
+    },
+  };
+  try {
+    // An existing ~/.mynt with loose permissions is tightened.
+    mkdirSync(join(home, ".mynt"), { mode: 0o755 });
+    const out = await registerFirstPartyApp(admin, "mynt-studio", "https://studio.example/api/auth/callback", { home });
+    assert.equal(out.path, join(home, ".mynt", "oauth-mynt-studio.json"));
+    assert.equal(statSync(join(home, ".mynt")).mode & 0o777, 0o700);
+    assert.equal(statSync(out.path).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(out.path, "utf8")), {
+      name: "mynt-studio",
+      redirect_uri: "https://studio.example/api/auth/callback",
+      client_id: "cid_1",
+      client_secret: "very-secret",
+    });
+    assert.ok(!JSON.stringify(out).includes("very-secret"), "the secret isn't returned to be printed");
+
+    // A file already there is refused before Clerk is asked for anything.
+    await assert.rejects(registerFirstPartyApp(admin, "mynt-studio", "https://studio.example/api/auth/callback", { home }), /already exists/);
+    assert.equal(created.length, 1);
+    // So is a bad redirect URI.
+    await assert.rejects(registerFirstPartyApp(admin, "other", "https://*.studio.example/cb", { home }), /wildcard/);
+    assert.equal(created.length, 1);
+
+    // The write fails (the folder is a file): the Clerk application is deleted again, and the error says so.
+    const blocked = join(home, "blocked");
+    writeFileSync(blocked, "");
+    await assert.rejects(
+      registerFirstPartyApp(admin, "mynt-chat", "https://chat.example/api/auth/callback", { file: join(blocked, "x.json") }),
+      (err) => /deleted the Clerk application 'mynt-chat' again/.test(err.message) && !err.message.includes("very-secret"),
+    );
+    assert.deepEqual(deleted, ["oauth_app_2"]);
+
+    // If deleting fails too, the error names the app to delete by hand, still without the secret.
+    failDelete = true;
+    await assert.rejects(
+      registerFirstPartyApp(admin, "mynt-chat", "https://chat.example/api/auth/callback", { file: join(blocked, "y.json") }),
+      (err) => /couldn't delete the Clerk application 'mynt-chat' \(client id cid_3\)/.test(err.message) && !err.message.includes("very-secret"),
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

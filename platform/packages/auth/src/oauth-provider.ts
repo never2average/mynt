@@ -5,12 +5,14 @@ import type {
   OAuthClientMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { PreRegisteredClient } from "./first-party-client";
 import type { AuthSession, AuthSessionStore } from "./types";
 
 // The MCP SDK's OAuth hooks, backed by one server-side session.
 //
 // The SDK does the protocol: it reads Mynt's protected-resource metadata, finds the
-// authorization server (Clerk), registers this app dynamically, and runs the authorization-code
+// authorization server (Clerk), registers this app dynamically (unless the app was
+// pre-registered, see first-party-client.ts), and runs the authorization-code
 // flow with PKCE. This class only stores what the SDK hands it. Instead of redirecting a
 // browser itself (there is none on the server), it remembers the authorization URL so the
 // login route can send a 302.
@@ -20,13 +22,23 @@ import type { AuthSession, AuthSessionStore } from "./types";
 export class SessionOAuthProvider<S extends AuthSession = AuthSession> implements OAuthClientProvider {
   authorizationUrl?: URL;
 
+  // Only for a client that registers itself. A pre-registered client has none: the SDK then can't replace it with a
+  // dynamic registration, so a client bound (MYNT_OAUTH_ISSUER) to another authorization server than the one Mynt's
+  // metadata names is refused outright, and its secret isn't sent.
+  saveClientInformation?: (info: OAuthClientInformationMixed) => void | Promise<void>;
+
   constructor(
     private session: S,
     private store: AuthSessionStore<S>,
     readonly redirectUrl: string,
     private scope: string,
     private clientName: string, // how the app names itself on the consent screen
-  ) {}
+    // A client registered ahead of time by an operator. When set, the app never registers itself
+    // dynamically and the store's registration is neither read, written nor forgotten.
+    private preRegistered: PreRegisteredClient | null = null,
+  ) {
+    if (!preRegistered) this.saveClientInformation = (info) => store.saveClientInformation(redirectUrl, info);
+  }
 
   get clientMetadata(): OAuthClientMetadata {
     return {
@@ -34,7 +46,9 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
       redirect_uris: [this.redirectUrl],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      token_endpoint_auth_method: "none", // a public client: PKCE, no client secret
+      // A dynamically registered app is a public client (PKCE, no secret). A pre-registered one has a secret; the
+      // SDK picks Basic or POST for it from what the authorization server advertises.
+      token_endpoint_auth_method: this.preRegistered ? "client_secret_basic" : "none",
       scope: this.scope,
     };
   }
@@ -47,11 +61,12 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
   // The client registration is app-wide, so it lives in the store, not the session. These return
   // whatever the app's store returns: a value from an in-memory store, a promise from a remote one.
   clientInformation() {
+    if (this.preRegistered) {
+      const { client_id, client_secret, issuer } = this.preRegistered;
+      // `issuer` is the SDK's binding: it presents the client only to that authorization server.
+      return issuer ? { client_id, client_secret, issuer } : { client_id, client_secret };
+    }
     return this.store.clientInformation(this.redirectUrl);
-  }
-
-  saveClientInformation(info: OAuthClientInformationMixed) {
-    return this.store.saveClientInformation(this.redirectUrl, info);
   }
 
   tokens(): OAuthTokens | undefined {
@@ -78,6 +93,7 @@ export class SessionOAuthProvider<S extends AuthSession = AuthSession> implement
   invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery") {
     if (scope === "all" || scope === "tokens") this.session.tokens = undefined;
     if (scope === "all" || scope === "verifier") this.session.codeVerifier = undefined;
-    if (scope === "all" || scope === "client") return this.store.forgetClient(this.redirectUrl);
+    // A pre-registered client can't be re-registered; forgetting it would only switch sign-in to dynamic registration.
+    if ((scope === "all" || scope === "client") && !this.preRegistered) return this.store.forgetClient(this.redirectUrl);
   }
 }

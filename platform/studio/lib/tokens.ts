@@ -2,7 +2,7 @@ import { discoverOAuthServerInfo, refreshAuthorization } from "@modelcontextprot
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { InvalidClientError, InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { myntMcpUrl, oauthRedirectUrl } from "./config";
+import { myntMcpUrl, oauthClient, oauthRedirectUrl } from "./config";
 import { connectMynt, NotSignedInError } from "./mynt-client";
 import { sessionStore, type Session, type SessionStore } from "./session-store";
 
@@ -100,7 +100,9 @@ export async function refreshWithMynt(
   const discover = deps.discover ?? discoverOAuthServerInfo;
   const refreshAuth = deps.refreshAuth ?? refreshAuthorization;
   const fetchFn = deps.fetchFn ?? deadlineFetch();
-  const client = await store.clientInformation(oauthRedirectUrl());
+  // A client the operator registered (MYNT_OAUTH_CLIENT_ID/SECRET) isn't in the store; the provider signs in with it too.
+  const preRegistered = oauthClient();
+  const client = preRegistered ? { ...preRegistered } : await store.clientInformation(oauthRedirectUrl());
   if (!client) {
     session.tokens = undefined; // no registration to refresh with: sign in again
     throw new NotSignedInError();
@@ -110,7 +112,9 @@ export async function refreshWithMynt(
     const server = await discover(myntMcpUrl(), { fetchFn });
     issuer = normalIssuer(String(server.authorizationServerUrl));
     const boundTo = issuerOf(session.tokens) ?? issuerOf(client);
-    if (boundTo && normalIssuer(boundTo) !== issuer) {
+    // A pre-registered client bound to an authorization server (MYNT_OAUTH_ISSUER) never sends its secret elsewhere.
+    const clientBound = issuerOf(client);
+    if ((boundTo && normalIssuer(boundTo) !== issuer) || (preRegistered && clientBound && normalIssuer(clientBound) !== issuer)) {
       session.tokens = undefined;
       throw new NotSignedInError();
     }
@@ -132,7 +136,7 @@ export async function refreshWithMynt(
     throw new RefreshFailedError(err instanceof Error ? err.name : "refresh failed");
   }
   // The registration learns which server it belongs to the first time it's used.
-  if (!issuerOf(client)) await store.saveClientInformation(oauthRedirectUrl(), { ...client, issuer } as typeof client).catch(() => undefined);
+  if (!preRegistered && !issuerOf(client)) await store.saveClientInformation(oauthRedirectUrl(), { ...client, issuer } as typeof client).catch(() => undefined);
 }
 
 // Connects to Mynt as the session's user, with fresh tokens.
