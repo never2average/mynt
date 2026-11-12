@@ -134,8 +134,16 @@ export class GitHubApp implements RepoAccess {
     const created = await call("POST", `/orgs/${encodeURIComponent(org)}/repos`, { name, description, private: true, auto_init: true, has_issues: false, has_wiki: false, has_projects: false });
     if (created.status === 201) return created.data.full_name as string;
     if (created.status === 422) {
-      const existing = await call("GET", `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`);
-      if (existing.status === 200 && existing.data.private === true) return existing.data.full_name as string;
+      // It exists (a retry after a lost response, or a concurrent create): read it back, giving a just-created
+      // repository a moment to become readable.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, 500 * attempt));
+        const existing = await call("GET", `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`);
+        if (existing.status === 200) {
+          if (existing.data.private === true) return existing.data.full_name as string;
+          break; // never use a public repository of that name
+        }
+      }
     }
     throw new Error(`GitHub refused to create ${org}/${name} (${created.status})`);
   }

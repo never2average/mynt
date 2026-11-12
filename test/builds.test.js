@@ -148,6 +148,7 @@ function fakeManagedHost() {
     async create(name) {
       if (!this.reachable) throw new Error("the host's app isn't installed");
       this.created.push(name);
+      await this.onCreate?.(); // a test's concurrent request, landing while the repository is being created
       return { repository: `mynt-apps/${name}`, access: 77 };
     },
     async readCredentials() {
@@ -717,6 +718,34 @@ test("by default an app's builds push to a private repository Mynt creates and m
   const repo = (await call(dev, "get_app_repository", { app_id: app.id })).data;
   assert.equal(repo.managed, true);
   assert.deepEqual([repo.clone.url, repo.clone.username, repo.clone.password, repo.clone.expires_in_minutes], [`https://git.example/${expected}.git`, "x-access-token", "ghs_readonly_short_lived", 60]);
+
+  // After moving the app to their own repository: continuing a managed build says what to do, and the managed
+  // repository can still be cloned to carry its branch over.
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" });
+  for (const b of (await call(dev, "list_builds", {})).data.builds) await call(dev, "stop_build", { build_id: b.id });
+  assert.match(
+    (await call(dev, "start_build", { goal: "Carry on in my own repository", continue_from: started.id })).data.error,
+    /in the app's previous managed repository .*push its branch .* to your own repository first/,
+  );
+  const after = (await call(dev, "get_app_repository", { app_id: app.id })).data;
+  assert.deepEqual([after.repository, after.managed, after.clone.repository], ["acme/savings-app", false, expected]);
+});
+
+test("a managed repository created while the developer set their own keeps the developer's choice, and never gets the managed access", async () => {
+  const managed = fakeManagedHost();
+  const { builds, as, connect, call, pg } = await setup({ managed });
+  const devUser = await as("Dev", ["developer"]);
+  const dev = await connect(devUser);
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  await call(dev, "connect_repository", { repository: "acme/savings-app" });
+  managed.onCreate = () => builds.setAppRepository(devUser, app.id, "acme/savings-app");
+  const b = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id })).data;
+  assert.equal(b.repository, "acme/savings-app");
+  const conns = (await pg.query("SELECT repository, installation_id FROM financial_products.repo_connections WHERE developer_id = $1 ORDER BY repository", [devUser.id])).rows;
+  assert.deepEqual(conns.map((r) => [r.repository, Number(r.installation_id)]), [["acme/savings-app", 42]], "the developer's own repository keeps its own installation");
+  // The managed one is still recorded as Mynt's: never connectable by name.
+  assert.equal((await builds.appRepository(app.id)).managed_repository, `mynt-apps/mynt-app-${app.id}`);
 });
 
 test("managed repositories belong to their app: never connected by name, never used by another app or developer; developers can switch to their own", async () => {
@@ -757,6 +786,9 @@ test("managed repositories belong to their app: never connected by name, never u
   const removed = await call(admin, "remove_app", { app_id: app.id, confirm: true, reason: "test" });
   assert.equal(removed.isError, false, JSON.stringify(removed.data));
   assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.app_repositories WHERE app_id = $1", [app.id])).rows[0].n, 0);
+  // And the developer's access to its managed repository; their own repository stays connected.
+  const left = (await pg.query("SELECT repository FROM financial_products.repo_connections ORDER BY repository")).rows.map((r) => r.repository);
+  assert.ok(!left.includes(repo) && left.includes("acme/savings-app"), left.join(", "));
 });
 
 test("scaffold_app.py starts an app in a fresh clone that holds only a README", async () => {

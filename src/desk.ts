@@ -9,6 +9,7 @@ import type { BoatClient } from "./boat.js";
 import type { Db } from "./db.js";
 import { DESK_RUNNER, type DeskOutcome, type DeskReport } from "./desk-runner.js";
 import type { RepoAccess } from "./github.js";
+import { refuseManagedRepository, type GitRepoHost } from "./git-host.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import { findLicenses, normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, User } from "./store.js";
@@ -156,8 +157,12 @@ export class DeskService {
 
   // ---- workspace and term sheets ----
 
+  // Mynt's managed repositories (src/git-host.ts): never a firm's workspace.
+  managedHost: GitRepoHost | null = null;
+
   async connectWorkspace(entityId: string, userId: string, repository: string) {
     if (!this.repos) throw new Error("The product desk isn't enabled on this Mynt yet");
+    await refuseManagedRepository(this.db, this.managedHost, repository);
     const installation = await this.repos.installationFor(repository);
     if (!installation) throw new Error(`Install the Mynt GitHub App on ${repository} first: ${this.repos.installUrl()}`);
     await this.db.query(

@@ -108,6 +108,7 @@ const openServices = async () => {
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
   const deskConfig = deskConfigFromEnv(buildConfig);
   const desk = await DeskService.open(db, store, boat, github, deskConfig);
+  desk.managedHost = builds.managedHost; // never a firm's workspace (so never an exploration's either)
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
   const bd = await BdService.open(db, boat, bdConfigFromEnv(buildConfig));
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.

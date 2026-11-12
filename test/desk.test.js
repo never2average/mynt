@@ -378,3 +378,24 @@ test("the desk is the firm's: other firms can't use your products or jobs, and b
   assert.equal((await call(client, "stop_desk_job", { job_id: job.id })).data.stopped, job.id);
   assert.equal((await desk.job(job.id)).status, "stopped");
 });
+
+test("a firm can't make an app's Mynt-managed repository its desk workspace, though the GitHub App is installed on it", async () => {
+  const { store, desk, repos, call, innovator } = await setup();
+  const { client } = await innovator("Mallory");
+  // The App is installed on every managed repository, so the installation alone would let it through.
+  const installed = repos.installationFor;
+  repos.installationFor = async (repo) => (repo.startsWith("mynt-apps/") || repo.startsWith("old-org/") ? 77 : installed(repo));
+  desk.managedHost = { name: "fake", owns: (r) => r.toLowerCase().startsWith("mynt-apps/") };
+  assert.match((await call(client, "connect_desk_repository", { repository: "mynt-apps/mynt-app-00000000-0000-0000-0000-000000000001" })).data.error, /Mynt's managed repositories/);
+  // One recorded as an app's managed repository under a name the host no longer matches (a renamed organization).
+  await store.db.query(
+    "CREATE TABLE IF NOT EXISTS financial_products.app_repositories (app_id uuid PRIMARY KEY, repository text NOT NULL, managed boolean NOT NULL, managed_repository text, created_at timestamptz NOT NULL DEFAULT now())",
+  );
+  await store.db.query("INSERT INTO financial_products.app_repositories (app_id, repository, managed, managed_repository) VALUES ($1, $2, true, $2)", [
+    "00000000-0000-0000-0000-000000000002",
+    "old-org/mynt-app-x",
+  ]);
+  assert.match((await call(client, "connect_desk_repository", { repository: "old-org/mynt-app-x" })).data.error, /Mynt's managed repositories/);
+  // The firm's own repository still connects.
+  assert.equal((await call(client, "connect_desk_repository", { repository: "acme/desk" })).data.connected, "acme/desk");
+});
