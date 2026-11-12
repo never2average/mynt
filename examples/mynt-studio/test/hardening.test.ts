@@ -5,9 +5,10 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { withoutPort } from "@/lib/rate-limit";
 import { addressBucket, clientAddress, LOGIN_LIMIT, LOGIN_WINDOW_SECONDS, loginAllowed, SHARED_LOGIN_LIMIT } from "@/lib/rate-limit";
 import { MemoryKeyValue, Sealer, SessionStore } from "@/lib/session-store";
-import { ensureRoles, isAuthError, ROLES_MAX_AGE_MS } from "@/lib/studio-server";
+import { certainlyNotDone, ensureRoles, isAuthError, MyntRefusedError, ROLES_MAX_AGE_MS, ToolRefusedError } from "@/lib/studio-server";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { NotSignedInError } from "@/lib/mynt-client";
-import { deadlineFetch, ensureFreshTokens, expiresSoon, RefreshFailedError, refreshWithMynt } from "@/lib/tokens";
+import { deadlineFetch, normalIssuer, ensureFreshTokens, expiresSoon, RefreshFailedError, refreshWithMynt } from "@/lib/tokens";
 import { oauthRedirectUrl } from "@/lib/config";
 import { InvalidClientError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
@@ -124,6 +125,15 @@ describe("refreshing with Mynt's authorization server", () => {
     expect(sent).toBe(false);
   });
 
+  it("compares issuers by their canonical URL, so a trailing slash or letter case isn't a mismatch", async () => {
+    const { store, s } = await signedIn();
+    s.tokens = { ...token("old"), issuer: "https://AUTH.example.com/" } as typeof s.tokens;
+    await refreshWithMynt(s, store, { discover: async () => server, refreshAuth: (async () => token("new")) as never });
+    expect(s.tokens?.access_token).toBe("new");
+    expect(normalIssuer("https://auth.example.com/tenant/")).toBe("https://auth.example.com/tenant");
+    expect(normalIssuer("https://auth.example.com")).toBe(normalIssuer("https://auth.example.com/"));
+  });
+
   it("binds new tokens and the registration to the issuing server", async () => {
     const { store, s } = await signedIn();
     await refreshWithMynt(s, store, { discover: async () => server, refreshAuth: (async () => token("new")) as never });
@@ -137,14 +147,14 @@ describe("refreshing with Mynt's authorization server", () => {
       signals.push(init?.signal ?? undefined);
       return new Response("{}");
     }) as typeof fetch;
-    const f = deadlineFetch(30, base);
+    const f = deadlineFetch(400, base);
     await f("https://auth.example.com/.well-known/x");
     await tick(10);
     await f("https://auth.example.com/token");
     expect(signals[0]).toBe(signals[1]);
     expect(signals[0]?.aborted).toBe(false);
-    await tick(40);
-    expect(signals[0]?.aborted).toBe(true); // 30 ms after the refresh began, not after each request
+    await tick(600);
+    expect(signals[0]?.aborted).toBe(true); // 400 ms after the refresh began, not after each request
   });
 
   it("stores the new tokens, refreshing with the registered client", async () => {
@@ -233,6 +243,33 @@ describe("roles", () => {
     expect(calls()).toBe(1);
     expect(await ensureRoles(session, client, t0 + ROLES_MAX_AGE_MS + 1)).toEqual(["consumer"]);
     expect(calls()).toBe(2);
+  });
+});
+
+describe("knowing a call had no effect", () => {
+  const refused = (error: string) => new MyntRefusedError("shown", JSON.stringify({ error }));
+  it("only for Mynt's refusals that come before it changes anything", () => {
+    for (const before of [
+      "Coding-agent builds aren't enabled on this Mynt yet",
+      "No app of yours with id 'a1'",
+      "No build of yours with id 'b1'",
+      "Monthly build budget used up (US$100.00 of US$100 spent this month)",
+      "This build's cap (US$20) is more than this month's remaining build budget (US$5.00 of US$100); start it with cap_usd of at most 5",
+      "Repository 'o/r' isn't connected; run connect_repository first",
+      "Build is succeeded; only a running agent can be steered",
+    ]) {
+      expect(certainlyNotDone(refused(before)), before).toBe(true);
+    }
+    expect(certainlyNotDone(new MyntRefusedError("shown", "MCP error -32602: Input validation error: goal too short"))).toBe(true);
+    expect(certainlyNotDone(new McpError(ErrorCode.InvalidParams, "bad"))).toBe(true);
+    expect(certainlyNotDone(new ToolRefusedError("The studio couldn't send that to Mynt."))).toBe(true); // never sent
+  });
+
+  it("not for other errors, which may have come after a build was inserted or a steer written", () => {
+    expect(certainlyNotDone(refused("relation build_events does not exist"))).toBe(false);
+    expect(certainlyNotDone(new MyntRefusedError("shown", "Internal error"))).toBe(false);
+    expect(certainlyNotDone(new McpError(ErrorCode.RequestTimeout, "timed out"))).toBe(false);
+    expect(certainlyNotDone(new Error("socket hang up"))).toBe(false);
   });
 });
 

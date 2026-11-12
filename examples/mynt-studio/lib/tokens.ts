@@ -70,6 +70,15 @@ export function deadlineFetch(ms = REFRESH_TIMEOUT_MS, base: typeof fetch = fetc
   return (input, init) => base(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
 }
 
+// An issuer as a comparable string: the URL's canonical form, without trailing slashes.
+export function normalIssuer(value: string): string {
+  try {
+    return new URL(value).href.replace(/\/+$/, "");
+  } catch {
+    return value.replace(/\/+$/, "");
+  }
+}
+
 type WithIssuer = { issuer?: unknown };
 const issuerOf = (v: unknown): string | undefined => {
   const i = (v as WithIssuer | undefined)?.issuer;
@@ -99,9 +108,9 @@ export async function refreshWithMynt(
   let issuer: string;
   try {
     const server = await discover(myntMcpUrl(), { fetchFn });
-    issuer = String(server.authorizationServerUrl);
+    issuer = normalIssuer(String(server.authorizationServerUrl));
     const boundTo = issuerOf(session.tokens) ?? issuerOf(client);
-    if (boundTo && boundTo !== issuer) {
+    if (boundTo && normalIssuer(boundTo) !== issuer) {
       session.tokens = undefined;
       throw new NotSignedInError();
     }

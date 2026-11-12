@@ -1,5 +1,6 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { callMyntTool, NotSignedInError } from "./mynt-client";
 import type { Session } from "./session-store";
@@ -9,13 +10,39 @@ import { isDeveloper, parseStudioCall, parseToolText, rolesFrom } from "./studio
 // or a generic one. Raw replies and validation details are never shown.
 export class ToolRefusedError extends Error {}
 
-// Mynt received the call and answered that it didn't do it. Unlike a timeout or a lost
-// connection, this says for certain that nothing happened.
-export class MyntRefusedError extends ToolRefusedError {}
+// Mynt answered the call with an error. `raw` is its reply as sent (never shown to the user).
+export class MyntRefusedError extends ToolRefusedError {
+  constructor(
+    message: string,
+    readonly raw: string,
+  ) {
+    super(message);
+  }
+}
 
-// Whether an error means the call certainly had no effect: Mynt refused it, or the studio never
-// sent it (the arguments didn't pass the allow-list).
+// Mynt's refusals that come before it changes anything: checks of permission, existence, state
+// and budget, worded as in Mynt's src/builds.ts (a test keeps them in step with it). Any other
+// error may have come after a build was inserted or a steer was written.
+export const MYNT_REFUSALS_BEFORE_ANY_CHANGE = [
+  /Coding-agent builds aren't enabled/,
+  /No (app|build) of yours with id/,
+  /Monthly build budget used up/,
+  /is more than this month's remaining build budget/,
+  /Repository '[^']*' isn't connected/,
+  /Build is [a-z_]+; only a running agent can be steered/,
+];
+
+// The MCP server rejecting a call's arguments, before the tool runs.
+const SDK_REFUSALS = [/Input validation error|Invalid arguments for tool/];
+
+const REFUSED_BEFORE_ANY_CHANGE = [...MYNT_REFUSALS_BEFORE_ANY_CHANGE, ...SDK_REFUSALS];
+
+// Whether an error means the call certainly had no effect: the studio never sent it (the
+// arguments didn't pass the allow-list), Mynt rejected it as a JSON-RPC request (unknown tool,
+// invalid parameters), or Mynt refused it with one of the checks above.
 export function certainlyNotDone(err: unknown): boolean {
+  if (err instanceof MyntRefusedError) return REFUSED_BEFORE_ANY_CHANGE.some((re) => re.test(err.raw));
+  if (err instanceof McpError) return err.code === ErrorCode.InvalidParams || err.code === ErrorCode.MethodNotFound;
   return err instanceof ToolRefusedError;
 }
 
@@ -37,7 +64,7 @@ export async function callStudioTool(client: Client, tool: string, args: Record<
   const call = parseStudioCall(tool, args);
   if ("error" in call) throw new ToolRefusedError("The studio couldn't send that to Mynt.");
   const outcome = await callMyntTool(client, call.tool, call.args);
-  if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text));
+  if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text), outcome.text);
   return parseToolText(outcome.text);
 }
 

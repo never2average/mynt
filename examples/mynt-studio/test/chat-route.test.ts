@@ -24,8 +24,11 @@ vi.mock("@/lib/session", () => ({
   },
 }));
 
-// Claims as the store keeps them: key -> owner token; a release frees only its own claim.
+// Claims as the store keeps them: key -> owner token and expiry (on a clock the tests move); a
+// release frees only its own claim.
 const claimed = new Map<string, number>();
+const expiry = new Map<string, number>();
+const clock = { now: 0 };
 let claimToken = 0;
 vi.mock("@/lib/session-store", () => ({
   sessionStore: () => ({
@@ -33,11 +36,12 @@ vi.mock("@/lib/session-store", () => ({
       fake.saved++;
       return true;
     },
-    claim: async (name: string, subject: string) => {
+    claim: async (name: string, subject: string, ttlSeconds: number) => {
       const key = `${name}\n${subject}`;
-      if (claimed.has(key)) return null;
+      if (claimed.has(key) && (expiry.get(key) ?? Infinity) > clock.now) return null;
       const mine = ++claimToken;
       claimed.set(key, mine);
+      expiry.set(key, clock.now + ttlSeconds * 1000);
       return async () => {
         if (claimed.get(key) === mine) claimed.delete(key);
       };
@@ -75,7 +79,7 @@ vi.mock("@/lib/mynt-client", () => {
           if (fake.startDelayMs) await new Promise((r) => setTimeout(r, fake.startDelayMs));
           if (fake.startFails > 0) {
             fake.startFails--;
-            return { isError: true, text: JSON.stringify({ error: "Monthly build budget reached" }) };
+            return { isError: true, text: JSON.stringify({ error: "Monthly build budget used up (US$100.00 of US$100 spent this month)" }) };
           }
           if (fake.startThrows > 0) {
             fake.startThrows--;
@@ -97,7 +101,7 @@ vi.mock("@/lib/mynt-client", () => {
   };
 });
 
-const { POST, WATCH_MS, maxDuration } = await import("@/app/api/chat/route");
+const { POST, WATCH_MS, maxDuration, START_LOCK_SECONDS } = await import("@/app/api/chat/route");
 
 function post(body: unknown, origin = "http://localhost:3000") {
   return POST(new Request("http://localhost:3000/api/chat", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }));
@@ -127,6 +131,8 @@ beforeEach(() => {
   fake.startDelayMs = 0;
   fake.refreshOnConnect = false;
   claimed.clear();
+  expiry.clear();
+  clock.now = 0;
 });
 
 describe("/api/chat", () => {
@@ -254,7 +260,7 @@ describe("/api/chat follow-ups", () => {
     fake.startFails = 1;
     fake.activity = [{ status: "failed", activity: [] }];
     const first = await chunks(await post(statements()));
-    expect(first).toContainEqual(expect.objectContaining({ type: "error", errorText: "Monthly build budget reached" }));
+    expect(first).toContainEqual(expect.objectContaining({ type: "error", errorText: "Monthly build budget used up (US$100.00 of US$100 spent this month)" }));
     expect(claimed.size).toBe(0); // claims and the start lock released
     await chunks(await post(statements()));
     expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(2);
@@ -325,7 +331,7 @@ describe("/api/chat start races", () => {
   const deviceA = () => ({ id: "a", createdAt: 0, lastSeen: 0, tokens: { access_token: "a", token_type: "Bearer" } }) as Session;
   const deviceB = () => ({ id: "b", createdAt: 0, lastSeen: 0, tokens: { access_token: "b", token_type: "Bearer" } }) as Session;
 
-  it("B's list_builds answered before A's start, but arriving after it: still one build", async () => {
+  it("B's list_builds answered before A's start, but arriving after it: B decides again under the lock and follows A's build", async () => {
     fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
     // B asks first; its (stale, empty) answer arrives only after A has started and finished.
     fake.listDelays = [150];
@@ -334,25 +340,26 @@ describe("/api/chat start races", () => {
     await new Promise((r) => setTimeout(r, 20));
     fake.session = deviceA();
     await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
-    const out = await chunks(await b);
-    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
-    expect(out.find((c) => c.type === "text-delta")?.delta).toMatch(/being started right now/); // A's lock is still held
-  });
-
-  it("once A's lock has lapsed, B decides again under its own lock and follows A's build", async () => {
-    fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
-    fake.listDelays = [150];
-    fake.session = deviceB();
-    const b = post({ projectId: "app1", messages: [userMessage("Build a budgeting screen instead")] });
-    await new Promise((r) => setTimeout(r, 20));
-    fake.session = deviceA();
-    await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
-    expect(startLocks()).toHaveLength(1); // kept after a successful start
-    for (const k of startLocks()) claimed.delete(k); // its 10 s TTL lapses
+    expect(startLocks()).toHaveLength(0); // released once A's start was done
     const out = await chunks(await b);
     expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
     expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "new-build", started: false } }));
-    expect(startLocks()).toHaveLength(0); // B gave its lock back: it started nothing
+    expect(startLocks()).toHaveLength(0);
+  });
+
+  it("A's start running past 70 s still keeps B from starting a second build", async () => {
+    expect(START_LOCK_SECONDS).toBeGreaterThan(120); // a second list_builds and start_build, each up to 60 s
+    fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];
+    fake.startDelayMs = 100;
+    fake.session = deviceA();
+    const a = post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] });
+    await new Promise((r) => setTimeout(r, 40)); // A holds the lock and waits on start_build
+    clock.now = 100_000; // 100 s into A's start: past the earlier 70 s lock
+    fake.session = deviceB();
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a budgeting screen instead")] }));
+    await chunks(await a);
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+    expect(out.find((c) => c.type === "text-delta")?.delta).toMatch(/being started right now/);
   });
 
   it("keeps the claims when start_build's reply is lost, so a retry can't start a second build", async () => {
