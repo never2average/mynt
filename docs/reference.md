@@ -216,11 +216,12 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 - **Created by Mynt.** On the app's first build, Mynt creates a private repository on its git host (`src/git-host.ts`), named by the app's id only (`mynt-app-<app_id>`), with a first commit so pull requests have a base.
 - **Works like a connected repository.** Builds push their branch there, Mynt opens the verified pull request there, `deploy_app` fetches the verified commit from it, and `continue_from` carries on in it.
 - **Reachable only through its app.** One guard covers every path that connects a repository by name: `connect_repository`, `set_app_repository`, a firm's desk workspace (`connect_desk_repository`, and so the desk's explorations), and a build naming a repository. It refuses any managed repository, except the caller's own app's in a build of that app.
-  - A repository counts as managed if it's in the managed organization by name, or if it's recorded as an app's managed repository. The second covers a name the host still redirects after the organization was renamed.
+  - A repository counts as managed if it's in the managed organization by name, or if Mynt ever created one under that name. Mynt keeps every name it creates in `managed_repository_names`: the name only, kept after the app is removed. That covers a name the host still redirects after the organization was renamed.
+  - The check fails closed: a database error refuses the connection. Only a table that doesn't exist yet counts as "none recorded".
   - `list_repositories` marks a managed repository `managed`.
 - **Cloning.** `get_app_repository` says where an app's code lives and, for a managed repository, gives a read-only token (one hour) to clone it.
 
-`set_app_repository` switches an app's next builds to one of the developer's own connected repositories. It works whether or not managed repositories are on: with them off, it's how an app gets a default repository.
+`set_app_repository` switches an app's next builds to one of the developer's own connected repositories. It also switches back to the app's own managed repository: that's the only managed repository it accepts. It works whether or not managed repositories are on: with them off, it's how an app gets a default repository.
 - Builds already made stay in the managed repository. `get_app_repository` still gives its clone credential, and `continue_from` on one of those builds says to push its branch to your own repository first.
 - `remove_app` drops the app's repository record and the developer's access to its managed repository. The repository itself is left on the host.
 

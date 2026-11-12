@@ -167,6 +167,26 @@ export interface Build {
   base_commit: string | null;
 }
 
+// Apps' repositories and the managed repositories' names (exported so other services' tests build the same tables).
+export const APP_REPOSITORIES_DDL = `
+  -- Each app's repository: the private one Mynt created for it (managed), or the developer's own they chose.
+  CREATE TABLE IF NOT EXISTS financial_products.app_repositories (
+    app_id uuid PRIMARY KEY REFERENCES financial_products.apps(id),
+    repository text NOT NULL,
+    managed boolean NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  -- The managed repository Mynt created for the app, kept when the app moves to the developer's own: it stays one of
+  -- Mynt's (never connectable by name), and the developer can still clone it or switch back to it.
+  ALTER TABLE financial_products.app_repositories ADD COLUMN IF NOT EXISTS managed_repository text;
+  -- Every name Mynt created a managed repository under: only the name, kept after its app is removed, so the
+  -- repository (still on the host, its old name perhaps redirected) is never connectable by name.
+  CREATE TABLE IF NOT EXISTS financial_products.managed_repository_names (
+    repository text PRIMARY KEY,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+`;
+
 const TABLES = `
   CREATE TABLE IF NOT EXISTS financial_products.build_runs (
     id uuid PRIMARY KEY,
@@ -226,16 +246,7 @@ const TABLES = `
     data jsonb NOT NULL DEFAULT '{}'
   );
   CREATE INDEX IF NOT EXISTS build_events_build_idx ON financial_products.build_events (build_id, at);
-  -- Each app's repository: the private one Mynt created for it (managed), or the developer's own they chose.
-  CREATE TABLE IF NOT EXISTS financial_products.app_repositories (
-    app_id uuid PRIMARY KEY REFERENCES financial_products.apps(id),
-    repository text NOT NULL,
-    managed boolean NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now()
-  );
-  -- The managed repository Mynt created for the app, kept when the app moves to the developer's own: it stays one of
-  -- Mynt's (never connectable by name), and the developer can still clone it.
-  ALTER TABLE financial_products.app_repositories ADD COLUMN IF NOT EXISTS managed_repository text;
+${APP_REPOSITORIES_DDL}
   -- The coding agent's activity (its messages, commands and edits), summarised by Mynt as the build runs and kept
   -- after the sandbox goes. seq orders it within the build and is the cursor developers page with.
   CREATE TABLE IF NOT EXISTS financial_products.build_activity (
@@ -580,6 +591,7 @@ export class BuildService {
     } catch (e) {
       throw new Error(`Mynt couldn't create the app's repository (${(e as Error).message}); connect your own with connect_repository and pass it as repository`);
     }
+    await this.db.query("INSERT INTO financial_products.managed_repository_names (repository) VALUES ($1) ON CONFLICT DO NOTHING", [created.repository]);
     // If the developer set their own repository meanwhile, that choice stands; the managed one is still recorded.
     await this.db.query(
       `INSERT INTO financial_products.app_repositories (app_id, repository, managed, managed_repository) VALUES ($1, $2, true, $2)
@@ -601,11 +613,17 @@ export class BuildService {
   }
 
   // The developer's own connected repository for the app's next builds, instead of the managed one.
+  // Or back to the app's own managed repository, the one exception to the guard here.
   async setAppRepository(developer: User, appId: string, repository: string) {
     const repo = repository.toLowerCase();
+    const before = await this.appRepository(appId);
+    if (before?.managed_repository && before.managed_repository === repo) {
+      await this.db.query("UPDATE financial_products.app_repositories SET repository = $2, managed = true, created_at = now() WHERE app_id = $1", [appId, repo]);
+      if (!(await this.installation(developer.id, repo))) await this.connectManaged(developer.id, repo);
+      return { app_id: appId, repository: repo, managed: true, previous: before.repository };
+    }
     await this.refuseManaged(repo);
     if (!(await this.installation(developer.id, repo))) throw new Error(`Repository '${repository}' isn't connected; run connect_repository first`);
-    const before = await this.appRepository(appId);
     await this.db.query(
       `INSERT INTO financial_products.app_repositories (app_id, repository, managed) VALUES ($1, $2, false)
        ON CONFLICT (app_id) DO UPDATE SET repository = EXCLUDED.repository, managed = false, created_at = now()`,
@@ -1751,7 +1769,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     {
       title: "Use your own repository for an app",
       description:
-        "Developer: from now on, the app's builds push to one of your own connected repositories instead of the one Mynt manages for it. Builds already made stay where they are (continue_from works within one repository: push the managed repository's branch to yours first if you want to carry on from it).",
+        "Developer: from now on, the app's builds push to one of your own connected repositories instead of the one Mynt manages for it; or, given the app's own managed repository (get_app_repository names it), back to that. Builds already made stay where they are (continue_from works within one repository: push the managed repository's branch to yours first if you want to carry on from it).",
       inputSchema: { app_id: z.string(), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name") },
     },
     async ({ app_id, repository }) => {

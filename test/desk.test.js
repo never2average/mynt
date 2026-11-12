@@ -387,14 +387,11 @@ test("a firm can't make an app's Mynt-managed repository its desk workspace, tho
   repos.installationFor = async (repo) => (repo.startsWith("mynt-apps/") || repo.startsWith("old-org/") ? 77 : installed(repo));
   desk.managedHost = { name: "fake", owns: (r) => r.toLowerCase().startsWith("mynt-apps/") };
   assert.match((await call(client, "connect_desk_repository", { repository: "mynt-apps/mynt-app-00000000-0000-0000-0000-000000000001" })).data.error, /Mynt's managed repositories/);
-  // One recorded as an app's managed repository under a name the host no longer matches (a renamed organization).
-  await store.db.query(
-    "CREATE TABLE IF NOT EXISTS financial_products.app_repositories (app_id uuid PRIMARY KEY, repository text NOT NULL, managed boolean NOT NULL, managed_repository text, created_at timestamptz NOT NULL DEFAULT now())",
-  );
-  await store.db.query("INSERT INTO financial_products.app_repositories (app_id, repository, managed, managed_repository) VALUES ($1, $2, true, $2)", [
-    "00000000-0000-0000-0000-000000000002",
-    "old-org/mynt-app-x",
-  ]);
+  // One Mynt created under a name the host no longer matches (a renamed organization; its app since removed). The
+  // tables are the builds code's own.
+  const { APP_REPOSITORIES_DDL } = await import("../dist/builds.js");
+  await store.db.exec(APP_REPOSITORIES_DDL);
+  await store.db.query("INSERT INTO financial_products.managed_repository_names (repository) VALUES ($1)", ["old-org/mynt-app-x"]);
   assert.match((await call(client, "connect_desk_repository", { repository: "old-org/mynt-app-x" })).data.error, /Mynt's managed repositories/);
   // The firm's own repository still connects.
   assert.equal((await call(client, "connect_desk_repository", { repository: "acme/desk" })).data.connected, "acme/desk");

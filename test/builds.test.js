@@ -766,11 +766,16 @@ test("managed repositories belong to their app: never connected by name, never u
 
   // Their own repository, later: it must be connected, and it can't be a managed one.
   assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data.error, /isn't connected/);
-  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: repo })).data.error, /of your own/);
+  assert.match((await call(dev, "set_app_repository", { app_id: app.id, repository: "mynt-apps/mynt-app-someone-else" })).data.error, /of your own/);
   await call(dev, "connect_repository", { repository: "acme/savings-app" });
   const set = (await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" })).data;
   assert.deepEqual([set.repository, set.managed, set.previous], ["acme/savings-app", false, repo]);
   assert.equal((await call(dev, "start_build", { goal: "Build the next version please", app_id: app.id })).data.repository, "acme/savings-app");
+  // And back to its own managed repository (the only managed one it can name), then to theirs again.
+  const back = (await call(dev, "set_app_repository", { app_id: app.id, repository: repo })).data;
+  assert.deepEqual([back.repository, back.managed, back.previous], [repo, true, "acme/savings-app"]);
+  assert.equal((await call(dev, "start_build", { goal: "Build in the managed one again", app_id: app.id })).data.repository, repo);
+  await call(dev, "set_app_repository", { app_id: app.id, repository: "acme/savings-app" });
   assert.deepEqual((await call(dev, "get_app_repository", { app_id: app.id })).data.managed, false);
 
   // A host that can't create one says what to do instead; without managed repositories, builds work as before.
@@ -789,6 +794,17 @@ test("managed repositories belong to their app: never connected by name, never u
   // And the developer's access to its managed repository; their own repository stays connected.
   const left = (await pg.query("SELECT repository FROM financial_products.repo_connections ORDER BY repository")).rows.map((r) => r.repository);
   assert.ok(!left.includes(repo) && left.includes("acme/savings-app"), left.join(", "));
+  // Its name stays refused, even with the managed organization no longer configured (as after a rename).
+  assert.equal(builds.managedHost, null);
+  assert.match((await call(other, "connect_repository", { repository: repo })).data.error, /Mynt's managed repositories/);
+});
+
+test("the managed-repository guard fails closed: only a missing table means none recorded", async () => {
+  const { isManagedRepository } = await import("../dist/git-host.js");
+  const failing = (code) => ({ query: async () => Promise.reject(Object.assign(new Error("db"), { code })) });
+  assert.equal(await isManagedRepository(failing("42P01"), null, "acme/x"), false);
+  await assert.rejects(isManagedRepository(failing("57P01"), null, "acme/x"), /db/);
+  await assert.rejects(isManagedRepository(failing(undefined), null, "acme/x"), /db/);
 });
 
 test("scaffold_app.py starts an app in a fresh clone that holds only a README", async () => {
