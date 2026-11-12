@@ -1,7 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { contentSecurityPolicy } from "./lib/csp";
-import { appUrl } from "./lib/config";
-import { clientAddress, loginAllowed, shouldGoToAppUrl } from "./lib/rate-limit";
+import { appUrlFor, clientAddress, loginAllowed, shouldGoToAppUrl, warnUntrustedEdgeOnce } from "./lib/rate-limit";
 import { sessionStore } from "./lib/session-store";
 
 // Runs before every page and API route:
@@ -18,9 +17,9 @@ import { sessionStore } from "./lib/session-store";
 //   turn every visit into a redirect loop.
 export async function proxy(req: NextRequest) {
   if (shouldGoToAppUrl(req.headers, req.nextUrl.host)) {
-    const target = new URL(req.nextUrl.pathname + req.nextUrl.search, appUrl());
-    return NextResponse.redirect(target, 308);
+    return NextResponse.redirect(appUrlFor(req.nextUrl.pathname, req.nextUrl.search), 308);
   }
+  warnUntrustedEdgeOnce(req.headers);
 
   if (req.nextUrl.pathname === "/api/auth/login" && !(await loginAllowed(sessionStore(), clientAddress(req.headers)))) {
     return new NextResponse("Too many sign-in attempts. Please wait a few minutes and try again.", {

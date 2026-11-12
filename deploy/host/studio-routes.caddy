@@ -1,5 +1,9 @@
-	# With Mynt Studio on this domain (install-host.sh --studio-upstream): Mynt's own paths that the
-	# blocks above don't name go to Mynt, and everything else is the studio.
+	# With Mynt Studio on this domain (install-host.sh --studio-upstream). For every request on the
+	# site, Mynt's paths included: a caller's own X-Mynt-Client-IP is removed (only this server sets
+	# it, below), and responses aren't type-sniffed.
+	request_header -X-Mynt-Client-IP
+	header X-Content-Type-Options nosniff
+	# Mynt's own paths that the blocks above don't name go to Mynt; everything else is the studio.
 	@mynt path /v1 /llms.txt /llms-full.txt /.well-known/* /ramp-sandbox/*
 	handle @mynt {
 		request_body {
@@ -7,17 +11,16 @@
 		}
 		reverse_proxy 127.0.0.1:@PORT@
 	}
-	# Mynt Studio, served from its own host. The studio sees the caller's address only in
-	# X-Mynt-Client-IP, set here after removing any the caller sent, and trusts it only from this
-	# server's address (its TRUSTED_EDGE_IPS).
+	# Mynt Studio, served from its own host. It sees the caller's address only in X-Mynt-Client-IP,
+	# set here, and trusts it only from this server's addresses (its TRUSTED_EDGE_IPS).
 	handle {
+		# The studio's host takes request bodies up to 4.5 MB.
 		request_body {
-			max_size 1MB
+			max_size 4.5MB
 		}
-		request_header -X-Mynt-Client-IP
 		reverse_proxy https://@STUDIO_UPSTREAM@ {
 			header_up Host @STUDIO_UPSTREAM@
-			header_up X-Mynt-Client-IP {remote_host}
+			header_up X-Mynt-Client-IP {client_ip}
 			# The chat streams its replies.
 			flush_interval -1
 			transport http {

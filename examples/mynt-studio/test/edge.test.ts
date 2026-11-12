@@ -1,7 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { oauthRedirectUrl } from "@/lib/config";
-import { clientAddress, connectingAddress, shouldGoToAppUrl, trustedEdges, viaTrustedEdge } from "@/lib/rate-limit";
+import {
+  appUrlFor,
+  clientAddress,
+  connectingAddress,
+  resetUntrustedEdgeWarning,
+  shouldGoToAppUrl,
+  trustedEdges,
+  viaTrustedEdge,
+  warnUntrustedEdgeOnce,
+} from "@/lib/rate-limit";
 import { MemoryKeyValue, Sealer, SessionStore } from "@/lib/session-store";
 
 // The studio served on Mynt's domain through Mynt's server (its host installer's --studio-upstream):
@@ -44,7 +53,37 @@ describe("the caller's address behind Mynt's server", () => {
   });
 });
 
+describe("an edge missing from TRUSTED_EDGE_IPS", () => {
+  it("is warned about once per instance, naming its address", () => {
+    resetUntrustedEdgeWarning();
+    const said: string[] = [];
+    const log = (m: string) => void said.push(m);
+    const fromV6 = h({ "x-vercel-forwarded-for": "edge-a-v6", "x-mynt-client-ip": "client-x" });
+    expect(warnUntrustedEdgeOnce(fromV6, vercel, log)).toBe(true);
+    expect(warnUntrustedEdgeOnce(fromV6, vercel, log)).toBe(false); // once
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("edge-a-v6");
+    expect(said[0]).toMatch(/IPv4 and IPv6/);
+  });
+
+  it("isn't warned about for trusted edges, requests without the header, or when no edges are set", () => {
+    resetUntrustedEdgeWarning();
+    const log = () => {
+      throw new Error("shouldn't warn");
+    };
+    expect(warnUntrustedEdgeOnce(h({ "x-vercel-forwarded-for": "edge-a", "x-mynt-client-ip": "client-x" }), vercel, log)).toBe(false);
+    expect(warnUntrustedEdgeOnce(h({ "x-vercel-forwarded-for": "someone" }), vercel, log)).toBe(false);
+    expect(warnUntrustedEdgeOnce(h({ "x-vercel-forwarded-for": "someone", "x-mynt-client-ip": "c" }), { VERCEL: "1" }, log)).toBe(false);
+  });
+});
+
 describe("visits to the studio's own deployment address", () => {
+  it("keep their path and query on APP_URL, which can't be changed by the path", () => {
+    const base = new URL("https://mynt.example.com");
+    expect(appUrlFor("/app-1/build-2", "?x=1", base).toString()).toBe("https://mynt.example.com/app-1/build-2?x=1");
+    expect(appUrlFor("//elsewhere.example.com/x", "", base).host).toBe("mynt.example.com");
+  });
+
   const app = "mynt.example.com";
   it("go to APP_URL once the studio is served through Mynt's server", () => {
     expect(shouldGoToAppUrl(h({}), "studio-abc.example.com", vercel, app)).toBe(true);

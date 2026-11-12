@@ -72,12 +72,38 @@ export function addressBucket(address: string): string {
     .join(":")}::/64`;
 }
 
+// A request carrying X-Mynt-Client-IP from an address not in TRUSTED_EDGE_IPS: usually one of
+// Mynt's server's outbound addresses (often its IPv6 one) missing from the list, which puts
+// every caller through it in one rate-limit bucket. Said once per instance, with the address to
+// add.
+let warnedUntrustedEdge = false;
+export function warnUntrustedEdgeOnce(headers: Headers, env: Env = process.env, log: (msg: string) => void = console.warn): boolean {
+  if (warnedUntrustedEdge || trustedEdges(env).size === 0 || !headers.has("x-mynt-client-ip") || viaTrustedEdge(headers, env)) return false;
+  warnedUntrustedEdge = true;
+  log(`X-Mynt-Client-IP came from ${connectingAddress(headers, env) ?? "an unknown address"}, which isn't in TRUSTED_EDGE_IPS. If that's Mynt's server, add it (IPv4 and IPv6); until then its callers share one sign-in rate limit.`);
+  return true;
+}
+
+// For tests.
+export function resetUntrustedEdgeWarning(): void {
+  warnedUntrustedEdge = false;
+}
+
 // Whether a request reached the studio's own deployment address directly while the studio is
 // served on Mynt's domain (TRUSTED_EDGE_IPS set, on Vercel), so it should go to APP_URL instead.
 export function shouldGoToAppUrl(headers: Headers, requestHost: string, env: Env = process.env, appHost = appUrl().host): boolean {
   if (!env.VERCEL || trustedEdges(env).size === 0) return false;
   if (headers.has("x-mynt-client-ip")) return false; // came through the edge (or says so)
   return requestHost.toLowerCase() !== appHost.toLowerCase();
+}
+
+// Where a direct visit goes: the same path and query on APP_URL (set field by field, never by
+// resolving the request's path against it).
+export function appUrlFor(pathname: string, search: string, base: URL = appUrl()): URL {
+  const target = new URL(base);
+  target.pathname = pathname;
+  target.search = search;
+  return target;
 }
 
 export async function loginAllowed(store: SessionStore, address: string | null): Promise<boolean> {

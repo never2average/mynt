@@ -76,11 +76,15 @@ test("every path literal Mynt routes in src/http.ts is among the paths checked h
 test("with a studio upstream, it strips the caller's X-Mynt-Client-IP, sets its own, streams, and keeps Mynt's routes as they were", () => {
   const r = render(DOMAIN, PORT, STUDIO);
   assert.equal(r.status, 0, r.err);
-  const studio = r.out.slice(r.out.indexOf("@mynt path"));
-  assert.match(studio, /request_header -X-Mynt-Client-IP\n\t\treverse_proxy https:\/\/studio\.example\.com \{/);
+  // Site-wide (a top-level directive of the site, so every route gets it, Mynt's included).
+  assert.match(r.out, /^\trequest_header -X-Mynt-Client-IP$/m);
+  assert.match(r.out, /^\theader X-Content-Type-Options nosniff$/m);
+  const studio = r.out.slice(r.out.lastIndexOf("\thandle {"));
+  assert.match(studio, /reverse_proxy https:\/\/studio\.example\.com \{/);
   assert.match(studio, /header_up Host studio\.example\.com/);
-  assert.match(studio, /header_up X-Mynt-Client-IP \{remote_host\}/);
+  assert.match(studio, /header_up X-Mynt-Client-IP \{client_ip\}/);
   assert.match(studio, /flush_interval -1/);
+  assert.match(studio, /max_size 4\.5MB/);
   const before = render(DOMAIN, PORT).out;
   const myntRoutes = before.slice(0, before.indexOf("\t# Everything else"));
   assert.ok(r.out.startsWith(myntRoutes), "Mynt's own routes are unchanged");
@@ -171,6 +175,25 @@ test("with a studio upstream: Mynt's paths go to Mynt, everything else to the st
     for (const p of MYNT_PATHS) assert.equal(route(p), MYNT, `${how}: ${p} should reach Mynt`);
     for (const p of STUDIO_PATHS) assert.equal(route(p), `${STUDIO}:443`, `${how}: ${p} should reach the studio`);
   }
+});
+
+test("with a studio upstream, Caddy strips a caller's X-Mynt-Client-IP and adds nosniff before any route", () => {
+  const image = process.env.CADDY_DOCKER_IMAGE;
+  const dir = mkdtempSync(join(tmpdir(), "mynt-caddy-"));
+  writeFileSync(join(dir, "Caddyfile"), render(DOMAIN, PORT, STUDIO).out);
+  const r = image
+    ? spawnSync("docker", ["run", "--rm", "-v", `${dir}:/w:ro`, image, "caddy", "adapt", "--adapter", "caddyfile", "--config", "/w/Caddyfile"], { encoding: "utf8" })
+    : spawnSync("caddy", ["adapt", "--adapter", "caddyfile", "--config", join(dir, "Caddyfile")], { encoding: "utf8" });
+  if (r.error || r.status !== 0) {
+    assert.ok(!process.env.MYNT_REQUIRE_CADDY, "Caddy was required (MYNT_REQUIRE_CADDY) but couldn't adapt the site");
+    return;
+  }
+  const routes = JSON.parse(r.stdout).apps.http.servers.srv0.routes[0].handle.find((h) => h.handler === "subroute").routes;
+  const first = routes[0];
+  assert.equal(first.match, undefined, "the first route applies to every request");
+  const headers = first.handle.filter((h) => h.handler === "headers");
+  assert.ok(headers.some((h) => h.request?.delete?.includes("X-Mynt-Client-IP")));
+  assert.ok(headers.some((h) => h.response?.set?.["X-Content-Type-Options"]?.[0] === "nosniff"));
 });
 
 test("without a studio upstream, every path still reaches Mynt", () => {

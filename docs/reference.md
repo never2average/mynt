@@ -1356,10 +1356,15 @@ bash install-host.sh <domain> [git-ref] --studio-upstream <studio host>
 - **Mynt's `/` pointer:** the one-line text Mynt used to answer at `/` is now the studio's home page, but `/llms.txt` still tells MCP clients and AI assistants where the endpoint is.
 - **Persistence:** the setting is kept in `/etc/mynt/edge.env`, which is root-only and holds no secrets, so later deploys without the flag keep it. `--no-studio` turns it off. Without it, Caddy's site for Mynt is exactly what it was. `deploy/host/render-site.sh` renders the site, and CI checks its routes with Caddy itself.
 
-**The caller's address.** This server passes the caller's address to the studio in `X-Mynt-Client-IP`, after removing any value the caller sent. The studio trusts that header only when the request comes from an address in its `TRUSTED_EDGE_IPS` setting. So:
-- Put this server's public outbound address (or addresses, IPv4 and IPv6) in `TRUSTED_EDGE_IPS`.
-- Set the studio's `APP_URL` to `https://<domain>`. Sign-in then returns to Mynt's domain.
-- Once `TRUSTED_EDGE_IPS` is set, visits to the studio's own deployment address are sent to `APP_URL`.
+**The caller's address.** This server removes any `X-Mynt-Client-IP` a caller sends, on every path, and then sets it to the caller's real address on requests it passes to the studio. The studio trusts the header only when the request comes from an address in its `TRUSTED_EDGE_IPS` setting. Every response also gets `X-Content-Type-Options: nosniff`.
+
+**Going live, in this order:**
+1. **Deploy the edge first:** run `install-host.sh <domain> --studio-upstream <studio host>`. The studio keeps working at its own address meanwhile.
+2. **Then set the studio's settings and redeploy it:**
+   - `APP_URL`: `https://<domain>`. Sign-in then returns to Mynt's domain, and everyone signs in once more.
+   - `TRUSTED_EDGE_IPS`: every public outbound address of this server, IPv4 and IPv6. A missing one puts every user coming through it into one sign-in rate-limit bucket (429 after 20 starts in 10 minutes). The studio logs a warning naming the address it saw.
+
+From then on, visits to the studio's own deployment address are sent to `APP_URL`.
 
 ### Backups
 
