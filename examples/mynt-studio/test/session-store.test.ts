@@ -26,9 +26,9 @@ class FakeKv implements KeyValue {
   get(key: string) {
     return this.inner.get(key);
   }
-  async set(key: string, value: string, ttlSeconds: number) {
+  async set(key: string, value: string, ttlSeconds: number, only?: "nx" | "xx") {
     this.writes.push({ key, value, ttlSeconds });
-    await this.inner.set(key, value, ttlSeconds);
+    return this.inner.set(key, value, ttlSeconds, only);
   }
   del(key: string) {
     return this.inner.del(key);

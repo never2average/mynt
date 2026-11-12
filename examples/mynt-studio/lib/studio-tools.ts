@@ -5,13 +5,14 @@ import { z } from "zod";
 // the studio to its job. Anything not listed (vm_access, app_run, admin tools...) can't be
 // called from the studio at all.
 //
-// This first version is read-only. Building (start_build, steer_build, finish_build,
-// stop_build), sandbox commands, creating apps, connecting repositories and hosting changes
-// join the list with the screens that use them.
+// Writing tools join the list with the screens that use them. The chat starts and steers
+// builds; shipping (finish_build), stopping, sandbox commands, creating apps, connecting
+// repositories and hosting changes come later.
 
 const id = z.string().trim().min(1).max(200);
 // A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
 const service = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/).optional();
+const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -24,9 +25,23 @@ export const STUDIO_TOOLS = {
   // repositories
   list_repositories: z.object({}).strict(),
   // builds
-  list_builds: z.object({ status: z.string().max(40).optional() }).strict(),
+  list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional() }).strict(),
   get_build: z.object({ build_id: id }).strict(),
-  get_build_activity: z.object({ build_id: id, limit: z.number().int().min(1).max(200).optional() }).strict(),
+  get_build_activity: z
+    .object({ build_id: id, limit: z.number().int().min(1).max(200).optional(), after: z.number().int().min(0).optional() })
+    .strict(),
+  // The chat: a message starts a build for the app, or steers the one running. `mode` and
+  // `continue_from` are sent only where Mynt offers session builds (lib/chat.ts).
+  start_build: z
+    .object({
+      goal: z.string().trim().min(10).max(4000),
+      app_id: id,
+      repository: repository.optional(),
+      mode: z.literal("session").optional(),
+      continue_from: id.optional(),
+    })
+    .strict(),
+  steer_build: z.object({ build_id: id, message: z.string().trim().min(3).max(4000) }).strict(),
   // sandbox (reading only)
   sandbox_files: z.object({ build_id: id, path: z.string().max(1000).optional() }).strict(),
   sandbox_diff: z.object({ build_id: id }).strict(),
