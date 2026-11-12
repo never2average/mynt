@@ -202,7 +202,11 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 - `finish_build` ends the session. Once its current request is done, the agent reviews, checks, previews and pushes the work, then exits. Mynt then verifies the build in a clean sandbox exactly as any other; the agent never grades its own work.
 - Finishing never interrupts the current request, and once a session is finishing it takes no more steers. A message that slips in as it starts finishing isn't delivered, and the build's timeline says so.
 - A session that has been idle (nothing running, nothing waiting) for `BUILD_SESSION_IDLE_MS` (default 15 minutes; from 1 minute to 24 hours) finishes the same way, so its work is shipped, not lost.
-- Mynt also finishes a session itself 30 minutes before its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours), and once it has spent 80% of its cap, so neither ends it with the work unshipped.
+- Mynt also finishes a session itself, so neither the time limit nor the cap ends it with the work unshipped:
+  - 30 minutes before its sandbox's time limit (`BUILD_SANDBOX_TTL_SECONDS`, default 4 hours, counted from when Mynt asked for the sandbox);
+  - once it has spent 70% of its cap, or earlier on a small cap, so that at least US$2 is left for the finish turn. That US$2 is an estimate of one finish turn, not a measured figure.
+- A finish is recorded first and then put in the agent's inbox. If the sandbox can't be reached at that moment, the finish still stands and Mynt delivers it on its next ticks.
+- `steer_build`'s `steered: true` means Mynt queued the message, not that the agent read it. A message held back because the session was finishing shows on the timeline as not delivered.
 - The sandbox is billed while it waits, so idle time counts against the build's cap.
 - Mynt runs the agent's runner with `MYNT_AGENT_HOLD=1` and `MYNT_AGENT_IDLE_MS`, and writes its inbox items whole (a temporary name, then a rename).
 

@@ -116,7 +116,8 @@ const settle = () => {
 // idle time still counts against the build's cap.
 const HOLD = process.env.MYNT_AGENT_HOLD === "1";
 const idleSetting = Number(process.env.MYNT_AGENT_IDLE_MS);
-const IDLE_MS = Number.isFinite(idleSetting) && idleSetting >= 1 ? idleSetting : 900000;
+// setTimeout fires at once for anything over 2^31-1 ms, so longer settings are held to that.
+const IDLE_MS = Number.isFinite(idleSetting) && idleSetting >= 1 ? Math.min(idleSetting, 2147483647) : 900000;
 let finishing = !HOLD;
 let idleTimer = null;
 if (HOLD) {

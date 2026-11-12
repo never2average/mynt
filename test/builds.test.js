@@ -57,6 +57,7 @@ function fakeBoat() {
       // Mynt puts inbox items in place with a rename.
       const mv = command.match(/^mv -f '([^']+)' '([^']+)'$/);
       if (mv) {
+        if (boat.failMv) return { exitCode: 1, stdout: "", stderr: "sandbox unreachable" };
         if (!s.files.has(mv[1])) return { exitCode: 1, stdout: "", stderr: "no such file" };
         s.files.set(mv[2], s.files.get(mv[1]));
         s.files.delete(mv[1]);
@@ -664,7 +665,8 @@ async function runningSession(ctx, args = {}) {
   await ctx.builds.tick();
   return { dev, started, sbx, s: ctx.boat.sandboxes.get(sbx) };
 }
-const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
+// Finish items in place in the runner's inbox (a dot-name is one still being written, which the runner skips).
+const finishItems = (s) => [...s.files].filter(([p]) => p.startsWith(`${A}/inbox/`) && !p.startsWith(`${A}/inbox/.`) && p.endsWith("-finish.json")).map(([, v]) => JSON.parse(v));
 
 test("a session the runner finished on its own (idle) takes no more steers; nor does one finished after the steer loaded it", async () => {
   const ctx = await setup();
@@ -697,9 +699,22 @@ test("a session the runner finished on its own (idle) takes no more steers; nor 
   boat.write(sbx, `${BUILD}/job/result.json`, agentReport);
   boat.finishAgent(sbx);
   boat.write(sbx, `${A}/state.json`, { session_id: "s1", cost_usd: 0.5, turns: 3, sent: 3, last_subtype: "success", done: true, exit_code: 0, error: null, summary: "shipped", finish: "idle", undelivered: 2 });
+  // Moving on to verification fails once (a provider's passing 503), so the tick is retried: the report is made once.
+  const exec = boat.exec;
+  let failed = false;
+  boat.exec = async (id, command, opts) => {
+    if (!failed && command.includes("tar --exclude")) {
+      failed = true;
+      throw new Error('Freestyle POST /vms/vm-1/exec-await: 503 {"code":"INTERNAL_ERROR"}');
+    }
+    return exec(id, command, opts);
+  };
   await builds.tick();
+  assert.equal((await builds.get(started.id)).status, "coding", "a passing 503 is ridden out");
+  await builds.tick();
+  boat.exec = exec;
   const timeline = (await call(dev, "get_build", { build_id: started.id })).data.timeline;
-  assert.ok(timeline.some((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)));
+  assert.equal(timeline.filter((e) => /2 message\(s\) arrived while the session was finishing/.test(e.message)).length, 1);
   assert.equal((await builds.get(started.id)).status, "verifying", "and Mynt verifies the work as usual");
 });
 
@@ -711,18 +726,51 @@ test("Mynt finishes a session itself before its sandbox's time limit or its cap 
   assert.deepEqual(finishItems(s).map((f) => f.reason), ["ttl"]);
   assert.ok((await ctx.builds.get(started.id)).finish_requested_at);
 
-  // Cap: at 80% of it.
+  // Cap: at 70% of it, or earlier so US$2 is left for the finish turn (on a US$5 cap: at US$3).
   const c2 = await setup();
   const second = await runningSession(c2, { cap_usd: 5 });
-  second.s.cost = 3.9;
+  second.s.cost = 2.9;
   await c2.builds.tick();
   assert.deepEqual(finishItems(second.s), []);
-  second.s.cost = 4.1;
+  second.s.cost = 3.1;
   await c2.builds.tick();
   assert.deepEqual(finishItems(second.s).map((f) => f.reason), ["cap"]);
   await c2.builds.tick();
   assert.equal(finishItems(second.s).length, 1, "once");
   assert.ok((await c2.call(second.dev, "get_build", { build_id: second.started.id })).data.timeline.some((e) => /spent most of its cap/.test(e.message)));
+  const { sessionCapThreshold } = await import("../dist/builds.js");
+  assert.deepEqual([sessionCapThreshold(10), sessionCapThreshold(5), sessionCapThreshold(1)], [7, 3, 0]);
+
+  // The time limit counts from the sandbox, not from when the build was queued.
+  const c3 = await setup({ config: { ttlSeconds: 7200 } });
+  const third = await runningSession(c3);
+  await c3.pg.query("UPDATE financial_products.build_runs SET created_at = now() - interval '3 hours' WHERE id = $1", [third.started.id]);
+  await c3.builds.tick();
+  assert.deepEqual(finishItems(third.s), [], "an old build in a new sandbox has its sandbox's full time");
+  await c3.pg.query("UPDATE financial_products.build_runs SET sandbox_started_at = now() - interval '91 minutes' WHERE id = $1", [third.started.id]);
+  await c3.builds.tick();
+  assert.deepEqual(finishItems(third.s).map((f) => f.reason), ["ttl"]);
+});
+
+test("a finish stands even when the agent can't be reached at that moment: Mynt delivers it on the next tick", async () => {
+  const ctx = await setup();
+  const { started, s, dev } = await runningSession(ctx);
+  ctx.boat.failMv = true;
+  const r = (await ctx.call(dev, "finish_build", { build_id: started.id })).data;
+  assert.equal(r.finishing, true);
+  assert.deepEqual(finishItems(s), []);
+  let b = await ctx.builds.get(started.id);
+  assert.ok(b.finish_requested_at && !b.finish_delivered_at, "claimed, not yet delivered");
+  assert.match((await ctx.call(dev, "steer_build", { build_id: started.id, message: "One more" })).data.error, /finishing/);
+  await ctx.builds.tick();
+  assert.deepEqual(finishItems(s), [], "still unreachable: still pending");
+  ctx.boat.failMv = false;
+  await ctx.builds.tick();
+  assert.deepEqual(finishItems(s).map((f) => f.reason), ["developer"]);
+  b = await ctx.builds.get(started.id);
+  assert.ok(b.finish_delivered_at);
+  await ctx.builds.tick();
+  assert.equal(finishItems(s).length, 1, "delivered once");
 });
 
 test("BUILD_SESSION_IDLE_MS must be a sensible number of milliseconds, or the 15-minute default applies", () => {
@@ -1218,6 +1266,16 @@ test("once a session is finishing, a steer never interrupts the finish turn: it 
   assert.equal(got.filter((m) => m.type === "control_request").length, 1, "only the ordinary steer interrupted");
   const s = r.state();
   assert.deepEqual([s.finish, s.undelivered, s.last_subtype, s.summary], ["developer", 1, "success", "did: Finish the session now (shipping)"]);
+});
+
+test("a session runner holds an idle setting beyond setTimeout's range to its maximum, rather than finishing at once", async () => {
+  const r = await sessionRunner({ env: { MYNT_AGENT_IDLE_MS: "99999999999" } });
+  await r.until(() => r.state().turns === 1);
+  await new Promise((res) => setTimeout(res, 1500));
+  assert.equal(r.isExited(), false);
+  assert.equal(r.state().finish, null);
+  r.inbox({ finish: true, message: "Finish" });
+  assert.equal(await r.exit, 0);
 });
 
 test("a session runner ignores a non-numeric idle setting, skips dot-files and retries an inbox file it can't parse yet", async () => {
