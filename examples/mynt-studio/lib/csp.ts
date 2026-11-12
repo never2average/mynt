@@ -17,12 +17,17 @@ export function frameSources(raw: string | undefined, dev = false): string[] {
   return out;
 }
 
-export function contentSecurityPolicy(previewFrameSrc: string | undefined, dev = false): string {
+const NONCE = /^[A-Za-z0-9+/]{16,}={0,2}$/;
+
+// With a nonce (one per request, from proxy.ts), only scripts carrying it run, and what they
+// load ('strict-dynamic'); Next puts it on its own scripts. Eval only for the dev server.
+export function contentSecurityPolicy(previewFrameSrc: string | undefined, dev = false, nonce?: string): string {
   const frames = frameSources(previewFrameSrc, dev);
+  if (nonce !== undefined && !NONCE.test(nonce)) throw new Error("CSP nonce must be base64");
+  const scripts = nonce ? `'self' 'nonce-${nonce}' 'strict-dynamic'` : "'self'";
   return [
     "default-src 'self'",
-    // Next's inline bootstrap scripts; eval only for the dev server's hot reload.
-    `script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ""}`,
+    `script-src ${scripts}${dev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self'",

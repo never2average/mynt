@@ -14,6 +14,9 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Rendered per request, so each page carries that request's CSP nonce (proxy.ts).
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Mynt Studio",
   description: "Build apps on Mynt with Mynt's coding agent",

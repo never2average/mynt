@@ -22,9 +22,16 @@ Mynt Studio is built on [Adorable](https://github.com/freestyle-sh/Adorable) by 
 - **Sign-in** is real Mynt user authentication: OAuth with dynamic client registration and PKCE, run on the server by the MCP SDK. Tokens never reach the browser. Only people whose Mynt roles include developer (or innovator, or admin) get past the project list.
 - **Shared with mynt-chat, byte for byte:** `lib/oauth-provider.ts`, `lib/session.ts`, `lib/mynt-client.ts` and `app/api/auth/{login,callback,logout}/route.ts`. CI fails if they drift apart. Each app has its own `lib/config.ts`, `lib/app-session.ts` and `lib/session-store.ts`.
 - **Mynt tools** are called only through the `STUDIO_TOOLS` allow-list (`lib/studio-tools.ts`), which checks each tool's arguments with zod. For now it holds read-only tools only. `vm_access`, `app_run` and admin tools are never on it.
-- **Sessions** (`lib/session-store.ts`). The browser holds only a random session id, in an `httpOnly`, `SameSite=Lax` cookie that is `Secure` and `__Host-`-prefixed everywhere except plain-http localhost. The session itself (OAuth tokens, the PKCE verifier, the user's roles) lives on the server, in a hosted Redis database when one is configured, and in memory otherwise (local development and tests). Every stored value is encrypted with AES-256-GCM using `SESSION_ENCRYPTION_KEY`, and stored under a hash of the session id. Lifetimes match mynt-chat: a session that never finishes signing in expires after 10 minutes, a signed-in one after 7 days without use.
+- **Sessions** (`lib/session-store.ts`). The browser holds only a random session id, in an `httpOnly`, `SameSite=Lax` cookie that is `Secure` and `__Host-`-prefixed everywhere except plain-http localhost. The session itself (OAuth tokens, the PKCE verifier, the user's roles) lives on the server, in a hosted Redis database when one is configured, and in memory otherwise (local development and tests). Every stored value is encrypted with AES-256-GCM (full 16-byte tags only) using `SESSION_ENCRYPTION_KEY`, names the key that sealed it, and is stored under a hash of the session id. Lifetimes match mynt-chat: a session that never finishes signing in expires after 10 minutes, a signed-in one after 7 days without use; the cookie's expiry moves with the server's.
+- **Several requests at once.** Each request works on its own copy of the session, so the store guards against them undoing each other:
+  - A request that finishes after sign-out can't bring the session back: saving only replaces a stored session (Redis `SET XX`), and only sign-in creates one (`SET NX`).
+  - A request never writes older tokens over newer ones.
+  - Tokens are refreshed ahead of expiry, before calling Mynt, by one request at a time per session (a short lock in Redis, `lib/tokens.ts`); the others wait and pick up the new tokens. Refresh tokens are single-use, so two refreshes at once would otherwise sign the user out.
+  - The workspace never has two project loads in flight.
+- **Roles** come from Mynt's `whoami` and are read again every 5 minutes, so a revoked developer role takes effect without signing out. Mynt checks every call itself regardless. When Mynt stops accepting a session's sign-in mid-request, the studio answers 401 and signs the session out.
+- **Sign-in rate limit.** Starting sign-in creates a session before anyone is signed in, so each address may start it 20 times per 10 minutes (counted in Redis, in `proxy.ts`); after that it gets a 429.
 - **Previews** are framed straight from their own origins, never proxied through the studio, in an iframe with `sandbox="allow-scripts allow-forms allow-same-origin allow-popups"` (no top-level navigation) and `referrerpolicy="no-referrer"`. Only `https` URLs are framed. Preview URLs are capabilities: they're sent only to their owner's browser and never logged.
-- **Security headers:** a Content-Security-Policy whose `frame-src` is exactly `PREVIEW_FRAME_SRC` (set per request by `proxy.ts`), with `frame-ancestors 'none'`; `X-Frame-Options: DENY`; `nosniff`. Serve the studio on its own host, not on a parent domain that hosted apps share.
+- **Security headers:** a Content-Security-Policy set per request by `proxy.ts`. Scripts run only with that request's nonce (`'strict-dynamic'`, no `'unsafe-inline'` for scripts), so pages are rendered per request. `frame-src` is exactly `PREVIEW_FRAME_SRC`, and `frame-ancestors 'none'`. Also `X-Frame-Options: DENY` and `nosniff`. Serve the studio on its own host, not on a parent domain that hosted apps share.
 
 ## Settings
 
@@ -34,10 +41,14 @@ Mynt Studio is built on [Adorable](https://github.com/freestyle-sh/Adorable) by 
 | `APP_URL` | The studio's public URL. Sign-in returns to `$APP_URL/api/auth/callback`. |
 | `PREVIEW_FRAME_SRC` | The origins previews are served from, space-separated `https` origins with optional wildcards, like `https://*.preview.example`. Unset, no preview can be shown. |
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | The Redis database for sessions. Vercel sets these when you connect a Redis database to the project. Upstash's own names, `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, work too. |
-| `SESSION_ENCRYPTION_KEY` | 32 random bytes, base64-encoded, that encrypt the stored sessions. Required with Redis. Changing it signs everyone out. |
+| `SESSION_ENCRYPTION_KEY` | 32 random bytes, base64-encoded, that encrypt the stored sessions. Required with Redis. |
+| `SESSION_ENCRYPTION_KEYS_OLD` | Optional: earlier keys, comma-separated, that still decrypt sessions sealed before a rotation (below). |
+| `SESSION_STORE` | Optional: `memory` allows the in-memory store with `NODE_ENV=production` (one local process only, never on Vercel). |
 | `MYNT_OAUTH_SCOPE` | Optional: the scopes to ask for. |
 
-The Redis client is [`@upstash/redis`](https://github.com/upstash/redis-js), Upstash's official client, which talks to Redis over HTTPS and so works from serverless functions. Without Redis settings, sessions stay in the server's memory, which is fine for one local process; on Vercel the studio refuses to start that way, because its function instances share no memory.
+The Redis client is [`@upstash/redis`](https://github.com/upstash/redis-js), Upstash's official client, which talks to Redis over HTTPS and so works from serverless functions. Without Redis settings, sessions stay in the server's memory, which is fine for `npm run dev`. On Vercel the studio refuses to start that way, because its function instances share no memory, and in production it refuses too unless `SESSION_STORE=memory` says it's wanted.
+
+**Rotating the encryption key.** Make a new key with `openssl rand -base64 32`. Set it as `SESSION_ENCRYPTION_KEY`, put the old one in `SESSION_ENCRYPTION_KEYS_OLD`, and redeploy. Existing sessions keep working and are re-sealed with the new key as they're used. After 7 days, every session sealed with the old key has expired, and the old key can be removed. Removing it sooner signs out whoever it still covers.
 
 ## Run it locally
 
