@@ -47,13 +47,13 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   // scheme://user:password@host keeps the user (which may be empty) and host.
   [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:@/]*:)[^\s@/]+@/gi, `$1${R}@`],
   // Authorization: Bearer … (a header, curl -H, or JSON), but not prose such as "authorization: required".
-  [new RegExp(String.raw`\b(authorization["']?${SP}[:=]${SP}["']?(?:(?:bearer|basic|token)[ \t]+)?)(?!(?:bearer|basic|token|required|optional|missing|invalid|denied|failed|expired|enabled|disabled|header|none|null|true|false)\b)[A-Za-z0-9._~+/=-]{6,}`, "gi"), `$1${R}`],
+  [new RegExp(String.raw`\b(authorization["']?${SP}[:=]${SP}["']?(?:(?:bearer|basic|token)[ \t]+)?)(?!(?:bearer|basic|token|required|optional|missing|invalid|denied|failed|expired|enabled|disabled|header|none|null|true|false)(?![A-Za-z0-9._~+/=-]))[A-Za-z0-9._~+/=-]{6,}`, "gi"), `$1${R}`],
 ];
 
 // NAME=value, `name: value` and "name": "value": a name that says it's secret (any case; db_pass and PASS included),
-// then its value: the whole quoted span (any length; an unclosed quote runs to the end of its line) or an unquoted run
-// of at least 6 characters. The scan looks for the end of such a name (a secret word and a separator), then walks back
-// to the name's start.
+// then its value: the whole quoted span (any length; an unclosed quote runs to the end of its line, leaving its \r\n)
+// or an unquoted run of at least 6 characters (through any quote inside it, so abc"defghijkl" goes whole). The scan
+// looks for the end of such a name (a secret word and a separator), then walks back to the name's start.
 //
 // Linearity: every value the scan reads is consumed (redacted or passed over as a whole), and the checks that skip a
 // value look only at its first characters, or at a bounded run, before reading it. So no text is read more than a
@@ -62,7 +62,7 @@ const NAME_END = new RegExp(String.raw`(token|secret|pass(?:wd|word|phrase)?|key
 // Names are at most 64 characters, which bounds the walk back. Longer runs are identifiers or data, not names.
 const NAME_MAX = 64;
 const isNameChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 46 || c === 45; // [A-Za-z0-9_.-]
-const VALUE = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|["'][^\n]*|[^\s"']{6,}/y;
+const VALUE = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|["'][^\r\n]*|(?=\S{6})[^\s"']{1,5}["']\S*|[^\s"']{6,}/y;
 const SECRET_NAME = /(?:token|secret|password|passwd|passphrase|api[_-]?key|private[_-]?key|secret[_-]?key|access[_-]?key|auth[_-]?key|credentials?)$|(?:^|[_.])pass$/i;
 // Upper-case names ending in _KEY (SENDGRID_KEY=…) are secret too, except public keys.
 const isSecretName = (name: string) => SECRET_NAME.test(name) || (/^[A-Z0-9_]*[A-Z0-9]_KEY$/.test(name) && !/PUB(?:LIC)?_KEY$/.test(name));
@@ -104,7 +104,7 @@ function scrubAssignments(text: string): string {
     NAME_END.lastIndex = at + value.length;
     const q = value[0] === '"' || value[0] === "'" ? value[0] : "";
     if (q && value.length === 2 && value[1] === q) continue; // empty
-    if (/^pass$/i.test(name) && /^\d+$/.test(value)) continue; // a test count (pass: 12)
+    if (name === "pass" && /^\d+$/.test(value)) continue; // a test count (pass: 12); PASS=12345678 is a password
     out += text.slice(last, at) + (!q ? R : value.length > 1 && value.endsWith(q) ? `${q}${R}${q}` : `${q}${R}`);
     last = at + value.length;
   }
