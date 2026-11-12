@@ -272,3 +272,40 @@ test("public sign-up: verified strangers join as consumers through an invite; re
     close();
   }
 });
+
+test("Mynt's own apps are registered with Clerk with no consent screen: confidential, PKCE, exact redirect; never a duplicate", async () => {
+  const { ClerkAdmin } = await import("../dist/auth.js");
+  const admin = new ClerkAdmin("sk_test_x");
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  let existing = [];
+  globalThis.fetch = async (url, init = {}) => {
+    sent.push({ url: String(url), method: init.method, body: init.body ? JSON.parse(init.body) : null });
+    if (init.method === "GET") return new Response(JSON.stringify({ data: existing }), { status: 200 });
+    return new Response(JSON.stringify({ client_id: "oauth_cid", client_secret: "oauth_secret", consent_screen_enabled: false }), { status: 200 });
+  };
+  try {
+    const app = await admin.firstPartyApp("mynt-studio", "https://studio.example/api/auth/callback");
+    assert.deepEqual(app, { client_id: "oauth_cid", client_secret: "oauth_secret", consent_screen_enabled: false });
+    const created = sent.find((s) => s.method === "POST");
+    assert.equal(created.url, "https://api.clerk.com/v1/oauth_applications");
+    assert.deepEqual(created.body, {
+      name: "mynt-studio",
+      redirect_uris: ["https://studio.example/api/auth/callback"],
+      scopes: "profile email",
+      public: false,
+      pkce_required: true,
+      consent_screen_enabled: false,
+    });
+    // Only exact https redirect URIs (http just for localhost); a name already registered is refused.
+    await assert.rejects(admin.firstPartyApp("x", "http://studio.example/cb"), /must be https/);
+    await assert.rejects(admin.firstPartyApp("x", "https://studio.example/cb?next=/"), /must be exact/);
+    assert.ok(await admin.firstPartyApp("dev", "http://localhost:3000/api/auth/callback"));
+    existing = [{ name: "mynt-studio", client_id: "oauth_cid" }];
+    const before = sent.filter((s) => s.method === "POST").length;
+    await assert.rejects(admin.firstPartyApp("mynt-studio", "https://studio.example/api/auth/callback"), /already exists/);
+    assert.equal(sent.filter((s) => s.method === "POST").length, before, "nothing created");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

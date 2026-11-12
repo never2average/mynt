@@ -165,6 +165,34 @@ export class ClerkAdmin {
 
   // Idempotent: allowlist on, dynamic client registration (how MCP clients register), PKCE required,
   // and audience claims so a token is bound to the resource it was issued for.
+  // Mynt's own apps (the studio, the chat app) as pre-registered OAuth applications with no consent screen: a person
+  // signing in to Mynt's own app isn't asked to let Mynt access Mynt. Only an operator registers one, by name and exact
+  // redirect URI; each is a confidential client (its secret stays on that app's server) with PKCE required. Clients
+  // that register themselves (MCP clients, any third party) always get the consent screen: Clerk doesn't let a
+  // dynamically registered application turn it off, and nothing here touches them.
+  // Refuses a name that's already registered (its secret can't be read back; rotate it in Clerk's dashboard).
+  async firstPartyApp(name: string, redirectUri: string): Promise<{ client_id: string; client_secret: string; consent_screen_enabled: boolean }> {
+    const u = new URL(redirectUri);
+    const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+    if (u.protocol !== "https:" && !(local && u.protocol === "http:")) throw new Error("The redirect URI must be https (http only for localhost)");
+    if (u.hash || u.search) throw new Error("The redirect URI must be exact: no query or fragment");
+    const existing = (await this.call("GET", "/oauth_applications?limit=500")) as { data?: { name?: string; client_id?: string }[] } | { name?: string }[];
+    const list = Array.isArray(existing) ? existing : (existing.data ?? []);
+    const same = list.find((a) => a.name === name);
+    if (same) throw new Error(`An OAuth application named '${name}' already exists (${(same as { client_id?: string }).client_id ?? "client id unknown"}); rotate its secret in Clerk's dashboard, or choose another name`);
+    const app = (await this.call("POST", "/oauth_applications", {
+      name,
+      redirect_uris: [redirectUri],
+      scopes: "profile email",
+      public: false,
+      pkce_required: true,
+      consent_screen_enabled: false,
+    })) as { client_id?: string; client_secret?: string; consent_screen_enabled?: boolean };
+    if (!app.client_id || !app.client_secret) throw new Error("Clerk didn't return a client id and secret");
+    // Kept on (an older instance or plan): the caller still gets the secret, and says so.
+    return { client_id: app.client_id, client_secret: app.client_secret, consent_screen_enabled: app.consent_screen_enabled !== false };
+  }
+
   // Returns warnings: Clerk's allowlist is a second layer (the invites table always decides), so a plan
   // without it doesn't stop the setup.
   async setup(opts: { allowlist: boolean } = { allowlist: true }): Promise<string[]> {
