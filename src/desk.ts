@@ -86,6 +86,8 @@ const TABLES = `
     finished_at timestamptz
   );
   CREATE INDEX IF NOT EXISTS desk_jobs_entity_idx ON financial_products.desk_jobs (entity_id, created_at DESC);
+  -- The workspace repository a job started on, approved then: every later use must be that same, still approved one.
+  ALTER TABLE financial_products.desk_jobs ADD COLUMN IF NOT EXISTS workspace_repository text;
   CREATE TABLE IF NOT EXISTS financial_products.desk_reports (
     id uuid PRIMARY KEY,
     product_id text NOT NULL,
@@ -181,6 +183,20 @@ export class DeskService {
     return r ? { repository: r.repository as string, installation_id: Number(r.installation_id), approval: r.approval as string, created_at: r.created_at } : null;
   }
 
+  // The workspace a job may use: the firm's, approved, and the very repository the job started on. A job queued before
+  // this check existed is pinned to the approved workspace it finds first. A firm that reconnected its workspace to
+  // another repository mid-job fails the job: it never gets a token or a pull request on the new one.
+  async jobWorkspace(j: Row) {
+    const ws = await this.approvedWorkspace(j.entity_id as string);
+    if (!j.workspace_repository) {
+      await this.db.query("UPDATE financial_products.desk_jobs SET workspace_repository = $2 WHERE id = $1 AND workspace_repository IS NULL", [j.id, ws.repository]);
+      j.workspace_repository = ws.repository;
+    }
+    if (ws.repository !== j.workspace_repository)
+      throw new Error(`The firm's workspace is now ${ws.repository}, not ${String(j.workspace_repository)} this job started on; start the job again`);
+    return ws;
+  }
+
   // The firm's workspace, only once an admin has approved it: no job, exploration or token without that.
   async approvedWorkspace(entityId: string) {
     const ws = await this.workspace(entityId);
@@ -261,7 +277,7 @@ export class DeskService {
     if (!this.enabled) throw new Error("The product desk isn't enabled on this Mynt yet");
     if (o.kind === "agent" && !this.agentsEnabled) throw new Error("Desk agents aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    await this.approvedWorkspace(user.entity_id);
+    const ws = await this.approvedWorkspace(user.entity_id);
     let termsH: string | null = null;
     if (o.product_id) {
       const p = await this.store.getProduct(o.product_id);
@@ -274,9 +290,9 @@ export class DeskService {
     if ((await this.monthCommitted(user.entity_id)) + cap > this.config.monthlyCapUsd) throw new Error(`Your firm's monthly desk budget of US$${this.config.monthlyCapUsd} is used up`);
     const id = randomUUID();
     await this.db.query(
-      `INSERT INTO financial_products.desk_jobs (id, entity_id, user_id, product_id, kind, goal, model, status, terms_hash, escalate, cap_usd, agent_cap_usd)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11)`,
-      [id, user.entity_id, user.id, o.product_id ?? null, o.kind, o.goal ?? null, o.model ?? null, termsH, o.escalate ?? false, cap, o.kind === "run" ? (o.cap_usd ?? null) : null],
+      `INSERT INTO financial_products.desk_jobs (id, entity_id, user_id, product_id, kind, goal, model, status, terms_hash, escalate, cap_usd, agent_cap_usd, workspace_repository)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11, $12)`,
+      [id, user.entity_id, user.id, o.product_id ?? null, o.kind, o.goal ?? null, o.model ?? null, termsH, o.escalate ?? false, cap, o.kind === "run" ? (o.cap_usd ?? null) : null, ws.repository],
     );
     return (await this.job(id))!;
   }
@@ -313,7 +329,7 @@ export class DeskService {
 
   // A sandbox job that clones the workspace (at `ref`) and runs the desk runner, credentials removed first.
   private async startRun(j: Row, sandbox: string, ref: string | null) {
-    const ws = (await this.workspace(j.entity_id as string))!;
+    const ws = await this.jobWorkspace(j);
     const p = (await this.store.getProduct(j.product_id as string))!;
     const t = (await this.terms(j.product_id as string))!;
     return startRepoRun(this.sandboxes!, this.repos!, sandbox, {
@@ -371,7 +387,7 @@ export class DeskService {
     if (j.status === "queued") {
       let env: Record<string, string> = {};
       if (j.kind === "agent") {
-        const ws = await this.approvedWorkspace(j.entity_id as string);
+        const ws = await this.jobWorkspace(j);
         const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
         env = { GITHUB_REPOSITORY: ws.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/desk-${String(j.id).slice(0, 8)}` };
       }
@@ -464,7 +480,7 @@ export class DeskService {
   }
 
   private async openPr(j: Row, summary: string, o: Extract<DeskOutcome, { outcome: "ran" }> | null) {
-    const ws = (await this.workspace(j.entity_id as string))!;
+    const ws = await this.jobWorkspace(j);
     const report = o
       ? [
           `**Verdict (run by Mynt, commit ${o.commit?.slice(0, 7) ?? "?"}):** ${o.report.verdict}: ${o.report.summary}`,

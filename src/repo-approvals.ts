@@ -30,13 +30,16 @@ export const approvalColumns = (table: string) => `
   ALTER TABLE ${T}.${table} ADD COLUMN IF NOT EXISTS decided_at timestamptz;
 `;
 
-// For an upsert's ON CONFLICT: an approved connection stays approved when the same repository is connected again;
-// anything else (a new repository, or one rejected or still pending) is a new request.
-export const reapprovalOnConflict = (table: string, sameRepository = "TRUE") =>
-  `approval = CASE WHEN ${table}.approval = '${APPROVED}' AND ${sameRepository} THEN '${APPROVED}' ELSE '${PENDING}' END,
-   approval_note = CASE WHEN ${table}.approval = '${APPROVED}' AND ${sameRepository} THEN ${table}.approval_note END,
-   decided_by = CASE WHEN ${table}.approval = '${APPROVED}' AND ${sameRepository} THEN ${table}.decided_by END,
-   decided_at = CASE WHEN ${table}.approval = '${APPROVED}' AND ${sameRepository} THEN ${table}.decided_at END`;
+// For an upsert's ON CONFLICT (whose SET reads the row's old values): an approved connection stays approved only when
+// the same repository is connected again through the same installation; anything else (a new repository or
+// installation, or one rejected or still pending) is a new request. Approvals don't expire (this is a stopgap).
+export const reapprovalOnConflict = (table: string, sameRepository = "TRUE") => {
+  const same = `${table}.approval = '${APPROVED}' AND ${sameRepository} AND ${table}.installation_id = EXCLUDED.installation_id`;
+  return `approval = CASE WHEN ${same} THEN '${APPROVED}' ELSE '${PENDING}' END,
+   approval_note = CASE WHEN ${same} THEN ${table}.approval_note END,
+   decided_by = CASE WHEN ${same} THEN ${table}.decided_by END,
+   decided_at = CASE WHEN ${same} THEN ${table}.decided_at END`;
+};
 
 // Throws, saying why, unless the connection is approved.
 export function requireApproved(approval: string | null | undefined, repository: string) {
@@ -99,6 +102,7 @@ async function requests(store: Store, repos: RepoAccess | null, status: string |
       repository: r.repository as string,
       status: r.approval as string,
       note: (r.approval_note as string | null) ?? null,
+      installation_id: Number(r.installation_id), // with repository, what approve and reject must name
       requested_by: { user_id: (r.user_id as string | null) ?? null, name: (r.name as string | null) ?? null, firm: (r.firm as string | null) ?? null },
       installation_account: account, // whose account the app's installation is on: { login, type }
       requested_at: new Date(String(r.created_at)).toISOString(),
@@ -107,18 +111,21 @@ async function requests(store: Store, repos: RepoAccess | null, status: string |
   return out.sort((a, b) => a.requested_at.localeCompare(b.requested_at));
 }
 
-async function decide(store: Store, adminId: string, id: string, decision: typeof APPROVED | typeof REJECTED, note: string) {
+// Applies only to exactly the request the admin saw: the same row, repository and installation. A connection changed
+// since (a firm reconnecting its workspace to another repository keeps its row) isn't touched. Approving needs it
+// pending; rejecting also withdraws an approval.
+async function decide(store: Store, adminId: string, id: string, repository: string, installationId: number, decision: typeof APPROVED | typeof REJECTED, note: string) {
+  const from = decision === APPROVED ? [PENDING] : [PENDING, APPROVED];
   for (const [table, who] of [
     ["repo_connections", "developer_id"],
     ["desk_workspaces", "connected_by"],
   ] as const) {
     const r = (await store.db
-      .query(`UPDATE ${T}.${table} SET approval = $2, approval_note = $3, decided_by = $4, decided_at = now() WHERE id::text = $1 RETURNING repository, ${who} AS user_id`, [
-        id,
-        decision,
-        note,
-        adminId,
-      ])
+      .query(
+        `UPDATE ${T}.${table} SET approval = $2, approval_note = $3, decided_by = $4, decided_at = now()
+         WHERE id::text = $1 AND repository = $5 AND installation_id = $6 AND approval = ANY($7) RETURNING repository, ${who} AS user_id`,
+        [id, decision, note, adminId, repository.toLowerCase(), installationId, from],
+      )
       .catch(noTable)).rows[0] as Row | undefined;
     if (!r) continue;
     const kind = table === "repo_connections" ? "developer" : "desk_workspace";
@@ -134,7 +141,7 @@ async function decide(store: Store, adminId: string, id: string, decision: typeo
       ]);
     return { id, kind, repository: r.repository as string, status: decision };
   }
-  throw new Error(`No repository connection with id '${id}'`);
+  throw new Error(`No ${decision === APPROVED ? "pending " : ""}connection '${id}' to ${repository} through installation ${installationId}: it may have changed since it was listed; list again`);
 }
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -161,13 +168,13 @@ export function registerRepoApprovalAdminTools(server: McpServer, store: Store, 
       name,
       {
         title,
-        description: `Admin: ${decision === APPROVED ? "let" : "stop"} Mynt ${decision === APPROVED ? "give out" : "giving out"} tokens for this connection (id from list_repository_requests). Audited; the person who asked is told.`,
-        inputSchema: { id: z.string().uuid(), [field]: z.string().min(3).max(500) },
+        description: `Admin: ${decision === APPROVED ? "let" : "stop"} Mynt ${decision === APPROVED ? "give out" : "giving out"} tokens for this connection. Name it exactly as list_repository_requests showed it (id, repository, installation_id): if it changed since, nothing is ${decision === APPROVED ? "approved" : "rejected"}. Audited; the person who asked is told.`,
+        inputSchema: { id: z.string().uuid(), repository: z.string().min(3).max(200), installation_id: z.number().int().positive(), [field]: z.string().min(3).max(500) },
         annotations: decision === REJECTED ? { destructiveHint: true } : {},
       },
-      async (args: Record<string, string>) => {
+      async (args: Record<string, string | number>) => {
         try {
-          return json(await decide(store, adminId, args.id, decision, args[field]));
+          return json(await decide(store, adminId, String(args.id), String(args.repository), Number(args.installation_id), decision, String(args[field])));
         } catch (e) {
           return fail((e as Error).message);
         }

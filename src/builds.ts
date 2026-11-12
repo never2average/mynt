@@ -12,7 +12,7 @@ import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_POR
 import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
 import { isManagedRepository, refuseManagedRepository, type GitRepoHost } from "./git-host.js";
-import { APPROVED, PENDING, approvalColumns, connectionApproval, reapprovalOnConflict, requireApproved } from "./repo-approvals.js";
+import { APPROVED, PENDING, REJECTED, approvalColumns, connectionApproval, reapprovalOnConflict, requireApproved } from "./repo-approvals.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
@@ -281,7 +281,7 @@ ${APP_REPOSITORIES_DDL}
   ${approvalColumns("repo_connections")}
   -- Mynt's own managed repositories need no admin: their connections are approved (connectManaged approves new ones).
   UPDATE financial_products.repo_connections SET approval = '${APPROVED}'
-  WHERE approval <> '${APPROVED}' AND (repository IN (SELECT repository FROM financial_products.managed_repository_names)
+  WHERE approval = '${PENDING}' AND (repository IN (SELECT repository FROM financial_products.managed_repository_names)
     OR repository IN (SELECT managed_repository FROM financial_products.app_repositories WHERE managed_repository IS NOT NULL));
 `;
 
@@ -1615,6 +1615,9 @@ export class BuildService {
       );
       commit = head.stdout.trim();
       if (head.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(commit)) return end("blocked", "The pushed branch doesn't match the verified source");
+      // The connection may have been rejected while the build ran: no pull request through it then.
+      const approval = await connectionApproval(this.db, b.developer_id, b.repository);
+      if (approval !== APPROVED) return end("blocked", approval === REJECTED ? `An admin rejected access to ${b.repository} while the build ran; no pull request was opened` : `Waiting for an admin to approve access to ${b.repository}; no pull request was opened`);
       const installation = await this.installation(b.developer_id, b.repository);
       pr = await this.repos.openPullRequest(b.repository, installation!, {
         head: b.branch,

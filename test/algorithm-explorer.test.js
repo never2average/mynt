@@ -375,6 +375,7 @@ async function setup({ approve = true } = {}) {
     await createServer(store, user, { desk, explore }).connect(s);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(c);
+    client.user = user; // whose client it is, for the harness's auto-approval
     return client;
   };
   const call = async (client, name, args = {}) => {
@@ -386,7 +387,7 @@ async function setup({ approve = true } = {}) {
       data = { error: res.content[0].text };
     }
     if (approve && name === "connect_desk_repository" && data.connected)
-      await store.db.query("UPDATE financial_products.desk_workspaces SET approval = 'approved' WHERE repository = $1", [data.connected]);
+      await store.db.query("UPDATE financial_products.desk_workspaces SET approval = 'approved' WHERE entity_id = $1 AND repository = $2", [client.user.entity_id, data.connected]);
     return { isError: res.isError ?? false, data };
   };
   const innovator = async (name) => {
