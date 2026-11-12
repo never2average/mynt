@@ -90,10 +90,26 @@ session endpoint). You own the final decision: if a reviewer and an engineer dis
 At each phase run `python3 scripts/report_status.py <phase> "<one line>"`. The phases are `coding`, `auditing`,
 `checking`, `previewing` and `pushing`. The developer watches this.
 
+## Session mode (when `build.mode` is `"session"`)
+The developer works with you one request at a time, as in a chat, and you keep your context between requests.
+- **First message:** `goal` is the first request. Do step 1 for it (plan and code, with tests), then run
+  `python3 scripts/report_status.py coding "Waiting for your next message"` and end your turn with a short
+  summary of what you did. Don't run steps 2 to 6 yet.
+- **Each later message** is the developer's next request (they may also edit files themselves: check
+  `git status` first). Do it the same way, then report `coding` "Waiting for your next message" again and end your
+  turn. Commit as you go on `build.branch`, but don't push until you finish.
+- **Finishing:** when a message tells you to finish the session (the developer pressed ship, or the session has
+  been idle too long), run steps 2 to 6 on the work so far, then stop. Mynt then verifies the build in a clean
+  sandbox, as with any build; you never decide whether it ships.
+- Your messages and commands are shown to the developer as you work: keep the summaries short and plain.
+
 ## Steps
 1. **Plan and code** (phase `coding`).
    - If `build.repository` is set, clone it into `~/workspace/app` and create `build.branch`. Authenticate git
      with `$GITHUB_TOKEN` through a credential helper, never in the URL.
+   - If `build.base` is set, this build continues an earlier one: create `build.branch` from `build.base.branch`
+     (at `build.base.commit_sha` when it's set), not from the default branch. That earlier work is the starting
+     point; build on it. If that branch isn't there, stop and say so in `job/result.json`'s `notes`.
    - Otherwise start from `templates/mynt-app/` in `~/workspace/app` (`python3 scripts/scaffold_app.py ~/workspace/app`, then the `scaffold` skill).
    - `architect` plans; the engineers build their parts with tests; `compliance-reviewer` reviews until clean.
    - **Live preview.** Once your `npm install` has finished (and the SDK is built), Mynt starts the app's dev

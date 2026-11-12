@@ -90,6 +90,8 @@ export async function launchAgent(
     workspace?: string; // a Mynt workspace to load as the agent's working directory
     jobFiles?: Record<string, string>; // job data, by path relative to the workspace (e.g. job/case.json)
     model?: string; // instead of the deployment's model (the proxy enforces it for the run's token)
+    runnerEnv?: Record<string, string>; // the runner's own settings (MYNT_AGENT_HOLD, MYNT_AGENT_IDLE_MS), never secrets
+    finishPrompt?: string; // a held session's last message, when it finishes or goes idle
   },
 ) {
   const budgetUsd = Math.max(0.5, Math.floor(o.budgetUsd * 100) / 100);
@@ -100,11 +102,15 @@ export async function launchAgent(
     if (boat.writeFiles) await boat.writeFiles(sandbox, files);
     else for (const [path, content] of Object.entries(files)) await boat.writeFile(sandbox, path, content);
   }
-  const run = { prompt: o.prompt, cwd, model: o.model ?? config.model, budgetUsd, version: CLAUDE_CODE_VERSION };
+  const run = { prompt: o.prompt, cwd, model: o.model ?? config.model, budgetUsd, version: CLAUDE_CODE_VERSION, ...(o.finishPrompt ? { finishPrompt: o.finishPrompt } : {}) };
   await boat.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, AGENT_RUNNER);
   await boat.writeFile(sandbox, `${AGENT_DIR}/config.json`, JSON.stringify(run));
   await boat.writeFile(sandbox, `${AGENT_DIR}/auth.json`, JSON.stringify(agentAuth(config, o.token, { mcp: o.mcp })));
-  const started = await boat.exec(sandbox, `node ${AGENT_DIR}/runner.mjs ${AGENT_DIR} >${AGENT_DIR}/runner.log 2>&1`, { detached: true });
+  const env = Object.entries(o.runnerEnv ?? {})
+    .filter(([k, v]) => /^MYNT_AGENT_[A-Z_]+$/.test(k) && /^[\w.-]*$/.test(v))
+    .map(([k, v]) => `${k}=${v} `)
+    .join("");
+  const started = await boat.exec(sandbox, `${env}node ${AGENT_DIR}/runner.mjs ${AGENT_DIR} >${AGENT_DIR}/runner.log 2>&1`, { detached: true });
   if (started.processId === undefined) throw new Error("Couldn't start the agent");
   return String(started.processId);
 }

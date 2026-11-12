@@ -1,28 +1,25 @@
 import { randomBytes } from "node:crypto";
 import type { OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
-import type Anthropic from "@anthropic-ai/sdk";
-import type { TranscriptItem } from "./events";
+import { newAppState, type AppState } from "./app-session";
 
 // Everything the server keeps for one browser. None of it is ever sent to the browser: the
 // browser only holds the random session id in an httpOnly cookie.
-export interface Session {
+//
+// session.ts, oauth-provider.ts, mynt-client.ts and app/api/auth/* are shared, byte for byte, by
+// the example apps (CI diffs them). Each app has its own store with the same methods (Mynt
+// Studio's keeps sessions in Redis), and keeps what only it needs in its lib/app-session.ts.
+export interface Session extends AppState {
   id: string;
   createdAt: number;
   lastSeen: number;
   tokens?: OAuthTokens;
   codeVerifier?: string;
   oauthState?: string; // CSRF check between /api/auth/login and /api/auth/callback
-  history: Anthropic.Beta.BetaMessageParam[]; // the chat with Claude, append-only
-  transcript: TranscriptItem[]; // what the user has seen, so a reload can redraw it
-  accepted: string[]; // product ids the user enrolled in from this chat's cards
-  sentRequests: string[]; // ids of proposed product requests the user sent to Mynt
-  pendingEvents: string[]; // app events (accept, request) for Claude, sent with the next message
-  busy?: boolean; // one chat turn, accept or request at a time per session
-  userId?: string; // the signed-in Mynt user (from whoami), for the daily message cap
-  roles?: string[]; // their effective Mynt roles (from whoami), refreshed when /developer loads
+  busy?: boolean; // one state-changing request at a time per session
+  userId?: string; // the signed-in Mynt user (from whoami)
+  roles?: string[]; // their effective Mynt roles (from whoami)
 }
 
-export const SESSION_COOKIE = "mynt_chat_sid";
 const SESSION_ID = /^[A-Za-z0-9_-]{43}$/; // 32 random bytes, base64url
 
 // A server-side session store.
@@ -50,7 +47,7 @@ export class SessionStore {
     while (this.sessions.size >= this.maxSessions) this.evictOne();
     const id = randomBytes(32).toString("base64url");
     const t = this.now();
-    const session: Session = { id, createdAt: t, lastSeen: t, history: [], transcript: [], accepted: [], sentRequests: [], pendingEvents: [] };
+    const session: Session = { ...newAppState(), id, createdAt: t, lastSeen: t };
     this.sessions.set(id, session);
     return session;
   }
@@ -67,7 +64,11 @@ export class SessionStore {
     return session;
   }
 
-  // After sign-in: a new id holding the old session's tokens, with an empty chat. The old id
+  // Sessions live in this Map, so changes made to one are already kept. The shared routes call
+  // save() anyway, for stores that keep sessions elsewhere (Mynt Studio's Redis store).
+  save(_session: Session): void {}
+
+  // After sign-in: a new id holding the old session's tokens, with fresh app state. The old id
   // stops working, so a session id planted before sign-in is useless after it.
   rotate(old: Session): Session {
     const fresh = this.create();
@@ -117,8 +118,8 @@ export class SessionStore {
 
 // One store per server process. Kept on globalThis so Next's dev-mode module reloads don't
 // drop everyone's session.
-const globalStore = globalThis as typeof globalThis & { __myntChatSessions?: SessionStore };
+const globalStore = globalThis as typeof globalThis & { __myntSessions?: SessionStore };
 export function sessionStore(): SessionStore {
-  globalStore.__myntChatSessions ??= new SessionStore();
-  return globalStore.__myntChatSessions;
+  globalStore.__myntSessions ??= new SessionStore();
+  return globalStore.__myntSessions;
 }

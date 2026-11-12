@@ -28,6 +28,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 | "Change hosting" | `src/hosting.ts`, `src/freestyle.ts`, `src/compose.ts` | `test/hosting.test.js` |
 | "Change agent sandboxes" | `src/boat.ts`, `src/freestyle-sandboxes.ts`, `src/agent-host.ts` | `test/freestyle-sandboxes.test.js`, `test/builds.test.js` |
 | "Change the sample chat app or developer console" | `examples/mynt-chat/` | `cd examples/mynt-chat && npx vitest run && npx tsc --noEmit` |
+| "Change Mynt Studio" (the chat-to-build web app, built on Adorable) | `examples/mynt-studio/` (its README lists what was changed from Adorable; sign-in files are shared with mynt-chat) | `cd examples/mynt-studio && npx vitest run && npx tsc --noEmit`; CI's `examples` job also diffs the shared sign-in files |
 | "What needs attention in production?" | the `ops_status` admin tool | |
 
 ## How to check your work

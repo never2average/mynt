@@ -2,11 +2,19 @@ import { cookies } from "next/headers";
 import type { NextResponse } from "next/server";
 import { appUrl, oauthRedirectUrl, oauthScope, secureCookies } from "./config";
 import { SessionOAuthProvider } from "./oauth-provider";
-import { SESSION_COOKIE, sessionStore, type Session } from "./session-store";
+import { SESSION_COOKIE } from "./app-session";
+import { sessionStore, type Session } from "./session-store";
+
+// Over https the cookie is __Host- prefixed: the browser then only accepts it Secure, for path
+// "/" and with no Domain, so no other host (a sibling subdomain included) can set or read it.
+// Plain http on localhost can't carry a Secure cookie, so local development uses the bare name.
+export function sessionCookieName(): string {
+  return secureCookies() ? `__Host-${SESSION_COOKIE}` : SESSION_COOKIE;
+}
 
 export async function currentSession(): Promise<Session | undefined> {
   const jar = await cookies();
-  return sessionStore().get(jar.get(SESSION_COOKIE)?.value);
+  return sessionStore().get(jar.get(sessionCookieName())?.value);
 }
 
 export async function currentOrNewSession(): Promise<{ session: Session; isNew: boolean }> {
@@ -16,7 +24,7 @@ export async function currentOrNewSession(): Promise<{ session: Session; isNew: 
 }
 
 export function setSessionCookie(res: NextResponse, session: Session): void {
-  res.cookies.set(SESSION_COOKIE, session.id, {
+  res.cookies.set(sessionCookieName(), session.id, {
     httpOnly: true,
     secure: secureCookies(),
     sameSite: "lax", // sent on the top-level redirect back from the authorization server
@@ -26,7 +34,7 @@ export function setSessionCookie(res: NextResponse, session: Session): void {
 }
 
 export function clearSessionCookie(res: NextResponse): void {
-  res.cookies.set(SESSION_COOKIE, "", { httpOnly: true, secure: secureCookies(), sameSite: "lax", path: "/", maxAge: 0 });
+  res.cookies.set(sessionCookieName(), "", { httpOnly: true, secure: secureCookies(), sameSite: "lax", path: "/", maxAge: 0 });
 }
 
 // State-changing requests must come from this app's own pages. SameSite=Lax already keeps the
@@ -34,13 +42,6 @@ export function clearSessionCookie(res: NextResponse): void {
 export function fromOwnOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
   return origin === null || origin === appUrl().origin;
-}
-
-// Tells Claude about something the user did outside the chat (tapped Accept, sent a
-// request). Queued and sent with the next message rather than written into the history now, so
-// it can never land in the middle of a turn's tool calls.
-export function queueAppEvent(session: Session, text: string): void {
-  session.pendingEvents.push(`[App event, not typed by the user] ${text}`);
 }
 
 export function oauthProviderFor(session: Session): SessionOAuthProvider {

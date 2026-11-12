@@ -8,8 +8,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { accessStatus, productEntity } from "./access.js";
 import type { BoatClient } from "./boat.js";
-import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, shellQuote } from "./boxes.js";
-import type { Db } from "./db.js";
+import { BOX_OUTPUT_LIMIT, BOX_TIMEOUT_MAX, boxOutput, EDITOR_CONFIG, EDITOR_PORT, editorCommand, editorConfig, redact, shellQuote } from "./boxes.js";
+import { inTransaction, type Db } from "./db.js";
 import type { RepoAccess } from "./github.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
@@ -44,6 +44,21 @@ export type BuildStatus = (typeof BUILD_STATUSES)[number];
 const TERMINAL: BuildStatus[] = ["succeeded", "blocked", "failed", "stopped", "over_budget"];
 const AGENT_PHASES: BuildStatus[] = ["coding", "auditing", "checking", "previewing", "pushing"];
 
+// Session builds: how long one waits idle for the developer's next message before it finishes on its own, and the
+// message that finishes it (sent by finish_build, or by the runner when idle). Finishing ships the work the usual
+// way, so nothing is lost: Mynt then verifies it exactly as any build.
+export const SESSION_IDLE_MS = 15 * 60 * 1000;
+// Mynt finishes a session itself this long before its sandbox's time limit, or once it has spent this share of its
+// cap, so the work is shipped rather than lost when the sandbox ends or the build goes over budget.
+export const SESSION_TTL_MARGIN_S = 30 * 60;
+export const SESSION_CAP_SHARE = 0.8;
+const sessionIdleMs = (v: string | undefined) => {
+  const n = Number(v);
+  return v !== undefined && Number.isFinite(n) && n >= 60_000 && n <= 24 * 3600 * 1000 ? n : SESSION_IDLE_MS;
+};
+export const SESSION_FINISH_PROMPT =
+  "Finish the session now: the developer is shipping, or the session has been idle too long. Follow steps 2 to 6 of CLAUDE.md (security self-review, production readiness, preview, push, job/result.json) on the work so far, then stop.";
+
 export type { AgentBackend };
 
 // Vertex AI when a Google service account is configured, else the Anthropic API when there's a key.
@@ -74,6 +89,8 @@ export interface BuildConfig {
   // Boot Solana sandboxes from a pre-built, hash-checked snapshot where the host can take one (build-env.ts).
   solanaSnapshot?: boolean;
   solanaSnapshotMaxAgeDays?: number; // rebuilt once older (SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS, default 7)
+  // A session build finishes on its own after this long idle (BUILD_SESSION_IDLE_MS, default 15 minutes).
+  sessionIdleMs?: number;
 }
 
 export function buildConfigFromEnv(env = process.env): BuildConfig {
@@ -95,6 +112,7 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
     },
     solanaSnapshot: env.SOLANA_BUILD_SNAPSHOT !== "off",
     solanaSnapshotMaxAgeDays: Number(env.SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS ?? 7),
+    sessionIdleMs: sessionIdleMs(env.BUILD_SESSION_IDLE_MS),
   };
 }
 
@@ -135,9 +153,18 @@ export interface Build {
   // The pre-built environment each of the build's sandboxes booted from, if any (build-env.ts).
   solana_env: { build?: SolanaEnvSnapshot; verify?: SolanaEnvSnapshot } | null;
   solana_toolchain: ToolchainRecord | null; // the exact toolchain Mynt's verification built the programs with
+  activity_offset: number; // bytes of the agent's stream-json log Mynt has read into build_activity
   created_at: string;
   updated_at: string;
   finished_at: string | null;
+  // "once": the agent builds and ships in one go. "session": it stays open between the developer's messages until
+  // finish_build (or SESSION_IDLE_MS idle), then ships.
+  mode: "once" | "session";
+  finish_requested_at: string | null;
+  // continue_from: the earlier build whose pushed branch this one starts from.
+  continued_from: string | null;
+  base_branch: string | null;
+  base_commit: string | null;
 }
 
 const TABLES = `
@@ -185,6 +212,12 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_env jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS solana_toolchain jsonb;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS live_preview_url text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'once';
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS finish_requested_at timestamptz;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS continued_from uuid;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_branch text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_commit text;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS activity_offset bigint NOT NULL DEFAULT 0;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -194,6 +227,16 @@ const TABLES = `
     data jsonb NOT NULL DEFAULT '{}'
   );
   CREATE INDEX IF NOT EXISTS build_events_build_idx ON financial_products.build_events (build_id, at);
+  -- The coding agent's activity (its messages, commands and edits), summarised by Mynt as the build runs and kept
+  -- after the sandbox goes. seq orders it within the build and is the cursor developers page with.
+  CREATE TABLE IF NOT EXISTS financial_products.build_activity (
+    build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
+    seq integer NOT NULL,
+    at timestamptz NOT NULL DEFAULT now(),
+    type text NOT NULL,
+    summary text NOT NULL,
+    PRIMARY KEY (build_id, seq)
+  );
   CREATE TABLE IF NOT EXISTS financial_products.repo_connections (
     developer_id uuid NOT NULL REFERENCES financial_products.users(id),
     repository text NOT NULL,
@@ -214,10 +257,16 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   finished_at: iso(r.finished_at),
   box_sandbox_id: (r.box_sandbox_id as string | null) ?? null,
   box_until: iso(r.box_until),
+  mode: r.mode === "session" ? "session" : "once",
+  finish_requested_at: iso(r.finish_requested_at),
+  continued_from: (r.continued_from as string | null) ?? null,
+  base_branch: (r.base_branch as string | null) ?? null,
+  base_commit: (r.base_commit as string | null) ?? null,
   audit_started_at: iso(r.audit_started_at),
   solana: !!r.solana,
   solana_env: (r.solana_env as Build["solana_env"]) ?? null,
   solana_toolchain: (r.solana_toolchain as ToolchainRecord | null) ?? null,
+  activity_offset: Number(r.activity_offset ?? 0),
 });
 
 // What builds need of Mynt's Solana programs (src/solana/): the addresses reserved for an app, so the agent
@@ -269,6 +318,36 @@ export const LIVE_PREVIEW_BACKOFF = 6;
 type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
 
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
+// The agent's activity log is read up to ACTIVITY_CHUNK bytes at a time, a few chunks a tick (more once the agent has
+// exited, to read it to the end), and each build keeps its latest ACTIVITY_KEEP entries.
+const ACTIVITY_CHUNK = 256 * 1024;
+const ACTIVITY_CHUNKS_PER_TICK = 8;
+const ACTIVITY_CHUNKS_AT_END = 64;
+export const ACTIVITY_KEEP = 5000;
+
+// The complete lines in `buf`, read from the log one byte before the offset when `prefixed` (that byte is a newline
+// when the offset is at the start of a line), and how many bytes past the offset are now dealt with. A line longer
+// than a whole chunk (a huge tool result, say) is skipped rather than waited for; a shorter one with no newline yet
+// is still being written, and waits.
+export function activityLines(buf: Buffer, prefixed: boolean, chunk: number): { consumed: number; lines: string[] } {
+  let start = 0;
+  if (prefixed) {
+    if (buf.length === 0) return { consumed: 0, lines: [] };
+    start = 1;
+    if (buf[0] !== 0x0a) {
+      // Partway through a line being skipped: drop the rest of it.
+      const nl = buf.indexOf(0x0a, 1);
+      if (nl < 0) return { consumed: buf.length - 1, lines: [] };
+      start = nl + 1;
+    }
+  }
+  const skipped = start - (prefixed ? 1 : 0);
+  const body = buf.subarray(start);
+  const last = body.lastIndexOf(0x0a);
+  if (last < 0) return { consumed: skipped + (body.length >= chunk ? body.length : 0), lines: [] };
+  const lines = body.subarray(0, last + 1).toString("utf8").split("\n").filter((l) => l.trim());
+  return { consumed: skipped + last + 1, lines };
+}
 const OUT = "/home/user/mynt-out";
 const SOLANA_INSTALLER = ENV_FILES.installer;
 
@@ -381,12 +460,13 @@ export class BuildService {
     return r && toBuild(r);
   }
 
-  async listFor(developerId: string | null, status?: string) {
+  async listFor(developerId: string | null, status?: string, appId?: string) {
     const rows = (
       await this.db.query(
         `SELECT * FROM financial_products.build_runs WHERE ($1::uuid IS NULL OR developer_id = $1) AND ($2::text IS NULL OR status = $2)
+         AND ($3::text IS NULL OR app_id::text = $3)
          ORDER BY created_at DESC LIMIT 200`,
-        [developerId, status ?? null],
+        [developerId, status ?? null, appId ?? null],
       )
     ).rows as Row[];
     return rows.map(toBuild);
@@ -452,7 +532,23 @@ export class BuildService {
 
   // ---- lifecycle ----
 
-  async start(developer: User, opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number; solana?: boolean }) {
+  async start(
+    developer: User,
+    opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number; solana?: boolean; mode?: "once" | "session"; continue_from?: string },
+  ) {
+    // Continuing an earlier build: the agents start from the branch it pushed, on the same app and repository.
+    let base: Build | null = null;
+    if (opts.continue_from) {
+      const prev = await this.get(opts.continue_from);
+      if (!prev || prev.developer_id !== developer.id) throw new Error(`No build of yours with id '${opts.continue_from}' to continue from`);
+      if (!TERMINAL.includes(prev.status)) throw new Error(`Build ${prev.id} is still ${prev.status}: steer it, or stop it before continuing from it`);
+      // Only a build whose push Mynt confirmed: it verified the pushed commit (commit_sha) and opened its pull request.
+      if (!prev.repository || !prev.branch || !(prev.commit_sha || prev.pr_url)) throw new Error(`Build ${prev.id} pushed no verified branch, so there's nothing to continue from`);
+      if (opts.app_id && prev.app_id && opts.app_id !== prev.app_id) throw new Error(`Build ${prev.id} is for another app`);
+      if (opts.repository && opts.repository.toLowerCase() !== prev.repository) throw new Error(`Build ${prev.id} pushed to ${prev.repository}, not ${opts.repository}`);
+      base = prev;
+      opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: prev.repository, solana: opts.solana ?? (prev.solana || undefined) };
+    }
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
     const spent = await this.monthSpend(developer.id);
     // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
@@ -468,13 +564,78 @@ export class BuildService {
     const id = randomUUID();
     // The Solana toolchain when asked for, or when the app has programs reserved.
     const solana = opts.solana ?? (!!opts.app_id && !!this.solana && (await this.solana.programsForApp(opts.app_id)).length > 0);
+    const mode = opts.mode ?? "once";
     await this.db.query(
-      `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd, solana)
-       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)`,
-      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana],
+      `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd, solana, mode, continued_from, base_branch, base_commit)
+       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11)`,
+      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana, mode, base?.id ?? null, base?.branch ?? null, base?.commit_sha ?? null],
     );
-    await this.event(id, "queued", `Build queued with a US$${cap} cap`);
+    const what = mode === "session" ? "Session build" : "Build";
+    await this.event(id, "queued", `${what} queued with a US$${cap} cap${base ? `, continuing from ${base.branch}` : ""}`, base ? { continued_from: base.id } : {});
     return (await this.get(id))!;
+  }
+
+  // Ends a session: the agent gets the finish message once its current turn is over, ships the work (review,
+  // checks, preview, push) and exits, and Mynt verifies it as any build. Spend stops only when the build ends.
+  // `reason`: the developer's finish_build, or Mynt's own before the sandbox's time limit ("ttl") or the cap ("cap").
+  // Claimed in the database first, so concurrent calls write one finish item, and a steer can't slip in after it.
+  async finish(build: Build, reason: "developer" | "ttl" | "cap" = "developer") {
+    if (build.mode !== "session") throw new Error("Only a session build is finished with finish_build; this build ships on its own");
+    if (!build.sandbox_id || !AGENT_PHASES.includes(build.status)) throw new Error(`Build is ${build.status}; only a running session can be finished`);
+    const claimed = await this.one(
+      "UPDATE financial_products.build_runs SET finish_requested_at = now(), updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL AND status = ANY($2) RETURNING finish_requested_at",
+      [build.id, AGENT_PHASES],
+    );
+    if (!claimed) {
+      const now = await this.get(build.id);
+      if (now?.finish_requested_at) return { finishing: true, since: now.finish_requested_at };
+      throw new Error(`Build is ${now?.status ?? "gone"}; only a running session can be finished`);
+    }
+    try {
+      await this.toInbox(build.sandbox_id, { finish: true, reason, message: SESSION_FINISH_PROMPT }, "-finish");
+    } catch (e) {
+      await this.db.query("UPDATE financial_products.build_runs SET finish_requested_at = NULL WHERE id = $1", [build.id]);
+      throw e;
+    }
+    const why = {
+      developer: "The developer finished the session",
+      ttl: "The session is near its sandbox's time limit, so Mynt finished it",
+      cap: "The session has spent most of its cap, so Mynt finished it",
+    }[reason];
+    await this.event(build.id, build.status, `${why}: the agent ships the work, then Mynt verifies it`);
+    return { finishing: true, since: iso(claimed.finish_requested_at)! };
+  }
+
+  // A running session: record a finish the runner started itself (idle), so steering stops; finish it before the
+  // sandbox's time limit or the cap would end it with the work unshipped; and say when messages that arrived while it
+  // was finishing weren't delivered.
+  private async followSession(b: Build, state: AgentState | null, running: boolean, cost: number) {
+    if (state?.finish && !b.finish_requested_at) {
+      const set = await this.one(
+        "UPDATE financial_products.build_runs SET finish_requested_at = now(), updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL RETURNING id",
+        [b.id],
+      );
+      if (set)
+        await this.event(b.id, b.status, state.finish === "idle" ? "The session was idle too long: the agent ships the work, then Mynt verifies it" : `The session is finishing (${state.finish})`);
+      b = { ...b, finish_requested_at: new Date().toISOString() };
+    }
+    if (running && !b.finish_requested_at && !state?.finish) {
+      const nearTtl = Date.now() - Date.parse(b.created_at) > Math.max(0, this.config.ttlSeconds - SESSION_TTL_MARGIN_S) * 1000;
+      if (nearTtl) await this.finish(b, "ttl").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
+      else if (cost >= SESSION_CAP_SHARE * b.cap_usd) await this.finish(b, "cap").catch((e) => console.error(`Build ${b.id} finish: ${(e as Error).message}`));
+    }
+    if (!running && (state?.undelivered ?? 0) > 0)
+      await this.event(b.id, b.status, `${state!.undelivered} message(s) arrived while the session was finishing and weren't delivered; send them in a new build with continue_from`);
+  }
+
+  // An item for the runner's inbox, written under a dot-name and renamed into place, so the runner never reads half
+  // of one.
+  private async toInbox(sandbox: string, item: unknown, suffix = "") {
+    const name = `${Date.now()}-${randomUUID().slice(0, 8)}${suffix}.json`;
+    const tmp = `${AGENT_DIR}/inbox/.${name}`;
+    await this.boat!.writeFile(sandbox, tmp, JSON.stringify(item));
+    const r = await this.boat!.exec(sandbox, `mv -f ${shellQuote(tmp)} ${shellQuote(`${AGENT_DIR}/inbox/${name}`)}`, { timeoutSeconds: 30 });
+    if (r.exitCode !== 0) throw new Error("Couldn't deliver the message to the agent");
   }
 
   private async retireKey(build: Build) {
@@ -485,6 +646,8 @@ export class BuildService {
   async stop(build: Build, reason: string, status: BuildStatus = "stopped") {
     if (TERMINAL.includes(build.status)) return build;
     await this.retireKey(build);
+    // What the agent did last, read before its sandbox goes, briefly: a stuck sandbox mustn't hold up a stop.
+    if (AGENT_PHASES.includes(build.status)) await this.collectActivitySafely((await this.get(build.id)) ?? build, { maxChunks: 4, timeoutSeconds: 10, toEnd: true });
     if (build.sandbox_id && this.boat) {
       await this.boat.stop(build.sandbox_id).catch(() => {});
     }
@@ -496,21 +659,123 @@ export class BuildService {
 
   async steer(build: Build, message: string) {
     if (!build.sandbox_id || !AGENT_PHASES.includes(build.status)) throw new Error(`Build is ${build.status}; only a running agent can be steered`);
-    // The runner interrupts the current turn and sends this as the next one.
-    await this.boat!.writeFile(build.sandbox_id, `${AGENT_DIR}/inbox/${Date.now()}-${randomUUID().slice(0, 8)}.json`, JSON.stringify({ message }));
+    // Checked against the database as it is now, not as this request loaded it: a session that started finishing in
+    // the meantime (finish_build, or the runner's own idle finish, recorded by the worker) takes no more messages.
+    const open = await this.one(
+      "UPDATE financial_products.build_runs SET updated_at = now() WHERE id = $1 AND finish_requested_at IS NULL AND status = ANY($2) RETURNING id",
+      [build.id, AGENT_PHASES],
+    );
+    if (!open) {
+      const now = await this.get(build.id);
+      if (now?.finish_requested_at) throw new Error("The session is finishing; continue in a new build with continue_from once it ends");
+      throw new Error(`Build is ${now?.status ?? "gone"}; only a running agent can be steered`);
+    }
+    // The runner interrupts the current turn and sends this as the next one. (If a finish lands between this check
+    // and the write, the runner holds this message back and the build's timeline says it wasn't delivered.)
+    await this.toInbox(build.sandbox_id, { message });
     await this.event(build.id, build.status, "Steered by the developer", { message });
   }
 
-  async activity(build: Build, limit = 30) {
-    if (!build.sandbox_id || !this.boat) return [];
-    const n = Math.max(1, Math.min(200, Math.floor(limit)));
-    const tail = await this.boat.exec(build.sandbox_id, `tail -n ${n} ${AGENT_DIR}/agent.jsonl 2>/dev/null || true`, { timeoutSeconds: 30 });
-    return tail.stdout
-      .split("\n")
-      .map((line) => parseJson<Record<string, unknown>>(line))
-      .filter((m): m is Record<string, unknown> => !!m)
-      .flatMap(summarizeAgentLine)
-      .reverse();
+  // The agent's stored activity. Without `after`: the latest `limit` entries, newest first. With `after` (a cursor
+  // from an earlier call): the entries after it, oldest first. `cursor` is the newest seq returned (or already
+  // seen), to pass as `after` next time; it stays put while nothing new has arrived.
+  async activity(build: Build, opts: { limit?: number; after?: number } = {}) {
+    const n = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 30)));
+    const rows = (
+      opts.after == null
+        ? await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 ORDER BY seq DESC LIMIT $2", [build.id, n])
+        : await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 ORDER BY seq LIMIT $3", [build.id, opts.after, n])
+    ).rows as Row[];
+    const activity = rows.map((r) => ({ seq: Number(r.seq), at: iso(r.at)!, type: r.type as string, summary: r.summary as string }));
+    // The oldest entry still kept: past the per-build limit, the oldest go, so a follower whose cursor is below
+    // first_seq - 1 has missed some.
+    const first = (await this.db.query("SELECT MIN(seq) AS m FROM financial_products.build_activity WHERE build_id = $1", [build.id])).rows[0] as Row | undefined;
+    return { activity, cursor: activity.reduce((m, a) => Math.max(m, a.seq), opts.after ?? 0), first_seq: first?.m == null ? null : Number(first.m) };
+  }
+
+  // Reads what the agent wrote to its stream-json log since last time into build_activity: a chunk at a time,
+  // base64-encoded so byte offsets stay exact, complete lines only. The new offset is claimed in the same transaction
+  // that stores the rows, so two readers never store the same lines. What the agent says is its own account: shown
+  // to the developer, never trusted.
+  async collectActivity(b: Build, maxChunks = ACTIVITY_CHUNKS_PER_TICK, timeoutSeconds = 60): Promise<{ complete: boolean; offset: number } | null> {
+    if (!this.boat || !b.sandbox_id) return null;
+    let offset = b.activity_offset;
+    for (let i = 0; i < maxChunks; i++) {
+      // From one byte before the offset, so the first byte says whether the offset is at the start of a line.
+      const from = Math.max(0, offset - 1);
+      const want = ACTIVITY_CHUNK + (offset > 0 ? 1 : 0);
+      const r = await this.boat.exec(
+        b.sandbox_id,
+        `f=${AGENT_DIR}/agent.jsonl; if [ -f "$f" ]; then tail -c +${from + 1} "$f" | head -c ${want} | base64 -w0; fi`,
+        { timeoutSeconds },
+      );
+      if (r.exitCode !== 0) return { complete: false, offset };
+      const buf = Buffer.from(r.stdout.trim(), "base64");
+      const { consumed, lines } = activityLines(buf, offset > 0, ACTIVITY_CHUNK);
+      if (consumed === 0) return { complete: true, offset };
+      const entries = lines
+        .map((line) => parseJson<Record<string, unknown>>(line))
+        .filter((m): m is Record<string, unknown> => !!m)
+        .flatMap(summarizeAgentLine);
+      // All of the chunk's entries in one statement; if the database refuses that, one at a time, each on its own
+      // savepoint, so an entry it won't take is dropped and the offset still moves on: one bad line never stalls it.
+      let claimed: boolean;
+      try {
+        claimed = await this.storeActivity(b.id, offset, offset + consumed, entries, false);
+      } catch (e) {
+        console.error(`Build ${b.id} activity: storing entries one by one (${(e as Error).message})`);
+        claimed = await this.storeActivity(b.id, offset, offset + consumed, entries, true);
+      }
+      if (!claimed) return { complete: true, offset };
+      offset += consumed;
+      if (buf.length < want) return { complete: true, offset }; // read to the end of what's there
+    }
+    return { complete: false, offset };
+  }
+
+  private storeActivity(buildId: string, from: number, to: number, entries: { type: string; summary: string }[], oneByOne: boolean) {
+    return inTransaction(this.db, async (tx) => {
+      const moved = await tx.query("UPDATE financial_products.build_runs SET activity_offset = $3 WHERE id = $1 AND activity_offset = $2 RETURNING id", [buildId, from, to]);
+      if (moved.rows.length === 0) return false;
+      if (entries.length === 0) return true;
+      let top = Number(((await tx.query("SELECT COALESCE(MAX(seq), 0) AS m FROM financial_products.build_activity WHERE build_id = $1", [buildId])).rows[0] as Row).m);
+      const insert = "INSERT INTO financial_products.build_activity (build_id, seq, type, summary) VALUES ";
+      if (!oneByOne) {
+        const values = entries.map((_, k) => `($1, $${k * 3 + 2}, $${k * 3 + 3}, $${k * 3 + 4})`);
+        await tx.query(insert + values.join(", "), [buildId, ...entries.flatMap((e, k) => [top + k + 1, e.type, e.summary])]);
+        top += entries.length;
+      } else {
+        for (const e of entries) {
+          await tx.query("SAVEPOINT activity_entry");
+          try {
+            await tx.query(insert + "($1, $2, $3, $4)", [buildId, top + 1, e.type, e.summary]);
+            await tx.query("RELEASE SAVEPOINT activity_entry");
+            top += 1;
+          } catch (err) {
+            await tx.query("ROLLBACK TO SAVEPOINT activity_entry");
+            console.error(`Build ${buildId} activity: dropped an entry the database refused (${(err as Error).message})`);
+          }
+        }
+      }
+      // Only a build's latest ACTIVITY_KEEP entries are kept.
+      await tx.query("DELETE FROM financial_products.build_activity WHERE build_id = $1 AND seq <= $2", [buildId, top - ACTIVITY_KEEP]);
+      return true;
+    });
+  }
+
+  // Activity is a convenience: failing to read it never fails or holds up a build. When it should have been read to
+  // the end (the agent exited, or the build is ending) and wasn't, say how much was left unread.
+  private async collectActivitySafely(b: Build, opts: { maxChunks?: number; timeoutSeconds?: number; toEnd?: boolean } = {}) {
+    try {
+      const r = await this.collectActivity(b, opts.maxChunks, opts.timeoutSeconds);
+      if (r && !r.complete && opts.toEnd && this.boat && b.sandbox_id) {
+        const size = await this.boat.exec(b.sandbox_id, `stat -c %s ${AGENT_DIR}/agent.jsonl 2>/dev/null || echo 0`, { timeoutSeconds: opts.timeoutSeconds ?? 30 });
+        const left = Math.max(0, Number(size.stdout.trim()) - r.offset);
+        if (left > 0) console.error(`Build ${b.id} activity: ${left} bytes of the agent's log were left unread`);
+      }
+    } catch (e) {
+      console.error(`Build ${b.id} activity: ${(e as Error).message}`);
+    }
   }
 
   // The build's box: the sandbox the coding agents work in, for as long as it's up (during the build and, once
@@ -652,6 +917,8 @@ export class BuildService {
         // build keeps the status it ended with.
         if (TERMINAL.includes(current.status)) continue;
         await this.retireKey(current);
+        // What the agent did up to the failure, read before its sandbox goes.
+        if (AGENT_PHASES.includes(current.status)) await this.collectActivitySafely(current, { maxChunks: ACTIVITY_CHUNKS_AT_END, timeoutSeconds: 30, toEnd: true });
         // Don't leave a failed build's machines running until their TTL.
         for (const id of [current.sandbox_id, current.verify_sandbox_id]) if (id) await this.boat.stop(id).catch(() => {});
         const error = failureMessage(e);
@@ -704,14 +971,25 @@ export class BuildService {
       const jobFiles: Record<string, string> = { "job/build.json": JSON.stringify(await this.spec(b), null, 2) };
       for (const file of await this.sdkFiles(b)) jobFiles[`job/sdk/${file.path}`] = file.content;
       if (b.solana) await this.installSolana(b.sandbox_id!, b.solana_env?.build);
+      const session = b.mode === "session";
+      const idleMs = Math.max(60_000, Math.floor(this.config.sessionIdleMs ?? SESSION_IDLE_MS));
       const processId = await this.startAgent(b, b.sandbox_id!, {
-        prompt: "Carry out the build in job/build.json, start to finish, following CLAUDE.md and its skills.",
+        prompt: session
+          ? "Carry out the developer's first request in job/build.json in session mode, following CLAUDE.md (\"Session mode\") and its skills."
+          : "Carry out the build in job/build.json, start to finish, following CLAUDE.md and its skills.",
         budgetUsd: b.cap_usd - b.cost_usd,
         workspace: "coding-build",
         jobFiles,
+        // A session stays open for the developer's next message, and finishes (ships) after idling this long.
+        ...(session ? { runnerEnv: { MYNT_AGENT_HOLD: "1", MYNT_AGENT_IDLE_MS: String(idleMs) }, finishPrompt: SESSION_FINISH_PROMPT } : {}),
       });
       await this.update(b.id, { status: "coding", prompt_id: processId, phase_message: "Agent started" });
-      await this.event(b.id, "coding", "Coding agent started", { agent: "claude-code", version: CLAUDE_CODE_VERSION, model: this.config.model });
+      await this.event(b.id, "coding", session ? "Coding agent started in a session" : "Coding agent started", {
+        agent: "claude-code",
+        version: CLAUDE_CODE_VERSION,
+        model: this.config.model,
+        ...(session ? { idle_minutes: Math.round(idleMs / 60_000) } : {}),
+      });
       return;
     }
 
@@ -735,6 +1013,9 @@ export class BuildService {
     }
     const now = phase && AGENT_PHASES.includes(phase) ? phase : b.status;
     if (agent.running && now === "coding") await this.ensureLivePreview(b);
+    if (b.mode === "session") await this.followSession(b, agent.state, agent.running, cost);
+    // Once the agent has exited, its log is read to the end before the build moves on.
+    await this.collectActivitySafely(b, agent.running ? {} : { maxChunks: ACTIVITY_CHUNKS_AT_END, toEnd: true });
     if (agent.running) return;
     if (!agent.ok) throw new Error(`Coding agent ${agent.state?.error ?? agent.state?.last_subtype ?? `exited with code ${agent.state?.exit_code ?? "unknown"}`}`);
     await this.startVerification(b);
@@ -1162,7 +1443,15 @@ export class BuildService {
     }
     return {
       // The security audit (Maxwell) runs once, in Mynt's own verification; the coding agent doesn't get it.
-      build: { id: b.id, repository: b.repository, branch: b.branch },
+      // mode "session": see CLAUDE.md's "Session mode". base: the earlier build's pushed branch (and its verified
+      // commit, when it shipped) to start from instead of the default branch.
+      build: {
+        id: b.id,
+        repository: b.repository,
+        branch: b.branch,
+        mode: b.mode,
+        base: b.base_branch ? { branch: b.base_branch, commit_sha: b.base_commit, build_id: b.continued_from } : null,
+      },
       goal: b.goal,
       app: app ?? null,
       products,
@@ -1278,6 +1567,9 @@ export function developerBuild(b: Build) {
     cap_usd: b.cap_usd,
     error: b.error,
     sandbox_open_until: b.box_sandbox_id && b.box_until ? b.box_until : null,
+    mode: b.mode,
+    ...(b.mode === "session" ? { finish_requested_at: b.finish_requested_at } : {}),
+    continued_from: b.continued_from,
     solana: b.solana,
     ...(b.solana && b.solana_toolchain ? { solana_toolchain: b.solana_toolchain } : {}),
     created_at: b.created_at,
@@ -1331,18 +1623,25 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
           .boolean()
           .optional()
           .describe("Give the agents the Solana toolchain (Agave, Anchor, Rust) to build an Anchor program beside the app; on by default when the app has programs reserved"),
+        mode: z
+          .enum(["once", "session"])
+          .default("once")
+          .describe(
+            "once (default): the agent builds and ships in one go. session: it does your first request, then stays open for your next ones (steer_build), keeping its context, until you call finish_build or it has been idle 15 minutes; then it ships and Mynt verifies it as usual. Idle time counts against the cap",
+          ),
+        continue_from: z.string().optional().describe("An earlier build of yours whose pushed branch this one starts from (same app and repository)"),
       },
     },
-    async ({ goal, app_id, repository, cap_usd, solana }) => {
+    async ({ goal, app_id, repository, cap_usd, solana, mode, continue_from }) => {
       if (!builds.enabled) return fail("Coding-agent builds aren't enabled on this Mynt yet");
       if (app_id) {
         const app = await store.getApp(app_id);
         if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
       }
       try {
-        const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana });
-        await store.audit(user.id, "start_build", b.id, { app_id, repository, cap_usd: b.cap_usd });
-        return json({ ...developerBuild(b), track_with: "get_build" });
+        const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana, mode, continue_from });
+        await store.audit(user.id, "start_build", b.id, { app_id: b.app_id, repository: b.repository, cap_usd: b.cap_usd, mode, continue_from: continue_from ?? null });
+        return json({ ...developerBuild(b), track_with: "get_build", ...(mode === "session" ? { next: "steer_build with each request; finish_build to ship" } : {}) });
       } catch (e) {
         return fail((e as Error).message);
       }
@@ -1354,14 +1653,14 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     {
       title: "My builds",
       description: "Developer: your coding-agent builds, newest first, with status, cost and links; plus this month's spend against your budget.",
-      inputSchema: { status: z.enum(BUILD_STATUSES).optional() },
+      inputSchema: { status: z.enum(BUILD_STATUSES).optional(), app_id: z.string().optional().describe("Only this app's builds") },
       annotations: { readOnlyHint: true },
     },
-    async ({ status }) =>
+    async ({ status, app_id }) =>
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
-        builds: (await builds.listFor(user.id, status)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
+        builds: (await builds.listFor(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
       }),
   );
 
@@ -1385,13 +1684,19 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     "get_build_activity",
     {
       title: "What the coding agent is doing",
-      description: "Developer: the coding agent's most recent activity in the sandbox (commands, edits, messages), live.",
-      inputSchema: { build_id: z.string(), limit: z.number().int().min(1).max(200).default(30) },
+      description:
+        "Developer: what the coding agent did (its messages, commands and edits), kept after its sandbox stops. Without `after`, the latest entries, newest first. To follow a build, pass the `cursor` you got back as `after`: you get only what's new, oldest first, and a new cursor.",
+      inputSchema: {
+        build_id: z.string(),
+        limit: z.number().int().min(1).max(200).default(30),
+        after: z.number().int().min(0).optional().describe("A cursor from an earlier call: only entries after it"),
+      },
       annotations: { readOnlyHint: true },
     },
-    async ({ build_id, limit }) => {
+    async ({ build_id, limit, after }) => {
       const b = await own(build_id);
-      return b ? json({ status: b.status, phase_message: b.phase_message, activity: await builds.activity(b, limit) }) : fail(`No build of yours with id '${build_id}'`);
+      if (!b) return fail(`No build of yours with id '${build_id}'`);
+      return json({ status: b.status, phase_message: b.phase_message, ...(await builds.activity(b, { limit, after })) });
     },
   );
 
@@ -1408,6 +1713,27 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       try {
         await builds.steer(b, message);
         return json({ build_id, steered: true });
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "finish_build",
+    {
+      title: "Finish a session build and ship it",
+      description:
+        "Developer: end a session build (start_build with mode 'session'). Once its current request is done, the agent reviews, checks, previews and pushes the work, then Mynt verifies it in a clean sandbox exactly as any build: only that verification decides whether it ships. Follow it with get_build.",
+      inputSchema: { build_id: z.string() },
+    },
+    async ({ build_id }) => {
+      const b = await own(build_id);
+      if (!b) return fail(`No build of yours with id '${build_id}'`);
+      try {
+        const r = await builds.finish(b);
+        await store.audit(user.id, "finish_build", b.id);
+        return json({ build_id, ...r, track_with: "get_build" });
       } catch (e) {
         return fail((e as Error).message);
       }
@@ -1560,12 +1886,30 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
 }
 
 // One line of Claude Code's stream-json output, as activity a developer can follow.
+// Summaries are stored and shown: control characters (NUL among them, which Postgres text refuses) go, secrets are
+// scrubbed before the text is cut (so a cut can't leave a partial token the patterns miss), and a cut never leaves
+// half a surrogate pair.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export function activitySummary(text: string, limit = 400) {
+  const clean = redact(
+    text
+      .replace(LONE_SURROGATE, "�")
+      .replace(/[\u0000-\u001F\u007F]+/g, " ")
+      .replace(/\s+/g, " "),
+  );
+  return clean.slice(0, limit).replace(LONE_SURROGATE, "");
+}
+
 function summarizeAgentLine(m: Record<string, unknown>): { type: string; summary: string }[] {
-  const clip = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? "")).replace(/\s+/g, " ").slice(0, 400);
-  if (m.type === "result") return [{ type: "turn_finished", summary: `${clip(m.subtype)}, US$${Number(m.total_cost_usd ?? 0).toFixed(2)}` }];
+  const str = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? ""));
+  if (m.type === "result") return [{ type: "turn_finished", summary: activitySummary(`${str(m.subtype)}, US$${Number(m.total_cost_usd ?? 0).toFixed(2)}`) }];
   const content = (m.message as { content?: unknown } | undefined)?.content;
   if (m.type !== "assistant" || !Array.isArray(content)) return [];
   return content.flatMap((c: Record<string, unknown>) =>
-    c.type === "text" ? [{ type: "message", summary: clip(c.text) }] : c.type === "tool_use" ? [{ type: "tool_use", summary: `${clip(c.name)} ${clip(c.input)}` }] : [],
+    c.type === "text"
+      ? [{ type: "message", summary: activitySummary(str(c.text)) }]
+      : c.type === "tool_use"
+        ? [{ type: "tool_use", summary: activitySummary(`${str(c.name)} ${str(c.input)}`) }]
+        : [],
   );
 }
