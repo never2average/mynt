@@ -62,7 +62,7 @@ User-Agent: Mynt-Vendor-Client/1
 
 Mynt asks once per round for every product you sponsor, so expect one request per hour, not one per product.
 
-Schema: [`schemas/partner-ledger/request.v1.schema.json`](../schemas/partner-ledger/request.v1.schema.json).
+Schema: [`core/schemas/partner-ledger/request.v1.schema.json`](../core/schemas/partner-ledger/request.v1.schema.json).
 
 **Check every request before you answer it.**
 
@@ -90,7 +90,7 @@ Answer `200` with a statement covering **every** `product_id` in the request:
 }
 ```
 
-Schema: [`schemas/partner-ledger/statement.v1.schema.json`](../schemas/partner-ledger/statement.v1.schema.json).
+Schema: [`core/schemas/partner-ledger/statement.v1.schema.json`](../core/schemas/partner-ledger/statement.v1.schema.json).
 
 The rules:
 
@@ -114,7 +114,7 @@ Canonical JSON is [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) (the JSON C
 
 ### Errors
 
-Any refusal is a `4xx` or `5xx` with a small JSON body ([`schemas/partner-ledger/error.v1.schema.json`](../schemas/partner-ledger/error.v1.schema.json)):
+Any refusal is a `4xx` or `5xx` with a small JSON body ([`core/schemas/partner-ledger/error.v1.schema.json`](../core/schemas/partner-ledger/error.v1.schema.json)):
 
 ```json
 { "error": { "code": "bad_signature", "message": "Signature mismatch" } }

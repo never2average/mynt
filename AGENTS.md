@@ -4,12 +4,14 @@ Instructions for any coding agent working in this repository, on any machine.
 
 ## What this is
 
-Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, Postgres) where licensed firms compose financial products from regulated primitives, admins keep the regulatory model, and developers build apps on those products with coding agents that Mynt verifies and hosts. Its hosted agents (the coding team, the product desk, the governance desk, the business-development agent) are steered by folders under `workspaces/`, not by prompts in code.
+Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, Postgres) where licensed firms compose financial products from regulated primitives, admins keep the regulatory model, and developers build apps on those products with coding agents that Mynt verifies and hosts. Its hosted agents (the coding team, the product desk, the governance desk, the business-development agent) are steered by folders under `core/workspaces/`, not by prompts in code.
+
+The repository is npm workspaces. `core/` is the MCP server (its `src/`, `test/`, `schemas/`, `workspaces/`, `programs/`, `sdk-templates/`, `scripts/` and `Dockerfile`, with its own lockfile). `platform/` holds the apps built on it: `platform/studio` (Mynt Studio), `platform/chat` (the sample chat and developer console) and `platform/packages/auth` (`@mynt/auth`, the sign-in code both import). `deploy/`, `docs/` and `.github/` stay at the root. Paths below are from the root.
 
 ## Start here
 
 1. If `AGENTS.local.md` exists next to this file, read it. It holds this machine's and this operator's own rules (git-ignored, never committed) and wins over this file where they differ.
-2. `npm ci && npm run build`. The build must be clean before anything else.
+2. For the server: `cd core && npm ci --workspaces=false && npm run build` (core's own lockfile, as production installs it). For the apps: `npm ci` at the root, which installs every workspace. The build must be clean before anything else.
 3. Read what the job needs: `README.md` explains the product, `docs/reference.md` the tools, the runtime API, hosting and deployment, and `docs/architecture.md` how the parts fit together.
 4. Then do what was asked, using the map below.
 
@@ -17,23 +19,26 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 
 | The person asks | Open | Check with |
 |---|---|---|
-| "Add or change a tool" | `src/server.ts` (which tools each role gets), then the module that owns it (`src/builds.ts`, `src/hosting-tools.ts`, `src/definition-tools.ts`, …) | `node --test test/<area>.test.js` |
-| "Change the runtime API" (apps, devices, hosting agents) | `src/runtime-api.ts` | `test/client-sessions.test.js`, `test/runtime.test.js` |
-| "Change how products are defined or checked" | `schemas/financial-product.v2.schema.json`, `src/definition.ts` | `test/definition.test.js` |
-| "Change the regulatory model" | `src/regulatory.ts`, `src/regime.ts` | `test/regulatory.test.js` |
-| "Change what an agent does" | its folder, `workspaces/<agent>/` (`CLAUDE.md`, `.claude/agents`, `.claude/skills`, `scripts/`) | `test/vibecoder-workspace.test.js` and the agent's own test |
-| "Change the generated SDKs" | `src/sdk.ts`, `src/sdk-clients.ts`, `sdk-templates/` | `test/client-sdks.test.js`; CI compiles every language |
-| "Change the starter app the coding agents scaffold" | `workspaces/coding-build/templates/mynt-app/`, `scripts/scaffold_app.py` | CI's `starter-app` job builds and runs it |
-| "Change how a licence provider connects its ledger" | `src/partner-kit.ts`, `src/partner-ledger/`, `schemas/partner-ledger/`, `docs/partners.md` | `test/partner-kit.test.js`, `test/product-health.test.js` |
-| "Change hosting" | `src/hosting.ts`, `src/freestyle.ts`, `src/compose.ts` | `test/hosting.test.js` |
-| "Change agent sandboxes" | `src/sandbox-host.ts`, `src/sandbox-providers/`, `src/agent-host.ts` | `test/sandbox-providers.test.js`, `test/builds.test.js` |
-| "Change the sample chat app or developer console" | `examples/mynt-chat/` | `cd examples/mynt-chat && npx vitest run && npx tsc --noEmit` |
-| "Change Mynt Studio" (the chat-to-build web app, built on Adorable) | `examples/mynt-studio/` (its README lists what was changed from Adorable; sign-in files are shared with mynt-chat) | `cd examples/mynt-studio && npx vitest run && npx tsc --noEmit`; CI's `examples` job also diffs the shared sign-in files |
+| "Add or change a tool" | `core/src/server.ts` (which tools each role gets), then the module that owns it (`core/src/builds.ts`, `core/src/hosting-tools.ts`, `core/src/definition-tools.ts`, …) | `node --test test/<area>.test.js` in `core/` |
+| "Change the runtime API" (apps, devices, hosting agents) | `core/src/runtime-api.ts` | `core/test/client-sessions.test.js`, `core/test/runtime.test.js` |
+| "Change how products are defined or checked" | `core/schemas/financial-product.v2.schema.json`, `core/src/definition.ts` | `core/test/definition.test.js` |
+| "Change the regulatory model" | `core/src/regulatory.ts`, `core/src/regime.ts` | `core/test/regulatory.test.js` |
+| "Change what an agent does" | its folder, `core/workspaces/<agent>/` (`CLAUDE.md`, `.claude/agents`, `.claude/skills`, `scripts/`) | `core/test/vibecoder-workspace.test.js` and the agent's own test |
+| "Change the generated SDKs" | `core/src/sdk.ts`, `core/src/sdk-clients.ts`, `core/sdk-templates/` | `core/test/client-sdks.test.js`; CI compiles every language |
+| "Change the starter app the coding agents scaffold" | `core/workspaces/coding-build/templates/mynt-app/`, `core/workspaces/coding-build/scripts/scaffold_app.py` | CI's `starter-app` job builds and runs it |
+| "Change how a licence provider connects its ledger" | `core/src/partner-kit.ts`, `core/src/partner-ledger/`, `core/schemas/partner-ledger/`, `docs/partners.md` | `core/test/partner-kit.test.js`, `core/test/product-health.test.js` |
+| "Change hosting" | `core/src/hosting.ts`, `core/src/freestyle.ts`, `core/src/compose.ts` | `core/test/hosting.test.js` |
+| "Change agent sandboxes" | `core/src/sandbox-host.ts`, `core/src/sandbox-providers/`, `core/src/agent-host.ts` | `core/test/sandbox-providers.test.js`, `core/test/builds.test.js` |
+| "Change how Mynt is deployed" | `deploy/host/install-host.sh` (builds and runs the server from each release's `core/`), `deploy/host/mynt.service`, `core/Dockerfile`, `deploy/docker-compose.yml` | `core/test/site-caddy.test.js`; CI's `caddy-site` job |
+| "Change the sample chat app or developer console" | `platform/chat/` | `cd platform/chat && npx vitest run && npx tsc --noEmit` |
+| "Change Mynt Studio" (the chat-to-build web app, built on Adorable) | `platform/studio/` (its README lists what was changed from Adorable) | `cd platform/studio && npx vitest run && npx tsc --noEmit`; CI's `platform` job also builds it |
+| "Change sign-in for Studio and the chat" | `platform/packages/auth/` (`@mynt/auth`; each app hands it its settings, cookie name and session store in `lib/session.ts`) | both apps' checks, and `npx tsc --noEmit -p platform/packages/auth` |
 | "What needs attention in production?" | the `ops_status` admin tool | |
 
 ## How to check your work
 
-- Run the test files for what you changed: `node --test test/<file>.test.js` after `npm run build`. The full suite (`npm test`) runs in CI on every push, with the client-SDK and starter-app jobs; run it locally only on a machine with memory to spare.
+- Run the test files for what you changed: in `core/`, `node --test test/<file>.test.js` after `npm run build`. The full suite (`npm test`) runs in CI on every push, with the client-SDK and starter-app jobs; run it locally only on a machine with memory to spare.
+- A dependency change to the server updates both lockfiles: `core/package-lock.json` (`cd core && npm install --workspaces=false …`, what production and CI's core jobs install from) and the root `package-lock.json` (`npm install` at the root). `npm ci` fails on either one if it's out of step.
 - Report what was measured, never what was hoped. Never edit a test to make it pass; fix the code, or say plainly that the test is wrong and why.
 - A figure that can't be measured says so. Never show it as 0.
 
@@ -42,7 +47,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 - Secrets are referenced by name only. Values live in the server's environment file, never in the repository, a test fixture, a command line, a log or the chat.
 - **You never type, paste, pipe, store or repeat a secret value.** When a key is needed, the operator sets it themselves on the server, and you refer to it by name (`FREESTYLE_API_KEY`, `CLERK_SECRET_KEY`, …).
 - If someone pastes a secret into the chat, don't repeat it or write it anywhere. Tell them it should be replaced, because it has been exposed.
-- Code that handles secrets keeps them out of commands and output: pass them as a process's environment or a file only that user can read, and scrub them from anything shown to people (`src/boxes.ts`).
+- Code that handles secrets keeps them out of commands and output: pass them as a process's environment or a file only that user can read, and scrub them from anything shown to people (`core/src/boxes.ts`).
 
 ## What needs an explicit yes
 

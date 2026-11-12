@@ -51,28 +51,28 @@ flowchart LR
   WORK -- "signed webhooks" --> APP
 ```
 
-Everything runs in **one Node process** backed by **one Postgres database**. There is no message bus: background work is a set of in-process loops that never overlap themselves (`serialLoop` in `src/worker.ts`) and claim their work from Postgres rows. Heavy or untrusted work (coding agents, model runs, verification, hosted apps) never runs in that process. It runs in sandboxes and VMs that Mynt drives through their providers' APIs.
+Everything runs in **one Node process** backed by **one Postgres database**. There is no message bus: background work is a set of in-process loops that never overlap themselves (`serialLoop` in `core/src/worker.ts`) and claim their work from Postgres rows. Heavy or untrusted work (coding agents, model runs, verification, hosted apps) never runs in that process. It runs in sandboxes and VMs that Mynt drives through their providers' APIs.
 
 ## 2. The three front doors
 
-`src/http.ts` routes every request by path. Each door has its own authentication, and none of them accepts another's credential.
+`core/src/http.ts` routes every request by path. Each door has its own authentication, and none of them accepts another's credential.
 
 | Path | Who calls it | Authenticates with | Code |
 |---|---|---|---|
-| `/mcp` | People, through any MCP client | Clerk OAuth (whitelisted users), or a local token in stdio mode | `src/http.ts`, `src/auth.ts`, `src/server.ts` |
-| `/v1/*` (server routes) | A developer's server (`api/`) | Per-app key `mynt_live_…` / `mynt_test_…`, stored only as a SHA-256 hash | `src/runtime-api.ts`, `src/runtime.ts` |
-| `/v1/client/*` | A customer's browser or phone | Client session secret `mcs_…`, at most an hour, scoped to products and actions | `src/runtime-api.ts` |
-| `/v1/vendor/callback/<sub>` | A vendor finishing an asynchronous action | `Mynt-Signature` HMAC with the subscription's secret, 300 s window | `src/vendors.ts` |
-| `/v1/hosting/*` | A hosted VM's agent (gateway mode) | One-time bootstrap token, then the tenant's own credentials | `src/hosting.ts` |
-| `/agent/*` | A coding or desk agent inside its sandbox | A run token that dies with the run | `src/agent-proxy.ts`, `src/agent-meter.ts` |
-| `/bd/unsubscribe` | Anyone the connector emailed | The unsubscribe link itself | `src/bd.ts` |
-| `/healthz`, `/.well-known/*` | Load balancers, OAuth discovery | None | `src/http.ts` |
+| `/mcp` | People, through any MCP client | Clerk OAuth (whitelisted users), or a local token in stdio mode | `core/src/http.ts`, `core/src/auth.ts`, `core/src/server.ts` |
+| `/v1/*` (server routes) | A developer's server (`api/`) | Per-app key `mynt_live_…` / `mynt_test_…`, stored only as a SHA-256 hash | `core/src/runtime-api.ts`, `core/src/runtime.ts` |
+| `/v1/client/*` | A customer's browser or phone | Client session secret `mcs_…`, at most an hour, scoped to products and actions | `core/src/runtime-api.ts` |
+| `/v1/vendor/callback/<sub>` | A vendor finishing an asynchronous action | `Mynt-Signature` HMAC with the subscription's secret, 300 s window | `core/src/vendors.ts` |
+| `/v1/hosting/*` | A hosted VM's agent (gateway mode) | One-time bootstrap token, then the tenant's own credentials | `core/src/hosting.ts` |
+| `/agent/*` | A coding or desk agent inside its sandbox | A run token that dies with the run | `core/src/agent-proxy.ts`, `core/src/agent-meter.ts` |
+| `/bd/unsubscribe` | Anyone the connector emailed | The unsubscribe link itself | `core/src/bd.ts` |
+| `/healthz`, `/.well-known/*` | Load balancers, OAuth discovery | None | `core/src/http.ts` |
 
 Locally, `mynt serve` speaks MCP over stdio for one user instead.
 
 ## 3. Roles and tool registration
 
-`createServer(store, user, ctx)` in `src/server.ts` builds a fresh MCP server **per signed-in user** and registers only the tools that user's roles allow, so a client never even sees a tool it can't call. Roles nest (`effectiveRoles` in `src/store.ts`):
+`createServer(store, user, ctx)` in `core/src/server.ts` builds a fresh MCP server **per signed-in user** and registers only the tools that user's roles allow, so a client never even sees a tool it can't call. Roles nest (`effectiveRoles` in `core/src/store.ts`):
 
 ```
 admin ⊃ builder (innovator = developer) ⊃ consumer          vendor and license_provider stand beside the builder
@@ -82,22 +82,22 @@ Each feature module owns its tools and registers them from `server.ts`:
 
 | Module | Tools for |
 |---|---|
-| `src/server.ts` | catalogue, consumers, enrollments, offers, apps, access requests |
-| `src/admin.ts` | regions, product categories, the regulatory model, whitelist, oversight |
-| `src/marketplace.ts` | entities, licences, parties, GRC folders, product composition and publishing |
-| `src/definition-tools.ts` | v2 product definitions and developer contracts |
-| `src/versions.ts` | product versions, diffs, restores, enrollment upgrades |
-| `src/vendors.ts` | service types, offerings, conformance, subscriptions, firm webhooks |
-| `src/sponsorships.ts` | licence providers' sponsorships of builders' product components |
-| `src/runtime.ts` | API keys, webhooks, sandbox hand-offs, releases, app metrics |
-| `src/journeys-tools.ts`, `src/modules.ts` | journeys, developer modules |
-| `src/gtm.ts` | segments and campaigns |
-| `src/build.ts`, `src/builds.ts` | SDKs, experiences, coding-agent builds |
-| `src/hosting-tools.ts` | hosting, deploys, app logs and commands, VM logins |
-| `src/desk.ts`, `src/explore.ts` | the product desk and algorithm explorations |
-| `src/review.ts` | the governance desk |
-| `src/bd.ts` | the connector (business development) |
-| `src/take-rates.ts`, `src/product-requests.ts`, `src/ops.ts` | take rates, product requests, `ops_status` |
+| `core/src/server.ts` | catalogue, consumers, enrollments, offers, apps, access requests |
+| `core/src/admin.ts` | regions, product categories, the regulatory model, whitelist, oversight |
+| `core/src/marketplace.ts` | entities, licences, parties, GRC folders, product composition and publishing |
+| `core/src/definition-tools.ts` | v2 product definitions and developer contracts |
+| `core/src/versions.ts` | product versions, diffs, restores, enrollment upgrades |
+| `core/src/vendors.ts` | service types, offerings, conformance, subscriptions, firm webhooks |
+| `core/src/sponsorships.ts` | licence providers' sponsorships of builders' product components |
+| `core/src/runtime.ts` | API keys, webhooks, sandbox hand-offs, releases, app metrics |
+| `core/src/journeys-tools.ts`, `core/src/modules.ts` | journeys, developer modules |
+| `core/src/gtm.ts` | segments and campaigns |
+| `core/src/build.ts`, `core/src/builds.ts` | SDKs, experiences, coding-agent builds |
+| `core/src/hosting-tools.ts` | hosting, deploys, app logs and commands, VM logins |
+| `core/src/desk.ts`, `core/src/explore.ts` | the product desk and algorithm explorations |
+| `core/src/review.ts` | the governance desk |
+| `core/src/bd.ts` | the connector (business development) |
+| `core/src/take-rates.ts`, `core/src/product-requests.ts`, `core/src/ops.ts` | take rates, product requests, `ops_status` |
 
 Every admin action, and every sensitive action by anyone, is written to `audit_log` with who did it.
 
@@ -127,10 +127,10 @@ flowchart TB
   REG --> DER
 ```
 
-- **Primitives.** A component is a product line (`credit`, `payments`, `exchange`, … in `src/catalog.ts`) with an action (`issuance`, `sale`, `purchase`, `servicing`, …), in a country, optionally with an `underlying` and a `wrapper`.
-- **Perimeter and regime.** `src/regime.ts` finds every regulated product type in that country whose category is on the line and allows the action. From that perimeter come the regulators, the licence types that may provide it, and their obligations, filings and controls. Licences grant specific actions on specific product types, so coverage is exact. Where a country licenses state by state, a product lists the states it's offered in (`offered_in`, ISO 3166-2 codes like `us-ny`) and coverage is checked in each: a state regulator's licences cover only its state, a national one's the whole country (or what its licence type's `covers` says).
-- **Definitions.** A v2 definition (`src/definition.ts`) is components joined by typed composition links (`funds`, `settles_into`, `converts_into`, `secures`, `discovers_price_for`, …), each with allowed primitive × action pairs at both ends (`x-from`, `x-to` in the schema), plus segments, algorithms, risk models, partner handoffs, terms, rates, fees, limits, servicing and ACTUS-coded lifecycle events. Upstream records (personas, licences, parties, GRC records) are referenced by connection, never copied.
-- **Publishing.** `publish_product` needs a verified, in-date licence covering the action, a valid definition with no publish blockers, and passing tests. It freezes the **developer contract** (`src/contract.ts`: offers, actions, consent purposes, documents; never algorithms, costs or parties) with a `contract_hash`, and **pins** the composition and a hash of every entity, licence, party and vendor binding it rests on.
+- **Primitives.** A component is a product line (`credit`, `payments`, `exchange`, … in `core/src/catalog.ts`) with an action (`issuance`, `sale`, `purchase`, `servicing`, …), in a country, optionally with an `underlying` and a `wrapper`.
+- **Perimeter and regime.** `core/src/regime.ts` finds every regulated product type in that country whose category is on the line and allows the action. From that perimeter come the regulators, the licence types that may provide it, and their obligations, filings and controls. Licences grant specific actions on specific product types, so coverage is exact. Where a country licenses state by state, a product lists the states it's offered in (`offered_in`, ISO 3166-2 codes like `us-ny`) and coverage is checked in each: a state regulator's licences cover only its state, a national one's the whole country (or what its licence type's `covers` says).
+- **Definitions.** A v2 definition (`core/src/definition.ts`) is components joined by typed composition links (`funds`, `settles_into`, `converts_into`, `secures`, `discovers_price_for`, …), each with allowed primitive × action pairs at both ends (`x-from`, `x-to` in the schema), plus segments, algorithms, risk models, partner handoffs, terms, rates, fees, limits, servicing and ACTUS-coded lifecycle events. Upstream records (personas, licences, parties, GRC records) are referenced by connection, never copied.
+- **Publishing.** `publish_product` needs a verified, in-date licence covering the action, a valid definition with no publish blockers, and passing tests. It freezes the **developer contract** (`core/src/contract.ts`: offers, actions, consent purposes, documents; never algorithms, costs or parties) with a `contract_hash`, and **pins** the composition and a hash of every entity, licence, party and vendor binding it rests on.
 - **Drift.** When any pinned fact changes (a licence lapses, a party ends, a vendor offering is suspended), the product drifts: new enrollments pause and `product.drifted` goes out, until the state is restored or a new version is published. A state licence's drift names the states it covered; sales pause for the whole product, because the runtime can't tell a customer's state. Changes made through Mynt are checked at once; an hourly sweep catches expiries.
 - **Derived values.** `regime_summary` and `take_rate` are stored on each product and recomputed whenever anything they rest on changes, so they're cheap to read and always match the live checks.
 
@@ -169,9 +169,9 @@ sequenceDiagram
 ```
 
 - **Evidence** (documents shown, consents given and withdrawn) is stored against the contract version (`client_evidence`).
-- **The vault** keeps each customer's fields per app, sealed. Fields are accepted only if an action needs them, after consent, sensitive ones only from a secure input, and every value is validated against the data dictionary (`src/data-dictionary.ts`). `DELETE /v1/client/fields` erases everything, including vendor results still queued.
+- **The vault** keeps each customer's fields per app, sealed. Fields are accepted only if an action needs them, after consent, sensitive ones only from a secure input, and every value is validated against the data dictionary (`core/src/data-dictionary.ts`). `DELETE /v1/client/fields` erases everything, including vendor results still queued.
 - **Params and quotes:** a vendor-served action may take `params` from the device (an amount, an asset; never customer data) and may be a quote, which another action accepts once, before it expires, by Mynt's reference. Mynt keeps the vendor's quote id.
-- **Vendor calls** (`src/vendor-call.ts`) go out HTTPS-only to a checked public address, with no redirects, 10 s, 256 KiB, HMAC-signed and replay-protected. Results are sealed, sent in full only to the innovator, and expire if never finished (`sweepVendorActionRuns`, every minute).
+- **Vendor calls** (`core/src/vendor-call.ts`) go out HTTPS-only to a checked public address, with no redirects, 10 s, 256 KiB, HMAC-signed and replay-protected. Results are sealed, sent in full only to the innovator, and expire if never finished (`sweepVendorActionRuns`, every minute).
 - **Webhooks** to apps and firms are signed (`Mynt-Signature`), queued in `webhook_deliveries` and retried with backoff by `startWebhookWorker`.
 
 ## 6. The agent harness
@@ -184,30 +184,30 @@ workspaces/<agent>/  ──copied into──►  sandbox (boat.dev or Freestyle 
      subagents, scripts                  job data under job/                      spend capped              (agent_spend)
 ```
 
-- **Steering is data.** An agent's instructions, subagents, skills and scripts live in its workspace folder (`src/agent-host.ts` copies it in). No agent's instructions are in TypeScript.
+- **Steering is data.** An agent's instructions, subagents, skills and scripts live in its workspace folder (`core/src/agent-host.ts` copies it in). No agent's instructions are in TypeScript.
 - **No secrets in sandboxes.** The model is reached only through Mynt's proxy with a token that works while the run does. GitHub access is a one-repository installation token for an hour, delivered as a file Mynt refreshes.
-- **Spend is metered.** `src/agent-meter.ts` prices each model response; sandboxes add machine time. Per-run and monthly caps stop work that passes them. A figure that can't be measured is never shown as $0.
+- **Spend is metered.** `core/src/agent-meter.ts` prices each model response; sandboxes add machine time. Per-run and monthly caps stop work that passes them. A figure that can't be measured is never shown as $0.
 - **Agents never grade their own work.** Each agent's output is checked by Mynt outside its sandbox:
 
 | Agent | Workspace | What Mynt checks afterwards | Code |
 |---|---|---|---|
-| Coding team | `coding-build/` | Fresh sandbox, no secrets: tests, lint, types, `gitleaks`, dependency audit, `syft` SBOM, disclosures, then an audit-only run (`build-audit/`) and a re-hash of the source. Mynt opens the PR. | `src/builds.ts`, `src/verify-script.ts`, `src/sandbox-host.ts`, `src/sandbox-providers/` |
-| Product desk | `product-desk/` | Mynt runs the agent's model code itself, in a clean sandbox, and keeps only its own numbers | `src/desk.ts`, `src/desk-runner.ts` |
-| Algorithm explorers | `algorithm-explorer/` | Mynt scores every kept variant on a holdout only it sees | `src/explore*.ts` |
-| Governance desk | `governance-review/` | Mynt re-fetches every cited page, checks each quote, and computes the recommendation | `src/review.ts`, `src/evidence.ts` |
-| Connector | `connector/` | Every message goes through one `send()` path that enforces consent, caps, identity and opt-out | `src/bd.ts` |
+| Coding team | `coding-build/` | Fresh sandbox, no secrets: tests, lint, types, `gitleaks`, dependency audit, `syft` SBOM, disclosures, then an audit-only run (`build-audit/`) and a re-hash of the source. Mynt opens the PR. | `core/src/builds.ts`, `core/src/verify-script.ts`, `core/src/sandbox-host.ts`, `core/src/sandbox-providers/` |
+| Product desk | `product-desk/` | Mynt runs the agent's model code itself, in a clean sandbox, and keeps only its own numbers | `core/src/desk.ts`, `core/src/desk-runner.ts` |
+| Algorithm explorers | `algorithm-explorer/` | Mynt scores every kept variant on a holdout only it sees | `core/src/explore*.ts` |
+| Governance desk | `governance-review/` | Mynt re-fetches every cited page, checks each quote, and computes the recommendation | `core/src/review.ts`, `core/src/evidence.ts` |
+| Connector | `connector/` | Every message goes through one `send()` path that enforces consent, caps, identity and opt-out | `core/src/bd.ts` |
 
 ## 7. Hosting
 
-`src/hosting.ts` deploys only builds that passed Mynt's verification.
+`core/src/hosting.ts` deploys only builds that passed Mynt's verification.
 
-- **Direct on Freestyle** (default with `FREESTYLE_API_KEY`, `src/freestyle.ts`): one Firecracker microVM per app; Compose services under gVisor, read-only, no capabilities, CPU and memory limits (`src/compose.ts`); egress only to the app's allowlist (`egressFor` in `src/hosting-tools.ts`); a public HTTPS route per service. The app's key is **never on its VM**: Freestyle's edge adds it on the way out, from a rule only Mynt writes, and Mynt honours it only next to the placeholder and never on `/v1/client/*`.
+- **Direct on Freestyle** (default with `FREESTYLE_API_KEY`, `core/src/freestyle.ts`): one Firecracker microVM per app; Compose services under gVisor, read-only, no capabilities, CPU and memory limits (`core/src/compose.ts`); egress only to the app's allowlist (`egressFor` in `core/src/hosting-tools.ts`); a public HTTPS route per service. The app's key is **never on its VM**: Freestyle's edge adds it on the way out, from a rule only Mynt writes, and Mynt honours it only next to the placeholder and never on `/v1/client/*`.
 - **Gateway mode** (legacy, DigitalOcean): one VM per developer, reachable only over WireGuard to the gateway on Mynt's host (`deploy/host/hosting-gateway.sh`).
 - Developers work with a running app through `app_status`, `app_logs`, `app_run` and `restart_app`, and short-lived SSH logins (`vm_access`). Admins have a kill switch.
 
 ## 8. Data
 
-All state is in one Postgres schema, `financial_products`, created on boot by `src/store.ts` and the feature modules. Tests use PGlite, an in-process Postgres, through the same `Db` interface (`src/db.ts`). Grouped by job:
+All state is in one Postgres schema, `financial_products`, created on boot by `core/src/store.ts` and the feature modules. Tests use PGlite, an in-process Postgres, through the same `Db` interface (`core/src/db.ts`). Grouped by job:
 
 | Area | Tables |
 |---|---|
@@ -227,13 +227,13 @@ Two secrets protect stored data: `MYNT_VAULT_KEY` seals the customer vault, firm
 
 ## 9. Background work
 
-`serve-http` starts these alongside the HTTP server (`src/index.ts`):
+`serve-http` starts these alongside the HTTP server (`core/src/index.ts`):
 
 | Loop | Interval | Does |
 |---|---|---|
-| Webhook worker | continuous | Delivers and retries signed webhooks (`src/runtime.ts`) |
-| Drift sweep | hourly | Re-checks every product's pins, recomputes derived values (`src/pins.ts`) |
-| Vendor action sweep | every minute | Expires vendor actions that never finished (`src/vendors.ts`) |
+| Webhook worker | continuous | Delivers and retries signed webhooks (`core/src/runtime.ts`) |
+| Drift sweep | hourly | Re-checks every product's pins, recomputes derived values (`core/src/pins.ts`) |
+| Vendor action sweep | every minute | Expires vendor actions that never finished (`core/src/vendors.ts`) |
 | Build, desk, explore, review, connector workers | per module | Start, steer, meter, verify and finish agent runs |
 | Derived values | on boot | Computes `regime_summary` and `take_rate` for products missing them |
 
@@ -248,17 +248,17 @@ Two secrets protect stored data: `MYNT_VAULT_KEY` seals the customer vault, firm
 | Device → app database | Customer financial data. It goes to Mynt's vault and to the provider, never the app |
 | Mynt → developer | Algorithms, risk models, costs, revenue shares and the parties behind a product |
 | Vendor result → device | Everything except a status, a reference and what `client_result` allows |
-| Anything → Mynt's logs and outputs | Secret values and customer data (scrubbed by `src/boxes.ts`) |
+| Anything → Mynt's logs and outputs | Secret values and customer data (scrubbed by `core/src/boxes.ts`) |
 
-Mynt itself **never holds customer funds or assets**. Money moves in the licensed providers' own flows (innovators' hosted flows, vendors' services); Mynt records consent, evidence and outcomes. Every transfer Mynt instructs goes through one chokepoint, `authorizeMovement` in `src/money-rails.ts`: it is refused unless an admin-approved rail of the product's licence provider fits its direction, customer state and limits, and each is a row in the money ledger. That includes the **Mynt Ramp**, the one on- and off-ramp for digital-asset liquidity: it is a `ramp` vendor service offered only by the firm designated with `set_mynt_ramp`, today a licensed ramp partner that holds funds in transit under its own licences ([plan](plans/crypto-liquidity.md)).
+Mynt itself **never holds customer funds or assets**. Money moves in the licensed providers' own flows (innovators' hosted flows, vendors' services); Mynt records consent, evidence and outcomes. Every transfer Mynt instructs goes through one chokepoint, `authorizeMovement` in `core/src/money-rails.ts`: it is refused unless an admin-approved rail of the product's licence provider fits its direction, customer state and limits, and each is a row in the money ledger. That includes the **Mynt Ramp**, the one on- and off-ramp for digital-asset liquidity: it is a `ramp` vendor service offered only by the firm designated with `set_mynt_ramp`, today a licensed ramp partner that holds funds in transit under its own licences ([plan](plans/crypto-liquidity.md)).
 
 ## 11. Deployment
 
-- **Image:** the root `Dockerfile` builds the server; `npm run build` compiles `src/` to `dist/`.
+- **Image:** `core/Dockerfile` builds the server; `npm run build` (in `core/`) compiles `core/src/` to `core/dist/`. The repository is npm workspaces: the server in `core/`, and the apps on it in `platform/` (Mynt Studio, the sample chat, and the sign-in code they share, `platform/packages/auth`).
 - **One host:** `deploy/docker-compose.yml` runs the server behind Caddy (automatic HTTPS), joined to a self-hosted Supabase Postgres (`deploy/supabase.override.yml`). `deploy/setup-vm.sh` and `deploy/host/install-host.sh` set a host up; `deploy/host/backup.sh`, `restore.sh` and their systemd timers handle backups and their verification.
-- **Configuration** is environment variables only, listed in `mynt --help` (`src/index.ts`) and [`docs/reference.md`](reference.md). Each feature turns on when its keys are present and stays off otherwise.
-- **CI** builds, runs `npm test`, compiles every generated SDK language, and scaffolds, builds and runs the starter app hardened.
+- **Configuration** is environment variables only, listed in `mynt --help` (`core/src/index.ts`) and [`docs/reference.md`](reference.md). Each feature turns on when its keys are present and stays off otherwise.
+- **CI** builds, runs `npm test` (in `core/`), tests and builds the `platform/` apps, compiles every generated SDK language, and scaffolds, builds and runs the starter app hardened.
 
 ## 12. Where to make a change
 
-[`AGENTS.md` § Where each job lives](../AGENTS.md#where-each-job-lives) maps each kind of change to its files and tests. In short: tools live in their feature module and are wired in `src/server.ts`; the runtime API in `src/runtime-api.ts`; products in the schema and `src/definition.ts`; regulation in `src/regulatory.ts` and `src/regime.ts`; agents in `workspaces/<agent>/`.
+[`AGENTS.md` § Where each job lives](../AGENTS.md#where-each-job-lives) maps each kind of change to its files and tests. In short: tools live in their feature module and are wired in `core/src/server.ts`; the runtime API in `core/src/runtime-api.ts`; products in the schema and `core/src/definition.ts`; regulation in `core/src/regulatory.ts` and `core/src/regime.ts`; agents in `core/workspaces/<agent>/`.

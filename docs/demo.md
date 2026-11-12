@@ -8,11 +8,11 @@ real company is named, and no money exists anywhere in it.
 
 You need a copy of this repository and Node.js 22 or newer.
 
-1. Open a terminal in the repository folder.
+1. Open a terminal in the repository's `core` folder (the server).
 2. Install and build (once, takes a minute or two):
 
    ```
-   npm ci && npm run build
+   npm ci --workspaces=false && npm run build
    ```
 
 3. Do a practice run, so you know what the screen will show:
@@ -54,7 +54,7 @@ the summary should say PASS.
 5. **A health snapshot.** Mynt computes the product's financial health from the licence provider's books (reserves
    against what's owed to customers), encrypts it so only the provider can read it, waits for the provider to
    co-sign it with its own key, and records its fingerprint on a blockchain. Then a separate, standalone checker
-   (`scripts/product-health-verify.mjs`, which uses nothing from Mynt) confirms the record: "OVERALL PASS".
+   (`core/scripts/product-health-verify.mjs`, which uses nothing from Mynt) confirms the record: "OVERALL PASS".
 6. **A covenant.** The provider sets a rule: tell us when reserves fall below 100% of what's owed. A rule on a live
    product is judged on the provider's own books, never on sandbox figures, so the provider first connects them with
    the [partner kit](partners.md)'s fallback for a firm without an API: it registers a test key, uploads a signed test

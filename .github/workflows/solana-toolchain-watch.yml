@@ -29,7 +29,8 @@ concurrency:
   group: solana-toolchain-watch
   cancel-in-progress: false
 env:
-  PATHS: schemas/solana-toolchain.json workspaces/coding-build/templates/solana-program workspaces/coding-build/docs/solana workspaces/coding-build/.claude/skills/solana-dev
+  # The toolchain's own paths, from the repository root (the watcher itself works inside core/).
+  PATHS: core/schemas/solana-toolchain.json core/workspaces/coding-build/templates/solana-program core/workspaces/coding-build/docs/solana core/workspaces/coding-build/.claude/skills/solana-dev
 jobs:
   compute:
     runs-on: ubuntu-24.04
@@ -52,7 +53,7 @@ jobs:
           RUST_TRACK: ${{ inputs.rust || 'stable' }}
         run: |
           mkdir -p "$RUNNER_TEMP/out"
-          node scripts/solana-toolchain-watch.mjs --apply --anchor-line "$ANCHOR_LINE" --rust "$RUST_TRACK" \
+          node core/scripts/solana-toolchain-watch.mjs --apply --anchor-line "$ANCHOR_LINE" --rust "$RUST_TRACK" \
             --title "$RUNNER_TEMP/out/title.txt" --body "$RUNNER_TEMP/out/body.md" --branch-file "$RUNNER_TEMP/out/branch.txt"
       - name: The change, as a patch
         id: diff
