@@ -1,3 +1,5 @@
+import type { Stage } from "./workspaces";
+
 // A project is one of the user's Mynt apps (list_my_apps). Its "conversations" are the app's
 // coding-agent builds (list_builds), newest first: each build is one conversation with Mynt's
 // coding agent. Nothing here is stored by the studio; it's read from Mynt on each load.
@@ -22,6 +24,8 @@ export type ProjectItem = {
   name: string;
   description: string;
   status: string; // the app's status (draft, published)
+  /** Where the app stands, for the sidebar's folders: Mynt's own, else from status and last build. */
+  stage: Stage;
   /** The newest build's preview that exists, if any. */
   previewUrl: string | null;
   conversations: ProjectConversationSummary[];

@@ -20,6 +20,7 @@ vi.mock("@/lib/session", async (importOriginal) => ({
 
 vi.mock("@/lib/tokens", () => ({
   connectStudio: async () => ({
+    listTools: async () => ({ tools: [] }),
     callTool: async ({ name }: { name: string }) => {
       if (fake.failWith) throw fake.failWith;
       const data = name === "whoami" ? { id: "u1", effective_roles: ["developer"] } : name === "list_builds" ? { builds: [] } : [];
@@ -31,6 +32,8 @@ vi.mock("@/lib/tokens", () => ({
 
 const session = await import("@/app/api/session/route");
 const projects = await import("@/app/api/projects/route");
+const { NextRequest } = await import("next/server");
+const projectsRequest = () => new NextRequest("http://localhost:3000/api/projects");
 
 async function signedIn(): Promise<Session> {
   const s = store.create();
@@ -62,7 +65,7 @@ describe("session cookie", () => {
   it("is refreshed by the projects route too", async () => {
     await signedIn();
     clock.now = 2 * 24 * 60 * 60 * 1000;
-    const res = await projects.GET();
+    const res = await projects.GET(projectsRequest());
     expect(res.status).toBe(200);
     expect(res.headers.get("set-cookie") ?? "").toMatch(/Max-Age=604800/);
   });
@@ -72,14 +75,14 @@ describe("projects route", () => {
   it("answers 401 (not 502) and signs the session out when Mynt refuses its sign-in mid-call", async () => {
     const s = await signedIn();
     fake.failWith = new UnauthorizedError();
-    const res = await projects.GET();
+    const res = await projects.GET(projectsRequest());
     expect(res.status).toBe(401);
     expect((await store.get(s.id))?.tokens).toBeUndefined();
   });
 
   it("doesn't bring back a session signed out while it ran", async () => {
     const s = await signedIn();
-    const pending = projects.GET();
+    const pending = projects.GET(projectsRequest());
     await store.destroy(s.id); // sign-out lands first
     await pending;
     expect(await store.get(s.id)).toBeUndefined();
