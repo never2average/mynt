@@ -615,13 +615,13 @@ test("leaving cuts access at once: the leaver's keys revoked, webhooks disabled,
   assert.deepEqual([...r.access_cut.stopped_builds].sort(), [runningBuild, reopened].sort());
   assert.deepEqual(r.access_cut.programs_to_owner, ["Prog1111"]);
   assert.equal((await store.getApiKey(bensKey.id)).status, "revoked");
+  assert.equal((await store.getApiKey(live.id)).status, "active", "others' keys stay");
+  const hooks = (await pg.query("SELECT id::text AS id, disabled_at FROM financial_products.webhooks")).rows;
+  assert.ok(hooks.find((h) => h.id === bensHook.id).disabled_at && !hooks.find((h) => h.id === anasHook.id).disabled_at);
   // An owner turns Ben's webhook back on: with a new secret, which only she now holds.
   const back = (await call(ana.client, "enable_webhook", { webhook_id: bensHook.id })).data;
   assert.equal(back.enabled, true);
   assert.match(back.secret, /^whsec_/);
-  assert.equal((await store.getApiKey(live.id)).status, "active", "others' keys stay");
-  const hooks = (await pg.query("SELECT id::text AS id, disabled_at FROM financial_products.webhooks")).rows;
-  assert.ok(hooks.find((h) => h.id === bensHook.id).disabled_at && !hooks.find((h) => h.id === anasHook.id).disabled_at);
   const builds = (await pg.query("SELECT id::text AS id, status, box_sandbox_id FROM financial_products.build_runs WHERE developer_id = $1", [ben.user.id])).rows;
   assert.equal(builds.find((x) => x.id === runningBuild).status, "stopped");
   assert.equal(builds.find((x) => x.id === reopened).box_sandbox_id, null);
