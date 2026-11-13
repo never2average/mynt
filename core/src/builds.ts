@@ -21,7 +21,7 @@ import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
 import type { Store, User } from "./store.js";
 import { canSeeBuild, memberApp } from "./workspaces.js";
-import { checkRepoOwnership } from "./repo-ownership.js";
+import { checkRepoOwnership, type OwnershipCheck } from "./repo-ownership.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
@@ -298,6 +298,10 @@ ${APP_REPOSITORIES_DDL}
   -- The repository's stable id at the git host when Mynt checked who can push to it (repo-ownership.ts): a later
   -- connection by that name must still be that repository.
   ALTER TABLE financial_products.repo_connections ADD COLUMN IF NOT EXISTS repo_id text;
+  -- How it was approved (github: the developer's own push permission, re-checked; admin; managed) and when GitHub
+  -- last confirmed it.
+  ALTER TABLE financial_products.repo_connections ADD COLUMN IF NOT EXISTS approved_via text;
+  ALTER TABLE financial_products.repo_connections ADD COLUMN IF NOT EXISTS checked_at timestamptz;
   -- Mynt's own managed repositories need no admin: their connections are approved (connectManaged approves new ones).
   UPDATE financial_products.repo_connections SET approval = '${APPROVED}'
   WHERE approval = '${PENDING}' AND (repository IN (SELECT repository FROM financial_products.managed_repository_names)
@@ -649,14 +653,52 @@ export class BuildService {
     await this.db.query(
       `INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id, approval) VALUES ($1, $2, $3, $4)
        ON CONFLICT (developer_id, repository) DO UPDATE SET installation_id = EXCLUDED.installation_id,
-         ${managed ? `approval = '${APPROVED}'` : reapprovalOnConflict("repo_connections")}`,
+         ${managed ? `approval = '${APPROVED}', approved_via = 'managed'` : reapprovalOnConflict("repo_connections", "TRUE", true)}`,
       [developerId, repository.toLowerCase(), installationId, managed ? APPROVED : PENDING],
     );
+    if (managed) await this.db.query("UPDATE financial_products.repo_connections SET approved_via = 'managed' WHERE developer_id = $1 AND repository = $2", [developerId, repository.toLowerCase()]);
   }
 
-  // Throws ("waiting for an admin to approve access to …") unless the developer's connection is approved.
+  // The GitHub account linked to each developer's sign-in, for the push check (repo-ownership.ts); set at startup.
+  identity: LinkedAccountsService | null = null;
+  // How long GitHub's answer about a connection holds before a build asks again.
+  static OWNERSHIP_TTL_MS = 10 * 60_000;
+  // Push checks a developer may run a minute (each asks GitHub a few things).
+  static OWNERSHIP_CHECKS_PER_MINUTE = 10;
+
+  // Throws ("waiting for an admin to approve access to …") unless the developer's connection is approved. One approved
+  // by the developer's own push permission is checked with GitHub again once the last answer is older than
+  // OWNERSHIP_TTL_MS: gone (no push, no linked account, the repository changed) puts it back with an admin. GitHub
+  // unreachable doesn't block it (an answer that recently said yes stands while GitHub is down); admins' approvals
+  // and Mynt's managed repositories aren't re-checked.
   async requireApprovedConnection(developerId: string, repository: string) {
-    requireApproved(await connectionApproval(this.db, developerId, repository), repository);
+    const repo = repository.toLowerCase();
+    const row = await this.one(
+      `SELECT approval, approved_via, repo_id, installation_id, (checked_at IS NULL OR checked_at < now() - make_interval(secs => $3)) AS stale
+       FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2`,
+      [developerId, repo, BuildService.OWNERSHIP_TTL_MS / 1000],
+    );
+    if (row?.approval === APPROVED && row.approved_via === "github" && row.stale && this.repos) {
+      const check = await checkRepoOwnership({
+        repos: this.repos,
+        identity: this.identity,
+        userId: developerId,
+        repository: repo,
+        installationId: Number(row.installation_id),
+        recordedRepoId: (row.repo_id as string | null) ?? null,
+      });
+      if (check.approved) await this.db.query("UPDATE financial_products.repo_connections SET checked_at = now() WHERE developer_id = $1 AND repository = $2", [developerId, repo]);
+      else if (check.reason !== "unreachable" && check.reason !== "no_identity") {
+        await this.db.query(
+          `UPDATE financial_products.repo_connections SET approval = $3, approval_note = $4, approved_via = NULL, decided_by = NULL, decided_at = NULL
+           WHERE developer_id = $1 AND repository = $2 AND approval = $5 AND approved_via = 'github'`,
+          [developerId, repo, PENDING, check.message, APPROVED],
+        );
+        await this.store.audit(developerId, "repository_access_withdrawn", repository, { reason: check.reason });
+        throw new Error(`${repository}: ${check.message.replace(/, so an admin approves it.*$/, "")}; it now waits for an admin to approve it again`);
+      }
+    }
+    requireApproved((row?.approval as string | undefined) ?? null, repository);
   }
 
   // The installation hosting may fetch the developer's source with: only through an approved connection.
@@ -1944,35 +1986,69 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
       const repo = repository.toLowerCase();
       const prior = (
-        await store.db.query("SELECT approval, repo_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2", [user.id, repo])
-      ).rows[0] as { approval: string; repo_id: string | null } | undefined;
+        await store.db.query(
+          `SELECT approval, repo_id, approved_via, installation_id, (checked_at > now() - make_interval(secs => $3)) AS fresh
+           FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2`,
+          [user.id, repo, BuildService.OWNERSHIP_TTL_MS / 1000],
+        )
+      ).rows[0] as { approval: string; repo_id: string | null; approved_via: string | null; installation_id: string; fresh: boolean | null } | undefined;
       await builds.connectRepository(user.id, repository, installation);
       await store.audit(user.id, "connect_repository", repository);
       // Approved when the GitHub account linked to their sign-in can push to it (repo-ownership.ts); otherwise, until
-      // an admin approves it, Mynt gives out no token for it (repo-approvals.ts). An admin's rejection stands.
+      // an admin approves it, Mynt gives out no token for it (repo-approvals.ts). An admin's rejection stays until an
+      // admin lifts it, whatever GitHub says.
       let approval = await connectionApproval(store.db, user.id, repository);
       let why: { message: string; manage_url?: string | null } | null = null;
-      if (prior?.approval === REJECTED) why = { message: "An admin rejected access to it before, so it waits for an admin again" };
-      else {
-        const check = await checkRepoOwnership({ repos: builds.repos, identity, userId: user.id, repository: repo, installationId: installation, recordedRepoId: prior?.repo_id ?? null });
+      const unchanged = prior?.approval === APPROVED && approval === APPROVED && prior.fresh && Number(prior.installation_id) === installation;
+      if (approval === REJECTED) why = { message: "An admin rejected access to it; only an admin can change that" };
+      else if (!unchanged) {
+        // A few GitHub calls each: at most OWNERSHIP_CHECKS_PER_MINUTE a minute per developer.
+        const recent = Number(
+          (
+            await store.db.query(
+              "SELECT count(*)::int AS n FROM financial_products.audit_log WHERE actor_id = $1 AND action = 'repository_ownership_check' AND created_at > now() - interval '1 minute'",
+              [user.id],
+            )
+          ).rows[0]?.n ?? 0,
+        );
+        if (recent >= BuildService.OWNERSHIP_CHECKS_PER_MINUTE)
+          return fail(`You've checked ${BuildService.OWNERSHIP_CHECKS_PER_MINUTE} repositories with GitHub in the last minute; wait a minute and run connect_repository again`);
+        await store.audit(user.id, "repository_ownership_check", repository);
+        const check: OwnershipCheck = await checkRepoOwnership({
+          repos: builds.repos,
+          identity: builds.identity ?? identity,
+          userId: user.id,
+          repository: repo,
+          installationId: installation,
+          recordedRepoId: prior?.repo_id ?? null,
+        });
         if (check.approved) {
           if (approval !== APPROVED) {
-            await store.db.query(
-              `UPDATE financial_products.repo_connections SET approval = $3, repo_id = $4, approval_note = $5, decided_by = NULL, decided_at = now()
-               WHERE developer_id = $1 AND repository = $2`,
-              [user.id, repo, APPROVED, check.repo_id, `${check.login} can push (${check.permission}), checked with GitHub`],
+            // Only from what was read: an admin's rejection landing meanwhile wins.
+            const set = await store.db.query(
+              `UPDATE financial_products.repo_connections SET approval = $3, repo_id = $4, approval_note = $5, approved_via = 'github', checked_at = now(),
+                 decided_by = NULL, decided_at = now()
+               WHERE developer_id = $1 AND repository = $2 AND approval = $6 RETURNING approval`,
+              [user.id, repo, APPROVED, check.repo_id, `${check.login} can push (${check.permission}), checked with GitHub`, approval],
             );
-            await store.audit(user.id, "auto_approve_repository_connection", repository, { login: check.login, permission: check.permission, repo_id: check.repo_id });
-            approval = APPROVED;
-          } else await store.db.query("UPDATE financial_products.repo_connections SET repo_id = $3 WHERE developer_id = $1 AND repository = $2", [user.id, repo, check.repo_id]);
+            if (set.rows.length) {
+              await store.audit(user.id, "auto_approve_repository_connection", repository, { login: check.login, permission: check.permission, repo_id: check.repo_id });
+              approval = APPROVED;
+            } else {
+              approval = await connectionApproval(store.db, user.id, repository);
+              if (approval !== APPROVED) why = { message: approval === REJECTED ? "An admin rejected access to it; only an admin can change that" : "It changed while being checked; run connect_repository again" };
+            }
+          } else
+            await store.db.query("UPDATE financial_products.repo_connections SET repo_id = $3, checked_at = now() WHERE developer_id = $1 AND repository = $2", [user.id, repo, check.repo_id]);
         } else {
-          // An approval kept from before stands only while the name is still the same repository.
-          if (approval === APPROVED && (check.reason === "changed" || check.reason === "mismatch")) {
-            await store.db.query("UPDATE financial_products.repo_connections SET approval = $3, decided_by = NULL, decided_at = NULL WHERE developer_id = $1 AND repository = $2", [
-              user.id,
-              repo,
-              PENDING,
-            ]);
+          // An approval kept from before stands only while the name is still the same repository, and one that rested on
+          // their push permission only while they still have it.
+          const lost = check.reason === "changed" || check.reason === "mismatch" || (prior?.approved_via === "github" && (check.reason === "no_push" || check.reason === "unlinked"));
+          if (approval === APPROVED && lost) {
+            await store.db.query(
+              "UPDATE financial_products.repo_connections SET approval = $3, approved_via = NULL, decided_by = NULL, decided_at = NULL WHERE developer_id = $1 AND repository = $2 AND approval = $4",
+              [user.id, repo, PENDING, APPROVED],
+            );
             approval = PENDING;
           }
           if (approval !== APPROVED) {

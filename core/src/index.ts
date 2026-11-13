@@ -111,6 +111,7 @@ const openServices = async () => {
   const builds = await BuildService.open(db, store, sandboxes, github, buildConfig);
   // Each app's managed repository, when Mynt has an organization for them (BUILD_MANAGED_REPO_OWNER).
   builds.managedHost = GitHubRepoHost.fromEnv(github);
+  builds.identity = identity(store); // the push check's GitHub account (repo-ownership.ts)
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
   const deskConfig = deskConfigFromEnv(buildConfig);
   const desk = await DeskService.open(db, store, sandboxes, github, deskConfig);

@@ -1284,11 +1284,13 @@ test("a repository connection waits for an admin's approval, per developer; unti
   assert.match((await call(alice, "start_build", { goal: "Carry on from the shipped build", continue_from: started.id })).data.error, /rejected access/);
   assert.match((await call(alice, "reopen_sandbox", { build_id: started.id })).data.error, /rejected access/);
   assert.equal(await builds.sourceInstallation(aliceUser.id, "acme/savings-app"), null);
-  // Reconnecting asks again.
-  assert.equal((await call(alice, "connect_repository", { repository: "acme/savings-app" })).data.approval, "pending_approval");
+  // Reconnecting doesn't undo an admin's rejection (repeatedly, whatever else would approve it); only an admin lifts it.
+  for (let i = 0; i < 2; i++) assert.equal((await call(alice, "connect_repository", { repository: "acme/savings-app" })).data.approval, "rejected");
+  const rejected = (await call(admin, "list_repository_requests", { status: "rejected" })).data.find((r) => r.requested_by.name === "Alice");
+  assert.equal((await call(admin, "approve_repository_connection", { ...named(rejected), note: "cleared up" })).data.status, "approved");
   // Every decision is audited.
   const actions = (await store.db.query("SELECT action FROM financial_products.audit_log WHERE action LIKE '%repository_connection' ORDER BY created_at")).rows.map((r) => r.action);
-  assert.deepEqual(actions, ["approve_repository_connection", "reject_repository_connection", "reject_repository_connection"]);
+  assert.deepEqual(actions, ["approve_repository_connection", "reject_repository_connection", "reject_repository_connection", "approve_repository_connection"]);
 });
 
 test("an approval applies only to the connection as it was listed; a new installation is a new request", async () => {

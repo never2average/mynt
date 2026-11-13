@@ -70,7 +70,8 @@ async function setup(accounts) {
   const store = await Store.open(db, CATALOG);
   const gh = fakeGitHub();
   const builds = await BuildService.open(db, store, null, gh, { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com" });
-  const identity = new LinkedAccountsService(new ClerkIdentityProvider({ secretKey: "sk_test_x", publishableKey: PK }, db, fakeClerk(accounts)));
+  const identity = new LinkedAccountsService(new ClerkIdentityProvider({ secretKey: "sk_test_x", publishableKey: PK }, db, fakeClerk(accounts)), 0);
+  builds.identity = identity; // as index.ts sets it, for builds' re-checks
   const connect = async (name, clerkId) => {
     const { user } = await store.createUser(name, ["developer"]);
     if (clerkId) await pg.query("UPDATE financial_products.users SET clerk_user_id = $2 WHERE id = $1", [user.id, clerkId]);
@@ -81,9 +82,10 @@ async function setup(accounts) {
     const call = async (tool, args = {}) => JSON.parse((await client.callTool({ name: tool, arguments: args })).content[0].text);
     return { user, call };
   };
-  const row = async (userId) => (await pg.query("SELECT approval, repo_id, approval_note FROM financial_products.repo_connections WHERE developer_id = $1", [userId])).rows[0];
+  const row = async (userId) => (await pg.query("SELECT approval, repo_id, approval_note, approved_via FROM financial_products.repo_connections WHERE developer_id = $1", [userId])).rows[0];
   const audits = async (action) => (await pg.query("SELECT details FROM financial_products.audit_log WHERE action = $1", [action])).rows.map((r) => r.details);
-  return { pg, gh, connect, row, audits };
+  const age = (userId, minutes) => pg.query("UPDATE financial_products.repo_connections SET checked_at = now() - make_interval(mins => $2) WHERE developer_id = $1", [userId, minutes]);
+  return { pg, gh, builds, connect, row, audits, age };
 }
 
 test("the GitHub account linked to the sign-in can push: approved at once, the repository pinned by its id", async () => {
@@ -153,19 +155,124 @@ test("a repository renamed or transferred during the check, or not the one conne
   const ana = await w.connect("Ana", "clerk_ana");
   assert.equal((await ana.call("connect_repository", { repository: REPO })).approval, "approved");
   w.gh.ids = [3003];
+  await w.age(ana.user.id, 11); // within 10 minutes of GitHub's answer, a reconnect isn't checked again
   r = await ana.call("connect_repository", { repository: REPO });
   assert.equal(r.approval, "pending_approval");
   assert.match(r.why, /different repository from the one you connected before/);
 });
 
-test("an admin's rejection stands, whoever can push", async () => {
+test("an admin's rejection stands through any number of reconnects, whoever can push; only an admin lifts it", async () => {
   const w = await setup({ clerk_ana: [github("42")] });
   const ana = await w.connect("Ana", "clerk_ana");
   w.gh.permissions.octo = "read";
   await ana.call("connect_repository", { repository: REPO });
-  await w.pg.query("UPDATE financial_products.repo_connections SET approval = 'rejected' WHERE developer_id = $1", [ana.user.id]);
+  await w.pg.query("UPDATE financial_products.repo_connections SET approval = 'rejected', decided_by = $2 WHERE developer_id = $1", [ana.user.id, ana.user.id]);
+  // Now they can push: reconnecting again and again changes nothing.
   w.gh.permissions.octo = "admin";
+  for (let i = 0; i < 3; i++) {
+    const r = await ana.call("connect_repository", { repository: REPO });
+    assert.equal(r.approval, "rejected", `reconnect ${i + 1}`);
+    assert.match(r.why, /only an admin can change that/);
+  }
+  assert.equal((await w.row(ana.user.id)).approval, "rejected");
+});
+
+test("an admin rejecting while GitHub is being asked wins", async () => {
+  const w = await setup({ clerk_ana: [github("42")] });
+  const ana = await w.connect("Ana", "clerk_ana");
+  const ask = w.gh.permissionOf;
+  w.gh.permissionOf = async (...a) => {
+    await w.pg.query("UPDATE financial_products.repo_connections SET approval = 'rejected' WHERE developer_id = $1", [ana.user.id]);
+    return ask(...a);
+  };
   const r = await ana.call("connect_repository", { repository: REPO });
-  assert.equal(r.approval, "pending_approval");
-  assert.match(r.why, /admin rejected access to it before/);
+  assert.equal(r.approval, "rejected");
+  assert.equal((await w.row(ana.user.id)).approval, "rejected");
+});
+
+test("push access lost later: a build checks again once GitHub's answer is 10 minutes old, and the connection goes back to an admin; admins' approvals aren't re-checked", async () => {
+  const w = await setup({ clerk_ana: [github("42")], clerk_ben: [github("42")] });
+  const ana = await w.connect("Ana", "clerk_ana");
+  assert.equal((await ana.call("connect_repository", { repository: REPO })).approval, "approved");
+  assert.equal((await w.row(ana.user.id)).approved_via, "github");
+  w.gh.permissions.octo = "read";
+  // Within the window: GitHub isn't asked again.
+  const before = w.gh.calls.length;
+  await w.builds.requireApprovedConnection(ana.user.id, REPO);
+  assert.equal(w.gh.calls.length, before, "the recent answer stands");
+  // Older than 10 minutes: asked again, and lost.
+  await w.age(ana.user.id, 11);
+  await assert.rejects(w.builds.requireApprovedConnection(ana.user.id, REPO), /can't push.*waits for an admin/);
+  assert.equal((await w.row(ana.user.id)).approval, "pending_approval");
+  assert.equal((await w.audits("repository_access_withdrawn")).length, 1);
+  // GitHub down at build time: an approval GitHub gave stands (not blocked by an outage).
+  w.gh.permissions.octo = "write";
+  assert.equal((await ana.call("connect_repository", { repository: REPO })).approval, "approved");
+  await w.age(ana.user.id, 11);
+  w.gh.fail = true;
+  await w.builds.requireApprovedConnection(ana.user.id, REPO);
+  assert.equal((await w.row(ana.user.id)).approval, "approved");
+  // An admin's approval isn't re-checked.
+  w.gh.fail = false;
+  await w.pg.query("UPDATE financial_products.repo_connections SET approved_via = 'admin' WHERE developer_id = $1", [ana.user.id]);
+  w.gh.permissions.octo = "none";
+  await w.builds.requireApprovedConnection(ana.user.id, REPO);
+  assert.equal((await w.row(ana.user.id)).approval, "approved");
+  // Reconnecting with no push any more also takes back an approval that rested on it.
+  const ben = await w.connect("Ben", "clerk_ben");
+  w.gh.permissions.octo = "write";
+  assert.equal((await ben.call("connect_repository", { repository: REPO })).approval, "approved");
+  w.gh.permissions.octo = "read";
+  await w.age(ben.user.id, 11);
+  assert.equal((await ben.call("connect_repository", { repository: REPO })).approval, "pending_approval");
+});
+
+test("GitHub is asked sparingly: an approved, recently checked connection isn't checked again; checks are capped per developer per minute", async () => {
+  const w = await setup({ clerk_ana: [github("42")] });
+  const ana = await w.connect("Ana", "clerk_ana");
+  assert.equal((await ana.call("connect_repository", { repository: REPO })).approval, "approved");
+  const before = w.gh.calls.length;
+  assert.equal((await ana.call("connect_repository", { repository: REPO })).approval, "approved");
+  assert.equal(w.gh.calls.length, before, "no GitHub call for an approved, recently checked connection");
+  // Ten checks a minute.
+  await w.pg.query("UPDATE financial_products.repo_connections SET approval = 'pending_approval' WHERE developer_id = $1", [ana.user.id]);
+  w.gh.permissions.octo = "read";
+  // One check so far (the first connect; the second was skipped): nine more are allowed.
+  let last;
+  for (let i = 0; i < 9; i++) last = await ana.call("connect_repository", { repository: REPO });
+  assert.equal(last.approval, "pending_approval");
+  assert.match((await ana.call("connect_repository", { repository: REPO })).error, /checked 10 repositories with GitHub in the last minute/);
+});
+
+test("GitHub: one check asks for one token and reuses it", async () => {
+  const { generateKeyPairSync } = await import("node:crypto");
+  const { GitHubApp } = await import("../dist/github.js");
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const app = new GitHubApp("1", privateKey.export({ type: "pkcs8", format: "pem" }), "mynt", "https://gh.test");
+  const real = globalThis.fetch;
+  let tokens = 0;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    const reply = (v, status = 200) => new Response(JSON.stringify(v), { status });
+    if (path === "/app/installations/7/access_tokens") {
+      tokens++;
+      return reply({ token: "ghs_meta", expires_at: new Date(Date.now() + 3600e3).toISOString() }, 201);
+    }
+    if (path === "/repos/acme/web") return reply({ id: 1001, full_name: "acme/web" });
+    if (path === "/user/42") return reply({ login: "octo" });
+    if (path === "/repos/acme/web/collaborators/octo/permission") return reply({ permission: "write" });
+    if (path === "/user/99") return reply({ message: "Not Found" }, 404);
+    return reply({}, 500);
+  };
+  try {
+    assert.deepEqual(await app.repositoryInfo("acme/web", 7), { id: "1001", full_name: "acme/web" });
+    assert.equal(await app.loginOf("42", "acme/web", 7), "octo");
+    assert.equal(await app.permissionOf("acme/web", 7, "octo"), "write");
+    assert.deepEqual(await app.repositoryInfo("acme/web", 7), { id: "1001", full_name: "acme/web" });
+    assert.equal(tokens, 1);
+    assert.equal(await app.loginOf("99", "acme/web", 7), null);
+    assert.equal(await app.loginOf("not-a-number", "acme/web", 7), null);
+  } finally {
+    globalThis.fetch = real;
+  }
 });

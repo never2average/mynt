@@ -180,11 +180,21 @@ export class GitHubApp implements RepoAccess {
     };
   }
 
-  // Read-only calls for the push check, with a metadata-only token for the one repository.
+  // Read-only calls for the push check, with a metadata-only token for the one repository, reused (one check makes
+  // several calls) until a minute before it expires.
+  private readonly metadataTokens = new Map<string, { token: string; until: number }>();
   private async metadata(repo: string, installationId: number) {
-    const r = await this.call("POST", `/app/installations/${installationId}/access_tokens`, { repositories: [repo.split("/")[1]], permissions: { metadata: "read" } });
-    if (r.status !== 201) throw new Error(`GitHub refused a token for ${repo} (${r.status})`);
-    const token = (r.data as { token: string }).token;
+    const key = `${installationId}:${repo.toLowerCase()}`;
+    let held = this.metadataTokens.get(key);
+    if (!held || held.until < Date.now()) {
+      const r = await this.call("POST", `/app/installations/${installationId}/access_tokens`, { repositories: [repo.split("/")[1]], permissions: { metadata: "read" } });
+      if (r.status !== 201) throw new Error(`GitHub refused a token for ${repo} (${r.status})`);
+      const d = r.data as { token: string; expires_at?: string };
+      held = { token: d.token, until: (d.expires_at ? Date.parse(d.expires_at) : Date.now() + 3600e3) - 60_000 };
+      this.metadataTokens.set(key, held);
+      if (this.metadataTokens.size > 500) this.metadataTokens.delete(this.metadataTokens.keys().next().value!);
+    }
+    const token = held.token;
     return async (path: string) => {
       const res = await fetch(`${this.api}${path}`, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mynt", "X-GitHub-Api-Version": "2022-11-28" },

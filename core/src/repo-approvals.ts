@@ -33,12 +33,15 @@ export const approvalColumns = (table: string) => `
 // For an upsert's ON CONFLICT (whose SET reads the row's old values): an approved connection stays approved only when
 // the same repository is connected again through the same installation; anything else (a new repository or
 // installation, or one rejected or still pending) is a new request. Approvals don't expire (this is a stopgap).
-export const reapprovalOnConflict = (table: string, sameRepository = "TRUE") => {
+// `keepRejected`: an admin's rejection stays through reconnects (only an admin lifts it, by approving). Developers'
+// connections keep it, since their own push check could otherwise approve what an admin refused.
+export const reapprovalOnConflict = (table: string, sameRepository = "TRUE", keepRejected = false) => {
   const same = `${table}.approval = '${APPROVED}' AND ${sameRepository} AND ${table}.installation_id = EXCLUDED.installation_id`;
-  return `approval = CASE WHEN ${same} THEN '${APPROVED}' ELSE '${PENDING}' END,
-   approval_note = CASE WHEN ${same} THEN ${table}.approval_note END,
-   decided_by = CASE WHEN ${same} THEN ${table}.decided_by END,
-   decided_at = CASE WHEN ${same} THEN ${table}.decided_at END`;
+  const keep = keepRejected ? `(${same}) OR ${table}.approval = '${REJECTED}'` : same;
+  return `approval = CASE WHEN ${keepRejected ? `${table}.approval = '${REJECTED}' THEN '${REJECTED}' WHEN ` : ""}${same} THEN '${APPROVED}' ELSE '${PENDING}' END,
+   approval_note = CASE WHEN ${keep} THEN ${table}.approval_note END,
+   decided_by = CASE WHEN ${keep} THEN ${table}.decided_by END,
+   decided_at = CASE WHEN ${keep} THEN ${table}.decided_at END`;
 };
 
 // Throws, saying why, unless the connection is approved.
@@ -113,16 +116,16 @@ async function requests(store: Store, repos: RepoAccess | null, status: string |
 
 // Applies only to exactly the request the admin saw: the same row, repository and installation. A connection changed
 // since (a firm reconnecting its workspace to another repository keeps its row) isn't touched. Approving needs it
-// pending; rejecting also withdraws an approval.
+// pending (or rejected: only an admin lifts a rejection); rejecting also withdraws an approval.
 async function decide(store: Store, adminId: string, id: string, repository: string, installationId: number, decision: typeof APPROVED | typeof REJECTED, note: string) {
-  const from = decision === APPROVED ? [PENDING] : [PENDING, APPROVED];
+  const from = decision === APPROVED ? [PENDING, REJECTED] : [PENDING, APPROVED];
   for (const [table, who] of [
     ["repo_connections", "developer_id"],
     ["desk_workspaces", "connected_by"],
   ] as const) {
     const r = (await store.db
       .query(
-        `UPDATE ${T}.${table} SET approval = $2, approval_note = $3, decided_by = $4, decided_at = now()
+        `UPDATE ${T}.${table} SET approval = $2, approval_note = $3, decided_by = $4, decided_at = now()${table === "repo_connections" ? ", approved_via = 'admin'" : ""}
          WHERE id::text = $1 AND repository = $5 AND installation_id = $6 AND approval = ANY($7) RETURNING repository, ${who} AS user_id`,
         [id, decision, note, adminId, repository.toLowerCase(), installationId, from],
       )
