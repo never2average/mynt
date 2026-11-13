@@ -190,12 +190,14 @@ const encodeCursor = (at: string, id: string) => Buffer.from(JSON.stringify([at,
 function decodeCursor(c: string): [string, string] | null {
   try {
     const v = JSON.parse(Buffer.from(c, "base64url").toString("utf8"));
-    return Array.isArray(v) && typeof v[0] === "string" && typeof v[1] === "string" && !Number.isNaN(Date.parse(v[0].replace(" ", "T"))) && UUIDISH.test(v[1]) ? [v[0], v[1]] : null;
+    return Array.isArray(v) && typeof v[0] === "string" && typeof v[1] === "string" && DB_TIME.test(v[0]) && UUIDISH.test(v[1]) ? [v[0], v[1]] : null;
   } catch {
     return null;
   }
 }
 const UUIDISH = /^[0-9a-f-]{36}$/i;
+// Postgres's own text for a timestamptz (e.g. "2026-01-02 00:00:00.123456+00"), as the cursor carries it.
+const DB_TIME = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?([+-]\d{2}(:?\d{2})?|Z)?$/;
 
 // A day (YYYY-MM-DD, a real calendar date) or an ISO time.
 export function validTime(v: string): boolean {
