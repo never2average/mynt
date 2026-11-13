@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
 import { ROLES, type Role, type Store, type User } from "./store.js";
 import { admitWorkspaceInvitee, openWorkspaceInvite } from "./workspaces.js";
+import { chainOf, type IdentityProvider, type LinkedAccounts } from "./linked-accounts.js";
 
 // The parts of Clerk's backend client this server uses, so tests can provide a stand-in.
 export interface ClerkLike {
@@ -49,6 +50,57 @@ export function frontendApiFromPublishableKey(publishableKey: string): string {
   const host = Buffer.from(encoded, "base64").toString("utf8").replace(/\$$/, "");
   if (!/^[a-z0-9.-]+$/i.test(host)) throw new Error("CLERK_PUBLISHABLE_KEY is not a valid Clerk publishable key");
   return host;
+}
+
+// ---- linked accounts, read from Clerk (linked-accounts.ts) ----
+
+// What Clerk's backend says about a user's linked accounts. Clerk's user object carries far more (including OAuth
+// tokens through another endpoint); only these fields are ever read, and no token.
+export interface ClerkUsersLike {
+  users: {
+    getUser(userId: string): Promise<{
+      externalAccounts?: { provider?: string; username?: string | null; verification?: { status?: string } | null }[];
+      web3Wallets?: { web3Wallet?: string; verification?: { status?: string } | null }[];
+    }>;
+  };
+}
+
+// Clerk's Account Portal user page, where people link GitHub or a wallet: accounts.<domain>/user for a production
+// instance (frontend API clerk.<domain>), <slug>.accounts.dev/user for a development one (<slug>.clerk.accounts.dev).
+// CLERK_ACCOUNT_PORTAL_URL overrides it (a custom Account Portal domain).
+export function clerkAccountPortalUrl(frontendApiHost: string, override?: string): string | null {
+  if (override) return override;
+  const dev = frontendApiHost.match(/^([a-z0-9-]+)\.clerk\.accounts\.dev$/i);
+  if (dev) return `https://${dev[1]}.accounts.dev/user`;
+  if (/^clerk\./i.test(frontendApiHost)) return `https://accounts.${frontendApiHost.slice("clerk.".length)}/user`;
+  return null;
+}
+
+export class ClerkIdentityProvider implements IdentityProvider {
+  private readonly portal: string | null;
+  constructor(
+    config: { secretKey: string; publishableKey: string; accountPortalUrl?: string },
+    private readonly clerk: ClerkUsersLike = createClerkClient({ secretKey: config.secretKey, publishableKey: config.publishableKey }) as never,
+  ) {
+    this.portal = clerkAccountPortalUrl(frontendApiFromPublishableKey(config.publishableKey), config.accountPortalUrl);
+  }
+
+  manageUrl() {
+    return this.portal;
+  }
+
+  async linkedAccounts(subject: string): Promise<LinkedAccounts> {
+    const u = await this.clerk.users.getUser(subject);
+    const verified = (v?: { status?: string } | null) => v?.status === "verified";
+    const gh = (u.externalAccounts ?? []).find((a) => a.provider === "oauth_github" || a.provider === "github");
+    return {
+      git: gh ? { provider: "github", username: gh.username ?? null, verified: verified(gh.verification) } : null,
+      wallets: (u.web3Wallets ?? []).flatMap((w) => {
+        const chain = w.web3Wallet ? chainOf(w.web3Wallet) : null;
+        return chain ? [{ chain, address: w.web3Wallet!, verified: verified(w.verification) }] : [];
+      }),
+    };
+  }
 }
 
 export function clerkConfigFromEnv(env = process.env): ClerkAuthConfig | null {

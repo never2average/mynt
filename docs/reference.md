@@ -937,6 +937,14 @@ Developers build apps in **workspaces**: teams. Every app belongs to one workspa
 - **The dashboard's product figures.** `get_developer_dashboard` also gives `active_products`, the published products its apps use, and `licences`, the licences behind them (as `list_workspace_licences` counts them).
 - **Existing apps.** When Mynt first starts with workspaces, each developer with apps gets one workspace, "<their name>'s workspace", which they own and which holds all their apps. Nothing else changes for them.
 
+## Linked accounts
+
+`get_linked_accounts` (anyone signed in through the identity provider) shows the GitHub account and crypto wallets linked to the caller's sign-in, as the identity provider knows them: `{ git: { provider: "github", username, verified } | null, wallets: [{ chain: "solana" | "ethereum", address, verified }], manage_url }`. `manage_url` is where they link or unlink them: Clerk's Account Portal user page (`https://accounts.<domain>/user` for a production instance, `https://<slug>.accounts.dev/user` for a development one; `CLERK_ACCOUNT_PORTAL_URL` overrides it for a custom domain).
+- Read-only, and never a token: only the account name, the wallet address and whether each is verified. A wallet's chain is told from its address (0x and 40 hex digits: Ethereum; base58 of 32 to 44 characters: Solana); any other address isn't shown.
+- Cached for a minute per person. If the identity provider can't be reached, `git` and `wallets` are null and `unavailable` says so (never the provider's own error text).
+- The core is provider-neutral (`IdentityProvider` in `linked-accounts.ts`); the Clerk adapter is `ClerkIdentityProvider` in `auth.ts`, which reads the user's `external_accounts` and `web3_wallets`.
+- Later, acting on a person's GitHub repositories with their own token will need custom GitHub OAuth credentials configured in Clerk: with Clerk's shared development credentials, `getUserOauthAccessToken` returns no token. Showing the username works now.
+
 ## Licence providers: sponsoring builders' products
 
 A builder needn't hold licences. A **licence provider** is a firm that does: an admin adds it by hand (`register_firm`, `invite_user` with the `license_provider` role, `add_entity_member`), it registers its licences (`register_license`) and an admin verifies them (`review_license`), as for any firm. Its people share its firm id with builders out of band; there is no directory of firms.
