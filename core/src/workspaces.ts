@@ -75,6 +75,9 @@ export const WORKSPACE_TABLES = `
   ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS admin_roles_at timestamptz;
   -- A webhook its maker can no longer answer for (they left the app's workspace) gets no more deliveries.
   ALTER TABLE ${T}.webhooks ADD COLUMN IF NOT EXISTS disabled_at timestamptz;
+  -- A workspace's audit trail is found by what each event is about: its target, or the app an event names.
+  CREATE INDEX IF NOT EXISTS audit_log_target_idx ON ${T}.audit_log (target, created_at DESC);
+  CREATE INDEX IF NOT EXISTS audit_log_app_idx ON ${T}.audit_log ((details->>'app_id'), created_at DESC);
   -- Any change to a Mynt invite (an admin's, a role added) counts it up: a workspace invite withdraws only one at 0.
   ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
   -- Who received a key's or webhook's current secret: someone leaving can't keep using one they hold.

@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appRole, memberApp, workspaceRole } from "./workspaces.js";
+import { licencesForProducts } from "./workspace-compliance.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
 import { DuplicateError, type AccessRequest, type App, type Handoff, type ProductRecord, type Store, type User } from "./store.js";
@@ -773,6 +774,16 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
             [workspace_id],
           )
         : undefined;
+      // The published products these apps use, and the licences behind their sponsorships (list_workspace_licences).
+      const usedProducts = [...new Set(apps.flatMap((a) => a.product_ids))];
+      const activeProducts = usedProducts.length
+        ? Number(
+            ((await store.db.query("SELECT count(*)::int AS n FROM financial_products.products WHERE id = ANY($1) AND status = 'published'", [usedProducts])).rows[0] as {
+              n: number;
+            }).n,
+          )
+        : 0;
+      const licenceCount = (await licencesForProducts(store, usedProducts)).length;
       const counts = ids.length ? await store.runtimeCounts({ app_ids: ids, from, to: toExclusive, include_sandbox: false }) : [];
       const traffic = rollUp(counts, (r: { app_id: string }) => r.app_id);
       const trafficOf = new Map(traffic.groups);
@@ -802,6 +813,8 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
             : {}),
         },
         earnings: { usd: null, tracked: false },
+        active_products: activeProducts,
+        licences: licenceCount,
         daily,
         apps: apps.map((a) => {
           const b = lastBuilds?.find((x) => x.app_id === a.id);
