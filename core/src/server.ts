@@ -59,6 +59,7 @@ import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
 import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
 import { registerWorkspaceComplianceTools } from "./workspace-compliance.js";
+import { registerLinkedAccountsTools } from "./linked-accounts.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
@@ -113,6 +114,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("consumer")) registerConsumerTools(server, store, user!);
   // Anyone signed in may have been invited to a workspace (as a developer or a user), and answers it themselves.
   if (user) registerInvitationTools(server, store, user, ctx.clerkAdmin ?? null);
+  if (user && ctx.identity) registerLinkedAccountsTools(server, user, ctx.identity);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
     // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).

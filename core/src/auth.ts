@@ -2,8 +2,10 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
+import type { Db } from "./db.js";
 import { ROLES, type Role, type Store, type User } from "./store.js";
 import { admitWorkspaceInvitee, openWorkspaceInvite } from "./workspaces.js";
+import { chainOf, type IdentityProvider, type LinkedAccounts } from "./linked-accounts.js";
 
 // The parts of Clerk's backend client this server uses, so tests can provide a stand-in.
 export interface ClerkLike {
@@ -49,6 +51,74 @@ export function frontendApiFromPublishableKey(publishableKey: string): string {
   const host = Buffer.from(encoded, "base64").toString("utf8").replace(/\$$/, "");
   if (!/^[a-z0-9.-]+$/i.test(host)) throw new Error("CLERK_PUBLISHABLE_KEY is not a valid Clerk publishable key");
   return host;
+}
+
+// ---- linked accounts, read from Clerk (linked-accounts.ts) ----
+
+// What Clerk's backend says about a user's linked accounts. Clerk's user object carries far more (including OAuth
+// tokens through another endpoint); only these fields are ever read, and no token.
+export interface ClerkUsersLike {
+  users: {
+    getUser(userId: string): Promise<{
+      externalAccounts?: { provider?: string; username?: string | null; verification?: { status?: string } | null }[];
+      web3Wallets?: { web3Wallet?: string; verification?: { status?: string } | null }[];
+    }>;
+  };
+}
+
+// Clerk's Account Portal user page, where people link GitHub or a wallet: accounts.<domain>/user for a production
+// instance (frontend API clerk.<domain>), <slug>.accounts.dev/user for a development one (<slug>.clerk.accounts.dev).
+// CLERK_ACCOUNT_PORTAL_URL overrides it (a custom Account Portal domain).
+export function clerkAccountPortalUrl(frontendApiHost: string, override?: string): string | null {
+  if (override) {
+    let u: URL;
+    try {
+      u = new URL(override);
+    } catch {
+      throw new Error("CLERK_ACCOUNT_PORTAL_URL must be a valid https URL");
+    }
+    if (u.protocol !== "https:" || u.username || u.password) throw new Error("CLERK_ACCOUNT_PORTAL_URL must be a valid https URL");
+    return u.href;
+  }
+  const dev = frontendApiHost.match(/^([a-z0-9-]+)\.clerk\.accounts\.dev$/i);
+  if (dev) return `https://${dev[1]}.accounts.dev/user`;
+  if (/^clerk\./i.test(frontendApiHost)) return `https://accounts.${frontendApiHost.slice("clerk.".length)}/user`;
+  return null;
+}
+
+export class ClerkIdentityProvider implements IdentityProvider {
+  private readonly portal: string | null;
+  // `db`: where Mynt keeps each user's Clerk id (users.clerk_user_id).
+  constructor(
+    config: { secretKey: string; publishableKey: string; accountPortalUrl?: string },
+    private readonly db: Pick<Db, "query">,
+    private readonly clerk: ClerkUsersLike = createClerkClient({ secretKey: config.secretKey, publishableKey: config.publishableKey }) as never,
+  ) {
+    this.portal = clerkAccountPortalUrl(frontendApiFromPublishableKey(config.publishableKey), config.accountPortalUrl);
+  }
+
+  async subjectOf(userId: string): Promise<string | null> {
+    const r = await this.db.query("SELECT clerk_user_id FROM financial_products.users WHERE id = $1", [userId]);
+    return ((r.rows[0] as { clerk_user_id?: string | null } | undefined)?.clerk_user_id ?? null) as string | null;
+  }
+
+  manageUrl() {
+    return this.portal;
+  }
+
+  async linkedAccounts(subject: string): Promise<LinkedAccounts> {
+    const u = await this.clerk.users.getUser(subject);
+    const verified = (v?: { status?: string } | null) => v?.status === "verified";
+    // Verified links only: an unverified one proves nothing about who holds it.
+    const gh = (u.externalAccounts ?? []).find((a) => (a.provider === "oauth_github" || a.provider === "github") && verified(a.verification));
+    return {
+      git: gh ? { provider: "github", username: gh.username ?? null, verified: true } : null,
+      wallets: (u.web3Wallets ?? []).flatMap((w) => {
+        const chain = w.web3Wallet && verified(w.verification) ? chainOf(w.web3Wallet) : null;
+        return chain ? [{ chain, address: w.web3Wallet!, verified: true }] : [];
+      }),
+    };
+  }
 }
 
 export function clerkConfigFromEnv(env = process.env): ClerkAuthConfig | null {

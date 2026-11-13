@@ -4,7 +4,8 @@ import { offboardingServices } from "./server.js";
 import { parseArgs } from "node:util";
 import { AgentMeter } from "./agent-meter.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ClerkAdmin, ClerkAuth, clerkConfigFromEnv, registerFirstPartyApp } from "./auth.js";
+import { ClerkAdmin, ClerkAuth, ClerkIdentityProvider, clerkConfigFromEnv, registerFirstPartyApp } from "./auth.js";
+import { LinkedAccountsService } from "./linked-accounts.js";
 import { sandboxesFromEnv } from "./sandbox-providers/index.js";
 import { BdService, bdConfigFromEnv } from "./bd.js";
 import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./hosting.js";
@@ -172,6 +173,18 @@ const parseEmail = (): string => {
 };
 
 const clerkAdmin = () => (process.env.CLERK_SECRET_KEY ? new ClerkAdmin(process.env.CLERK_SECRET_KEY) : null);
+// People's linked accounts (GitHub, wallets), read from Clerk when it's the sign-in provider.
+const identity = (store: { db: ConstructorParameters<typeof ClerkIdentityProvider>[1] }) => {
+  const c = process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY ? process.env : null;
+  return c
+    ? new LinkedAccountsService(
+        new ClerkIdentityProvider(
+          { secretKey: c.CLERK_SECRET_KEY!, publishableKey: c.CLERK_PUBLISHABLE_KEY!, accountPortalUrl: c.CLERK_ACCOUNT_PORTAL_URL || undefined },
+          store.db,
+        ),
+      )
+    : null;
+};
 
 const [command = "serve", sub] = positionals;
 if (values.help) {
@@ -180,7 +193,7 @@ if (values.help) {
   const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
   const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants } = await openServices();
@@ -197,7 +210,7 @@ if (values.help) {
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
