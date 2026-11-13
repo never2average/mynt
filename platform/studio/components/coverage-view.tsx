@@ -5,9 +5,11 @@
 // tooltip, a side panel for the state clicked (its partners, licences, products and rails) and a
 // list view of the same data as a table. Server-renderable, so tests run without a browser.
 //
-// Colours: an ordinal single-hue ramp (one blue, light to dark) for unlocked and available,
-// checked against the dark surface with the dataviz skill's validator, and a neutral grey for
-// unavailable. Status is never colour alone: the legend, tooltip, panel and list name it.
+// Colours (app/globals.css, light and dark): unlocked is the most prominent, a strong bright
+// blue; available a muted blue of the same hue; unavailable neutral grey. The two blues pass the
+// dataviz skill's ordinal checks on each surface, and all three pairs are told apart with normal
+// and colour-blind vision. Status is never colour alone: the legend, tooltip, panel and list
+// name it.
 import { useMemo, useState } from "react"
 import type { GeoJsonObject } from "geojson"
 import { ComposableMap, Geographies, Geography } from "react-simple-maps"
@@ -31,9 +33,9 @@ import {
 } from "@/lib/compliance"
 
 export const COVERAGE_FILL: Record<CoverageStatus, string> = {
-  unlocked: "#6da7ec",
-  available: "#1c5cab",
-  unavailable: "#383835",
+  unlocked: "var(--coverage-unlocked)",
+  available: "var(--coverage-available)",
+  unavailable: "var(--coverage-unavailable)",
 }
 
 const geography = statesTopology as unknown as GeoJsonObject

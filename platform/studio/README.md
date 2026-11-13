@@ -42,7 +42,7 @@ The sidebar, the dashboard and its cards, chart and table are [shadcn/ui](https:
 - **Coverage** (`/coverage`, `components/coverage-view.tsx`) is a map of US states (react-simple-maps, MIT, over us-atlas, ISC), each coloured unlocked, available or unavailable for the workspace from `get_compliance_coverage`.
   - Hovering a state shows its name, status and partner count. Clicking it opens a side panel with its partners, licences, products and rails.
   - A legend counts the states by status, and **List view** shows the same data as a table.
-  - The colours are one blue ramp (unlocked brighter than available) and a neutral grey, checked for contrast against the dark surface. Status is always named in words too.
+  - Colours (`app/globals.css`): Unlocked is the most prominent, a strong bright blue; Available is a muted blue of the same hue; Unavailable is neutral grey. They were checked with the dataviz validator on both the light and dark surfaces. Status is always named in words too.
 - **Licences** (`/licences`) lists the partner licences behind the workspace's products (`list_workspace_licences`), with a search, filters by status, regulator and state, and **Export CSV**.
   - Expired licences, and those expiring within 60 days, are marked with an icon and words as well as a tinted row.
 - **Audits** (`/audits`) is the workspace's audit trail (`list_workspace_audit`), a page at a time by Mynt's cursor.

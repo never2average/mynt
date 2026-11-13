@@ -68,6 +68,14 @@ describe("coverage", () => {
     expect(html).toContain('aria-label="Map of US states by coverage"');
   });
 
+  it("uses one set of status colours, light and dark, in the legend, list and panel", async () => {
+    const { readFileSync } = await import("node:fs");
+    const css = readFileSync("app/globals.css", "utf8");
+    for (const s of ["unlocked", "available", "unavailable"]) expect(css.match(new RegExp(`--coverage-${s}: #[0-9a-f]{6};`, "g")), s).toHaveLength(2);
+    const html = renderToStaticMarkup(<CoverageView coverage={coverage} />) + renderToStaticMarkup(<CoverageList states={allStates(coverage)} />) + renderToStaticMarkup(<StatePanel state={coverage.states[0]} />);
+    for (const s of ["unlocked", "available", "unavailable"]) expect(html).toContain(`background:var(--coverage-${s})`);
+  });
+
   it("finds every state and DC on the us-atlas map, by FIPS code", () => {
     const topo = states10m as unknown as { objects: { states: { geometries: { id: string }[] } } };
     const codes = topo.objects.states.geometries.map((g) => FIPS_TO_CODE[g.id]).filter(Boolean);
