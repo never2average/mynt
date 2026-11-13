@@ -765,7 +765,18 @@ export class HostingService {
     const vms = await this.appVms(tenant.id);
     if (!vms.length) throw new Error("None of your apps has a VM yet: deploy one first");
     const prev = (await this.one("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.access_identity as string | null;
-    if (prev) await this.provider.revokeAccess(prev).catch(() => undefined);
+    // The last login ends before a new one is given: if the provider can't confirm that, no new login either (so no
+    // login is ever left behind unrecorded); try again shortly.
+    if (prev)
+      try {
+        await this.provider.revokeAccess(prev);
+      } catch {
+        throw new Error("The VMs' last login couldn't be ended just now, so no new one is given; try again shortly");
+      }
+    await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = NULL, access_granted_to = NULL, updated_at = now() WHERE id = $1 AND access_identity = $2", [
+      tenant.id,
+      prev,
+    ]);
     const grant = await this.provider.grantAccess(
       vms.map((v) => v.vm_id),
       "developer",

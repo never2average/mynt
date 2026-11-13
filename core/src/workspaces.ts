@@ -380,19 +380,34 @@ type OffboardRow = {
 // a member ("demotion"). It's recorded first, with the VM logins that were theirs then; each step runs once it
 // succeeds (keys, webhooks, invites, builds, VM logins...), and the ones that fail (a provider down) are tried again
 // with backoff (retryOffboards: the worker, or an admin's retry_offboard), up to OFFBOARD_MAX_ATTEMPTS, after which
-// it's marked failed and ops_status names it. If they're back in the workspace (or an owner or admin again) before
-// it's finished, it's superseded and nothing more is revoked. Hosted apps' runtime keys belong to the workspace
-// (created_by NULL), so a deployer leaving never takes a running app down.
+// it's marked failed and ops_status names it. If they're back in the workspace as an owner or admin before it's
+// finished, it's superseded and nothing more is revoked; back only as a member, the rest is superseded but the VM
+// logins of their admin days are still revoked (a member gets none). Hosted apps' runtime keys belong to the
+// workspace (created_by NULL), so a deployer leaving never takes a running app down.
 export async function offboard(store: Store, services: OffboardServices, workspaceId: string, userId: string, actor: string | null, kind: "leave" | "demotion" = "leave") {
   const db = store.db;
   const apps = await workspaceApps(db, workspaceId);
-  const logins = services.vmLoginsOf ? await services.vmLoginsOf(workspaceId, apps, userId).catch(() => []) : [];
+  // Their VM logins now. If that can't be read (the hosting side is down), the VM step reads it again on each retry:
+  // a failed snapshot is never taken for "nothing to revoke".
+  let logins: { tenant_id: string; identity: string }[] = [];
+  let snapshot = !services.vmLoginsOf;
+  if (services.vmLoginsOf)
+    try {
+      logins = await services.vmLoginsOf(workspaceId, apps, userId);
+      snapshot = true;
+    } catch {
+      snapshot = false;
+    }
+  const initialSteps = {
+    ...(kind === "demotion" ? Object.fromEntries(LEAVE_STEPS.filter((x) => x !== "vm").map((x) => [x, true])) : {}),
+    ...(snapshot ? { vm_snapshot: true } : {}),
+  };
   const row = (await one(
     db,
     `INSERT INTO ${T}.workspace_offboards (workspace_id, user_id, actor_id, kind, vm_logins, steps)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING workspace_id::text AS workspace_id, user_id::text AS user_id, actor_id::text AS actor_id,
        started_at::text AS started_at, kind, attempts, steps, vm_logins`,
-    [workspaceId, userId, actor, kind, JSON.stringify(logins), JSON.stringify(kind === "demotion" ? Object.fromEntries(LEAVE_STEPS.filter((x) => x !== "vm").map((x) => [x, true])) : {})],
+    [workspaceId, userId, actor, kind, JSON.stringify(logins), JSON.stringify(initialSteps)],
   )) as unknown as OffboardRow;
   return runOffboard(store, services, row);
 }
@@ -405,15 +420,20 @@ async function runOffboard(store: Store, services: OffboardServices, row: Offboa
   const { workspace_id: workspaceId, user_id: userId, actor_id: actor } = row;
   const key = [workspaceId, userId, row.started_at];
   const where = `workspace_id = $1 AND user_id = $2 AND started_at = $3::timestamptz`;
-  // Back in the workspace (or an owner or admin again) since: what they have now was granted since, so it stays.
+  // Back as an owner or admin since: what they have now was granted since, so it all stays. Back only as a member:
+  // their keys, invites and the rest are a member's again, but a member holds no VM login, so any from before still go.
   const role = await workspaceRole(db, workspaceId, userId);
-  if (row.kind === "leave" ? role : role === "owner" || role === "admin") {
+  if (role === "owner" || role === "admin") {
     await db.query(`UPDATE ${T}.workspace_offboards SET status = 'superseded', completed_at = now() WHERE ${where}`, key);
     await store.audit(null, "workspace_offboard_superseded", workspaceId, { user_id: userId, kind: row.kind });
     return { user_id: userId, superseded: true };
   }
-  const apps = await workspaceApps(db, workspaceId);
   const steps: Record<string, boolean> = { ...row.steps };
+  if (role === "member" && row.kind === "leave") {
+    for (const x of LEAVE_STEPS) if (x !== "vm") steps[x] = true;
+    await store.audit(null, "workspace_offboard_superseded", workspaceId, { user_id: userId, kind: row.kind, except: "vm" });
+  }
+  const apps = await workspaceApps(db, workspaceId);
   const done: Record<string, unknown> = { user_id: userId };
   const failures: string[] = [];
   const step = async (name: Step, f: () => Promise<unknown>) => {
@@ -506,9 +526,15 @@ async function runOffboard(store: Store, services: OffboardServices, row: Offboa
       throw e;
     }
   });
-  // Only the logins that were theirs when they left; each once the provider confirms.
-  const logins = row.vm_logins.map((l) => ({ ...l }));
+  // Only the logins that were theirs when they left (read again here if that failed then); each once the provider
+  // confirms.
+  let logins = row.vm_logins.map((l) => ({ ...l }));
   await step("vm", async () => {
+    if (!steps.vm_snapshot) {
+      if (!services.vmLoginsOf) throw new Error("hosting isn't available to say which VM logins are theirs");
+      logins = (await services.vmLoginsOf(workspaceId, apps, userId)).map((l) => ({ ...l }));
+      steps.vm_snapshot = true;
+    }
     let revoked = 0;
     const left = [];
     for (const l of logins.filter((x) => !x.revoked)) {
