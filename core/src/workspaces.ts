@@ -96,6 +96,17 @@ export const WORKSPACE_TABLES = `
     PRIMARY KEY (workspace_id, user_id, started_at)
   );
   CREATE INDEX IF NOT EXISTS workspace_offboards_pending_idx ON ${T}.workspace_offboards (started_at) WHERE completed_at IS NULL;
+  -- leave (someone left or was removed) or demotion (an owner or admin made a member: their VM logins only).
+  ALTER TABLE ${T}.workspace_offboards ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'leave';
+  -- pending, done, superseded (they're back, so nothing more is revoked) or failed (gave up: ops_status says so).
+  ALTER TABLE ${T}.workspace_offboards ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
+  ALTER TABLE ${T}.workspace_offboards ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
+  -- The steps done so far (only the rest are tried again), and the VM logins that were theirs when they left.
+  ALTER TABLE ${T}.workspace_offboards ADD COLUMN IF NOT EXISTS steps jsonb NOT NULL DEFAULT '{}';
+  ALTER TABLE ${T}.workspace_offboards ADD COLUMN IF NOT EXISTS vm_logins jsonb NOT NULL DEFAULT '[]';
+  CREATE INDEX IF NOT EXISTS workspace_offboards_due_idx ON ${T}.workspace_offboards (attempts, next_attempt_at) WHERE status = 'pending';
+  -- Lapsed workspace invites already looked at for releasing their Mynt invite.
+  ALTER TABLE ${T}.workspace_invites ADD COLUMN IF NOT EXISTS lapse_checked_at timestamptz;
 `;
 
 type Q = Pick<Db, "query">;
@@ -325,10 +336,14 @@ async function releaseMyntInvite(store: Store, inviteId: string, email: string, 
 
 // Invites that lapsed unanswered: the Mynt invites they made go too, where nobody used or changed them.
 export async function releaseLapsedInvites(store: Store, clerk: ClerkAllowlist | null = null): Promise<number> {
+  // Each lapsed invite is looked at once (lapse_checked_at), so ones that can't be released don't hold up the rest.
   const lapsed = (
     await store.db.query(
-      `SELECT w.id::text AS id, w.email FROM ${T}.workspace_invites w JOIN ${T}.invites i ON i.created_by_workspace_invite_id = w.id
-       WHERE w.accepted_at IS NULL AND w.revoked_at IS NULL AND w.created_at <= now() - interval '${WORKSPACE_INVITE_DAYS} days' LIMIT 100`,
+      `UPDATE ${T}.workspace_invites SET lapse_checked_at = now() WHERE id IN (
+         SELECT w.id FROM ${T}.workspace_invites w
+         WHERE w.accepted_at IS NULL AND w.revoked_at IS NULL AND w.lapse_checked_at IS NULL AND w.created_at <= now() - interval '${WORKSPACE_INVITE_DAYS} days'
+         ORDER BY w.created_at LIMIT 100)
+       RETURNING id::text AS id, email`,
     )
   ).rows as { id: string; email: string }[];
   let n = 0;
@@ -340,110 +355,219 @@ export async function releaseLapsedInvites(store: Store, clerk: ClerkAllowlist |
 
 export interface OffboardServices {
   // Stops the leaver's running builds of these apps and closes the sandboxes they reopened (builds.ts): the ones
-  // stopped, and the ones that couldn't be (retried).
+  // stopped, and the ones that couldn't be (tried again).
   stopBuilds?(userId: string, appIds: string[]): Promise<{ stopped: string[]; failed: string[] }>;
-  // Revokes current VM logins to the tenants that host these apps (hosting.ts): how many, and how many couldn't be.
-  revokeVmAccess?(workspaceId: string, appIds: string[]): Promise<{ revoked: number; failed: number }>;
+  // The VM logins someone holds now on the hosting that runs these apps (recorded when they leave, so a retry only
+  // ever revokes those, never a login someone else got since).
+  vmLoginsOf?(workspaceId: string, appIds: string[], userId: string): Promise<{ tenant_id: string; identity: string }[]>;
+  // Revokes one login; throws unless the provider confirmed.
+  revokeVmLogin?(tenantId: string, identity: string): Promise<void>;
 }
 
-// Cuts someone off from a workspace's apps, step by step. Every step is idempotent, and the whole is recorded first
-// (workspace_offboards) so a step that fails (the sandbox host or hosting provider down) is retried on the next
-// worker tick (retryOffboards) or by an admin (retry_offboard) until all are done. Hosted apps' runtime keys belong
-// to the workspace (created_by NULL), so the deployer leaving never takes a running app down.
-export async function offboard(store: Store, services: OffboardServices, workspaceId: string, userId: string, actor: string | null, startedAt?: string) {
+export const OFFBOARD_MAX_ATTEMPTS = 10;
+const LEAVE_STEPS = ["keys", "webhooks", "webhook_secrets", "invites", "repo_connections", "builds", "programs", "vm"] as const;
+type Step = (typeof LEAVE_STEPS)[number];
+
+type OffboardRow = {
+  workspace_id: string;
+  user_id: string;
+  actor_id: string | null;
+  started_at: string;
+  kind: "leave" | "demotion";
+  attempts: number;
+  steps: Record<string, boolean>;
+  vm_logins: { tenant_id: string; identity: string; revoked?: boolean }[];
+};
+
+// Cuts someone off from a workspace's apps (kind "leave"), or ends an owner's or admin's VM logins when they're made
+// a member ("demotion"). It's recorded first, with the VM logins that were theirs then; each step runs once it
+// succeeds (keys, webhooks, invites, builds, VM logins...), and the ones that fail (a provider down) are tried again
+// with backoff (retryOffboards: the worker, or an admin's retry_offboard), up to OFFBOARD_MAX_ATTEMPTS, after which
+// it's marked failed and ops_status names it. If they're back in the workspace (or an owner or admin again) before
+// it's finished, it's superseded and nothing more is revoked. Hosted apps' runtime keys belong to the workspace
+// (created_by NULL), so a deployer leaving never takes a running app down.
+export async function offboard(store: Store, services: OffboardServices, workspaceId: string, userId: string, actor: string | null, kind: "leave" | "demotion" = "leave") {
   const db = store.db;
-  const started =
-    startedAt ??
-    ((await one(db, `INSERT INTO ${T}.workspace_offboards (workspace_id, user_id, actor_id) VALUES ($1, $2, $3) RETURNING started_at::text AS at`, [workspaceId, userId, actor]))!
-      .at as string);
-  await db.query(`UPDATE ${T}.workspace_offboards SET attempts = attempts + 1 WHERE workspace_id = $1 AND user_id = $2 AND started_at = $3::timestamptz`, [workspaceId, userId, started]);
-  const apps = (await db.query(`SELECT id::text AS id FROM ${T}.apps WHERE workspace_id::text = $1`, [workspaceId])).rows.map((r) => (r as { id: string }).id);
-  const ids = (rows: unknown[]) => rows.map((r) => (r as { id: string }).id);
-  const failures: string[] = [];
-  // Keys they made, or whose current secret they were given (by rotating it).
-  const keys = ids(
-    (
-      await db.query(
-        `UPDATE ${T}.api_keys SET status = 'revoked', revoked_at = now()
-         WHERE app_id::text = ANY($1) AND status = 'active' AND (created_by = $2 OR last_secret_issued_to = $2) RETURNING id::text AS id`,
-        [apps, userId],
-      )
-    ).rows,
-  );
-  // Webhooks they made stop; others whose secret they were given get a new one nobody has yet.
-  const webhooks = ids(
-    (await db.query(`UPDATE ${T}.webhooks SET disabled_at = now() WHERE app_id::text = ANY($1) AND created_by = $2 AND disabled_at IS NULL RETURNING id::text AS id`, [apps, userId])).rows,
-  );
-  const rotated = [];
-  for (const id of ids((await db.query(`SELECT id::text AS id FROM ${T}.webhooks WHERE app_id::text = ANY($1) AND last_secret_issued_to = $2`, [apps, userId])).rows)) {
-    await store.rotateWebhookSecret(id, null);
-    rotated.push(id);
-  }
-  // Invites they sent and nobody has answered: void, so they can't come back through one.
-  const invites = (
-    await db.query(
-      `UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE workspace_id::text = $1 AND invited_by = $2 AND accepted_at IS NULL AND revoked_at IS NULL
-       RETURNING id::text AS id, email`,
-      [workspaceId, userId],
-    )
-  ).rows as { id: string; email: string }[];
-  for (const i of invites) await releaseMyntInvite(store, i.id, i.email, actor, null);
-  let builds: string[] = [];
-  if (services.stopBuilds) {
-    const r = await services.stopBuilds(userId, apps).catch((e) => ({ stopped: [], failed: [`all (${(e as Error).message})`] }));
-    builds = r.stopped;
-    if (r.failed.length) failures.push(`builds not stopped yet: ${r.failed.join(", ")}`);
-  }
-  // Programs they reserved for the team's apps pass to the workspace's longest-standing owner.
-  let programs: string[] = [];
-  try {
-    programs = (
-      await db.query(
-        `UPDATE ${T}.solana_programs SET owner_id = (SELECT user_id FROM ${T}.workspace_members WHERE workspace_id::text = $3 AND role = 'owner' ORDER BY joined_at LIMIT 1)
-         WHERE app_id::text = ANY($1) AND owner_id = $2 RETURNING program_id`,
-        [apps, userId, workspaceId],
-      )
-    ).rows.map((r) => (r as { program_id: string }).program_id);
-  } catch (e) {
-    if ((e as { code?: string }).code !== "42P01") throw e; // no Solana service here
-  }
-  let vmLogins = 0;
-  if (services.revokeVmAccess) {
-    const r = await services.revokeVmAccess(workspaceId, apps).catch(() => ({ revoked: 0, failed: 1 }));
-    vmLogins = r.revoked;
-    if (r.failed) failures.push(`${r.failed} VM login(s) not revoked yet`);
-  }
-  const done = {
-    user_id: userId,
-    revoked_api_keys: keys,
-    disabled_webhooks: webhooks,
-    rotated_webhook_secrets: rotated,
-    revoked_invites: invites.map((i) => i.id),
-    stopped_builds: builds,
-    programs_to_owner: programs,
-    vm_logins_revoked: vmLogins,
-    ...(failures.length ? { pending: failures } : {}),
-  };
-  await db.query(
-    `UPDATE ${T}.workspace_offboards SET done = done || $4::jsonb, error = $5, completed_at = CASE WHEN $5::text IS NULL THEN now() END
-     WHERE workspace_id = $1 AND user_id = $2 AND started_at = $3::timestamptz`,
-    [workspaceId, userId, started, JSON.stringify(done), failures.length ? failures.join("; ") : null],
-  );
-  await store.audit(actor, "workspace_offboard", workspaceId, done);
-  return done;
+  const apps = await workspaceApps(db, workspaceId);
+  const logins = services.vmLoginsOf ? await services.vmLoginsOf(workspaceId, apps, userId).catch(() => []) : [];
+  const row = (await one(
+    db,
+    `INSERT INTO ${T}.workspace_offboards (workspace_id, user_id, actor_id, kind, vm_logins, steps)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING workspace_id::text AS workspace_id, user_id::text AS user_id, actor_id::text AS actor_id,
+       started_at::text AS started_at, kind, attempts, steps, vm_logins`,
+    [workspaceId, userId, actor, kind, JSON.stringify(logins), JSON.stringify(kind === "demotion" ? Object.fromEntries(LEAVE_STEPS.filter((x) => x !== "vm").map((x) => [x, true])) : {})],
+  )) as unknown as OffboardRow;
+  return runOffboard(store, services, row);
 }
 
-// Offboardings with a step still to do: tried again (worker tick, retry_offboard).
-export async function retryOffboards(store: Store, services: OffboardServices, filter: { workspace_id?: string; user_id?: string } = {}) {
-  const pending = (
+const workspaceApps = async (db: Q, workspaceId: string) =>
+  (await db.query(`SELECT id::text AS id FROM ${T}.apps WHERE workspace_id::text = $1`, [workspaceId])).rows.map((r) => (r as { id: string }).id);
+
+async function runOffboard(store: Store, services: OffboardServices, row: OffboardRow) {
+  const db = store.db;
+  const { workspace_id: workspaceId, user_id: userId, actor_id: actor } = row;
+  const key = [workspaceId, userId, row.started_at];
+  const where = `workspace_id = $1 AND user_id = $2 AND started_at = $3::timestamptz`;
+  // Back in the workspace (or an owner or admin again) since: what they have now was granted since, so it stays.
+  const role = await workspaceRole(db, workspaceId, userId);
+  if (row.kind === "leave" ? role : role === "owner" || role === "admin") {
+    await db.query(`UPDATE ${T}.workspace_offboards SET status = 'superseded', completed_at = now() WHERE ${where}`, key);
+    await store.audit(null, "workspace_offboard_superseded", workspaceId, { user_id: userId, kind: row.kind });
+    return { user_id: userId, superseded: true };
+  }
+  const apps = await workspaceApps(db, workspaceId);
+  const steps: Record<string, boolean> = { ...row.steps };
+  const done: Record<string, unknown> = { user_id: userId };
+  const failures: string[] = [];
+  const step = async (name: Step, f: () => Promise<unknown>) => {
+    if (steps[name]) return;
+    try {
+      const r = await f();
+      if (r !== undefined) done[name] = r;
+      steps[name] = true;
+    } catch (e) {
+      failures.push(`${name}: ${(e as Error).message}`);
+    }
+  };
+  const ids = (rows: unknown[]) => rows.map((r) => (r as { id: string }).id);
+  // Keys they made, or whose current secret they were given (by rotating it).
+  await step("keys", async () =>
+    ids(
+      (
+        await db.query(
+          `UPDATE ${T}.api_keys SET status = 'revoked', revoked_at = now()
+           WHERE app_id::text = ANY($1) AND status = 'active' AND (created_by = $2 OR last_secret_issued_to = $2) RETURNING id::text AS id`,
+          [apps, userId],
+        )
+      ).rows,
+    ),
+  );
+  // Webhooks they made stop; others whose secret they were given get a new one nobody has yet, and the workspace's
+  // owners and admins are told (in its audit trail and ops_status) so the receiver can be given the new one.
+  await step("webhooks", async () =>
+    ids((await db.query(`UPDATE ${T}.webhooks SET disabled_at = now() WHERE app_id::text = ANY($1) AND created_by = $2 AND disabled_at IS NULL RETURNING id::text AS id`, [apps, userId])).rows),
+  );
+  await step("webhook_secrets", async () => {
+    const rotated = [];
+    for (const h of (await db.query(`SELECT id::text AS id, app_id::text AS app_id FROM ${T}.webhooks WHERE app_id::text = ANY($1) AND last_secret_issued_to = $2`, [apps, userId])).rows as {
+      id: string;
+      app_id: string;
+    }[]) {
+      await store.rotateWebhookSecret(h.id, null);
+      await store.audit(null, "webhook_secret_rotated_on_offboard", h.id, { app_id: h.app_id, workspace_id: workspaceId, next: "an owner or admin rotates it (rotate_webhook_secret) and gives the receiver the new secret" });
+      rotated.push(h.id);
+    }
+    return rotated;
+  });
+  // Invites they sent and nobody has answered: void, so they can't come back through one.
+  await step("invites", async () => {
+    const invites = (
+      await db.query(
+        `UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE workspace_id::text = $1 AND invited_by = $2 AND accepted_at IS NULL AND revoked_at IS NULL
+         RETURNING id::text AS id, email`,
+        [workspaceId, userId],
+      )
+    ).rows as { id: string; email: string }[];
+    for (const i of invites) await releaseMyntInvite(store, i.id, i.email, actor, null);
+    return invites.map((i) => i.id);
+  });
+  // The access Mynt gave them to the apps' managed repositories (approved automatically) goes.
+  await step("repo_connections", async () => {
+    try {
+      return (
+        await db.query(
+          `DELETE FROM ${T}.repo_connections WHERE developer_id = $1 AND repository IN (
+             SELECT repository FROM ${T}.app_repositories WHERE app_id::text = ANY($2) AND managed
+             UNION SELECT managed_repository FROM ${T}.app_repositories WHERE app_id::text = ANY($2) AND managed_repository IS NOT NULL)
+           RETURNING repository`,
+          [userId, apps],
+        )
+      ).rows.map((r) => (r as { repository: string }).repository);
+    } catch (e) {
+      if ((e as { code?: string }).code === "42P01") return []; // no builds service here
+      throw e;
+    }
+  });
+  await step("builds", async () => {
+    if (!services.stopBuilds) return [];
+    const r = await services.stopBuilds(userId, apps);
+    if (r.failed.length) throw Object.assign(new Error(`not stopped yet: ${r.failed.join(", ")}`), { partial: r.stopped });
+    return r.stopped;
+  });
+  // Programs they reserved for the team's apps pass to the workspace's longest-standing owner.
+  await step("programs", async () => {
+    try {
+      return (
+        await db.query(
+          `UPDATE ${T}.solana_programs SET owner_id = (SELECT user_id FROM ${T}.workspace_members WHERE workspace_id::text = $3 AND role = 'owner' ORDER BY joined_at LIMIT 1)
+           WHERE app_id::text = ANY($1) AND owner_id = $2 RETURNING program_id`,
+          [apps, userId, workspaceId],
+        )
+      ).rows.map((r) => (r as { program_id: string }).program_id);
+    } catch (e) {
+      if ((e as { code?: string }).code === "42P01") return []; // no Solana service here
+      throw e;
+    }
+  });
+  // Only the logins that were theirs when they left; each once the provider confirms.
+  const logins = row.vm_logins.map((l) => ({ ...l }));
+  await step("vm", async () => {
+    let revoked = 0;
+    const left = [];
+    for (const l of logins.filter((x) => !x.revoked)) {
+      try {
+        if (!services.revokeVmLogin) throw new Error("hosting isn't available");
+        await services.revokeVmLogin(l.tenant_id, l.identity);
+        l.revoked = true;
+        revoked++;
+      } catch {
+        left.push(l.tenant_id);
+      }
+    }
+    if (left.length) throw new Error(`${left.length} VM login(s) not revoked yet`);
+    return revoked;
+  });
+  const attempts = row.attempts + 1;
+  const status = failures.length ? (attempts >= OFFBOARD_MAX_ATTEMPTS ? "failed" : "pending") : "done";
+  await db.query(
+    `UPDATE ${T}.workspace_offboards SET attempts = $4::int, steps = $5::jsonb, vm_logins = $6::jsonb, done = done || $7::jsonb, error = $8::text, status = $9::text,
+       next_attempt_at = now() + make_interval(mins => LEAST(60, power(2, $4::int)::int)), completed_at = CASE WHEN $9::text IN ('done', 'failed') THEN now() END
+     WHERE ${where}`,
+    [...key, attempts, JSON.stringify(steps), JSON.stringify(logins), JSON.stringify(done), failures.length ? failures.join("; ") : null, status],
+  );
+  const result = {
+    user_id: userId,
+    revoked_api_keys: (done.keys as string[] | undefined) ?? [],
+    disabled_webhooks: (done.webhooks as string[] | undefined) ?? [],
+    rotated_webhook_secrets: (done.webhook_secrets as string[] | undefined) ?? [],
+    revoked_invites: (done.invites as string[] | undefined) ?? [],
+    removed_repo_connections: (done.repo_connections as string[] | undefined) ?? [],
+    stopped_builds: (done.builds as string[] | undefined) ?? [],
+    programs_to_owner: (done.programs as string[] | undefined) ?? [],
+    vm_logins_revoked: (done.vm as number | undefined) ?? 0,
+    ...(failures.length ? { pending: failures } : {}),
+    status,
+  };
+  await store.audit(actor, row.kind === "leave" ? "workspace_offboard" : "workspace_demotion_offboard", workspaceId, result);
+  return result;
+}
+
+// Offboardings with a step still to do, the longest-waiting first among the least-tried (so one that keeps failing
+// can't hold up newer ones). The worker takes the ones due; an admin (retry_offboard) any pending or failed one.
+export async function retryOffboards(store: Store, services: OffboardServices, filter: { workspace_id?: string; user_id?: string; force?: boolean } = {}) {
+  const rows = (
     await store.db.query(
-      `SELECT workspace_id::text AS workspace_id, user_id::text AS user_id, actor_id::text AS actor_id, started_at::text AS started_at FROM ${T}.workspace_offboards
-       WHERE completed_at IS NULL AND ($1::text IS NULL OR workspace_id::text = $1) AND ($2::text IS NULL OR user_id::text = $2) ORDER BY started_at LIMIT 50`,
+      `SELECT workspace_id::text AS workspace_id, user_id::text AS user_id, actor_id::text AS actor_id, started_at::text AS started_at, kind,
+         CASE WHEN status = 'failed' THEN 0 ELSE attempts END AS attempts, steps, vm_logins
+       FROM ${T}.workspace_offboards
+       WHERE ${filter.force ? "status IN ('pending', 'failed')" : "status = 'pending' AND next_attempt_at <= now()"}
+         AND ($1::text IS NULL OR workspace_id::text = $1) AND ($2::text IS NULL OR user_id::text = $2)
+       ORDER BY attempts, next_attempt_at LIMIT 50`,
       [filter.workspace_id ?? null, filter.user_id ?? null],
     )
-  ).rows as { workspace_id: string; user_id: string; actor_id: string | null; started_at: string }[];
+  ).rows as unknown as OffboardRow[];
   const out = [];
-  for (const o of pending) out.push(await offboard(store, services, o.workspace_id, o.user_id, o.actor_id, o.started_at));
+  for (const r of rows) out.push(await runOffboard(store, services, r));
   return out;
 }
 
@@ -705,10 +829,7 @@ export function registerWorkspaceTools(
           return current;
         });
         await audit("change_member_role", workspace_id, { user_id, from, to: role });
-        if (from !== "member" && role === "member" && ctx.offboarding?.revokeVmAccess) {
-          const apps = (await db.query(`SELECT id::text AS id FROM ${T}.apps WHERE workspace_id::text = $1`, [workspace_id])).rows.map((r) => (r as { id: string }).id);
-          await ctx.offboarding.revokeVmAccess(workspace_id, apps).catch(() => undefined);
-        }
+        if (from !== "member" && role === "member") await offboard(store, ctx.offboarding ?? {}, workspace_id, user_id, user.id, "demotion");
         return json({ workspace_id, user_id, role });
       }),
   );
@@ -900,7 +1021,20 @@ export function registerInvitationTools(server: McpServer, store: Store, user: U
       });
       if (!inv) return none(invite_id);
       await store.audit(user.id, "decline_workspace_invite", inv.workspace_id, { invite_id });
-      await releaseMyntInvite(store, invite_id, email!, user.id, clerk);
+      // They came onto Mynt only through this invite (a user's admission nobody changed) and belong to no workspace:
+      // declining it takes them back off, unless another invite is still waiting for them.
+      const out = await one(
+        db,
+        `DELETE FROM ${T}.invites i WHERE i.email = $1 AND i.created_by_workspace_invite_id::text = $2 AND i.revision = 0 AND i.admin_roles_at IS NULL
+           AND i.roles = '{consumer}' AND NOT EXISTS (SELECT 1 FROM ${T}.workspace_members m WHERE m.user_id = $3)
+           AND NOT EXISTS (SELECT 1 FROM ${T}.workspace_invites w WHERE w.email = $1 AND w.${OPEN.split(" AND ").join(" AND w.")})
+         RETURNING email`,
+        [email, invite_id, user.id],
+      );
+      if (out) {
+        await store.audit(user.id, "uninvite_via_workspace", email!, { workspace_invite_id: invite_id, declined: true });
+        await clerk?.disallow?.(email!).catch(() => undefined);
+      }
       return json({ declined: true });
     },
   );

@@ -552,17 +552,21 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     {
       title: "Turn a disabled webhook back on",
       description:
-        "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace. Turning it back on gives it a new signing secret, shown once to you.",
-      inputSchema: { webhook_id: z.string() },
+        "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace, since its address may be theirs. Turning it back on takes its URL: the one it has (list_webhooks shows it), to confirm it's still the right receiver, or a new one. It gets a new signing secret, shown once to you.",
+      inputSchema: { webhook_id: z.string(), url: z.string().describe("The address deliveries go to: its current one to confirm it, or a new one") },
     },
-    async ({ webhook_id }) => {
+    async ({ webhook_id, url }) => {
       const hook = await ownWebhook(webhook_id);
       if (!hook) return fail(`No webhook '${webhook_id}'`);
       if ((await appRole(store, user, (await store.getApp(hook.app_id))!)) === "member") return fail("Only the workspace's owners and admins turn webhooks back on");
+      if (url !== hook.url) {
+        const problem = await checkWebhookUrl(url);
+        if (problem) return fail(problem);
+      }
       const secret = await store.rotateWebhookSecret(hook.id, user.id);
-      await store.db.query("UPDATE financial_products.webhooks SET disabled_at = NULL WHERE id = $1", [hook.id]);
-      await audit("enable_webhook", hook.id, { app_id: hook.app_id });
-      return json({ webhook_id: hook.id, enabled: true, secret, note: "Save the signing secret now; it can't be shown again." });
+      await store.db.query("UPDATE financial_products.webhooks SET disabled_at = NULL, url = $2 WHERE id = $1", [hook.id, url]);
+      await audit("enable_webhook", hook.id, { app_id: hook.app_id, url_changed: url !== hook.url });
+      return json({ webhook_id: hook.id, url, enabled: true, secret, note: "Save the signing secret now; it can't be shown again." });
     },
   );
 
