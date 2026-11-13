@@ -54,13 +54,16 @@ function fakeGitHub() {
 
 // Clerk's backend: the person's linked GitHub account (verified or not), by Clerk user.
 function fakeClerk(accounts) {
-  return {
+  const c = {
+    down: false,
     users: {
       async getUser(id) {
+        if (c.down) throw Object.assign(new Error("clerk down"), { status: 503 });
         return { externalAccounts: accounts[id] ?? [], web3Wallets: [] };
       },
     },
   };
+  return c;
 }
 const github = (providerUserId, status = "verified") => ({ provider: "oauth_github", username: "octo", providerUserId, verification: { status } });
 
@@ -70,7 +73,8 @@ async function setup(accounts) {
   const store = await Store.open(db, CATALOG);
   const gh = fakeGitHub();
   const builds = await BuildService.open(db, store, null, gh, { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com" });
-  const identity = new LinkedAccountsService(new ClerkIdentityProvider({ secretKey: "sk_test_x", publishableKey: PK }, db, fakeClerk(accounts)), 0);
+  const clerk = fakeClerk(accounts);
+  const identity = new LinkedAccountsService(new ClerkIdentityProvider({ secretKey: "sk_test_x", publishableKey: PK }, db, clerk), 0, Date.now, 0);
   builds.identity = identity; // as index.ts sets it, for builds' re-checks
   const connect = async (name, clerkId) => {
     const { user } = await store.createUser(name, ["developer"]);
@@ -85,7 +89,7 @@ async function setup(accounts) {
   const row = async (userId) => (await pg.query("SELECT approval, repo_id, approval_note, approved_via FROM financial_products.repo_connections WHERE developer_id = $1", [userId])).rows[0];
   const audits = async (action) => (await pg.query("SELECT details FROM financial_products.audit_log WHERE action = $1", [action])).rows.map((r) => r.details);
   const age = (userId, minutes) => pg.query("UPDATE financial_products.repo_connections SET checked_at = now() - make_interval(mins => $2) WHERE developer_id = $1", [userId, minutes]);
-  return { pg, gh, builds, connect, row, audits, age };
+  return { pg, gh, builds, clerk, connect, row, audits, age };
 }
 
 test("the GitHub account linked to the sign-in can push: approved at once, the repository pinned by its id", async () => {
@@ -275,4 +279,21 @@ test("GitHub: one check asks for one token and reuses it", async () => {
   } finally {
     globalThis.fetch = real;
   }
+});
+
+test("an identity-provider outage is an outage: a re-check keeps the approval, and a new connection waits for an admin, saying why", async () => {
+  const w = await setup({ clerk_ana: [github("42")], clerk_bob: [github("42")] });
+  const ana = await w.connect("Ana", "clerk_ana");
+  assert.equal((await ana.call("connect_repository", { repository: REPO })).approval, "approved");
+  // Clerk stops answering.
+  w.clerk.down = true;
+  await w.age(ana.user.id, 11);
+  await w.builds.requireApprovedConnection(ana.user.id, REPO);
+  assert.equal((await w.row(ana.user.id)).approval, "approved", "not withdrawn by the outage");
+  assert.equal((await w.audits("repository_access_withdrawn")).length, 0);
+  // A new connection meanwhile goes to an admin, with the reason.
+  const bob = await w.connect("Bob", "clerk_bob");
+  const r = await bob.call("connect_repository", { repository: REPO });
+  assert.equal(r.approval, "pending_approval");
+  assert.match(r.why, /couldn't read the accounts linked to your sign-in/);
 });

@@ -29,15 +29,15 @@ export async function checkRepoOwnership(o: {
   if (!o.identity || !repos.repositoryInfo || !repos.permissionOf || !repos.loginOf)
     return { approved: false, reason: "no_identity", message: "Mynt can't check who can push to it here, so an admin approves it" };
   const linked = await o.identity.forUser(o.userId);
+  // The identity provider not answering is an outage, like GitHub's: it says nothing about their access.
+  if ("unavailable" in linked && linked.unavailable)
+    return { approved: false, reason: "unreachable", message: `Mynt couldn't read the accounts linked to your sign-in (${linked.unavailable}), so an admin approves it (or run connect_repository again shortly)` };
   const git = linked.git;
   if (!git?.user_id)
     return {
       approved: false,
       reason: "unlinked",
-      message:
-        "unavailable" in linked
-          ? `Mynt couldn't read the accounts linked to your sign-in (${linked.unavailable}), so an admin approves it`
-          : "No verified GitHub account is linked to your sign-in, so an admin approves it. To skip the wait next time, link your GitHub account (manage_url) and run connect_repository again",
+      message: "No verified GitHub account is linked to your sign-in, so an admin approves it. To skip the wait next time, link your GitHub account (manage_url) and run connect_repository again",
       manage_url: linked.manage_url,
     };
   try {

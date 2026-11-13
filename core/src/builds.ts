@@ -1775,9 +1775,23 @@ export class BuildService {
       );
       commit = head.stdout.trim();
       if (head.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(commit)) return end("blocked", "The pushed branch doesn't match the verified source");
-      // The connection may have been rejected while the build ran: no pull request through it then.
-      const approval = await connectionApproval(this.db, b.developer_id, b.repository);
-      if (approval !== APPROVED) return end("blocked", approval === REJECTED ? `An admin rejected access to ${b.repository} while the build ran; no pull request was opened` : `Waiting for an admin to approve access to ${b.repository}; no pull request was opened`);
+      // The connection may have been rejected, or its push access gone (checked with GitHub again, as before any token),
+      // while the build ran: no pull request through it then. The verified work stays on its branch.
+      let refusal: string | null = null;
+      try {
+        await this.requireApprovedConnection(b.developer_id, b.repository);
+      } catch (e) {
+        refusal = (e as Error).message;
+      }
+      if (refusal) {
+        const approval = await connectionApproval(this.db, b.developer_id, b.repository);
+        return end(
+          "blocked",
+          approval === REJECTED
+            ? `An admin rejected access to ${b.repository} while the build ran; no pull request was opened`
+            : `${refusal.startsWith("Waiting for an admin") ? `Waiting for an admin to approve access to ${b.repository}` : refusal}; no pull request was opened (the verified work is on branch ${b.branch})`,
+        );
+      }
       const installation = await this.installation(b.developer_id, b.repository);
       pr = await this.repos.openPullRequest(b.repository, installation!, {
         head: b.branch,
