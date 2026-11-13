@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
+import type { Db } from "./db.js";
 import { ROLES, type Role, type Store, type User } from "./store.js";
 import { admitWorkspaceInvitee, openWorkspaceInvite } from "./workspaces.js";
 import { chainOf, type IdentityProvider, type LinkedAccounts } from "./linked-accounts.js";
@@ -69,7 +70,16 @@ export interface ClerkUsersLike {
 // instance (frontend API clerk.<domain>), <slug>.accounts.dev/user for a development one (<slug>.clerk.accounts.dev).
 // CLERK_ACCOUNT_PORTAL_URL overrides it (a custom Account Portal domain).
 export function clerkAccountPortalUrl(frontendApiHost: string, override?: string): string | null {
-  if (override) return override;
+  if (override) {
+    let u: URL;
+    try {
+      u = new URL(override);
+    } catch {
+      throw new Error("CLERK_ACCOUNT_PORTAL_URL must be a valid https URL");
+    }
+    if (u.protocol !== "https:" || u.username || u.password) throw new Error("CLERK_ACCOUNT_PORTAL_URL must be a valid https URL");
+    return u.href;
+  }
   const dev = frontendApiHost.match(/^([a-z0-9-]+)\.clerk\.accounts\.dev$/i);
   if (dev) return `https://${dev[1]}.accounts.dev/user`;
   if (/^clerk\./i.test(frontendApiHost)) return `https://accounts.${frontendApiHost.slice("clerk.".length)}/user`;
@@ -78,11 +88,18 @@ export function clerkAccountPortalUrl(frontendApiHost: string, override?: string
 
 export class ClerkIdentityProvider implements IdentityProvider {
   private readonly portal: string | null;
+  // `db`: where Mynt keeps each user's Clerk id (users.clerk_user_id).
   constructor(
     config: { secretKey: string; publishableKey: string; accountPortalUrl?: string },
+    private readonly db: Pick<Db, "query">,
     private readonly clerk: ClerkUsersLike = createClerkClient({ secretKey: config.secretKey, publishableKey: config.publishableKey }) as never,
   ) {
     this.portal = clerkAccountPortalUrl(frontendApiFromPublishableKey(config.publishableKey), config.accountPortalUrl);
+  }
+
+  async subjectOf(userId: string): Promise<string | null> {
+    const r = await this.db.query("SELECT clerk_user_id FROM financial_products.users WHERE id = $1", [userId]);
+    return ((r.rows[0] as { clerk_user_id?: string | null } | undefined)?.clerk_user_id ?? null) as string | null;
   }
 
   manageUrl() {
@@ -92,12 +109,13 @@ export class ClerkIdentityProvider implements IdentityProvider {
   async linkedAccounts(subject: string): Promise<LinkedAccounts> {
     const u = await this.clerk.users.getUser(subject);
     const verified = (v?: { status?: string } | null) => v?.status === "verified";
-    const gh = (u.externalAccounts ?? []).find((a) => a.provider === "oauth_github" || a.provider === "github");
+    // Verified links only: an unverified one proves nothing about who holds it.
+    const gh = (u.externalAccounts ?? []).find((a) => (a.provider === "oauth_github" || a.provider === "github") && verified(a.verification));
     return {
-      git: gh ? { provider: "github", username: gh.username ?? null, verified: verified(gh.verification) } : null,
+      git: gh ? { provider: "github", username: gh.username ?? null, verified: true } : null,
       wallets: (u.web3Wallets ?? []).flatMap((w) => {
-        const chain = w.web3Wallet ? chainOf(w.web3Wallet) : null;
-        return chain ? [{ chain, address: w.web3Wallet!, verified: verified(w.verification) }] : [];
+        const chain = w.web3Wallet && verified(w.verification) ? chainOf(w.web3Wallet) : null;
+        return chain ? [{ chain, address: w.web3Wallet!, verified: true }] : [];
       }),
     };
   }

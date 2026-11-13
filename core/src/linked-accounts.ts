@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Store, User } from "./store.js";
+import type { User } from "./store.js";
 
 // The accounts a person has linked to their sign-in: their git host account and their crypto wallets, as the identity
 // provider knows them. Read-only: linking happens on the provider's own account page (manage_url). Never a token.
@@ -23,7 +23,9 @@ export interface LinkedAccounts {
 }
 
 export interface IdentityProvider {
-  // The person's linked accounts, by the provider's own id for them (users.clerk_user_id for Clerk).
+  // Mynt's user to the provider's own id for them; null when they didn't sign in through it.
+  subjectOf(userId: string): Promise<string | null>;
+  // The person's linked accounts, by the provider's id: verified ones only.
   linkedAccounts(subject: string): Promise<LinkedAccounts>;
   // Where the person links or unlinks accounts themselves; null if the provider has no such page.
   manageUrl(): string | null;
@@ -42,48 +44,62 @@ export type LinkedAccountsReply =
   | { git: null; wallets: null; manage_url: string | null; unavailable: string };
 
 export class LinkedAccountsService {
-  private readonly cache = new Map<string, { at: number; value: LinkedAccounts }>();
+  // Answers for a minute; a failure for 15 seconds (so a provider outage isn't hammered by every page load).
+  private readonly cache = new Map<string, { at: number; ttl: number; value: LinkedAccounts | { unavailable: string } }>();
 
   constructor(
     private readonly provider: IdentityProvider,
     private readonly ttlMs = 60_000,
     private readonly now: () => number = Date.now,
+    private readonly failureTtlMs = 15_000,
   ) {}
 
-  async forSubject(subject: string | null): Promise<LinkedAccountsReply> {
+  async forUser(userId: string): Promise<LinkedAccountsReply> {
     const manage_url = this.provider.manageUrl();
-    if (!subject) return { git: null, wallets: null, manage_url, unavailable: "This account didn't sign in through the identity provider" };
-    const hit = this.cache.get(subject);
-    if (hit && this.now() - hit.at < this.ttlMs) return { ...hit.value, manage_url };
+    const reply = (v: LinkedAccounts | { unavailable: string }): LinkedAccountsReply =>
+      "unavailable" in v ? { git: null, wallets: null, manage_url, unavailable: v.unavailable } : { ...v, manage_url };
+    let subject: string | null;
     try {
-      const value = await this.provider.linkedAccounts(subject);
-      this.cache.set(subject, { at: this.now(), value });
-      if (this.cache.size > 10_000) this.cache.delete(this.cache.keys().next().value!);
-      return { ...value, manage_url };
+      subject = await this.provider.subjectOf(userId);
+    } catch {
+      return reply({ unavailable: "Your account couldn't be looked up just now; try again shortly" });
+    }
+    if (!subject) return reply({ unavailable: "This account didn't sign in through the identity provider" });
+    const hit = this.cache.get(subject);
+    if (hit && this.now() - hit.at < hit.ttl) return reply(hit.value);
+    let value: LinkedAccounts | { unavailable: string };
+    let ttl = this.ttlMs;
+    try {
+      value = await this.provider.linkedAccounts(subject);
     } catch (e) {
       // Only the kind of failure: a provider's message may carry request details.
       const status = (e as { status?: number }).status;
-      return { git: null, wallets: null, manage_url, unavailable: `The identity provider couldn't be reached${status ? ` (HTTP ${status})` : ""}; try again shortly` };
+      value = {
+        unavailable:
+          status === 404
+            ? "The identity provider has no account for you any more (it was deleted); sign in again"
+            : `The identity provider couldn't be reached${status ? ` (HTTP ${status})` : ""}; try again shortly`,
+      };
+      ttl = this.failureTtlMs;
     }
+    this.cache.set(subject, { at: this.now(), ttl, value });
+    if (this.cache.size > 10_000) this.cache.delete(this.cache.keys().next().value!);
+    return reply(value);
   }
 }
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 
-export function registerLinkedAccountsTools(server: McpServer, store: Store, user: User, service: LinkedAccountsService) {
+export function registerLinkedAccountsTools(server: McpServer, user: User, service: LinkedAccountsService) {
   server.registerTool(
     "get_linked_accounts",
     {
       title: "Your linked accounts",
       description:
-        "Your GitHub account and crypto wallets (Solana, Ethereum) linked to your sign-in, and whether each is verified, as the identity provider knows them; manage_url is where you link or unlink them. null with a reason when the provider can't be reached.",
+        "Your verified GitHub account and crypto wallets (Solana, Ethereum) linked to your sign-in, as the identity provider knows them; manage_url is where you link or unlink them. null with a reason when the provider can't be reached or no longer has your account.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => {
-      const r = await store.db.query("SELECT clerk_user_id FROM financial_products.users WHERE id = $1", [user.id]);
-      const subject = ((r.rows[0] as { clerk_user_id?: string | null } | undefined)?.clerk_user_id ?? null) as string | null;
-      return json(await service.forSubject(subject));
-    },
+    async () => json(await service.forUser(user.id)),
   );
 }

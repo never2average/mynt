@@ -114,7 +114,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("consumer")) registerConsumerTools(server, store, user!);
   // Anyone signed in may have been invited to a workspace (as a developer or a user), and answers it themselves.
   if (user) registerInvitationTools(server, store, user, ctx.clerkAdmin ?? null);
-  if (user && ctx.identity) registerLinkedAccountsTools(server, store, user, ctx.identity);
+  if (user && ctx.identity) registerLinkedAccountsTools(server, user, ctx.identity);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
     // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).
