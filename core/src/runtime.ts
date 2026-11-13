@@ -759,7 +759,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
             }).n,
           )
         : 0;
-      const licenceCount = (await licencesForProducts(store.db, usedProducts)).length;
+      const licenceCount = (await licencesForProducts(store, usedProducts)).length;
       const counts = ids.length ? await store.runtimeCounts({ app_ids: ids, from, to: toExclusive, include_sandbox: false }) : [];
       const traffic = rollUp(counts, (r: { app_id: string }) => r.app_id);
       const trafficOf = new Map(traffic.groups);
