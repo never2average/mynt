@@ -4,8 +4,8 @@ import { z } from "zod";
 import type { RepoAccess } from "./github.js";
 import type { Store } from "./store.js";
 
-// Stopgap until people prove they can push to a repository themselves (the git-account check): an admin approves
-// each repository connection before Mynt gives out any token for it. The repository host's app being installed on a
+// An admin approves each repository connection before Mynt gives out any token for it, unless the developer's own
+// GitHub account (linked to their sign-in) can push to it, checked with GitHub (repo-ownership.ts). The repository host's app being installed on a
 // repository only says Mynt can reach it, not that the person asking may use it.
 //
 // A developer's connection (developer and repository) and a firm's desk workspace (firm and repository) each start

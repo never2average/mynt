@@ -21,6 +21,8 @@ import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
 import type { Store, User } from "./store.js";
 import { canSeeBuild, memberApp } from "./workspaces.js";
+import { checkRepoOwnership } from "./repo-ownership.js";
+import type { LinkedAccountsService } from "./linked-accounts.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
 
@@ -293,6 +295,9 @@ ${APP_REPOSITORIES_DDL}
     PRIMARY KEY (developer_id, repository)
   );
   ${approvalColumns("repo_connections")}
+  -- The repository's stable id at the git host when Mynt checked who can push to it (repo-ownership.ts): a later
+  -- connection by that name must still be that repository.
+  ALTER TABLE financial_products.repo_connections ADD COLUMN IF NOT EXISTS repo_id text;
   -- Mynt's own managed repositories need no admin: their connections are approved (connectManaged approves new ones).
   UPDATE financial_products.repo_connections SET approval = '${APPROVED}'
   WHERE approval = '${PENDING}' AND (repository IN (SELECT repository FROM financial_products.managed_repository_names)
@@ -1907,7 +1912,7 @@ export function developerBuild(b: Build) {
   };
 }
 
-export function registerCodingAgentTools(server: McpServer, store: Store, user: User, builds: BuildService) {
+export function registerCodingAgentTools(server: McpServer, store: Store, user: User, builds: BuildService, identity: LinkedAccountsService | null = null) {
   // A build of an app in one of the developer's workspaces, or their own build for no app (workspaces.ts).
   const own = async (id: string) => {
     const b = await builds.get(id);
@@ -1924,7 +1929,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     {
       title: "Connect a GitHub repository for builds",
       description:
-        "Developer: let Mynt's coding agent push branches and open pull requests on one of your repositories. Install the Mynt GitHub App on it first (the result tells you where).",
+        "Developer: let Mynt's coding agent push branches and open pull requests on one of your repositories. Install the Mynt GitHub App on it first (the result tells you where). If the GitHub account linked to your sign-in can push to it (admin, maintain or write), it's approved at once; otherwise an admin approves it, and the result says why (link your GitHub account at manage_url to skip that).",
       inputSchema: { repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name") },
     },
     async ({ repository }) => {
@@ -1937,15 +1942,52 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       }
       const installation = await builds.repos.installationFor(repository);
       if (!installation) return json({ connected: false, install_url: builds.repos.installUrl(), next: `Install the app on ${repository}, then run this again` });
+      const repo = repository.toLowerCase();
+      const prior = (
+        await store.db.query("SELECT approval, repo_id FROM financial_products.repo_connections WHERE developer_id = $1 AND repository = $2", [user.id, repo])
+      ).rows[0] as { approval: string; repo_id: string | null } | undefined;
       await builds.connectRepository(user.id, repository, installation);
       await store.audit(user.id, "connect_repository", repository);
-      // Until an admin approves it, Mynt gives out no token for it (repo-approvals.ts).
-      const approval = await connectionApproval(store.db, user.id, repository);
+      // Approved when the GitHub account linked to their sign-in can push to it (repo-ownership.ts); otherwise, until
+      // an admin approves it, Mynt gives out no token for it (repo-approvals.ts). An admin's rejection stands.
+      let approval = await connectionApproval(store.db, user.id, repository);
+      let why: { message: string; manage_url?: string | null } | null = null;
+      if (prior?.approval === REJECTED) why = { message: "An admin rejected access to it before, so it waits for an admin again" };
+      else {
+        const check = await checkRepoOwnership({ repos: builds.repos, identity, userId: user.id, repository: repo, installationId: installation, recordedRepoId: prior?.repo_id ?? null });
+        if (check.approved) {
+          if (approval !== APPROVED) {
+            await store.db.query(
+              `UPDATE financial_products.repo_connections SET approval = $3, repo_id = $4, approval_note = $5, decided_by = NULL, decided_at = now()
+               WHERE developer_id = $1 AND repository = $2`,
+              [user.id, repo, APPROVED, check.repo_id, `${check.login} can push (${check.permission}), checked with GitHub`],
+            );
+            await store.audit(user.id, "auto_approve_repository_connection", repository, { login: check.login, permission: check.permission, repo_id: check.repo_id });
+            approval = APPROVED;
+          } else await store.db.query("UPDATE financial_products.repo_connections SET repo_id = $3 WHERE developer_id = $1 AND repository = $2", [user.id, repo, check.repo_id]);
+        } else {
+          // An approval kept from before stands only while the name is still the same repository.
+          if (approval === APPROVED && (check.reason === "changed" || check.reason === "mismatch")) {
+            await store.db.query("UPDATE financial_products.repo_connections SET approval = $3, decided_by = NULL, decided_at = NULL WHERE developer_id = $1 AND repository = $2", [
+              user.id,
+              repo,
+              PENDING,
+            ]);
+            approval = PENDING;
+          }
+          if (approval !== APPROVED) {
+            why = check;
+            await store.audit(user.id, "repository_check_pending", repository, { reason: check.reason });
+          }
+        }
+      }
       return json({
         connected: true,
         repository,
         approval,
-        ...(approval !== APPROVED ? { next: "An admin approves access to it before builds can use it; repository_access_notices shows the decision" } : {}),
+        ...(approval !== APPROVED
+          ? { why: why?.message ?? null, ...(why?.manage_url ? { manage_url: why.manage_url } : {}), next: "An admin approves access to it before builds can use it; repository_access_notices shows the decision" }
+          : {}),
       });
     },
   );

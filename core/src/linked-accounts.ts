@@ -10,6 +10,8 @@ import type { User } from "./store.js";
 export interface LinkedGit {
   provider: "github";
   username: string | null;
+  // The account's stable id at the git host (its name can change hands; this can't).
+  user_id: string | null;
   verified: boolean;
 }
 export interface LinkedWallet {
@@ -100,6 +102,10 @@ export function registerLinkedAccountsTools(server: McpServer, user: User, servi
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => json(await service.forUser(user.id)),
+    async () => {
+      // The account's id is for Mynt's own checks (repo-ownership.ts); the reply keeps its published shape.
+      const r = await service.forUser(user.id);
+      return json(r.git ? { ...r, git: { provider: r.git.provider, username: r.git.username, verified: r.git.verified } } : r);
+    },
   );
 }

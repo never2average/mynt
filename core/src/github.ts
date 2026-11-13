@@ -17,6 +17,13 @@ export interface RepoAccess {
   resolveRef(repo: string, installationId: number, ref: string): Promise<string | null>;
   // A branch Mynt creates itself at a commit it checked (e.g. to propose exactly what it scored).
   createBranch(repo: string, installationId: number, branch: string, sha: string): Promise<void>;
+  // For the push check (repo-ownership.ts), through the installation covering the repository; each throws if the
+  // host can't answer. The repository as it is now (its stable id and current full name; null if not visible):
+  repositoryInfo?(repo: string, installationId: number): Promise<{ id: string; full_name: string } | null>;
+  // An account's current login, from its stable id (null if there's no such account):
+  loginOf?(accountId: string, repo: string, installationId: number): Promise<string | null>;
+  // That account's permission on the repository: admin, maintain, write, triage, read or none.
+  permissionOf?(repo: string, installationId: number, login: string): Promise<string>;
 }
 
 // Mynt's managed repositories on GitHub: private repositories in an organization Mynt owns
@@ -171,6 +178,44 @@ export class GitHubApp implements RepoAccess {
       });
       return { status: res.status, data: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Record<string, unknown> };
     };
+  }
+
+  // Read-only calls for the push check, with a metadata-only token for the one repository.
+  private async metadata(repo: string, installationId: number) {
+    const r = await this.call("POST", `/app/installations/${installationId}/access_tokens`, { repositories: [repo.split("/")[1]], permissions: { metadata: "read" } });
+    if (r.status !== 201) throw new Error(`GitHub refused a token for ${repo} (${r.status})`);
+    const token = (r.data as { token: string }).token;
+    return async (path: string) => {
+      const res = await fetch(`${this.api}${path}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mynt", "X-GitHub-Api-Version": "2022-11-28" },
+      });
+      return { status: res.status, data: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+    };
+  }
+
+  async repositoryInfo(repo: string, installationId: number) {
+    const get = await this.metadata(repo, installationId);
+    const r = await get(`/repos/${repo}`);
+    if (r.status === 404) return null;
+    if (r.status !== 200) throw new Error(`GitHub couldn't describe ${repo} (${r.status})`);
+    return { id: String(r.data.id), full_name: String(r.data.full_name) };
+  }
+
+  async loginOf(accountId: string, repo: string, installationId: number) {
+    if (!/^\d+$/.test(accountId)) return null;
+    const get = await this.metadata(repo, installationId);
+    const r = await get(`/user/${accountId}`);
+    if (r.status === 404) return null;
+    if (r.status !== 200) throw new Error(`GitHub couldn't look up account ${accountId} (${r.status})`);
+    return typeof r.data.login === "string" ? r.data.login : null;
+  }
+
+  async permissionOf(repo: string, installationId: number, login: string) {
+    const get = await this.metadata(repo, installationId);
+    const r = await get(`/repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`);
+    if (r.status === 404) return "none"; // not a collaborator at all
+    if (r.status !== 200) throw new Error(`GitHub couldn't say what ${login} may do in ${repo} (${r.status})`);
+    return typeof r.data.permission === "string" ? r.data.permission : "none";
   }
 
   async resolveRef(repo: string, installationId: number, ref: string) {

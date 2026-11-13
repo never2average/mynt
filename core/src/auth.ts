@@ -60,7 +60,7 @@ export function frontendApiFromPublishableKey(publishableKey: string): string {
 export interface ClerkUsersLike {
   users: {
     getUser(userId: string): Promise<{
-      externalAccounts?: { provider?: string; username?: string | null; verification?: { status?: string } | null }[];
+      externalAccounts?: { provider?: string; username?: string | null; providerUserId?: string | null; verification?: { status?: string } | null }[];
       web3Wallets?: { web3Wallet?: string; verification?: { status?: string } | null }[];
     }>;
   };
@@ -112,7 +112,7 @@ export class ClerkIdentityProvider implements IdentityProvider {
     // Verified links only: an unverified one proves nothing about who holds it.
     const gh = (u.externalAccounts ?? []).find((a) => (a.provider === "oauth_github" || a.provider === "github") && verified(a.verification));
     return {
-      git: gh ? { provider: "github", username: gh.username ?? null, verified: true } : null,
+      git: gh ? { provider: "github", username: gh.username ?? null, user_id: gh.providerUserId ? String(gh.providerUserId) : null, verified: true } : null,
       wallets: (u.web3Wallets ?? []).flatMap((w) => {
         const chain = w.web3Wallet && verified(w.verification) ? chainOf(w.web3Wallet) : null;
         return chain ? [{ chain, address: w.web3Wallet!, verified: true }] : [];
