@@ -1284,11 +1284,13 @@ test("a repository connection waits for an admin's approval, per developer; unti
   assert.match((await call(alice, "start_build", { goal: "Carry on from the shipped build", continue_from: started.id })).data.error, /rejected access/);
   assert.match((await call(alice, "reopen_sandbox", { build_id: started.id })).data.error, /rejected access/);
   assert.equal(await builds.sourceInstallation(aliceUser.id, "acme/savings-app"), null);
-  // Reconnecting asks again.
-  assert.equal((await call(alice, "connect_repository", { repository: "acme/savings-app" })).data.approval, "pending_approval");
+  // Reconnecting doesn't undo an admin's rejection (repeatedly, whatever else would approve it); only an admin lifts it.
+  for (let i = 0; i < 2; i++) assert.equal((await call(alice, "connect_repository", { repository: "acme/savings-app" })).data.approval, "rejected");
+  const rejected = (await call(admin, "list_repository_requests", { status: "rejected" })).data.find((r) => r.requested_by.name === "Alice");
+  assert.equal((await call(admin, "approve_repository_connection", { ...named(rejected), note: "cleared up" })).data.status, "approved");
   // Every decision is audited.
   const actions = (await store.db.query("SELECT action FROM financial_products.audit_log WHERE action LIKE '%repository_connection' ORDER BY created_at")).rows.map((r) => r.action);
-  assert.deepEqual(actions, ["approve_repository_connection", "reject_repository_connection", "reject_repository_connection"]);
+  assert.deepEqual(actions, ["approve_repository_connection", "reject_repository_connection", "reject_repository_connection", "approve_repository_connection"]);
 });
 
 test("an approval applies only to the connection as it was listed; a new installation is a new request", async () => {
@@ -2191,4 +2193,60 @@ test("redact stays linear on adversarial output", () => {
   // quadratic ones this replaced took 3 to 60 seconds on a single input. The bounds leave room for slow CI runners.
   assert.ok(slowest[0][0] < 150, `redact took ${slowest[0][0].toFixed(0)} ms of CPU on ${slowest[0][1]}`);
   assert.ok(total < 1000, `redact took ${total.toFixed(0)} ms of CPU over ${inputs.length} inputs; slowest: ${slowest.slice(0, 3).map(([ms, s]) => `${s} ${ms.toFixed(0)} ms`).join(", ")}`);
+});
+
+test("push access lost while a build ran: Mynt checks again before opening the pull request, opens none, and keeps the work on its branch", async () => {
+  const ctx = await setup();
+  const { builds, sandboxes, repos, as, connect, call, pg } = ctx;
+  // The developer's own push permission, as GitHub answers it (repo-ownership.ts), and their linked account.
+  let perm = "write";
+  Object.assign(repos, {
+    async repositoryInfo(repo) {
+      return { id: "555", full_name: repo };
+    },
+    async loginOf() {
+      return "octo";
+    },
+    async permissionOf() {
+      return perm;
+    },
+  });
+  builds.identity = { forUser: async () => ({ git: { provider: "github", username: "octo", user_id: "42", verified: true }, wallets: [], manage_url: null }) };
+  const ttl = BuildService.OWNERSHIP_TTL_MS;
+  BuildService.OWNERSHIP_TTL_MS = 0; // every token checks GitHub again
+  try {
+    const dev = await connect(await as("Dev", ["developer"]));
+    const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+    assert.equal((await call(dev, "connect_repository", { repository: "acme/savings-app" })).data.approval, "approved");
+    const row = (await pg.query("SELECT approved_via FROM financial_products.repo_connections WHERE developer_id = $1", [dev.user.id])).rows[0];
+    assert.equal(row.approved_via, "github");
+    const started = (await call(dev, "start_build", { goal: "Build a savings comparison page", app_id: app.id, repository: "acme/savings-app" })).data;
+    await builds.tick();
+    const sbx = (await builds.get(started.id)).sandbox_id;
+    sandboxes.ready(sbx);
+    await builds.tick();
+    sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+    sandboxes.finishAgent(sbx);
+    await builds.tick();
+    const vid = (await builds.get(started.id)).verify_sandbox_id;
+    sandboxes.ready(vid);
+    await builds.tick();
+    sandboxes.sandboxes.get(vid).checksRunning = false;
+    sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+    sandboxes.write(vid, `${V}/report.json`, { checks: passingChecks });
+    await builds.tick();
+    sandboxes.write(vid, `${V}/maxwell.json`, cleanAudit);
+    sandboxes.finishAgent(vid, "success");
+    // Their push access goes while the build is being verified.
+    perm = "read";
+    await builds.tick();
+    const b = await builds.get(started.id);
+    assert.equal(b.status, "blocked");
+    assert.match(b.error ?? b.phase_message, /can't push to acme\/savings-app.*no pull request was opened \(the verified work is on branch mynt\/build-/);
+    assert.equal(repos.prs.length, 0, "no pull request");
+    const now = (await pg.query("SELECT approval FROM financial_products.repo_connections WHERE developer_id = $1", [dev.user.id])).rows[0];
+    assert.equal(now.approval, "pending_approval", "back with an admin");
+  } finally {
+    BuildService.OWNERSHIP_TTL_MS = ttl;
+  }
 });

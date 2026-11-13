@@ -176,7 +176,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     });
   }
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
-  if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds);
+  if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds, ctx.identity ?? null);
   // Repository connections wait for an admin's approval (repo-approvals.ts): who asked sees the decisions; admins decide.
   if (user && (ctx.builds || ctx.desk) && (has("developer") || has("innovator"))) registerRepoAccessNoticeTools(server, store, user.id);
   if (user && (ctx.builds || ctx.desk) && has("admin")) registerRepoApprovalAdminTools(server, store, user.id, ctx.builds?.repos ?? ctx.desk?.repos ?? null);
