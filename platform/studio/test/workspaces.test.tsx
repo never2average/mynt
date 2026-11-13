@@ -87,11 +87,12 @@ function sidebar(over: Partial<Parameters<typeof SidebarView>[0]> = {}) {
 }
 
 describe("sidebar", () => {
-  it("shows the selected workspace in the switcher, then Dashboard, then the three folders", () => {
+  it("shows the selected workspace in the switcher, then Dashboard, Coverage, Licences and Audits, then the three folders", () => {
     const html = sidebar();
     expect(html).toContain("Acme");
     expect(html).toContain('aria-label="Switch workspace"');
-    const order = ["Switch workspace", ">Dashboard<", ">Production<", ">Staging<", ">Ideas<"].map((s) => html.indexOf(s));
+    for (const href of ["/coverage", "/licences", "/audits"]) expect(html).toContain(`href="${href}"`);
+    const order = ["Switch workspace", ">Dashboard<", ">Coverage<", ">Licences<", ">Audits<", ">Production<", ">Staging<", ">Ideas<"].map((s) => html.indexOf(s));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(html).toContain('href="/app-p"');

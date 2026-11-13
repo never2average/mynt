@@ -16,7 +16,8 @@ const workspaceId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
 const workspaceName = z.string().trim().min(1).max(80);
 // Roles given from the studio; ownership isn't handed over here.
 const memberRole = z.enum(["admin", "member"]);
-const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
+const auditDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
+const repository =z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -52,6 +53,28 @@ export const STUDIO_TOOLS = {
   change_member_role: z.object({ workspace_id: workspaceId, user_id: id, role: memberRole }).strict(),
   remove_workspace_member: z.object({ workspace_id: workspaceId, user_id: id }).strict(),
   leave_workspace: z.object({ workspace_id: workspaceId }).strict(),
+  // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
+  // (no workspace_id for the implicit Personal one).
+  get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),
+  list_workspace_licences: z
+    .object({
+      workspace_id: workspaceId.optional(),
+      status: z.string().max(40).optional(),
+      regulator: z.string().max(120).optional(),
+      state: z.string().regex(/^[A-Z]{2}$/).optional(),
+    })
+    .strict(),
+  list_workspace_audit: z
+    .object({
+      workspace_id: workspaceId.optional(),
+      cursor: z.string().max(500).optional(),
+      action: z.string().max(120).optional(),
+      user_id: id.optional(),
+      app_id: id.optional(),
+      from: auditDate.optional(),
+      to: auditDate.optional(),
+    })
+    .strict(),
   // repositories
   list_repositories: z.object({}).strict(),
   // builds

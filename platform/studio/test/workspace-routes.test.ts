@@ -49,6 +49,12 @@ vi.mock("@/lib/tokens", () => ({
           return ok([{ id: "a1", name: "Cards", status: "published" }]);
         case "list_builds":
           return ok({ builds: [] });
+        case "get_compliance_coverage":
+          return ok({ states: [{ code: "CA", status: "unlocked", partners: [{ entity_id: "e1", name: "Harbor Bank" }] }] });
+        case "list_workspace_licences":
+          return ok({ licences: [{ partner: "Harbor Bank", number: "MT-1", states: ["CA"], status: "active" }] });
+        case "list_workspace_audit":
+          return ok({ events: [{ at: "2026-11-12T10:00:00Z", actor: { id: "u1", name: "Ines" }, action: "app.created", target: { type: "app", id: "a1" } }], next_cursor: "c2" });
         case "create_app":
           return ok({ id: "new-app" });
         case "start_build":
@@ -73,6 +79,9 @@ const workspaces = await import("@/app/api/workspaces/route");
 const members = await import("@/app/api/workspaces/[workspaceId]/members/route");
 const linkedAccounts = await import("@/app/api/linked-accounts/route");
 const apps = await import("@/app/api/apps/route");
+const coverageRoute = await import("@/app/api/coverage/route");
+const licencesRoute = await import("@/app/api/licences/route");
+const auditRoute = await import("@/app/api/audit/route");
 
 const get = (path: string, cookie?: string) => new NextRequest(`http://localhost:3000${path}`, cookie ? { headers: { cookie } } : undefined);
 const send = (method: string, body: unknown) =>
@@ -222,5 +231,38 @@ describe("linked accounts route", () => {
     expect((await (await linkedAccounts.GET()).json()).linked).toMatchObject({ supported: true, github: "ines", manageUrl: "https://accounts.example.com/user" });
     fake.tools = WITH_WORKSPACES;
     expect((await (await linkedAccounts.GET()).json()).linked).toEqual({ supported: false, github: null, wallet: null, manageUrl: null });
+  });
+});
+
+describe("compliance routes (Coverage, Licences, Audits)", () => {
+  const COMPLIANCE = ["get_compliance_coverage", "list_workspace_licences", "list_workspace_audit"].map((name) => ({ name, inputSchema: props("workspace_id", "cursor", "action", "user_id", "app_id", "from", "to") }));
+
+  it("read the selected workspace's coverage, licences and audit trail", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...COMPLIANCE];
+    const c = await (await coverageRoute.GET(get("/api/coverage?workspace=w1"))).json();
+    expect(c).toMatchObject({ supported: true, coverage: { states: [{ code: "CA", status: "unlocked", partners: [{ name: "Harbor Bank" }] }] } });
+    expect(called("get_compliance_coverage")[0].args).toEqual({ workspace_id: "w1" });
+    const l = await (await licencesRoute.GET(get("/api/licences?workspace=w1"))).json();
+    expect(l.licences[0]).toMatchObject({ partner: "Harbor Bank", number: "MT-1" });
+    const a = await (await auditRoute.GET(get("/api/audit?workspace=w1&action=app.created&user_id=u1&from=2026-11-01&to=2026-11-13&cursor=c1"))).json();
+    expect(a.page).toMatchObject({ nextCursor: "c2", events: [{ action: "app.created" }] });
+    expect(called("list_workspace_audit")[0].args).toEqual({ workspace_id: "w1", action: "app.created", user_id: "u1", from: "2026-11-01", to: "2026-11-13", cursor: "c1" });
+  });
+
+  it("refuse bad audit filters before anything reaches Mynt", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...COMPLIANCE];
+    expect((await auditRoute.GET(get("/api/audit?from=yesterday"))).status).toBe(400);
+    expect((await auditRoute.GET(get("/api/audit?owner_id=u9"))).status).toBe(400);
+    expect(called("list_workspace_audit")).toEqual([]);
+  });
+
+  it("say not available yet before Mynt has the tools, or when they can't be scoped to a shared workspace", async () => {
+    fake.tools = WITH_WORKSPACES;
+    expect(await (await coverageRoute.GET(get("/api/coverage?workspace=w1"))).json()).toEqual({ supported: false });
+    fake.tools = [...WITH_WORKSPACES, { name: "get_compliance_coverage", inputSchema: props() }];
+    expect((await (await coverageRoute.GET(get("/api/coverage?workspace=w1"))).json()).unavailable).toMatch(/next update/);
+    expect(called("get_compliance_coverage")).toEqual([]);
+    await coverageRoute.GET(get("/api/coverage")); // Personal: nothing to scope
+    expect(called("get_compliance_coverage")[0].args).toEqual({});
   });
 });

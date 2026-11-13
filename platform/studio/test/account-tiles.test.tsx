@@ -59,6 +59,7 @@ describe("dashboard tiles", () => {
     const mismatch = tiles(undefined, fromLinkedAccounts({ wallets: [{ address: ADDRESS, chain: "solana" }] }));
     expect(mismatch).toContain(UNKNOWN_NETWORK);
     expect(mismatch).not.toMatch(/>Solana</);
+    expect(html).toMatch(/data-tile="licences"[\s\S]*?href="\/licences"/);
     expect(html).not.toContain("Link GitHub");
     expect(html).not.toContain("Link wallet");
   });

@@ -1,13 +1,14 @@
 "use client"
 
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
-// the workspace switcher at the top, Dashboard, the workspace's apps in three folders by stage
+// the workspace switcher at the top, Dashboard, Coverage, Licences and Audits, the workspace's
+// apps in three folders by stage
 // (Production, Staging, Ideas), and the signed-in account with a visible Log out at the foot.
 // New app and Builds aren't in the sidebar (their pages, /new and /builds, still work).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { LayoutDashboard } from "lucide-react"
+import { FileBadge, History, LayoutDashboard, Map as MapIcon } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -27,6 +28,14 @@ import {
 import { groupByStage, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
+
+// The fixed pages, above the app folders.
+const PAGES = [
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/coverage", label: "Coverage", icon: MapIcon },
+  { href: "/licences", label: "Licences", icon: FileBadge },
+  { href: "/audits", label: "Audits", icon: History },
+] as const
 
 export type SidebarViewProps = {
   workspaces: Workspace[]
@@ -50,14 +59,16 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton asChild tooltip="Dashboard" isActive={pathname === "/"}>
-                <Link href="/">
-                  <LayoutDashboard />
-                  <span>Dashboard</span>
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
+            {PAGES.map(({ href, label, icon: Icon }) => (
+              <SidebarMenuItem key={href}>
+                <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
+                  <Link href={href}>
+                    <Icon />
+                    <span>{label}</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))}
           </SidebarMenu>
         </SidebarGroup>
         <NavFolders groups={groups} activeAppId={appId} />

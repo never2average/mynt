@@ -96,6 +96,20 @@ describe("STUDIO_TOOLS", () => {
     bad("get_linked_accounts", { user_id: "u2" });
   });
 
+  it("checks the compliance pages' reads (Coverage, Licences, Audits)", () => {
+    const ok = (tool: string, args: Record<string, unknown>) => expect(parseStudioCall(tool, args), tool).toHaveProperty("tool");
+    const bad = (tool: string, args: Record<string, unknown>) => expect(parseStudioCall(tool, args), JSON.stringify(args)).toHaveProperty("error");
+    ok("get_compliance_coverage", { workspace_id: "w1" });
+    ok("get_compliance_coverage", {});
+    bad("get_compliance_coverage", { workspace_id: "w1", all: true });
+    ok("list_workspace_licences", { workspace_id: "w1", status: "active", regulator: "OCC", state: "CA" });
+    bad("list_workspace_licences", { workspace_id: "w1", state: "California" });
+    ok("list_workspace_audit", { workspace_id: "w1", cursor: "c2", action: "app.created", user_id: "u1", app_id: "a1", from: "2026-11-01", to: "2026-11-13" });
+    bad("list_workspace_audit", { workspace_id: "w1", from: "yesterday" });
+    bad("list_workspace_audit", { workspace_id: "w1", limit: 10000 });
+    for (const t of ["get_compliance_coverage", "list_workspace_licences", "list_workspace_audit"]) expect(Object.keys(STUDIO_TOOLS)).toContain(t);
+  });
+
   it("lets developers, innovators and admins in", () => {
     expect(rolesFrom({ roles: ["developer"], effective_roles: ["consumer", "developer"] })).toEqual(["consumer", "developer"]);
     expect(rolesFrom({ roles: ["innovator"] })).toEqual(["innovator"]);
