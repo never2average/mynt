@@ -5,6 +5,7 @@ import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
 import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
+import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
   hydrateRegulators,
@@ -515,7 +516,8 @@ export interface Campaign {
 
 export interface App {
   id: string;
-  owner_id: string;
+  owner_id: string; // who created it; access goes by membership of its workspace
+  workspace_id: string | null; // null only for an app made before workspaces, until Store.open migrates it
   name: string;
   description: string;
   audience: string;
@@ -1736,6 +1738,7 @@ const TABLES = `
   );
   CREATE INDEX IF NOT EXISTS firm_checks_entity_idx ON financial_products.firm_checks (entity_id, source, retrieved_at DESC);
   ${LIQUIDITY_TABLES}
+${WORKSPACE_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -2079,6 +2082,7 @@ const toCampaign = (r: Row): Campaign => ({
 const toApp = (r: Row): App => ({
   id: r.id as string,
   owner_id: r.owner_id as string,
+  workspace_id: (r.workspace_id as string | null) ?? null,
   name: r.name as string,
   description: r.description as string,
   audience: r.audience as string,
@@ -2147,6 +2151,7 @@ export class Store {
     await store.liftScopeProductTypes();
     await store.migrateProductLines();
     await store.migrateComponents();
+    await migrateAppWorkspaces(db);
     return store;
   }
 
@@ -2507,8 +2512,8 @@ export class Store {
   ): Promise<{ key: ApiKey; secret: string }> {
     const secret = newApiKey(k.environment);
     const r = await this.one(
-      `INSERT INTO financial_products.api_keys (id, app_id, environment, label, prefix, key_hash, allowed_origins, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8) RETURNING *`,
+      `INSERT INTO financial_products.api_keys (id, app_id, environment, label, prefix, key_hash, allowed_origins, status, created_by, last_secret_issued_to)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $8) RETURNING *`,
       [randomUUID(), k.app_id, k.environment, k.label, secret.slice(0, 14), hashToken(secret), k.allowed_origins, createdBy],
     );
     return { key: toApiKey(r!), secret };
@@ -2643,11 +2648,12 @@ export class Store {
   }
 
   // A new secret for the same key; the old secret stops working at once.
-  async rotateApiKey(id: string, environment: KeyEnvironment): Promise<{ key: ApiKey; secret: string }> {
+  // `issuedTo`: who receives the new secret (offboarding revokes keys whose current secret a leaver holds).
+  async rotateApiKey(id: string, environment: KeyEnvironment, issuedTo: string | null = null): Promise<{ key: ApiKey; secret: string }> {
     const secret = newApiKey(environment);
     const r = await this.one(
-      "UPDATE financial_products.api_keys SET key_hash = $2, prefix = $3, rotated_at = now() WHERE id::text = $1 RETURNING *",
-      [id, hashToken(secret), secret.slice(0, 14)],
+      "UPDATE financial_products.api_keys SET key_hash = $2, prefix = $3, rotated_at = now(), last_secret_issued_to = $4 WHERE id::text = $1 RETURNING *",
+      [id, hashToken(secret), secret.slice(0, 14), issuedTo],
     );
     return { key: toApiKey(r!), secret };
   }
@@ -2728,7 +2734,7 @@ export class Store {
   async createWebhook(createdBy: string, w: Pick<Webhook, "app_id" | "url" | "events">): Promise<{ webhook: Webhook; secret: string }> {
     const secret = `whsec_${randomBytes(24).toString("base64url")}`;
     const r = await this.one(
-      "INSERT INTO financial_products.webhooks (id, app_id, url, events, secret, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+      "INSERT INTO financial_products.webhooks (id, app_id, url, events, secret, created_by, last_secret_issued_to) VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING *",
       [randomUUID(), w.app_id, w.url, w.events, secret, createdBy],
     );
     return { webhook: toWebhook(r!), secret };
@@ -2744,9 +2750,10 @@ export class Store {
     return (await this.all("SELECT * FROM financial_products.webhooks WHERE app_id::text = ANY($1) ORDER BY created_at", [appIds])).map(toWebhook);
   }
 
-  async rotateWebhookSecret(id: string): Promise<string> {
+  // `issuedTo`: who receives the new secret; null when nobody does (offboarding rotating a leaver's out of reach).
+  async rotateWebhookSecret(id: string, issuedTo: string | null = null): Promise<string> {
     const secret = `whsec_${randomBytes(24).toString("base64url")}`;
-    await this.db.query("UPDATE financial_products.webhooks SET secret = $2 WHERE id::text = $1", [id, secret]);
+    await this.db.query("UPDATE financial_products.webhooks SET secret = $2, last_secret_issued_to = $3 WHERE id::text = $1", [id, secret, issuedTo]);
     return secret;
   }
 
@@ -2761,7 +2768,7 @@ export class Store {
     const rows = await this.all(
       `INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status, next_attempt_at)
        SELECT gen_random_uuid(), w.id, $2::uuid, $3, jsonb_set($4::jsonb, '{data,app_id}', to_jsonb(w.app_id::text)), $5, 'pending', now()
-       FROM financial_products.webhooks w WHERE w.app_id::text = ANY($1) AND $3 = ANY(w.events)
+       FROM financial_products.webhooks w WHERE w.app_id::text = ANY($1) AND $3 = ANY(w.events) AND w.disabled_at IS NULL
        RETURNING id`,
       [appIds, payload.id, payload.type, JSON.stringify(payload), sandbox],
     );
@@ -2873,10 +2880,10 @@ export class Store {
     }
   }
 
-  // Overwrites the app's definition with a snapshot: every column except identity, ownership, status
-  // and timestamps. Columns the snapshot predates keep their current value.
+  // Overwrites the app's definition with a snapshot: every column except identity, ownership (its creator and its
+  // workspace), status and timestamps. Columns the snapshot predates keep their current value.
   async restoreAppSnapshot(appId: string, snapshot: Record<string, unknown>): Promise<App> {
-    const keep = new Set(["id", "owner_id", "status", "created_at", "updated_at"]);
+    const keep = new Set(["id", "owner_id", "workspace_id", "status", "created_at", "updated_at"]);
     const cols = (
       await this.all("SELECT column_name FROM information_schema.columns WHERE table_schema = 'financial_products' AND table_name = 'apps'")
     )
@@ -3054,7 +3061,7 @@ export class Store {
   async upsertInvite(email: string, roles: Role[]): Promise<Invite> {
     const r = await this.one(
       `INSERT INTO financial_products.invites (email, roles) VALUES ($1, $2)
-       ON CONFLICT (email) DO UPDATE SET roles = EXCLUDED.roles RETURNING *`,
+       ON CONFLICT (email) DO UPDATE SET roles = EXCLUDED.roles, updated_at = now(), revision = invites.revision + 1 RETURNING *`,
       [email.toLowerCase(), roles],
     );
     return toInvite(r!);
@@ -3452,14 +3459,18 @@ export class Store {
 
   // Apps
 
+  // `workspaceId`: one the caller belongs to (the tools check). Omitted: the owner's own workspace (made if they have
+  // none), for callers that predate workspaces.
   async createApp(
     ownerId: string,
     fields: Pick<App, "name" | "description" | "audience" | "product_ids"> & Partial<Pick<App, "disclosures" | "actions">>,
+    workspaceId?: string,
   ): Promise<App> {
+    const workspace = workspaceId ?? (await personalWorkspace(this.db, ownerId));
     const r = await this.one(
-      `INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, disclosures, actions)
-       VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8) RETURNING *`,
-      [randomUUID(), ownerId, fields.name, fields.description, fields.audience, fields.product_ids, fields.disclosures ?? [], fields.actions ?? ["display"]],
+      `INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, disclosures, actions, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, $9) RETURNING *`,
+      [randomUUID(), ownerId, fields.name, fields.description, fields.audience, fields.product_ids, fields.disclosures ?? [], fields.actions ?? ["display"], workspace],
     );
     return toApp(r!);
   }
@@ -3481,6 +3492,21 @@ export class Store {
 
   async appsByOwner(ownerId: string): Promise<App[]> {
     return (await this.all("SELECT * FROM financial_products.apps WHERE owner_id = $1 ORDER BY created_at", [ownerId])).map(toApp);
+  }
+
+  // The apps a user may see and work on: those of every workspace they belong to (or of one of them), and any of
+  // their own not yet in a workspace.
+  async appsVisibleTo(userId: string, workspaceId?: string): Promise<App[]> {
+    return (
+      await this.all(
+        `SELECT a.* FROM financial_products.apps a
+         WHERE (a.workspace_id IN (SELECT workspace_id FROM financial_products.workspace_members WHERE user_id = $1)
+                OR (a.workspace_id IS NULL AND a.owner_id = $1))
+           AND ($2::text IS NULL OR a.workspace_id::text = $2)
+         ORDER BY a.created_at`,
+        [userId, workspaceId ?? null],
+      )
+    ).map(toApp);
   }
 
 

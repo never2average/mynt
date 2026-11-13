@@ -14,7 +14,9 @@ import { PRODUCT_LINES } from "../dist/catalog.js";
 import { CATALOG, licensed } from "./helpers.js";
 
 const CATALOG_TOOLS = ["find_licenses", "get_product", "get_product_regime", "get_region", "get_regulator", "get_template", "list_apps", "list_categories", "list_legal_instruments", "list_product_categories", "list_products", "list_regions", "list_regulated_product_types", "list_template_defaults", "whoami"];
-const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_product", "list_firm_notices", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment"];
+// Anyone signed in may have been invited to a workspace, and answers it themselves.
+const INVITATION_TOOLS = ["accept_workspace_invite", "decline_workspace_invite", "list_my_invitations"];
+const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_product", "list_firm_notices", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment", ...INVITATION_TOOLS];
 const DEVELOPER_TOOLS = [
   "create_app", "list_my_apps", "preview_app", "publish_app", "update_app",
   // building on innovators' products
@@ -31,6 +33,11 @@ const DEVELOPER_TOOLS = [
   "render_experience_preview", "set_experience",
   // journeys
   "check_journey", "get_data_dictionary", "get_default_journey", "list_journeys", "preview_journey", "save_journey",
+  // workspaces: the teams apps belong to
+  "change_member_role", "create_workspace", "invite_to_workspace", "leave_workspace", "list_workspace_members", "list_workspaces",
+  "remove_workspace_member", "rename_workspace", "revoke_workspace_invite",
+  "get_compliance_coverage", "list_workspace_audit", "list_workspace_licences",
+  "enable_webhook",
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",

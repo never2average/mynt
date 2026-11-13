@@ -203,7 +203,17 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const openPoolFlags = (await exists("pool_flags"))
     ? ((await db.query(`SELECT kind, count(*)::int AS n FROM financial_products.pool_flags WHERE status = 'open' AND NOT sandbox GROUP BY kind ORDER BY kind`)).rows as unknown as { kind: string; n: number }[])
     : [];
+  const offboards = (await exists("workspace_offboards"))
+    ? ((await db.query(
+        `SELECT workspace_id::text AS workspace_id, user_id::text AS user_id, kind, attempts, error FROM financial_products.workspace_offboards WHERE status = 'failed' ORDER BY started_at`,
+      )).rows as { workspace_id: string; user_id: string; kind: string; attempts: number; error: string | null }[])
+    : [];
+  const rotatedOnOffboard = (await exists("audit_log"))
+    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'webhook_secret_rotated_on_offboard' AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
+    : 0;
   const attention = [
+    ...(offboards.length ? [`workspaces: ${offboards.length} offboarding(s) gave up after repeated failures (someone may keep access): retry_offboard once the provider is back`] : []),
+    ...(rotatedOnOffboard ? [`workspaces: ${rotatedOnOffboard} webhook secret(s) rotated in the last ${hours}h because someone holding them left; their workspaces' owners must give receivers the new secret (rotate_webhook_secret)`] : []),
     ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
     ...Object.entries(agents).flatMap(([name, a]) => {
       const x = a as { failures: unknown[]; stuck: unknown[] };
@@ -230,7 +240,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard }, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

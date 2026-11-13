@@ -5,6 +5,7 @@ import type { DeveloperContract } from "./contract.js";
 import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { checkJourney, defaultJourney, JourneySchema, previewJourney, type Journey } from "./journeys.js";
 import type { Store, User } from "./store.js";
+import { memberApp } from "./workspaces.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string, extra: Record<string, unknown> = {}) => ({ ...json({ error, ...extra }), isError: true });
@@ -95,8 +96,8 @@ export function registerJourneyTools(server: McpServer, store: Store, user: User
       inputSchema: { app_id: z.string(), journey: z.record(z.string(), z.unknown()) },
     },
     async ({ app_id, journey }) => {
-      const app = await store.getApp(app_id);
-      if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
+      const app = await memberApp(store, user, app_id);
+      if (!app) return fail(`No app of yours with id '${app_id}'`);
       const j = parse(journey);
       if (typeof j === "string") return fail("The journey doesn't match the spec", { errors: [j] });
       if (!app.product_ids.includes(j.built_on.product_id)) return fail(`'${j.built_on.product_id}' isn't one of this app's products`);
@@ -119,8 +120,8 @@ export function registerJourneyTools(server: McpServer, store: Store, user: User
       annotations: { readOnlyHint: true },
     },
     async ({ app_id }) => {
-      const app = await store.getApp(app_id);
-      if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
+      const app = await memberApp(store, user, app_id);
+      if (!app) return fail(`No app of yours with id '${app_id}'`);
       const out = [];
       for (const j of await store.journeysOf(app_id)) {
         const live = (await store.getProduct(j.product_id))?.pins?.contract?.contract_hash ?? null;

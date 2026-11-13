@@ -646,3 +646,115 @@ test("direct hosting: a provider's passing 5xx while a deploy runs is ridden out
   assert.match(bad.error, /400/);
   assert.equal(bad.polls, 1);
 });
+
+test("hosting is the workspace's: a teammate's deploy lands on it, only owners and admins log in, and leaving revokes the logins at once", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
+  try {
+    const { call, dev } = w;
+    const [ws] = (await call(dev, "list_workspaces")).data;
+    const { user: benUser } = await w.store.createUser("Ben", ["developer"]);
+    const { user: memUser } = await w.store.createUser("Mem", ["developer"]);
+    const ben = await w.connectWith(benUser);
+    const mem = await w.connectWith(memUser);
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'member')", [ws.id, benUser.id, memUser.id]);
+    // Members don't turn hosting on; owners and admins do, for the workspace.
+    assert.match((await call(mem, "request_hosting", { workspace_id: ws.id })).data.error, /owners and admins/);
+    const tenant = (await call(dev, "request_hosting", { workspace_id: ws.id })).data;
+    assert.equal(tenant.workspace_id, ws.id);
+    assert.equal(tenant.developer_id, null, "nobody's own tenant");
+    // Ben deploys a teammate's verified build through his own approved connection.
+    await w.store.db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved')", [benUser.id]);
+    const deployed = (await call(ben, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") })).data;
+    assert.equal(deployed.tenant_id, tenant.id, "on the workspace's hosting, not Ben's");
+    assert.equal(deployed.deployed_by, benUser.id);
+    await w.hosting.pending;
+    // Logins: owners and admins only.
+    assert.match((await call(mem, "vm_access", { workspace_id: ws.id })).data.error, /owners and admins/);
+    const login = (await call(ben, "vm_access", { workspace_id: ws.id })).data;
+    assert.ok(login.logins?.length, JSON.stringify(login));
+    const identity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity;
+    assert.ok(identity);
+    // The provider is down when Ben is removed: the login stays on record and the offboarding stays pending.
+    const realRevoke = provider.revokeAccess;
+    provider.revokeAccess = async () => {
+      throw new Error("provider down");
+    };
+    const removed = (await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data;
+    assert.equal(removed.access_cut.vm_logins_revoked, 0);
+    assert.match(removed.access_cut.pending.join(" "), /VM login\(s\) not revoked yet/);
+    assert.equal((await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity, identity);
+    // Once it's back, an admin's retry (or the worker's) finishes it.
+    provider.revokeAccess = realRevoke;
+    const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
+    const retried = (await call(await w.connectWith(adminUser), "retry_offboard", { workspace_id: ws.id })).data.retried;
+    assert.equal(retried[0].vm_logins_revoked, 1);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === identity), "the identity revoked at the provider");
+    assert.equal((await w.store.db.query("SELECT count(*)::int AS n FROM financial_products.workspace_offboards WHERE completed_at IS NULL")).rows[0].n, 0);
+    // The app's runtime key is the workspace's: the deployer leaving doesn't stop the app.
+    const runtimeKeys = (await w.store.db.query("SELECT status, created_by FROM financial_products.api_keys WHERE app_id = $1 AND label = 'hosted runtime'", [w.app.id])).rows;
+    assert.deepEqual(runtimeKeys, [{ status: "active", created_by: null }]);
+    assert.match((await call(ben, "vm_access", { workspace_id: ws.id })).data.error, /No workspace of yours/);
+    assert.match((await call(ben, "app_logs", { app_id: w.app.id })).data.error, /No app of yours/);
+    // The app keeps running for the team.
+    assert.equal((await call(dev, "hosting_status", { workspace_id: ws.id })).data.apps.length, 1);
+    // Demoting an admin to member ends their VM logins too.
+    const { user: carlUser } = await w.store.createUser("Carl", ["developer"]);
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')", [ws.id, carlUser.id]);
+    const carl = await w.connectWith(carlUser);
+    assert.ok((await call(carl, "vm_access", { workspace_id: ws.id })).data.logins?.length);
+    const carlsIdentity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity;
+    await call(dev, "change_member_role", { workspace_id: ws.id, user_id: carlUser.id, role: "member" });
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === carlsIdentity));
+    assert.match((await call(carl, "vm_access", { workspace_id: ws.id })).data.error, /owners and admins/);
+  } finally {
+    w.close();
+  }
+});
+
+test("a retry never takes back what was granted after: someone removed while the provider was down, then let back in, keeps their new access", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
+  try {
+    const { call, dev } = w;
+    const [ws] = (await call(dev, "list_workspaces")).data;
+    const { user: benUser } = await w.store.createUser("Ben", ["developer"]);
+    await w.store.db.query("UPDATE financial_products.users SET email = 'ben@example.com' WHERE id = $1", [benUser.id]);
+    const ben = await w.connectWith({ ...benUser, email: "ben@example.com" });
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')", [ws.id, benUser.id]);
+    await call(dev, "request_hosting", { workspace_id: ws.id });
+    await w.store.db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved')", [benUser.id]);
+    await call(ben, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") });
+    await w.hosting.pending;
+    assert.ok((await call(ben, "vm_access", { workspace_id: ws.id })).data.logins?.length);
+    const oldIdentity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity;
+    // Removed while the provider is down: his old login can't be revoked yet.
+    const real = provider.revokeAccess;
+    provider.revokeAccess = async () => {
+      throw new Error("provider down");
+    };
+    assert.match((await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data.access_cut.pending.join(" "), /VM login/);
+    // Let back in: a new login, a key and an invite of his own.
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')", [ws.id, benUser.id]);
+    provider.revokeAccess = async (id) => {
+      if (id === oldIdentity) throw new Error("provider down");
+      return real.call(provider, id);
+    };
+    assert.ok((await call(ben, "vm_access", { workspace_id: ws.id })).data.logins?.length);
+    const newIdentity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity;
+    const key = (await call(ben, "create_api_key", { app_id: w.app.id, environment: "sandbox", label: "mine" })).data;
+    const invite = (await call(ben, "invite_to_workspace", { workspace_id: ws.id, email: "friend@example.com" })).data;
+    // The provider's back; the retry runs.
+    provider.revokeAccess = real;
+    const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
+    const [r] = (await call(await w.connectWith(adminUser), "retry_offboard", { workspace_id: ws.id })).data.retried;
+    assert.equal(r.superseded, true);
+    assert.equal((await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity, newIdentity);
+    assert.ok(!provider.calls.some(([c, id]) => c === "revoke" && id === newIdentity), "his new login is untouched");
+    assert.equal((await w.store.getApiKey(key.id)).status, "active");
+    assert.equal((await w.store.db.query("SELECT revoked_at FROM financial_products.workspace_invites WHERE id = $1", [invite.id])).rows[0].revoked_at, null);
+    assert.equal((await w.store.db.query("SELECT status FROM financial_products.workspace_offboards WHERE user_id = $1", [benUser.id])).rows[0].status, "superseded");
+  } finally {
+    w.close();
+  }
+});

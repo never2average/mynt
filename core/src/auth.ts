@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
 import { ROLES, type Role, type Store, type User } from "./store.js";
+import { admitWorkspaceInvitee, openWorkspaceInvite } from "./workspaces.js";
 
 // The parts of Clerk's backend client this server uses, so tests can provide a stand-in.
 export interface ClerkLike {
@@ -128,6 +129,10 @@ export class ClerkAuth {
         invite = await this.store.upsertInvite(email, ["consumer"]);
         await this.store.audit(null, "invite_via_public_signup", email, { roles: ["consumer"], clerk_user_id: subject });
       }
+      // An open workspace invite lets someone new in, as a consumer (unless an admin revoked them); they accept it
+      // themselves (accept_workspace_invite), which is what may make them a developer (workspaces.ts).
+      const pending = email && !invite ? await openWorkspaceInvite(this.store.db, email) : null;
+      if (email && pending && (await admitWorkspaceInvitee(this.store, email, pending)).admitted === "new") invite = await this.store.getInvite(email);
     }
 
     if (!email || !invite) {

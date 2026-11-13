@@ -1,12 +1,14 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { appRole, memberApp, workspaceRole } from "./workspaces.js";
+import { licencesForProducts } from "./workspace-compliance.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
 import { DuplicateError, type AccessRequest, type App, type Handoff, type ProductRecord, type Store, type User } from "./store.js";
 import { open } from "./vault.js";
 import { isBlockedAddress, resolveVendorUrl, safePost, type VendorCallOptions } from "./vendor-call.js";
-import { monthlyBuildCapUsd } from "./builds.js";
+import { monthlyBuildCapUsd, workspaceBuildCapUsd } from "./builds.js";
 
 // The runtime layer: what a developer's shipped app talks to. Per-app API keys for the REST API
 // (src/runtime-api.ts), webhooks, a sandbox, app releases and analytics.
@@ -359,10 +361,8 @@ export type Readiness = (app: App) => Promise<{
 // publish_app's check, so releases and rollbacks pass exactly the same gate.
 export function registerRuntimeTools(server: McpServer, store: Store, user: User, readiness: Readiness) {
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
-  const ownApp = async (id: string) => {
-    const app = await store.getApp(id);
-    return app && app.owner_id === user.id ? app : undefined;
-  };
+  // An app of a workspace the developer belongs to (workspaces.ts); its keys and webhooks are the team's too.
+  const ownApp = (id: string) => memberApp(store, user, id);
   const ownKey = async (id: string) => {
     const key = await store.getApiKey(id);
     return key && (await ownApp(key.app_id)) ? key : undefined;
@@ -411,6 +411,8 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ app_id, environment, label, allowed_origins }) => {
       const app = await ownApp(app_id);
       if (!app) return fail(`No app with id '${app_id}'`);
+      // A live key reaches real customers' data: only the workspace's owners and admins make one.
+      if (environment === "live" && (await appRole(store, user, app)) === "member") return fail("Only the workspace's owners and admins create live keys; members create sandbox keys");
       const { key, secret } = await store.createApiKey(user.id, { app_id: app.id, environment, label, allowed_origins });
       await audit("create_api_key", key.id, { app_id: app.id, environment, label });
       return json({
@@ -448,8 +450,9 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ key_id }) => {
       const key = await ownKey(key_id);
       if (!key) return fail(`No API key '${key_id}'`);
+      if ((await appRole(store, user, (await store.getApp(key.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate keys");
       if (key.status !== "active") return fail("The key is revoked; create a new one");
-      const rotated = await store.rotateApiKey(key.id, key.environment);
+      const rotated = await store.rotateApiKey(key.id, key.environment, user.id);
       await audit("rotate_api_key", key.id, { app_id: key.app_id });
       return json({ ...rotated.key, key: rotated.secret, note: "Save this key now; it can't be shown again." });
     },
@@ -505,7 +508,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     },
     async ({ app_id }) => {
       if (app_id && !(await ownApp(app_id))) return fail(`No app with id '${app_id}'`);
-      const ids = app_id ? [app_id] : (await store.appsByOwner(user.id)).map((a) => a.id);
+      const ids = app_id ? [app_id] : (await store.appsVisibleTo(user.id)).map((a) => a.id);
       return json(await store.webhooksForApps(ids));
     },
   );
@@ -537,9 +540,33 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ webhook_id }) => {
       const hook = await ownWebhook(webhook_id);
       if (!hook) return fail(`No webhook '${webhook_id}'`);
-      const secret = await store.rotateWebhookSecret(hook.id);
+      if ((await appRole(store, user, (await store.getApp(hook.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate webhook secrets");
+      const secret = await store.rotateWebhookSecret(hook.id, user.id);
       await audit("rotate_webhook_secret", hook.id, { app_id: hook.app_id });
       return json({ ...hook, secret, note: "Save the signing secret now; it can't be shown again." });
+    },
+  );
+
+  server.registerTool(
+    "enable_webhook",
+    {
+      title: "Turn a disabled webhook back on",
+      description:
+        "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace, since its address may be theirs. Turning it back on takes its URL: the one it has (list_webhooks shows it), to confirm it's still the right receiver, or a new one. It gets a new signing secret, shown once to you.",
+      inputSchema: { webhook_id: z.string(), url: z.string().describe("The address deliveries go to: its current one to confirm it, or a new one") },
+    },
+    async ({ webhook_id, url }) => {
+      const hook = await ownWebhook(webhook_id);
+      if (!hook) return fail(`No webhook '${webhook_id}'`);
+      if ((await appRole(store, user, (await store.getApp(hook.app_id))!)) === "member") return fail("Only the workspace's owners and admins turn webhooks back on");
+      if (url !== hook.url) {
+        const problem = await checkWebhookUrl(url);
+        if (problem) return fail(problem);
+      }
+      const secret = await store.rotateWebhookSecret(hook.id, user.id);
+      await store.db.query("UPDATE financial_products.webhooks SET disabled_at = NULL, url = $2 WHERE id = $1", [hook.id, url]);
+      await audit("enable_webhook", hook.id, { app_id: hook.app_id, url_changed: url !== hook.url });
+      return json({ webhook_id: hook.id, url, enabled: true, secret, note: "Save the signing secret now; it can't be shown again." });
     },
   );
 
@@ -699,15 +726,18 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     {
       title: "Your dashboard",
       description:
-        "Developer: across all your apps, for the last 7, 30 or 90 days (default 30): live money moved (settled, in US dollars), hand-offs and how many converted, this month's build spend against your cap, money moved per day, and each app's figures, status and last build. Live (not sandbox) only. A figure Mynt doesn't measure is null, never 0: active enrollments per app and your earnings aren't tracked yet.",
-      inputSchema: z.object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional() }).strict(),
+        "Developer: across all your workspaces' apps (or one workspace's, with workspace_id), for the last 7, 30 or 90 days (default 30): live money moved (settled, in US dollars), hand-offs and how many converted, this month's build spend against your cap, money moved per day, and each app's figures, status and last build. Live (not sandbox) only. A figure Mynt doesn't measure is null, never 0: active enrollments per app and your earnings aren't tracked yet.",
+      inputSchema: z
+        .object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional(), workspace_id: z.string().optional() })
+        .strict(),
       annotations: { readOnlyHint: true },
     },
-    async ({ days = 30 }) => {
+    async ({ days = 30, workspace_id }) => {
+      if (workspace_id && !(await workspaceRole(store.db, workspace_id, user.id))) return fail(`No workspace of yours with id '${workspace_id}'`);
       const to = new Date().toISOString().slice(0, 10);
       const from = new Date(Date.parse(to) - (days - 1) * 86_400_000).toISOString().slice(0, 10);
       const toExclusive = new Date(Date.parse(to) + 86_400_000).toISOString();
-      const apps = await store.appsByOwner(user.id);
+      const apps = await store.appsVisibleTo(user.id, workspace_id);
       const ids = apps.map((a) => a.id);
       // A table this Mynt doesn't have (no money rails, no builds): not measured, so null.
       const optional = async <T>(sql: string, params: unknown[]): Promise<T[] | null> => {
@@ -736,6 +766,24 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
         "SELECT round(COALESCE(SUM(cost_usd), 0) * 100)::bigint::text AS cents FROM financial_products.build_runs WHERE developer_id = $1 AND created_at >= date_trunc('month', now())",
         [user.id],
       );
+      // One workspace's spend (everyone's builds of its apps) against its own budget, beside the developer's.
+      const workspaceSpend = workspace_id
+        ? await optional<{ cents: string }>(
+            `SELECT round(COALESCE(SUM(b.cost_usd), 0) * 100)::bigint::text AS cents FROM financial_products.build_runs b
+             JOIN financial_products.apps a ON a.id = b.app_id WHERE a.workspace_id::text = $1 AND b.created_at >= date_trunc('month', now())`,
+            [workspace_id],
+          )
+        : undefined;
+      // The published products these apps use, and the licences behind their sponsorships (list_workspace_licences).
+      const usedProducts = [...new Set(apps.flatMap((a) => a.product_ids))];
+      const activeProducts = usedProducts.length
+        ? Number(
+            ((await store.db.query("SELECT count(*)::int AS n FROM financial_products.products WHERE id = ANY($1) AND status = 'published'", [usedProducts])).rows[0] as {
+              n: number;
+            }).n,
+          )
+        : 0;
+      const licenceCount = (await licencesForProducts(store, usedProducts)).length;
       const counts = ids.length ? await store.runtimeCounts({ app_ids: ids, from, to: toExclusive, include_sandbox: false }) : [];
       const traffic = rollUp(counts, (r: { app_id: string }) => r.app_id);
       const trafficOf = new Map(traffic.groups);
@@ -757,8 +805,16 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
         // Enrollments aren't linked to the app that brought them, so Mynt can't count them per developer yet.
         customers: { active_enrollments: null },
         handoffs: { total: handoffs.handoffs_started, converted: handoffs.handoffs_completed, conversion_rate: handoffs.handoff_completion_rate },
-        build_spend: { month_usd: spend === null ? null : usd(BigInt(spend[0].cents)), monthly_cap_usd: spend === null ? null : monthlyBuildCapUsd() },
+        build_spend: {
+          month_usd: spend === null ? null : usd(BigInt(spend[0].cents)),
+          monthly_cap_usd: spend === null ? null : monthlyBuildCapUsd(),
+          ...(workspaceSpend !== undefined
+            ? { workspace: { month_usd: workspaceSpend === null ? null : usd(BigInt(workspaceSpend[0].cents)), monthly_cap_usd: workspaceBuildCapUsd() } }
+            : {}),
+        },
         earnings: { usd: null, tracked: false },
+        active_products: activeProducts,
+        licences: licenceCount,
         daily,
         apps: apps.map((a) => {
           const b = lastBuilds?.find((x) => x.app_id === a.id);

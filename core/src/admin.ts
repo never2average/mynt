@@ -549,6 +549,8 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       if (admins.includes(lower) && !roles.includes("admin") && admins.length === 1)
         return fail("That would remove the last admin; make someone else an admin first");
       const invite = await store.upsertInvite(lower, [...new Set(roles)] as Role[]);
+      // An admin chose these roles: a workspace invite sent before this never raises them (workspaces.ts).
+      await store.db.query("UPDATE financial_products.invites SET admin_roles_at = now() WHERE email = $1", [lower]);
       await store.unblockSignup(lower);
       const warnings = [(await ctx.clerkAdmin?.allow(lower)) ?? null, await mirrorToClerk(lower, invite.roles)].filter(Boolean);
       await audit("invite_user", lower, { roles: invite.roles });

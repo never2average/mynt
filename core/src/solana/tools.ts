@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Store, User } from "../store.js";
+import { memberApp } from "../workspaces.js";
 import { CLUSTERS } from "./rpc.js";
 import type { CallInput, SolanaService } from "./service.js";
 import { CUSTODY_PROVIDERS, MAINNET_BACKENDS } from "./signer.js";
@@ -65,8 +66,7 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
     async ({ name, cluster, app_id, product_id }) =>
       attempt(async () => {
         if (app_id) {
-          const app = await store.getApp(app_id);
-          if (!app || app.owner_id !== user.id) throw new Error(`No app of yours with id '${app_id}'`);
+          if (!(await memberApp(store, user, app_id))) throw new Error(`No app of yours with id '${app_id}'`);
         }
         if (product_id) {
           const product = await store.getProduct(product_id);
