@@ -610,18 +610,24 @@ export class BuildService {
     ]);
   }
 
-  private async update(id: string, fields: Partial<Build>) {
+  // Whether it applied. A build that ended (stopped, say, while this tick was provisioning it) is never moved back to
+  // a running status: a non-terminal status only replaces a non-terminal one.
+  private async update(id: string, fields: Partial<Build>): Promise<boolean> {
     const keys = Object.keys(fields) as (keyof Build)[];
-    if (keys.length === 0) return;
+    if (keys.length === 0) return true;
     const sets = keys.map((k, i) => `${k} = $${i + 2}`);
     const values = keys.map((k) =>
       k === "maxwell" || k === "readiness" || k === "agent_report" || k === "solana_check" || k === "solana_env" || k === "solana_toolchain" ? JSON.stringify(fields[k]) : fields[k],
     );
     const terminal = fields.status && TERMINAL.includes(fields.status);
-    await this.db.query(
-      `UPDATE financial_products.build_runs SET ${sets.join(", ")}, updated_at = now()${terminal ? ", finished_at = now()" : ""} WHERE id = $1`,
-      [id, ...values],
+    const reviving = fields.status && !terminal;
+    const r = await this.db.query(
+      `UPDATE financial_products.build_runs SET ${sets.join(", ")}, updated_at = now()${terminal ? ", finished_at = now()" : ""} WHERE id = $1${
+        reviving ? ` AND status <> ALL($${keys.length + 2})` : ""
+      } RETURNING id`,
+      reviving ? [id, ...values, TERMINAL] : [id, ...values],
     );
+    return r.rows.length > 0;
   }
 
   async monthSpend(developerId: string) {
@@ -1264,14 +1270,18 @@ export class BuildService {
         { name: `mynt-build-${b.id}`, type: this.config.sandboxType, ttlSeconds: this.config.ttlSeconds, labels: { mynt_build: b.id }, env },
         b.solana,
       );
-      await this.update(b.id, {
-        status: "provisioning",
-        sandbox_id: sandbox.id,
-        sandbox_started_at: new Date().toISOString(),
-        sandbox_key_id: sandboxKeyId,
-        branch: env.MYNT_BRANCH ?? null,
-        ...(base ? { solana_env: { ...b.solana_env, build: base } } : {}),
-      });
+      const moved = await this.db.query(
+        `UPDATE financial_products.build_runs SET status = 'provisioning', sandbox_id = $2, sandbox_started_at = now(), sandbox_key_id = $3, branch = $4,
+           solana_env = COALESCE($5::jsonb, solana_env), updated_at = now()
+         WHERE id = $1 AND status = 'queued' RETURNING id`,
+        [b.id, sandbox.id, sandboxKeyId, env.MYNT_BRANCH ?? null, base ? JSON.stringify({ ...b.solana_env, build: base }) : null],
+      );
+      if (!moved.rows.length) {
+        // Stopped while the sandbox was being made: nothing may run in it.
+        await sandboxes.stop(sandbox.id).catch(() => undefined);
+        if (sandboxKeyId) await this.store.revokeApiKey(sandboxKeyId).catch(() => undefined);
+        return;
+      }
       await this.event(b.id, "provisioning", "Sandbox requested", { sandbox_id: sandbox.id, ...(base ? { solana_environment: base.key } : {}) });
       return;
     }

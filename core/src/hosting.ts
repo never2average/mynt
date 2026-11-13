@@ -231,6 +231,8 @@ const TABLES = `
   ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS workspace_id uuid UNIQUE;
   -- Who deployed the running commit: the source is fetched through their own approved connection.
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS deployed_by uuid;
+  -- Whose the tenant's current VM login is.
+  ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS access_granted_to uuid;
 `;
 
 // gVisor's release, pinned and checked against its published SHA-512.
@@ -577,6 +579,26 @@ export class HostingService {
   }
 
   // Ends the current VM logins to a tenant (someone left the workspace it serves): whoever still may, logs in again.
+  // The current VM logins of these tenants that are this person's.
+  async loginsHeldBy(userId: string, tenantIds: string[]): Promise<{ tenant_id: string; identity: string }[]> {
+    if (!tenantIds.length) return [];
+    return (
+      await this.db.query(
+        "SELECT id::text AS tenant_id, access_identity AS identity FROM financial_products.hosting_tenants WHERE access_granted_to = $1 AND access_identity IS NOT NULL AND id::text = ANY($2)",
+        [userId, tenantIds],
+      )
+    ).rows as { tenant_id: string; identity: string }[];
+  }
+
+  // Revokes one login; throws unless the provider confirmed. The tenant's record is cleared only if it's still that login.
+  async revokeLogin(tenantId: string, identity: string): Promise<void> {
+    if (isDirect(this.provider)) await this.provider.revokeAccess(identity);
+    await this.db.query(
+      "UPDATE financial_products.hosting_tenants SET access_identity = NULL, access_granted_to = NULL, updated_at = now() WHERE id::text = $1 AND access_identity = $2",
+      [tenantId, identity],
+    );
+  }
+
   // Throws when the provider didn't confirm, keeping the record so a retry revokes it.
   async revokeVmAccess(tenant: Tenant): Promise<boolean> {
     const prev = (await this.one("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.access_identity as string | null;
@@ -737,7 +759,7 @@ export class HostingService {
 
   // Logins for the developer on each of their apps' VMs (their Linux user, in the docker group, no sudo); the
   // previous ones are revoked. The apps' keys aren't on the VMs, so a login never exposes them.
-  async vmAccess(tenant: Tenant, hours = 8) {
+  async vmAccess(tenant: Tenant, hours = 8, grantedTo: string | null = null) {
     if (!isDirect(this.provider)) throw new Error("Direct VM access needs a direct hosting provider");
     if (tenant.status !== "running") throw new Error(`Your hosting is ${tenant.status}`);
     const vms = await this.appVms(tenant.id);
@@ -749,7 +771,7 @@ export class HostingService {
       "developer",
       new Date(Date.now() + hours * 3600e3),
     );
-    await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = $2, updated_at = now() WHERE id = $1", [tenant.id, grant.identity]);
+    await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = $2, access_granted_to = $3, updated_at = now() WHERE id = $1", [tenant.id, grant.identity, grantedTo]);
     return { logins: vms.map((v) => ({ app_id: v.app_id, ssh: grant.ssh[v.vm_id] })), expires_at: grant.expires_at };
   }
 
