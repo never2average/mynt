@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
 import { ROLES, type Role, type Store, type User } from "./store.js";
-import { acceptWorkspaceInvites } from "./workspaces.js";
+import { acceptWorkspaceInvites, admitWorkspaceInvitee, needsDeveloper, openWorkspaceInviter } from "./workspaces.js";
 
 // The parts of Clerk's backend client this server uses, so tests can provide a stand-in.
 export interface ClerkLike {
@@ -129,6 +129,10 @@ export class ClerkAuth {
         invite = await this.store.upsertInvite(email, ["consumer"]);
         await this.store.audit(null, "invite_via_public_signup", email, { roles: ["consumer"], clerk_user_id: subject });
       }
+      // An open workspace invite counts as an invite to Mynt, as a developer (unless an admin revoked them).
+      const pending = email && !invite ? await openWorkspaceInviter(this.store.db, email) : null;
+      if (email && pending && (await admitWorkspaceInvitee(this.store, email, pending.invited_by, pending.mynt_role)).admitted === "new")
+        invite = await this.store.getInvite(email);
     }
 
     if (!email || !invite) {
@@ -139,10 +143,17 @@ export class ClerkAuth {
         message: email ? "Your account is not on this server's whitelist" : "Verify your email address with the sign-in provider, then sign in again",
       };
     }
-    const user =
+    let user =
       linked && (linked.held_roles ?? linked.roles).join() === invite.roles.join() ? linked : await this.store.upsertClerkUser(subject, email, name, invite.roles);
-    // Workspace invites to this verified address become memberships as they sign in (workspaces.ts).
-    await acceptWorkspaceInvites(this.store.db, user.id, email);
+    // Workspace invites to this verified address become memberships as they sign in (workspaces.ts), and joining
+    // through a developer invite makes them a developer if they weren't a builder yet. Never any other role.
+    const joined = await acceptWorkspaceInvites(this.store.db, user.id, email);
+    if (joined.some((j) => j.mynt_role === "developer") && needsDeveloper(invite.roles)) {
+      const roles = [...invite.roles, "developer"] as Role[];
+      await this.store.upsertInvite(email, roles);
+      await this.store.audit(user.id, "developer_via_workspace", email, { roles, workspaces: joined.map((j) => j.workspace_id) });
+      user = await this.store.upsertClerkUser(subject, email, name, roles);
+    }
     return { ok: true, user };
   }
 }

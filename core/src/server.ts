@@ -112,7 +112,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("consumer")) registerConsumerTools(server, store, user!);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
-    registerWorkspaceTools(server, store, user!);
+    registerWorkspaceTools(server, store, user!, ctx.clerkAdmin ?? null);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
     if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);

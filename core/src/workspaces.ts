@@ -10,6 +10,10 @@ import type { App, Store, User } from "./store.js";
 //
 // Joining is invite → membership, as for Mynt itself: an owner or admin invites an email address with a role, and the
 // invite is accepted when someone signs in with that verified address. Nothing here reads an allow-list from settings.
+// Any member may invite (members as members only; owners and admins as admins too), and the inviter picks the Mynt
+// role the invite carries: developer or user (Mynt's consumer role), never more (admitWorkspaceInvitee). Someone a
+// Mynt admin revoked stays out, and admins can still revoke anyone let in this way. Each person may send
+// WORKSPACE_INVITES_PER_DAY invites a day.
 
 export const WORKSPACE_ROLES = ["owner", "admin", "member"] as const;
 export type WorkspaceRole = (typeof WORKSPACE_ROLES)[number];
@@ -46,6 +50,11 @@ export const WORKSPACE_TABLES = `
     WHERE accepted_at IS NULL AND revoked_at IS NULL;
   CREATE INDEX IF NOT EXISTS workspace_invites_email_idx ON ${T}.workspace_invites (email) WHERE accepted_at IS NULL AND revoked_at IS NULL;
   ALTER TABLE ${T}.apps ADD COLUMN IF NOT EXISTS workspace_id uuid REFERENCES ${T}.workspaces(id);
+  -- The Mynt role a workspace invite carries for someone new to Mynt: developer or consumer (shown as "user").
+  ALTER TABLE ${T}.workspace_invites ADD COLUMN IF NOT EXISTS mynt_role text NOT NULL DEFAULT 'developer' CHECK (mynt_role IN ('developer', 'consumer'));
+  CREATE INDEX IF NOT EXISTS workspace_invites_inviter_idx ON ${T}.workspace_invites (invited_by, created_at);
+  -- Who let someone onto Mynt, when it wasn't an admin: the workspace member whose invite did.
+  ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS invited_by uuid REFERENCES ${T}.users(id);
   CREATE INDEX IF NOT EXISTS apps_workspace_idx ON ${T}.apps (workspace_id);
 `;
 
@@ -148,7 +157,54 @@ export async function appStages(db: Db, apps: Pick<App, "id" | "status">[]): Pro
 
 // ---- invites: accepted when the invited, verified email signs in ----
 
-export async function acceptWorkspaceInvites(db: Db, userId: string, email: string | null): Promise<{ workspace_id: string; role: string }[]> {
+// The Mynt roles a workspace invite can carry: developer, or user (Mynt's consumer role). Never anything else.
+export const INVITE_MYNT_ROLES = { developer: "developer", user: "consumer" } as const;
+export type InviteMyntRole = keyof typeof INVITE_MYNT_ROLES;
+export const WORKSPACE_INVITES_PER_DAY = 20;
+
+// The roles that already give a builder's tools: nothing to add for them.
+const BUILDER_ROLES = ["developer", "innovator", "admin"];
+export const needsDeveloper = (roles: readonly string[]) => !roles.some((r) => BUILDER_ROLES.includes(r));
+
+// A workspace invite lets its invitee onto Mynt itself, with the role it carries (developer or consumer) and no other.
+// Someone a Mynt admin revoked (a signup block) stays out, and an existing Mynt invite is left as it is (sign-in adds
+// developer to it when a developer invite is accepted). `clerk` keeps the identity provider's allowlist in step, as
+// admins' invites do.
+export async function admitWorkspaceInvitee(
+  store: Store,
+  email: string,
+  invitedBy: string | null,
+  myntRole: "developer" | "consumer",
+  clerk?: { allow(email: string): Promise<string | null> } | null,
+): Promise<{ admitted: "new" | "already" | "blocked"; warning?: string }> {
+  const lower = email.toLowerCase();
+  if (await store.isSignupBlocked(lower)) return { admitted: "blocked" };
+  if (await store.getInvite(lower)) return { admitted: "already" };
+  const role = myntRole === "developer" ? "developer" : "consumer";
+  const added = await one(
+    store.db,
+    `INSERT INTO ${T}.invites (email, roles, invited_by) VALUES ($1, ARRAY[$3::text], $2) ON CONFLICT (email) DO NOTHING RETURNING email`,
+    [lower, invitedBy, role],
+  );
+  if (!added) return { admitted: "already" };
+  await store.audit(invitedBy, "invite_via_workspace", lower, { roles: [role] });
+  const warning = (await clerk?.allow(lower)) ?? undefined;
+  return { admitted: "new", ...(warning ? { warning } : {}) };
+}
+
+// An open workspace invite for this address, if any: who sent it and the Mynt role it carries (a developer invite
+// first, if several are waiting).
+export async function openWorkspaceInviter(db: Db, email: string): Promise<{ invited_by: string | null; mynt_role: "developer" | "consumer" } | null> {
+  const r = await one(
+    db,
+    `SELECT invited_by::text AS invited_by, mynt_role FROM ${T}.workspace_invites WHERE email = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+     ORDER BY (mynt_role = 'developer') DESC, created_at LIMIT 1`,
+    [email.toLowerCase()],
+  );
+  return r ? { invited_by: (r.invited_by as string | null) ?? null, mynt_role: r.mynt_role === "developer" ? "developer" : "consumer" } : null;
+}
+
+export async function acceptWorkspaceInvites(db: Db, userId: string, email: string | null): Promise<{ workspace_id: string; role: string; mynt_role: string }[]> {
   if (!email) return [];
   const lower = email.toLowerCase();
   // The common case (nothing waiting) costs one indexed lookup.
@@ -157,10 +213,10 @@ export async function acceptWorkspaceInvites(db: Db, userId: string, email: stri
     const open = (
       await tx.query(
         `UPDATE ${T}.workspace_invites SET accepted_at = now(), accepted_by = $2
-         WHERE email = $1 AND accepted_at IS NULL AND revoked_at IS NULL RETURNING id, workspace_id::text AS workspace_id, role`,
+         WHERE email = $1 AND accepted_at IS NULL AND revoked_at IS NULL RETURNING id, workspace_id::text AS workspace_id, role, mynt_role`,
         [lower, userId],
       )
-    ).rows as { id: string; workspace_id: string; role: string }[];
+    ).rows as { id: string; workspace_id: string; role: string; mynt_role: string }[];
     const joined = [];
     for (const i of open) {
       // Someone already in keeps the role they have: an invite never changes it.
@@ -176,7 +232,7 @@ export async function acceptWorkspaceInvites(db: Db, userId: string, email: stri
         i.workspace_id,
         JSON.stringify({ invite_id: i.id, role: i.role, joined: added > 0 }),
       ]);
-      if (added) joined.push({ workspace_id: i.workspace_id, role: i.role });
+      if (added) joined.push({ workspace_id: i.workspace_id, role: i.role, mynt_role: i.mynt_role });
     }
     return joined;
   });
@@ -189,7 +245,9 @@ const fail = (error: string) => ({ ...json({ error }), isError: true });
 
 class Refused extends Error {}
 
-export function registerWorkspaceTools(server: McpServer, store: Store, user: User) {
+type ClerkAllowlist = { allow(email: string): Promise<string | null>; disallow?(email: string): Promise<unknown> };
+
+export function registerWorkspaceTools(server: McpServer, store: Store, user: User, clerk: ClerkAllowlist | null = null) {
   const db = store.db;
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
   const notYours = (id: string) => `No workspace of yours with id '${id}'`;
@@ -310,15 +368,25 @@ export function registerWorkspaceTools(server: McpServer, store: Store, user: Us
     {
       title: "Invite someone to a workspace",
       description:
-        "Developer: owners and admins invite an email address with a role (member by default; only owners invite owners). They join when they next sign in to Mynt with that verified address. Mynt doesn't email them: tell them yourself.",
-      inputSchema: { workspace_id: z.string(), email: z.email(), role: z.enum(WORKSPACE_ROLES).default("member") },
+        "Developer: invite an email address to a workspace you're in. role is their place in the workspace: member (anyone may invite members), admin (owners and admins only) or owner (owners only). mynt_role is what they may do on Mynt if they're new to it: developer (build apps) or user (use apps; in the workspace, but they can't build); never more. They join when they next sign in with that verified address; someone a Mynt admin removed stays out. Up to 20 invites a day each. Mynt doesn't email them: tell them yourself.",
+      inputSchema: {
+        workspace_id: z.string(),
+        email: z.email(),
+        role: z.enum(WORKSPACE_ROLES).default("member"),
+        mynt_role: z.enum(["developer", "user"]).default("developer"),
+      },
     },
-    async ({ workspace_id, email, role }) =>
+    async ({ workspace_id, email, role, mynt_role }) =>
       attempt(async () => {
         const lower = email.toLowerCase();
+        const myntRole = INVITE_MYNT_ROLES[mynt_role as InviteMyntRole];
         const invite = await locked(workspace_id, async (tx, mine) => {
-          manager(mine);
+          if (role !== "member") manager(mine);
           if (role === "owner" && mine !== "owner") throw new Refused("Only an owner can invite another owner");
+          const sent = Number(
+            (await one(tx, `SELECT count(*)::int AS n FROM ${T}.workspace_invites WHERE invited_by = $1 AND created_at > now() - interval '1 day'`, [user.id]))!.n,
+          );
+          if (sent >= WORKSPACE_INVITES_PER_DAY) throw new Refused(`You've sent ${WORKSPACE_INVITES_PER_DAY} workspace invites in the last day; try again later`);
           const already = await one(
             tx,
             `SELECT 1 FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id WHERE m.workspace_id::text = $1 AND u.email = $2`,
@@ -328,22 +396,29 @@ export function registerWorkspaceTools(server: McpServer, store: Store, user: Us
           if (await one(tx, `SELECT 1 FROM ${T}.workspace_invites WHERE workspace_id::text = $1 AND email = $2 AND accepted_at IS NULL AND revoked_at IS NULL`, [workspace_id, lower]))
             throw new Refused(`${lower} already has an open invite; revoke it first to change the role`);
           const id = randomUUID();
-          await tx.query(`INSERT INTO ${T}.workspace_invites (id, workspace_id, email, role, invited_by) VALUES ($1, $2, $3, $4, $5)`, [
+          await tx.query(`INSERT INTO ${T}.workspace_invites (id, workspace_id, email, role, invited_by, mynt_role) VALUES ($1, $2, $3, $4, $5, $6)`, [
             id,
             workspace_id,
             lower,
             role,
             user.id,
+            myntRole,
           ]);
-          return { id, workspace_id, email: lower, role };
+          return { id, workspace_id, email: lower, role, mynt_role };
         });
-        await audit("invite_to_workspace", workspace_id, { invite_id: invite.id, email: lower, role });
-        // A workspace invite doesn't let anyone onto Mynt itself: that's Mynt's own invite, which its admins give.
-        const onMynt = (await store.getInvite(lower)) || (await one(db, `SELECT 1 FROM ${T}.users WHERE email = $1`, [lower]));
-        return json({
-          ...invite,
-          ...(onMynt ? {} : { note: `${lower} can't sign in to Mynt yet: a Mynt admin has to invite them too (or public sign-up must be on)` }),
-        });
+        await audit("invite_to_workspace", workspace_id, { invite_id: invite.id, email: lower, role, mynt_role });
+        // The invite also lets them onto Mynt with the role it carries, unless an admin revoked them.
+        const mynt = await admitWorkspaceInvitee(store, lower, user.id, myntRole, clerk);
+        const as = mynt_role === "developer" ? "a developer" : "a user (they can't build)";
+        const note = {
+          new: `${lower} can now sign in to Mynt as ${as}; they join the workspace when they do`,
+          already:
+            mynt_role === "developer"
+              ? `${lower} joins the workspace when they next sign in (with the developer role, if they don't have it yet)`
+              : `${lower} joins the workspace when they next sign in, keeping their Mynt roles`,
+          blocked: `${lower} was removed from Mynt by an admin, so they can't sign in: an admin has to let them back first`,
+        }[mynt.admitted];
+        return json({ ...invite, mynt_access: mynt.admitted, note, ...(mynt.warning ? { warning: mynt.warning } : {}) });
       }),
   );
 
@@ -351,7 +426,7 @@ export function registerWorkspaceTools(server: McpServer, store: Store, user: Us
     "revoke_workspace_invite",
     {
       title: "Withdraw a workspace invite",
-      description: "Developer: owners and admins withdraw an invite that hasn't been accepted yet (list_workspace_members shows them).",
+      description: "Developer: withdraw an invite that hasn't been accepted yet: your own, or anyone's if you're an owner or admin (list_workspace_members shows them).",
       inputSchema: { invite_id: z.string() },
     },
     async ({ invite_id }) =>
@@ -360,14 +435,33 @@ export function registerWorkspaceTools(server: McpServer, store: Store, user: Us
         if (!inv) return fail(`No open invite with id '${invite_id}'`);
         const ws = inv.workspace_id as string;
         const revoked = await locked(ws, async (tx, mine) => {
-          manager(mine);
-          const r = await one(tx, `SELECT email, role FROM ${T}.workspace_invites WHERE id::text = $1 AND accepted_at IS NULL AND revoked_at IS NULL`, [invite_id]);
+          const r = await one(
+            tx,
+            `SELECT email, role, invited_by::text AS invited_by FROM ${T}.workspace_invites WHERE id::text = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
+            [invite_id],
+          );
           if (!r) throw new Refused(`No open invite with id '${invite_id}'`);
+          if (r.invited_by !== user.id) manager(mine);
           if (r.role === "owner" && mine !== "owner") throw new Refused("Only an owner can withdraw an invite for an owner");
           await tx.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite_id]);
           return r;
         });
         await audit("revoke_workspace_invite", ws, { invite_id, email: revoked.email });
+        // The way onto Mynt that a workspace invite opened closes with it, if they never came in and no other
+        // workspace invite is still waiting for them. An admin's own invite is never touched.
+        const email = revoked.email as string;
+        const unused = await one(
+          db,
+          `DELETE FROM ${T}.invites i WHERE i.email = $1 AND i.invited_by IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM ${T}.users u WHERE u.email = $1)
+             AND NOT EXISTS (SELECT 1 FROM ${T}.workspace_invites w WHERE w.email = $1 AND w.accepted_at IS NULL AND w.revoked_at IS NULL)
+           RETURNING email`,
+          [email],
+        );
+        if (unused) {
+          await audit("uninvite_via_workspace", email, { invite_id });
+          await clerk?.disallow?.(email).catch(() => undefined);
+        }
         return json({ invite_id, revoked: true });
       }),
   );
