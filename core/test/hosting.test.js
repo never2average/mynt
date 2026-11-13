@@ -853,12 +853,19 @@ test("Freestyle: ending a login the provider no longer has is 'already gone', no
   const fetch = async (url, init) => {
     const path = url.replace("https://api.freestyle.sh/v5", "");
     if (init.method === "DELETE" && path === "/identities/idn-live") return new Response("{}", { status: 200 });
-    if (init.method === "DELETE" && path === "/identities/idn-gone") return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    // Freestyle's documented error body (PublicErrorBody: { code, message }) for an identity it doesn't have.
+    if (init.method === "DELETE" && path === "/identities/idn-gone") return new Response(JSON.stringify({ code: "IDENTITY_NOT_FOUND", message: "no such identity in this account" }), { status: 404 });
+    // Other 404s: a route that doesn't exist (wrong base, retired version), an empty reply, another code.
+    if (path === "/identities/idn-html") return new Response("<html>Not Found</html>", { status: 404 });
+    if (path === "/identities/idn-empty") return new Response("", { status: 404 });
+    if (path === "/identities/idn-other") return new Response(JSON.stringify({ code: "NOT_FOUND", message: "route not found" }), { status: 404 });
+    if (path === "/identities/idn-loose") return new Response(JSON.stringify({ error: "IdentityNotFound" }), { status: 404 });
     return new Response("upstream error", { status: 502 });
   };
   const p = new FreestyleProvider("fs_key", { fetch });
   assert.deepEqual(await p.revokeAccess("idn-live"), {});
   assert.deepEqual(await p.revokeAccess("idn-gone"), { alreadyGone: true });
+  for (const id of ["idn-html", "idn-empty", "idn-other", "idn-loose"]) await assert.rejects(p.revokeAccess(id), /404/, id);
   await assert.rejects(p.revokeAccess("idn-broken"), /502/);
 });
 

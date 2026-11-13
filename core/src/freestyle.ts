@@ -29,8 +29,8 @@ export interface DirectHostingProvider {
   grantAccess(vmIds: string[], linuxUser: string, expiresAt: Date): Promise<{ ssh: Record<string, string>; expires_at: string; identity: string }>;
   // Machine time so far, never under-counted.
   usage(vmId: string): Promise<{ seconds: number }>;
-  // Ends a login. An identity the provider no longer has (deleted in its dashboard, or by an earlier revoke whose
-  // answer was lost) is already ended: { alreadyGone: true }, never an error. Anything else that fails throws.
+  // Ends a login. An identity the provider says it no longer has (deleted in its dashboard, or by an earlier revoke
+  // whose answer was lost) is already ended: { alreadyGone: true }, never an error. Anything else that fails throws.
   revokeAccess(identity: string): Promise<{ alreadyGone?: boolean } | void>;
 }
 
@@ -63,7 +63,17 @@ export class FreestyleProvider implements DirectHostingProvider {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
-    if (!res.ok) throw Object.assign(new Error(`Freestyle ${method} ${path}: ${res.status} ${text.slice(0, 300)}`), { status: res.status });
+    if (!res.ok) {
+      // Freestyle's errors are { code, message } (its OpenAPI PublicErrorBody), code being the stable part to branch on.
+      let code: string | undefined;
+      try {
+        const body = JSON.parse(text) as { code?: unknown; message?: unknown };
+        if (typeof body?.code === "string" && typeof body?.message === "string") code = body.code;
+      } catch {
+        // not Freestyle's error body (an HTML page, an empty reply)
+      }
+      throw Object.assign(new Error(`Freestyle ${method} ${path}: ${res.status} ${text.slice(0, 300)}`), { status: res.status, ...(code ? { code } : {}) });
+    }
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -161,7 +171,10 @@ export class FreestyleProvider implements DirectHostingProvider {
       await this.call("DELETE", `/identities/${encodeURIComponent(identity)}`);
       return {};
     } catch (e) {
-      if ((e as { status?: number }).status === 404) return { alreadyGone: true };
+      // Only Freestyle saying it has no such identity: any other 404 (a wrong base URL, a retired API version, an
+      // HTML "Not Found") may hide a live login, so it stays an error.
+      const err = e as { status?: number; code?: string };
+      if (err.status === 404 && err.code === "IDENTITY_NOT_FOUND") return { alreadyGone: true };
       throw e;
     }
   }
