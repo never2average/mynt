@@ -347,6 +347,17 @@ describe("/api/chat start races", () => {
     expect(startLocks()).toHaveLength(0);
   });
 
+  it("the start lock is the app's, not the user's: a teammate starting a build on it keeps anyone else from starting a second", async () => {
+    // A teammate (another user, another session) holds the app's start lock.
+    claimed.set("start-lock\napp1", -1);
+    expiry.set("start-lock\napp1", clock.now + 60_000);
+    fake.session = deviceA();
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(0);
+    expect(out.filter((c) => c.type === "text-delta").map((c) => c.delta).join("")).toMatch(/being started right now/);
+    claimed.delete("start-lock\napp1");
+  });
+
   it("A's start running past 70 s still keeps B from starting a second build", async () => {
     expect(START_LOCK_SECONDS).toBeGreaterThan(120); // a second list_builds and start_build, each up to 60 s
     fake.activity = [{ status: "failed", activity: [] }, { status: "failed", activity: [] }];

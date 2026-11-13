@@ -17,6 +17,14 @@ const rate = (v: unknown): number | null => {
 
 export type Figure = number | null;
 
+// A count Mynt may give as a number, a list, or { count }; anything else isn't measured.
+function countOf(v: unknown): Figure {
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+  if (Array.isArray(v)) return v.length;
+  if (isObj(v) && typeof v.count === "number" && Number.isFinite(v.count)) return v.count;
+  return null;
+}
+
 export type DashboardApp = {
   id: string;
   name: string;
@@ -39,6 +47,8 @@ export type Dashboard = {
   buildSpend: Figure; // this month
   buildCap: Figure;
   earnings: Figure; // null: not tracked
+  activeProducts: Figure; // products live in the workspace's apps
+  licences: Figure; // partner licences behind them
   daily: { date: string; value: number }[] | null; // money moved per day; null when not measured
   apps: DashboardApp[];
 };
@@ -72,6 +82,8 @@ export function fromDashboardTool(reply: unknown): Dashboard {
     buildSpend: num(spend.month_usd),
     buildCap: num(spend.monthly_cap_usd),
     earnings: earnings.tracked === true ? num(earnings.usd) : null,
+    activeProducts: countOf(r.active_products),
+    licences: countOf(r.licences),
     daily: daily && daily.length ? daily.sort((a, b) => a.date.localeCompare(b.date)) : null,
     apps: (Array.isArray(r.apps) ? r.apps : []).filter(isObj).flatMap((a) =>
       str(a.app_id)
@@ -130,6 +142,8 @@ export function fromAppsAndBuilds(appsReply: unknown, buildsReply: unknown): Das
     buildSpend: num(r.month_spend_usd),
     buildCap: num(r.monthly_cap_usd),
     earnings: null,
+    activeProducts: null,
+    licences: null,
     daily: null,
     apps,
   };

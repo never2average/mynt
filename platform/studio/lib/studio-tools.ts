@@ -12,12 +12,16 @@ import { z } from "zod";
 const id = z.string().trim().min(1).max(200);
 // A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
 const service = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/).optional();
+const workspaceId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
+const workspaceName = z.string().trim().min(1).max(80);
+// Roles given from the studio; ownership isn't handed over here.
+const memberRole = z.enum(["admin", "member"]);
 const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
   whoami: z.object({}).strict(),
-  list_my_apps: z.object({}).strict(),
+  list_my_apps: z.object({ workspace_id: workspaceId.optional() }).strict(),
   list_buildable_products: z
     .object({ product_line: z.string().max(80).optional(), query: z.string().max(200).optional(), access_mode: z.string().max(40).optional() })
     .strict(),
@@ -29,14 +33,33 @@ export const STUDIO_TOOLS = {
       description: z.string().trim().min(1).max(4000),
       audience: z.string().trim().min(1).max(500),
       product_ids: z.array(id).min(1).max(20),
+      workspace_id: workspaceId.optional(),
     })
     .strict(),
   // The dashboard: money moved, customers, hand-offs and build spend across the user's apps.
-  get_developer_dashboard: z.object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional() }).strict(),
+  get_developer_dashboard: z
+    .object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional(), workspace_id: workspaceId.optional() })
+    .strict(),
+  // The dashboard's GitHub and wallet tiles.
+  get_linked_accounts: z.object({}).strict(),
+  // Workspaces: the switcher, Create workspace and the Members page.
+  list_workspaces: z.object({}).strict(),
+  create_workspace: z.object({ name: workspaceName }).strict(),
+  rename_workspace: z.object({ workspace_id: workspaceId, name: workspaceName }).strict(),
+  list_workspace_members: z.object({ workspace_id: workspaceId }).strict(),
+  invite_to_workspace: z.object({ workspace_id: workspaceId, email: z.string().trim().toLowerCase().email().max(320), role: memberRole }).strict(),
+  revoke_workspace_invite: z.object({ workspace_id: workspaceId, invite_id: id }).strict(),
+  change_member_role: z.object({ workspace_id: workspaceId, user_id: id, role: memberRole }).strict(),
+  remove_workspace_member: z.object({ workspace_id: workspaceId, user_id: id }).strict(),
+  leave_workspace: z.object({ workspace_id: workspaceId }).strict(),
+  // Invitations to other people's workspaces: joining is always the user's explicit choice.
+  list_my_invitations: z.object({}).strict(),
+  accept_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),
+  decline_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),
   // repositories
   list_repositories: z.object({}).strict(),
   // builds
-  list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional() }).strict(),
+  list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional(), workspace_id: workspaceId.optional() }).strict(),
   get_build: z.object({ build_id: id }).strict(),
   get_build_activity: z
     .object({ build_id: id, limit: z.number().int().min(1).max(200).optional(), after: z.number().int().min(0).optional() })

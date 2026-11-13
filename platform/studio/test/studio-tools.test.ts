@@ -73,6 +73,36 @@ describe("STUDIO_TOOLS", () => {
     expect(parseStudioCall("list_buildable_products", { query: "savings" })).toHaveProperty("tool");
   });
 
+  it("checks the workspace and linked-account tools strictly", () => {
+    const ok = (t: string, a: object) => expect(parseStudioCall(t, a), t).toHaveProperty("tool");
+    const bad = (t: string, a: object) => expect(parseStudioCall(t, a), t).toHaveProperty("error");
+    ok("list_workspaces", {});
+    ok("create_workspace", { name: "Acme" });
+    bad("create_workspace", { name: "" });
+    ok("rename_workspace", { workspace_id: "w1", name: "Acme 2" });
+    ok("list_workspace_members", { workspace_id: "w1" });
+    bad("list_workspace_members", { workspace_id: "../w1" });
+    ok("invite_to_workspace", { workspace_id: "w1", email: "a@example.com", role: "admin" });
+    bad("invite_to_workspace", { workspace_id: "w1", email: "a@example.com", role: "owner" });
+    bad("invite_to_workspace", { workspace_id: "w1", email: "not an email", role: "member" });
+    ok("revoke_workspace_invite", { workspace_id: "w1", invite_id: "i1" });
+    ok("change_member_role", { workspace_id: "w1", user_id: "u2", role: "member" });
+    bad("change_member_role", { workspace_id: "w1", user_id: "u2", role: "owner" });
+    ok("remove_workspace_member", { workspace_id: "w1", user_id: "u2" });
+    ok("leave_workspace", { workspace_id: "w1" });
+    ok("list_my_apps", { workspace_id: "w1" });
+    ok("get_developer_dashboard", { days: 30, workspace_id: "w1" });
+    ok("get_linked_accounts", {});
+    bad("get_linked_accounts", { user_id: "u2" });
+    ok("list_my_invitations", {});
+    bad("list_my_invitations", { user_id: "u2" });
+    ok("accept_workspace_invite", { invite_id: "inv1" });
+    bad("accept_workspace_invite", { invite_id: "../inv1" });
+    bad("accept_workspace_invite", { invite_id: "inv1", workspace_id: "w1" });
+    ok("decline_workspace_invite", { invite_id: "inv1" });
+    bad("decline_workspace_invite", {});
+  });
+
   it("lets developers, innovators and admins in", () => {
     expect(rolesFrom({ roles: ["developer"], effective_roles: ["consumer", "developer"] })).toEqual(["consumer", "developer"]);
     expect(rolesFrom({ roles: ["innovator"] })).toEqual(["innovator"]);

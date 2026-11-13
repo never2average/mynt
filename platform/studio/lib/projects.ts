@@ -1,3 +1,4 @@
+import { stageOf } from "./workspaces";
 import type { ProjectConversationSummary, ProjectItem } from "./project-types";
 
 // Turns Mynt's replies (list_my_apps, list_builds) into the studio's projects. Pure, so the
@@ -67,6 +68,7 @@ export function toProjects(appsReply: unknown, buildsReply: unknown): ProjectIte
         name: str(a.name, "Untitled app") || "Untitled app",
         description: str(a.description),
         status: str(a.status, "draft"),
+        stage: stageOf(a, conversations[0] ?? null),
         previewUrl: conversations.find((c) => c.previewUrl)?.previewUrl ?? null,
         conversations,
         updatedAt: str(a.updated_at),

@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { Plus } from "lucide-react"
 
+import { AccountTiles } from "@/components/account-tiles"
 import { ChartAreaInteractive } from "@/components/chart-area-interactive"
 import { SectionCards } from "@/components/section-cards"
 import { Badge } from "@/components/ui/badge"
@@ -10,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { count, percent, usd, type Dashboard, type DashboardApp } from "@/lib/dashboard"
+import type { LinkedAccounts } from "@/lib/linked-accounts"
 
 const when = (at: string | null) =>
   at ? new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : ""
@@ -91,10 +93,11 @@ function EmptyState() {
   )
 }
 
-export function DashboardView({ dashboard }: { dashboard: Dashboard }) {
+export function DashboardView({ dashboard, linked = null }: { dashboard: Dashboard; linked?: LinkedAccounts | null }) {
   return (
     <div className="@container/main flex flex-1 flex-col gap-4 py-4 md:gap-6 md:py-6">
       <SectionCards dashboard={dashboard} />
+      <AccountTiles dashboard={dashboard} linked={linked} />
       {dashboard.apps.length === 0 ? (
         <EmptyState />
       ) : (
