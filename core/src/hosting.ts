@@ -577,11 +577,12 @@ export class HostingService {
   }
 
   // Ends the current VM logins to a tenant (someone left the workspace it serves): whoever still may, logs in again.
+  // Throws when the provider didn't confirm, keeping the record so a retry revokes it.
   async revokeVmAccess(tenant: Tenant): Promise<boolean> {
     const prev = (await this.one("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.access_identity as string | null;
     if (!prev) return false;
+    if (isDirect(this.provider)) await this.provider.revokeAccess(prev);
     await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = NULL, updated_at = now() WHERE id = $1 AND access_identity = $2", [tenant.id, prev]);
-    if (isDirect(this.provider)) await this.provider.revokeAccess(prev).catch(() => undefined);
     return true;
   }
 

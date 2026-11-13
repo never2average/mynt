@@ -109,7 +109,16 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const ws = await workspaceOf(workspace_id, false);
       if ("error" in ws) return fail(ws.error);
       const tenant = await hosting.tenantOfWorkspace(ws.id);
-      if (!tenant) return json({ tenant: null, apps: [] });
+      // The workspace's apps still on a developer's hosting from before workspaces, until they're deployed again.
+      const legacy = (
+        await store.db.query(
+          `SELECT h.app_id::text AS app_id, h.status, h.commit_sha, h.updated_at FROM financial_products.hosted_apps h
+           JOIN financial_products.apps a ON a.id = h.app_id JOIN financial_products.hosting_tenants t ON t.id = h.tenant_id
+           WHERE a.workspace_id::text = $1 AND t.workspace_id IS NULL`,
+          [ws.id],
+        )
+      ).rows.map((r) => ({ ...(r as Record<string, unknown>), legacy: true }));
+      if (!tenant) return json({ tenant: null, apps: legacy });
       const routes = await hosting.routes();
       const apps = (await hosting.hostedApps(tenant.id)).map((h) => {
         const route = routes.find((r) => r.upstream === `${tenant.tunnel_ip}:${h.port}`);
@@ -117,7 +126,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         const services = h.services?.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null }));
         return { ...h, ...(services ? { services } : {}), url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
       });
-      return json({ tenant: developerTenant(tenant, isDirect(hosting.provider)), apps, usage: await hosting.usage(tenant) });
+      return json({ tenant: developerTenant(tenant, isDirect(hosting.provider)), apps: [...apps, ...legacy], usage: await hosting.usage(tenant) });
     },
   );
 
@@ -158,7 +167,9 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       if (plan.check?.errors.length) return fail(`Mynt can't host this compose file: ${plan.check.errors.join("; ")}`);
       if (plan.composeFile && !(hosting.provider && "direct" in hosting.provider)) return fail("Compose apps need direct hosting (Freestyle), which isn't configured here");
       const egress = await egressFor(store, hosting, app_id);
-      const { secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
+      const { key: runtimeKey, secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
+      // Sealed for the edge and never shown: the workspace's, not the deployer's (their leaving doesn't stop the app).
+      await store.db.query("UPDATE financial_products.api_keys SET created_by = NULL, last_secret_issued_to = NULL WHERE id = $1", [runtimeKey.id]);
       const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan, user.id);
       await store.audit(user.id, "deploy_app", app_id, { build_id, commit_sha: found.build.commit_sha, environment });
       const domain = hosting.appDomain(app_id);

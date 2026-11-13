@@ -547,8 +547,8 @@ export class BuildService {
   }
 
   // Someone leaving a workspace: their running builds of its apps stop, and sandboxes they reopened close.
-  async stopFor(developerId: string, appIds: string[]): Promise<string[]> {
-    if (!appIds.length) return [];
+  async stopFor(developerId: string, appIds: string[]): Promise<{ stopped: string[]; failed: string[] }> {
+    if (!appIds.length) return { stopped: [], failed: [] };
     const rows = (
       await this.db.query(
         `SELECT * FROM financial_products.build_runs WHERE developer_id = $1 AND app_id::text = ANY($2)
@@ -556,13 +556,21 @@ export class BuildService {
         [developerId, appIds, TERMINAL],
       )
     ).rows as Row[];
-    const out = [];
+    const stopped = [];
+    const failed = [];
     for (const b of rows.map(toBuild)) {
-      if (!TERMINAL.includes(b.status)) await this.stop(b, "Its developer left the app's workspace").catch((e) => console.error(`Build ${b.id} stop: ${(e as Error).message}`));
-      if (b.box_sandbox_id) await this.closeBox(b).catch((e) => console.error(`Build ${b.id} sandbox: ${(e as Error).message}`));
-      out.push(b.id);
+      try {
+        if (!TERMINAL.includes(b.status)) await this.stop(b, "Its developer left the app's workspace");
+        if (b.box_sandbox_id) await this.closeBox(b);
+        const now = await this.get(b.id);
+        if (now && (!TERMINAL.includes(now.status) || (now.box_sandbox_id && now.box_until && Date.parse(now.box_until) > Date.now()))) failed.push(b.id);
+        else stopped.push(b.id);
+      } catch (e) {
+        console.error(`Build ${b.id} stop: ${(e as Error).message}`);
+        failed.push(b.id);
+      }
     }
-    return out;
+    return { stopped, failed };
   }
 
   // Whether someone other than the build's starter may drive its sandbox (run commands in it, open its editor):
@@ -2046,6 +2054,12 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       }
       try {
         const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana, mode, continue_from });
+        // Removed from the app's workspace while this was starting: the build is stopped at once (offboarding
+        // removes the membership before it stops builds, so one of the two always sees the other).
+        if (b.app_id && !(await memberApp(store, user, b.app_id))) {
+          await builds.stop(b, "Its developer left the app's workspace").catch(() => undefined);
+          return fail(`No app of yours with id '${b.app_id}'`);
+        }
         await store.audit(user.id, "start_build", b.id, { app_id: b.app_id, repository: b.repository, cap_usd: b.cap_usd, mode, continue_from: continue_from ?? null });
         return json({ ...developerBuild(b), track_with: "get_build", ...(mode === "session" ? { next: "steer_build with each request; finish_build to ship" } : {}) });
       } catch (e) {
@@ -2235,7 +2249,11 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       inputSchema: { build_id: z.string(), path: z.string().max(1000).default(".") },
       annotations: { readOnlyHint: true },
     },
-    async ({ build_id, path }) => onBox(build_id, (b) => builds.boxFiles(b, path)),
+    async ({ build_id, path }) => {
+      // Inside the app's directory only: no absolute path, no way up out of it.
+      if (path.startsWith("/") || path.startsWith("~") || path.split(/[\\/]+/).includes("..")) return fail("Give a path inside the app's directory (no leading / and no ..)");
+      return onBox(build_id, (b) => builds.boxFiles(b, path));
+    },
   );
 
   server.registerTool(

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { releaseLapsedInvites, retryOffboards } from "./workspaces.js";
+import { offboardingServices } from "./server.js";
 import { parseArgs } from "node:util";
 import { AgentMeter } from "./agent-meter.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -198,6 +200,13 @@ if (values.help) {
   const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
+  // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
+  // that lapsed unanswered: every five minutes.
+  const workspaceSweep = setInterval(() => {
+    retryOffboards(store, offboardingServices({ builds, hosting })).catch((e) => console.error("offboarding retry:", e));
+    releaseLapsedInvites(store, clerkAdmin()).catch((e) => console.error("lapsed invites:", e));
+  }, 5 * 60 * 1000);
+  void workspaceSweep;
   // Sends queued webhook deliveries (events from any process sharing the database).
   const webhooks = startWebhookWorker(store);
   // Licences lapse with time: re-check pinned products hourly (changes made through Mynt re-check at once).

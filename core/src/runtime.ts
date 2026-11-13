@@ -451,7 +451,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
       if (!key) return fail(`No API key '${key_id}'`);
       if ((await appRole(store, user, (await store.getApp(key.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate keys");
       if (key.status !== "active") return fail("The key is revoked; create a new one");
-      const rotated = await store.rotateApiKey(key.id, key.environment);
+      const rotated = await store.rotateApiKey(key.id, key.environment, user.id);
       await audit("rotate_api_key", key.id, { app_id: key.app_id });
       return json({ ...rotated.key, key: rotated.secret, note: "Save this key now; it can't be shown again." });
     },
@@ -539,9 +539,29 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ webhook_id }) => {
       const hook = await ownWebhook(webhook_id);
       if (!hook) return fail(`No webhook '${webhook_id}'`);
-      const secret = await store.rotateWebhookSecret(hook.id);
+      if ((await appRole(store, user, (await store.getApp(hook.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate webhook secrets");
+      const secret = await store.rotateWebhookSecret(hook.id, user.id);
       await audit("rotate_webhook_secret", hook.id, { app_id: hook.app_id });
       return json({ ...hook, secret, note: "Save the signing secret now; it can't be shown again." });
+    },
+  );
+
+  server.registerTool(
+    "enable_webhook",
+    {
+      title: "Turn a disabled webhook back on",
+      description:
+        "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace. Turning it back on gives it a new signing secret, shown once to you.",
+      inputSchema: { webhook_id: z.string() },
+    },
+    async ({ webhook_id }) => {
+      const hook = await ownWebhook(webhook_id);
+      if (!hook) return fail(`No webhook '${webhook_id}'`);
+      if ((await appRole(store, user, (await store.getApp(hook.app_id))!)) === "member") return fail("Only the workspace's owners and admins turn webhooks back on");
+      const secret = await store.rotateWebhookSecret(hook.id, user.id);
+      await store.db.query("UPDATE financial_products.webhooks SET disabled_at = NULL WHERE id = $1", [hook.id]);
+      await audit("enable_webhook", hook.id, { app_id: hook.app_id });
+      return json({ webhook_id: hook.id, enabled: true, secret, note: "Save the signing secret now; it can't be shown again." });
     },
   );
 

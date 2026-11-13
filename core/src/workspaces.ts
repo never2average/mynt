@@ -75,6 +75,24 @@ export const WORKSPACE_TABLES = `
   ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS admin_roles_at timestamptz;
   -- A webhook its maker can no longer answer for (they left the app's workspace) gets no more deliveries.
   ALTER TABLE ${T}.webhooks ADD COLUMN IF NOT EXISTS disabled_at timestamptz;
+  -- Any change to a Mynt invite (an admin's, a role added) counts it up: a workspace invite withdraws only one at 0.
+  ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
+  -- Who received a key's or webhook's current secret: someone leaving can't keep using one they hold.
+  ALTER TABLE ${T}.api_keys ADD COLUMN IF NOT EXISTS last_secret_issued_to uuid;
+  ALTER TABLE ${T}.webhooks ADD COLUMN IF NOT EXISTS last_secret_issued_to uuid;
+  -- Someone leaving a workspace: cut off step by step, retried until every step is done (offboard).
+  CREATE TABLE IF NOT EXISTS ${T}.workspace_offboards (
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    actor_id uuid,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    attempts integer NOT NULL DEFAULT 0,
+    done jsonb NOT NULL DEFAULT '{}',
+    error text,
+    completed_at timestamptz,
+    PRIMARY KEY (workspace_id, user_id, started_at)
+  );
+  CREATE INDEX IF NOT EXISTS workspace_offboards_pending_idx ON ${T}.workspace_offboards (started_at) WHERE completed_at IS NULL;
 `;
 
 type Q = Pick<Db, "query">;
@@ -285,14 +303,14 @@ export async function openWorkspaceInvite(db: Db, email: string): Promise<{ id: 
   return r ? { id: r.id as string, invited_by: (r.invited_by as string | null) ?? null } : null;
 }
 
-// Withdraws the Mynt invite a workspace invite made, if it's still exactly as that invite made it and its person
-// never signed in. An admin's invite, or one anyone changed since, is never touched.
-async function releaseMyntInvite(store: Store, inviteId: string, email: string, actor: string, clerk: ClerkAllowlist | null) {
+// Withdraws the Mynt invite a workspace invite made, if it's still exactly as that invite made it (revision 0, no
+// admin's choice) and its person never signed in. An admin's invite, or one anyone changed since, is never touched.
+async function releaseMyntInvite(store: Store, inviteId: string, email: string, actor: string | null, clerk: ClerkAllowlist | null) {
   const gone = await one(
     store.db,
-    `DELETE FROM ${T}.invites i WHERE i.email = $1 AND i.created_by_workspace_invite_id::text = $2 AND i.updated_at = i.created_at
+    `DELETE FROM ${T}.invites i WHERE i.email = $1 AND i.created_by_workspace_invite_id::text = $2 AND i.revision = 0
        AND i.admin_roles_at IS NULL AND NOT EXISTS (SELECT 1 FROM ${T}.users u WHERE u.email = $1)
-       AND NOT EXISTS (SELECT 1 FROM ${T}.workspace_invites w WHERE w.email = $1 AND w.accepted_at IS NULL AND w.revoked_at IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM ${T}.workspace_invites w WHERE w.email = $1 AND w.${OPEN.split(" AND ").join(" AND w.")})
      RETURNING email`,
     [email, inviteId],
   );
@@ -302,31 +320,77 @@ async function releaseMyntInvite(store: Store, inviteId: string, email: string, 
   return true;
 }
 
+// Invites that lapsed unanswered: the Mynt invites they made go too, where nobody used or changed them.
+export async function releaseLapsedInvites(store: Store, clerk: ClerkAllowlist | null = null): Promise<number> {
+  const lapsed = (
+    await store.db.query(
+      `SELECT w.id::text AS id, w.email FROM ${T}.workspace_invites w JOIN ${T}.invites i ON i.created_by_workspace_invite_id = w.id
+       WHERE w.accepted_at IS NULL AND w.revoked_at IS NULL AND w.created_at <= now() - interval '${WORKSPACE_INVITE_DAYS} days' LIMIT 100`,
+    )
+  ).rows as { id: string; email: string }[];
+  let n = 0;
+  for (const l of lapsed) if (await releaseMyntInvite(store, l.id, l.email, null, clerk)) n++;
+  return n;
+}
+
 // ---- leaving: cut access at once ----
 
 export interface OffboardServices {
-  // Stops a running build or closes its reopened sandbox (builds.ts).
-  stopBuilds?(userId: string, appIds: string[]): Promise<string[]>;
-  // Revokes current VM logins to the tenants that host these apps (hosting.ts).
-  revokeVmAccess?(workspaceId: string, appIds: string[]): Promise<number>;
+  // Stops the leaver's running builds of these apps and closes the sandboxes they reopened (builds.ts): the ones
+  // stopped, and the ones that couldn't be (retried).
+  stopBuilds?(userId: string, appIds: string[]): Promise<{ stopped: string[]; failed: string[] }>;
+  // Revokes current VM logins to the tenants that host these apps (hosting.ts): how many, and how many couldn't be.
+  revokeVmAccess?(workspaceId: string, appIds: string[]): Promise<{ revoked: number; failed: number }>;
 }
 
-export async function offboard(store: Store, services: OffboardServices, workspaceId: string, userId: string, actor: string) {
+// Cuts someone off from a workspace's apps, step by step. Every step is idempotent, and the whole is recorded first
+// (workspace_offboards) so a step that fails (the sandbox host or hosting provider down) is retried on the next
+// worker tick (retryOffboards) or by an admin (retry_offboard) until all are done. Hosted apps' runtime keys belong
+// to the workspace (created_by NULL), so the deployer leaving never takes a running app down.
+export async function offboard(store: Store, services: OffboardServices, workspaceId: string, userId: string, actor: string | null, startedAt?: string) {
   const db = store.db;
+  const started =
+    startedAt ??
+    ((await one(db, `INSERT INTO ${T}.workspace_offboards (workspace_id, user_id, actor_id) VALUES ($1, $2, $3) RETURNING started_at::text AS at`, [workspaceId, userId, actor]))!
+      .at as string);
+  await db.query(`UPDATE ${T}.workspace_offboards SET attempts = attempts + 1 WHERE workspace_id = $1 AND user_id = $2 AND started_at = $3::timestamptz`, [workspaceId, userId, started]);
   const apps = (await db.query(`SELECT id::text AS id FROM ${T}.apps WHERE workspace_id::text = $1`, [workspaceId])).rows.map((r) => (r as { id: string }).id);
-  const keys = (
+  const ids = (rows: unknown[]) => rows.map((r) => (r as { id: string }).id);
+  const failures: string[] = [];
+  // Keys they made, or whose current secret they were given (by rotating it).
+  const keys = ids(
+    (
+      await db.query(
+        `UPDATE ${T}.api_keys SET status = 'revoked', revoked_at = now()
+         WHERE app_id::text = ANY($1) AND status = 'active' AND (created_by = $2 OR last_secret_issued_to = $2) RETURNING id::text AS id`,
+        [apps, userId],
+      )
+    ).rows,
+  );
+  // Webhooks they made stop; others whose secret they were given get a new one nobody has yet.
+  const webhooks = ids(
+    (await db.query(`UPDATE ${T}.webhooks SET disabled_at = now() WHERE app_id::text = ANY($1) AND created_by = $2 AND disabled_at IS NULL RETURNING id::text AS id`, [apps, userId])).rows,
+  );
+  const rotated = [];
+  for (const id of ids((await db.query(`SELECT id::text AS id FROM ${T}.webhooks WHERE app_id::text = ANY($1) AND last_secret_issued_to = $2`, [apps, userId])).rows)) {
+    await store.rotateWebhookSecret(id, null);
+    rotated.push(id);
+  }
+  // Invites they sent and nobody has answered: void, so they can't come back through one.
+  const invites = (
     await db.query(
-      `UPDATE ${T}.api_keys SET status = 'revoked', revoked_at = now() WHERE app_id::text = ANY($1) AND created_by = $2 AND status = 'active' RETURNING id::text AS id`,
-      [apps, userId],
+      `UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE workspace_id::text = $1 AND invited_by = $2 AND accepted_at IS NULL AND revoked_at IS NULL
+       RETURNING id::text AS id, email`,
+      [workspaceId, userId],
     )
-  ).rows.map((r) => (r as { id: string }).id);
-  const webhooks = (
-    await db.query(
-      `UPDATE ${T}.webhooks SET disabled_at = now() WHERE app_id::text = ANY($1) AND created_by = $2 AND disabled_at IS NULL RETURNING id::text AS id`,
-      [apps, userId],
-    )
-  ).rows.map((r) => (r as { id: string }).id);
-  const builds = services.stopBuilds ? await services.stopBuilds(userId, apps) : [];
+  ).rows as { id: string; email: string }[];
+  for (const i of invites) await releaseMyntInvite(store, i.id, i.email, actor, null);
+  let builds: string[] = [];
+  if (services.stopBuilds) {
+    const r = await services.stopBuilds(userId, apps).catch((e) => ({ stopped: [], failed: [`all (${(e as Error).message})`] }));
+    builds = r.stopped;
+    if (r.failed.length) failures.push(`builds not stopped yet: ${r.failed.join(", ")}`);
+  }
   // Programs they reserved for the team's apps pass to the workspace's longest-standing owner.
   let programs: string[] = [];
   try {
@@ -340,10 +404,44 @@ export async function offboard(store: Store, services: OffboardServices, workspa
   } catch (e) {
     if ((e as { code?: string }).code !== "42P01") throw e; // no Solana service here
   }
-  const vmLogins = services.revokeVmAccess ? await services.revokeVmAccess(workspaceId, apps) : 0;
-  const done = { user_id: userId, revoked_api_keys: keys, disabled_webhooks: webhooks, stopped_builds: builds, programs_to_owner: programs, vm_logins_revoked: vmLogins };
+  let vmLogins = 0;
+  if (services.revokeVmAccess) {
+    const r = await services.revokeVmAccess(workspaceId, apps).catch(() => ({ revoked: 0, failed: 1 }));
+    vmLogins = r.revoked;
+    if (r.failed) failures.push(`${r.failed} VM login(s) not revoked yet`);
+  }
+  const done = {
+    user_id: userId,
+    revoked_api_keys: keys,
+    disabled_webhooks: webhooks,
+    rotated_webhook_secrets: rotated,
+    revoked_invites: invites.map((i) => i.id),
+    stopped_builds: builds,
+    programs_to_owner: programs,
+    vm_logins_revoked: vmLogins,
+    ...(failures.length ? { pending: failures } : {}),
+  };
+  await db.query(
+    `UPDATE ${T}.workspace_offboards SET done = done || $4::jsonb, error = $5, completed_at = CASE WHEN $5::text IS NULL THEN now() END
+     WHERE workspace_id = $1 AND user_id = $2 AND started_at = $3::timestamptz`,
+    [workspaceId, userId, started, JSON.stringify(done), failures.length ? failures.join("; ") : null],
+  );
   await store.audit(actor, "workspace_offboard", workspaceId, done);
   return done;
+}
+
+// Offboardings with a step still to do: tried again (worker tick, retry_offboard).
+export async function retryOffboards(store: Store, services: OffboardServices, filter: { workspace_id?: string; user_id?: string } = {}) {
+  const pending = (
+    await store.db.query(
+      `SELECT workspace_id::text AS workspace_id, user_id::text AS user_id, actor_id::text AS actor_id, started_at::text AS started_at FROM ${T}.workspace_offboards
+       WHERE completed_at IS NULL AND ($1::text IS NULL OR workspace_id::text = $1) AND ($2::text IS NULL OR user_id::text = $2) ORDER BY started_at LIMIT 50`,
+      [filter.workspace_id ?? null, filter.user_id ?? null],
+    )
+  ).rows as { workspace_id: string; user_id: string; actor_id: string | null; started_at: string }[];
+  const out = [];
+  for (const o of pending) out.push(await offboard(store, services, o.workspace_id, o.user_id, o.actor_id, o.started_at));
+  return out;
 }
 
 // ---- tools ----
@@ -386,8 +484,16 @@ export function registerWorkspaceTools(
   const manager = (role: WorkspaceRole) => {
     if (role === "member") throw new Refused("Only the workspace's owners and admins manage its members");
   };
+  // Owners who can manage the workspace: they hold a builder's role on Mynt (the workspace tools are a developer's).
   const owners = async (tx: Q, workspaceId: string) =>
-    Number((await one(tx, `SELECT count(*)::int AS n FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND role = 'owner'`, [workspaceId]))!.n);
+    Number(
+      (await one(
+        tx,
+        `SELECT count(*)::int AS n FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id
+         WHERE m.workspace_id::text = $1 AND m.role = 'owner' AND u.roles && ARRAY['developer', 'innovator', 'admin']::text[]`,
+        [workspaceId],
+      ))!.n,
+    );
 
   server.registerTool(
     "list_workspaces",
@@ -499,6 +605,7 @@ export function registerWorkspaceTools(
         const invite = await locked(workspace_id, async (tx, mine) => {
           if (role !== "member") manager(mine);
           if (role === "owner" && mine !== "owner") throw new Refused("Only an owner can invite another owner");
+          if (mynt_role === "user" && role !== "member") throw new Refused("Someone invited as a user can't build or manage, so they can only be a member");
           // One count at a time per sender, whichever workspace: the daily cap can't be raced past.
           await tx.query("SELECT pg_advisory_xact_lock(hashtext('mynt.workspace_invites:' || $1))", [user.id]);
           const sent = Number(
@@ -595,6 +702,10 @@ export function registerWorkspaceTools(
           return current;
         });
         await audit("change_member_role", workspace_id, { user_id, from, to: role });
+        if (from !== "member" && role === "member" && ctx.offboarding?.revokeVmAccess) {
+          const apps = (await db.query(`SELECT id::text AS id FROM ${T}.apps WHERE workspace_id::text = $1`, [workspace_id])).rows.map((r) => (r as { id: string }).id);
+          await ctx.offboarding.revokeVmAccess(workspace_id, apps).catch(() => undefined);
+        }
         return json({ workspace_id, user_id, role });
       }),
   );
@@ -714,6 +825,14 @@ export function registerInvitationTools(server: McpServer, store: Store, user: U
       const r = await inTransaction(db, async (tx) => {
         const inv = await mine(tx, invite_id, true);
         if (!inv) return null;
+        // Whoever sent it must still be in the workspace, with the standing to invite to that role; otherwise the
+        // invite is void (someone removed can't bring themselves, or anyone, back through one).
+        const sender = inv.invited_by ? await workspaceRole(tx, inv.workspace_id, inv.invited_by) : null;
+        const allowed = sender && (inv.role === "member" || (inv.role === "admin" && sender !== "member") || (inv.role === "owner" && sender === "owner"));
+        if (!allowed) {
+          await tx.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite_id]);
+          return { void: true as const, workspace_id: inv.workspace_id };
+        }
         await tx.query(`UPDATE ${T}.workspace_invites SET accepted_at = now(), accepted_by = $2 WHERE id::text = $1`, [invite_id, user.id]);
         // Someone already in keeps the role they have.
         const joined =
@@ -733,7 +852,7 @@ export function registerInvitationTools(server: McpServer, store: Store, user: U
         );
         if (developer === "granted") {
           await tx.query(`UPDATE ${T}.users SET roles = array_append(roles, 'developer') WHERE id = $1 AND NOT ('developer' = ANY(roles))`, [user.id]);
-          await tx.query(`UPDATE ${T}.invites SET roles = array_append(roles, 'developer'), updated_at = now() WHERE email = $1 AND NOT ('developer' = ANY(roles))`, [email]);
+          await tx.query(`UPDATE ${T}.invites SET roles = array_append(roles, 'developer'), updated_at = now(), revision = revision + 1 WHERE email = $1 AND NOT ('developer' = ANY(roles))`, [email]);
         }
         developer = developer as typeof developer;
         await tx.query(`INSERT INTO ${T}.audit_log (id, actor_id, action, target, details) VALUES ($1, $2, 'accept_workspace_invite', $3, $4)`, [
@@ -745,6 +864,10 @@ export function registerInvitationTools(server: McpServer, store: Store, user: U
         return { workspace_id: inv.workspace_id, role: inv.role, joined, developer };
       });
       if (!r) return none(invite_id);
+      if ("void" in r) {
+        await store.audit(user.id, "void_workspace_invite", r.workspace_id, { invite_id, reason: "its sender can no longer invite to that role" });
+        return fail("This invitation no longer stands: whoever sent it can't invite to that role any more");
+      }
       return json({
         workspace_id: r.workspace_id,
         role: r.role,
@@ -774,6 +897,7 @@ export function registerInvitationTools(server: McpServer, store: Store, user: U
       });
       if (!inv) return none(invite_id);
       await store.audit(user.id, "decline_workspace_invite", inv.workspace_id, { invite_id });
+      await releaseMyntInvite(store, invite_id, email!, user.id, clerk);
       return json({ declined: true });
     },
   );
