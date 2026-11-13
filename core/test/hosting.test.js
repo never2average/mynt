@@ -847,3 +847,53 @@ test("a new VM login isn't given while the last one can't be ended", async () =>
     w.close();
   }
 });
+
+test("Freestyle: ending a login the provider no longer has is 'already gone', not a failure; other errors still fail", async () => {
+  const { FreestyleProvider } = await import("../dist/freestyle.js");
+  const fetch = async (url, init) => {
+    const path = url.replace("https://api.freestyle.sh/v5", "");
+    if (init.method === "DELETE" && path === "/identities/idn-live") return new Response("{}", { status: 200 });
+    if (init.method === "DELETE" && path === "/identities/idn-gone") return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    return new Response("upstream error", { status: 502 });
+  };
+  const p = new FreestyleProvider("fs_key", { fetch });
+  assert.deepEqual(await p.revokeAccess("idn-live"), {});
+  assert.deepEqual(await p.revokeAccess("idn-gone"), { alreadyGone: true });
+  await assert.rejects(p.revokeAccess("idn-broken"), /502/);
+});
+
+test("a login the provider no longer has never locks anyone out: vm_access clears the stale record, and an offboarding's VM step completes", async () => {
+  const provider = fakeDirect();
+  // Like Freestyle: an identity it doesn't have is already gone.
+  const live = new Set();
+  const grant = provider.grantAccess.bind(provider);
+  provider.grantAccess = async (...a) => {
+    const g = await grant(...a);
+    live.add(g.identity);
+    return g;
+  };
+  provider.revokeAccess = async (identity) => {
+    provider.calls.push(["revoke", identity]);
+    return live.delete(identity) ? {} : { alreadyGone: true };
+  };
+  const w = await world({ provider, config: DIRECT });
+  try {
+    const { call, dev } = w;
+    const { ws, ben, benUser, identity, retry } = await adminWithLogin(w, provider);
+    // Deleted in the provider's dashboard: the record still names it.
+    live.delete(identity);
+    const login = (await call(ben, "vm_access", { workspace_id: ws.id })).data;
+    assert.ok(login.logins?.length, JSON.stringify(login));
+    const now = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity;
+    assert.notEqual(now, identity, "the stale record is replaced");
+    // The new one vanishes too (an earlier revoke whose answer was lost); Ben is removed: the VM step still completes.
+    live.delete(now);
+    const cut = (await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data.access_cut;
+    assert.equal(cut.status, "done");
+    assert.equal(cut.vm_logins_revoked, 1);
+    assert.equal((await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity, null);
+    assert.deepEqual(await retry(), [], "nothing left to retry");
+  } finally {
+    w.close();
+  }
+});

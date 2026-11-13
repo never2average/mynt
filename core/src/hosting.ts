@@ -590,7 +590,8 @@ export class HostingService {
     ).rows as { tenant_id: string; identity: string }[];
   }
 
-  // Revokes one login; throws unless the provider confirmed. The tenant's record is cleared only if it's still that login.
+  // Revokes one login; throws unless the provider confirmed it's ended (one it no longer has counts: already gone). The
+  // tenant's record is cleared only if it's still that login.
   async revokeLogin(tenantId: string, identity: string): Promise<void> {
     if (isDirect(this.provider)) await this.provider.revokeAccess(identity);
     await this.db.query(

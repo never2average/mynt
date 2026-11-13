@@ -29,7 +29,9 @@ export interface DirectHostingProvider {
   grantAccess(vmIds: string[], linuxUser: string, expiresAt: Date): Promise<{ ssh: Record<string, string>; expires_at: string; identity: string }>;
   // Machine time so far, never under-counted.
   usage(vmId: string): Promise<{ seconds: number }>;
-  revokeAccess(identity: string): Promise<void>;
+  // Ends a login. An identity the provider no longer has (deleted in its dashboard, or by an earlier revoke whose
+  // answer was lost) is already ended: { alreadyGone: true }, never an error. Anything else that fails throws.
+  revokeAccess(identity: string): Promise<{ alreadyGone?: boolean } | void>;
 }
 
 export const isDirect = (p: unknown): p is DirectHostingProvider => !!p && (p as { direct?: unknown }).direct === true;
@@ -61,7 +63,7 @@ export class FreestyleProvider implements DirectHostingProvider {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
-    if (!res.ok) throw new Error(`Freestyle ${method} ${path}: ${res.status} ${text.slice(0, 300)}`);
+    if (!res.ok) throw Object.assign(new Error(`Freestyle ${method} ${path}: ${res.status} ${text.slice(0, 300)}`), { status: res.status });
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -155,7 +157,13 @@ export class FreestyleProvider implements DirectHostingProvider {
   }
 
   async revokeAccess(identity: string) {
-    await this.call("DELETE", `/identities/${encodeURIComponent(identity)}`);
+    try {
+      await this.call("DELETE", `/identities/${encodeURIComponent(identity)}`);
+      return {};
+    } catch (e) {
+      if ((e as { status?: number }).status === 404) return { alreadyGone: true };
+      throw e;
+    }
   }
 }
 
