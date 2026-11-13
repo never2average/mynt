@@ -141,7 +141,8 @@ export function hostingProviderFromEnv(env = process.env): HostingProvider | Dir
 
 export interface Tenant {
   id: string;
-  developer_id: string;
+  developer_id: string | null; // a developer's own hosting, from before workspaces
+  workspace_id: string | null; // a workspace's hosting
   provider: string;
   vm_id: string | null;
   status: TenantStatus;
@@ -152,6 +153,7 @@ export interface Tenant {
   updated_at: string;
 }
 export interface HostedApp {
+  deployed_by?: string; // whose approved connection fetches its source
   app_id: string;
   tenant_id: string;
   build_id: string;
@@ -223,6 +225,12 @@ const TABLES = `
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS vm_id text;
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS runtime text;
   CREATE INDEX IF NOT EXISTS hosting_commands_tenant_idx ON financial_products.hosting_commands (tenant_id, status, created_at);
+  -- A workspace's hosting: its apps run there, whoever deploys them, and only its owners and admins log in to it. The
+  -- developer tenants from before workspaces keep the apps they host until those are deployed again.
+  ALTER TABLE financial_products.hosting_tenants ALTER COLUMN developer_id DROP NOT NULL;
+  ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS workspace_id uuid UNIQUE;
+  -- Who deployed the running commit: the source is fetched through their own approved connection.
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS deployed_by uuid;
 `;
 
 // gVisor's release, pinned and checked against its published SHA-512.
@@ -328,7 +336,8 @@ const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOStrin
 const tunnelIp = (index: number | null) => (index == null ? null : `${TUNNEL_PREFIX}.${Math.floor(index / 250) + 1}.${(index % 250) + 2}`);
 const toTenant = (r: Record<string, unknown>): Tenant => ({
   id: r.id as string,
-  developer_id: r.developer_id as string,
+  developer_id: (r.developer_id as string | null) ?? null,
+  workspace_id: (r.workspace_id as string | null) ?? null,
   provider: r.provider as string,
   vm_id: (r.vm_id as string | null) ?? null,
   status: r.status as TenantStatus,
@@ -348,6 +357,7 @@ const toHostedApp = (r: Record<string, unknown>): HostedApp => ({
   status: r.status as HostedApp["status"],
   ...(r.error ? { error: r.error as string } : {}),
   ...(r.services ? { services: (typeof r.services === "string" ? JSON.parse(r.services) : r.services) as HostedService[] } : {}),
+  ...(r.deployed_by ? { deployed_by: r.deployed_by as string } : {}),
   updated_at: iso(r.updated_at)!,
 });
 
@@ -516,19 +526,40 @@ export class HostingService {
     return rows.map((r) => toHostedApp(r as Record<string, unknown>));
   }
 
-  // A VM for this developer, booting with a one-time bootstrap token (valid an hour).
+  async tenantOfWorkspace(workspaceId: string): Promise<Tenant | undefined> {
+    const r = await this.one("SELECT * FROM financial_products.hosting_tenants WHERE workspace_id::text = $1", [workspaceId]);
+    return r && toTenant(r);
+  }
+
+  // A workspace's hosting (its apps' VMs), booting with a one-time bootstrap token (valid an hour).
+  async provisionWorkspace(workspaceId: string): Promise<Tenant> {
+    return this.provisionFor("workspace_id", workspaceId);
+  }
+
+  // A developer's own hosting: what came before workspaces (new apps' hosting is their workspace's).
   async provision(developerId: string): Promise<Tenant> {
+    return this.provisionFor("developer_id", developerId);
+  }
+
+  private async provisionFor(column: "developer_id" | "workspace_id", key: string): Promise<Tenant> {
     if (!this.provider || !this.config) throw new Error("Hosting isn't configured on this deployment");
-    const existing = await this.tenantOf(developerId);
+    const find = async () => {
+      const r = await this.one(`SELECT * FROM financial_products.hosting_tenants WHERE ${column} = $1`, [key]);
+      return r && toTenant(r);
+    };
+    const existing = await find();
     if (existing && existing.status !== "failed") return existing;
     if (existing) await this.db.query("DELETE FROM financial_products.hosting_tenants WHERE id = $1", [existing.id]);
     const id = randomUUID();
-    if (isDirect(this.provider)) return this.provisionDirect(this.provider, id, developerId);
+    if (isDirect(this.provider)) {
+      await this.db.query(`INSERT INTO financial_products.hosting_tenants (id, ${column}, provider, status) VALUES ($1, $2, $3, 'running')`, [id, key, this.provider.name]);
+      return (await find())!;
+    }
     const bootstrap = randomBytes(24).toString("base64url");
     await this.db.query(
-      `INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status, bootstrap_hash, bootstrap_expires_at)
+      `INSERT INTO financial_products.hosting_tenants (id, ${column}, provider, status, bootstrap_hash, bootstrap_expires_at)
        VALUES ($1, $2, $3, 'provisioning', $4, now() + interval '1 hour')`,
-      [id, developerId, this.provider.name, hash(bootstrap)],
+      [id, key, this.provider.name, hash(bootstrap)],
     );
     try {
       const vm = await this.provider.createVm({
@@ -542,13 +573,28 @@ export class HostingService {
     } catch (e) {
       await this.db.query("UPDATE financial_products.hosting_tenants SET status = 'failed', error = $2, updated_at = now() WHERE id = $1", [id, (e as Error).message.slice(0, 500)]);
     }
-    return (await this.tenantOf(developerId))!;
+    return (await find())!;
   }
 
-  // Direct hosting gives each app its own VM when it's first deployed, so the tenant is ready at once.
-  private async provisionDirect(p: DirectHostingProvider, id: string, developerId: string): Promise<Tenant> {
-    await this.db.query("INSERT INTO financial_products.hosting_tenants (id, developer_id, provider, status) VALUES ($1, $2, $3, 'running')", [id, developerId, p.name]);
-    return (await this.tenantOf(developerId))!;
+  // Ends the current VM logins to a tenant (someone left the workspace it serves): whoever still may, logs in again.
+  async revokeVmAccess(tenant: Tenant): Promise<boolean> {
+    const prev = (await this.one("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id]))?.access_identity as string | null;
+    if (!prev) return false;
+    await this.db.query("UPDATE financial_products.hosting_tenants SET access_identity = NULL, updated_at = now() WHERE id = $1 AND access_identity = $2", [tenant.id, prev]);
+    if (isDirect(this.provider)) await this.provider.revokeAccess(prev).catch(() => undefined);
+    return true;
+  }
+
+  // The tenants whose VMs run any of these apps.
+  async tenantsHosting(appIds: string[]): Promise<Tenant[]> {
+    if (!appIds.length) return [];
+    const rows = (
+      await this.db.query(
+        "SELECT DISTINCT t.* FROM financial_products.hosting_tenants t JOIN financial_products.hosted_apps h ON h.tenant_id = t.id WHERE h.app_id::text = ANY($1)",
+        [appIds],
+      )
+    ).rows as Record<string, unknown>[];
+    return rows.map(toTenant);
   }
 
   // Each hosted app has a VM of its own: the edge can then add that app's key, and only that app's, to its calls
@@ -653,7 +699,7 @@ export class HostingService {
     try {
       const { vmId, runtime } = await this.appVm(p, hosted);
       await this.syncEgress(p, vmId, hosted.app_id);
-      const token = await this.sourceToken(tenant.developer_id, hosted.repository);
+      const token = await this.sourceToken(hosted.deployed_by ?? tenant.developer_id ?? "", hosted.repository);
       const services = hosted.services ?? [];
       const origin = this.config?.publicUrl ?? "";
       const r = await this.runJob(p, vmId, DIRECT_DEPLOY, {
@@ -743,6 +789,7 @@ export class HostingService {
     sandbox: boolean,
     egress: string[] = [],
     plan: { composeFile: string | null; check: ComposeCheck | null } = { composeFile: null, check: null },
+    deployedBy: string | null = null,
   ): Promise<HostedApp> {
     if (plan.check?.errors.length) throw new Error(`The compose file isn't accepted: ${plan.check.errors.join("; ")}`);
     if (plan.composeFile && !isDirect(this.provider)) throw new Error("Compose apps need direct hosting (Freestyle)");
@@ -756,12 +803,12 @@ export class HostingService {
     const services: HostedService[] = (plan.check?.exposed ?? []).map((e) => ({ service: e.service, expose: e.expose, port: free(), domain: this.appDomain(app.id, e.expose) }));
     const port = services[0]?.port ?? free();
     const r = await this.one(
-      `INSERT INTO financial_products.hosted_apps (app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'deploying')
-       ON CONFLICT (app_id) DO UPDATE SET build_id = EXCLUDED.build_id, repository = EXCLUDED.repository, commit_sha = EXCLUDED.commit_sha,
-         app_key_sealed = EXCLUDED.app_key_sealed, status = 'deploying', updated_at = now()
+      `INSERT INTO financial_products.hosted_apps (app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status, deployed_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'deploying', $8)
+       ON CONFLICT (app_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, build_id = EXCLUDED.build_id, repository = EXCLUDED.repository,
+         commit_sha = EXCLUDED.commit_sha, app_key_sealed = EXCLUDED.app_key_sealed, deployed_by = EXCLUDED.deployed_by, status = 'deploying', updated_at = now()
        RETURNING *`,
-      [app.id, tenant.id, build.id, build.repository, build.commit_sha, port, seal(appKey, sandbox) + (sandbox ? ":sandbox" : ":live")],
+      [app.id, tenant.id, build.id, build.repository, build.commit_sha, port, seal(appKey, sandbox) + (sandbox ? ":sandbox" : ":live"), deployedBy],
     );
     void r;
     const hosted = toHostedApp(
@@ -823,7 +870,7 @@ export class HostingService {
         app_id: h.app_id,
         commit_sha: h.commit_sha,
         source_url: `https://api.github.com/repos/${h.repository}/tarball/${h.commit_sha}`,
-        source_token: await this.sourceToken(tenant.developer_id, h.repository),
+        source_token: await this.sourceToken(h.deployed_by ?? tenant.developer_id ?? "", h.repository),
         port: h.port,
         tunnel_ip: tenant.tunnel_ip,
         app_key: appKey,

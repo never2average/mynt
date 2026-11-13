@@ -240,6 +240,7 @@ if (values.help) {
   const roles = parseRoles();
   const store = await openStore();
   const invite = await store.upsertInvite(email, roles);
+  await store.db.query("UPDATE financial_products.invites SET admin_roles_at = now() WHERE email = $1", [email.toLowerCase()]);
   const warning = await clerkAdmin()?.allow(email);
   if (warning) console.error(`warning: ${email} ${warning}`);
   console.log(JSON.stringify(invite, null, 2));

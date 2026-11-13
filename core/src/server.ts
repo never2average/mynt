@@ -57,7 +57,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
-import { appStages, memberApp, personalWorkspace, registerWorkspaceTools, workspaceRole } from "./workspaces.js";
+import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, workspaceRole } from "./workspaces.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
@@ -110,9 +110,29 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (user && ctx.bd && !peerOnly) registerConnectTools(server, ctx.bd, user);
   if (user && !peerOnly) registerProductRequestTools(server, store, user);
   if (has("consumer")) registerConsumerTools(server, store, user!);
+  // Anyone signed in may have been invited to a workspace (as a developer or a user), and answers it themselves.
+  if (user) registerInvitationTools(server, store, user, ctx.clerkAdmin ?? null);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
-    registerWorkspaceTools(server, store, user!, ctx.clerkAdmin ?? null);
+    // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).
+    registerWorkspaceTools(server, store, user!, {
+      clerk: ctx.clerkAdmin ?? null,
+      offboarding: {
+        ...(ctx.builds ? { stopBuilds: (userId: string, appIds: string[]) => ctx.builds!.stopFor(userId, appIds) } : {}),
+        ...(ctx.hosting
+          ? {
+              revokeVmAccess: async (workspaceId: string, appIds: string[]) => {
+                const tenants = [...(await ctx.hosting!.tenantsHosting(appIds))];
+                const own = await ctx.hosting!.tenantOfWorkspace(workspaceId);
+                if (own && !tenants.some((t) => t.id === own.id)) tenants.push(own);
+                let n = 0;
+                for (const t of tenants) if (await ctx.hosting!.revokeVmAccess(t)) n++;
+                return n;
+              },
+            }
+          : {}),
+      },
+    });
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
     if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);
@@ -787,7 +807,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
         workspace_id: z
           .string()
           .optional()
-          .describe("The workspace it belongs to (list_workspaces). Omitted: the one workspace you own, or a new one of your own if you own none"),
+          .describe("The workspace it belongs to (list_workspaces). Omitted: the workspace you created, or a new one of your own if you created none"),
         name: z.string().trim().min(1).max(200),
         description: z.string().trim().min(1).max(4000),
         audience: z.string().trim().min(1).max(500).describe("Who the experience is for, e.g. 'first-time investors in India'"),
@@ -802,12 +822,10 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
       if (workspace) {
         if (!(await workspaceRole(store.db, workspace, user.id))) return fail(`No workspace of yours with id '${workspace}'`);
       } else {
-        // Never someone else's workspace by default: only one the caller owns.
-        const mine = (
-          await store.db.query("SELECT workspace_id::text AS id FROM financial_products.workspace_members WHERE user_id = $1 AND role = 'owner'", [user.id])
-        ).rows as { id: string }[];
-        if (mine.length > 1) return fail("You own several workspaces: say which one with workspace_id (list_workspaces)");
-        workspace = mine[0]?.id ?? (await personalWorkspace(store.db, user.id));
+        // Never a workspace they were invited into: only one they created (their own, made now if they have none).
+        const mine = await createdWorkspaces(store.db, user.id);
+        if (mine.length > 1) return fail("You created several workspaces: say which one this app goes in with workspace_id (list_workspaces)");
+        workspace = mine[0] ?? (await personalWorkspace(store.db, user.id));
       }
       const bad = await unusable(fields.product_ids, null);
       if (bad.length) return fail(`Products not available: ${bad.join(", ")}`);

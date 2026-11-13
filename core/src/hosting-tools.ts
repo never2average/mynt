@@ -7,7 +7,7 @@ import { connectionApproval, requireApproved } from "./repo-approvals.js";
 import { appProducts, buildTerms } from "./runtime.js";
 import type { BuildService } from "./builds.js";
 import type { Store, User } from "./store.js";
-import { canSeeBuild, memberApp } from "./workspaces.js";
+import { canSeeBuild, createdWorkspaces, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -64,19 +64,35 @@ export function developerTenant(tenant: Tenant, direct: boolean): Partial<Tenant
   return rest;
 }
 
+// Hosting belongs to a workspace: its apps run on its tenant whoever deploys them, and only its owners and admins
+// turn it on or log in to its VMs. A developer tenant from before workspaces keeps what it hosts until it's deployed
+// again; logging in to it needs owner or admin standing in every workspace whose apps it still runs.
 export function registerHostingTools(server: McpServer, store: Store, user: User, hosting: HostingService, builds: BuildService | null = null) {
+  const WORKSPACE = z.string().optional().describe("The workspace (list_workspaces). Default: your own");
+  // The named workspace if the caller is in it, else their own; `manage`: owners and admins only.
+  const workspaceOf = async (id: string | undefined, manage: boolean): Promise<{ id: string } | { error: string }> => {
+    const ws = id ?? (await createdWorkspaces(store.db, user.id))[0] ?? (manage ? await personalWorkspace(store.db, user.id) : null);
+    if (!ws) return { error: "You have no workspace of your own yet; name one with workspace_id" };
+    const role = await workspaceRole(store.db, ws, user.id);
+    if (!role) return { error: `No workspace of yours with id '${ws}'` };
+    if (manage && role === "member") return { error: "Only the workspace's owners and admins manage its hosting" };
+    return { id: ws };
+  };
+
   server.registerTool(
     "request_hosting",
     {
       title: "Get your isolated hosting",
       description:
-        "Developer: turn on hosting for your apps. Each app you deploy gets its own VM, and each Compose service with a mynt.port label gets a public HTTPS address on the hosting provider's domain (e.g. https://mynt-<first 8 characters of the app id>.style.dev). The app's Mynt key is never stored on its VM: Mynt adds it at the edge to the app's calls to Mynt. Apps run there only from commits Mynt verified.",
-      inputSchema: {},
+        "Developer (a workspace's owners and admins): turn on hosting for a workspace's apps. Each app deployed gets its own VM, and each Compose service with a mynt.port label gets a public HTTPS address on the hosting provider's domain (e.g. https://mynt-<first 8 characters of the app id>.style.dev). The app's Mynt key is never stored on its VM: Mynt adds it at the edge to the app's calls to Mynt. Apps run there only from commits Mynt verified.",
+      inputSchema: { workspace_id: WORKSPACE },
     },
-    async () => {
+    async ({ workspace_id }) => {
       if (!hosting.enabled) return fail("Hosting isn't configured on this deployment yet");
-      const tenant = await hosting.provision(user.id);
-      await store.audit(user.id, "request_hosting", tenant.id, { status: tenant.status });
+      const ws = await workspaceOf(workspace_id, true);
+      if ("error" in ws) return fail(ws.error);
+      const tenant = await hosting.provisionWorkspace(ws.id);
+      await store.audit(user.id, "request_hosting", tenant.id, { status: tenant.status, workspace_id: ws.id });
       return json(developerTenant(tenant, isDirect(hosting.provider)));
     },
   );
@@ -85,12 +101,14 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     "hosting_status",
     {
       title: "Your hosting",
-      description: "Developer: your hosting's status, the apps you host (at which verified commit, on which port) and the public address of each app and service.",
-      inputSchema: {},
+      description: "Developer: a workspace's hosting: its status, the apps it hosts (at which verified commit, on which port) and the public address of each app and service.",
+      inputSchema: { workspace_id: WORKSPACE },
       annotations: { readOnlyHint: true },
     },
-    async () => {
-      const tenant = await hosting.tenantOf(user.id);
+    async ({ workspace_id }) => {
+      const ws = await workspaceOf(workspace_id, false);
+      if ("error" in ws) return fail(ws.error);
+      const tenant = await hosting.tenantOfWorkspace(ws.id);
       if (!tenant) return json({ tenant: null, apps: [] });
       const routes = await hosting.routes();
       const apps = (await hosting.hostedApps(tenant.id)).map((h) => {
@@ -115,9 +133,10 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       if (!hosting.enabled) return fail("Hosting isn't configured on this deployment yet");
       const app = await memberApp(store, user, app_id);
       if (!app) return fail(`No app of yours with id '${app_id}'`);
-      const tenant = await hosting.tenantOf(user.id);
-      if (!tenant) return fail("Request your hosting first (request_hosting)");
-      if (tenant.status !== "running") return fail(`Your hosting is ${tenant.status}`);
+      // The app's workspace's hosting, whoever deploys it.
+      const tenant = app.workspace_id ? await hosting.tenantOfWorkspace(app.workspace_id) : await hosting.tenantOf(user.id);
+      if (!tenant) return fail("The workspace has no hosting yet: an owner or admin turns it on (request_hosting)");
+      if (tenant.status !== "running") return fail(`The workspace's hosting is ${tenant.status}`);
       const found = await verifiedBuild(store, user, build_id);
       if ("error" in found) return fail(found.error!);
       if (found.build.app_id && found.build.app_id !== app_id) return fail(`Build '${build_id}' was for another app`);
@@ -140,7 +159,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       if (plan.composeFile && !(hosting.provider && "direct" in hosting.provider)) return fail("Compose apps need direct hosting (Freestyle), which isn't configured here");
       const egress = await egressFor(store, hosting, app_id);
       const { secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
-      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan);
+      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan, user.id);
       await store.audit(user.id, "deploy_app", app_id, { build_id, commit_sha: found.build.commit_sha, environment });
       const domain = hosting.appDomain(app_id);
       return json({
@@ -174,12 +193,31 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Log in to your hosting VM",
       description:
-        "Developer: SSH logins to your hosted apps' VMs (each app has its own) as your own Linux user (in the docker group, no sudo), valid for a few hours; new logins revoke the last ones. Paste a command in a terminal, or use it as a VS Code Remote-SSH host. Keep them private: they're credentials. Apps' Mynt keys aren't on the VMs (they're added to calls to Mynt on the way out).",
-      inputSchema: { hours: z.number().int().min(1).max(24).default(8) },
+        "Developer (a workspace's owners and admins): SSH logins to the workspace's hosted apps' VMs (each app has its own) as a Linux user (in the docker group, no sudo), valid for a few hours; new logins revoke the last ones, and so does anyone leaving the workspace. Paste a command in a terminal, or use it as a VS Code Remote-SSH host. Keep them private: they're credentials. Apps' Mynt keys aren't on the VMs (they're added to calls to Mynt on the way out).",
+      inputSchema: { hours: z.number().int().min(1).max(24).default(8), workspace_id: WORKSPACE, legacy: z.boolean().default(false).describe("Your own hosting from before workspaces, instead") },
     },
-    async ({ hours }) => {
-      const tenant = await hosting.tenantOf(user.id);
-      if (!tenant) return fail("You have no hosting yet (request_hosting)");
+    async ({ hours, workspace_id, legacy }) => {
+      let tenant;
+      if (legacy) {
+        // Your own tenant from before workspaces: only while you're an owner or admin of every workspace it serves.
+        tenant = await hosting.tenantOf(user.id);
+        if (!tenant) return fail("You have no hosting of your own from before workspaces");
+        const served = (
+          await store.db.query(
+            "SELECT DISTINCT a.workspace_id::text AS ws FROM financial_products.hosted_apps h JOIN financial_products.apps a ON a.id = h.app_id WHERE h.tenant_id = $1",
+            [tenant.id],
+          )
+        ).rows as { ws: string | null }[];
+        for (const { ws } of served) {
+          const role = ws ? await workspaceRole(store.db, ws, user.id) : null;
+          if (role !== "owner" && role !== "admin") return fail("That VM runs apps of a workspace you're no longer an owner or admin of; ask its owners to redeploy them");
+        }
+      } else {
+        const ws = await workspaceOf(workspace_id, true);
+        if ("error" in ws) return fail(ws.error);
+        tenant = await hosting.tenantOfWorkspace(ws.id);
+        if (!tenant) return fail("The workspace has no hosting yet (request_hosting)");
+      }
       try {
         const access = await hosting.vmAccess(tenant, hours);
         await store.audit(user.id, "vm_access", tenant.id, { hours });
@@ -194,8 +232,9 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
   // Nothing reaches the VM from outside; commands only ever touch the developer's own app containers.
   // A workspace's app runs on the VM of whoever deployed it: commands go there, for any member of the workspace.
   const onVm = async (app_id: string, kind: HostingCommandKind, args: Record<string, unknown>, waitSeconds: number) => {
-    if (!(await memberApp(store, user, app_id))) return fail(`No app of yours with id '${app_id}'`);
-    const tenant = (await hosting.tenantHostingApp(app_id)) ?? (await hosting.tenantOf(user.id));
+    const app = await memberApp(store, user, app_id);
+    if (!app) return fail(`No app of yours with id '${app_id}'`);
+    const tenant = (await hosting.tenantHostingApp(app_id)) ?? (app.workspace_id ? await hosting.tenantOfWorkspace(app.workspace_id) : await hosting.tenantOf(user.id));
     if (!tenant) return fail("You have no hosting yet (request_hosting)");
     try {
       const queued = await hosting.queueCommand(tenant, app_id, kind, args, user.id);

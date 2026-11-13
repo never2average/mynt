@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { memberApp, workspaceRole } from "./workspaces.js";
+import { appRole, memberApp, workspaceRole } from "./workspaces.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
 import { DuplicateError, type AccessRequest, type App, type Handoff, type ProductRecord, type Store, type User } from "./store.js";
@@ -410,6 +410,8 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ app_id, environment, label, allowed_origins }) => {
       const app = await ownApp(app_id);
       if (!app) return fail(`No app with id '${app_id}'`);
+      // A live key reaches real customers' data: only the workspace's owners and admins make one.
+      if (environment === "live" && (await appRole(store, user, app)) === "member") return fail("Only the workspace's owners and admins create live keys; members create sandbox keys");
       const { key, secret } = await store.createApiKey(user.id, { app_id: app.id, environment, label, allowed_origins });
       await audit("create_api_key", key.id, { app_id: app.id, environment, label });
       return json({
@@ -447,6 +449,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
     async ({ key_id }) => {
       const key = await ownKey(key_id);
       if (!key) return fail(`No API key '${key_id}'`);
+      if ((await appRole(store, user, (await store.getApp(key.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate keys");
       if (key.status !== "active") return fail("The key is revoked; create a new one");
       const rotated = await store.rotateApiKey(key.id, key.environment);
       await audit("rotate_api_key", key.id, { app_id: key.app_id });

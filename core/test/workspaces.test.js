@@ -13,11 +13,24 @@ import { CATALOG } from "./helpers.js";
 
 // A sandbox host that never gets past queueing: these tests are about who may reach a build, not running one.
 const idleSandboxes = {
+  stopped: [],
   async createSandbox() {
     return { id: "sbx", state: "provisioning" };
   },
   async getSandbox() {
     return undefined;
+  },
+  async stop(id) {
+    this.stopped.push(id);
+  },
+  async readFile() {
+    return null;
+  },
+  async exec() {
+    return { exitCode: 0, stdout: "", stderr: "" };
+  },
+  async costDollars() {
+    return 0;
   },
 };
 
@@ -31,6 +44,15 @@ const stubHosting = {
   },
   async tenantHostingApp() {
     return undefined;
+  },
+  async tenantOfWorkspace() {
+    return undefined;
+  },
+  async tenantsHosting() {
+    return [];
+  },
+  async revokeVmAccess() {
+    return false;
   },
   async undeploy() {
     return false;
@@ -79,7 +101,7 @@ async function setup({ env = {} } = {}) {
 }
 
 const app = (name) => ({ name, description: `${name} app`, audience: "Savers", product_ids: ["fixed-deposit"] });
-const NOT_FOUND = /No (app|build)( of yours)? with id|No workspace of yours/;
+const NOT_FOUND = /No (app|build)( of yours)? with id|No workspace of yours|No API key|No webhook|No sandbox hand-off/;
 
 test("migration: every app made before workspaces lands in its owner's own workspace, owned by them; running it again changes nothing", async () => {
   const pg = new PGlite();
@@ -129,7 +151,9 @@ test("apps go in a workspace the caller belongs to; list_my_apps shows every wor
   assert.equal(mine.name, "Ana's workspace");
   assert.equal(mine.role, "owner");
   const team = (await call(ana.client, "create_workspace", { name: "Team" })).data;
-  assert.match((await call(ana.client, "create_app", app("Ambiguous"))).data.error, /own several workspaces/);
+  assert.match((await call(ana.client, "create_app", app("Ambiguous"))).data.error, /created several workspaces/);
+  assert.equal(mine.personal, true, "list_workspaces marks her own");
+  assert.equal((await call(ana.client, "list_workspaces")).data.find((w) => w.id === team.id).personal, false);
   const t1 = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: team.id })).data;
   assert.equal(t1.workspace_id, team.id);
   assert.equal(t1.owner_id, ana.user.id, "owner_id stays the creator");
@@ -164,49 +188,90 @@ function fakeClerk(people) {
 const clerkAuth = (store, people) =>
   new ClerkAuth({ secretKey: "sk_test_x", publishableKey: `pk_test_${Buffer.from("x.clerk.accounts.dev$").toString("base64")}`, publicUrl: "https://mcp.example.com", requireAudience: false }, store, fakeClerk(people));
 
-test("a workspace invite lets someone new onto Mynt as a developer; they join when they sign in; a withdrawn invite lets nobody in", async () => {
+// Signs someone in through the identity provider and connects them, as the studio would.
+async function signIn(store, people, token) {
+  const r = await clerkAuth(store, people).authenticate(token);
+  if (!r.ok) return r;
+  const [c, sv] = InMemoryTransport.createLinkedPair();
+  await createServer(store, r.user, {}).connect(sv);
+  const client = new Client({ name: "test", version: "0" });
+  await client.connect(c);
+  return { ...r, client };
+}
+
+test("invites are explicit: someone new signs in as a user, sees the invite, and accepting a developer invite makes them a developer", async () => {
   const { pg, store, connect, call } = await setup();
   const ana = await connect("Ana");
   const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
   const inv = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "Cara@Example.com", role: "admin" })).data;
   assert.equal(inv.email, "cara@example.com");
   assert.equal(inv.mynt_access, "new");
-  assert.match(inv.note, /can now sign in to Mynt as a developer/);
-  assert.deepEqual((await store.getInvite("cara@example.com")).roles, ["developer"], "Mynt's own invite, developer only");
-  const via = (await pg.query("SELECT invited_by FROM financial_products.invites WHERE email = 'cara@example.com'")).rows[0];
-  assert.equal(via.invited_by, ana.user.id);
-  assert.match((await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "cara@example.com" })).data.error, /already has an open invite/);
-  const dropped = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "dan@example.com" })).data;
-  assert.deepEqual((await call(ana.client, "revoke_workspace_invite", { invite_id: dropped.id })).data, { invite_id: dropped.id, revoked: true });
-  assert.equal(await store.getInvite("dan@example.com"), undefined, "withdrawn before they ever signed in: no way onto Mynt either");
-
-  const auth = clerkAuth(store, { t_cara: { sub: "clerk_cara", email: "cara@example.com" }, t_dan: { sub: "clerk_dan", email: "dan@example.com" } });
-  const cara = await auth.authenticate("t_cara");
+  assert.deepEqual((await store.getInvite("cara@example.com")).roles, ["consumer"], "let onto Mynt as a user, nothing more yet");
+  const people = { t_cara: { sub: "clerk_cara", email: "cara@example.com" } };
+  const cara = await signIn(store, people, "t_cara");
   assert.equal(cara.ok, true);
-  assert.deepEqual(cara.user.roles, ["developer"]);
-  const dan = await auth.authenticate("t_dan");
-  assert.equal(dan.ok, false);
-  assert.equal(dan.error, "not_whitelisted");
-  const members = (await call(ana.client, "list_workspace_members", { workspace_id: ws.id })).data;
-  assert.deepEqual(members.members.map((m) => [m.email, m.role]).sort(), [["ana@example.com", "owner"], ["cara@example.com", "admin"]]);
-  assert.deepEqual(members.open_invites, []);
-  // Signing in again changes nothing; the acceptance is audited.
-  await auth.authenticate("t_cara");
-  const audits = (await pg.query("SELECT actor_id FROM financial_products.audit_log WHERE action = 'accept_workspace_invite'")).rows;
-  assert.deepEqual(audits.map((a) => a.actor_id), [cara.user.id]);
-  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'invite_via_workspace'")).rows[0].n, 2);
+  assert.deepEqual(cara.user.roles, ["consumer"]);
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.workspace_members WHERE user_id = $1", [cara.user.id])).rows[0].n, 0, "nobody joins by signing in");
+
+  const { invitations } = (await call(cara.client, "list_my_invitations")).data;
+  assert.equal(invitations.length, 1);
+  const [i] = invitations;
+  assert.deepEqual(i.workspace, { id: ws.id, name: "Team" });
+  assert.deepEqual(i.invited_by, { name: "Ana", email: "ana@example.com" });
+  assert.equal(i.role, "admin");
+  assert.ok(i.grants.includes("Become a developer on Mynt") && i.grants.includes("Build and steer this workspace's apps"));
+  assert.ok(Date.parse(i.expires_at) > Date.now());
+  // Only the invitee can answer it.
+  assert.match((await call(ana.client, "accept_workspace_invite", { invite_id: i.id })).data.error, /No open invitation to you/);
+  assert.deepEqual((await call(cara.client, "accept_workspace_invite", { invite_id: i.id })).data.workspace_id, ws.id);
+  assert.deepEqual((await store.getUser(cara.user.id)).roles, ["consumer", "developer"]);
+  assert.deepEqual((await store.getInvite("cara@example.com")).roles, ["consumer", "developer"]);
+  assert.equal((await pg.query("SELECT role FROM financial_products.workspace_members WHERE user_id = $1", [cara.user.id])).rows[0].role, "admin");
+  // Signing in again keeps it; the identity provider sees the same roles.
+  assert.deepEqual([...(await clerkAuth(store, people).authenticate("t_cara")).user.roles].sort(), ["consumer", "developer"]);
+  assert.match((await call(cara.client, "accept_workspace_invite", { invite_id: i.id })).data.error, /No open invitation/);
+  const audit = (await pg.query("SELECT details FROM financial_products.audit_log WHERE action = 'accept_workspace_invite'")).rows;
+  assert.equal(audit[0].details.developer, "granted");
 });
 
-test("an open workspace invite opens Mynt's gate even when it was made before the invite to Mynt existed", async () => {
+test("declining and withdrawing: a declined invite joins nobody; a withdrawn one closes the way onto Mynt it opened, unless it was changed since", async () => {
+  const { pg, store, connect, call } = await setup();
+  const ana = await connect("Ana");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  // Declined.
+  await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "dee@example.com" });
+  const dee = await signIn(store, { t: { sub: "clerk_dee", email: "dee@example.com" } }, "t");
+  const [di] = (await call(dee.client, "list_my_invitations")).data.invitations;
+  assert.deepEqual((await call(dee.client, "decline_workspace_invite", { invite_id: di.id })).data, { declined: true });
+  assert.deepEqual((await call(dee.client, "list_my_invitations")).data.invitations, []);
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.workspace_members WHERE user_id = $1", [dee.user.id])).rows[0].n, 0);
+  // Withdrawn before they ever signed in: no way onto Mynt either.
+  const dan = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "dan@example.com" })).data;
+  await call(ana.client, "revoke_workspace_invite", { invite_id: dan.id });
+  assert.equal(await store.getInvite("dan@example.com"), undefined);
+  assert.equal((await clerkAuth(store, { t: { sub: "clerk_dan", email: "dan@example.com" } }).authenticate("t")).error, "not_whitelisted");
+  // Withdrawn after an admin changed the Mynt invite: the admin's choice stands.
+  const fay = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "fay@example.com" })).data;
+  await store.upsertInvite("fay@example.com", ["consumer", "vendor"]); // what invite_user does
+  await call(ana.client, "revoke_workspace_invite", { invite_id: fay.id });
+  assert.deepEqual((await store.getInvite("fay@example.com")).roles, ["consumer", "vendor"]);
+  // An admin's own invite is never withdrawn by a workspace's.
+  await store.upsertInvite("gus@example.com", ["developer"]);
+  const gus = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "gus@example.com" })).data;
+  assert.equal(gus.mynt_access, "already");
+  await call(ana.client, "revoke_workspace_invite", { invite_id: gus.id });
+  assert.deepEqual((await store.getInvite("gus@example.com")).roles, ["developer"]);
+});
+
+test("an open workspace invite opens Mynt's gate, as a user, even when it was made before the invite to Mynt existed", async () => {
   const { pg, store, connect, call } = await setup();
   const ana = await connect("Ana");
   const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
   await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "gil@example.com" });
-  await store.deleteInvite("gil@example.com"); // as if the workspace invite came first, with no Mynt invite written
+  await pg.query("DELETE FROM financial_products.invites WHERE email = 'gil@example.com'"); // the Mynt invite never written
   const gil = await clerkAuth(store, { t: { sub: "clerk_gil", email: "gil@example.com" } }).authenticate("t");
   assert.equal(gil.ok, true);
-  assert.deepEqual(gil.user.roles, ["developer"]);
-  assert.equal((await pg.query("SELECT role FROM financial_products.workspace_members WHERE user_id = $1", [gil.user.id])).rows[0].role, "member");
+  assert.deepEqual(gil.user.roles, ["consumer"]);
 });
 
 test("someone a Mynt admin revoked stays out, workspace invite or not", async () => {
@@ -223,27 +288,53 @@ test("someone a Mynt admin revoked stays out, workspace invite or not", async ()
   assert.equal(eve.error, "not_whitelisted");
 });
 
-test("joining a workspace adds developer and nothing else; an owner invite grants no Mynt role above developer", async () => {
+test("a developer invite never promotes a firm's or an admin's account, or past roles an admin set after it; a user invite grants nothing", async () => {
   const { pg, store, connect, call } = await setup();
   const ana = await connect("Ana");
   const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
-  // Already on Mynt as a consumer (say, through public sign-up), invited as the workspace's owner.
-  await store.upsertInvite("hal@example.com", ["consumer"]);
-  const inv = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "hal@example.com", role: "owner" })).data;
-  assert.equal(inv.mynt_access, "already");
-  assert.deepEqual((await store.getInvite("hal@example.com")).roles, ["consumer"], "untouched until they join");
-  // Even roles claimed through the identity provider's metadata don't come from a workspace invite.
-  const hal = await clerkAuth(store, { t: { sub: "clerk_hal", email: "hal@example.com" } }).authenticate("t");
-  assert.equal(hal.ok, true);
-  assert.deepEqual([...hal.user.roles].sort(), ["consumer", "developer"]);
-  assert.deepEqual([...(await store.getInvite("hal@example.com")).roles].sort(), ["consumer", "developer"]);
-  assert.equal((await pg.query("SELECT role FROM financial_products.workspace_members WHERE user_id = $1", [hal.user.id])).rows[0].role, "owner", "owner of the workspace only");
-  // A new person invited as a workspace owner gets developer on Mynt, no more.
-  await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "ivy@example.com", role: "owner" });
-  const ivy = await clerkAuth(store, { t: { sub: "clerk_ivy", email: "ivy@example.com" } }).authenticate("t");
-  assert.deepEqual(ivy.user.roles, ["developer"]);
-  const granted = (await pg.query("SELECT roles FROM financial_products.invites")).rows.flatMap((r) => r.roles);
-  assert.ok(!granted.includes("admin") && !granted.includes("license_provider") && !granted.includes("liquidity_provider"));
+  const invite = async (email, extra = {}) => (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email, ...extra })).data;
+  const answer = async (email, sub) => {
+    const who = await signIn(store, { t: { sub, email } }, "t");
+    const [i] = (await call(who.client, "list_my_invitations")).data.invitations;
+    const r = (await call(who.client, "accept_workspace_invite", { invite_id: i.id })).data;
+    return { who, i, r, roles: [...(await store.getUser(who.user.id)).roles].sort() };
+  };
+  // A vendor: joins, roles unchanged, and the invitation says why.
+  await store.upsertInvite("val@example.com", ["vendor"]);
+  await invite("val@example.com", { role: "owner" });
+  const val = await answer("val@example.com", "clerk_val");
+  assert.ok(val.i.grants.includes("Your Mynt role stays as it is (you're a vendor)"));
+  assert.deepEqual(val.roles, ["vendor"]);
+  assert.equal(val.r.developer, "not_eligible");
+  // An admin re-admitted Wes as a user after the invite was sent: the stale invite doesn't promote him.
+  await invite("wes@example.com");
+  await pg.query("UPDATE financial_products.workspace_invites SET created_at = now() - interval '1 hour' WHERE email = 'wes@example.com'");
+  await store.upsertInvite("wes@example.com", ["consumer"]);
+  await pg.query("UPDATE financial_products.invites SET admin_roles_at = now() WHERE email = 'wes@example.com'");
+  const wes = await answer("wes@example.com", "clerk_wes");
+  assert.deepEqual(wes.roles, ["consumer"]);
+  // A user invite.
+  await invite("uma@example.com", { mynt_role: "user" });
+  const uma = await answer("uma@example.com", "clerk_uma");
+  assert.deepEqual(uma.roles, ["consumer"]);
+  assert.equal(uma.r.developer, "not_offered");
+  const tools = (await uma.who.client.listTools()).tools.map((t) => t.name);
+  for (const t of ["create_app", "start_build", "list_my_apps", "invite_to_workspace"]) assert.ok(!tools.includes(t), `a user doesn't get ${t}`);
+  const granted = (await pg.query("SELECT roles FROM financial_products.users")).rows.flatMap((r) => r.roles);
+  assert.ok(!granted.includes("admin") && !granted.includes("license_provider"));
+});
+
+test("new apps go only in a workspace the caller created, never one they were invited into, and two first apps at once make one workspace", async () => {
+  const { pg, store, connect, call } = await setup();
+  const ana = await connect("Ana");
+  const ben = await connect("Ben");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')", [ws.id, ben.user.id]);
+  const [a, b] = await Promise.all([call(ben.client, "create_app", app("One")), call(ben.client, "create_app", app("Two"))]);
+  assert.equal(a.data.workspace_id, b.data.workspace_id);
+  assert.notEqual(a.data.workspace_id, ws.id, "not the workspace he was brought into, though he owns it");
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.workspaces WHERE created_by = $1", [ben.user.id])).rows[0].n, 1);
+  void store;
 });
 
 test("any member invites, as a member only; the inviter picks developer or user on Mynt, never more; invites are capped per day", async () => {
@@ -258,24 +349,13 @@ test("any member invites, as a member only; the inviter picks developer or user 
   const u = (await call(cara.client, "invite_to_workspace", { workspace_id: ws.id, email: "uma@example.com", mynt_role: "user" })).data;
   assert.equal(u.role, "member");
   assert.equal(u.mynt_role, "user");
-  assert.match(u.note, /as a user \(they can't build\)/);
+  assert.match(u.note, /adds no Mynt role/);
   assert.deepEqual((await store.getInvite("uma@example.com")).roles, ["consumer"]);
   assert.match((await call(cara.client, "invite_to_workspace", { workspace_id: ws.id, email: "x@example.com", role: "admin" })).data.error, /owners and admins/);
   // Only into workspaces they're in; no Mynt role beyond the two.
   assert.match((await call(eve.client, "invite_to_workspace", { workspace_id: ws.id, email: "y@example.com" })).data.error, /No workspace of yours/);
   assert.equal((await call(cara.client, "invite_to_workspace", { workspace_id: ws.id, email: "z@example.com", mynt_role: "admin" })).isError, true);
 
-  // Uma signs in: in the workspace, a consumer on Mynt, so no builder's tools.
-  const uma = await clerkAuth(store, { t: { sub: "clerk_uma", email: "uma@example.com" } }).authenticate("t");
-  assert.equal(uma.ok, true);
-  assert.deepEqual(uma.user.roles, ["consumer"]);
-  assert.equal((await pg.query("SELECT role FROM financial_products.workspace_members WHERE user_id = $1", [uma.user.id])).rows[0].role, "member");
-  const [c, s2] = InMemoryTransport.createLinkedPair();
-  await createServer(store, uma.user, {}).connect(s2);
-  const client = new Client({ name: "test", version: "0" });
-  await client.connect(c);
-  const tools = (await client.listTools()).tools.map((t) => t.name);
-  for (const t of ["create_app", "start_build", "list_my_apps", "invite_to_workspace"]) assert.ok(!tools.includes(t), `a user doesn't get ${t}`);
 
   // A member withdraws their own invite, not someone else's.
   const theirs = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "vic@example.com" })).data;
@@ -327,14 +407,24 @@ test("roles: members can't manage members; only owners make owners; the last own
   assert.equal((await call(ana.client, "change_member_role", { workspace_id: ws.id, user_id: ana.user.id, role: "member" })).isError, false);
   assert.match((await call(ben.client, "remove_workspace_member", { workspace_id: ws.id, user_id: ben.user.id })).data.error, /leave_workspace/);
   assert.match((await call(ben.client, "leave_workspace", { workspace_id: ws.id })).data.error, /last owner/);
-  assert.deepEqual((await call(ben.client, "remove_workspace_member", { workspace_id: ws.id, user_id: cara.user.id })).data, { workspace_id: ws.id, user_id: cara.user.id, removed: true });
-  assert.deepEqual((await call(ana.client, "leave_workspace", { workspace_id: ws.id })).data, { workspace_id: ws.id, left: true });
+  assert.equal((await call(ben.client, "remove_workspace_member", { workspace_id: ws.id, user_id: cara.user.id })).data.removed, true);
+  assert.equal((await call(ana.client, "leave_workspace", { workspace_id: ws.id })).data.left, true);
   // Gone means gone.
   assert.match((await call(ana.client, "list_workspace_members", { workspace_id: ws.id })).data.error, /No workspace of yours/);
   assert.match((await call(cara.client, "rename_workspace", { workspace_id: ws.id, name: "x" })).data.error, /No workspace of yours/);
 
   const actions = (await pg.query("SELECT action FROM financial_products.audit_log WHERE target = $1 ORDER BY created_at", [ws.id])).rows.map((r) => r.action);
-  assert.deepEqual(actions, ["create_workspace", "change_member_role", "rename_workspace", "change_member_role", "change_member_role", "remove_workspace_member", "leave_workspace"]);
+  assert.deepEqual(actions, [
+    "create_workspace",
+    "change_member_role",
+    "rename_workspace",
+    "change_member_role",
+    "change_member_role",
+    "remove_workspace_member",
+    "workspace_offboard",
+    "leave_workspace",
+    "workspace_offboard",
+  ]);
 });
 
 test("isolation: nobody outside an app's workspace can see or act on it or its builds, through any tool; members can", async () => {
@@ -347,6 +437,14 @@ test("isolation: nobody outside an app's workspace can see or act on it or its b
   const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
   const b = await build(ana.user.id, a.id, "succeeded");
   const running = await build(ana.user.id, a.id, "coding");
+  const key = (await call(ana.client, "create_api_key", { app_id: a.id, environment: "sandbox", label: "k" })).data;
+  const hook = (await call(ana.client, "create_webhook", { app_id: a.id, url: "http://127.0.0.1:9/x", events: ["product.version_published"] })).data;
+  assert.ok(hook.id, JSON.stringify(hook));
+  const handoff = randomUUID();
+  await pg.query(
+    "INSERT INTO financial_products.handoffs (id, app_id, product_id, action, sandbox, status, redirect_url) VALUES ($1, $2, 'fixed-deposit', 'deep_link', true, 'started', 'https://x.example')",
+    [handoff, a.id],
+  );
 
   const appTools = [
     ["update_app", { app_id: a.id, name: "Renamed" }],
@@ -357,6 +455,15 @@ test("isolation: nobody outside an app's workspace can see or act on it or its b
     ["create_api_key", { app_id: a.id, environment: "sandbox", label: "k" }],
     ["create_webhook", { app_id: a.id, url: "https://hooks.example.com/x", events: ["product.version_published"] }],
     ["list_webhooks", { app_id: a.id }],
+    ["list_api_keys", { app_id: a.id }],
+    ["rotate_api_key", { key_id: key.id }],
+    ["revoke_api_key", { key_id: key.id }],
+    ["rotate_webhook_secret", { webhook_id: hook.id }],
+    ["list_webhook_deliveries", { webhook_id: hook.id }],
+    ["delete_webhook", { webhook_id: hook.id }],
+    ["simulate_handoff", { handoff_id: handoff, outcome: "completed" }],
+    ["list_my_apps", { workspace_id: ws.id }],
+    ["get_developer_dashboard", { workspace_id: ws.id }],
     ["create_test_consumer", { app_id: a.id, label: "t" }],
     ["release_app", { app_id: a.id, version: "1.0.0", changelog: "first" }],
     ["list_app_releases", { app_id: a.id }],
@@ -478,4 +585,76 @@ test("stages: idea until a verified build, staging with one or a deployment that
   const bare = new PGlite();
   await Store.open({ query: (s, p) => bare.query(s, p), exec: (s) => bare.exec(s), close: () => bare.close() }, CATALOG);
   assert.equal((await appStages(bare, [idea])).get(idea.id), "idea");
+});
+
+test("leaving cuts access at once: the leaver's keys revoked, webhooks disabled, builds and reopened sandboxes stopped, programs to an owner; live keys are owners' and admins'", async () => {
+  const { pg, store, connect, call, build } = await setup();
+  const ana = await connect("Ana");
+  const ben = await connect("Ben");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [ws.id, ben.user.id]);
+  const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
+  // Members make sandbox keys only, and don't rotate.
+  assert.match((await call(ben.client, "create_api_key", { app_id: a.id, environment: "live", label: "prod" })).data.error, /owners and admins create live keys/);
+  const live = (await call(ana.client, "create_api_key", { app_id: a.id, environment: "live", label: "prod" })).data;
+  assert.match((await call(ben.client, "rotate_api_key", { key_id: live.id })).data.error, /owners and admins rotate/);
+  const bensKey = (await call(ben.client, "create_api_key", { app_id: a.id, environment: "sandbox", label: "bens" })).data;
+  const bensHook = (await call(ben.client, "create_webhook", { app_id: a.id, url: "http://127.0.0.1:9/ben", events: ["product.version_published"] })).data;
+  const anasHook = (await call(ana.client, "create_webhook", { app_id: a.id, url: "http://127.0.0.1:9/ana", events: ["product.version_published"] })).data;
+  const runningBuild = await build(ben.user.id, a.id, "coding");
+  await pg.query("UPDATE financial_products.build_runs SET sandbox_id = 'sbx-run' WHERE id = $1", [runningBuild]);
+  const reopened = await build(ben.user.id, a.id, "succeeded");
+  await pg.query("UPDATE financial_products.build_runs SET box_sandbox_id = 'sbx-box', box_until = now() + interval '1 hour' WHERE id = $1", [reopened]);
+  await pg.exec("CREATE TABLE IF NOT EXISTS financial_products.solana_programs (program_id text PRIMARY KEY, owner_id uuid, app_id uuid)");
+  await pg.query("INSERT INTO financial_products.solana_programs (program_id, owner_id, app_id) VALUES ('Prog1111', $1, $2)", [ben.user.id, a.id]);
+
+  const r = (await call(ana.client, "remove_workspace_member", { workspace_id: ws.id, user_id: ben.user.id })).data;
+  assert.equal(r.removed, true);
+  assert.deepEqual(r.access_cut.revoked_api_keys, [bensKey.id]);
+  assert.deepEqual(r.access_cut.disabled_webhooks, [bensHook.id]);
+  assert.deepEqual([...r.access_cut.stopped_builds].sort(), [runningBuild, reopened].sort());
+  assert.deepEqual(r.access_cut.programs_to_owner, ["Prog1111"]);
+  assert.equal((await store.getApiKey(bensKey.id)).status, "revoked");
+  assert.equal((await store.getApiKey(live.id)).status, "active", "others' keys stay");
+  const hooks = (await pg.query("SELECT id::text AS id, disabled_at FROM financial_products.webhooks")).rows;
+  assert.ok(hooks.find((h) => h.id === bensHook.id).disabled_at && !hooks.find((h) => h.id === anasHook.id).disabled_at);
+  const builds = (await pg.query("SELECT id::text AS id, status, box_sandbox_id FROM financial_products.build_runs WHERE developer_id = $1", [ben.user.id])).rows;
+  assert.equal(builds.find((x) => x.id === runningBuild).status, "stopped");
+  assert.equal(builds.find((x) => x.id === reopened).box_sandbox_id, null);
+  assert.equal((await pg.query("SELECT owner_id FROM financial_products.solana_programs")).rows[0].owner_id, ana.user.id);
+  // And Ben reaches none of it any more.
+  assert.match((await call(ben.client, "get_build", { build_id: runningBuild })).data.error, NOT_FOUND);
+  assert.match((await call(ben.client, "list_api_keys", { app_id: a.id })).data.error, NOT_FOUND);
+});
+
+test("a teammate's build: read-only, unless they may drive its sandbox (their own approved connection, the app's managed repository, or no repository); steering and reopening stay its starter's", async () => {
+  const { pg, connect, call, build } = await setup();
+  const ana = await connect("Ana");
+  const ben = await connect("Ben");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [ws.id, ben.user.id]);
+  const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
+  const own = await build(ana.user.id, a.id, "coding");
+  await pg.query("UPDATE financial_products.build_runs SET repository = 'acme/web', sandbox_id = 'sbx-a' WHERE id = $1", [own]);
+  const DRIVE = /connect it yourself/;
+  // Reading is fine.
+  for (const [tool, args] of [["get_build", { build_id: own }], ["get_build_activity", { build_id: own }], ["sandbox_files", { build_id: own }], ["sandbox_diff", { build_id: own }]]) {
+    const r = await call(ben.client, tool, args);
+    assert.ok(!(r.isError && (DRIVE.test(r.data.error) || NOT_FOUND.test(r.data.error))), tool);
+  }
+  // Driving needs his own approved connection to the repository the sandbox can push to.
+  assert.match((await call(ben.client, "sandbox_run", { build_id: own, command: "ls" })).data.error, DRIVE);
+  assert.match((await call(ben.client, "open_sandbox_editor", { build_id: own })).data.error, DRIVE);
+  await pg.query("INSERT INTO financial_products.repo_connections (developer_id, repository, installation_id, approval) VALUES ($1, 'acme/web', 1, 'pending')", [ben.user.id]);
+  assert.match((await call(ben.client, "sandbox_run", { build_id: own, command: "ls" })).data.error, DRIVE, "pending isn't approved");
+  await pg.query("UPDATE financial_products.repo_connections SET approval = 'approved' WHERE developer_id = $1", [ben.user.id]);
+  const r = await call(ben.client, "sandbox_run", { build_id: own, command: "ls" });
+  assert.ok(!(r.isError && DRIVE.test(r.data.error)), JSON.stringify(r.data));
+  // A build with no repository holds no credential.
+  const plain = await build(ana.user.id, a.id, "coding");
+  const p = await call(ben.client, "sandbox_run", { build_id: plain, command: "ls" });
+  assert.ok(!(p.isError && DRIVE.test(p.data.error)));
+  // Steering and reopening spend the starter's budget: only theirs.
+  assert.match((await call(ben.client, "steer_build", { build_id: own, message: "use the design system" })).data.error, /Only the developer who started this build/);
+  assert.match((await call(ben.client, "reopen_sandbox", { build_id: own })).data.error, /Only the developer who started this build/);
 });

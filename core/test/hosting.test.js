@@ -646,3 +646,44 @@ test("direct hosting: a provider's passing 5xx while a deploy runs is ridden out
   assert.match(bad.error, /400/);
   assert.equal(bad.polls, 1);
 });
+
+test("hosting is the workspace's: a teammate's deploy lands on it, only owners and admins log in, and leaving revokes the logins at once", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null } });
+  try {
+    const { call, dev } = w;
+    const [ws] = (await call(dev, "list_workspaces")).data;
+    const { user: benUser } = await w.store.createUser("Ben", ["developer"]);
+    const { user: memUser } = await w.store.createUser("Mem", ["developer"]);
+    const ben = await w.connectWith(benUser);
+    const mem = await w.connectWith(memUser);
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'member')", [ws.id, benUser.id, memUser.id]);
+    // Members don't turn hosting on; owners and admins do, for the workspace.
+    assert.match((await call(mem, "request_hosting", { workspace_id: ws.id })).data.error, /owners and admins/);
+    const tenant = (await call(dev, "request_hosting", { workspace_id: ws.id })).data;
+    assert.equal(tenant.workspace_id, ws.id);
+    assert.equal(tenant.developer_id, null, "nobody's own tenant");
+    // Ben deploys a teammate's verified build through his own approved connection.
+    await w.store.db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved')", [benUser.id]);
+    const deployed = (await call(ben, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") })).data;
+    assert.equal(deployed.tenant_id, tenant.id, "on the workspace's hosting, not Ben's");
+    assert.equal(deployed.deployed_by, benUser.id);
+    await w.hosting.pending;
+    // Logins: owners and admins only.
+    assert.match((await call(mem, "vm_access", { workspace_id: ws.id })).data.error, /owners and admins/);
+    const login = (await call(ben, "vm_access", { workspace_id: ws.id })).data;
+    assert.ok(login.logins?.length, JSON.stringify(login));
+    const identity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity;
+    assert.ok(identity);
+    // Ben is removed: his login is revoked on the spot, and he can't get another or touch the app.
+    const removed = (await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data;
+    assert.equal(removed.access_cut.vm_logins_revoked, 1);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === identity), "the identity revoked at the provider");
+    assert.match((await call(ben, "vm_access", { workspace_id: ws.id })).data.error, /No workspace of yours/);
+    assert.match((await call(ben, "app_logs", { app_id: w.app.id })).data.error, /No app of yours/);
+    // The app keeps running for the team.
+    assert.equal((await call(dev, "hosting_status", { workspace_id: ws.id })).data.apps.length, 1);
+  } finally {
+    w.close();
+  }
+});

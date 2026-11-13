@@ -651,7 +651,6 @@ const TABLES = `
     roles text[] NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
   );
-${WORKSPACE_TABLES}
   -- Versioning: products.data/version is the live version; product_versions keeps every published
   -- version and at most one draft of the next one.
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1;
@@ -1739,6 +1738,7 @@ ${WORKSPACE_TABLES}
   );
   CREATE INDEX IF NOT EXISTS firm_checks_entity_idx ON financial_products.firm_checks (entity_id, source, retrieved_at DESC);
   ${LIQUIDITY_TABLES}
+${WORKSPACE_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -2766,7 +2766,7 @@ export class Store {
     const rows = await this.all(
       `INSERT INTO financial_products.webhook_deliveries (id, webhook_id, event_id, type, payload, sandbox, status, next_attempt_at)
        SELECT gen_random_uuid(), w.id, $2::uuid, $3, jsonb_set($4::jsonb, '{data,app_id}', to_jsonb(w.app_id::text)), $5, 'pending', now()
-       FROM financial_products.webhooks w WHERE w.app_id::text = ANY($1) AND $3 = ANY(w.events)
+       FROM financial_products.webhooks w WHERE w.app_id::text = ANY($1) AND $3 = ANY(w.events) AND w.disabled_at IS NULL
        RETURNING id`,
       [appIds, payload.id, payload.type, JSON.stringify(payload), sandbox],
     );
@@ -2878,10 +2878,10 @@ export class Store {
     }
   }
 
-  // Overwrites the app's definition with a snapshot: every column except identity, ownership, status
-  // and timestamps. Columns the snapshot predates keep their current value.
+  // Overwrites the app's definition with a snapshot: every column except identity, ownership (its creator and its
+  // workspace), status and timestamps. Columns the snapshot predates keep their current value.
   async restoreAppSnapshot(appId: string, snapshot: Record<string, unknown>): Promise<App> {
-    const keep = new Set(["id", "owner_id", "status", "created_at", "updated_at"]);
+    const keep = new Set(["id", "owner_id", "workspace_id", "status", "created_at", "updated_at"]);
     const cols = (
       await this.all("SELECT column_name FROM information_schema.columns WHERE table_schema = 'financial_products' AND table_name = 'apps'")
     )
@@ -3059,7 +3059,7 @@ export class Store {
   async upsertInvite(email: string, roles: Role[]): Promise<Invite> {
     const r = await this.one(
       `INSERT INTO financial_products.invites (email, roles) VALUES ($1, $2)
-       ON CONFLICT (email) DO UPDATE SET roles = EXCLUDED.roles RETURNING *`,
+       ON CONFLICT (email) DO UPDATE SET roles = EXCLUDED.roles, updated_at = now() RETURNING *`,
       [email.toLowerCase(), roles],
     );
     return toInvite(r!);

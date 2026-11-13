@@ -534,13 +534,45 @@ export class BuildService {
     return rows.map(toBuild);
   }
 
+  // This month's spend on the workspace's apps' builds, counting a build still running at its whole cap (what it may
+  // yet spend), so concurrent builds can't overrun the workspace's budget.
   async workspaceMonthSpend(workspaceId: string) {
     const r = await this.one(
-      `SELECT COALESCE(SUM(b.cost_usd), 0) AS s FROM financial_products.build_runs b JOIN financial_products.apps a ON a.id = b.app_id
+      `SELECT COALESCE(SUM(CASE WHEN b.status = ANY($2) THEN b.cost_usd ELSE GREATEST(b.cap_usd, b.cost_usd) END), 0) AS s
+       FROM financial_products.build_runs b JOIN financial_products.apps a ON a.id = b.app_id
        WHERE a.workspace_id = $1 AND b.created_at >= date_trunc('month', now())`,
-      [workspaceId],
+      [workspaceId, TERMINAL],
     );
     return Number(r?.s ?? 0);
+  }
+
+  // Someone leaving a workspace: their running builds of its apps stop, and sandboxes they reopened close.
+  async stopFor(developerId: string, appIds: string[]): Promise<string[]> {
+    if (!appIds.length) return [];
+    const rows = (
+      await this.db.query(
+        `SELECT * FROM financial_products.build_runs WHERE developer_id = $1 AND app_id::text = ANY($2)
+           AND (status <> ALL($3) OR (box_sandbox_id IS NOT NULL AND box_until > now()))`,
+        [developerId, appIds, TERMINAL],
+      )
+    ).rows as Row[];
+    const out = [];
+    for (const b of rows.map(toBuild)) {
+      if (!TERMINAL.includes(b.status)) await this.stop(b, "Its developer left the app's workspace").catch((e) => console.error(`Build ${b.id} stop: ${(e as Error).message}`));
+      if (b.box_sandbox_id) await this.closeBox(b).catch((e) => console.error(`Build ${b.id} sandbox: ${(e as Error).message}`));
+      out.push(b.id);
+    }
+    return out;
+  }
+
+  // Whether someone other than the build's starter may drive its sandbox (run commands in it, open its editor):
+  // the sandbox holds a git credential, so only with their own approved connection to its repository, or when that
+  // is the app's Mynt-managed repository, or when there's none.
+  async mayDrive(b: Build, developerId: string) {
+    if (b.developer_id === developerId || !b.repository) return true;
+    const set = b.app_id ? await this.appRepository(b.app_id) : null;
+    if (set && (set.managed_repository === b.repository || (set.managed && set.repository === b.repository))) return true;
+    return (await connectionApproval(this.db, developerId, b.repository)) === APPROVED;
   }
 
   async listFor(developerId: string | null, status?: string, appId?: string) {
@@ -1863,6 +1895,11 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     const b = await builds.get(id);
     return b && (await canSeeBuild(store, user, b)) ? b : undefined;
   };
+  // A teammate's build is read-only to them unless they may drive its sandbox (BuildService.mayDrive).
+  const drive = async (b: Build) => {
+    if (!(await builds.mayDrive(b, user.id)))
+      throw new Error(`This build's sandbox can push to ${b.repository}: connect it yourself (connect_repository) to work in it; you can still read its files and diff`);
+  };
 
   server.registerTool(
     "connect_repository",
@@ -2081,6 +2118,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async ({ build_id, message }) => {
       const b = await own(build_id);
       if (!b) return fail(`No build of yours with id '${build_id}'`);
+      // A build runs on its starter's budget: a teammate starts their own, carrying on from it (continue_from).
+      if (b.developer_id !== user.id) return fail("Only the developer who started this build can steer it (it spends their budget); start your own with continue_from");
       try {
         await builds.steer(b, message);
         return json({ build_id, steered: true });
@@ -2146,6 +2185,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     },
     async ({ build_id, hours }) =>
       onBox(build_id, async (b) => {
+        if (b.developer_id !== user.id) throw new Error("Only the developer who started this build can reopen its sandbox (it spends their budget); start your own with continue_from");
         if (b.box_sandbox_id && b.box_until && Date.parse(b.box_until) > Date.now()) {
           const ready = await builds.boxReady(b);
           return { build_id, ready, until: b.box_until, ...(ready ? { next: "open_sandbox_editor or sandbox_run" } : { next: "call reopen_sandbox again in a few seconds" }) };
@@ -2173,7 +2213,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
         "Developer: VS Code in your browser on the sandbox where the coding agents are building your app, with a terminal. Returns a private link and a password. Works while the build runs and, after it ships, while its preview is up.",
       inputSchema: { build_id: z.string() },
     },
-    async ({ build_id }) => onBox(build_id, (b) => builds.openEditor(b)),
+    async ({ build_id }) => onBox(build_id, async (b) => (await drive(b), builds.openEditor(b))),
   );
 
   server.registerTool(
@@ -2184,7 +2224,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
         "Developer: run a shell command in your build's sandbox, in the app's directory (e.g. 'npm test', 'docker compose ps', 'git log --oneline -5'). Output is capped and secrets are scrubbed; every command is on the build's timeline.",
       inputSchema: { build_id: z.string(), command: z.string().min(1).max(4000), timeout_seconds: z.number().int().min(1).max(300).default(60) },
     },
-    async ({ build_id, command, timeout_seconds }) => onBox(build_id, (b) => builds.boxExec(b, command, timeout_seconds)),
+    async ({ build_id, command, timeout_seconds }) => onBox(build_id, async (b) => (await drive(b), builds.boxExec(b, command, timeout_seconds))),
   );
 
   server.registerTool(

@@ -55,10 +55,9 @@ export async function accessStatus(store: Store, user: User, product: ProductRec
   if (product.access_mode === "open") return { granted: true, via: "open" as const };
   // A request for this app counts for everyone in its workspace (the callers have checked the user may work on the
   // app); an invitation (no app) only for the person invited.
-  const requests = (await store.requestsForProducts([product.product.id])).filter(
-    (r) => r.kind === "product_access" && ((appId !== null && r.app_id === appId) || (r.requester_id === user.id && r.app_id === null)),
-  );
-  const forThis = requests[0];
+  const all = (await store.requestsForProducts([product.product.id])).filter((r) => r.kind === "product_access");
+  const newest = (rs: typeof all) => [...rs].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+  const forThis = (appId !== null ? newest(all.filter((r) => r.app_id === appId)) : undefined) ?? newest(all.filter((r) => r.app_id === null && r.requester_id === user.id));
   if (forThis?.status === "approved") return { granted: true, via: (forThis.app_id ? "approved" : "invited") as "approved" | "invited", request_id: forThis.id };
   return { granted: false, via: (forThis?.status ?? (product.access_mode === "private" ? "private" : "none")) as string, request_id: forThis?.id };
 }
