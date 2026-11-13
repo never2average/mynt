@@ -31,6 +31,9 @@ const DEVELOPER_TOOLS = [
   "render_experience_preview", "set_experience",
   // journeys
   "check_journey", "get_data_dictionary", "get_default_journey", "list_journeys", "preview_journey", "save_journey",
+  // workspaces: the teams apps belong to
+  "change_member_role", "create_workspace", "invite_to_workspace", "leave_workspace", "list_workspace_members", "list_workspaces",
+  "remove_workspace_member", "rename_workspace", "revoke_workspace_invite",
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",

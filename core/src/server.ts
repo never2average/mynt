@@ -57,6 +57,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
+import { appStages, memberApp, personalWorkspace, registerWorkspaceTools, workspaceRole } from "./workspaces.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
@@ -111,9 +112,10 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("consumer")) registerConsumerTools(server, store, user!);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
+    registerWorkspaceTools(server, store, user!);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
-    if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting);
+    if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);
     if (ctx.modules) registerModuleTools(server, store, user!, ctx.modules);
     registerGtmTools(server, store, user!);
   }
@@ -658,10 +660,8 @@ async function resolveApp(store: Store, app: App) {
 
 // Developers build software on innovators' products; they never issue, sell or hold funds.
 function registerDeveloperTools(server: McpServer, store: Store, user: User) {
-  const ownApp = async (id: string) => {
-    const app = await store.getApp(id);
-    return app && app.owner_id === user.id ? app : undefined;
-  };
+  // An app of a workspace the developer belongs to (workspaces.ts).
+  const ownApp = (id: string) => memberApp(store, user, id);
 
   // Products a draft may include: published, and not private unless this developer was let in.
   const unusable = async (ids: string[], appId: string | null) => {
@@ -782,8 +782,12 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "Create an app experience",
       description:
-        "Developer: create a draft app experience (e.g. a retirement planner or first-salary starter kit) on published products. Declare what it does (actions) and the disclosures it shows; check_experience tells you whether it meets each product's terms.",
+        "Developer: create a draft app experience (e.g. a retirement planner or first-salary starter kit) on published products, in one of your workspaces (everyone in it can work on it). Declare what it does (actions) and the disclosures it shows; check_experience tells you whether it meets each product's terms.",
       inputSchema: {
+        workspace_id: z
+          .string()
+          .optional()
+          .describe("The workspace it belongs to (list_workspaces). Omitted: the one workspace you own, or a new one of your own if you own none"),
         name: z.string().trim().min(1).max(200),
         description: z.string().trim().min(1).max(4000),
         audience: z.string().trim().min(1).max(500).describe("Who the experience is for, e.g. 'first-time investors in India'"),
@@ -791,12 +795,25 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
         ...experienceFields,
       },
     },
-    async (fields) => {
+    async ({ workspace_id, ...fields }) => {
       // A product named twice is one product (the studio's picker may send repeats).
       fields = { ...fields, product_ids: [...new Set(fields.product_ids)] };
+      let workspace = workspace_id;
+      if (workspace) {
+        if (!(await workspaceRole(store.db, workspace, user.id))) return fail(`No workspace of yours with id '${workspace}'`);
+      } else {
+        // Never someone else's workspace by default: only one the caller owns.
+        const mine = (
+          await store.db.query("SELECT workspace_id::text AS id FROM financial_products.workspace_members WHERE user_id = $1 AND role = 'owner'", [user.id])
+        ).rows as { id: string }[];
+        if (mine.length > 1) return fail("You own several workspaces: say which one with workspace_id (list_workspaces)");
+        workspace = mine[0]?.id ?? (await personalWorkspace(store.db, user.id));
+      }
       const bad = await unusable(fields.product_ids, null);
       if (bad.length) return fail(`Products not available: ${bad.join(", ")}`);
-      return json(await store.createApp(user.id, fields));
+      const app = await store.createApp(user.id, fields, workspace);
+      await store.audit(user.id, "create_app", app.id, { workspace_id: workspace });
+      return json(app);
     },
   );
 
@@ -828,11 +845,17 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     "list_my_apps",
     {
       title: "List my app experiences",
-      description: "Developer: list the app experiences you have built, drafts included.",
-      inputSchema: {},
+      description:
+        "Developer: the app experiences of every workspace you belong to (or of one, with workspace_id), drafts included, each with its stage: idea (no verified build yet), staging (a verified build or a deployment that isn't live) or production (published and running on Mynt's hosting).",
+      inputSchema: { workspace_id: z.string().optional().describe("Only this workspace's apps") },
       annotations: { readOnlyHint: true },
     },
-    async () => json(await store.appsByOwner(user.id)),
+    async ({ workspace_id }) => {
+      if (workspace_id && !(await workspaceRole(store.db, workspace_id, user.id))) return fail(`No workspace of yours with id '${workspace_id}'`);
+      const apps = await store.appsVisibleTo(user.id, workspace_id);
+      const stages = await appStages(store.db, apps);
+      return json(apps.map((a) => ({ ...a, stage: stages.get(a.id) ?? "idea" })));
+    },
   );
 
   // Access per product and the terms lint, for one of the developer's apps.

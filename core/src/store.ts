@@ -5,6 +5,7 @@ import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
 import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
+import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
   hydrateRegulators,
@@ -515,7 +516,8 @@ export interface Campaign {
 
 export interface App {
   id: string;
-  owner_id: string;
+  owner_id: string; // who created it; access goes by membership of its workspace
+  workspace_id: string | null; // null only for an app made before workspaces, until Store.open migrates it
   name: string;
   description: string;
   audience: string;
@@ -649,6 +651,7 @@ const TABLES = `
     roles text[] NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
   );
+${WORKSPACE_TABLES}
   -- Versioning: products.data/version is the live version; product_versions keeps every published
   -- version and at most one draft of the next one.
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1;
@@ -2079,6 +2082,7 @@ const toCampaign = (r: Row): Campaign => ({
 const toApp = (r: Row): App => ({
   id: r.id as string,
   owner_id: r.owner_id as string,
+  workspace_id: (r.workspace_id as string | null) ?? null,
   name: r.name as string,
   description: r.description as string,
   audience: r.audience as string,
@@ -2147,6 +2151,7 @@ export class Store {
     await store.liftScopeProductTypes();
     await store.migrateProductLines();
     await store.migrateComponents();
+    await migrateAppWorkspaces(db);
     return store;
   }
 
@@ -3452,14 +3457,18 @@ export class Store {
 
   // Apps
 
+  // `workspaceId`: one the caller belongs to (the tools check). Omitted: the owner's own workspace (made if they have
+  // none), for callers that predate workspaces.
   async createApp(
     ownerId: string,
     fields: Pick<App, "name" | "description" | "audience" | "product_ids"> & Partial<Pick<App, "disclosures" | "actions">>,
+    workspaceId?: string,
   ): Promise<App> {
+    const workspace = workspaceId ?? (await personalWorkspace(this.db, ownerId));
     const r = await this.one(
-      `INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, disclosures, actions)
-       VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8) RETURNING *`,
-      [randomUUID(), ownerId, fields.name, fields.description, fields.audience, fields.product_ids, fields.disclosures ?? [], fields.actions ?? ["display"]],
+      `INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, disclosures, actions, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, $9) RETURNING *`,
+      [randomUUID(), ownerId, fields.name, fields.description, fields.audience, fields.product_ids, fields.disclosures ?? [], fields.actions ?? ["display"], workspace],
     );
     return toApp(r!);
   }
@@ -3481,6 +3490,21 @@ export class Store {
 
   async appsByOwner(ownerId: string): Promise<App[]> {
     return (await this.all("SELECT * FROM financial_products.apps WHERE owner_id = $1 ORDER BY created_at", [ownerId])).map(toApp);
+  }
+
+  // The apps a user may see and work on: those of every workspace they belong to (or of one of them), and any of
+  // their own not yet in a workspace.
+  async appsVisibleTo(userId: string, workspaceId?: string): Promise<App[]> {
+    return (
+      await this.all(
+        `SELECT a.* FROM financial_products.apps a
+         WHERE (a.workspace_id IN (SELECT workspace_id FROM financial_products.workspace_members WHERE user_id = $1)
+                OR (a.workspace_id IS NULL AND a.owner_id = $1))
+           AND ($2::text IS NULL OR a.workspace_id::text = $2)
+         ORDER BY a.created_at`,
+        [userId, workspaceId ?? null],
+      )
+    ).map(toApp);
   }
 
 

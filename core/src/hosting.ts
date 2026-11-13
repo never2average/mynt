@@ -496,6 +496,15 @@ export class HostingService {
     return r && toTenant(r);
   }
 
+  // The tenant whose VM runs the app, whoever that is.
+  async tenantHostingApp(appId: string): Promise<Tenant | undefined> {
+    const r = await this.one(
+      "SELECT t.* FROM financial_products.hosting_tenants t JOIN financial_products.hosted_apps h ON h.tenant_id = t.id WHERE h.app_id::text = $1",
+      [appId],
+    );
+    return r && toTenant(r);
+  }
+
   async tenants(): Promise<Tenant[]> {
     return (await this.db.query("SELECT * FROM financial_products.hosting_tenants ORDER BY created_at")).rows.map((r) => toTenant(r as Record<string, unknown>));
   }

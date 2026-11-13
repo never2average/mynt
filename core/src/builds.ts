@@ -20,6 +20,7 @@ import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolch
 import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
 import type { Store, User } from "./store.js";
+import { canSeeBuild, memberApp } from "./workspaces.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
 
@@ -82,6 +83,9 @@ function agentBackendFromEnv(env: NodeJS.ProcessEnv): AgentBackend | null {
 export interface BuildConfig {
   capUsd: number; // per build
   monthlyCapUsd: number; // per developer per calendar month
+  // Per workspace per calendar month, across all its apps' builds whoever started them (BUILD_WORKSPACE_MONTHLY_CAP_USD;
+  // unset: no workspace cap, only each developer's). Both apply.
+  workspaceMonthlyCapUsd?: number | null;
   agentBackend: AgentBackend | null; // used only by Mynt's agent proxy; never sent to a sandbox
   model: string;
   sandboxType: string;
@@ -103,10 +107,17 @@ export interface BuildConfig {
 // Each developer's build budget per calendar month (BUILD_MONTHLY_CAP_USD, default 100).
 export const monthlyBuildCapUsd = (env = process.env) => Number(env.BUILD_MONTHLY_CAP_USD ?? 100);
 
+// Each workspace's build budget per calendar month (BUILD_WORKSPACE_MONTHLY_CAP_USD); null when unset or not positive.
+export const workspaceBuildCapUsd = (env = process.env) => {
+  const n = Number(env.BUILD_WORKSPACE_MONTHLY_CAP_USD ?? "");
+  return env.BUILD_WORKSPACE_MONTHLY_CAP_USD && Number.isFinite(n) && n > 0 ? n : null;
+};
+
 export function buildConfigFromEnv(env = process.env): BuildConfig {
   return {
     capUsd: Number(env.BUILD_CAP_USD ?? 10),
     monthlyCapUsd: monthlyBuildCapUsd(env),
+    workspaceMonthlyCapUsd: workspaceBuildCapUsd(env),
     agentBackend: agentBackendFromEnv(env),
     model: env.BUILD_AGENT_MODEL ?? "claude-opus-5-5",
     sandboxType: env.BUILD_SANDBOX_TYPE ?? "default",
@@ -505,6 +516,33 @@ export class BuildService {
     return r && toBuild(r);
   }
 
+  // The builds a developer may see: those of every app in their workspaces (whoever started them), and their own
+  // builds for no app.
+  async listVisible(userId: string, status?: string, appId?: string) {
+    const rows = (
+      await this.db.query(
+        `SELECT * FROM financial_products.build_runs b
+         WHERE ((b.app_id IS NULL AND b.developer_id = $1)
+             OR b.app_id IN (SELECT a.id FROM financial_products.apps a
+                             WHERE a.workspace_id IN (SELECT workspace_id FROM financial_products.workspace_members WHERE user_id = $1)
+                                OR (a.workspace_id IS NULL AND a.owner_id = $1)))
+           AND ($2::text IS NULL OR b.status = $2) AND ($3::text IS NULL OR b.app_id::text = $3)
+         ORDER BY b.created_at DESC LIMIT 200`,
+        [userId, status ?? null, appId ?? null],
+      )
+    ).rows as Row[];
+    return rows.map(toBuild);
+  }
+
+  async workspaceMonthSpend(workspaceId: string) {
+    const r = await this.one(
+      `SELECT COALESCE(SUM(b.cost_usd), 0) AS s FROM financial_products.build_runs b JOIN financial_products.apps a ON a.id = b.app_id
+       WHERE a.workspace_id = $1 AND b.created_at >= date_trunc('month', now())`,
+      [workspaceId],
+    );
+    return Number(r?.s ?? 0);
+  }
+
   async listFor(developerId: string | null, status?: string, appId?: string) {
     const rows = (
       await this.db.query(
@@ -655,6 +693,16 @@ export class BuildService {
     return stored.repository;
   }
 
+  // A teammate deploying a build of the app gets the same approved access to the app's own managed repository its
+  // builders have (hosting fetches the source through the deployer's connection). Only that app's managed
+  // repository, current or recorded; anything else is refused by the deploy's own approval check.
+  async ensureManagedConnection(developerId: string, appId: string, repository: string) {
+    const set = await this.appRepository(appId);
+    const repo = repository.toLowerCase();
+    if (!set || (set.managed_repository !== repo && !(set.managed && set.repository === repo))) return;
+    if (!(await this.installation(developerId, repo))) await this.connectManaged(developerId, repo);
+  }
+
   private async connectManaged(developerId: string, repository: string) {
     const access = await this.managedHost?.access();
     if (!access) throw new Error("Mynt's managed repositories aren't available right now");
@@ -700,7 +748,7 @@ export class BuildService {
     let base: Build | null = null;
     if (opts.continue_from) {
       const prev = await this.get(opts.continue_from);
-      if (!prev || prev.developer_id !== developer.id) throw new Error(`No build of yours with id '${opts.continue_from}' to continue from`);
+      if (!prev || !(await canSeeBuild(this.store, developer, prev))) throw new Error(`No build of yours with id '${opts.continue_from}' to continue from`);
       if (!TERMINAL.includes(prev.status)) throw new Error(`Build ${prev.id} is still ${prev.status}: steer it, or stop it before continuing from it`);
       // Only a build whose push Mynt confirmed: it verified the pushed commit (commit_sha) and opened its pull request.
       if (!prev.repository || !prev.branch || !(prev.commit_sha || prev.pr_url)) throw new Error(`Build ${prev.id} pushed no verified branch, so there's nothing to continue from`);
@@ -732,6 +780,18 @@ export class BuildService {
       throw new Error(
         `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
       );
+    // The app's workspace has its own monthly budget too, shared by everyone building its apps.
+    const wsCap = this.config.workspaceMonthlyCapUsd ?? null;
+    const workspace = opts.app_id && wsCap ? (await this.store.getApp(opts.app_id))?.workspace_id : null;
+    if (workspace && wsCap) {
+      const wsSpent = await this.workspaceMonthSpend(workspace);
+      const wsLeft = Math.max(0, wsCap - wsSpent);
+      if (wsLeft < 0.5) throw new Error(`The workspace's monthly build budget is used up (US$${wsSpent.toFixed(2)} of US$${wsCap} spent this month)`);
+      if (cap > wsLeft)
+        throw new Error(
+          `This build's cap (US$${cap}) is more than the workspace's remaining build budget this month (US$${wsLeft.toFixed(2)} of US$${wsCap}); start it with cap_usd of at most ${Math.floor(wsLeft * 100) / 100}`,
+        );
+    }
     // No repository named: the app's own (Mynt-managed unless the developer chose theirs).
     if (!opts.repository && opts.app_id) {
       const repository = await this.repositoryForApp(developer, opts.app_id);
@@ -1798,9 +1858,10 @@ export function developerBuild(b: Build) {
 }
 
 export function registerCodingAgentTools(server: McpServer, store: Store, user: User, builds: BuildService) {
+  // A build of an app in one of the developer's workspaces, or their own build for no app (workspaces.ts).
   const own = async (id: string) => {
     const b = await builds.get(id);
-    return b && b.developer_id === user.id ? b : undefined;
+    return b && (await canSeeBuild(store, user, b)) ? b : undefined;
   };
 
   server.registerTool(
@@ -1845,10 +1906,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async () => json(await builds.repositories(user.id)),
   );
 
-  const ownApp = async (appId: string) => {
-    const app = await store.getApp(appId);
-    return app && app.owner_id === user.id ? app : undefined;
-  };
+  const ownApp = (appId: string) => memberApp(store, user, appId);
 
   server.registerTool(
     "get_app_repository",
@@ -1947,8 +2005,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async ({ goal, app_id, repository, cap_usd, solana, mode, continue_from }) => {
       if (!builds.enabled) return fail("Coding-agent builds aren't enabled on this Mynt yet");
       if (app_id) {
-        const app = await store.getApp(app_id);
-        if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
+        if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
       }
       try {
         const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana, mode, continue_from });
@@ -1964,7 +2021,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     "list_builds",
     {
       title: "My builds",
-      description: "Developer: your coding-agent builds, newest first, with status, cost and links; plus this month's spend against your budget.",
+      description:
+        "Developer: the coding-agent builds of your workspaces' apps (whoever started them) and your own builds for no app, newest first, with status, cost and links; plus this month's spend against your budget.",
       inputSchema: { status: z.enum(BUILD_STATUSES).optional(), app_id: z.string().optional().describe("Only this app's builds") },
       annotations: { readOnlyHint: true },
     },
@@ -1972,7 +2030,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
-        builds: (await builds.listFor(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
+        builds: (await builds.listVisible(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
       }),
   );
 

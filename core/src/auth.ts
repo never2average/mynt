@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClerkClient } from "@clerk/backend";
 import { ROLES, type Role, type Store, type User } from "./store.js";
+import { acceptWorkspaceInvites } from "./workspaces.js";
 
 // The parts of Clerk's backend client this server uses, so tests can provide a stand-in.
 export interface ClerkLike {
@@ -138,8 +139,11 @@ export class ClerkAuth {
         message: email ? "Your account is not on this server's whitelist" : "Verify your email address with the sign-in provider, then sign in again",
       };
     }
-    if (linked && (linked.held_roles ?? linked.roles).join() === invite.roles.join()) return { ok: true, user: linked };
-    return { ok: true, user: await this.store.upsertClerkUser(subject, email, name, invite.roles) };
+    const user =
+      linked && (linked.held_roles ?? linked.roles).join() === invite.roles.join() ? linked : await this.store.upsertClerkUser(subject, email, name, invite.roles);
+    // Workspace invites to this verified address become memberships as they sign in (workspaces.ts).
+    await acceptWorkspaceInvites(this.store.db, user.id, email);
+    return { ok: true, user };
   }
 }
 

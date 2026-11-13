@@ -4,6 +4,7 @@ import { accessStatus, productEntity } from "./access.js";
 import { checkStructure, ExperienceSchema, renderPreview, type Experience } from "./experience.js";
 import { compareSemver, generateSdk, SDK_LANGUAGES, SEMVER, termsHash, type SdkProduct } from "./sdk.js";
 import { DuplicateError, type ProductRecord, type Sdk, type SdkRelease, type Store, type User } from "./store.js";
+import { memberApp } from "./workspaces.js";
 
 // Developer build layer: generated SDKs and structured experience definitions.
 
@@ -51,10 +52,7 @@ export function registerBuildTools(server: McpServer, store: Store, user: User) 
     const sdk = await store.getSdk(id);
     return sdk && sdk.owner_id === user.id ? sdk : undefined;
   };
-  const ownApp = async (id: string) => {
-    const app = await store.getApp(id);
-    return app && app.owner_id === user.id ? app : undefined;
-  };
+  const ownApp = (id: string) => memberApp(store, user, id); // an app of one of the developer's workspaces
   const summary = async (sdk: Sdk) => {
     const [latest] = byVersionDesc(await store.sdkReleases(sdk.id));
     return {

@@ -53,8 +53,12 @@ export async function coveringLicenses(store: Store, entityId: string | null, re
 export async function accessStatus(store: Store, user: User, product: ProductRecord, appId: string | null) {
   if (product.owner_id === user.id || (user.entity_id && product.entity_id === user.entity_id)) return { granted: true, via: "own" as const };
   if (product.access_mode === "open") return { granted: true, via: "open" as const };
-  const requests = (await store.requestsForProducts([product.product.id])).filter((r) => r.kind === "product_access" && r.requester_id === user.id);
-  const forThis = requests.find((r) => r.app_id === appId || r.app_id === null);
+  // A request for this app counts for everyone in its workspace (the callers have checked the user may work on the
+  // app); an invitation (no app) only for the person invited.
+  const requests = (await store.requestsForProducts([product.product.id])).filter(
+    (r) => r.kind === "product_access" && ((appId !== null && r.app_id === appId) || (r.requester_id === user.id && r.app_id === null)),
+  );
+  const forThis = requests[0];
   if (forThis?.status === "approved") return { granted: true, via: (forThis.app_id ? "approved" : "invited") as "approved" | "invited", request_id: forThis.id };
   return { granted: false, via: (forThis?.status ?? (product.access_mode === "private" ? "private" : "none")) as string, request_id: forThis?.id };
 }

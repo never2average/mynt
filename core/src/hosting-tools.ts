@@ -5,7 +5,9 @@ import { isDirect } from "./freestyle.js";
 import type { HostingService, Tenant } from "./hosting.js";
 import { connectionApproval, requireApproved } from "./repo-approvals.js";
 import { appProducts, buildTerms } from "./runtime.js";
+import type { BuildService } from "./builds.js";
 import type { Store, User } from "./store.js";
+import { canSeeBuild, memberApp } from "./workspaces.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -46,10 +48,10 @@ const SERVICE = z
   .optional()
   .describe("For a compose app: the service (e.g. api or web)");
 
-// The build a deployment runs: one of the developer's builds that Mynt verified and pushed.
-async function verifiedBuild(store: Store, developerId: string, buildId: string) {
+// The build a deployment runs: a build of the developer's workspace's app (or their own) that Mynt verified and pushed.
+async function verifiedBuild(store: Store, user: User, buildId: string) {
   const r = await store.buildRun(buildId);
-  if (!r || r.developer_id !== developerId) return { error: `No build of yours with id '${buildId}'` };
+  if (!r || !(await canSeeBuild(store, user, r))) return { error: `No build of yours with id '${buildId}'` };
   if (r.status !== "succeeded" || !r.repository || !r.commit_sha) return { error: `Build '${buildId}' didn't pass Mynt's verification (status ${r.status}), so it can't be hosted` };
   return { build: { id: r.id, app_id: r.app_id, repository: r.repository, commit_sha: r.commit_sha } };
 }
@@ -62,7 +64,7 @@ export function developerTenant(tenant: Tenant, direct: boolean): Partial<Tenant
   return rest;
 }
 
-export function registerHostingTools(server: McpServer, store: Store, user: User, hosting: HostingService) {
+export function registerHostingTools(server: McpServer, store: Store, user: User, hosting: HostingService, builds: BuildService | null = null) {
   server.registerTool(
     "request_hosting",
     {
@@ -111,14 +113,16 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     },
     async ({ app_id, build_id }) => {
       if (!hosting.enabled) return fail("Hosting isn't configured on this deployment yet");
-      const app = await store.getApp(app_id);
-      if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
+      const app = await memberApp(store, user, app_id);
+      if (!app) return fail(`No app of yours with id '${app_id}'`);
       const tenant = await hosting.tenantOf(user.id);
       if (!tenant) return fail("Request your hosting first (request_hosting)");
       if (tenant.status !== "running") return fail(`Your hosting is ${tenant.status}`);
-      const found = await verifiedBuild(store, user.id, build_id);
+      const found = await verifiedBuild(store, user, build_id);
       if ("error" in found) return fail(found.error!);
       if (found.build.app_id && found.build.app_id !== app_id) return fail(`Build '${build_id}' was for another app`);
+      // A teammate's build of this app in its managed repository: the deployer gets the same access its builders have.
+      if (builds) await builds.ensureManagedConnection(user.id, app_id, found.build.repository).catch(() => undefined);
       // Hosting fetches the source through the developer's connection to the repository: only once an admin approved it.
       try {
         requireApproved(await connectionApproval(store.db, user.id, found.build.repository), found.build.repository);
@@ -158,8 +162,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       annotations: { destructiveHint: true },
     },
     async ({ app_id }) => {
-      const app = await store.getApp(app_id);
-      if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
+      if (!(await memberApp(store, user, app_id))) return fail(`No app of yours with id '${app_id}'`);
       if (!(await hosting.undeploy(app_id))) return fail(`'${app_id}' isn't hosted`);
       await store.audit(user.id, "undeploy_app", app_id);
       return json({ app_id, hosted: false });
@@ -189,10 +192,10 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
 
   // The VM the app runs on: the developer asks, the VM's agent does it within a few seconds over the tunnel.
   // Nothing reaches the VM from outside; commands only ever touch the developer's own app containers.
+  // A workspace's app runs on the VM of whoever deployed it: commands go there, for any member of the workspace.
   const onVm = async (app_id: string, kind: HostingCommandKind, args: Record<string, unknown>, waitSeconds: number) => {
-    const app = await store.getApp(app_id);
-    if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
-    const tenant = await hosting.tenantOf(user.id);
+    if (!(await memberApp(store, user, app_id))) return fail(`No app of yours with id '${app_id}'`);
+    const tenant = (await hosting.tenantHostingApp(app_id)) ?? (await hosting.tenantOf(user.id));
     if (!tenant) return fail("You have no hosting yet (request_hosting)");
     try {
       const queued = await hosting.queueCommand(tenant, app_id, kind, args, user.id);
