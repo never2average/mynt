@@ -82,6 +82,7 @@ const apps = await import("@/app/api/apps/route");
 const coverageRoute = await import("@/app/api/coverage/route");
 const licencesRoute = await import("@/app/api/licences/route");
 const auditRoute = await import("@/app/api/audit/route");
+const { complianceRead } = await import("@/lib/compliance-server");
 
 const get = (path: string, cookie?: string) => new NextRequest(`http://localhost:3000${path}`, cookie ? { headers: { cookie } } : undefined);
 const send = (method: string, body: unknown) =>
@@ -118,10 +119,13 @@ describe("the switcher's scope", () => {
     fake.tools = [{ name: "get_developer_dashboard", inputSchema: props("days") }];
     const ws = await (await workspaces.GET()).json();
     expect(ws).toEqual({ workspaces: [{ id: "personal", name: "Personal", role: "owner", implicit: true }], supported: false });
-    await projects.GET(get("/api/projects?workspace=w2"));
-    await dashboard.GET(get("/api/dashboard?workspace=w2"));
+    // Personal (as the switcher asks for it, or a leftover cookie) is unscoped.
+    await projects.GET(get("/api/projects?workspace=personal"));
+    await dashboard.GET(get("/api/dashboard", "__Host-mynt_workspace=w2"));
     expect(called("list_my_apps")[0].args).toEqual({});
     expect(called("get_developer_dashboard")[0].args).toEqual({ days: 30 });
+    // A shared workspace named explicitly can't be one of the user's yet: unavailable, not Personal's data.
+    expect((await (await dashboard.GET(get("/api/dashboard?workspace=w2"))).json()).unavailable).toMatch(/no longer a member/);
   });
 
   it("never shows unscoped data under a shared workspace's name", async () => {
@@ -254,6 +258,29 @@ describe("compliance routes (Coverage, Licences, Audits)", () => {
     expect((await auditRoute.GET(get("/api/audit?from=yesterday"))).status).toBe(400);
     expect((await auditRoute.GET(get("/api/audit?owner_id=u9"))).status).toBe(400);
     expect(called("list_workspace_audit")).toEqual([]);
+  });
+
+  it("refuse impossible dates, a start after the end and an empty cursor", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...COMPLIANCE];
+    for (const q of ["from=2026-02-30", "to=2026-13-01", "from=2026-11-13&to=2026-11-01", "cursor=", "action="]) {
+      expect((await auditRoute.GET(get(`/api/audit?${q}`))).status, q).toBe(400);
+    }
+    expect(called("list_workspace_audit")).toEqual([]);
+    expect((await auditRoute.GET(get("/api/audit?from=2024-02-29&to=2024-02-29"))).status).toBe(200);
+  });
+
+  it("always send the selected workspace, whatever the caller's arguments say", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...COMPLIANCE];
+    await complianceRead(get("/api/audit?workspace=w1"), "list_workspace_audit", "test", () => ({}), { workspace_id: "w2", action: "x" });
+    expect(called("list_workspace_audit")[0].args).toEqual({ workspace_id: "w1", action: "x" });
+  });
+
+  it("say unavailable for a workspace the user has left, never Personal's data under its name", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...COMPLIANCE];
+    expect((await (await coverageRoute.GET(get("/api/coverage?workspace=w9"))).json()).unavailable).toMatch(/no longer a member/);
+    expect(await (await projects.GET(get("/api/projects?workspace=w9"))).json()).toMatchObject({ projects: [], unavailable: expect.stringMatching(/no longer a member/) });
+    expect(await (await dashboard.GET(get("/api/dashboard?workspace=w9"))).json()).toMatchObject({ dashboard: null, unavailable: expect.stringMatching(/no longer a member/) });
+    for (const t of ["get_compliance_coverage", "list_my_apps", "get_developer_dashboard"]) expect(called(t)).toEqual([]);
   });
 
   it("say not available yet before Mynt has the tools, or when they can't be scoped to a shared workspace", async () => {

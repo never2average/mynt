@@ -90,6 +90,10 @@ export function StatePanel({ state }: { state: CoverageState }) {
   )
 }
 
+const joined = (items: string[]) => items.join(", ") || "—"
+
+// The map's full equivalent as a table: every state's status, partners, licences, products and
+// rails by name, and a button per state that opens the same side panel.
 export function CoverageList({ states, onOpen }: { states: CoverageState[]; onOpen?: (code: string) => void }) {
   return (
     <Table>
@@ -98,25 +102,33 @@ export function CoverageList({ states, onOpen }: { states: CoverageState[]; onOp
           <TableHead>State</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Partners</TableHead>
-          <TableHead className="text-right">Licences</TableHead>
-          <TableHead className="text-right">Products</TableHead>
-          <TableHead className="text-right">Rails</TableHead>
+          <TableHead>Licences</TableHead>
+          <TableHead>Products</TableHead>
+          <TableHead>Rails</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {states.map((s) => (
-          <TableRow key={s.code} data-state={s.code} className={onOpen ? "cursor-pointer" : undefined} onClick={() => onOpen?.(s.code)}>
-            <TableCell className="font-medium">{s.name}</TableCell>
+          <TableRow key={s.code} data-state={s.code}>
+            <TableCell className="font-medium">
+              {onOpen ? (
+                <button type="button" className="rounded-sm text-left underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(s.code)}>
+                  {s.name}
+                </button>
+              ) : (
+                s.name
+              )}
+            </TableCell>
             <TableCell>
               <span className="flex items-center gap-2">
                 <Swatch status={s.status} />
                 {COVERAGE_LABELS[s.status]}
               </span>
             </TableCell>
-            <TableCell className="max-w-64 truncate text-muted-foreground">{s.partners.map((p) => p.name).join(", ") || "—"}</TableCell>
-            <TableCell className="text-right tabular-nums">{s.licences.length}</TableCell>
-            <TableCell className="text-right tabular-nums">{s.products.length}</TableCell>
-            <TableCell className="text-right tabular-nums">{s.rails.length}</TableCell>
+            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.partners.map((p) => p.name))}</TableCell>
+            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.licences)}</TableCell>
+            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.products)}</TableCell>
+            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.rails)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -182,12 +194,19 @@ export function CoverageView({ coverage, initialView = "map" }: { coverage: Cove
                         fill={COVERAGE_FILL[state.status]}
                         stroke={active ? "var(--foreground)" : "var(--card)"}
                         strokeWidth={active ? 1.5 : 0.75}
-                        style={{ default: { outline: "none" }, hover: { outline: "none", cursor: "pointer" }, pressed: { outline: "none" } } as never}
+                        className="cursor-pointer outline-none focus-visible:[stroke-width:2.5] focus-visible:[stroke:var(--ring)]"
                         onMouseEnter={(e: React.MouseEvent) => {
                           const box = (e.currentTarget as Element).closest("div.relative")!.getBoundingClientRect()
                           setHover({ code, x: e.clientX - box.left, y: e.clientY - box.top })
                         }}
                         onMouseLeave={() => setHover(null)}
+                        // Keyboard users get the same tooltip, beside the state's centre.
+                        onFocus={(e: React.FocusEvent) => {
+                          const box = (e.currentTarget as Element).closest("div.relative")!.getBoundingClientRect()
+                          const at = (e.currentTarget as Element).getBoundingClientRect()
+                          setHover({ code, x: at.left + at.width / 2 - box.left, y: at.top + at.height / 2 - box.top })
+                        }}
+                        onBlur={() => setHover(null)}
                         onClick={() => setOpen(code)}
                         onKeyDown={(e: React.KeyboardEvent) => {
                           if (e.key === "Enter" || e.key === " ") {

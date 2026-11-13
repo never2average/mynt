@@ -106,6 +106,8 @@ describe("STUDIO_TOOLS", () => {
     bad("list_workspace_licences", { workspace_id: "w1", state: "California" });
     ok("list_workspace_audit", { workspace_id: "w1", cursor: "c2", action: "app.created", user_id: "u1", app_id: "a1", from: "2026-11-01", to: "2026-11-13" });
     bad("list_workspace_audit", { workspace_id: "w1", from: "yesterday" });
+    bad("list_workspace_audit", { workspace_id: "w1", from: "2026-02-30" });
+    bad("list_workspace_audit", { workspace_id: "w1", cursor: "" });
     bad("list_workspace_audit", { workspace_id: "w1", limit: 10000 });
     for (const t of ["get_compliance_coverage", "list_workspace_licences", "list_workspace_audit"]) expect(Object.keys(STUDIO_TOOLS)).toContain(t);
   });

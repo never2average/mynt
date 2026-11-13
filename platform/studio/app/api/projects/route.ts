@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { toProjects } from "@/lib/projects";
 import { callStudioTool, listMyntTools } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
-import { NOT_SCOPED, resolveWorkspace, workspaceOf, workspaceSupport } from "@/lib/workspace-server";
+import { NOT_SCOPED, scopeFor, workspaceSupport } from "@/lib/workspace-server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,10 +11,11 @@ export const dynamic = "force-dynamic";
 // no copy. Before Mynt has workspaces, every app is in the implicit Personal workspace. A shared
 // workspace this Mynt can't scope apps to shows none, never the user's unscoped apps.
 export async function GET(req: NextRequest) {
-  const requested = workspaceOf(req);
   return asDeveloper("loading projects", async (mynt) => {
     const support = workspaceSupport(await listMyntTools(mynt));
-    const workspace = await resolveWorkspace(mynt, requested, support);
+    const scoped = await scopeFor(mynt, req, support);
+    if (scoped.unavailable !== undefined) return json({ projects: [], unavailable: scoped.unavailable });
+    const { workspace } = scoped;
     if (workspace && !support.appsByWorkspace) return json({ projects: [], unavailable: NOT_SCOPED });
     const apps = workspace ? { workspace_id: workspace } : {};
     const builds = workspace && support.buildsByWorkspace ? { workspace_id: workspace } : {};

@@ -72,3 +72,20 @@ export async function resolveWorkspace(mynt: Client, requested: string | null, s
 // What a shared workspace's page says when this Mynt can't scope that data to it yet. The studio
 // never shows the user's unscoped data under a workspace's name.
 export const NOT_SCOPED = "This workspace's data comes with Mynt's next update. Your Personal workspace still shows everything.";
+export const WORKSPACE_GONE = "You're no longer a member of this workspace. Pick another one in the switcher.";
+
+// The scope for a page's read. A workspace the page names (?workspace=<id>) that isn't the
+// user's any more (left or removed) gets `unavailable`, never Personal's data under its name. Only
+// a remembered cookie with no explicit workspace falls back quietly to Personal.
+export async function scopeFor(
+  mynt: Client,
+  req: Request,
+  support: WorkspaceSupport,
+): Promise<{ workspace: string | null; unavailable?: undefined } | { unavailable: string }> {
+  const explicit = workspaceParam(new URL(req.url));
+  if (explicit) {
+    const workspace = await resolveWorkspace(mynt, explicit, support);
+    return workspace ? { workspace } : { unavailable: WORKSPACE_GONE };
+  }
+  return { workspace: await resolveWorkspace(mynt, workspaceOf(req), support) };
+}

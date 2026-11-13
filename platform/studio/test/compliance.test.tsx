@@ -10,6 +10,7 @@ import {
   expiryOf,
   FIPS_TO_CODE,
   filterLicences,
+  isCalendarDate,
   STATE_NAMES,
   fromAudit,
   fromCoverage,
@@ -74,9 +75,13 @@ describe("coverage", () => {
   });
 
   it("has a list view and a side panel naming partners, licences, products and rails", () => {
-    const list = renderToStaticMarkup(<CoverageList states={allStates(coverage)} />);
+    const list = renderToStaticMarkup(<CoverageList states={allStates(coverage)} onOpen={() => undefined} />);
     expect(list).toContain("Harbor Bank");
     expect((list.match(/<tr/g) ?? []).length).toBe(52);
+    // A real button per state opens the panel, and the names are all in the table too.
+    expect((list.match(/<button type="button"/g) ?? []).length).toBe(51);
+    expect(list).toMatch(/<button type="button"[^>]*>California<\/button>/);
+    for (const t of ["Money transmitter · MT-1", "Round-up savings", "ACH"]) expect(list).toContain(t);
     const panel = renderToStaticMarkup(<StatePanel state={coverage.states[0]} />);
     for (const t of ["Partners", "Licences", "Products", "Money rails", "Harbor Bank", "Money transmitter · MT-1", "Round-up savings", "ACH"]) expect(panel).toContain(t);
     expect(renderToStaticMarkup(<StatePanel state={allStates(coverage).find((s) => s.code === "WY")!} />)).toContain("No partner licensed here yet");
@@ -149,6 +154,13 @@ describe("audits", () => {
     );
     for (const t of ["All actions", "All members", "All apps", "From", "To", "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
     expect(html).toMatch(/<button[^>]*disabled[^>]*>[\s\S]*?Previous/);
+  });
+});
+
+describe("audit dates", () => {
+  it("accept only real calendar dates", () => {
+    for (const ok of ["2026-11-13", "2024-02-29"]) expect(isCalendarDate(ok), ok).toBe(true);
+    for (const bad of ["2026-02-30", "2025-02-29", "2026-13-01", "2026-1-1", "yesterday", ""]) expect(isCalendarDate(bad), bad).toBe(false);
   });
 });
 

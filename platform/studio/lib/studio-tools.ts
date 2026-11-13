@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isCalendarDate } from "./compliance";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
 // checks everything again (who owns what, roles, limits); these keep junk off the wire and keep
@@ -16,7 +17,7 @@ const workspaceId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
 const workspaceName = z.string().trim().min(1).max(80);
 // Roles given from the studio; ownership isn't handed over here.
 const memberRole = z.enum(["admin", "member"]);
-const auditDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
+const auditDate = z.string().refine(isCalendarDate, "a real YYYY-MM-DD date");
 const repository =z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
 
 export const STUDIO_TOOLS = {
@@ -67,7 +68,7 @@ export const STUDIO_TOOLS = {
   list_workspace_audit: z
     .object({
       workspace_id: workspaceId.optional(),
-      cursor: z.string().max(500).optional(),
+      cursor: z.string().min(1).max(500).optional(),
       action: z.string().max(120).optional(),
       user_id: id.optional(),
       app_id: id.optional(),

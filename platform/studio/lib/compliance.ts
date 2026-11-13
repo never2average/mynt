@@ -202,6 +202,13 @@ export function fromAudit(raw: unknown): AuditPage {
 
 export const AUDIT_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+// A real calendar date as YYYY-MM-DD (not 2026-02-30 or 2026-13-01).
+export function isCalendarDate(s: string): boolean {
+  if (!AUDIT_DATE.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
 export function searchAudit(events: AuditEvent[], query: string): AuditEvent[] {
   const q = query.trim().toLowerCase();
   if (!q) return events;
