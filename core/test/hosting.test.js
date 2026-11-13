@@ -675,14 +675,38 @@ test("hosting is the workspace's: a teammate's deploy lands on it, only owners a
     assert.ok(login.logins?.length, JSON.stringify(login));
     const identity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity;
     assert.ok(identity);
-    // Ben is removed: his login is revoked on the spot, and he can't get another or touch the app.
+    // The provider is down when Ben is removed: the login stays on record and the offboarding stays pending.
+    const realRevoke = provider.revokeAccess;
+    provider.revokeAccess = async () => {
+      throw new Error("provider down");
+    };
     const removed = (await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data;
-    assert.equal(removed.access_cut.vm_logins_revoked, 1);
+    assert.equal(removed.access_cut.vm_logins_revoked, 0);
+    assert.match(removed.access_cut.pending.join(" "), /VM login\(s\) not revoked yet/);
+    assert.equal((await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity, identity);
+    // Once it's back, an admin's retry (or the worker's) finishes it.
+    provider.revokeAccess = realRevoke;
+    const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
+    const retried = (await call(await w.connectWith(adminUser), "retry_offboard", { workspace_id: ws.id })).data.retried;
+    assert.equal(retried[0].vm_logins_revoked, 1);
     assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === identity), "the identity revoked at the provider");
+    assert.equal((await w.store.db.query("SELECT count(*)::int AS n FROM financial_products.workspace_offboards WHERE completed_at IS NULL")).rows[0].n, 0);
+    // The app's runtime key is the workspace's: the deployer leaving doesn't stop the app.
+    const runtimeKeys = (await w.store.db.query("SELECT status, created_by FROM financial_products.api_keys WHERE app_id = $1 AND label = 'hosted runtime'", [w.app.id])).rows;
+    assert.deepEqual(runtimeKeys, [{ status: "active", created_by: null }]);
     assert.match((await call(ben, "vm_access", { workspace_id: ws.id })).data.error, /No workspace of yours/);
     assert.match((await call(ben, "app_logs", { app_id: w.app.id })).data.error, /No app of yours/);
     // The app keeps running for the team.
     assert.equal((await call(dev, "hosting_status", { workspace_id: ws.id })).data.apps.length, 1);
+    // Demoting an admin to member ends their VM logins too.
+    const { user: carlUser } = await w.store.createUser("Carl", ["developer"]);
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')", [ws.id, carlUser.id]);
+    const carl = await w.connectWith(carlUser);
+    assert.ok((await call(carl, "vm_access", { workspace_id: ws.id })).data.logins?.length);
+    const carlsIdentity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE id = $1", [tenant.id])).rows[0].access_identity;
+    await call(dev, "change_member_role", { workspace_id: ws.id, user_id: carlUser.id, role: "member" });
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === carlsIdentity));
+    assert.match((await call(carl, "vm_access", { workspace_id: ws.id })).data.error, /owners and admins/);
   } finally {
     w.close();
   }

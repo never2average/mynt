@@ -618,6 +618,10 @@ test("leaving cuts access at once: the leaver's keys revoked, webhooks disabled,
   assert.equal((await store.getApiKey(live.id)).status, "active", "others' keys stay");
   const hooks = (await pg.query("SELECT id::text AS id, disabled_at FROM financial_products.webhooks")).rows;
   assert.ok(hooks.find((h) => h.id === bensHook.id).disabled_at && !hooks.find((h) => h.id === anasHook.id).disabled_at);
+  // An owner turns Ben's webhook back on: with a new secret, which only she now holds.
+  const back = (await call(ana.client, "enable_webhook", { webhook_id: bensHook.id })).data;
+  assert.equal(back.enabled, true);
+  assert.match(back.secret, /^whsec_/);
   const builds = (await pg.query("SELECT id::text AS id, status, box_sandbox_id FROM financial_products.build_runs WHERE developer_id = $1", [ben.user.id])).rows;
   assert.equal(builds.find((x) => x.id === runningBuild).status, "stopped");
   assert.equal(builds.find((x) => x.id === reopened).box_sandbox_id, null);
@@ -654,7 +658,60 @@ test("a teammate's build: read-only, unless they may drive its sandbox (their ow
   const plain = await build(ana.user.id, a.id, "coding");
   const p = await call(ben.client, "sandbox_run", { build_id: plain, command: "ls" });
   assert.ok(!(p.isError && DRIVE.test(p.data.error)));
+  // Files only inside the app's directory.
+  for (const path of ["/etc/passwd", "../../secrets", "src/../../x", "~/.ssh"])
+    assert.match((await call(ben.client, "sandbox_files", { build_id: own, path })).data.error, /inside the app's directory/, path);
   // Steering and reopening spend the starter's budget: only theirs.
   assert.match((await call(ben.client, "steer_build", { build_id: own, message: "use the design system" })).data.error, /Only the developer who started this build/);
   assert.match((await call(ben.client, "reopen_sandbox", { build_id: own })).data.error, /Only the developer who started this build/);
+});
+
+test("someone removed can't come back through an invite they sent, and an invite stands only while its sender may still send it", async () => {
+  const { pg, store, connect, call } = await setup();
+  const ana = await connect("Ana");
+  const ben = await connect("Ben");
+  const cara = await connect("Cara");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member'), ($1, $3, 'admin')", [ws.id, ben.user.id, cara.user.id]);
+  // Ben invites a second address of his own, then is removed: the invite goes with him.
+  const alt = (await call(ben.client, "invite_to_workspace", { workspace_id: ws.id, email: "ben.alt@example.com" })).data;
+  const cut = (await call(ana.client, "remove_workspace_member", { workspace_id: ws.id, user_id: ben.user.id })).data.access_cut;
+  assert.deepEqual(cut.revoked_invites, [alt.id]);
+  assert.equal(await store.getInvite("ben.alt@example.com"), undefined, "and the way onto Mynt it opened");
+  // Cara (an admin) invites an admin, then is made a member: the invite no longer stands.
+  const adm = (await call(cara.client, "invite_to_workspace", { workspace_id: ws.id, email: "dee@example.com", role: "admin" })).data;
+  await call(ana.client, "change_member_role", { workspace_id: ws.id, user_id: cara.user.id, role: "member" });
+  const dee = await signIn(store, { t: { sub: "clerk_dee", email: "dee@example.com" } }, "t");
+  const r = await call(dee.client, "accept_workspace_invite", { invite_id: adm.id });
+  assert.match(r.data.error, /no longer stands/);
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.workspace_members WHERE user_id = $1", [dee.user.id])).rows[0].n, 0);
+  assert.deepEqual((await call(dee.client, "list_my_invitations")).data.invitations, [], "voided");
+  // A user invite is a member's only.
+  assert.match((await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "u@example.com", role: "admin", mynt_role: "user" })).data.error, /can only be a member/);
+});
+
+test("secrets someone was handed go with them: keys whose secret they rotated are revoked, webhook secrets they got are rotated; members don't rotate", async () => {
+  const { pg, store, connect, call } = await setup();
+  const ana = await connect("Ana");
+  const ben = await connect("Ben");
+  const mem = await connect("Mem");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'member')", [ws.id, ben.user.id, mem.user.id]);
+  const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
+  const key = (await call(ana.client, "create_api_key", { app_id: a.id, environment: "live", label: "prod" })).data;
+  const hook = (await call(ana.client, "create_webhook", { app_id: a.id, url: "http://127.0.0.1:9/ana", events: ["product.version_published"] })).data;
+  assert.match((await call(mem.client, "rotate_webhook_secret", { webhook_id: hook.id })).data.error, /owners and admins rotate/);
+  // Ben (an admin) rotates both: he holds their current secrets.
+  await call(ben.client, "rotate_api_key", { key_id: key.id });
+  const bensSecret = (await call(ben.client, "rotate_webhook_secret", { webhook_id: hook.id })).data.secret;
+  const before = (await pg.query("SELECT secret FROM financial_products.webhooks WHERE id = $1", [hook.id])).rows[0].secret;
+  assert.equal(before, bensSecret);
+  const cut = (await call(ana.client, "remove_workspace_member", { workspace_id: ws.id, user_id: ben.user.id })).data.access_cut;
+  assert.deepEqual(cut.revoked_api_keys, [key.id]);
+  assert.deepEqual(cut.rotated_webhook_secrets, [hook.id]);
+  assert.equal((await store.getApiKey(key.id)).status, "revoked");
+  const after = (await pg.query("SELECT secret, disabled_at, last_secret_issued_to FROM financial_products.webhooks WHERE id = $1", [hook.id])).rows[0];
+  assert.notEqual(after.secret, bensSecret, "Ben's secret no longer signs anything");
+  assert.equal(after.disabled_at, null, "Ana's webhook keeps delivering");
+  assert.equal(after.last_secret_issued_to, null);
 });

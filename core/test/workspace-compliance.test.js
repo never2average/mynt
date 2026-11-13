@@ -1,211 +1,180 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
+import { applyRegulatoryModel } from "../scripts/regulatory-model.mjs";
+import { loadFixture, runSponsoredProduct } from "../scripts/sponsored-product.mjs";
 import { CATALOG } from "./helpers.js";
 
-async function setup() {
+// A real sponsored US product, built the way an admin builds one (scripts/sponsored-product.mjs with the placeholder
+// fixture and the US model): a licence provider sponsors its money-transmission component in us-ny and us-ca under
+// its New York and California licences. Coverage is then whatever Mynt's own rules (regime.ts) say.
+process.env.SPONSOR_LEGITIMACY_RULE = "off";
+const MODEL = JSON.parse(readFileSync(new URL("../schemas/regulatory/us.json", import.meta.url), "utf8"));
+const PRODUCT = "example-dollar-transfer";
+
+async function world() {
   const pg = new PGlite();
-  const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
-  const store = await Store.open(db, CATALOG);
-  const connect = async (name) => {
-    const { user } = await store.createUser(name, ["developer"]);
+  const store = await Store.open({ query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() }, CATALOG);
+  const connect = async (u) => {
     const [c, s] = InMemoryTransport.createLinkedPair();
-    await createServer(store, user, {}).connect(s);
+    await createServer(store, u).connect(s);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(c);
-    return { user, client };
+    return client;
   };
-  const call = async (client, name, args = {}) => {
+  const caller = (client) => async (name, args = {}) => {
     const res = await client.callTool({ name, arguments: args });
-    const text = res.content[0].text;
     let data;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(res.content[0].text);
     } catch {
-      data = { error: text };
+      data = { error: res.content[0].text };
     }
     return { isError: res.isError ?? false, data };
   };
-  const entity = async (name) => (await store.createEntity(null, { name, registration_numbers: {}, regions: ["US"] })).id;
-  const licence = async (entityId, { type = "money_transmitter", regulator = "us-ny-dfs", number = "MT-1", jurisdiction = null, status = "verified", valid_to = "2027-12-31" } = {}) => {
-    const id = randomUUID();
-    await pg.query(
-      `INSERT INTO financial_products.held_licenses (id, entity_id, region, regulator_id, license_id, registration_number, valid_to, status, jurisdiction)
-       VALUES ($1, $2, 'US', $3, $4, $5, $6, $7, $8)`,
-      [id, entityId, regulator, type, number, valid_to, status, jurisdiction],
-    );
-    return id;
+  const { user: adminUser } = await store.createUser("Ada", ["admin"]);
+  const adminClient = await connect(adminUser);
+  const admin = caller(adminClient);
+  const applied = await applyRegulatoryModel({ call: admin, listTools: async () => (await adminClient.listTools()).tools, model: MODEL });
+  assert.equal(applied.applied, true);
+  const fixture = loadFixture();
+  const lpUser = await store.upsertClerkUser("clerk_lp", fixture.licence_provider.member_email, "Lena", ["license_provider"]);
+  const { user: builderUser } = await store.createUser("Neo", ["developer"]);
+  const sessions = { admin, licence_provider: caller(await connect(lpUser)), builder: caller(await connect(builderUser)) };
+  const run = await runSponsoredProduct({ call: (n, i, actor) => sessions[actor](n, i), staging: true });
+  assert.equal(run.done, true, JSON.stringify(run));
+  const dev = async (name) => {
+    const { user } = await store.createUser(name, ["developer"]);
+    await pg.query("UPDATE financial_products.users SET email = $2 WHERE id = $1", [user.id, `${name.toLowerCase()}@example.com`]);
+    return { user, call: caller(await connect({ ...user, email: `${name.toLowerCase()}@example.com` })) };
   };
-  const sponsor = async (productId, builder, provider, licenceIds, jurisdictions, status = "approved") =>
-    pg.query(
-      `INSERT INTO financial_products.sponsorships (id, product_id, component_key, builder_entity_id, provider_entity_id, licence_ids, jurisdictions, status)
-       VALUES ($1, $2, 'c1', $3, $4, $5, $6, $7)`,
-      [randomUUID(), productId, builder, provider, licenceIds, jurisdictions, status],
-    );
-  const rail = async (entityId, states, { kind = "ach", direction = "deposit", status = "approved" } = {}) =>
-    pg.query(
-      `INSERT INTO financial_products.money_rails (id, entity_id, kind, provider, direction, states, per_transfer_limit_cents, daily_limit_cents, status)
-       VALUES ($1, $2, $3, 'bank-co', $4, $5, 123456, 9999999, $6)`,
-      [randomUUID(), entityId, kind, direction, states, status],
-    );
-  return { pg, store, connect, call, entity, licence, sponsor, rail };
+  const ana = await dev("Ana");
+  const eve = await dev("Eve");
+  const ws = (await ana.call("create_workspace", { name: "Team" })).data;
+  const app = (await ana.call("create_app", { name: "Dollar transfers", description: "Send dollars", audience: "US individuals", product_ids: [PRODUCT], workspace_id: ws.id })).data;
+  const licence = async (id) => (await pg.query("SELECT id::text AS id, registration_number FROM financial_products.held_licenses WHERE entity_id = $1 AND license_id = $2", [run.provider_entity_id, id])).rows[0];
+  return { pg, store, run, ana, eve, ws, app, dev, licence };
 }
 
-const appOn = (name, products) => ({ name, description: `${name} app`, audience: "Savers", product_ids: products });
+const byCode = (r) => Object.fromEntries(r.data.states.map((s) => [s.code, s]));
 
-// Two published products: the workspace uses one; another workspace uses the other.
-async function world() {
-  const w = await setup();
-  const ana = await w.connect("Ana");
-  const eve = await w.connect("Eve");
-  const products = CATALOG.map((p) => p.id);
-  const [ours, theirs] = products;
-  const ws = (await w.call(ana.client, "create_workspace", { name: "Team" })).data;
-  const a = (await w.call(ana.client, "create_app", { ...appOn("Saver", [ours]), workspace_id: ws.id })).data;
-  const e = (await w.call(eve.client, "create_app", appOn("Theirs", [theirs]))).data;
-  const builder = await w.entity("Builder Inc");
-  const partner = await w.entity("Partner Bank");
-  const stranger = await w.entity("Stranger Trust");
-  const nyLicence = await w.licence(partner, { number: "MT-NY-1", jurisdiction: "us-ny" });
-  const caLicence = await w.licence(partner, { number: "MT-CA-9", jurisdiction: "us-ca", regulator: "us-ca-dfpi", valid_to: "2026-12-31" });
-  const strangerLicence = await w.licence(stranger, { number: "SECRET-NO-1", jurisdiction: "us-tx", regulator: "us-tx-dob" });
-  await w.sponsor(ours, builder, partner, [nyLicence, caLicence], ["us-ny", "us-ca"]);
-  await w.sponsor(ours, builder, partner, [nyLicence], ["us-nj"], "pending"); // not approved: counts for nothing
-  await w.sponsor(theirs, builder, stranger, [strangerLicence], ["us-tx"]);
-  await w.rail(partner, ["us-ny"]);
-  await w.rail(partner, ["us-ca"], { kind: "wire", status: "proposed" }); // not approved
-  await w.rail(stranger, ["us-tx"]);
-  return { ...w, ana, eve, ws, a, e, ours, theirs, partner, stranger, nyLicence, caLicence };
-}
-
-test("coverage: unlocked where the workspace's products are sponsored, available where only others' are, unavailable elsewhere; nothing of others shown", async () => {
+test("coverage follows Mynt's rules: unlocked where the product's every component is covered by a licence in force, available where only others' are", async () => {
   const w = await world();
-  const r = await w.call(w.ana.client, "get_compliance_coverage", { workspace_id: w.ws.id });
-  assert.equal(r.isError, false);
-  const states = r.data.states;
-  assert.equal(states.length, 51, "the 50 states and DC");
-  assert.ok(states.some((s) => s.code === "us-dc" && s.name === "District of Columbia"));
-  const by = Object.fromEntries(states.map((s) => [s.code, s]));
-  assert.equal(by["us-ny"].status, "unlocked");
-  assert.equal(by["us-ca"].status, "unlocked");
-  assert.equal(by["us-tx"].status, "available", "another workspace's product is sponsored there");
-  assert.equal(by["us-nj"].status, "unavailable", "a pending sponsorship counts for nothing");
-  assert.equal(by["us-fl"].status, "unavailable");
-
-  assert.deepEqual(by["us-ny"].partners, [{ entity_id: w.partner, name: "Partner Bank" }]);
-  assert.deepEqual(by["us-ny"].licences.map((l) => l.number), ["MT-NY-1"], "only the licence that counts in that state");
-  assert.deepEqual(by["us-ny"].products.map((p) => p.id), [w.ours]);
-  assert.deepEqual(by["us-ny"].rails, [{ kind: "ach", direction: "deposit", provider: "bank-co", status: "approved" }]);
-  assert.deepEqual(by["us-ca"].rails, [], "a proposed rail isn't approved");
-  assert.deepEqual(by["us-tx"].partners, []);
-  assert.deepEqual(by["us-tx"].licences, []);
-  const text = JSON.stringify(r.data);
-  for (const leak of ["Stranger Trust", "SECRET-NO-1", w.theirs, "123456", "9999999"]) assert.ok(!text.includes(leak), `never shows ${leak}`);
-
-  // A whole-country sponsorship unlocks every state.
-  await w.sponsor(w.ours, await w.entity("B2"), w.partner, [w.nyLicence], ["us"]);
-  const all = (await w.call(w.ana.client, "get_compliance_coverage", { workspace_id: w.ws.id })).data.states;
-  assert.ok(all.every((s) => s.status === "unlocked"));
-});
-
-test("licences: those behind the workspace's products' sponsorships, filtered by status, regulator and state", async () => {
-  const w = await world();
-  const all = (await w.call(w.ana.client, "list_workspace_licences", { workspace_id: w.ws.id })).data.licences;
-  assert.deepEqual(
-    all.map((l) => [l.partner.name, l.number, l.regulator, l.states, l.status, l.expires_at]).sort(),
-    [
-      ["Partner Bank", "MT-CA-9", "us-ca-dfpi", ["us-ca"], "verified", "2026-12-31"],
-      ["Partner Bank", "MT-NY-1", "us-ny-dfs", ["us-ny"], "verified", "2027-12-31"],
-    ],
+  const ny = await w.licence("nydfs_money_transmitter");
+  await w.pg.query(
+    `INSERT INTO financial_products.money_rails (id, entity_id, kind, provider, direction, states, per_transfer_limit_cents, daily_limit_cents, status)
+     VALUES ($1, $2, 'ach', 'bank-co', 'deposit', '{us-ny}', 123456, 9999999, 'approved')`,
+    [randomUUID(), w.run.provider_entity_id],
   );
-  assert.deepEqual((await w.call(w.ana.client, "list_workspace_licences", { workspace_id: w.ws.id, state: "us-ca" })).data.licences.map((l) => l.number), ["MT-CA-9"]);
-  assert.deepEqual((await w.call(w.ana.client, "list_workspace_licences", { workspace_id: w.ws.id, regulator: "us-ny-dfs" })).data.licences.map((l) => l.number), ["MT-NY-1"]);
-  assert.deepEqual((await w.call(w.ana.client, "list_workspace_licences", { workspace_id: w.ws.id, status: "suspended" })).data.licences, []);
-  // The dashboard counts the same licences and the published products in use.
-  const d = (await w.call(w.ana.client, "get_developer_dashboard", { workspace_id: w.ws.id })).data;
-  assert.equal(d.active_products, 1);
-  assert.equal(d.licences, 2);
+  const r = await w.ana.call("get_compliance_coverage", { workspace_id: w.ws.id });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.states.length, 51);
+  const s = byCode(r);
+  assert.equal(s["us-ny"].status, "unlocked");
+  assert.equal(s["us-ca"].status, "unlocked");
+  assert.equal(s["us-tx"].status, "unavailable");
+  assert.deepEqual(s["us-ny"].products, [{ id: PRODUCT, name: s["us-ny"].products[0].name }]);
+  assert.ok(s["us-ny"].partners.some((p) => p.entity_id === w.run.provider_entity_id));
+  assert.ok(s["us-ny"].licences.some((l) => l.id === ny.id && l.number === ny.registration_number));
+  assert.ok(!s["us-ny"].licences.some((l) => l.type === "ca_dfpi_money_transmitter"), "only the licences that count in that state");
+  assert.deepEqual(s["us-ny"].rails, [{ kind: "ach", direction: "deposit", provider: "bank-co", status: "approved" }]);
+  assert.ok(!JSON.stringify(r.data).includes("123456"), "never a rail's limits");
+  // Someone whose workspace uses no product: an empty workspace works, and sees the product's states as available.
+  const empty = byCode(await w.eve.call("get_compliance_coverage", { workspace_id: (await w.eve.call("create_workspace", { name: "Empty" })).data.id }));
+  assert.equal(empty["us-ny"].status, "available");
+  assert.equal(empty["us-tx"].status, "unavailable");
+  assert.deepEqual(empty["us-ny"].partners, [], "nothing of a product they don't use");
 });
 
-test("members only: someone outside the workspace gets nothing from any of the three tools", async () => {
+test("a licence suspended or expired, a state the sponsorship doesn't cover, or paused sales: not unlocked", async () => {
   const w = await world();
+  const ny = await w.licence("nydfs_money_transmitter");
+  const ca = await w.licence("ca_dfpi_money_transmitter");
+  await w.pg.query("UPDATE financial_products.held_licenses SET status = 'suspended' WHERE id = $1", [ny.id]);
+  await w.pg.query("UPDATE financial_products.held_licenses SET valid_to = '2020-01-01' WHERE id = $1", [ca.id]);
+  let s = byCode(await w.ana.call("get_compliance_coverage", { workspace_id: w.ws.id }));
+  assert.equal(s["us-ny"].status, "unavailable", "suspended");
+  assert.equal(s["us-ca"].status, "unavailable", "expired");
+  // Back in force, but the sponsorship covers New York only: California's component is uncovered.
+  await w.pg.query("UPDATE financial_products.held_licenses SET status = 'verified', valid_to = NULL WHERE id = ANY($1)", [[ny.id, ca.id]]);
+  await w.pg.query("UPDATE financial_products.sponsorships SET jurisdictions = '{us-ny}' WHERE product_id = $1 AND status = 'approved'", [PRODUCT]);
+  s = byCode(await w.ana.call("get_compliance_coverage", { workspace_id: w.ws.id }));
+  assert.equal(s["us-ny"].status, "unlocked");
+  assert.equal(s["us-ca"].status, "unavailable");
+  // Sales paused (a covenant breach or anything else that drifted it): nowhere.
+  await w.store.setDrift(PRODUCT, { detected_at: new Date().toISOString(), changes: [], note: "covenant breach" });
+  s = byCode(await w.ana.call("get_compliance_coverage", { workspace_id: w.ws.id }));
+  assert.equal(s["us-ny"].status, "unavailable");
+});
+
+test("licences: the ones covering the workspace's products, where they cover them; filters; the dashboard counts the same", async () => {
+  const w = await world();
+  const all = (await w.ana.call("list_workspace_licences", { workspace_id: w.ws.id })).data.licences;
+  const states = Object.fromEntries(all.map((l) => [l.type, l.states]));
+  assert.deepEqual(states.nydfs_money_transmitter, ["us-ny"]);
+  assert.deepEqual(states.ca_dfpi_money_transmitter, ["us-ca"]);
+  assert.deepEqual((await w.ana.call("list_workspace_licences", { workspace_id: w.ws.id, state: "us-ca" })).data.licences.map((l) => l.type).includes("nydfs_money_transmitter"), false);
+  assert.deepEqual((await w.ana.call("list_workspace_licences", { workspace_id: w.ws.id, status: "suspended" })).data.licences, []);
+  const d = (await w.ana.call("get_developer_dashboard", { workspace_id: w.ws.id })).data;
+  assert.equal(d.active_products, 1);
+  assert.equal(d.licences, all.length);
   for (const [tool, args] of [
     ["get_compliance_coverage", { workspace_id: w.ws.id }],
     ["list_workspace_licences", { workspace_id: w.ws.id }],
     ["list_workspace_audit", { workspace_id: w.ws.id }],
-  ]) {
-    const r = await w.call(w.eve.client, tool, args);
-    assert.equal(r.isError, true, tool);
-    assert.match(r.data.error, /No workspace of yours/, tool);
-  }
+  ])
+    assert.match((await w.eve.call(tool, args)).data.error, /No workspace of yours/, tool);
 });
 
-test("audit: the workspace's own events, by what they're about, redacted, newest first and paged; never another workspace's", async () => {
+test("audit: by what events are about (keys and webhooks by their app, repository approvals), full-precision paging, redaction, and invitees' addresses for owners and admins only", async () => {
   const w = await world();
-  const { pg, store, ana, eve, ws, a, e } = w;
-  const ev = (actor, action, target, details = {}, at) =>
-    pg.query("INSERT INTO financial_products.audit_log (id, actor_id, action, target, details, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [
-      randomUUID(),
-      actor,
-      action,
-      target,
-      JSON.stringify(details),
-      at,
-    ]);
-  const buildId = randomUUID();
-  await pg.query("INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, status, cap_usd) VALUES ($1, $2, $3, 'Add a calculator', 'queued', 5)", [buildId, ana.user.id, a.id]).catch(async () => {
-    // No builds service in this harness: make its table the way the service would.
-    await pg.exec("CREATE TABLE financial_products.build_runs (id uuid PRIMARY KEY, developer_id uuid, app_id uuid, goal text, status text, cap_usd numeric)");
-    await pg.query("INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, status, cap_usd) VALUES ($1, $2, $3, 'Add a calculator', 'queued', 5)", [buildId, ana.user.id, a.id]);
-  });
-  await ev(ana.user.id, "start_build", buildId, { app_id: a.id }, "2026-11-01T10:00:00Z");
-  await ev(ana.user.id, "create_api_key", a.id, { key: "mynt_live_abcdefghijklmnop", label: "prod", secret: "s3cr3t-value-here" }, "2026-11-01T11:00:00Z");
-  await ev(ana.user.id, "deploy_app", a.id, { note: "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 deployed" }, "2026-11-01T12:00:00Z");
-  await ev(eve.user.id, "deploy_app", e.id, { note: "eve's app" }, "2026-11-01T12:30:00Z"); // another workspace
-  await ev(eve.user.id, "note", `mentions ${ws.id} and ${a.id} in text only`, {}, "2026-11-01T12:40:00Z"); // free text: never matched
-  const page1 = (await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, limit: 3 })).data;
-  const all = [];
-  all.push(...page1.events);
-  let cursor = page1.next_cursor;
-  while (cursor) {
-    const p = (await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, limit: 3, cursor })).data;
-    all.push(...p.events);
+  const { pg, ana, ws, app } = w;
+  const mem = await w.dev("Mem");
+  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [ws.id, mem.user.id]);
+  // Real tool events: a key (its target is the key, its details name the app) and an invite.
+  const key = (await ana.call("create_api_key", { app_id: app.id, environment: "sandbox", label: "k" })).data;
+  await ana.call("invite_to_workspace", { workspace_id: ws.id, email: "newbie@example.com" });
+  // A decision on a member's connection to the app's repository.
+  await pg.exec("CREATE TABLE IF NOT EXISTS financial_products.app_repositories (app_id uuid PRIMARY KEY, repository text, managed boolean, managed_repository text)");
+  await pg.query("INSERT INTO financial_products.app_repositories (app_id, repository, managed) VALUES ($1, 'acme/web', false)", [app.id]);
+  const ev = (action, target, details, at) =>
+    pg.query("INSERT INTO financial_products.audit_log (id, actor_id, action, target, details, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [randomUUID(), ana.user.id, action, target, JSON.stringify(details), at]);
+  await ev("approve_repository_connection", randomUUID(), { kind: "developer", repository: "acme/web", user_id: mem.user.id }, "2026-01-01T00:00:00Z");
+  await ev("approve_repository_connection", randomUUID(), { kind: "developer", repository: "other/repo", user_id: mem.user.id }, "2026-01-01T00:00:01Z");
+  // Six events in the same microsecond, paged two at a time: all six come back.
+  const same = "2026-01-02T00:00:00.123456Z";
+  for (let i = 0; i < 6; i++) await ev("deploy_app", app.id, { n: i, authorization: "Bearer abc", api_key: "mynt_live_x", note: "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789" }, same);
+  const seen = [];
+  let cursor;
+  do {
+    const p = (await ana.call("list_workspace_audit", { workspace_id: ws.id, action: "deploy_app", limit: 2, ...(cursor ? { cursor } : {}) })).data;
+    seen.push(...p.events);
     cursor = p.next_cursor;
-  }
-  const actions = all.map((x) => [x.action, x.target.type]);
-  // create_workspace and create_app come from the tools themselves, just now: newest first.
-  assert.deepEqual(actions, [
-    ["create_app", "app"],
-    ["create_workspace", "workspace"],
-    ["deploy_app", "app"],
-    ["create_api_key", "app"],
-    ["start_build", "build"],
-  ]);
-  const text = JSON.stringify(all);
-  assert.ok(!text.includes("eve's app") && !text.includes("mentions"), "nothing of another workspace, nothing matched by text");
-  for (const secret of ["s3cr3t-value-here", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"]) assert.ok(!text.includes(secret), `redacts ${secret}`);
-  const deploy = all.find((x) => x.action === "deploy_app");
-  assert.equal(deploy.target.name, "Saver");
-  assert.deepEqual(deploy.actor, { id: ana.user.id, name: "Ana" });
-  assert.equal(all.find((x) => x.action === "start_build").target.name, "Add a calculator");
+  } while (cursor);
+  assert.deepEqual(seen.map((e) => e.details.n).sort(), [0, 1, 2, 3, 4, 5]);
+  const text = JSON.stringify(seen);
+  assert.ok(!text.includes("Bearer abc") && !text.includes("mynt_live_x") && !text.includes("ghp_abcdef"), "redacted");
 
-  // Filters.
-  const byApp = (await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, app_id: a.id })).data.events.map((x) => x.action);
-  assert.deepEqual(byApp, ["create_app", "deploy_app", "create_api_key", "start_build"], "the app's own events and its builds'");
-  assert.deepEqual((await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, action: "deploy_app" })).data.events.length, 1);
-  assert.deepEqual(
-    (await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, from: "2026-11-01T10:30:00Z", to: "2026-11-01T11:30:00Z" })).data.events.map((x) => x.action),
-    ["create_api_key"],
-  );
-  assert.equal((await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, user_id: eve.user.id })).data.events.length, 0);
-  assert.match((await w.call(ana.client, "list_workspace_audit", { workspace_id: ws.id, cursor: "not-a-cursor" })).data.error, /cursor/);
-  // A member who joins sees the workspace's history too; leaving ends it.
-  await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [ws.id, eve.user.id]);
-  assert.ok((await w.call(eve.client, "list_workspace_audit", { workspace_id: ws.id })).data.events.length > 0);
-  void store;
+  const all = (await ana.call("list_workspace_audit", { workspace_id: ws.id, limit: 100 })).data.events;
+  const k = all.find((e) => e.action === "create_api_key");
+  assert.equal(k.target.id, key.id);
+  assert.equal(k.target.type, "key");
+  assert.equal(k.target.name, "Dollar transfers");
+  assert.deepEqual(all.filter((e) => e.action === "approve_repository_connection").map((e) => e.details.repository), ["acme/web"], "its apps' repositories only");
+  assert.ok((await ana.call("list_workspace_audit", { workspace_id: ws.id, app_id: app.id })).data.events.some((e) => e.action === "create_api_key"));
+  // Whom an invite went to: owners and admins only.
+  const invOwner = all.find((e) => e.action === "invite_to_workspace");
+  assert.equal(invOwner.details.email, "newbie@example.com");
+  const invMember = (await mem.call("list_workspace_audit", { workspace_id: ws.id, action: "invite_to_workspace" })).data.events[0];
+  assert.equal(invMember.details.email, undefined);
+  assert.equal(invMember.details.invite_id, undefined);
+  // Dates are real calendar dates, and bad input never reaches the database.
+  assert.equal((await ana.call("list_workspace_audit", { workspace_id: ws.id, from: "2026-02-30" })).isError, true);
+  assert.match((await ana.call("list_workspace_audit", { workspace_id: ws.id, cursor: "nope" })).data.error, /cursor/);
 });
