@@ -10,6 +10,7 @@ export type WorkspaceSupport = {
   dashboardByWorkspace: boolean; // get_developer_dashboard takes workspace_id
   buildsByWorkspace: boolean; // list_builds takes workspace_id (teammates' builds too)
   createByWorkspace: boolean; // create_app takes workspace_id
+  invitations: boolean; // list_my_invitations, accept_workspace_invite and decline_workspace_invite
 };
 
 type Tool = { name: string; inputSchema?: unknown };
@@ -25,6 +26,7 @@ export function workspaceSupport(tools: Tool[]): WorkspaceSupport {
     dashboardByWorkspace: takes(tools, "get_developer_dashboard", "workspace_id"),
     buildsByWorkspace: takes(tools, "list_builds", "workspace_id"),
     createByWorkspace: takes(tools, "create_app", "workspace_id"),
+    invitations: ["list_my_invitations", "accept_workspace_invite", "decline_workspace_invite"].every((n) => tools.some((t) => t.name === n)),
   };
 }
 
@@ -67,6 +69,12 @@ export async function resolveWorkspace(mynt: Client, requested: string | null, s
   if (!requested || !support.workspaces) return null;
   const mine = await loadWorkspaces(mynt, support);
   return mine.some((w) => w.id === requested && !w.implicit) ? requested : null;
+}
+
+// The user's own workspace on Mynt (list_workspaces marks it personal), if Mynt has one.
+export async function ownWorkspace(mynt: Client, support: WorkspaceSupport): Promise<string | null> {
+  if (!support.workspaces) return null;
+  return (await loadWorkspaces(mynt, support)).find((w) => w.personal && !w.implicit)?.id ?? null;
 }
 
 // What a shared workspace's page says when this Mynt can't scope that data to it yet. The studio

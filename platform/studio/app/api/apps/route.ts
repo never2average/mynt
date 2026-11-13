@@ -4,15 +4,20 @@ import { fromOwnOrigin } from "@/lib/session";
 import { sessionStore } from "@/lib/session-store";
 import { callStudioTool, certainlyNotDone, GENERIC_REFUSAL, listMyntTools, ToolRefusedError } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
-import { resolveWorkspace, workspaceOf, workspaceSupport } from "@/lib/workspace-server";
+import { ownWorkspace, resolveWorkspace, workspaceOf, workspaceSupport } from "@/lib/workspace-server";
+
+const CHOOSE_WORKSPACE = "Choose the workspace for this app in the switcher, then try again.";
+// Mynt's refusal when it can't tell which workspace an app belongs in.
+const asksForWorkspace = (message: string) => /choose a workspace|workspace_id|which workspace/i.test(message);
 
 export const dynamic = "force-dynamic";
 
 // New app: creates a draft app on the picked products (create_app), then starts its first
 // build with the prompt as the goal (start_build; in session mode where Mynt offers it, so the
 // chat can keep steering it). The page then opens the app's workspace on that build. The app is
-// created in the selected workspace; a shared workspace this Mynt can't create apps in yet is
-// refused rather than the app landing somewhere else.
+// created in the selected workspace, always named: in Personal, the user's own workspace (Mynt
+// doesn't default into workspaces they were invited to). A shared workspace this Mynt can't
+// create apps in yet is refused rather than the app landing somewhere else.
 export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
   const parsed = NewAppRequest.safeParse(await req.json().catch(() => null));
@@ -23,9 +28,11 @@ export async function POST(req: Request) {
   return asDeveloper("creating an app", async (mynt, session) => {
     const tools = await listMyntTools(mynt);
     const support = workspaceSupport(tools);
-    const workspace = await resolveWorkspace(mynt, requested, support);
-    if (workspace && !support.createByWorkspace)
+    const selected = await resolveWorkspace(mynt, requested, support);
+    if (selected && !support.createByWorkspace)
       return json({ error: "unsupported", message: "Creating apps in a shared workspace comes with Mynt's next update. Switch to Personal to create one now." }, 501);
+    const workspace = selected ?? (support.createByWorkspace ? await ownWorkspace(mynt, support) : null);
+    if (support.createByWorkspace && support.workspaces && !workspace) return json({ error: "choose_workspace", message: CHOOSE_WORKSPACE }, 409);
     const scope = workspace ? { workspace_id: workspace } : {};
 
     // The same request twice (a double click) creates one app.
@@ -42,6 +49,7 @@ export async function POST(req: Request) {
       // anything, or it was never sent). After a timeout or a lost reply it may exist, so the
       // claim stays: a retry can't create a second app.
       if (certainlyNotDone(err)) await release();
+      if (err instanceof ToolRefusedError && asksForWorkspace(err.message)) return json({ error: "choose_workspace", message: CHOOSE_WORKSPACE }, 409);
       throw err;
     }
 

@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 
 import { DashboardView } from "@/components/dashboard-view";
+import { InvitationsBanner } from "@/components/invitations";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +19,7 @@ type State = { dashboard: Dashboard } | { unavailable: string } | { error: strin
 export default function DashboardPage() {
   const [state, setState] = useState<State>(null);
   const [linked, setLinked] = useState<LinkedAccounts | null>(null);
-  const { selected, loading } = useWorkspace();
+  const { selected, loading, invitations, answerInvitation } = useWorkspace();
 
   // The linked GitHub and wallet; read again when the user comes back (from linking one on the
   // identity provider's page) or returns to the tab.
@@ -78,6 +79,7 @@ export default function DashboardPage() {
           </Link>
         </Button>
       </SiteHeader>
+      <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
       {state === null ? (
         <div className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-5 lg:p-6">
           {[0, 1, 2, 3, 4].map((i) => (

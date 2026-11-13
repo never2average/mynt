@@ -15,7 +15,8 @@ export type Role = (typeof ROLES)[number];
 export const ASSIGNABLE_ROLES = ["admin", "member"] as const;
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
 
-export type Workspace = { id: string; name: string; role: Role; implicit?: boolean };
+// `personal`: the user's own workspace on Mynt (where their apps go unless they pick another).
+export type Workspace = { id: string; name: string; role: Role; implicit?: boolean; personal?: boolean };
 
 export const PERSONAL_ID = "personal";
 export const PERSONAL: Workspace = { id: PERSONAL_ID, name: "Personal", role: "owner", implicit: true };
@@ -32,13 +33,16 @@ export function fromListWorkspaces(reply: unknown): Workspace[] {
   const list = Array.isArray(reply) ? reply : isObj(reply) && Array.isArray(reply.workspaces) ? reply.workspaces : [];
   return list.filter(isObj).flatMap((w) => {
     const id = str(w.id) ?? str(w.workspace_id);
-    return id && WORKSPACE_ID.test(id) ? [{ id, name: str(w.name) ?? "Untitled workspace", role: role(w.role ?? w.my_role) }] : [];
+    if (!id || !WORKSPACE_ID.test(id)) return [];
+    const personal = w.personal === true || w.kind === "personal" || w.type === "personal";
+    return [{ id, name: str(w.name) ?? "Untitled workspace", role: role(w.role ?? w.my_role), ...(personal ? { personal } : {}) }];
   });
 }
 
-// The workspace to show: the remembered one if it's still the user's, else the first.
+// The workspace to show: the remembered one if it's still the user's, else their own, else the
+// first.
 export function selectWorkspace(workspaces: Workspace[], remembered: string | null | undefined): Workspace {
-  return workspaces.find((w) => w.id === remembered) ?? workspaces[0] ?? PERSONAL;
+  return workspaces.find((w) => w.id === remembered) ?? workspaces.find((w) => w.personal) ?? workspaces[0] ?? PERSONAL;
 }
 
 export const canManageMembers = (r: Role | undefined) => r === "owner" || r === "admin";

@@ -94,6 +94,13 @@ describe("STUDIO_TOOLS", () => {
     ok("get_developer_dashboard", { days: 30, workspace_id: "w1" });
     ok("get_linked_accounts", {});
     bad("get_linked_accounts", { user_id: "u2" });
+    ok("list_my_invitations", {});
+    bad("list_my_invitations", { user_id: "u2" });
+    ok("accept_workspace_invite", { invite_id: "inv1" });
+    bad("accept_workspace_invite", { invite_id: "../inv1" });
+    bad("accept_workspace_invite", { invite_id: "inv1", workspace_id: "w1" });
+    ok("decline_workspace_invite", { invite_id: "inv1" });
+    bad("decline_workspace_invite", {});
   });
 
   it("lets developers, innovators and admins in", () => {

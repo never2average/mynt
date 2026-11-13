@@ -24,6 +24,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
+import type { Invitation } from "@/lib/invitations"
 import { groupByStage, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
@@ -37,15 +38,25 @@ export type SidebarViewProps = {
   pathname: string
   onSelectWorkspace: (id: string) => void
   onCreateWorkspace: (name: string) => Promise<string | null>
+  invitations?: Invitation[]
+  onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        <TeamSwitcher workspaces={workspaces} selected={selected} supported={supported} onSelect={onSelectWorkspace} onCreate={onCreateWorkspace} />
+        <TeamSwitcher
+          workspaces={workspaces}
+          selected={selected}
+          supported={supported}
+          onSelect={onSelectWorkspace}
+          onCreate={onCreateWorkspace}
+          invitations={invitations}
+          onAnswerInvitation={onAnswerInvitation}
+        />
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
@@ -72,7 +83,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname()
-  const { workspaces, selected, supported, select, reload } = useWorkspace()
+  const { workspaces, selected, supported, select, reload, invitations, answerInvitation } = useWorkspace()
   const [groups, setGroups] = useState<Record<Stage, StagedApp[]> | null>(null)
   const [account, setAccount] = useState<Account>({ name: null, email: null })
 
@@ -125,6 +136,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       pathname={pathname}
       onSelectWorkspace={select}
       onCreateWorkspace={create}
+      invitations={invitations}
+      onAnswerInvitation={answerInvitation}
     />
   )
 }

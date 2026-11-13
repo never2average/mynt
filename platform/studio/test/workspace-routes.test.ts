@@ -16,6 +16,8 @@ const fake = {
   tools: WITH_WORKSPACES as { name: string; inputSchema?: unknown }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
   myRole: "owner",
+  personal: false, // list_workspaces includes the user's own workspace
+  refuse: {} as Record<string, string>, // tool -> Mynt's refusal text
 };
 
 vi.mock("@/lib/session", () => ({
@@ -40,11 +42,27 @@ vi.mock("@/lib/tokens", () => ({
     callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
       fake.calls.push({ name, args });
       const ok = (data: unknown) => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
+      if (fake.refuse[name]) return { isError: true, content: [{ type: "text", text: fake.refuse[name] }] };
       switch (name) {
         case "whoami":
           return ok({ id: "u1", effective_roles: ["developer"] });
         case "list_workspaces":
-          return ok({ workspaces: [{ id: "w1", name: "Acme", role: fake.myRole }, { id: "w2", name: "Beta", role: "member" }] });
+          return ok({
+            workspaces: [
+              ...(fake.personal ? [{ id: "me", name: "Ines", role: "owner", personal: true }] : []),
+              { id: "w1", name: "Acme", role: fake.myRole },
+              { id: "w2", name: "Beta", role: "member" },
+            ],
+          });
+        case "list_my_invitations":
+          return ok({
+            invitations: [
+              { id: "inv1", workspace: { id: "w7", name: "Gamma" }, invited_by: { name: "Sam Lee", email: "sam@example.com" }, role: "admin" },
+              { id: "../evil", workspace: { id: "w8", name: "Bad" }, role: "member" },
+            ],
+          });
+        case "accept_workspace_invite":
+          return ok({ workspace_id: "w7" });
         case "list_my_apps":
           return ok([{ id: "a1", name: "Cards", status: "published" }]);
         case "list_builds":
@@ -73,6 +91,8 @@ const workspaces = await import("@/app/api/workspaces/route");
 const members = await import("@/app/api/workspaces/[workspaceId]/members/route");
 const linkedAccounts = await import("@/app/api/linked-accounts/route");
 const apps = await import("@/app/api/apps/route");
+const invitationsRoute = await import("@/app/api/invitations/route");
+const invitationRoute = await import("@/app/api/invitations/[inviteId]/route");
 
 const get = (path: string, cookie?: string) => new NextRequest(`http://localhost:3000${path}`, cookie ? { headers: { cookie } } : undefined);
 const send = (method: string, body: unknown) =>
@@ -85,6 +105,8 @@ beforeEach(() => {
   fake.tools = WITH_WORKSPACES;
   fake.calls = [];
   fake.myRole = "owner";
+  fake.personal = false;
+  fake.refuse = {};
   claims.length = 0;
 });
 
@@ -169,6 +191,32 @@ describe("the switcher's scope", () => {
     expect(called("create_app")[0].args).not.toHaveProperty("workspace_id");
   });
 
+  it("in Personal, creates the app in the user's own workspace, never one they were invited to", async () => {
+    const newApp = () =>
+      new NextRequest("http://localhost:3000/api/apps", {
+        method: "POST",
+        headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "A savings goal app for students", product_ids: ["p1"] }),
+      });
+    fake.tools = [...WITH_WORKSPACES, { name: "create_app", inputSchema: props("name", "product_ids", "workspace_id") }];
+    fake.personal = true;
+    expect((await apps.POST(newApp())).status).toBe(201);
+    expect(called("create_app")[0].args).toMatchObject({ workspace_id: "me" });
+    // No own workspace to name: the user is asked to choose, and nothing is created.
+    fake.personal = false;
+    fake.calls = [];
+    const res = await apps.POST(newApp());
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "choose_workspace" });
+    expect(called("create_app")).toEqual([]);
+    // Mynt's own "choose a workspace" refusal reads the same way.
+    fake.personal = true;
+    fake.refuse = { create_app: JSON.stringify({ error: "Choose a workspace for this app" }) };
+    const refused = await apps.POST(newApp());
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).message).toMatch(/Choose the workspace/);
+  });
+
   it("ignores a malformed workspace id", async () => {
     await projects.GET(get("/api/projects?workspace=../../etc"));
     expect(called("list_my_apps")[0].args).toEqual({});
@@ -222,5 +270,44 @@ describe("linked accounts route", () => {
     expect((await (await linkedAccounts.GET()).json()).linked).toMatchObject({ supported: true, github: "ines", manageUrl: "https://accounts.example.com/user" });
     fake.tools = WITH_WORKSPACES;
     expect((await (await linkedAccounts.GET()).json()).linked).toEqual({ supported: false, github: null, wallet: null, manageUrl: null });
+  });
+});
+
+describe("invitations (always explicit)", () => {
+  const INVITE_TOOLS = ["list_my_invitations", "accept_workspace_invite", "decline_workspace_invite"].map((name) => ({ name, inputSchema: props() }));
+  const answer = (id: string, body: unknown, origin = "http://localhost:3000") =>
+    invitationRoute.POST(new Request(`http://localhost:3000/api/invitations/${id}`, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }), {
+      params: Promise.resolve({ inviteId: id }),
+    });
+
+  it("lists pending invitations with workspace, inviter, role and what they grant", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...INVITE_TOOLS];
+    const body = await (await invitationsRoute.GET()).json();
+    expect(body.supported).toBe(true);
+    expect(body.invitations).toHaveLength(1); // the malformed id is dropped
+    expect(body.invitations[0]).toMatchObject({ id: "inv1", workspaceId: "w7", workspaceName: "Gamma", inviter: "Sam Lee", role: "admin" });
+    expect(body.invitations[0].grants.length).toBeGreaterThan(0);
+  });
+
+  it("accept joins and answers the workspace to switch to; decline declines", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...INVITE_TOOLS];
+    const accepted = await answer("inv1", { action: "accept" });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({ ok: true, workspaceId: "w7" });
+    expect(called("accept_workspace_invite")[0].args).toEqual({ invite_id: "inv1" });
+    expect((await answer("inv1", { action: "decline" })).status).toBe(200);
+    expect(called("decline_workspace_invite")[0].args).toEqual({ invite_id: "inv1" });
+  });
+
+  it("refuse other origins, unknown invitations, bad answers and Mynts without invitations", async () => {
+    fake.tools = [...WITH_WORKSPACES, ...INVITE_TOOLS];
+    expect((await answer("inv1", { action: "accept" }, "https://evil.example.com")).status).toBe(403);
+    expect((await answer("inv9", { action: "accept" })).status).toBe(404);
+    expect((await answer("inv1", { action: "join" })).status).toBe(400);
+    expect((await answer("..%2Fx", { action: "accept" })).status).toBe(400);
+    expect(called("accept_workspace_invite")).toEqual([]);
+    fake.tools = WITH_WORKSPACES;
+    expect(await (await invitationsRoute.GET()).json()).toEqual({ supported: false, invitations: [] });
+    expect((await answer("inv1", { action: "accept" })).status).toBe(501);
   });
 });
