@@ -736,10 +736,8 @@ test("a retry never takes back what was granted after: someone removed while the
     assert.match((await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data.access_cut.pending.join(" "), /VM login/);
     // Let back in: a new login, a key and an invite of his own.
     await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')", [ws.id, benUser.id]);
-    provider.revokeAccess = async (id) => {
-      if (id === oldIdentity) throw new Error("provider down");
-      return real.call(provider, id);
-    };
+    // The provider is back by the time he asks for a login (a new one is only given once the last one ends).
+    provider.revokeAccess = real;
     assert.ok((await call(ben, "vm_access", { workspace_id: ws.id })).data.logins?.length);
     const newIdentity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity;
     const key = (await call(ben, "create_api_key", { app_id: w.app.id, environment: "sandbox", label: "mine" })).data;
@@ -754,6 +752,154 @@ test("a retry never takes back what was granted after: someone removed while the
     assert.equal((await w.store.getApiKey(key.id)).status, "active");
     assert.equal((await w.store.db.query("SELECT revoked_at FROM financial_products.workspace_invites WHERE id = $1", [invite.id])).rows[0].revoked_at, null);
     assert.equal((await w.store.db.query("SELECT status FROM financial_products.workspace_offboards WHERE user_id = $1", [benUser.id])).rows[0].status, "superseded");
+  } finally {
+    w.close();
+  }
+});
+
+// An admin of the workspace with a deployed app and a VM login of their own, for the offboarding tests below.
+async function adminWithLogin(w, provider) {
+  const { call, dev } = w;
+  const [ws] = (await call(dev, "list_workspaces")).data;
+  const { user: benUser } = await w.store.createUser("Ben", ["developer"]);
+  await w.store.db.query("UPDATE financial_products.users SET email = 'ben@example.com' WHERE id = $1", [benUser.id]);
+  const ben = await w.connectWith({ ...benUser, email: "ben@example.com" });
+  await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')", [ws.id, benUser.id]);
+  await call(dev, "request_hosting", { workspace_id: ws.id });
+  await w.store.db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved')", [benUser.id]);
+  await call(ben, "deploy_app", { app_id: w.app.id, build_id: await w.build("succeeded") });
+  await w.hosting.pending;
+  assert.ok((await call(ben, "vm_access", { workspace_id: ws.id })).data.logins?.length);
+  const identity = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity;
+  const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
+  const ada = await w.connectWith(adminUser);
+  return { ws, ben, benUser, identity, retry: async () => (await call(ada, "retry_offboard", { workspace_id: ws.id })).data.retried };
+}
+const DIRECT = { ...CONFIG, gatewayEndpoint: "", gatewayPublicKey: "", gatewayIp: "", appsDomain: null };
+
+test("an admin removed while the provider is down and let back in as a member: their admin-era VM login still goes, what they made since stays", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: DIRECT });
+  try {
+    const { call, dev } = w;
+    const { ws, ben, benUser, identity, retry } = await adminWithLogin(w, provider);
+    const real = provider.revokeAccess;
+    provider.revokeAccess = async () => {
+      throw new Error("provider down");
+    };
+    await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id });
+    // Back, as a member only: a key and an invite of his own.
+    await w.store.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [ws.id, benUser.id]);
+    const key = (await call(ben, "create_api_key", { app_id: w.app.id, environment: "sandbox", label: "mine" })).data;
+    const invite = (await call(ben, "invite_to_workspace", { workspace_id: ws.id, email: "friend@example.com" })).data;
+    provider.revokeAccess = real;
+    const [r] = await retry();
+    assert.equal(r.status, "done");
+    assert.equal(r.vm_logins_revoked, 1);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === identity), "the admin-era login is revoked");
+    assert.equal((await w.store.getApiKey(key.id)).status, "active");
+    assert.equal((await w.store.db.query("SELECT revoked_at FROM financial_products.workspace_invites WHERE id = $1", [invite.id])).rows[0].revoked_at, null);
+  } finally {
+    w.close();
+  }
+});
+
+test("if whose VM logins they are can't be read when someone leaves, the VM step isn't skipped: it reads them again on retry", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: DIRECT });
+  try {
+    const { call, dev } = w;
+    const { ws, benUser, identity, retry } = await adminWithLogin(w, provider);
+    const real = w.hosting.loginsHeldBy;
+    w.hosting.loginsHeldBy = async () => {
+      throw new Error("database blip");
+    };
+    const cut = (await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data.access_cut;
+    assert.equal(cut.status, "pending");
+    assert.match(cut.pending.join(" "), /vm:/);
+    assert.ok(!provider.calls.some(([c, id]) => c === "revoke" && id === identity));
+    w.hosting.loginsHeldBy = real;
+    const [r] = await retry();
+    assert.equal(r.status, "done");
+    assert.equal(r.vm_logins_revoked, 1);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === identity));
+  } finally {
+    w.close();
+  }
+});
+
+test("a new VM login isn't given while the last one can't be ended", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: DIRECT });
+  try {
+    const { call } = w;
+    const { ws, ben, identity } = await adminWithLogin(w, provider);
+    const real = provider.revokeAccess;
+    provider.revokeAccess = async () => {
+      throw new Error("provider down");
+    };
+    assert.match((await call(ben, "vm_access", { workspace_id: ws.id })).data.error, /last login couldn't be ended/);
+    assert.equal((await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity, identity, "still on record, to be revoked");
+    provider.revokeAccess = real;
+    assert.ok((await call(ben, "vm_access", { workspace_id: ws.id })).data.logins?.length);
+    assert.ok(provider.calls.some(([c, id]) => c === "revoke" && id === identity));
+  } finally {
+    w.close();
+  }
+});
+
+test("Freestyle: ending a login the provider no longer has is 'already gone', not a failure; other errors still fail", async () => {
+  const { FreestyleProvider } = await import("../dist/freestyle.js");
+  const fetch = async (url, init) => {
+    const path = url.replace("https://api.freestyle.sh/v5", "");
+    if (init.method === "DELETE" && path === "/identities/idn-live") return new Response("{}", { status: 200 });
+    // Freestyle's documented error body (PublicErrorBody: { code, message }) for an identity it doesn't have.
+    if (init.method === "DELETE" && path === "/identities/idn-gone") return new Response(JSON.stringify({ code: "IDENTITY_NOT_FOUND", message: "no such identity in this account" }), { status: 404 });
+    // Other 404s: a route that doesn't exist (wrong base, retired version), an empty reply, another code.
+    if (path === "/identities/idn-html") return new Response("<html>Not Found</html>", { status: 404 });
+    if (path === "/identities/idn-empty") return new Response("", { status: 404 });
+    if (path === "/identities/idn-other") return new Response(JSON.stringify({ code: "NOT_FOUND", message: "route not found" }), { status: 404 });
+    if (path === "/identities/idn-loose") return new Response(JSON.stringify({ error: "IdentityNotFound" }), { status: 404 });
+    return new Response("upstream error", { status: 502 });
+  };
+  const p = new FreestyleProvider("fs_key", { fetch });
+  assert.deepEqual(await p.revokeAccess("idn-live"), {});
+  assert.deepEqual(await p.revokeAccess("idn-gone"), { alreadyGone: true });
+  for (const id of ["idn-html", "idn-empty", "idn-other", "idn-loose"]) await assert.rejects(p.revokeAccess(id), /404/, id);
+  await assert.rejects(p.revokeAccess("idn-broken"), /502/);
+});
+
+test("a login the provider no longer has never locks anyone out: vm_access clears the stale record, and an offboarding's VM step completes", async () => {
+  const provider = fakeDirect();
+  // Like Freestyle: an identity it doesn't have is already gone.
+  const live = new Set();
+  const grant = provider.grantAccess.bind(provider);
+  provider.grantAccess = async (...a) => {
+    const g = await grant(...a);
+    live.add(g.identity);
+    return g;
+  };
+  provider.revokeAccess = async (identity) => {
+    provider.calls.push(["revoke", identity]);
+    return live.delete(identity) ? {} : { alreadyGone: true };
+  };
+  const w = await world({ provider, config: DIRECT });
+  try {
+    const { call, dev } = w;
+    const { ws, ben, benUser, identity, retry } = await adminWithLogin(w, provider);
+    // Deleted in the provider's dashboard: the record still names it.
+    live.delete(identity);
+    const login = (await call(ben, "vm_access", { workspace_id: ws.id })).data;
+    assert.ok(login.logins?.length, JSON.stringify(login));
+    const now = (await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity;
+    assert.notEqual(now, identity, "the stale record is replaced");
+    // The new one vanishes too (an earlier revoke whose answer was lost); Ben is removed: the VM step still completes.
+    live.delete(now);
+    const cut = (await call(dev, "remove_workspace_member", { workspace_id: ws.id, user_id: benUser.id })).data.access_cut;
+    assert.equal(cut.status, "done");
+    assert.equal(cut.vm_logins_revoked, 1);
+    assert.equal((await w.store.db.query("SELECT access_identity FROM financial_products.hosting_tenants WHERE workspace_id = $1", [ws.id])).rows[0].access_identity, null);
+    assert.deepEqual(await retry(), [], "nothing left to retry");
   } finally {
     w.close();
   }
