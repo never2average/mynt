@@ -191,7 +191,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
         inputSchema: { workspace_id: z.string().uuid().optional(), user_id: z.string().uuid().optional() },
       },
       async ({ workspace_id, user_id }) => {
-        const done = await retryOffboards(store, offboardingServices(ctx), { workspace_id, user_id });
+        // An admin's retry takes failed ones too, and ones not yet due.
+        const done = await retryOffboards(store, offboardingServices(ctx), { workspace_id, user_id, force: true });
         await store.audit(user!.id, "retry_offboard", workspace_id ?? "all", { user_id: user_id ?? null, retried: done.length });
         return { content: [{ type: "text" as const, text: JSON.stringify({ retried: done }, null, 2) }] };
       },
@@ -684,20 +685,13 @@ export function offboardingServices(ctx: Pick<AdminContext, "builds" | "hosting"
     ...(ctx.builds ? { stopBuilds: (userId: string, appIds: string[]) => ctx.builds!.stopFor(userId, appIds) } : {}),
     ...(ctx.hosting
       ? {
-          revokeVmAccess: async (workspaceId: string, appIds: string[]) => {
+          vmLoginsOf: async (workspaceId: string, appIds: string[], userId: string) => {
             const tenants = [...(await ctx.hosting!.tenantsHosting(appIds))];
             const own = await ctx.hosting!.tenantOfWorkspace(workspaceId);
             if (own && !tenants.some((t) => t.id === own.id)) tenants.push(own);
-            let revoked = 0;
-            let failed = 0;
-            for (const t of tenants)
-              try {
-                if (await ctx.hosting!.revokeVmAccess(t)) revoked++;
-              } catch {
-                failed++;
-              }
-            return { revoked, failed };
+            return ctx.hosting!.loginsHeldBy(userId, tenants.map((t) => t.id));
           },
+          revokeVmLogin: (tenantId: string, identity: string) => ctx.hosting!.revokeLogin(tenantId, identity),
         }
       : {}),
   };

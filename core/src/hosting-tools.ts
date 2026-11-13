@@ -230,7 +230,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         if (!tenant) return fail("The workspace has no hosting yet (request_hosting)");
       }
       try {
-        const access = await hosting.vmAccess(tenant, hours);
+        const access = await hosting.vmAccess(tenant, hours, user.id);
         await store.audit(user.id, "vm_access", tenant.id, { hours });
         return json({ ...access, user: "developer", note: "Your apps run as containers named mynt-app-<id>: docker ps, docker logs, docker exec." });
       } catch (e) {

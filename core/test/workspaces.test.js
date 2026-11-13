@@ -8,7 +8,8 @@ import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { BuildService, buildConfigFromEnv } from "../dist/builds.js";
 import { ClerkAuth } from "../dist/auth.js";
-import { appStages } from "../dist/workspaces.js";
+import { appStages, releaseLapsedInvites } from "../dist/workspaces.js";
+import { opsStatus } from "../dist/ops.js";
 import { CATALOG } from "./helpers.js";
 
 // A sandbox host that never gets past queueing: these tests are about who may reach a build, not running one.
@@ -245,6 +246,9 @@ test("declining and withdrawing: a declined invite joins nobody; a withdrawn one
   assert.deepEqual((await call(dee.client, "decline_workspace_invite", { invite_id: di.id })).data, { declined: true });
   assert.deepEqual((await call(dee.client, "list_my_invitations")).data.invitations, []);
   assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.workspace_members WHERE user_id = $1", [dee.user.id])).rows[0].n, 0);
+  // She came onto Mynt only to answer it, and joined nothing: declining takes her back off.
+  assert.equal(await store.getInvite("dee@example.com"), undefined);
+  assert.equal((await clerkAuth(store, { t: { sub: "clerk_dee", email: "dee@example.com" } }).authenticate("t")).error, "not_whitelisted");
   // Withdrawn before they ever signed in: no way onto Mynt either.
   const dan = (await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "dan@example.com" })).data;
   await call(ana.client, "revoke_workspace_invite", { invite_id: dan.id });
@@ -420,6 +424,7 @@ test("roles: members can't manage members; only owners make owners; the last own
     "rename_workspace",
     "change_member_role",
     "change_member_role",
+    "workspace_demotion_offboard", // Ana stepping down from owner: her VM logins go (none here)
     "remove_workspace_member",
     "workspace_offboard",
     "leave_workspace",
@@ -619,7 +624,9 @@ test("leaving cuts access at once: the leaver's keys revoked, webhooks disabled,
   const hooks = (await pg.query("SELECT id::text AS id, disabled_at FROM financial_products.webhooks")).rows;
   assert.ok(hooks.find((h) => h.id === bensHook.id).disabled_at && !hooks.find((h) => h.id === anasHook.id).disabled_at);
   // An owner turns Ben's webhook back on: with a new secret, which only she now holds.
-  const back = (await call(ana.client, "enable_webhook", { webhook_id: bensHook.id })).data;
+  assert.match((await call(ana.client, "enable_webhook", { webhook_id: bensHook.id })).data.error, /expected string|url/i, "the URL must be confirmed or replaced");
+  const back = (await call(ana.client, "enable_webhook", { webhook_id: bensHook.id, url: "http://127.0.0.1:9/ben" })).data;
+  assert.equal(back.url, "http://127.0.0.1:9/ben");
   assert.equal(back.enabled, true);
   assert.match(back.secret, /^whsec_/);
   const builds = (await pg.query("SELECT id::text AS id, status, box_sandbox_id FROM financial_products.build_runs WHERE developer_id = $1", [ben.user.id])).rows;
@@ -714,4 +721,46 @@ test("secrets someone was handed go with them: keys whose secret they rotated ar
   assert.notEqual(after.secret, bensSecret, "Ben's secret no longer signs anything");
   assert.equal(after.disabled_at, null, "Ana's webhook keeps delivering");
   assert.equal(after.last_secret_issued_to, null);
+});
+
+test("a build stopped while its sandbox was being made isn't brought back: the new sandbox is torn down", async () => {
+  const { pg, builds, connect, call } = await setup();
+  const ana = await connect("Ana");
+  const a = (await call(ana.client, "create_app", app("Saver"))).data;
+  const started = (await call(ana.client, "start_build", { app_id: a.id, goal: "Add a savings calculator" })).data;
+  // The developer stops it at the very moment the worker is asking for its sandbox.
+  const host = builds.sandboxes;
+  const realCreate = host.createSandbox;
+  host.createSandbox = async (opts) => {
+    await call(ana.client, "stop_build", { build_id: started.id });
+    return { id: "sbx-late", state: "provisioning", opts };
+  };
+  try {
+    await builds.tick();
+  } finally {
+    host.createSandbox = realCreate;
+  }
+  const b = (await pg.query("SELECT status, sandbox_id FROM financial_products.build_runs WHERE id = $1", [started.id])).rows[0];
+  assert.equal(b.status, "stopped", "not moved back to provisioning");
+  assert.notEqual(b.sandbox_id, "sbx-late");
+  assert.ok(host.stopped.includes("sbx-late"), "the sandbox made meanwhile is stopped");
+});
+
+test("lapsed invites are looked at once each; an offboarding given up on shows in ops_status", async () => {
+  const { pg, store, connect, call } = await setup();
+  const ana = await connect("Ana");
+  const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
+  await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "old@example.com" });
+  await call(ana.client, "invite_to_workspace", { workspace_id: ws.id, email: "kept@example.com" });
+  await store.upsertInvite("kept@example.com", ["consumer", "vendor"]); // changed since: can't be released
+  await pg.query("UPDATE financial_products.workspace_invites SET created_at = now() - interval '31 days'");
+  assert.equal(await releaseLapsedInvites(store), 1);
+  assert.equal(await store.getInvite("old@example.com"), undefined);
+  assert.ok(await store.getInvite("kept@example.com"));
+  assert.equal(await releaseLapsedInvites(store), 0, "not looked at again");
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.workspace_invites WHERE lapse_checked_at IS NULL")).rows[0].n, 0);
+  await pg.query("INSERT INTO financial_products.workspace_offboards (workspace_id, user_id, status, attempts, error) VALUES ($1, $2, 'failed', 10, 'vm: provider down')", [ws.id, ana.user.id]);
+  const ops = await opsStatus(store.db);
+  assert.ok(ops.attention.some((a) => /offboarding\(s\) gave up/.test(a)));
+  assert.equal(ops.workspaces.failed_offboards.length, 1);
 });
