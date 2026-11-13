@@ -58,6 +58,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
 import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, workspaceRole } from "./workspaces.js";
+import { registerWorkspaceComplianceTools } from "./workspace-compliance.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
@@ -133,6 +134,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
           : {}),
       },
     });
+    registerWorkspaceComplianceTools(server, store, user!);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
     if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);
