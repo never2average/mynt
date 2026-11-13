@@ -23,7 +23,17 @@ vi.mock("@/lib/session", () => ({
   fromOwnOrigin: (req: Request) => [null, "http://localhost:3000"].includes(req.headers.get("origin")),
   setSessionCookie: () => undefined,
 }));
-vi.mock("@/lib/session-store", () => ({ sessionStore: () => ({ save: async () => true, wasTouched: () => false }) }));
+const claims: string[] = [];
+vi.mock("@/lib/session-store", () => ({
+  sessionStore: () => ({
+    save: async () => true,
+    wasTouched: () => false,
+    claim: async (name: string, subject: string) => {
+      claims.push(`${name}\n${subject}`);
+      return async () => undefined;
+    },
+  }),
+}));
 vi.mock("@/lib/tokens", () => ({
   connectStudio: async () => ({
     listTools: async () => ({ tools: fake.tools }),
@@ -39,6 +49,10 @@ vi.mock("@/lib/tokens", () => ({
           return ok([{ id: "a1", name: "Cards", status: "published" }]);
         case "list_builds":
           return ok({ builds: [] });
+        case "create_app":
+          return ok({ id: "new-app" });
+        case "start_build":
+          return ok({ id: "b1" });
         case "get_developer_dashboard":
           return ok({ apps: [] });
         case "get_linked_accounts":
@@ -58,6 +72,7 @@ const dashboard = await import("@/app/api/dashboard/route");
 const workspaces = await import("@/app/api/workspaces/route");
 const members = await import("@/app/api/workspaces/[workspaceId]/members/route");
 const linkedAccounts = await import("@/app/api/linked-accounts/route");
+const apps = await import("@/app/api/apps/route");
 
 const get = (path: string, cookie?: string) => new NextRequest(`http://localhost:3000${path}`, cookie ? { headers: { cookie } } : undefined);
 const send = (method: string, body: unknown) =>
@@ -70,6 +85,7 @@ beforeEach(() => {
   fake.tools = WITH_WORKSPACES;
   fake.calls = [];
   fake.myRole = "owner";
+  claims.length = 0;
 });
 
 describe("the switcher's scope", () => {
@@ -80,7 +96,7 @@ describe("the switcher's scope", () => {
   });
 
   it("uses the remembered workspace (its cookie) when the request doesn't name one", async () => {
-    await projects.GET(get("/api/projects", "mynt_workspace=w1"));
+    await projects.GET(get("/api/projects", "__Host-mynt_workspace=w1"));
     expect(called("list_my_apps")[0].args).toEqual({ workspace_id: "w1" });
   });
 
@@ -97,6 +113,60 @@ describe("the switcher's scope", () => {
     await dashboard.GET(get("/api/dashboard?workspace=w2"));
     expect(called("list_my_apps")[0].args).toEqual({});
     expect(called("get_developer_dashboard")[0].args).toEqual({ days: 30 });
+  });
+
+  it("never shows unscoped data under a shared workspace's name", async () => {
+    fake.tools = [
+      { name: "list_workspaces", inputSchema: props() },
+      { name: "list_my_apps", inputSchema: props() },
+      { name: "get_developer_dashboard", inputSchema: props("days") },
+    ];
+    const p = await (await projects.GET(get("/api/projects?workspace=w1"))).json();
+    expect(p.projects).toEqual([]);
+    expect(p.unavailable).toMatch(/next update/);
+    const d = await (await dashboard.GET(get("/api/dashboard?workspace=w1"))).json();
+    expect(d.dashboard).toBeNull();
+    expect(d.unavailable).toMatch(/next update/);
+    expect(called("list_my_apps")).toEqual([]);
+    expect(called("get_developer_dashboard")).toEqual([]);
+    // Without get_developer_dashboard, the fallback's list_my_apps isn't unscoped either.
+    fake.tools = fake.tools.slice(0, 2);
+    expect((await (await dashboard.GET(get("/api/dashboard?workspace=w1"))).json()).dashboard).toBeNull();
+    expect(called("list_my_apps")).toEqual([]);
+  });
+
+  it("falls back quietly to Personal when the remembered workspace is no longer the user's", async () => {
+    const res = await projects.GET(get("/api/projects", "__Host-mynt_workspace=w9"));
+    expect(res.status).toBe(200);
+    expect(called("list_my_apps")[0].args).toEqual({});
+  });
+
+  it("lists the workspace's builds (teammates' too) where Mynt can", async () => {
+    await projects.GET(get("/api/projects?workspace=w1"));
+    expect(called("list_builds")[0].args).toEqual({});
+    fake.tools = [...WITH_WORKSPACES, { name: "list_builds", inputSchema: props("app_id", "workspace_id") }];
+    fake.calls = [];
+    await projects.GET(get("/api/projects?workspace=w1"));
+    expect(called("list_builds")[0].args).toEqual({ workspace_id: "w1" });
+  });
+
+  it("creates a new app in the selected workspace, and refuses where Mynt can't yet", async () => {
+    const newApp = (cookie?: string) =>
+      new NextRequest("http://localhost:3000/api/apps", {
+        method: "POST",
+        headers: { origin: "http://localhost:3000", "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+        body: JSON.stringify({ prompt: "A savings goal app for students", product_ids: ["p1"] }),
+      });
+    fake.tools = [...WITH_WORKSPACES, { name: "create_app", inputSchema: props("name", "product_ids", "workspace_id") }];
+    expect((await apps.POST(newApp("__Host-mynt_workspace=w1"))).status).toBe(201);
+    expect(called("create_app")[0].args).toMatchObject({ workspace_id: "w1", product_ids: ["p1"] });
+    expect(claims.find((c) => c.startsWith("new-app"))).toContain("\nw1\n");
+    fake.tools = [...WITH_WORKSPACES, { name: "create_app", inputSchema: props("name", "product_ids") }];
+    fake.calls = [];
+    expect((await apps.POST(newApp("__Host-mynt_workspace=w1"))).status).toBe(501);
+    expect(called("create_app")).toEqual([]);
+    expect((await apps.POST(newApp())).status).toBe(201); // Personal
+    expect(called("create_app")[0].args).not.toHaveProperty("workspace_id");
   });
 
   it("ignores a malformed workspace id", async () => {

@@ -29,8 +29,8 @@ function rememberedId(): string | null {
 }
 
 function remember(id: string) {
-  const secure = location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${WORKSPACE_COOKIE}=${encodeURIComponent(id)}; Path=/; Max-Age=31536000; SameSite=Lax${secure}`;
+  // __Host- cookies need Secure, Path=/ and no Domain (browsers treat localhost as secure).
+  document.cookie = `${WORKSPACE_COOKIE}=${encodeURIComponent(id)}; Path=/; Max-Age=31536000; SameSite=Lax; Secure`;
 }
 
 export function WorkspaceProvider({ children }: { children: React.ReactNode }) {

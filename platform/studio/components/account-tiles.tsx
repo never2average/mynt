@@ -70,10 +70,10 @@ export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; link
           <CardTitle className={linked?.wallet ? "font-mono text-xl font-semibold" : valueClass(false)}>
             {linked?.wallet ? shortAddress(linked.wallet.address) : linked ? "Not linked" : "…"}
           </CardTitle>
-          {linked?.wallet?.chain && (
+          {linked?.wallet && (
             <CardAction>
-              <Badge variant="outline" className="capitalize">
-                {linked.wallet.chain}
+              <Badge variant="outline" data-network>
+                {linked.wallet.network}
               </Badge>
             </CardAction>
           )}

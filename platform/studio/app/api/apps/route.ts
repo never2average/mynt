@@ -4,26 +4,37 @@ import { fromOwnOrigin } from "@/lib/session";
 import { sessionStore } from "@/lib/session-store";
 import { callStudioTool, certainlyNotDone, GENERIC_REFUSAL, listMyntTools, ToolRefusedError } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
+import { resolveWorkspace, workspaceOf, workspaceSupport } from "@/lib/workspace-server";
 
 export const dynamic = "force-dynamic";
 
 // New app: creates a draft app on the picked products (create_app), then starts its first
 // build with the prompt as the goal (start_build; in session mode where Mynt offers it, so the
-// chat can keep steering it). The page then opens the app's workspace on that build.
+// chat can keep steering it). The page then opens the app's workspace on that build. The app is
+// created in the selected workspace; a shared workspace this Mynt can't create apps in yet is
+// refused rather than the app landing somewhere else.
 export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
   const parsed = NewAppRequest.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return json({ error: "bad_request", message: parsed.error.issues[0]?.message ?? "Check what you entered." }, 400);
   const { prompt, product_ids } = parsed.data;
+  const requested = workspaceOf(req);
 
   return asDeveloper("creating an app", async (mynt, session) => {
+    const tools = await listMyntTools(mynt);
+    const support = workspaceSupport(tools);
+    const workspace = await resolveWorkspace(mynt, requested, support);
+    if (workspace && !support.createByWorkspace)
+      return json({ error: "unsupported", message: "Creating apps in a shared workspace comes with Mynt's next update. Switch to Personal to create one now." }, 501);
+    const scope = workspace ? { workspace_id: workspace } : {};
+
     // The same request twice (a double click) creates one app.
-    const release = await sessionStore().claim("new-app", `${session.userId ?? session.id}\n${prompt}\n${product_ids.join(",")}`, 30);
+    const release = await sessionStore().claim("new-app", `${session.userId ?? session.id}\n${workspace ?? ""}\n${prompt}\n${product_ids.join(",")}`, 30);
     if (!release) return json({ error: "duplicate", message: "That app is already being created." }, 409);
 
     let appId: string;
     try {
-      const app = (await callStudioTool(mynt, "create_app", { ...appFieldsFromPrompt(prompt), product_ids })) as { id?: unknown } | null;
+      const app = (await callStudioTool(mynt, "create_app", { ...appFieldsFromPrompt(prompt), product_ids, ...scope })) as { id?: unknown } | null;
       if (typeof app?.id !== "string") throw new Error("create_app returned no app id");
       appId = app.id;
     } catch (err) {
@@ -34,7 +45,7 @@ export async function POST(req: Request) {
       throw err;
     }
 
-    const sessionBuilds = capabilitiesFrom(await listMyntTools(mynt)).sessionBuilds;
+    const sessionBuilds = capabilitiesFrom(tools).sessionBuilds;
     try {
       const build = (await callStudioTool(mynt, "start_build", { goal: prompt, app_id: appId, ...(sessionBuilds ? { mode: "session" as const } : {}) })) as {
         id?: unknown;

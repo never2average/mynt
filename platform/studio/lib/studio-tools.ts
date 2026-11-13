@@ -33,6 +33,7 @@ export const STUDIO_TOOLS = {
       description: z.string().trim().min(1).max(4000),
       audience: z.string().trim().min(1).max(500),
       product_ids: z.array(id).min(1).max(20),
+      workspace_id: workspaceId.optional(),
     })
     .strict(),
   // The dashboard: money moved, customers, hand-offs and build spend across the user's apps.
@@ -54,7 +55,7 @@ export const STUDIO_TOOLS = {
   // repositories
   list_repositories: z.object({}).strict(),
   // builds
-  list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional() }).strict(),
+  list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional(), workspace_id: workspaceId.optional() }).strict(),
   get_build: z.object({ build_id: id }).strict(),
   get_build_activity: z
     .object({ build_id: id, limit: z.number().int().min(1).max(200).optional(), after: z.number().int().min(0).optional() })

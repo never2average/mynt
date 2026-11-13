@@ -10,7 +10,7 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim
 export type LinkedAccounts = {
   supported: boolean; // Mynt has get_linked_accounts
   github: string | null; // the username
-  wallet: { address: string; chain: string | null } | null; // the first wallet
+  wallet: { address: string; chain: string | null; network: string } | null; // the first wallet; network is checked against the address
   manageUrl: string | null; // https only
 };
 
@@ -33,8 +33,31 @@ export function fromLinkedAccounts(reply: unknown): LinkedAccounts {
   const git = r.git;
   const github = typeof git === "string" ? str(git) : isObj(git) ? (str(git.username) ?? str(git.login) ?? null) : null;
   const first = Array.isArray(r.wallets) ? r.wallets.find((w) => isObj(w) && str(w.address)) : undefined;
-  const wallet = isObj(first) ? { address: str(first.address)!, chain: str(first.chain) ?? null } : null;
+  const wallet = isObj(first) ? { address: str(first.address)!, chain: str(first.chain) ?? null, network: networkOf(str(first.address)!, str(first.chain)) } : null;
   return { supported: true, github: github ?? null, wallet, manageUrl: httpsUrl(r.manage_url) };
+}
+
+// The wallet's network, shown only when the address fits it: an EVM address (0x and 40 hex
+// digits) on an EVM chain, or a Solana address (base58, 32-44 characters, no 0, O, I or l) on
+// Solana. Anything else is "Unknown network", never a guess.
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const EVM_CHAINS: Record<string, string> = {
+  ethereum: "Ethereum",
+  base: "Base",
+  polygon: "Polygon",
+  arbitrum: "Arbitrum",
+  optimism: "Optimism",
+  avalanche: "Avalanche",
+  evm: "EVM",
+};
+export const UNKNOWN_NETWORK = "Unknown network";
+
+export function networkOf(address: string, chain?: string | null): string {
+  const c = chain?.trim().toLowerCase() || null;
+  if (SOLANA_ADDRESS.test(address)) return !c || c === "solana" ? "Solana" : UNKNOWN_NETWORK;
+  if (EVM_ADDRESS.test(address)) return c ? (EVM_CHAINS[c] ?? UNKNOWN_NETWORK) : "EVM";
+  return UNKNOWN_NETWORK;
 }
 
 // 0x1234…abcd: enough to recognise, short enough for a tile.

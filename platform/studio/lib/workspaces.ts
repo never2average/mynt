@@ -21,8 +21,8 @@ export const PERSONAL_ID = "personal";
 export const PERSONAL: Workspace = { id: PERSONAL_ID, name: "Personal", role: "owner", implicit: true };
 
 // The cookie that remembers the selected workspace (not a credential: Mynt checks membership on
-// every call).
-export const WORKSPACE_COOKIE = "mynt_workspace";
+// every call). __Host-: set only by this origin, over https, for the whole site.
+export const WORKSPACE_COOKIE = "__Host-mynt_workspace";
 export const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,100}$/;
 
 const role = (v: unknown): Role => (ROLES.includes(v as Role) ? (v as Role) : "member");

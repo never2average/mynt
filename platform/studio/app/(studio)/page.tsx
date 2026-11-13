@@ -13,7 +13,7 @@ import { useWorkspace } from "@/components/workspace-context";
 import type { Dashboard } from "@/lib/dashboard";
 import type { LinkedAccounts } from "@/lib/linked-accounts";
 
-type State = { dashboard: Dashboard } | { error: string } | null;
+type State = { dashboard: Dashboard } | { unavailable: string } | { error: string } | null;
 
 export default function DashboardPage() {
   const [state, setState] = useState<State>(null);
@@ -53,9 +53,15 @@ export default function DashboardPage() {
         window.location.assign("/api/auth/login"); // the session ended meanwhile
         return;
       }
-      const data = (await res?.json().catch(() => null)) as { dashboard?: Dashboard; message?: string } | null;
+      const data = (await res?.json().catch(() => null)) as { dashboard?: Dashboard; unavailable?: string; message?: string } | null;
       if (!live) return;
-      setState(res?.ok && data?.dashboard ? { dashboard: data.dashboard } : { error: data?.message ?? "Couldn't load the dashboard." });
+      setState(
+        res?.ok && data?.dashboard
+          ? { dashboard: data.dashboard }
+          : res?.ok && data?.unavailable
+            ? { unavailable: data.unavailable }
+            : { error: data?.message ?? "Couldn't load the dashboard." },
+      );
     })();
     return () => {
       live = false;
@@ -78,6 +84,8 @@ export default function DashboardPage() {
             <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
         </div>
+      ) : "unavailable" in state ? (
+        <p className="p-6 text-sm text-muted-foreground">{state.unavailable}</p>
       ) : "error" in state ? (
         <p role="alert" className="p-6 text-sm text-destructive">
           {state.error}
