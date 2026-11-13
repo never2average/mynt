@@ -37,6 +37,7 @@ const DEVELOPER_TOOLS = [
   "change_member_role", "create_workspace", "invite_to_workspace", "leave_workspace", "list_workspace_members", "list_workspaces",
   "remove_workspace_member", "rename_workspace", "revoke_workspace_invite",
   "get_compliance_coverage", "list_workspace_audit", "list_workspace_licences",
+  "enable_webhook",
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",

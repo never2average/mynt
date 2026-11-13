@@ -57,7 +57,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
-import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, workspaceRole } from "./workspaces.js";
+import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
 import { registerWorkspaceComplianceTools } from "./workspace-compliance.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
@@ -116,24 +116,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
     // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).
-    registerWorkspaceTools(server, store, user!, {
-      clerk: ctx.clerkAdmin ?? null,
-      offboarding: {
-        ...(ctx.builds ? { stopBuilds: (userId: string, appIds: string[]) => ctx.builds!.stopFor(userId, appIds) } : {}),
-        ...(ctx.hosting
-          ? {
-              revokeVmAccess: async (workspaceId: string, appIds: string[]) => {
-                const tenants = [...(await ctx.hosting!.tenantsHosting(appIds))];
-                const own = await ctx.hosting!.tenantOfWorkspace(workspaceId);
-                if (own && !tenants.some((t) => t.id === own.id)) tenants.push(own);
-                let n = 0;
-                for (const t of tenants) if (await ctx.hosting!.revokeVmAccess(t)) n++;
-                return n;
-              },
-            }
-          : {}),
-      },
-    });
+    registerWorkspaceTools(server, store, user!, { clerk: ctx.clerkAdmin ?? null, offboarding: offboardingServices(ctx) });
     registerWorkspaceComplianceTools(server, store, user!);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
@@ -199,6 +182,20 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
+    server.registerTool(
+      "retry_offboard",
+      {
+        title: "Finish cutting someone off from a workspace",
+        description:
+          "Admin: run again the steps of a workspace offboarding that didn't all succeed (a sandbox or VM provider was down): stopping their builds, revoking VM logins. The worker retries on its own every few minutes; this does it now. Without filters, every pending one.",
+        inputSchema: { workspace_id: z.string().uuid().optional(), user_id: z.string().uuid().optional() },
+      },
+      async ({ workspace_id, user_id }) => {
+        const done = await retryOffboards(store, offboardingServices(ctx), { workspace_id, user_id });
+        await store.audit(user!.id, "retry_offboard", workspace_id ?? "all", { user_id: user_id ?? null, retried: done.length });
+        return { content: [{ type: "text" as const, text: JSON.stringify({ retried: done }, null, 2) }] };
+      },
+    );
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
     registerTakeRateAdminTools(server, store, user!);
     registerVendorAdminTools(server, store, user!);
@@ -677,6 +674,32 @@ async function resolveApp(store: Store, app: App) {
     ...app,
     products: products.filter((p) => p.ok).map((p) => p.record!.product),
     unavailable_product_ids: products.filter((p) => !p.ok).map((p) => p.id),
+  };
+}
+
+// What cutting someone off from a workspace needs from the optional services (workspaces.ts offboard): their builds
+// stopped, VM logins revoked. Also the worker's, for retrying (index.ts).
+export function offboardingServices(ctx: Pick<AdminContext, "builds" | "hosting">): OffboardServices {
+  return {
+    ...(ctx.builds ? { stopBuilds: (userId: string, appIds: string[]) => ctx.builds!.stopFor(userId, appIds) } : {}),
+    ...(ctx.hosting
+      ? {
+          revokeVmAccess: async (workspaceId: string, appIds: string[]) => {
+            const tenants = [...(await ctx.hosting!.tenantsHosting(appIds))];
+            const own = await ctx.hosting!.tenantOfWorkspace(workspaceId);
+            if (own && !tenants.some((t) => t.id === own.id)) tenants.push(own);
+            let revoked = 0;
+            let failed = 0;
+            for (const t of tenants)
+              try {
+                if (await ctx.hosting!.revokeVmAccess(t)) revoked++;
+              } catch {
+                failed++;
+              }
+            return { revoked, failed };
+          },
+        }
+      : {}),
   };
 }
 

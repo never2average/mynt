@@ -2512,8 +2512,8 @@ export class Store {
   ): Promise<{ key: ApiKey; secret: string }> {
     const secret = newApiKey(k.environment);
     const r = await this.one(
-      `INSERT INTO financial_products.api_keys (id, app_id, environment, label, prefix, key_hash, allowed_origins, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8) RETURNING *`,
+      `INSERT INTO financial_products.api_keys (id, app_id, environment, label, prefix, key_hash, allowed_origins, status, created_by, last_secret_issued_to)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $8) RETURNING *`,
       [randomUUID(), k.app_id, k.environment, k.label, secret.slice(0, 14), hashToken(secret), k.allowed_origins, createdBy],
     );
     return { key: toApiKey(r!), secret };
@@ -2648,11 +2648,12 @@ export class Store {
   }
 
   // A new secret for the same key; the old secret stops working at once.
-  async rotateApiKey(id: string, environment: KeyEnvironment): Promise<{ key: ApiKey; secret: string }> {
+  // `issuedTo`: who receives the new secret (offboarding revokes keys whose current secret a leaver holds).
+  async rotateApiKey(id: string, environment: KeyEnvironment, issuedTo: string | null = null): Promise<{ key: ApiKey; secret: string }> {
     const secret = newApiKey(environment);
     const r = await this.one(
-      "UPDATE financial_products.api_keys SET key_hash = $2, prefix = $3, rotated_at = now() WHERE id::text = $1 RETURNING *",
-      [id, hashToken(secret), secret.slice(0, 14)],
+      "UPDATE financial_products.api_keys SET key_hash = $2, prefix = $3, rotated_at = now(), last_secret_issued_to = $4 WHERE id::text = $1 RETURNING *",
+      [id, hashToken(secret), secret.slice(0, 14), issuedTo],
     );
     return { key: toApiKey(r!), secret };
   }
@@ -2733,7 +2734,7 @@ export class Store {
   async createWebhook(createdBy: string, w: Pick<Webhook, "app_id" | "url" | "events">): Promise<{ webhook: Webhook; secret: string }> {
     const secret = `whsec_${randomBytes(24).toString("base64url")}`;
     const r = await this.one(
-      "INSERT INTO financial_products.webhooks (id, app_id, url, events, secret, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+      "INSERT INTO financial_products.webhooks (id, app_id, url, events, secret, created_by, last_secret_issued_to) VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING *",
       [randomUUID(), w.app_id, w.url, w.events, secret, createdBy],
     );
     return { webhook: toWebhook(r!), secret };
@@ -2749,9 +2750,10 @@ export class Store {
     return (await this.all("SELECT * FROM financial_products.webhooks WHERE app_id::text = ANY($1) ORDER BY created_at", [appIds])).map(toWebhook);
   }
 
-  async rotateWebhookSecret(id: string): Promise<string> {
+  // `issuedTo`: who receives the new secret; null when nobody does (offboarding rotating a leaver's out of reach).
+  async rotateWebhookSecret(id: string, issuedTo: string | null = null): Promise<string> {
     const secret = `whsec_${randomBytes(24).toString("base64url")}`;
-    await this.db.query("UPDATE financial_products.webhooks SET secret = $2 WHERE id::text = $1", [id, secret]);
+    await this.db.query("UPDATE financial_products.webhooks SET secret = $2, last_secret_issued_to = $3 WHERE id::text = $1", [id, secret, issuedTo]);
     return secret;
   }
 
@@ -3059,7 +3061,7 @@ export class Store {
   async upsertInvite(email: string, roles: Role[]): Promise<Invite> {
     const r = await this.one(
       `INSERT INTO financial_products.invites (email, roles) VALUES ($1, $2)
-       ON CONFLICT (email) DO UPDATE SET roles = EXCLUDED.roles, updated_at = now() RETURNING *`,
+       ON CONFLICT (email) DO UPDATE SET roles = EXCLUDED.roles, updated_at = now(), revision = invites.revision + 1 RETURNING *`,
       [email.toLowerCase(), roles],
     );
     return toInvite(r!);
