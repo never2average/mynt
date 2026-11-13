@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { fromAppsAndBuilds, fromDashboardTool } from "@/lib/dashboard";
 import { callStudioTool, listMyntTools } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
-import { NOT_SCOPED, resolveWorkspace, workspaceOf, workspaceSupport } from "@/lib/workspace-server";
+import { NOT_SCOPED, scopeFor, workspaceSupport } from "@/lib/workspace-server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,11 +11,12 @@ export const dynamic = "force-dynamic";
 // measured. A shared workspace this Mynt can't scope the figures to says so, never showing the
 // user's unscoped figures under the workspace's name.
 export async function GET(req: NextRequest) {
-  const requested = workspaceOf(req);
   return asDeveloper("loading the dashboard", async (mynt) => {
     const tools = await listMyntTools(mynt);
     const support = workspaceSupport(tools);
-    const workspace = await resolveWorkspace(mynt, requested, support);
+    const scoped = await scopeFor(mynt, req, support);
+    if (scoped.unavailable !== undefined) return json({ dashboard: null, unavailable: scoped.unavailable });
+    const { workspace } = scoped;
     const scope = workspace ? { workspace_id: workspace } : {};
     if (tools.some((t) => t.name === "get_developer_dashboard")) {
       if (workspace && !support.dashboardByWorkspace) return json({ dashboard: null, unavailable: NOT_SCOPED });

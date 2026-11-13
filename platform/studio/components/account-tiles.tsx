@@ -2,7 +2,8 @@
 // dashboard-01 section cards): active products, licences, the linked GitHub account and crypto
 // wallet. Link GitHub and Link wallet go to the identity provider's account page in the same
 // tab (never an embedded sign-in); the page reads the accounts again when the user comes back.
-import { Github, Link2, Wallet } from "lucide-react"
+import Link from "next/link"
+import { ArrowRight, Github, Link2, Wallet } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -47,7 +48,13 @@ export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; link
           <CardDescription>Licences</CardDescription>
           <CardTitle className={valueClass(dashboard.licences !== null)}>{count(dashboard.licences)}</CardTitle>
         </CardHeader>
-        <CardFooter className="text-sm text-muted-foreground">Partner licences behind your products</CardFooter>
+        <CardFooter className="flex flex-col items-start gap-2 text-sm text-muted-foreground">
+          Partner licences behind your products
+          <Link href="/licences" className="flex shrink-0 items-center gap-1 font-medium text-foreground hover:underline">
+            View licences
+            <ArrowRight className="size-3.5" />
+          </Link>
+        </CardFooter>
       </Card>
 
       <Card className="@container/card" data-tile="github">
