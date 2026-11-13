@@ -1,11 +1,13 @@
 "use client"
 
 // From shadcn/ui's sidebar-07 block (team-switcher.tsx, MIT): the workspace switcher at the top
-// of the sidebar. Its menu lists the user's workspaces, then Members (the selected workspace's)
-// and Create workspace.
+// of the sidebar. Its menu lists the user's workspaces, then Invitations (N) when they have
+// pending ones, Members (the selected workspace's) and Create workspace.
 import * as React from "react"
 import Link from "next/link"
-import { ChevronsUpDown, Plus, Users } from "lucide-react"
+import { ChevronsUpDown, Mail, Plus, Users } from "lucide-react"
+
+import { InvitationsList } from "@/components/invitations"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -31,6 +33,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar"
+import type { Invitation } from "@/lib/invitations"
 import type { Workspace } from "@/lib/workspaces"
 
 const initial = (name: string) => (name.trim()[0] ?? "W").toUpperCase()
@@ -41,13 +44,18 @@ export function TeamSwitcher({
   supported,
   onSelect,
   onCreate,
+  invitations = [],
+  onAnswerInvitation = async () => null,
 }: {
   workspaces: Workspace[]
   selected: Workspace
   supported: boolean
   onSelect: (id: string) => void
   onCreate: (name: string) => Promise<string | null> // an error to show, or null
+  invitations?: Invitation[]
+  onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
 }) {
+  const [showInvitations, setShowInvitations] = React.useState(false)
   const { isMobile } = useSidebar()
   const [creating, setCreating] = React.useState(false)
   const [name, setName] = React.useState("")
@@ -104,6 +112,14 @@ export function TeamSwitcher({
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
+            {invitations.length > 0 && (
+              <DropdownMenuItem className="gap-2 p-2" onSelect={() => setShowInvitations(true)}>
+                <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
+                  <Mail className="size-4" />
+                </div>
+                <div className="font-medium">Invitations ({invitations.length})</div>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem asChild className="gap-2 p-2">
               <Link href="/members">
                 <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
@@ -120,6 +136,16 @@ export function TeamSwitcher({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        <Dialog open={showInvitations && invitations.length > 0} onOpenChange={setShowInvitations}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Invitations</DialogTitle>
+              <DialogDescription>You join a workspace only if you accept.</DialogDescription>
+            </DialogHeader>
+            <InvitationsList invitations={invitations} onAnswer={onAnswerInvitation} />
+          </DialogContent>
+        </Dialog>
 
         <Dialog open={creating} onOpenChange={setCreating}>
           <DialogContent className="sm:max-w-md">

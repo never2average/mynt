@@ -76,6 +76,10 @@ export const STUDIO_TOOLS = {
       to: auditDate.optional(),
     })
     .strict(),
+  // Invitations to other people's workspaces: joining is always the user's explicit choice.
+  list_my_invitations: z.object({}).strict(),
+  accept_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),
+  decline_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),
   // repositories
   list_repositories: z.object({}).strict(),
   // builds
