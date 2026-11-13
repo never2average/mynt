@@ -220,8 +220,9 @@ async function converse(
       writeText(writer, "You've just sent that. The agent has it already.");
       return;
     }
-    // One start at a time per user and app, across devices.
-    const unlock = await sessionStore().claim("start-lock", `${who}\n${opts.projectId}`, START_LOCK_SECONDS);
+    // One start at a time per app, across devices and teammates: two people in a workspace
+    // can't start two paid builds on one app.
+    const unlock = await sessionStore().claim("start-lock", opts.projectId, START_LOCK_SECONDS);
     if (!unlock) {
       await releaseAll(claims);
       writeText(writer, START_BUSY_NOTE);
