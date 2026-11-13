@@ -57,6 +57,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
+import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
@@ -109,11 +110,15 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (user && ctx.bd && !peerOnly) registerConnectTools(server, ctx.bd, user);
   if (user && !peerOnly) registerProductRequestTools(server, store, user);
   if (has("consumer")) registerConsumerTools(server, store, user!);
+  // Anyone signed in may have been invited to a workspace (as a developer or a user), and answers it themselves.
+  if (user) registerInvitationTools(server, store, user, ctx.clerkAdmin ?? null);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
+    // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).
+    registerWorkspaceTools(server, store, user!, { clerk: ctx.clerkAdmin ?? null, offboarding: offboardingServices(ctx) });
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
-    if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting);
+    if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);
     if (ctx.modules) registerModuleTools(server, store, user!, ctx.modules);
     registerGtmTools(server, store, user!);
   }
@@ -175,6 +180,21 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
+    server.registerTool(
+      "retry_offboard",
+      {
+        title: "Finish cutting someone off from a workspace",
+        description:
+          "Admin: run again the steps of a workspace offboarding that didn't all succeed (a sandbox or VM provider was down): stopping their builds, revoking VM logins. The worker retries on its own every few minutes; this does it now. Without filters, every pending one.",
+        inputSchema: { workspace_id: z.string().uuid().optional(), user_id: z.string().uuid().optional() },
+      },
+      async ({ workspace_id, user_id }) => {
+        // An admin's retry takes failed ones too, and ones not yet due.
+        const done = await retryOffboards(store, offboardingServices(ctx), { workspace_id, user_id, force: true });
+        await store.audit(user!.id, "retry_offboard", workspace_id ?? "all", { user_id: user_id ?? null, retried: done.length });
+        return { content: [{ type: "text" as const, text: JSON.stringify({ retried: done }, null, 2) }] };
+      },
+    );
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
     registerTakeRateAdminTools(server, store, user!);
     registerVendorAdminTools(server, store, user!);
@@ -656,12 +676,29 @@ async function resolveApp(store: Store, app: App) {
   };
 }
 
+// What cutting someone off from a workspace needs from the optional services (workspaces.ts offboard): their builds
+// stopped, VM logins revoked. Also the worker's, for retrying (index.ts).
+export function offboardingServices(ctx: Pick<AdminContext, "builds" | "hosting">): OffboardServices {
+  return {
+    ...(ctx.builds ? { stopBuilds: (userId: string, appIds: string[]) => ctx.builds!.stopFor(userId, appIds) } : {}),
+    ...(ctx.hosting
+      ? {
+          vmLoginsOf: async (workspaceId: string, appIds: string[], userId: string) => {
+            const tenants = [...(await ctx.hosting!.tenantsHosting(appIds))];
+            const own = await ctx.hosting!.tenantOfWorkspace(workspaceId);
+            if (own && !tenants.some((t) => t.id === own.id)) tenants.push(own);
+            return ctx.hosting!.loginsHeldBy(userId, tenants.map((t) => t.id));
+          },
+          revokeVmLogin: (tenantId: string, identity: string) => ctx.hosting!.revokeLogin(tenantId, identity),
+        }
+      : {}),
+  };
+}
+
 // Developers build software on innovators' products; they never issue, sell or hold funds.
 function registerDeveloperTools(server: McpServer, store: Store, user: User) {
-  const ownApp = async (id: string) => {
-    const app = await store.getApp(id);
-    return app && app.owner_id === user.id ? app : undefined;
-  };
+  // An app of a workspace the developer belongs to (workspaces.ts).
+  const ownApp = (id: string) => memberApp(store, user, id);
 
   // Products a draft may include: published, and not private unless this developer was let in.
   const unusable = async (ids: string[], appId: string | null) => {
@@ -782,8 +819,12 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "Create an app experience",
       description:
-        "Developer: create a draft app experience (e.g. a retirement planner or first-salary starter kit) on published products. Declare what it does (actions) and the disclosures it shows; check_experience tells you whether it meets each product's terms.",
+        "Developer: create a draft app experience (e.g. a retirement planner or first-salary starter kit) on published products, in one of your workspaces (everyone in it can work on it). Declare what it does (actions) and the disclosures it shows; check_experience tells you whether it meets each product's terms.",
       inputSchema: {
+        workspace_id: z
+          .string()
+          .optional()
+          .describe("The workspace it belongs to (list_workspaces). Omitted: the workspace you created, or a new one of your own if you created none"),
         name: z.string().trim().min(1).max(200),
         description: z.string().trim().min(1).max(4000),
         audience: z.string().trim().min(1).max(500).describe("Who the experience is for, e.g. 'first-time investors in India'"),
@@ -791,12 +832,23 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
         ...experienceFields,
       },
     },
-    async (fields) => {
+    async ({ workspace_id, ...fields }) => {
       // A product named twice is one product (the studio's picker may send repeats).
       fields = { ...fields, product_ids: [...new Set(fields.product_ids)] };
+      let workspace = workspace_id;
+      if (workspace) {
+        if (!(await workspaceRole(store.db, workspace, user.id))) return fail(`No workspace of yours with id '${workspace}'`);
+      } else {
+        // Never a workspace they were invited into: only one they created (their own, made now if they have none).
+        const mine = await createdWorkspaces(store.db, user.id);
+        if (mine.length > 1) return fail("You created several workspaces: say which one this app goes in with workspace_id (list_workspaces)");
+        workspace = mine[0] ?? (await personalWorkspace(store.db, user.id));
+      }
       const bad = await unusable(fields.product_ids, null);
       if (bad.length) return fail(`Products not available: ${bad.join(", ")}`);
-      return json(await store.createApp(user.id, fields));
+      const app = await store.createApp(user.id, fields, workspace);
+      await store.audit(user.id, "create_app", app.id, { workspace_id: workspace });
+      return json(app);
     },
   );
 
@@ -828,11 +880,17 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     "list_my_apps",
     {
       title: "List my app experiences",
-      description: "Developer: list the app experiences you have built, drafts included.",
-      inputSchema: {},
+      description:
+        "Developer: the app experiences of every workspace you belong to (or of one, with workspace_id), drafts included, each with its stage: idea (no verified build yet), staging (a verified build or a deployment that isn't live) or production (published and running on Mynt's hosting).",
+      inputSchema: { workspace_id: z.string().optional().describe("Only this workspace's apps") },
       annotations: { readOnlyHint: true },
     },
-    async () => json(await store.appsByOwner(user.id)),
+    async ({ workspace_id }) => {
+      if (workspace_id && !(await workspaceRole(store.db, workspace_id, user.id))) return fail(`No workspace of yours with id '${workspace_id}'`);
+      const apps = await store.appsVisibleTo(user.id, workspace_id);
+      const stages = await appStages(store.db, apps);
+      return json(apps.map((a) => ({ ...a, stage: stages.get(a.id) ?? "idea" })));
+    },
   );
 
   // Access per product and the terms lint, for one of the developer's apps.

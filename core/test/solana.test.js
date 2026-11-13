@@ -477,9 +477,19 @@ test("devnet deploy: Mynt deploys the program it built, records it and its hash,
   const failing = await w.build(w.devUser, "failed");
   r = await w.call(w.dev, "deploy_program", { program_id: reserved.program_id, build_id: failing });
   assert.match(r.data.error, /only a build Mynt verified/);
-  const othersBuild = await w.build(w.otherUser);
+  // Someone else's build: of an app outside the developer's workspaces (a build of the developer's own app is their
+  // workspace's, whoever started it).
+  const othersApp = await w.store.createApp(w.otherUser.id, { name: "Theirs", description: "", audience: "", product_ids: [] });
+  const othersBuild = (await w.builds.start(w.otherUser, { goal: "Build their program", app_id: othersApp.id })).id;
+  await w.db.query("UPDATE financial_products.build_runs SET status = 'succeeded' WHERE id = $1", [othersBuild]);
   r = await w.call(w.dev, "deploy_program", { program_id: reserved.program_id, build_id: othersBuild });
   assert.match(r.data.error, /No build of yours/);
+  // A teammate's build of the developer's app is their workspace's: it gets past that check.
+  await w.db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [w.app.workspace_id, w.otherUser.id]);
+  const teammates = await w.build(w.otherUser, "failed");
+  r = await w.call(w.dev, "deploy_program", { program_id: reserved.program_id, build_id: teammates });
+  assert.match(r.data.error, /only a build Mynt verified/, "a teammate's build is judged on its merits, not refused as someone else's");
+  await w.db.query("DELETE FROM financial_products.workspace_members WHERE user_id = $1", [w.otherUser.id]);
 
   const started = await w.ok(w.dev, "deploy_program", { program_id: reserved.program_id, build_id: buildId });
   assert.equal(started.status, "deploying");

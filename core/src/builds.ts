@@ -20,6 +20,7 @@ import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolch
 import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
 import type { Store, User } from "./store.js";
+import { canSeeBuild, memberApp } from "./workspaces.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
 
@@ -82,6 +83,9 @@ function agentBackendFromEnv(env: NodeJS.ProcessEnv): AgentBackend | null {
 export interface BuildConfig {
   capUsd: number; // per build
   monthlyCapUsd: number; // per developer per calendar month
+  // Per workspace per calendar month, across all its apps' builds whoever started them (BUILD_WORKSPACE_MONTHLY_CAP_USD;
+  // unset: no workspace cap, only each developer's). Both apply.
+  workspaceMonthlyCapUsd?: number | null;
   agentBackend: AgentBackend | null; // used only by Mynt's agent proxy; never sent to a sandbox
   model: string;
   sandboxType: string;
@@ -103,10 +107,17 @@ export interface BuildConfig {
 // Each developer's build budget per calendar month (BUILD_MONTHLY_CAP_USD, default 100).
 export const monthlyBuildCapUsd = (env = process.env) => Number(env.BUILD_MONTHLY_CAP_USD ?? 100);
 
+// Each workspace's build budget per calendar month (BUILD_WORKSPACE_MONTHLY_CAP_USD); null when unset or not positive.
+export const workspaceBuildCapUsd = (env = process.env) => {
+  const n = Number(env.BUILD_WORKSPACE_MONTHLY_CAP_USD ?? "");
+  return env.BUILD_WORKSPACE_MONTHLY_CAP_USD && Number.isFinite(n) && n > 0 ? n : null;
+};
+
 export function buildConfigFromEnv(env = process.env): BuildConfig {
   return {
     capUsd: Number(env.BUILD_CAP_USD ?? 10),
     monthlyCapUsd: monthlyBuildCapUsd(env),
+    workspaceMonthlyCapUsd: workspaceBuildCapUsd(env),
     agentBackend: agentBackendFromEnv(env),
     model: env.BUILD_AGENT_MODEL ?? "claude-opus-5-5",
     sandboxType: env.BUILD_SANDBOX_TYPE ?? "default",
@@ -505,6 +516,73 @@ export class BuildService {
     return r && toBuild(r);
   }
 
+  // The builds a developer may see: those of every app in their workspaces (whoever started them), and their own
+  // builds for no app.
+  async listVisible(userId: string, status?: string, appId?: string) {
+    const rows = (
+      await this.db.query(
+        `SELECT * FROM financial_products.build_runs b
+         WHERE ((b.app_id IS NULL AND b.developer_id = $1)
+             OR b.app_id IN (SELECT a.id FROM financial_products.apps a
+                             WHERE a.workspace_id IN (SELECT workspace_id FROM financial_products.workspace_members WHERE user_id = $1)
+                                OR (a.workspace_id IS NULL AND a.owner_id = $1)))
+           AND ($2::text IS NULL OR b.status = $2) AND ($3::text IS NULL OR b.app_id::text = $3)
+         ORDER BY b.created_at DESC LIMIT 200`,
+        [userId, status ?? null, appId ?? null],
+      )
+    ).rows as Row[];
+    return rows.map(toBuild);
+  }
+
+  // This month's spend on the workspace's apps' builds, counting a build still running at its whole cap (what it may
+  // yet spend), so concurrent builds can't overrun the workspace's budget.
+  async workspaceMonthSpend(workspaceId: string) {
+    const r = await this.one(
+      `SELECT COALESCE(SUM(CASE WHEN b.status = ANY($2) THEN b.cost_usd ELSE GREATEST(b.cap_usd, b.cost_usd) END), 0) AS s
+       FROM financial_products.build_runs b JOIN financial_products.apps a ON a.id = b.app_id
+       WHERE a.workspace_id = $1 AND b.created_at >= date_trunc('month', now())`,
+      [workspaceId, TERMINAL],
+    );
+    return Number(r?.s ?? 0);
+  }
+
+  // Someone leaving a workspace: their running builds of its apps stop, and sandboxes they reopened close.
+  async stopFor(developerId: string, appIds: string[]): Promise<{ stopped: string[]; failed: string[] }> {
+    if (!appIds.length) return { stopped: [], failed: [] };
+    const rows = (
+      await this.db.query(
+        `SELECT * FROM financial_products.build_runs WHERE developer_id = $1 AND app_id::text = ANY($2)
+           AND (status <> ALL($3) OR (box_sandbox_id IS NOT NULL AND box_until > now()))`,
+        [developerId, appIds, TERMINAL],
+      )
+    ).rows as Row[];
+    const stopped = [];
+    const failed = [];
+    for (const b of rows.map(toBuild)) {
+      try {
+        if (!TERMINAL.includes(b.status)) await this.stop(b, "Its developer left the app's workspace");
+        if (b.box_sandbox_id) await this.closeBox(b);
+        const now = await this.get(b.id);
+        if (now && (!TERMINAL.includes(now.status) || (now.box_sandbox_id && now.box_until && Date.parse(now.box_until) > Date.now()))) failed.push(b.id);
+        else stopped.push(b.id);
+      } catch (e) {
+        console.error(`Build ${b.id} stop: ${(e as Error).message}`);
+        failed.push(b.id);
+      }
+    }
+    return { stopped, failed };
+  }
+
+  // Whether someone other than the build's starter may drive its sandbox (run commands in it, open its editor):
+  // the sandbox holds a git credential, so only with their own approved connection to its repository, or when that
+  // is the app's Mynt-managed repository, or when there's none.
+  async mayDrive(b: Build, developerId: string) {
+    if (b.developer_id === developerId || !b.repository) return true;
+    const set = b.app_id ? await this.appRepository(b.app_id) : null;
+    if (set && (set.managed_repository === b.repository || (set.managed && set.repository === b.repository))) return true;
+    return (await connectionApproval(this.db, developerId, b.repository)) === APPROVED;
+  }
+
   async listFor(developerId: string | null, status?: string, appId?: string) {
     const rows = (
       await this.db.query(
@@ -532,18 +610,24 @@ export class BuildService {
     ]);
   }
 
-  private async update(id: string, fields: Partial<Build>) {
+  // Whether it applied. A build that ended (stopped, say, while this tick was provisioning it) is never moved back to
+  // a running status: a non-terminal status only replaces a non-terminal one.
+  private async update(id: string, fields: Partial<Build>): Promise<boolean> {
     const keys = Object.keys(fields) as (keyof Build)[];
-    if (keys.length === 0) return;
+    if (keys.length === 0) return true;
     const sets = keys.map((k, i) => `${k} = $${i + 2}`);
     const values = keys.map((k) =>
       k === "maxwell" || k === "readiness" || k === "agent_report" || k === "solana_check" || k === "solana_env" || k === "solana_toolchain" ? JSON.stringify(fields[k]) : fields[k],
     );
     const terminal = fields.status && TERMINAL.includes(fields.status);
-    await this.db.query(
-      `UPDATE financial_products.build_runs SET ${sets.join(", ")}, updated_at = now()${terminal ? ", finished_at = now()" : ""} WHERE id = $1`,
-      [id, ...values],
+    const reviving = fields.status && !terminal;
+    const r = await this.db.query(
+      `UPDATE financial_products.build_runs SET ${sets.join(", ")}, updated_at = now()${terminal ? ", finished_at = now()" : ""} WHERE id = $1${
+        reviving ? ` AND status <> ALL($${keys.length + 2})` : ""
+      } RETURNING id`,
+      reviving ? [id, ...values, TERMINAL] : [id, ...values],
     );
+    return r.rows.length > 0;
   }
 
   async monthSpend(developerId: string) {
@@ -655,6 +739,16 @@ export class BuildService {
     return stored.repository;
   }
 
+  // A teammate deploying a build of the app gets the same approved access to the app's own managed repository its
+  // builders have (hosting fetches the source through the deployer's connection). Only that app's managed
+  // repository, current or recorded; anything else is refused by the deploy's own approval check.
+  async ensureManagedConnection(developerId: string, appId: string, repository: string) {
+    const set = await this.appRepository(appId);
+    const repo = repository.toLowerCase();
+    if (!set || (set.managed_repository !== repo && !(set.managed && set.repository === repo))) return;
+    if (!(await this.installation(developerId, repo))) await this.connectManaged(developerId, repo);
+  }
+
   private async connectManaged(developerId: string, repository: string) {
     const access = await this.managedHost?.access();
     if (!access) throw new Error("Mynt's managed repositories aren't available right now");
@@ -700,7 +794,7 @@ export class BuildService {
     let base: Build | null = null;
     if (opts.continue_from) {
       const prev = await this.get(opts.continue_from);
-      if (!prev || prev.developer_id !== developer.id) throw new Error(`No build of yours with id '${opts.continue_from}' to continue from`);
+      if (!prev || !(await canSeeBuild(this.store, developer, prev))) throw new Error(`No build of yours with id '${opts.continue_from}' to continue from`);
       if (!TERMINAL.includes(prev.status)) throw new Error(`Build ${prev.id} is still ${prev.status}: steer it, or stop it before continuing from it`);
       // Only a build whose push Mynt confirmed: it verified the pushed commit (commit_sha) and opened its pull request.
       if (!prev.repository || !prev.branch || !(prev.commit_sha || prev.pr_url)) throw new Error(`Build ${prev.id} pushed no verified branch, so there's nothing to continue from`);
@@ -732,6 +826,18 @@ export class BuildService {
       throw new Error(
         `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
       );
+    // The app's workspace has its own monthly budget too, shared by everyone building its apps.
+    const wsCap = this.config.workspaceMonthlyCapUsd ?? null;
+    const workspace = opts.app_id && wsCap ? (await this.store.getApp(opts.app_id))?.workspace_id : null;
+    if (workspace && wsCap) {
+      const wsSpent = await this.workspaceMonthSpend(workspace);
+      const wsLeft = Math.max(0, wsCap - wsSpent);
+      if (wsLeft < 0.5) throw new Error(`The workspace's monthly build budget is used up (US$${wsSpent.toFixed(2)} of US$${wsCap} spent this month)`);
+      if (cap > wsLeft)
+        throw new Error(
+          `This build's cap (US$${cap}) is more than the workspace's remaining build budget this month (US$${wsLeft.toFixed(2)} of US$${wsCap}); start it with cap_usd of at most ${Math.floor(wsLeft * 100) / 100}`,
+        );
+    }
     // No repository named: the app's own (Mynt-managed unless the developer chose theirs).
     if (!opts.repository && opts.app_id) {
       const repository = await this.repositoryForApp(developer, opts.app_id);
@@ -1164,14 +1270,18 @@ export class BuildService {
         { name: `mynt-build-${b.id}`, type: this.config.sandboxType, ttlSeconds: this.config.ttlSeconds, labels: { mynt_build: b.id }, env },
         b.solana,
       );
-      await this.update(b.id, {
-        status: "provisioning",
-        sandbox_id: sandbox.id,
-        sandbox_started_at: new Date().toISOString(),
-        sandbox_key_id: sandboxKeyId,
-        branch: env.MYNT_BRANCH ?? null,
-        ...(base ? { solana_env: { ...b.solana_env, build: base } } : {}),
-      });
+      const moved = await this.db.query(
+        `UPDATE financial_products.build_runs SET status = 'provisioning', sandbox_id = $2, sandbox_started_at = now(), sandbox_key_id = $3, branch = $4,
+           solana_env = COALESCE($5::jsonb, solana_env), updated_at = now()
+         WHERE id = $1 AND status = 'queued' RETURNING id`,
+        [b.id, sandbox.id, sandboxKeyId, env.MYNT_BRANCH ?? null, base ? JSON.stringify({ ...b.solana_env, build: base }) : null],
+      );
+      if (!moved.rows.length) {
+        // Stopped while the sandbox was being made: nothing may run in it.
+        await sandboxes.stop(sandbox.id).catch(() => undefined);
+        if (sandboxKeyId) await this.store.revokeApiKey(sandboxKeyId).catch(() => undefined);
+        return;
+      }
       await this.event(b.id, "provisioning", "Sandbox requested", { sandbox_id: sandbox.id, ...(base ? { solana_environment: base.key } : {}) });
       return;
     }
@@ -1798,9 +1908,15 @@ export function developerBuild(b: Build) {
 }
 
 export function registerCodingAgentTools(server: McpServer, store: Store, user: User, builds: BuildService) {
+  // A build of an app in one of the developer's workspaces, or their own build for no app (workspaces.ts).
   const own = async (id: string) => {
     const b = await builds.get(id);
-    return b && b.developer_id === user.id ? b : undefined;
+    return b && (await canSeeBuild(store, user, b)) ? b : undefined;
+  };
+  // A teammate's build is read-only to them unless they may drive its sandbox (BuildService.mayDrive).
+  const drive = async (b: Build) => {
+    if (!(await builds.mayDrive(b, user.id)))
+      throw new Error(`This build's sandbox can push to ${b.repository}: connect it yourself (connect_repository) to work in it; you can still read its files and diff`);
   };
 
   server.registerTool(
@@ -1845,10 +1961,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async () => json(await builds.repositories(user.id)),
   );
 
-  const ownApp = async (appId: string) => {
-    const app = await store.getApp(appId);
-    return app && app.owner_id === user.id ? app : undefined;
-  };
+  const ownApp = (appId: string) => memberApp(store, user, appId);
 
   server.registerTool(
     "get_app_repository",
@@ -1947,11 +2060,16 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async ({ goal, app_id, repository, cap_usd, solana, mode, continue_from }) => {
       if (!builds.enabled) return fail("Coding-agent builds aren't enabled on this Mynt yet");
       if (app_id) {
-        const app = await store.getApp(app_id);
-        if (!app || app.owner_id !== user.id) return fail(`No app of yours with id '${app_id}'`);
+        if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
       }
       try {
         const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana, mode, continue_from });
+        // Removed from the app's workspace while this was starting: the build is stopped at once (offboarding
+        // removes the membership before it stops builds, so one of the two always sees the other).
+        if (b.app_id && !(await memberApp(store, user, b.app_id))) {
+          await builds.stop(b, "Its developer left the app's workspace").catch(() => undefined);
+          return fail(`No app of yours with id '${b.app_id}'`);
+        }
         await store.audit(user.id, "start_build", b.id, { app_id: b.app_id, repository: b.repository, cap_usd: b.cap_usd, mode, continue_from: continue_from ?? null });
         return json({ ...developerBuild(b), track_with: "get_build", ...(mode === "session" ? { next: "steer_build with each request; finish_build to ship" } : {}) });
       } catch (e) {
@@ -1964,7 +2082,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     "list_builds",
     {
       title: "My builds",
-      description: "Developer: your coding-agent builds, newest first, with status, cost and links; plus this month's spend against your budget.",
+      description:
+        "Developer: the coding-agent builds of your workspaces' apps (whoever started them) and your own builds for no app, newest first, with status, cost and links; plus this month's spend against your budget.",
       inputSchema: { status: z.enum(BUILD_STATUSES).optional(), app_id: z.string().optional().describe("Only this app's builds") },
       annotations: { readOnlyHint: true },
     },
@@ -1972,7 +2091,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
-        builds: (await builds.listFor(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
+        builds: (await builds.listVisible(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
       }),
   );
 
@@ -2023,6 +2142,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async ({ build_id, message }) => {
       const b = await own(build_id);
       if (!b) return fail(`No build of yours with id '${build_id}'`);
+      // A build runs on its starter's budget: a teammate starts their own, carrying on from it (continue_from).
+      if (b.developer_id !== user.id) return fail("Only the developer who started this build can steer it (it spends their budget); start your own with continue_from");
       try {
         await builds.steer(b, message);
         return json({ build_id, steered: true });
@@ -2088,6 +2209,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     },
     async ({ build_id, hours }) =>
       onBox(build_id, async (b) => {
+        if (b.developer_id !== user.id) throw new Error("Only the developer who started this build can reopen its sandbox (it spends their budget); start your own with continue_from");
         if (b.box_sandbox_id && b.box_until && Date.parse(b.box_until) > Date.now()) {
           const ready = await builds.boxReady(b);
           return { build_id, ready, until: b.box_until, ...(ready ? { next: "open_sandbox_editor or sandbox_run" } : { next: "call reopen_sandbox again in a few seconds" }) };
@@ -2115,7 +2237,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
         "Developer: VS Code in your browser on the sandbox where the coding agents are building your app, with a terminal. Returns a private link and a password. Works while the build runs and, after it ships, while its preview is up.",
       inputSchema: { build_id: z.string() },
     },
-    async ({ build_id }) => onBox(build_id, (b) => builds.openEditor(b)),
+    async ({ build_id }) => onBox(build_id, async (b) => (await drive(b), builds.openEditor(b))),
   );
 
   server.registerTool(
@@ -2126,7 +2248,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
         "Developer: run a shell command in your build's sandbox, in the app's directory (e.g. 'npm test', 'docker compose ps', 'git log --oneline -5'). Output is capped and secrets are scrubbed; every command is on the build's timeline.",
       inputSchema: { build_id: z.string(), command: z.string().min(1).max(4000), timeout_seconds: z.number().int().min(1).max(300).default(60) },
     },
-    async ({ build_id, command, timeout_seconds }) => onBox(build_id, (b) => builds.boxExec(b, command, timeout_seconds)),
+    async ({ build_id, command, timeout_seconds }) => onBox(build_id, async (b) => (await drive(b), builds.boxExec(b, command, timeout_seconds))),
   );
 
   server.registerTool(
@@ -2137,7 +2259,11 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       inputSchema: { build_id: z.string(), path: z.string().max(1000).default(".") },
       annotations: { readOnlyHint: true },
     },
-    async ({ build_id, path }) => onBox(build_id, (b) => builds.boxFiles(b, path)),
+    async ({ build_id, path }) => {
+      // Inside the app's directory only: no absolute path, no way up out of it.
+      if (path.startsWith("/") || path.startsWith("~") || path.split(/[\\/]+/).includes("..")) return fail("Give a path inside the app's directory (no leading / and no ..)");
+      return onBox(build_id, (b) => builds.boxFiles(b, path));
+    },
   );
 
   server.registerTool(

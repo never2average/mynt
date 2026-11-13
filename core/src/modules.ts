@@ -4,6 +4,7 @@ import { accessStatus } from "./access.js";
 import type { ContractAction } from "./contract.js";
 import type { Db } from "./db.js";
 import type { Store, User } from "./store.js";
+import { canSeeBuild } from "./workspaces.js";
 
 // Developer modules: reusable pieces developers vibecode on top of products' developer contracts (an EMI
 // planner, a loan-with-cover journey step, a webhook handler) and publish under their own namespace for
@@ -90,7 +91,7 @@ export async function checkModule(store: Store, user: User, m: ModuleManifest) {
   let verified = false;
   if (m.source_build_id) {
     const build = await store.buildRun(m.source_build_id);
-    if (!build || build.developer_id !== user.id) errors.push(`No build of yours with id '${m.source_build_id}'`);
+    if (!build || !(await canSeeBuild(store, user, build))) errors.push(`No build of yours with id '${m.source_build_id}'`);
     else if (build.status !== "succeeded") errors.push(`Build '${m.source_build_id}' didn't pass Mynt's verification`);
     else verified = true;
   }

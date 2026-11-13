@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
 import type { Store, User } from "../store.js";
+import { canSeeBuild } from "../workspaces.js";
 import { open, seal, vaultAvailable } from "../vault.js";
 import { anchorDiscriminator, base58Encode, executableHash, findProgramAddress, isAddress, Keypair, pubkeyBytes } from "./codec.js";
 import { HealthPublisher, healthIx } from "./product-health-chain.js";
@@ -716,8 +717,10 @@ export class SolanaService {
   // and Mynt's own build of it must declare exactly this program's address.
   // `user` null: Mynt itself, re-reading a build a person's request already checked (the mainnet gate's worker).
   private async verifiedArtifact(user: User | null, p: ProgramRecord, buildId: string) {
-    const b = await this.one(`SELECT developer_id, status FROM ${T}.build_runs WHERE id::text = $1`, [buildId]);
-    if (!b || (user && b.developer_id !== user.id && b.developer_id !== p.owner_id)) throw new SolanaError(`No build of yours with id '${buildId}'`);
+    const b = await this.one(`SELECT developer_id, app_id::text AS app_id, status FROM ${T}.build_runs WHERE id::text = $1`, [buildId]);
+    // The program owner's own builds, or a build the developer may see (their workspace's app's: workspaces.ts).
+    if (!b || (user && b.developer_id !== p.owner_id && !(await canSeeBuild(this.store, user, b as { developer_id: string; app_id: string | null }))))
+      throw new SolanaError(`No build of yours with id '${buildId}'`);
     if (b.status !== "succeeded") throw new SolanaError(`Build ${buildId} is ${b.status}: only a build Mynt verified can be deployed`);
     const rows = (await this.db.query(`SELECT * FROM ${T}.solana_program_artifacts WHERE build_id = $1`, [buildId])).rows as Row[];
     if (!rows.length) throw new SolanaError(`Mynt's verification of build ${buildId} built no Solana program`);
