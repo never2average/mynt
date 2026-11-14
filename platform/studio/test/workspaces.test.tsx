@@ -87,13 +87,13 @@ function sidebar(over: Partial<Parameters<typeof SidebarView>[0]> = {}) {
 }
 
 describe("sidebar", () => {
-  it("shows the selected workspace in the switcher, then Dashboard, Licences, Audits and Workspace, then the Apps folders", () => {
+  it("shows the selected workspace in the switcher, then Dashboard, Licences, Audits and Settings, then the Apps folders", () => {
     const html = sidebar();
     expect(html).toContain("Acme");
     expect(html).toContain('aria-label="Switch workspace"');
-    for (const href of ["/licences", "/audits", "/workspace"]) expect(html).toContain(`href="${href}"`);
+    for (const href of ["/licences", "/audits", "/settings"]) expect(html).toContain(`href="${href}"`);
     expect(html).not.toContain('href="/coverage"'); // Coverage is a tab of Licences now
-    const order = ["Switch workspace", ">Dashboard<", ">Licences<", ">Audits<", ">Workspace<", ">Apps<", ">Production<", ">Staging<", ">Ideas<"].map((s) => html.indexOf(s));
+    const order = ["Switch workspace", ">Dashboard<", ">Licences<", ">Audits<", ">Settings<", ">Apps<", ">Production<", ">Staging<", ">Ideas<"].map((s) => html.indexOf(s));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(html).toContain('href="/app-p"');

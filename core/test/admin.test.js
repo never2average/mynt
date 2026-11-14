@@ -12,6 +12,7 @@ const ADMIN_TOOLS = [
   "define_judgment", "define_legal_instrument", "define_legislation", "define_regulated_product_type", "define_regulator", "invite_user", "list_all_campaigns",
   "list_whitelist", "remove_judgment", "remove_legal_instrument", "remove_legislation",
   "remove_regulated_product_type", "remove_regulator", "revoke_user", "define_take_rate", "list_take_rates", "recompute_product_derived",
+  "decide_promotion_signoff", "list_promotion_signoffs",
 ];
 
 async function setup() {

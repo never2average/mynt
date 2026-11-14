@@ -11,14 +11,17 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/licences", label: "Licences", keywords: "licenses partners regulators coverage states map where serve" },
   { href: "/licences?tab=coverage", label: "Coverage", keywords: "states map where serve licences" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
-  { href: "/workspace", label: "Workspace", keywords: "members team invite invitations people roles apps settings rename" },
+  { href: "/settings", label: "Settings", keywords: "workspace members team invite invitations people roles apps repositories general rename" },
+  { href: "/earn", label: "Earn", keywords: "liquidity pools opportunities capital commit withdraw positions invest wallet" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
   { href: "/new", label: "New app", keywords: "create build start" },
 ];
 
 // Old pages that now redirect elsewhere: still fixed pages, never an app's id.
 const MOVED: readonly StudioPage[] = [
-  { href: "/members", label: "Workspace" },
+  { href: "/members", label: "Settings" },
+  { href: "/workspace", label: "Settings" },
+  { href: "/liquidity", label: "Earn" },
   { href: "/coverage", label: "Licences" },
 ];
 
@@ -76,7 +79,7 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
   }
   for (const m of sources.members ?? []) {
     const label = m.name ?? m.email ?? "Member";
-    items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/workspace?tab=members", text: lower(m.name, m.email, m.role) });
+    items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/settings?tab=members", text: lower(m.name, m.email, m.role) });
   }
   (sources.licences ?? []).forEach((l, i) => {
     const label = [l.partner, l.type].filter(Boolean).join(" · ") || l.number || "Licence";

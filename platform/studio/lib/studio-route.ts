@@ -14,7 +14,12 @@ export const json = (body: unknown, status = 200) => NextResponse.json(body, { s
 // An API route that talks to Mynt as the signed-in developer: sign-in, the developer check, the
 // connection and the usual answers (401, 403, 422 with Mynt's own message, 502), and the session
 // saved at the end. `what` names the route in the server log (never its arguments or reply).
-export async function asDeveloper(what: string, handle: (mynt: Client, session: Session) => Promise<NextResponse>): Promise<NextResponse> {
+// `allowed` widens who the route serves (the liquidity routes also serve liquidity providers).
+export async function asDeveloper(
+  what: string,
+  handle: (mynt: Client, session: Session) => Promise<NextResponse>,
+  allowed: (session: Session) => boolean = sessionIsDeveloper,
+): Promise<NextResponse> {
   const session = await currentSession();
   if (!session?.tokens) return json({ error: "auth_required" }, 401);
   let mynt: Client | undefined;
@@ -22,7 +27,7 @@ export async function asDeveloper(what: string, handle: (mynt: Client, session: 
   try {
     mynt = await connectStudio(session);
     await ensureRoles(session, mynt);
-    res = sessionIsDeveloper(session)
+    res = allowed(session)
       ? await handle(mynt, session)
       : json({ error: "not_developer", message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." }, 403);
   } catch (err) {

@@ -10,6 +10,8 @@ import { ConnectRepository, RepoTileList, type ReposState } from "@/components/r
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { LiquidityLinks } from "@/components/liquidity-links"
+import type { LiquidityAccess } from "@/lib/liquidity"
 import { count, type Dashboard } from "@/lib/dashboard"
 import { shortAddress, type LinkedAccounts } from "@/lib/linked-accounts"
 
@@ -39,11 +41,13 @@ export function AccountTiles({
   linked,
   repos = { kind: "loading" },
   onReposChanged,
+  liquidity,
 }: {
   dashboard: Dashboard
   linked: LinkedAccounts | null
   repos?: ReposState // the developer's connected repositories, on the GitHub tile
   onReposChanged?: () => void
+  liquidity?: LiquidityAccess | null // the wallet tile's liquidity links; read by the tile itself when not given
 }) {
   return (
     <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4">
@@ -103,7 +107,10 @@ export function AccountTiles({
             </CardAction>
           )}
         </CardHeader>
-        <CardFooter>{linked && !linked.wallet && <LinkOut href={linked.manageUrl} label="Link wallet" />}</CardFooter>
+        <CardFooter className="flex flex-wrap gap-2">
+          {linked && !linked.wallet && <LinkOut href={linked.manageUrl} label="Link wallet" />}
+          <LiquidityLinks access={liquidity} />
+        </CardFooter>
       </Card>
     </div>
   )

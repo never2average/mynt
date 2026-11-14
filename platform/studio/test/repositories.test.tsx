@@ -62,7 +62,7 @@ describe("the GitHub tile", () => {
     expect(tile).toMatch(/data-repo="ines\/savings" data-approval="approved"[\s\S]*?data-tone="green"[\s\S]*?Approved/);
     expect(tile).toMatch(/data-approval="pending"[\s\S]*?Waiting for an admin[\s\S]*?Link your GitHub account so Mynt can check you can push/);
     expect(tile).toMatch(/data-approval="rejected"[\s\S]*?data-tone="red"[\s\S]*?Rejected/);
-    expect(tile).toContain('href="/workspace?tab=repositories"');
+    expect(tile).toContain('href="/settings?tab=repositories"');
     expect(tile).toMatch(/>\s*Connect repository\s*</);
   });
 
