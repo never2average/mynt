@@ -160,7 +160,7 @@ export function PnlView({ pnl }: { pnl: AppPnl }) {
           {row("Revenue", pnl.totals.revenue, true)}
           {pnl.costs.map((l) => row(l.label, l.values))}
           {row("Costs", pnl.totals.costs, true)}
-          {row("Net", pnl.totals.net, true)}
+          {row("Net", pnl.totals["net"], true)}
         </TableBody>
       </Table>
       {pnl.unmeasured.length > 0 && (
