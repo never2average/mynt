@@ -164,7 +164,7 @@ describe("attention and stages routes", () => {
     fake.tools = [...BASE, { name: "get_workspace_pnl", inputSchema: props("workspace_id", "granularity", "periods", "app_id") }];
     const body = await (await pnlRoute.GET(req("/api/pnl?workspace=w1&granularity=week&periods=12"))).json();
     expect(called("get_workspace_pnl")[0].args).toEqual({ workspace_id: "w1", granularity: "week", periods: 12 });
-    expect(body.pnl.series[0]).toMatchObject({ revenue: 5000, costs: null, net: null });
+    expect(body.pnl.series[0]).toMatchObject({ revenue: 5000, costs: null, netIncome: null });
     expect(body.pnl.columns.map((c: { label: string }) => c.label)).toEqual(["This period", "Last period", "Year to date"]);
     // Anything else falls back to a month over 6; Personal is the user's own workspace.
     await pnlRoute.GET(req("/api/pnl?workspace=personal&granularity=year&periods=99"));

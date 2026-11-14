@@ -110,12 +110,12 @@ describe("the P&L", () => {
   it("reads Mynt's answer in cents, keeping unmeasured figures null, and formats USD with a minus sign", () => {
     expect(pnl.series.map((p) => p.revenue)).toEqual([null, 50000, 150000]);
     expect(pnl.costs[1]).toMatchObject({ key: "hosting", measured: false, values: { this_period: null, last_period: null, year_to_date: null } });
-    expect(fromPnl({ series: [{ start: "a", end: "b", revenue_cents: 1.5, costs_cents: "3", net_cents: 0 }] }).series[0]).toMatchObject({ revenue: null, costs: null, net: 0 });
+    expect(fromPnl({ series: [{ start: "a", end: "b", revenue_cents: 1.5, costs_cents: "3", net_cents: 0 }] }).series[0]).toMatchObject({ revenue: null, costs: null, netIncome: 0 });
     expect(money(123456)).toBe("$1,234.56");
     expect(money(-30000)).toBe(`${MINUS}$300.00`);
     expect(money(null)).toBe(NOT_MEASURED);
     expect(money(0)).toBe("$0.00"); // a measured zero is a zero
-    expect(changeText(pnl.totals.net)).toBe("+$1,400.00 vs last period");
+    expect(changeText(pnl.totals.netIncome)).toBe("+$1,400.00 vs last period");
     expect(changeText(pnl.totals.revenue)).toBe("+$1,000.00 (+200%) vs last period");
     expect(changeText({ this_period: 1, last_period: null, year_to_date: null })).toBe("No comparison yet");
   });
@@ -123,7 +123,7 @@ describe("the P&L", () => {
   it("chart: one row per period, an unmeasured value stays null (a gap), never 0", () => {
     const rows = chartRows(pnl.series, "month");
     expect(rows.map((r) => r.period)).toEqual(["Sep 26", "Oct 26", "Nov 26"]);
-    expect(rows[0]).toMatchObject({ revenue: null, costs: 12000, net: null });
+    expect(rows[0]).toMatchObject({ revenue: null, costs: 12000, netIncome: null });
     const html = renderToStaticMarkup(<PnlChart state={{ kind: "ready", data: pnl }} granularity="month" periods={6} />);
     expect(html).toMatch(/data-pnl-gaps[^>]*>Gaps are periods Mynt didn.{1,6}t measure: Sep 26\.</);
     expect(html).toContain("data-pnl-chart");

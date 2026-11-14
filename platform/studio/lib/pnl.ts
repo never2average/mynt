@@ -19,7 +19,7 @@ export const COLUMN_KEYS = ["this_period", "last_period", "year_to_date"] as con
 export type ColumnKey = (typeof COLUMN_KEYS)[number];
 export type Values = Record<ColumnKey, number | null>;
 
-export type PnlPeriod = { start: string; end: string; revenue: number | null; costs: number | null; net: number | null };
+export type PnlPeriod = { start: string; end: string; revenue: number | null; costs: number | null; netIncome: number | null };
 export type PnlLine = { key: string; label: string; appId: string | null; productId: string | null; values: Values; measured: boolean; source: string | null };
 export type PnlColumn = { key: ColumnKey; label: string; start: string | null; end: string | null };
 export type Pnl = {
@@ -28,7 +28,7 @@ export type Pnl = {
   columns: PnlColumn[];
   revenue: PnlLine[];
   costs: PnlLine[];
-  totals: { revenue: Values; costs: Values; net: Values };
+  totals: { revenue: Values; costs: Values; netIncome: Values };
   unmeasured: { key: string; label: string; reason: string }[];
 };
 
@@ -71,12 +71,12 @@ export function fromPnl(reply: unknown): Pnl {
   return {
     currency: "USD",
     series: (Array.isArray(r.series) ? r.series : []).filter(isObj).flatMap((p) =>
-      str(p.start) && str(p.end) ? [{ start: str(p.start)!, end: str(p.end)!, revenue: cents(p.revenue_cents), costs: cents(p.costs_cents), net: cents(p.net_cents) }] : [],
+      str(p.start) && str(p.end) ? [{ start: str(p.start)!, end: str(p.end)!, revenue: cents(p.revenue_cents), costs: cents(p.costs_cents), netIncome: cents(p.net_cents) }] : [],
     ).sort((a, b) => a.start.localeCompare(b.start)),
     columns,
     revenue: lines(st.revenue),
     costs: lines(st.costs),
-    totals: { revenue: values(totals.revenue), costs: values(totals.costs), net: values(totals.net) },
+    totals: { revenue: values(totals.revenue), costs: values(totals.costs), netIncome: values(totals["net"]) },
     unmeasured: (Array.isArray(r.unmeasured) ? r.unmeasured : []).filter(isObj).flatMap((u) =>
       str(u.key) ? [{ key: str(u.key)!, label: str(u.label) ?? str(u.key)!, reason: str(u.reason) ?? "Mynt doesn't measure it yet." }] : [],
     ),
@@ -130,8 +130,8 @@ const periodFmt = (g: Granularity) => (iso: string) => {
 /** The chart's rows: one per period; an unmeasured value stays null (a gap), never 0. */
 export function chartRows(series: PnlPeriod[], g: Granularity) {
   const label = periodFmt(g);
-  return series.map((p) => ({ period: label(p.start), start: p.start, revenue: p.revenue, costs: p.costs, net: p.net }));
+  return series.map((p) => ({ period: label(p.start), start: p.start, revenue: p.revenue, costs: p.costs, netIncome: p.netIncome }));
 }
 
-export const hasGaps = (series: PnlPeriod[]) => series.some((p) => p.revenue === null || p.costs === null || p.net === null);
-export const anyMeasured = (series: PnlPeriod[]) => series.some((p) => p.revenue !== null || p.costs !== null || p.net !== null);
+export const hasGaps = (series: PnlPeriod[]) => series.some((p) => p.revenue === null || p.costs === null || p.netIncome === null);
+export const anyMeasured = (series: PnlPeriod[]) => series.some((p) => p.revenue !== null || p.costs !== null || p.netIncome !== null);

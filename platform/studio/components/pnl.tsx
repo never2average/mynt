@@ -20,7 +20,7 @@ export const PNL_NOT_AVAILABLE = "P&L isn't available yet. It comes with Mynt's 
 const chartConfig = {
   revenue: { label: "Revenue", color: "var(--chart-2)" },
   costs: { label: "Costs", color: "var(--chart-1)" },
-  net: { label: "Net", color: "var(--foreground)" },
+  netIncome: { label: "Net", color: "var(--foreground)" },
 } satisfies ChartConfig
 
 /** Loading, not offered, not for this workspace, or an error: what a P&L part says instead. */
@@ -56,7 +56,7 @@ export function PnlStats({ state }: { state: Loaded<Pnl> }) {
   const rows: [string, Values, boolean][] = [
     ["Revenue", t.revenue, false],
     ["Costs", t.costs, false],
-    ["Net", t.net, true],
+    ["Net", t.netIncome, true],
   ]
   return (
     <dl className="grid grid-cols-3 divide-x rounded-md border" data-pnl-stats>
@@ -114,7 +114,7 @@ export function PnlChart({
   const unit = granularity === "month" ? "mo" : "wk"
   const series = state.kind === "ready" ? state.data.series : []
   const rows = chartRows(series, granularity)
-  const gaps = rows.filter((r) => r.revenue === null || r.costs === null || r.net === null)
+  const gaps = rows.filter((r) => r.revenue === null || r.costs === null || r.netIncome === null)
   return (
     <section className="flex min-w-0 flex-col gap-2" data-section="pnl-chart" aria-labelledby="section-pnl-chart">
       <div className="flex flex-wrap items-center gap-2 border-b pb-2">
@@ -157,7 +157,7 @@ export function PnlChart({
               <Bar dataKey="revenue" fill="var(--color-revenue)" radius={[4, 4, 0, 0]} maxBarSize={28} />
               <Bar dataKey="costs" fill="var(--color-costs)" radius={[4, 4, 0, 0]} maxBarSize={28} />
               {/* A period Mynt didn't measure stays a gap: nulls are never joined or drawn as 0. */}
-              <Line dataKey="net" type="linear" stroke="var(--color-net)" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+              <Line dataKey="netIncome" type="linear" stroke="var(--color-netIncome)" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
             </ComposedChart>
           </ChartContainer>
           {hasGaps(series) && (
@@ -250,7 +250,7 @@ export function PnlStatement({ state }: { state: Loaded<Pnl> }) {
               <TotalRow id="costs" label="Total costs" values={state.data.totals.costs} />
             </TableBody>
             <TableFooter>
-              <TotalRow id="net" label="Net" values={state.data.totals.net} net />
+              <TotalRow id="net" label="Net" values={state.data.totals.netIncome} net />
             </TableFooter>
           </Table>
           {state.data.unmeasured.length > 0 && (
