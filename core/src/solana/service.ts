@@ -1570,13 +1570,13 @@ export class SolanaService {
     const rpc = this.rpc("devnet");
     let have = await this.balance(rpc, address);
     if (have >= need) return;
-    const audit = (source: string, lamports: number, signature: string) =>
+    const recordTopup = (source: string, lamports: number, signature: string) =>
       this.store.audit(user.id, TOPUP_ACTION, address, { cluster: "devnet", owner_id: ownerId, role, source, lamports, signature });
     try {
       const lamports = Math.min(AIRDROP_MAX, need);
       const sig = await rpc.call<string>("requestAirdrop", [address, lamports]);
       await this.confirm(rpc, [sig]);
-      await audit("faucet", lamports, sig);
+      await recordTopup("faucet", lamports, sig);
       have = await this.balance(rpc, address);
       if (have >= need) return;
     } catch {
@@ -1605,7 +1605,7 @@ export class SolanaService {
     const spare = authority ? (await this.balance(rpc, authority.address)) - limits.authorityKeepLamports - SIGNATURE_FEE : 0;
     if (!authority || spare < shortfall) throw new SolanaError(`The devnet faucet refused and Mynt's own devnet SOL is low; ${fundIt}`);
     const signature = await this.send(rpc, signs(authority), [system.transfer(authority.address, address, shortfall)]);
-    await audit("devnet-authority", shortfall, signature);
+    await recordTopup("devnet-authority", shortfall, signature);
   }
 
   // ---- the indexer ----
