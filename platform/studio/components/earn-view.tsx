@@ -1,8 +1,7 @@
 "use client"
 
-// The Earn page's content (/earn), by role. A metadata card on top, a tab selector, the
-// investing assistant first (components/earn-assistant.tsx), then a table per tab with a
-// full-width search, labelled filters and its own CTA:
+// Earn's table tabs (/earn's right-hand panel, beside the assistant: components/earn-assistant.tsx),
+// by role, each a table with a full-width search, labelled filters and its own CTA:
 // - My pools (builders): their products' pools, each one's state, terms, latest verified
 //   health and withdrawal queue; "Propose pool" on a sponsored component of their firm's product.
 // - Opportunities (liquidity providers): pools open to commitments, their health and terms, and
@@ -36,14 +35,11 @@ import {
   STAGE_LABELS,
   stageOf,
   statusText,
-  TAB_LABELS,
-  tabsFor,
   US_STATE_CODES,
   usd,
   withdrawalRefusal,
   withdrawalTerms,
   type LiquidityData,
-  type EarnTab,
   type PoolFilters,
   type PoolRow,
   type PoolStage,
@@ -780,93 +776,35 @@ function MyPositions({ positions, withdrawals, pools, canWithdraw, actions, form
 
 // ---- the page ----
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-0.5" data-stat={label}>
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className="text-lg font-semibold tabular-nums">{value}</span>
-    </div>
-  )
-}
-
-export function EarnView({
-  data,
-  actions,
-  initialTab,
-  initialForm = null,
-  assistant = null,
-}: {
-  data: LiquidityData
-  actions: LiquidityActions
-  initialTab?: string | null
-  initialForm?: OpenForm
-  assistant?: React.ReactNode // the Assistant tab's content
-}) {
-  const tabs = tabsFor(data.access)
-  const [tab, setTab] = useState<EarnTab | undefined>(tabs.includes(initialTab as EarnTab) ? (initialTab as EarnTab) : tabs[0])
-  const [form, setForm] = useState<OpenForm>(initialForm)
-
-  if (!tabs.length || !tab)
-    return (
-      <Card data-empty="no-role">
-        <CardHeader>
-          <CardTitle>Earn</CardTitle>
-          <CardDescription>Earn is for builders of products with pools and for liquidity providers. Ask a Mynt admin if you should have one of those roles.</CardDescription>
-        </CardHeader>
-      </Card>
-    )
-
+// The panel header's summary on Earn: the user's roles and their counts, in a line.
+export function EarnStats({ data }: { data: LiquidityData }) {
   const b = data.builder
   const lp = data.provider
   const roles = [data.access.builder && "Builder", data.access.liquidityProvider && "Liquidity provider"].filter(Boolean) as string[]
   const sum = (k: "committedCents" | "settledCents" | "queuedCents") => (lp ? lp.positions.reduce((n, p) => n + p[k], 0) : 0)
-
+  const stats = [
+    ...(lp ? [`${lp.pools.length} open`, `${usd(sum("settledCents"))} settled`, `${usd(sum("queuedCents"))} queued`] : []),
+    ...(b ? [`${b.pools.length} of yours`, `${b.pools.filter((p) => stageOf(p) === "awaiting_approval").length} awaiting approval`] : []),
+  ]
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <Card data-metadata>
-        <CardHeader>
-          <CardTitle className="flex flex-wrap items-center gap-2">
-            Earn
-            {roles.map((r) => (
-              <Badge key={r} variant="secondary" data-role={r}>
-                {r}
-              </Badge>
-            ))}
-          </CardTitle>
-          <CardDescription>
-            {EARN_DISCLOSURE}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          {b && <Stat label="My pools" value={String(b.pools.length)} />}
-          {b && <Stat label="Awaiting sponsor approval" value={String(b.pools.filter((p) => stageOf(p) === "awaiting_approval").length)} />}
-          {lp && <Stat label="Opportunities" value={String(lp.pools.length)} />}
-          {lp && <Stat label="Committed" value={usd(sum("committedCents"))} />}
-          {lp && <Stat label="Settled" value={usd(sum("settledCents"))} />}
-          {lp && <Stat label="Queued withdrawals" value={usd(sum("queuedCents"))} />}
-        </CardContent>
-      </Card>
+    <span className="flex min-w-0 items-center gap-2" data-earn-stats>
+      {roles.map((r) => (
+        <Badge key={r} variant="secondary" data-role={r}>
+          {r}
+        </Badge>
+      ))}
+      <span className="truncate tabular-nums">{stats.join(" · ")}</span>
+    </span>
+  )
+}
 
-      <div role="tablist" aria-label="Earn" className="flex gap-1 border-b">
-        {tabs.map((t) => (
-          <button
-            key={t}
-            role="tab"
-            type="button"
-            aria-selected={t === tab}
-            data-tab={t}
-            onClick={() => {
-              setTab(t)
-              setForm(null)
-            }}
-            className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${t === tab ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-          >
-            {TAB_LABELS[t]}
-          </button>
-        ))}
-      </div>
-
-      {tab === "assistant" && <div className="flex min-h-0 flex-1 flex-col" data-tab-panel="assistant">{assistant}</div>}
+// One of Earn's table tabs in the right-hand panel: Opportunities, My positions or My pools.
+export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "opportunities" | "my-positions" | "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
+  const [form, setForm] = useState<OpenForm>(initialForm)
+  const b = data.builder
+  const lp = data.provider
+  return (
+    <div className="h-full overflow-auto p-4" data-tab-panel={tab}>
       {tab === "my-pools" && b && <BuilderPools pools={b.pools} proposable={b.proposable} withdrawalsShown={b.withdrawalsShown} actions={actions} form={form} setForm={setForm} />}
       {tab === "opportunities" && lp && <OpenPools pools={lp.pools} positions={lp.positions} canCommit={lp.canCommit} actions={actions} form={form} setForm={setForm} />}
       {tab === "my-positions" && lp && <MyPositions positions={lp.positions} withdrawals={lp.withdrawals} pools={lp.pools} canWithdraw={lp.canWithdraw} actions={actions} form={form} setForm={setForm} />}

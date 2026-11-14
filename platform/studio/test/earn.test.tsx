@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AccountTiles } from "@/components/account-tiles";
 import { SidebarView } from "@/components/app-sidebar";
-import { CommitForm, commitOutcome, EarnView, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
+import { CommitForm, commitOutcome, EarnTable, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { fromDashboardTool } from "@/lib/dashboard";
 import {
   accessFrom,
   commitRefusal,
+  earnTabFromQuery,
   fromPools,
   fromPoolsWithHealth,
   fromPositions,
@@ -21,6 +20,7 @@ import {
   proposalFrom,
   STAGE_LABELS,
   stageOf,
+  tabOpensPanel,
   tabsFor,
   usd,
   walletLinksFor,
@@ -28,7 +28,6 @@ import {
   type LiquidityData,
   type PoolRow,
 } from "@/lib/liquidity";
-import { fromLinkedAccounts } from "@/lib/linked-accounts";
 import { pageTitle } from "@/lib/studio-search";
 import { groupByStage } from "@/lib/workspaces";
 
@@ -73,61 +72,44 @@ const data = (over: Partial<LiquidityData> & { access: LiquidityData["access"] }
   provider: over.access.liquidityProvider ? { pools: [CLEARED, UNCLEARED, SANDBOX], positions: [POSITION], withdrawals: [], canCommit: true, canWithdraw: true } : undefined,
   ...over,
 });
-// Without a tab, the table the role's tests are about (the page itself opens on the assistant).
-const view = (d: LiquidityData, tab?: string, form: Parameters<typeof EarnView>[0]["initialForm"] = null) =>
-  renderToStaticMarkup(<EarnView data={d} actions={noActions} initialTab={tab ?? (d.access.liquidityProvider ? "opportunities" : "my-pools")} initialForm={form} assistant={<p data-assistant-slot>assistant</p>} />);
-const tabsIn = (html: string) => [...html.matchAll(/data-tab="([a-z-]+)"/g)].map((m) => m[1]);
+// One of Earn's table tabs (the right-hand panel's Opportunities, My positions or My pools).
+const view = (d: LiquidityData, tab?: "opportunities" | "my-positions" | "my-pools", form: Parameters<typeof EarnTable>[0]["initialForm"] = null) =>
+  renderToStaticMarkup(<EarnTable data={d} actions={noActions} tab={tab ?? (d.access.liquidityProvider ? "opportunities" : "my-pools")} initialForm={form} />);
 
 describe("Earn by role", () => {
-  it("everyone with a liquidity role gets the Assistant; builders (developer or innovator) My pools; liquidity providers Opportunities and My positions", () => {
+  it("everyone with a liquidity role gets Pools; builders (developer or innovator) My pools; liquidity providers Opportunities, My positions and Drafts", () => {
     expect(accessFrom(["developer", "consumer", "innovator"])).toEqual({ builder: true, liquidityProvider: false });
     expect(accessFrom(["liquidity_provider"])).toEqual({ builder: false, liquidityProvider: true });
-    expect(tabsFor(accessFrom(["innovator"]))).toEqual(["assistant", "my-pools"]);
-    expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["assistant", "opportunities", "my-positions"]);
-    expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["assistant", "opportunities", "my-positions", "my-pools"]);
+    expect(tabsFor(accessFrom(["innovator"]))).toEqual(["pools", "my-pools"]);
+    expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["pools", "opportunities", "my-positions", "drafts"]);
+    expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["pools", "opportunities", "my-positions", "my-pools", "drafts"]);
     expect(tabsFor(accessFrom(["consumer"]))).toEqual([]);
-
-    expect(tabsIn(view(data({ access: { builder: true, liquidityProvider: false } })))).toEqual(["assistant", "my-pools"]);
-    expect(tabsIn(view(data({ access: { builder: false, liquidityProvider: true } })))).toEqual(["assistant", "opportunities", "my-positions"]);
-    const both = view(data({ access: { builder: true, liquidityProvider: true } }), "my-positions");
-    expect(tabsIn(both)).toEqual(["assistant", "opportunities", "my-positions", "my-pools"]);
-    expect(both).toMatch(/data-tab="assistant"[^>]*>Assistant</);
-    expect(both).toMatch(/data-tab="opportunities"[^>]*>Opportunities</);
-    expect(both).toMatch(/aria-selected="true"[^>]*data-tab="my-positions"/);
-    expect(both).toContain('data-tab-panel="my-positions"');
-    // A tab the user doesn't have falls back to their first: the assistant.
-    const fallback = view(data({ access: { builder: false, liquidityProvider: true } }), "my-pools");
-    expect(fallback).toContain('data-tab-panel="assistant"');
-    expect(fallback).toContain("data-assistant-slot");
-    expect(view(data({ access: { builder: false, liquidityProvider: true } }), "opportunities")).toContain('data-tab-panel="opportunities"');
-    expect(view(data({ access: { builder: false, liquidityProvider: false } }))).toContain('data-empty="no-role"');
+    expect(view(data({ access: { builder: false, liquidityProvider: true } }), "my-positions")).toContain('data-tab-panel="my-positions"');
   });
 
-  it("the wallet tile links to /earn by role, keeping the address, network and Link wallet", () => {
-    expect(walletLinksFor({ builder: true, liquidityProvider: true }).map((l) => l.label)).toEqual(["Manage pools", "Provide liquidity"]);
-    const SOLANA = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
-    const linked = fromLinkedAccounts({ wallets: [{ address: SOLANA, chain: "solana" }], manage_url: "https://accounts.example.com/user" });
-    const tile = (liquidity: Parameters<typeof AccountTiles>[0]["liquidity"], l = linked) =>
-      renderToStaticMarkup(<AccountTiles dashboard={fromDashboardTool({})} linked={l} liquidity={liquidity} />).split('data-tile="wallet"')[1];
+  it("maps ?tab= (and /liquidity's and the old Assistant's tabs) to the right-hand tab", () => {
+    expect(["pools", "opportunities", "open-pools", "my-positions", "my-pools", "drafts", "assistant", "nope", undefined].map(earnTabFromQuery)).toEqual([
+      "pools",
+      "opportunities",
+      "opportunities",
+      "my-positions",
+      "my-pools",
+      "drafts",
+      "pools",
+      "pools",
+      "pools",
+    ]);
+    expect(["opportunities", "drafts", "pools", "assistant", undefined].map(tabOpensPanel)).toEqual([true, true, false, false, false]);
+  });
 
-    const builder = tile({ builder: true, liquidityProvider: false });
-    expect(builder).toContain("7EcDhS…FLtV");
-    expect(builder).toMatch(/data-network="true"[^>]*>Solana</);
-    expect(builder).toContain('href="/earn?tab=my-pools"');
-    expect(builder).toContain("Manage pools");
-    expect(builder).not.toContain("Provide liquidity");
-
-    const lp = tile({ builder: false, liquidityProvider: true });
-    expect(lp).toContain('href="/earn?tab=opportunities"');
-    expect(lp).not.toContain("Manage pools");
-
-    const none = tile({ builder: false, liquidityProvider: false });
-    expect(none).not.toContain("/earn");
-
-    const unlinked = tile({ builder: true, liquidityProvider: true }, fromLinkedAccounts({ wallets: [], manage_url: "https://accounts.example.com/user" }));
-    expect(unlinked).toContain("Link wallet");
-    expect(unlinked).toContain("Manage pools");
-    expect(unlinked).toContain("Provide liquidity");
+  it("the header's wallet control links to /earn by role (test/wallet-control.test.tsx renders it)", () => {
+    expect(walletLinksFor({ builder: true, liquidityProvider: true })).toEqual([
+      { label: "Manage pools", href: "/earn?tab=my-pools" },
+      { label: "Provide liquidity", href: "/earn?tab=opportunities" },
+    ]);
+    expect(walletLinksFor({ builder: false, liquidityProvider: true }).map((l) => l.label)).toEqual(["Provide liquidity"]);
+    expect(walletLinksFor({ builder: false, liquidityProvider: false })).toEqual([]);
+    expect(walletLinksFor(null)).toEqual([]);
   });
 
   it("the sidebar lists Earn (in place of Liquidity) after Settings only for builders and liquidity providers", () => {
@@ -333,6 +315,6 @@ describe("/liquidity", () => {
     expect(await to("open-pools")).toContain("/earn?tab=opportunities");
     expect(await to("my-positions")).toContain("/earn?tab=my-positions");
     expect(await to("my-pools")).toContain("/earn?tab=my-pools");
-    expect(await to()).toContain("/earn?tab=assistant");
+    expect(await to()).toContain("/earn?tab=pools");
   });
 });

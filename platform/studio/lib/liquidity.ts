@@ -1,4 +1,4 @@
-// Liquidity pools, as the studio shows them (the /liquidity page and the wallet tile's links).
+// Liquidity pools, as the studio shows them (the /liquidity page and the header wallet control's links).
 // Pure: reads Mynt's liquidity tools' replies (core/src/liquidity-tools.ts, product-health-tools.ts,
 // sponsorships.ts) into the page's rows, and the checks the page makes before it sends anything.
 // Mynt checks everything again. Amounts are integer cents from Mynt, shown as US dollars.
@@ -29,21 +29,27 @@ export const hasLiquidity = (a: LiquidityAccess | null | undefined) => Boolean(a
 // Whether the studio's liquidity routes serve this session at all (Mynt checks every call again).
 export const canUseLiquidity = (roles: readonly string[]) => hasLiquidity(accessFrom(roles));
 
-// The Earn page's tabs (/earn?tab=...): the assistant first, then the detailed tables by role.
+// Earn's right-hand panel tabs (/earn?tab=...), beside its assistant: the pools the conversation
+// matched, then the detailed tables by role, then the assistant's drafts (liquidity providers'
+// only: builders can't commit).
 export type LiquidityTab = "opportunities" | "my-positions" | "my-pools";
-export type EarnTab = "assistant" | LiquidityTab;
-export const TAB_LABELS: Record<EarnTab, string> = { assistant: "Assistant", opportunities: "Opportunities", "my-positions": "My positions", "my-pools": "My pools" };
+export type EarnTab = "pools" | LiquidityTab | "drafts";
+export const TAB_LABELS: Record<EarnTab, string> = { pools: "Pools", opportunities: "Opportunities", "my-positions": "My positions", "my-pools": "My pools", drafts: "Drafts" };
 export function tabsFor(a: LiquidityAccess): EarnTab[] {
   if (!hasLiquidity(a)) return [];
-  return ["assistant", ...(a.liquidityProvider ? (["opportunities", "my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : [])];
+  return ["pools", ...(a.liquidityProvider ? (["opportunities", "my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : []), ...(a.liquidityProvider ? (["drafts"] as const) : [])];
 }
-// /liquidity's old tabs, on Earn.
-export function earnTabFromLiquidity(tab: unknown): EarnTab {
+// ?tab= on /earn, and /liquidity's old tabs: the panel tab it names. The old "assistant" (and
+// anything unknown) is Pools.
+export function earnTabFromQuery(tab: unknown): EarnTab {
   if (tab === "open-pools" || tab === "opportunities") return "opportunities";
-  if (tab === "my-positions" || tab === "my-pools") return tab;
-  return "assistant";
+  if (tab === "my-positions" || tab === "my-pools" || tab === "drafts") return tab;
+  return "pools";
 }
-// The wallet tile's links, by role.
+export const earnTabFromLiquidity = earnTabFromQuery;
+// A link that names a table or the drafts opens the panel straight away, before any message.
+export const tabOpensPanel = (tab: unknown) => earnTabFromQuery(tab) !== "pools";
+// The header wallet control's links, by role.
 export function walletLinksFor(a: LiquidityAccess | null | undefined): { label: string; href: string }[] {
   if (!a) return [];
   return [...(a.builder ? [{ label: "Manage pools", href: "/earn?tab=my-pools" }] : []), ...(a.liquidityProvider ? [{ label: "Provide liquidity", href: "/earn?tab=opportunities" }] : [])];

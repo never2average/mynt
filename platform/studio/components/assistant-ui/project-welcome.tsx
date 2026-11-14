@@ -2,6 +2,10 @@
 
 import { useProjectConversations } from "@/lib/project-conversations-context";
 import type { FC } from "react";
+import { ChatWelcome } from "@/components/chat-welcome";
+
+// Examples for an app with no builds yet. A chip only fills the composer: sending starts a build.
+export const BUILDER_EXAMPLES = ["Add a savings goal screen", "Show recent transactions", "Make it work well on phones"] as const;
 
 export const ProjectWelcome: FC = () => {
   const { conversations, onSelectConversation, projectId } =
@@ -10,19 +14,7 @@ export const ProjectWelcome: FC = () => {
   const hasConversations = projectId && conversations.length > 0;
 
   return (
-    <div className="aui-thread-welcome-root mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
-      <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-center">
-        <div className="aui-thread-welcome-message flex flex-col items-center justify-center px-4 text-center">
-          <h1 className="aui-thread-welcome-message-inner animate-in text-2xl font-semibold tracking-tight duration-300 fade-in slide-in-from-bottom-2 md:text-3xl">
-            {""}
-          </h1>
-          {projectId && !hasConversations && (
-            <p className="text-sm text-muted-foreground/60">
-              No builds for this app yet.
-            </p>
-          )}
-        </div>
-
+    <ChatWelcome title="" subtitle={projectId && !hasConversations ? "No builds for this app yet." : undefined} chips={projectId && !hasConversations ? BUILDER_EXAMPLES : []} fill>
         {hasConversations && (
           <div className="mt-8 w-full max-w-(--thread-max-width) animate-in delay-100 duration-300 fade-in slide-in-from-bottom-2">
             <p className="mb-2 px-3 text-xs font-medium text-muted-foreground/50">
@@ -50,7 +42,6 @@ export const ProjectWelcome: FC = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </ChatWelcome>
   );
 };

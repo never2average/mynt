@@ -1,28 +1,31 @@
 "use client"
 
-// Earn's Assistant tab, Lovable-style: first a big prompt box ("What do you want to earn?") with
-// example chips; after the first prompt, a split view with the investing assistant's chat on the
-// left (the Ask AI stack, app/api/earn) and a live panel on the right that follows the
-// conversation: the pools the assistant matched, as cards, the user's positions, and any draft
-// commitment or withdrawal it proposed. A draft is a card the user confirms with their own click,
-// which calls the same routes as the tables; the assistant can't send anything itself.
+// Earn (/earn): the investing assistant in the studio's chat workspace, the same shell as an app's
+// builder (components/chat-workspace-shell.tsx), with different tabs on the right. The chat starts
+// as the big centred prompt ("What do you want to earn?") with example chips; after the first
+// message the right panel opens beside it with Pools (what the conversation matched, the default),
+// Opportunities, My positions, My pools (builders) and Drafts (liquidity providers: the
+// commitments and withdrawals the assistant proposed, each confirmed only by the user's own click,
+// which calls the same routes as the tables; the assistant can't send anything itself).
 import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
 import type { UIMessage } from "ai"
-import { ArrowUp, Loader2, MessageSquarePlus } from "lucide-react"
-import { useState } from "react"
+import { Loader2 } from "lucide-react"
+import { useMemo, useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
-import { MyntMark } from "@/components/brand/mynt-logo"
-import { commitOutcome, EARN_DISCLOSURE, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
+import { ChatWelcome } from "@/components/chat-welcome"
+import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
+import { commitOutcome, EARN_DISCLOSURE, EarnStats, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
 import {
   commitRefusal,
+  earnTabFromQuery,
   healthText,
   limitsText,
   lockInText,
@@ -31,8 +34,12 @@ import {
   reserveText,
   stageOf,
   statusText,
+  TAB_LABELS,
+  tabOpensPanel,
+  tabsFor,
   usd,
   withdrawalRefusal,
+  type EarnTab,
   type LiquidityData,
   type PoolRow,
   type Position,
@@ -41,63 +48,48 @@ import {
 export type EarnStatus = "loading" | "enabled" | "disabled"
 type Chat = UseChatHelpers<UIMessage>
 
-// ---- the landing ----
+// ---- the chat ----
 
-export function EarnLanding({ status, onAsk }: { status: EarnStatus; onAsk: (text: string) => void }) {
-  const [text, setText] = useState("")
-  const off = status !== "enabled"
-  const send = (t: string) => {
-    const q = t.trim()
-    if (!q || off) return
-    onAsk(q)
-    setText("")
-  }
+const WELCOME_TITLE = "What do you want to earn?"
+
+// The thread draws text and reads; the panel's data parts (data-earn-pools, data-earn-draft) are
+// the panel's, not the thread's, so they're left out of what the thread renders (assistant-ui's
+// AI SDK runtime has no renderer for data parts and would throw on one).
+export const withoutDataParts = (messages: UIMessage[]): UIMessage[] => messages.map((m) => (m.parts.some((p) => p.type.startsWith("data-")) ? { ...m, parts: m.parts.filter((p) => !p.type.startsWith("data-")) } : m))
+
+function EarnThread({ chat }: { chat: Chat }) {
+  const messages = useMemo(() => withoutDataParts(chat.messages), [chat.messages])
+  const threadChat = useMemo(() => ({ ...chat, messages }), [chat, messages])
+  const runtime = useAISDKRuntime(threadChat)
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-6 py-10" data-earn-landing>
-      <MyntMark size={40} />
-      <h2 className="text-center text-3xl font-semibold tracking-tight sm:text-4xl">What do you want to earn?</h2>
-      <form
-        className="relative w-full"
-        onSubmit={(e) => {
-          e.preventDefault()
-          send(text)
-        }}
-      >
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault()
-              send(text)
-            }
-          }}
-          rows={4}
-          disabled={off}
-          aria-label="What do you want to earn?"
-          placeholder={status === "disabled" ? "AI is not configured" : "Describe an amount, a lock-in, a state or a product line…"}
-          className="w-full resize-none rounded-2xl border border-input bg-card px-5 py-4 pr-16 text-base shadow-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20 disabled:opacity-60"
-        />
-        <Button type="submit" className="absolute right-3 bottom-4" disabled={off || !text.trim()} data-earn-send>
-          {status === "loading" ? <Loader2 className="animate-spin" /> : <ArrowUp />}
-          Ask
-        </Button>
-      </form>
-      <div className="flex flex-wrap justify-center gap-2">
-        {PROMPT_EXAMPLES.map((ex) => (
-          <Button key={ex} type="button" variant="outline" size="sm" className="rounded-full" disabled={off} onClick={() => send(ex)} data-earn-example={ex}>
-            {ex}
-          </Button>
-        ))}
-      </div>
-      {status === "disabled" && (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <Thread
+        Text={AskAiMarkdownText}
+        placeholder={chat.messages.length ? "Ask a follow-up…" : "Describe an amount, a lock-in, a state or a product line…"}
+        welcome={<ChatWelcome title={WELCOME_TITLE} subtitle="The assistant explains pool terms and matches them to what you ask. It can't move money." chips={PROMPT_EXAMPLES} />}
+        note={<span data-earn-disclosure>{EARN_DISCLOSURE}</span>}
+      />
+    </AssistantRuntimeProvider>
+  )
+}
+
+// The chat side: the assistant, or, without a model, the same centred prompt that can't be used.
+export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
+  if (status === "enabled") return <EarnThread chat={chat} />
+  return (
+    <div className="flex h-full flex-col bg-background px-4 pt-4" style={{ ["--thread-max-width" as string]: "44rem" }} data-earn-chat-off>
+      <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-center justify-center gap-2 text-center">
+        <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">{WELCOME_TITLE}</h1>
         <p className="text-sm text-muted-foreground" role="status">
-          AI is not configured on this studio. The Opportunities and My positions tabs still work.
+          {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. The Opportunities and My positions tabs still work."}
         </p>
-      )}
-      <p className="max-w-xl text-center text-xs text-muted-foreground" data-earn-disclosure>
-        {EARN_DISCLOSURE}
-      </p>
+      </div>
+      <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-4 md:pb-6">
+        <textarea disabled rows={2} aria-label="Message input" placeholder={status === "loading" ? "…" : "AI is not configured"} className="w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm opacity-60" />
+        <p className="-mt-2 text-center text-xs text-muted-foreground" data-earn-disclosure>
+          {EARN_DISCLOSURE}
+        </p>
+      </div>
     </div>
   )
 }
@@ -230,32 +222,19 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
   )
 }
 
-export function EarnPanel({ data, poolIds, drafts, actions }: { data: LiquidityData; poolIds: string[] | null; drafts: Draft[]; actions: LiquidityActions }) {
+// Pools: the pools the assistant last matched (every pool open to the user until it has), and
+// the user's positions.
+export function PoolsTab({ data, poolIds }: { data: LiquidityData; poolIds: string[] | null }) {
   const pools = [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])]
   const positions = data.provider?.positions ?? []
   const matched = poolIds && poolIds.length ? poolIds.map((id) => pools.find((p) => p.id === id)).filter((p): p is PoolRow => Boolean(p)) : pools
   return (
-    <div className="flex min-h-0 flex-col gap-4 overflow-auto" data-earn-panel>
-      {drafts.length > 0 && (
-        <section className="flex flex-col gap-3">
-          {drafts.map((d) => (
-            <DraftCard
-              key={d.id}
-              draft={d}
-              pool={pools.find((p) => p.id === d.poolId) ?? null}
-              position={positions.find((p) => p.poolId === d.poolId) ?? null}
-              actions={actions}
-              canCommit={data.provider?.canCommit ?? false}
-              canWithdraw={data.provider?.canWithdraw ?? false}
-            />
-          ))}
-        </section>
-      )}
+    <div className="flex h-full flex-col gap-4 overflow-auto p-4" data-earn-pools-tab>
       <section className="flex flex-col gap-3">
         <h3 className="text-sm font-medium">
           {poolIds && poolIds.length ? "Matching pools" : "Pools open to you"} <Badge variant="secondary">{matched.length}</Badge>
         </h3>
-        {matched.length ? matched.map((p) => <PoolCard key={p.id} pool={p} />) : <p className="text-sm text-muted-foreground">No pools to show yet.</p>}
+        {matched.length ? <div className="grid gap-3 xl:grid-cols-2">{matched.map((p) => <PoolCard key={p.id} pool={p} />)}</div> : <p className="text-sm text-muted-foreground">No pools to show yet.</p>}
       </section>
       {data.provider && (
         <section className="flex flex-col gap-2" data-earn-positions>
@@ -280,44 +259,89 @@ export function EarnPanel({ data, poolIds, drafts, actions }: { data: LiquidityD
   )
 }
 
-// ---- the tab ----
-
-function EarnThread({ chat }: { chat: Chat }) {
-  const runtime = useAISDKRuntime(chat)
+// Drafts: each draft the assistant proposed, as a card the user confirms (or not).
+export function DraftsTab({ data, drafts, actions }: { data: LiquidityData; drafts: Draft[]; actions: LiquidityActions }) {
+  const pools = [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])]
+  const positions = data.provider?.positions ?? []
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <Thread Text={AskAiMarkdownText} placeholder="Ask a follow-up…" />
-    </AssistantRuntimeProvider>
+    <div className="flex h-full flex-col gap-3 overflow-auto p-4" data-earn-drafts-tab>
+      {drafts.length ? (
+        drafts.map((d) => (
+          <DraftCard
+            key={d.id}
+            draft={d}
+            pool={pools.find((p) => p.id === d.poolId) ?? null}
+            position={positions.find((p) => p.poolId === d.poolId) ?? null}
+            actions={actions}
+            canCommit={data.provider?.canCommit ?? false}
+            canWithdraw={data.provider?.canWithdraw ?? false}
+          />
+        ))
+      ) : (
+        <p className="text-sm text-muted-foreground">No drafts. Ask the assistant to draft a commitment or a withdrawal; you confirm each one yourself.</p>
+      )}
+    </div>
   )
 }
 
-export function EarnAssistant({ chat, status, data, actions }: { chat: Chat; status: EarnStatus; data: LiquidityData; actions: LiquidityActions }) {
-  if (!chat.messages.length) return <EarnLanding status={status} onAsk={(text) => void chat.sendMessage({ text })} />
+// ---- the page ----
+
+export function EarnWorkspace({
+  chat,
+  status,
+  data,
+  actions,
+  initialTab,
+  isMobile,
+}: {
+  chat: Chat
+  status: EarnStatus
+  data: LiquidityData
+  actions: LiquidityActions
+  initialTab?: string | null
+  isMobile?: boolean
+}) {
+  const available = tabsFor(data.access)
+  const wanted = earnTabFromQuery(initialTab)
+  const [tab, setTab] = useState<EarnTab>(available.includes(wanted) ? wanted : "pools")
+  const [opened, setOpened] = useState(tabOpensPanel(initialTab) && available.includes(wanted))
   const { poolIds, drafts } = panelFrom(chat.messages as never)
-  return (
-    <div className="grid min-h-[36rem] flex-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,26rem)]" data-earn-split>
-      <div className="flex min-h-0 flex-col rounded-xl border" role="region" aria-label="Investing assistant">
-        <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
-          <span className="text-sm font-medium">Investing assistant</span>
-          <span className="text-xs text-muted-foreground">explains terms; doesn&apos;t give advice or move money</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="ml-auto"
-            onClick={() => {
-              void chat.stop()
-              chat.setMessages([])
-            }}
-          >
-            <MessageSquarePlus /> New chat
-          </Button>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <EarnThread chat={chat} />
-        </div>
+
+  // A new draft brings its tab forward, so the user sees what to confirm.
+  const [seenDrafts, setSeenDrafts] = useState(drafts.length)
+  if (drafts.length !== seenDrafts) {
+    setSeenDrafts(drafts.length)
+    if (drafts.length > seenDrafts && available.includes("drafts")) setTab("drafts")
+  }
+
+  const choose = (id: string) => {
+    const t = id as EarnTab
+    setTab(t)
+    if (typeof window !== "undefined") window.history.replaceState(window.history.state, "", `/earn?tab=${t}`)
+  }
+
+  if (!available.length)
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground" data-empty="no-role">
+        Earn is for builders of products with pools and for liquidity providers. Ask a Mynt admin if you should have one of those roles.
       </div>
-      <EarnPanel data={data} poolIds={poolIds} drafts={drafts} actions={actions} />
-    </div>
+    )
+
+  const content = (t: EarnTab) =>
+    t === "pools" ? <PoolsTab data={data} poolIds={poolIds} /> : t === "drafts" ? <DraftsTab data={data} drafts={drafts} actions={actions} /> : <EarnTable tab={t} data={data} actions={actions} />
+
+  return (
+    <ChatWorkspaceShell
+      chat={<EarnChat chat={chat} status={status} />}
+      showPanel={opened || chat.messages.length > 0}
+      tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "drafts" ? drafts.length : undefined, content: content(t) }))}
+      tab={tab}
+      onTab={(id) => {
+        choose(id)
+        setOpened(true)
+      }}
+      panelHeader={<EarnStats data={data} />}
+      isMobile={isMobile}
+    />
   )
 }

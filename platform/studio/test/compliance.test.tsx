@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import states10m from "us-atlas/states-10m.json";
+import countries110m from "world-atlas/countries-110m.json";
 import { AuditsView, NO_AUDIT_FILTERS } from "@/components/audits-view";
-import { CoverageList, CoverageView, StatePanel } from "@/components/coverage-view";
-import { LicencesView } from "@/components/licences-view";
+import { CoverageMap, StatePanel, US_COUNTRY_ID, usStatus } from "@/components/coverage-view";
+import { rowsFromEvents } from "@/lib/audit-classes";
+import { LicencesView, licencesCsv } from "@/components/licences-view";
 import { NotAvailableYet } from "@/components/not-available";
 import {
   allStates,
@@ -57,14 +59,14 @@ describe("coverage", () => {
     expect(all.find((s) => s.code === "WY")?.status).toBe("unavailable");
   });
 
-  it("draws the map with every state, a legend with counts and a Map/List toggle", () => {
-    const html = renderToStaticMarkup(<CoverageView coverage={coverage} />);
+  it("draws the US map with every state, a legend with counts and the US / World selector", () => {
+    const html = renderToStaticMarkup(<CoverageMap coverage={coverage} region="us" onRegion={() => undefined} />);
     expect(html).toContain('data-legend="unlocked"');
     expect(html).toMatch(/Unlocked<\/span><span[^>]*>1</);
     expect(html).toMatch(/Available<\/span><span[^>]*>1</);
     expect(html).toMatch(/Unavailable<\/span><span[^>]*>49</);
-    expect(html).toContain("Map view");
-    expect(html).toContain("List view");
+    expect(html).toMatch(/aria-pressed="true"[^>]*data-region="us"/);
+    expect(html).toMatch(/aria-pressed="false"[^>]*data-region="world"/);
     expect(html).toContain('aria-label="Map of US states by coverage"');
   });
 
@@ -72,7 +74,7 @@ describe("coverage", () => {
     const { readFileSync } = await import("node:fs");
     const css = readFileSync("app/globals.css", "utf8");
     for (const s of ["unlocked", "available", "unavailable"]) expect(css.match(new RegExp(`--coverage-${s}: #[0-9a-f]{6};`, "g")), s).toHaveLength(2);
-    const html = renderToStaticMarkup(<CoverageView coverage={coverage} />) + renderToStaticMarkup(<CoverageList states={allStates(coverage)} />) + renderToStaticMarkup(<StatePanel state={coverage.states[0]} />);
+    const html = renderToStaticMarkup(<CoverageMap coverage={coverage} region="us" onRegion={() => undefined} />) + renderToStaticMarkup(<StatePanel state={coverage.states[0]} />);
     for (const s of ["unlocked", "available", "unavailable"]) expect(html).toContain(`background:var(--coverage-${s})`);
   });
 
@@ -82,17 +84,22 @@ describe("coverage", () => {
     expect(new Set(codes)).toEqual(new Set(Object.keys(STATE_NAMES)));
   });
 
-  it("has a list view and a side panel naming partners, licences, products and rails", () => {
-    const list = renderToStaticMarkup(<CoverageList states={allStates(coverage)} onOpen={() => undefined} />);
-    expect(list).toContain("Harbor Bank");
-    expect((list.match(/<tr/g) ?? []).length).toBe(52);
-    // A real button per state opens the panel, and the names are all in the table too.
-    expect((list.match(/<button type="button"/g) ?? []).length).toBe(51);
-    expect(list).toMatch(/<button type="button"[^>]*>California<\/button>/);
-    for (const t of ["Money transmitter · MT-1", "Round-up savings", "ACH"]) expect(list).toContain(t);
+  it("has a side panel naming partners, licences, products and rails", () => {
     const panel = renderToStaticMarkup(<StatePanel state={coverage.states[0]} />);
     for (const t of ["Partners", "Licences", "Products", "Money rails", "Harbor Bank", "Money transmitter · MT-1", "Round-up savings", "ACH"]) expect(panel).toContain(t);
     expect(renderToStaticMarkup(<StatePanel state={allStates(coverage).find((s) => s.code === "WY")!} />)).toContain("No partner licensed here yet");
+  });
+
+  it("World: the legend says the US's status and that every other country is Not available (the map itself: test/coverage-map.test.tsx)", () => {
+    const topo = countries110m as unknown as { objects: { countries: { geometries: { id?: string }[] } } };
+    expect(topo.objects.countries.geometries.some((g) => g.id === US_COUNTRY_ID)).toBe(true);
+    expect(usStatus(allStates(coverage))).toBe("unlocked");
+    expect(usStatus(allStates(fromCoverage({ states: [{ code: "NY", status: "available" }] })))).toBe("available");
+    expect(usStatus(allStates(fromCoverage({ states: [] })))).toBe("unavailable");
+    const html = renderToStaticMarkup(<CoverageMap coverage={coverage} region="world" onRegion={() => undefined} />);
+    expect(html).toContain("United States: Unlocked");
+    expect(html).toContain("Every other country: Not available (Mynt serves the US only)");
+    expect(html).toMatch(/aria-pressed="true"[^>]*data-region="world"/);
   });
 });
 
@@ -120,13 +127,43 @@ describe("licences", () => {
     expect(f({ status: "suspended" })).toEqual(["L-4"]);
     expect(f({ regulator: "NY DFS" })).toEqual(["L-2"]);
     expect(f({ state: "NJ" })).toEqual(["L-2"]);
+    expect(f({ partner: "Prairie Trust" })).toEqual(["MT-3", "L-4"]);
+    // Expiring within N days: not yet expired, and due within the window.
+    expect(f({ within: "30" })).toEqual(["L-2"]);
+    expect(f({ within: "365" })).toEqual(["MT-1", "L-2"]);
+    expect(f({ within: "" })).toHaveLength(4);
   });
 
   it("highlights expired and expiring rows with words, not colour alone", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     expect(html).toMatch(/<tr[^>]*data-expiry="expired"[\s\S]*?Expired/);
     expect(html).toMatch(/<tr[^>]*data-expiry="expiring"[\s\S]*?Expires soon/);
-    for (const t of ["Search licences", "Export CSV", "All statuses", "All regulators", "All states", "4 of 4"]) expect(html).toContain(t);
+    for (const t of ["Search licences", "All partners", "All statuses", "All regulators", "All states", "Any expiry", "Expiring within 90 days", "4 of 4"]) expect(html).toContain(t);
+  });
+
+  it("has one toolbar row beside the search: filters, Import, Export, Invite partner and the view toggle", () => {
+    const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
+    const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("data-table-view"));
+    const order = ['aria-label="Search licences"', 'aria-label="Partner"', 'aria-label="Regulator"', 'aria-label="State"', 'aria-label="Status"', 'aria-label="Expiring within"', "data-import", "data-export", "data-invite-partner", "data-view-toggle"];
+    const at = order.map((t) => bar.indexOf(t));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect([...at].sort((x, y) => x - y)).toEqual(at);
+    // Import isn't in Mynt yet: disabled, saying so. Export and Invite partner are labelled.
+    expect(bar).toMatch(/<button[^>]*disabled=""[^>]*title="Coming with Mynt&#x27;s next update"[^>]*data-import/);
+    expect(bar).toMatch(/data-export[^>]*>[\s\S]*?Export</);
+    expect(bar).toMatch(/data-invite-partner[^>]*>[\s\S]*?Invite partner</);
+    // The toggle: an icon button named for the view it opens.
+    expect(bar).toMatch(/aria-label="Map view"[^>]*data-view-toggle="map"/);
+    const map = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} view="map" coverage={{ kind: "ready", data: coverage }} />);
+    expect(map).toMatch(/aria-label="Table view"[^>]*data-view-toggle="table"/);
+    expect(map).toContain("data-map-view");
+    expect(map).not.toContain("data-table-view");
+    expect(map).toContain('aria-label="Search licences"'); // the filters stay
+  });
+
+  it("exports the filtered rows", () => {
+    const csv = licencesCsv(filterLicences(licences, { ...NO_LICENCE_FILTERS, partner: "Harbor Bank" }, NOW));
+    expect(csv.split("\n")).toEqual(["Partner,Type,Regulator,Number,States,Status,Expires", "Harbor Bank,Money transmitter,CA DFPI,MT-1,CA,active,2027-06-01", "Harbor Bank,Lender,NY DFS,L-2,NY NJ,active,2026-12-01"]);
   });
 
   it("says when there are none", () => {
@@ -158,7 +195,7 @@ describe("audits", () => {
 
   it("renders the table with filters, pagination and Export", () => {
     const html = renderToStaticMarkup(
-      <AuditsView events={page.events} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["app.created"]} page={1} hasNext onPrev={() => undefined} onNext={() => undefined} />,
+      <AuditsView rows={rowsFromEvents(page.events)} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["app.created"]} page={1} hasNext onPrev={() => undefined} onNext={() => undefined} />,
     );
     for (const t of ["All actions", "All members", "All apps", "From", "To", "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
     expect(html).toMatch(/<button[^>]*disabled[^>]*>[\s\S]*?Previous/);

@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-// Coverage is now the Licences page's Coverage tab.
+// Coverage is now the Licences page's map view (US).
 export default function CoveragePage() {
-  redirect("/licences?tab=coverage");
+  redirect("/licences?view=map&region=us");
 }

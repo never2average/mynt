@@ -13,7 +13,7 @@ const { default: StudioLayout } = await import("@/app/(studio)/layout");
 const { AppTopBar } = await import("@/components/app-top-bar");
 const { AskAiPanel, AskAiUnavailable, NOT_CONFIGURED } = await import("@/components/ask-ai");
 const { FOLDER_ICONS, NavFolders } = await import("@/components/nav-folders");
-const { NavUser, REVEAL_LOGOUT } = await import("@/components/nav-user");
+const { NavUser } = await import("@/components/nav-user");
 const { SearchResults } = await import("@/components/studio-search");
 const { Command, CommandInput, CommandList } = await import("@/components/ui/command");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
@@ -53,31 +53,58 @@ const withProviders = (ui: React.ReactNode, open = true) => (
   </TooltipProvider>
 );
 
-describe("the account row's Log out", () => {
-  it("is an icon-only button, hidden until the row is hovered or focused, and always shown without hover (touch)", () => {
+describe("the account row", () => {
+  it("expanded: one row that never wraps, with Log out always shown (no hover reveal)", () => {
     render(withProviders(<NavUser user={{ name: "Ines Diaz", email: "ines@example.com" }} />));
     const button = screen.getByRole("button", { name: "Log out" });
     expect(button.textContent?.trim()).toBe(""); // the LogOut icon only
     expect(button.querySelector("svg.lucide-log-out")).not.toBeNull();
-    for (const c of ["opacity-0", "group-hover/account:opacity-100", "group-focus-within/account:opacity-100", "focus-visible:opacity-100", "[@media(hover:none)]:opacity-100"])
-      expect(button.className).toContain(c);
-    expect(REVEAL_LOGOUT).toContain("opacity-0");
-    // The row is the hover/focus group.
-    expect(button.closest("[data-account]")?.className).toContain("group/account");
+    for (const c of ["opacity-0", "group-hover", "group-focus-within"]) expect(button.className).not.toContain(c);
+    const row = button.closest("[data-account]")!;
+    expect(row.className).toContain("flex-nowrap");
+    expect(row.className).toContain("min-w-0");
+    expect(row.className).not.toContain("flex-col");
+    const text = row.querySelector("[data-account-name]")!;
+    expect(text.className).toContain("min-w-0");
+    expect(text.querySelector("span")!.className).toContain("truncate");
   });
 
-  it("is still reachable by keyboard: a real button in the tab order, posting to logout", () => {
+  it("Log out is a real button in the tab order, posting to logout", () => {
     render(withProviders(<NavUser user={{ name: "Ines Diaz", email: null }} />));
     const button = screen.getByRole("button", { name: "Log out" });
     expect(button.tagName).toBe("BUTTON");
     expect(button.getAttribute("tabindex")).not.toBe("-1");
-    expect(button.hasAttribute("disabled")).toBe(false);
     expect(button.getAttribute("type")).toBe("submit");
     act(() => button.focus());
     expect(document.activeElement).toBe(button);
     const form = button.closest("form");
     expect(form?.getAttribute("action")).toBe("/api/auth/logout");
     expect(form?.getAttribute("method")).toBe("post");
+  });
+
+  it("collapsed: the avatar alone, centred, with no Log out button in the rail", () => {
+    const { container } = render(withProviders(<NavUser user={{ name: "Ines Diaz", email: "ines@example.com" }} />, false));
+    expect(screen.queryByRole("button", { name: "Log out" })).toBeNull();
+    expect(container.querySelector("[data-account-name]")).toBeNull();
+    expect(container.querySelector("[data-account]")?.className).toContain("group-data-[collapsible=icon]:justify-center");
+    expect(screen.getByRole("button", { name: "Account menu" }).textContent).toBe("ID");
+  });
+
+  it("clicking the avatar opens the account menu: name, email and Log out (posting the same form)", async () => {
+    render(withProviders(<NavUser user={{ name: "Ines Diaz", email: "ines@example.com" }} />, false));
+    const trigger = screen.getByRole("button", { name: "Account menu" });
+    await act(async () => {
+      fireEvent.keyDown(trigger, { key: "Enter" }); // how Radix opens it without a pointer (jsdom)
+    });
+    const menu = document.querySelector("[data-account-menu]")!;
+    expect(menu).not.toBeNull();
+    expect(menu.textContent).toContain("Ines Diaz");
+    expect(menu.textContent).toContain("ines@example.com");
+    const item = menu.querySelector("[data-menu-logout]")!;
+    expect(item.textContent).toContain("Log out");
+    expect(item.getAttribute("type")).toBe("submit");
+    expect(item.closest("form")?.getAttribute("action")).toBe("/api/auth/logout");
+    expect(item.closest("form")?.getAttribute("method")).toBe("post");
   });
 });
 
@@ -245,7 +272,7 @@ describe("search", () => {
     expect(labels("nydfs")).toEqual(["Licences:Lead Bank · Money transmitter"]);
     expect(labels("invited")).toEqual(["Audit actions:member.invited"]);
     expect(labels("cover")).toEqual(["Pages:Coverage", "Pages:Licences"]); // Coverage is a tab of Licences
-    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?tab=coverage");
+    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?view=map&region=us");
     expect(labels("zzz")).toEqual([]);
     // Every word must match; empty lists the pages and apps.
     expect(labels("round savings")).toEqual(["Apps:Round-up savings"]);

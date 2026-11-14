@@ -1,25 +1,23 @@
 "use client"
 
-// The Coverage page's content: a US map (react-simple-maps, MIT, over us-atlas's states, ISC)
+// The Licences page's map view: a US map (react-simple-maps, MIT, over us-atlas's states, ISC)
 // colouring each state by whether the workspace's products can serve it, with a legend, a hover
-// tooltip, a side panel for the state clicked (its partners, licences, products and rails) and a
-// list view of the same data as a table. Server-renderable, so tests run without a browser.
+// tooltip and a side panel for the state clicked (its partners, licences, products and rails);
+// or, with World picked, a world map (world-atlas's countries, ISC, from the same family as
+// us-atlas) where the US is coloured by its coverage and every other country is Not available,
+// since Mynt serves the US only. Server-renderable, so tests run without a browser.
 //
 // Colours (app/globals.css, light and dark): unlocked is the most prominent, a strong bright
 // blue; available a muted blue of the same hue; unavailable neutral grey. The two blues pass the
 // dataviz skill's ordinal checks on each surface, and all three pairs are told apart with normal
-// and colour-blind vision. Status is never colour alone: the legend, tooltip, panel and list
-// name it.
+// and colour-blind vision. Status is never colour alone: the legend, tooltip and panel name it.
 import { useMemo, useState } from "react"
 import type { GeoJsonObject } from "geojson"
 import { ComposableMap, Geographies, Geography } from "react-simple-maps"
 import statesTopology from "us-atlas/states-10m.json"
-import { List, Map as MapIcon } from "lucide-react"
+import countriesTopology from "world-atlas/countries-110m.json"
 
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
   allStates,
   countByStatus,
@@ -31,6 +29,7 @@ import {
   type CoverageState,
   type CoverageStatus,
 } from "@/lib/compliance"
+import { cn } from "@/lib/utils"
 
 export const COVERAGE_FILL: Record<CoverageStatus, string> = {
   unlocked: "var(--coverage-unlocked)",
@@ -39,6 +38,7 @@ export const COVERAGE_FILL: Record<CoverageStatus, string> = {
 }
 
 const geography = statesTopology as unknown as GeoJsonObject
+const world = countriesTopology as unknown as GeoJsonObject
 
 function Swatch({ status }: { status: CoverageStatus }) {
   return <span aria-hidden className="inline-block size-3 shrink-0 rounded-[3px]" style={{ background: COVERAGE_FILL[status] }} />
@@ -92,157 +92,215 @@ export function StatePanel({ state }: { state: CoverageState }) {
   )
 }
 
-const joined = (items: string[]) => items.join(", ") || "—"
+export const MAP_REGIONS = ["us", "world"] as const
+export type MapRegion = (typeof MAP_REGIONS)[number]
+const REGION_LABELS: Record<MapRegion, string> = { us: "US", world: "World" }
 
-// The map's full equivalent as a table: every state's status, partners, licences, products and
-// rails by name, and a button per state that opens the same side panel.
-export function CoverageList({ states, onOpen }: { states: CoverageState[]; onOpen?: (code: string) => void }) {
+/** The US on world-atlas (ISO 3166-1 numeric 840), coloured by the best status of its states. */
+export const US_COUNTRY_ID = "840"
+export const NOT_AVAILABLE = "Not available"
+export function usStatus(states: CoverageState[]): CoverageStatus {
+  if (states.some((s) => s.status === "unlocked")) return "unlocked"
+  if (states.some((s) => s.status === "available")) return "available"
+  return "unavailable"
+}
+
+export function RegionSelector({ region, onRegion }: { region: MapRegion; onRegion: (r: MapRegion) => void }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>State</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Partners</TableHead>
-          <TableHead>Licences</TableHead>
-          <TableHead>Products</TableHead>
-          <TableHead>Rails</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {states.map((s) => (
-          <TableRow key={s.code} data-state={s.code}>
-            <TableCell className="font-medium">
-              {onOpen ? (
-                <button type="button" className="rounded-sm text-left underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(s.code)}>
-                  {s.name}
-                </button>
-              ) : (
-                s.name
-              )}
-            </TableCell>
-            <TableCell>
-              <span className="flex items-center gap-2">
-                <Swatch status={s.status} />
-                {COVERAGE_LABELS[s.status]}
-              </span>
-            </TableCell>
-            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.partners.map((p) => p.name))}</TableCell>
-            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.licences)}</TableCell>
-            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.products)}</TableCell>
-            <TableCell className="whitespace-normal text-muted-foreground">{joined(s.rails)}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <div className="inline-flex items-center rounded-md border p-0.5" role="group" aria-label="Map">
+      {MAP_REGIONS.map((r) => (
+        <button
+          key={r}
+          type="button"
+          aria-pressed={region === r}
+          onClick={() => onRegion(r)}
+          className={cn("rounded px-3 py-1 text-sm text-muted-foreground hover:text-foreground", region === r && "bg-muted font-medium text-foreground")}
+          data-region={r}
+        >
+          {REGION_LABELS[r]}
+        </button>
+      ))}
+    </div>
   )
 }
 
-export function CoverageView({ coverage, initialView = "map" }: { coverage: Coverage; initialView?: "map" | "list" }) {
+function WorldLegend({ us }: { us: CoverageStatus }) {
+  return (
+    <ul className="flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-label="Legend" data-world-legend>
+      <li className="flex items-center gap-2" data-legend="us">
+        <Swatch status={us} />
+        <span>United States: {COVERAGE_LABELS[us]}</span>
+      </li>
+      <li className="flex items-center gap-2" data-legend="not-available">
+        <Swatch status="unavailable" />
+        <span>Every other country: {NOT_AVAILABLE} (Mynt serves the US only)</span>
+      </li>
+    </ul>
+  )
+}
+
+function Tip({ at, children }: { at: { x: number; y: number }; children: React.ReactNode }) {
+  return (
+    <div role="tooltip" className="pointer-events-none absolute z-10 min-w-44 rounded-md border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md" style={{ left: at.x + 14, top: at.y + 14 }}>
+      {children}
+    </div>
+  )
+}
+
+const boxOf = (e: { currentTarget: EventTarget }) => (e.currentTarget as Element).closest("div.relative")!.getBoundingClientRect()
+
+/**
+ * The map in the Licences page's map view. `highlight`: the states the filtered licences cover,
+ * when filters are on; the rest are dimmed (never recoloured: their status still shows).
+ */
+export function CoverageMap({
+  coverage,
+  region,
+  onRegion,
+  highlight = null,
+}: {
+  coverage: Coverage
+  region: MapRegion
+  onRegion: (r: MapRegion) => void
+  highlight?: Set<string> | null
+}) {
   const states = useMemo(() => allStates(coverage), [coverage])
   const byCode = useMemo(() => new Map(states.map((s) => [s.code, s])), [states])
-  const [view, setView] = useState<"map" | "list">(initialView)
   const [hover, setHover] = useState<{ code: string; x: number; y: number } | null>(null)
+  const [countryHover, setCountryHover] = useState<{ name: string; us: boolean; x: number; y: number } | null>(null)
   const [open, setOpen] = useState<string | null>(null)
   const hovered = hover ? byCode.get(hover.code) : undefined
   const opened = open ? byCode.get(open) : undefined
+  const us = usStatus(states)
 
   return (
-    <Card>
-      <CardHeader className="flex flex-wrap items-start justify-between gap-4">
-        <div className="space-y-1.5">
-          <CardTitle>Where your products can serve customers</CardTitle>
-          <CardDescription>Each state&apos;s status, from your partners&apos; licences. Click a state for its partners, licences, products and rails.</CardDescription>
+    <div className="flex min-h-0 flex-1 flex-col gap-3 rounded-lg border p-3" data-map-view data-region-shown={region}>
+      <div className="flex flex-wrap items-center gap-3">
+        <RegionSelector region={region} onRegion={onRegion} />
+        {region === "us" ? <CoverageLegend states={states} /> : <WorldLegend us={us} />}
+      </div>
+      {region === "us" && highlight && (
+        <p className="text-xs text-muted-foreground" data-map-filtered>
+          Showing the {highlight.size} {highlight.size === 1 ? "state" : "states"} covered by the licences matching your filters; the rest are dimmed.
+        </p>
+      )}
+      {region === "us" ? (
+        <div
+          className="relative"
+          onMouseMove={(e) => {
+            if (!hover) return
+            const box = e.currentTarget.getBoundingClientRect()
+            setHover({ ...hover, x: e.clientX - box.left, y: e.clientY - box.top })
+          }}
+        >
+          <ComposableMap projection="geoAlbersUsa" width={975} height={610} className="h-auto max-h-[70vh] w-full" aria-label="Map of US states by coverage">
+            <Geographies geography={geography}>
+              {({ geographies }) =>
+                geographies.map((geo) => {
+                  const code = FIPS_TO_CODE[String(geo.id)]
+                  const state = code ? byCode.get(code) : undefined
+                  if (!state) return null
+                  const active = hover?.code === code || open === code
+                  const dimmed = highlight ? !highlight.has(code) : false
+                  return (
+                    <Geography
+                      key={geo.rsmKey}
+                      geography={geo}
+                      data-state={code}
+                      data-status={state.status}
+                      data-dimmed={dimmed || undefined}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`${state.name}: ${COVERAGE_LABELS[state.status]}`}
+                      fill={COVERAGE_FILL[state.status]}
+                      fillOpacity={dimmed ? 0.3 : 1}
+                      stroke={active ? "var(--foreground)" : "var(--card)"}
+                      strokeWidth={active ? 1.5 : 0.75}
+                      className="cursor-pointer outline-none focus-visible:[stroke-width:2.5] focus-visible:[stroke:var(--ring)]"
+                      onMouseEnter={(e: React.MouseEvent) => {
+                        const box = boxOf(e)
+                        setHover({ code, x: e.clientX - box.left, y: e.clientY - box.top })
+                      }}
+                      onMouseLeave={() => setHover(null)}
+                      // Keyboard users get the same tooltip, beside the state's centre.
+                      onFocus={(e: React.FocusEvent) => {
+                        const box = boxOf(e)
+                        const at = (e.currentTarget as Element).getBoundingClientRect()
+                        setHover({ code, x: at.left + at.width / 2 - box.left, y: at.top + at.height / 2 - box.top })
+                      }}
+                      onBlur={() => setHover(null)}
+                      onClick={() => setOpen(code)}
+                      onKeyDown={(e: React.KeyboardEvent) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault()
+                          setOpen(code)
+                        }
+                      }}
+                    />
+                  )
+                })
+              }
+            </Geographies>
+          </ComposableMap>
+          {hovered && hover && (
+            <Tip at={hover}>
+              <p className="font-medium">{hovered.name}</p>
+              <p className="flex items-center gap-2 text-muted-foreground">
+                <Swatch status={hovered.status} />
+                {COVERAGE_LABELS[hovered.status]}
+              </p>
+              <p className="text-muted-foreground">
+                {hovered.partners.length ? `${hovered.partners.length} partner${hovered.partners.length === 1 ? "" : "s"}` : "No partners yet"}
+              </p>
+            </Tip>
+          )}
         </div>
-        <div className="flex gap-2" role="group" aria-label="View">
-          <Button size="sm" variant={view === "map" ? "secondary" : "outline"} aria-pressed={view === "map"} onClick={() => setView("map")}>
-            <MapIcon />
-            Map view
-          </Button>
-          <Button size="sm" variant={view === "list" ? "secondary" : "outline"} aria-pressed={view === "list"} onClick={() => setView("list")}>
-            <List />
-            List view
-          </Button>
+      ) : (
+        <div
+          className="relative"
+          onMouseMove={(e) => {
+            if (!countryHover) return
+            const box = e.currentTarget.getBoundingClientRect()
+            setCountryHover({ ...countryHover, x: e.clientX - box.left, y: e.clientY - box.top })
+          }}
+        >
+          <ComposableMap projection="geoEqualEarth" width={975} height={480} className="h-auto max-h-[70vh] w-full" aria-label="World map: the US by coverage, every other country not available">
+            <Geographies geography={world}>
+              {({ geographies }) =>
+                geographies.map((geo) => {
+                  const isUs = String(geo.id) === US_COUNTRY_ID
+                  const name = String((geo.properties as { name?: string } | undefined)?.name ?? "")
+                  return (
+                    <Geography
+                      key={geo.rsmKey}
+                      geography={geo}
+                      data-country={isUs ? "us" : String(geo.id ?? "")}
+                      data-status={isUs ? us : "not-available"}
+                      aria-label={`${name}: ${isUs ? COVERAGE_LABELS[us] : NOT_AVAILABLE}`}
+                      fill={isUs ? COVERAGE_FILL[us] : COVERAGE_FILL.unavailable}
+                      stroke="var(--card)"
+                      strokeWidth={0.5}
+                      className={cn("outline-none", isUs && "cursor-pointer")}
+                      onMouseEnter={(e: React.MouseEvent) => {
+                        const box = boxOf(e)
+                        setCountryHover({ name, us: isUs, x: e.clientX - box.left, y: e.clientY - box.top })
+                      }}
+                      onMouseLeave={() => setCountryHover(null)}
+                      onClick={() => isUs && onRegion("us")}
+                    />
+                  )
+                })
+              }
+            </Geographies>
+          </ComposableMap>
+          {countryHover && (
+            <Tip at={countryHover}>
+              <p className="font-medium">{countryHover.name}</p>
+              <p className="text-muted-foreground">{countryHover.us ? `${COVERAGE_LABELS[us]} · click for the states` : NOT_AVAILABLE}</p>
+            </Tip>
+          )}
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <CoverageLegend states={states} />
-        {view === "map" ? (
-          <div
-            className="relative"
-            onMouseMove={(e) => {
-              if (!hover) return
-              const box = e.currentTarget.getBoundingClientRect()
-              setHover({ ...hover, x: e.clientX - box.left, y: e.clientY - box.top })
-            }}
-          >
-            <ComposableMap projection="geoAlbersUsa" width={975} height={610} className="h-auto w-full" aria-label="Map of US states by coverage">
-              <Geographies geography={geography}>
-                {({ geographies }) =>
-                  geographies.map((geo) => {
-                    const code = FIPS_TO_CODE[String(geo.id)]
-                    const state = code ? byCode.get(code) : undefined
-                    if (!state) return null
-                    const active = hover?.code === code || open === code
-                    return (
-                      <Geography
-                        key={geo.rsmKey}
-                        geography={geo}
-                        data-state={code}
-                        data-status={state.status}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`${state.name}: ${COVERAGE_LABELS[state.status]}`}
-                        fill={COVERAGE_FILL[state.status]}
-                        stroke={active ? "var(--foreground)" : "var(--card)"}
-                        strokeWidth={active ? 1.5 : 0.75}
-                        className="cursor-pointer outline-none focus-visible:[stroke-width:2.5] focus-visible:[stroke:var(--ring)]"
-                        onMouseEnter={(e: React.MouseEvent) => {
-                          const box = (e.currentTarget as Element).closest("div.relative")!.getBoundingClientRect()
-                          setHover({ code, x: e.clientX - box.left, y: e.clientY - box.top })
-                        }}
-                        onMouseLeave={() => setHover(null)}
-                        // Keyboard users get the same tooltip, beside the state's centre.
-                        onFocus={(e: React.FocusEvent) => {
-                          const box = (e.currentTarget as Element).closest("div.relative")!.getBoundingClientRect()
-                          const at = (e.currentTarget as Element).getBoundingClientRect()
-                          setHover({ code, x: at.left + at.width / 2 - box.left, y: at.top + at.height / 2 - box.top })
-                        }}
-                        onBlur={() => setHover(null)}
-                        onClick={() => setOpen(code)}
-                        onKeyDown={(e: React.KeyboardEvent) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault()
-                            setOpen(code)
-                          }
-                        }}
-                      />
-                    )
-                  })
-                }
-              </Geographies>
-            </ComposableMap>
-            {hovered && hover && (
-              <div
-                role="tooltip"
-                className="pointer-events-none absolute z-10 min-w-44 rounded-md border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
-                style={{ left: hover.x + 14, top: hover.y + 14 }}
-              >
-                <p className="font-medium">{hovered.name}</p>
-                <p className="flex items-center gap-2 text-muted-foreground">
-                  <Swatch status={hovered.status} />
-                  {COVERAGE_LABELS[hovered.status]}
-                </p>
-                <p className="text-muted-foreground">
-                  {hovered.partners.length ? `${hovered.partners.length} partner${hovered.partners.length === 1 ? "" : "s"}` : "No partners yet"}
-                </p>
-              </div>
-            )}
-          </div>
-        ) : (
-          <CoverageList states={states} onOpen={setOpen} />
-        )}
-      </CardContent>
+      )}
       <Sheet open={Boolean(opened)} onOpenChange={(o) => !o && setOpen(null)}>
         <SheetContent>
           {opened && (
@@ -256,6 +314,6 @@ export function CoverageView({ coverage, initialView = "map" }: { coverage: Cove
           )}
         </SheetContent>
       </Sheet>
-    </Card>
+    </div>
   )
 }
