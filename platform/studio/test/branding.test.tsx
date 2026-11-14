@@ -96,13 +96,14 @@ describe("manifest and icons", () => {
     expect(m.description).toBe(SITE_DESCRIPTION);
     expect(m.theme_color).toBe("#0F2A23");
     expect(m.background_color).toBe("#0F2A23");
-    expect(m.icons?.map((i) => i.src)).toEqual(["/icon.svg", "/apple-icon"]);
+    expect(m.icons?.map((i) => i.src)).toEqual(["/icon", "/apple-icon"]);
   });
 
   it("has the tab icon (a mint circle), the home-screen icon and the share image", async () => {
-    const icon = readFileSync(join(root, "app/icon.svg"), "utf8");
-    expect(icon).toMatch(/<circle[^>]*fill="#3DDC97"/);
-    expect(icon).toContain('viewBox="0 0 32 32"');
+    const icon = await import("@/app/icon");
+    expect(icon.size).toEqual({ width: 32, height: 32 });
+    expect(icon.contentType).toBe("image/png");
+    expect(readFileSync(join(root, "app/icon.tsx"), "utf8")).toContain("background: BRAND.mint");
     expect(existsSync(join(root, "app/favicon.ico"))).toBe(false); // no stray default icon
 
     const apple = await import("@/app/apple-icon");
@@ -116,7 +117,7 @@ describe("manifest and icons", () => {
 
   it("serves the icons and manifest without a sign-in", async () => {
     const { pageNeedsSignIn } = await import("@/lib/page-gate");
-    for (const p of ["/icon.svg", "/apple-icon", "/opengraph-image", "/opengraph-image-1a2b3c", "/manifest.webmanifest"]) expect(pageNeedsSignIn(p), p).toBe(false);
+    for (const p of ["/icon", "/apple-icon", "/opengraph-image", "/opengraph-image-1a2b3c", "/manifest.webmanifest"]) expect(pageNeedsSignIn(p), p).toBe(false);
     for (const p of ["/icons", "/icon.svg/x", "/apple-icon/../settings", "/manifest"]) expect(pageNeedsSignIn(p), p).toBe(true);
   });
 });

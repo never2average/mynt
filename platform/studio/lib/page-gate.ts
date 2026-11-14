@@ -5,7 +5,7 @@
 // back to sign-in, or a failure would loop and signing out would sign straight back in).
 export const OPEN_PAGES = new Set(["/signin-error", "/signed-out"]);
 
-// The brand files Next serves from app/ (icon.svg, apple-icon.tsx, opengraph-image.tsx,
+// The brand files Next serves from app/ (icon.tsx, apple-icon.tsx, opengraph-image.tsx,
 // manifest.ts), which the signed-out pages, browsers and link previews fetch without a sign-in.
 // Next may add a "-<hash>" or an extension to the generated ones.
 const BRAND_ASSET = /^\/(?:icon|apple-icon|opengraph-image)(?:-[A-Za-z0-9]+)?(?:\.(?:svg|png))?$/;

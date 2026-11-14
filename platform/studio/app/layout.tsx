@@ -26,7 +26,7 @@ const geistMono = Geist_Mono({
 // Rendered per request, so each page carries that request's CSP nonce (proxy.ts).
 export const dynamic = "force-dynamic";
 
-// The icons, the share image and the manifest come from the files beside this one (icon.svg,
+// The icons, the share image and the manifest come from the files beside this one (icon.tsx,
 // apple-icon.tsx, opengraph-image.tsx, manifest.ts); Next links them on every page.
 export async function generateMetadata(): Promise<Metadata> {
   return {
