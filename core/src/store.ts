@@ -5,6 +5,7 @@ import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
 import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
+import { PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
@@ -1739,6 +1740,7 @@ const TABLES = `
   CREATE INDEX IF NOT EXISTS firm_checks_entity_idx ON financial_products.firm_checks (entity_id, source, retrieved_at DESC);
   ${LIQUIDITY_TABLES}
 ${WORKSPACE_TABLES}
+${PROMOTION_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -2152,6 +2154,7 @@ export class Store {
     await store.migrateProductLines();
     await store.migrateComponents();
     await migrateAppWorkspaces(db);
+    await seedAppStages(db);
     return store;
   }
 

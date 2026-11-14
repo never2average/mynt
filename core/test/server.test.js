@@ -38,6 +38,8 @@ const DEVELOPER_TOOLS = [
   "remove_workspace_member", "rename_workspace", "revoke_workspace_invite",
   "archive_workspace", "relink_workspace_org", "unarchive_workspace",
   "get_compliance_coverage", "list_workspace_audit", "list_workspace_licences",
+  // promotion between stages, and what needs attention
+  "demote_app", "get_promotion_checks", "get_workspace_attention", "promote_app", "request_promotion_signoff", "set_app_target_states",
   "enable_webhook",
 ];
 const INNOVATOR_TOOLS = [

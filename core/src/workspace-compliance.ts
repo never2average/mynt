@@ -48,7 +48,7 @@ async function workspaceProductIds(db: Db, workspaceId: string): Promise<string[
 // sponsorship where a licence provider provides it; and nothing paused (a covenant breach or anything else that
 // drifted it stops new sales everywhere). Each covered state maps to the licences covering it there.
 type Cover = { entity_id: string; licence_id: string };
-async function coveredStates(store: Store, record: ProductRecord): Promise<Map<string, Cover[]>> {
+export async function coveredStates(store: Store, record: ProductRecord): Promise<Map<string, Cover[]>> {
   const out = new Map<string, Cover[]>();
   if (record.status !== "published" || record.drift) return out;
   const regime = await productRegime(store, record, { live: Boolean(record.pins) });
