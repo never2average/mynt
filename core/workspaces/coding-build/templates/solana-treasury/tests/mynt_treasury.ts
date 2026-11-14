@@ -328,6 +328,11 @@ describe("mynt_treasury", () => {
     await deposit(withTopups, d, 10);
     await fails(deposit(withTopups, newcomer, 10), /TopUpsOnly/);
     await fails(deposit(without, d, 10), /DepositsPausedForHealth/);
+    // Each keeps its own flag: the health authority can't lift a health pause the authority set.
+    await healthPause(without, true, authority);
+    await healthPause(without, false);
+    await fails(deposit(without, d, 10), /DepositsPausedForHealth/);
+    assert.equal((await program.account.pool.fetch(without.pool, "confirmed")).healthPausedByAuthority, true);
 
     const sig = await authorityCall("setSponsorPause", without, [true]);
     assert.equal((await events(sig))[0].name, "pausechanged");

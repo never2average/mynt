@@ -95,7 +95,7 @@ then enters through `deposit` and its allow-list like any other USDC. Nothing he
 ## Pauses
 
 - `set_sponsor_pause` (the authority) stops new deposits.
-- `set_health_pause` (the authority or the health authority) stops new deposits; if `topups_when_health_paused`,
+- `set_health_pause` (the authority or the health authority, each its own flag) stops new deposits; if `topups_when_health_paused`,
   existing depositors (principal above zero) may still top up.
 - Nothing pauses `request_withdrawal`, `cancel_request`, `process_queue`, `park_head` or `claim_parked`.
 
@@ -165,8 +165,18 @@ chain, only the sha256. The treasury doesn't call product-health itself, so a he
   before treating it as that product's treasury.
 - **Events through logs (L6).** `emit!` events ride on program logs, which can be truncated. Moving to `emit_cpi!`
   (Anchor's `event-cpi`) adds an event-authority account to every instruction; not done here.
-- **Review findings L3 and the informational items** of the review of `f1b3658` are recorded with that review, not
-  restated here; they aren't changed by this template.
+- **Health pause (L3, fixed).** The authority and the health authority each keep their own health-pause flag, and
+  deposits stay health-paused while either is set, so neither can lift the other's pause.
+- **Informational, from the review of `f1b3658`:**
+  - `commitment_min` binds deposits only; withdrawals may take a position below it (all the way to zero).
+  - No account is ever closed, so rent for positions, deposits and requests accumulates.
+  - An SPL associated token account's owner can be changed with `SetAuthority`, so "paid to the requester's own
+    account" means paid to that associated token account's address, whoever owns it now.
+  - Payment hooks are best effort, so an extension's own accounting can drift when a cranker leaves the hook out.
+  - `total_queued` includes requests voided at pay time but not yet cranked past.
+  - Events link allow-listed (KYC'd) depositor wallets to amounts, publicly.
+  - The program's upgrade authority is the ultimate custody key: deploy each version immutable, or keep the upgrade
+    authority behind a Squads vault with a time lock.
 - **Surplus share** is by deposits not refused, whenever they were made; a time-weighted share would need more state.
 - **No authority hand-over instruction:** the authority is a Squads vault, whose members change inside Squads.
 - **Audit focus:** the payment paths' accounting (`record_payment`, parked claims, surplus against principal still

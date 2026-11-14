@@ -49,6 +49,8 @@ pub mod mynt_treasury {
         pool.has_pending_terms = false;
         pool.sponsor_paused = false;
         pool.health_paused = false;
+        pool.health_paused_by_authority = false;
+        pool.health_paused_by_health_authority = false;
         pool.obligations = 0;
         pool.obligations_as_of = 0;
         pool.total_principal = 0;
@@ -412,16 +414,22 @@ pub mod mynt_treasury {
         Ok(())
     }
 
-    /// The authority or the pool's health authority pauses deposits for the pool's health. Existing depositors may
-    /// still top up while health-paused if the terms say so. Exits have no pause.
+    /// The authority or the pool's health authority pauses deposits for the pool's health. Each keeps its own flag,
+    /// so neither can lift the other's pause; deposits stay health-paused while either is set. Existing depositors
+    /// may still top up while health-paused if the terms say so. Exits have no pause.
     pub fn set_health_pause(ctx: Context<HealthPause>, paused: bool) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
         let signer = ctx.accounts.signer.key();
-        require!(
-            signer == pool.authority || (pool.terms.health_authority != Pubkey::default() && signer == pool.terms.health_authority),
-            TreasuryError::Unauthorized
-        );
-        pool.health_paused = paused;
+        let is_authority = signer == pool.authority;
+        let is_health = pool.terms.health_authority != Pubkey::default() && signer == pool.terms.health_authority;
+        require!(is_authority || is_health, TreasuryError::Unauthorized);
+        if is_authority {
+            pool.health_paused_by_authority = paused;
+        }
+        if is_health {
+            pool.health_paused_by_health_authority = paused;
+        }
+        pool.health_paused = pool.health_paused_by_authority || pool.health_paused_by_health_authority;
         emit!(PauseChanged { pool: pool.key(), sponsor_paused: pool.sponsor_paused, health_paused: pool.health_paused, by: signer });
         Ok(())
     }
@@ -1055,7 +1063,10 @@ pub struct Pool {
     pub pending_effective_at: i64,
     pub has_pending_terms: bool,
     pub sponsor_paused: bool,
+    /// Either of the two below.
     pub health_paused: bool,
+    pub health_paused_by_authority: bool,
+    pub health_paused_by_health_authority: bool,
     pub obligations: u64,
     pub obligations_as_of: i64,
     /// What's left of every deposit (not yet paid out or refunded).
@@ -1354,7 +1365,7 @@ pub enum TreasuryError {
     TermsChanged,
     #[msg("This would take the depositor's principal over the commitment maximum")]
     AboveCommitmentMax,
-    #[msg("This would leave the depositor's principal under the commitment minimum")]
+    #[msg("After this deposit the depositor's principal would still be under the commitment minimum")]
     BelowCommitmentMin,
     #[msg("The deposit was rejected")]
     DepositRejected,
