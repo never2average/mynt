@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { inTransaction, type Db } from "./db.js";
-import type { Org, OrgDirectory, OrgEvent, OrgMembership } from "./org-directory.js";
+import type { Org, OrgDirectory, OrgEvent, OrgEventSource, OrgMembership } from "./org-directory.js";
 import type { Store } from "./store.js";
-import { acceptInvite, offboard, openInvite, orgRole, WORKSPACE_INVITE_DAYS, workspaceRole, type OffboardServices } from "./workspaces.js";
+import { acceptInvite, dropNewWorkspace, offboard, openInvite, orgRole, WORKSPACE_INVITE_DAYS, workspaceRole, type OffboardServices } from "./workspaces.js";
 
 // Keeps Mynt's workspaces in step with the identity provider's organizations. The provider decides who is in a
 // workspace's organization; Mynt alone decides platform roles (developer, user, ...) and who owns a workspace. So:
@@ -20,7 +20,12 @@ import { acceptInvite, offboard, openInvite, orgRole, WORKSPACE_INVITE_DAYS, wor
 //   organization the provider confirms deleted freezes its workspace (org_missing_at) until an owner relinks or archives
 //   it; and the reconcile worker stops (ops_status) rather than remove more than RECONCILE_MAX_SHARE at once.
 // - Someone not on Mynt who joins an organization in the provider isn't let onto Mynt: it's a join request the
-//   workspace's owners and admins see (list_workspace_members), and an invite from Mynt lets them in.
+//   workspace's owners and admins see (list_workspace_members), and an invite from Mynt lets them in. They're kept an
+//   org:member there, so the provider's admins are only ever Mynt's owners and admins: a removal or role change made
+//   in the provider is then one a Mynt owner or admin could make (an owner's is undone anyway). The provider doesn't
+//   say who made a change, so the audit records its event id and the request's address and client.
+// - The provider is written to only after Mynt's transaction is over (no waiting out its rate limit while holding a
+//   workspace's row).
 // - Someone a Mynt admin revoked (by their Mynt address or any address the provider verified as theirs) is removed
 //   from the organization again, and that's audited.
 
@@ -33,6 +38,17 @@ type Ws = { id: string; name: string; org_sync: string | null; org_missing_at: s
 // reconcile worker changes nothing and says so in ops_status: an outage or a bad listing mustn't empty workspaces. One
 // at a time always proceeds (each is confirmed with the provider first).
 export const RECONCILE_MAX_SHARE = 0.1;
+// How long a workspace or organization may stay half-made (its making crashed) before it's cleared away.
+export const ABANDONED_MS = 60 * 60_000;
+
+// This installation's id (made once), stamped on the organizations it makes.
+export async function orgInstanceId(db: Q): Promise<string> {
+  await db.query(
+    `INSERT INTO ${T}.org_sync_status (id, instance_id) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET instance_id = COALESCE(${T}.org_sync_status.instance_id, EXCLUDED.instance_id)`,
+    [randomUUID()],
+  );
+  return (await one(db, `SELECT instance_id FROM ${T}.org_sync_status WHERE id = 1`))!.instance_id as string;
+}
 
 let active: WorkspaceSync | null = null;
 
@@ -42,7 +58,7 @@ export function reconcileAtSignIn(userId: string, subject: string) {
 }
 
 const one = async (q: Q, sql: string, params: unknown[] = []) => (await q.query(sql, params)).rows[0] as Row | undefined;
-const auditTx = (q: Q, action: string, target: string, details: unknown) =>
+const auditRow = (q: Q, action: string, target: string, details: unknown) =>
   q.query(`INSERT INTO ${T}.audit_log (id, actor_id, action, target, details) VALUES ($1, NULL, $2, $3, $4)`, [randomUUID(), action, target, JSON.stringify(details)]);
 const OPEN = `accepted_at IS NULL AND revoked_at IS NULL AND created_at > now() - interval '${WORKSPACE_INVITE_DAYS} days'`;
 
@@ -91,7 +107,7 @@ export class WorkspaceSync {
         await this.syncOrg(e.orgId);
         return;
       case "membership.changed":
-        await this.syncMembership(e.orgId, e.subject);
+        await this.syncMembership(e.orgId, e.subject, undefined, e.source);
         return;
       case "invitation.accepted":
         await this.invitationAccepted(e.orgId, e.invitationId);
@@ -130,7 +146,17 @@ export class WorkspaceSync {
   private async adoptOrg(org: Org): Promise<Ws | null> {
     if (org.workspace_id) {
       await this.db.query(`UPDATE ${T}.workspaces SET external_org_id = $2 WHERE id::text = $1 AND external_org_id IS NULL`, [org.workspace_id, org.id]);
-      return (await this.workspaceOf(this.db, org.id)) ?? null;
+      const ws = await this.workspaceOf(this.db, org.id);
+      if (ws) return ws;
+      // Made by this installation for a workspace that doesn't exist (or has another organization): its making failed
+      // after the organization was made. Deleted once it's old enough not to be one still being made. Another
+      // installation's are never touched.
+      const ours = Boolean(org.instance_id && org.instance_id === this.dir.instanceId);
+      if (ours && org.created_at !== null && Date.now() - org.created_at > ABANDONED_MS) {
+        await this.dir.deleteOrg(org.id);
+        await this.store.audit(null, "workspace_orphan_org_deleted", org.id, { workspace_id: org.workspace_id });
+      }
+      return null;
     }
     if (!org.created_by) return null;
     const creator = await this.userOf(this.db, org.created_by);
@@ -156,10 +182,13 @@ export class WorkspaceSync {
   // One person's place in one workspace, from the provider's current state (`known`: just listed by the caller; else
   // read now), under Mynt's rules (above). The workspace's row is locked meanwhile, so a Mynt tool changing the same
   // membership (which writes to the provider first) has finished. Returns what changed, or null.
-  async syncMembership(orgId: string, subject: string, known?: OrgMembership | null): Promise<string | null> {
+  async syncMembership(orgId: string, subject: string, known?: OrgMembership | null, source?: OrgEventSource): Promise<string | null> {
     const ws = (await this.workspaceOf(this.db, orgId)) ?? (await this.syncOrg(orgId));
     if (!ws || !WorkspaceSync.synced(ws)) return null;
+    // Run once the transaction is over: the provider's writes (then offboardings), in order.
     const after: (() => Promise<unknown>)[] = [];
+    const via = source ? { via: "provider webhook", event: source } : { via: "reconcile" };
+    const auditTx = (q: Q, action: string, target: string, details: Record<string, unknown>) => auditRow(q, action, target, { ...details, ...via });
     const outcome = await inTransaction(this.db, async (tx): Promise<string | null> => {
       const w = await this.workspaceOf(tx, orgId, true);
       if (!w || !WorkspaceSync.synced(w)) return null;
@@ -173,15 +202,18 @@ export class WorkspaceSync {
         await forget();
         if (!user || !current) return null;
         if (current === "owner") {
-          await this.dir.addMember(orgId, subject, "admin");
+          after.push(() => this.dir.addMember(orgId, subject, "admin"));
           await auditTx(tx, "workspace_owner_restored", w.id, { user_id: user.id, reason: "ownership is Mynt's: an owner leaves with leave_workspace, or another owner removes them" });
           return "owner_restored";
         }
         const seen = (await one(tx, `SELECT org_synced_at FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND user_id::text = $2`, [w.id, user.id]))?.org_synced_at;
         if (!seen) {
-          // In Mynt only so far (from before organizations): added there, never taken out.
-          await this.dir.addMember(orgId, subject, orgRole(current));
-          await tx.query(`UPDATE ${T}.workspace_members SET org_synced_at = now() WHERE workspace_id::text = $1 AND user_id::text = $2`, [w.id, user.id]);
+          // In Mynt only so far (from before organizations): added there, never taken out. Marked seen only once
+          // the provider has them, so a failure here is retried, never taken for a removal.
+          after.push(async () => {
+            await this.dir.addMember(orgId, subject, orgRole(current));
+            await this.db.query(`UPDATE ${T}.workspace_members SET org_synced_at = now() WHERE workspace_id::text = $1 AND user_id::text = $2`, [w.id, user.id]);
+          });
           await auditTx(tx, "workspace_member_added_to_directory", w.id, { user_id: user.id, role: current });
           return "added_to_org";
         }
@@ -192,7 +224,7 @@ export class WorkspaceSync {
       }
 
       if (await this.blocked(tx, user?.email ?? null, subject)) {
-        await this.dir.removeMember(orgId, subject);
+        after.push(() => this.dir.removeMember(orgId, subject));
         await forget();
         if (user && current) {
           await tx.query(`DELETE FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND user_id::text = $2`, [w.id, user.id]);
@@ -203,8 +235,15 @@ export class WorkspaceSync {
       }
 
       if (!user) {
-        // Not on Mynt: a join request for the workspace's owners and admins; nobody gets onto Mynt this way.
-        if (await one(tx, `SELECT 1 FROM ${T}.workspace_join_requests WHERE workspace_id::text = $1 AND subject = $2`, [w.id, subject])) return null;
+        // Not on Mynt: a join request for the workspace's owners and admins; nobody gets onto Mynt this way. Kept a
+        // member in the provider, so they can't manage the organization.
+        let outcome: string | null = null;
+        if (m.role === "admin") {
+          after.push(() => this.dir.setMemberRole(orgId, subject, "member"));
+          await auditTx(tx, "workspace_role_restored", w.id, { subject, role: "member", reason: "not on Mynt: a join request, kept a member of the organization" });
+          outcome = "role_restored";
+        }
+        if (await one(tx, `SELECT 1 FROM ${T}.workspace_join_requests WHERE workspace_id::text = $1 AND subject = $2`, [w.id, subject])) return outcome;
         const email = (await this.dir.verifiedEmails(subject))[0] ?? null;
         await tx.query(`INSERT INTO ${T}.workspace_join_requests (workspace_id, subject, email) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [w.id, subject, email]);
         await auditTx(tx, "workspace_join_request", w.id, { email });
@@ -215,18 +254,18 @@ export class WorkspaceSync {
       if (current) {
         await tx.query(`UPDATE ${T}.workspace_members SET org_synced_at = now() WHERE workspace_id::text = $1 AND user_id::text = $2 AND org_synced_at IS NULL`, [w.id, user.id]);
         if (current === "owner" && m.role !== "admin") {
-          await this.dir.setMemberRole(orgId, subject, "admin");
+          after.push(() => this.dir.setMemberRole(orgId, subject, "admin"));
           await auditTx(tx, "workspace_owner_restored", w.id, { user_id: user.id, reason: "ownership is Mynt's: owners are the organization's admins" });
           return "owner_restored";
         }
         if (current === "admin" && m.role === "member") {
           await tx.query(`UPDATE ${T}.workspace_members SET role = 'member' WHERE workspace_id::text = $1 AND user_id::text = $2`, [w.id, user.id]);
-          await auditTx(tx, "workspace_member_synced", w.id, { user_id: user.id, from: "admin", role: "member", via: "identity provider" });
+          await auditTx(tx, "workspace_member_synced", w.id, { user_id: user.id, from: "admin", role: "member" });
           after.push(() => offboard(this.store, this.services, w.id, user.id, null, "demotion"));
           return "demoted";
         }
         if (current === "member" && m.role === "admin") {
-          await this.dir.setMemberRole(orgId, subject, "member");
+          after.push(() => this.dir.setMemberRole(orgId, subject, "member"));
           await auditTx(tx, "workspace_role_restored", w.id, { user_id: user.id, role: "member", reason: "workspace roles are raised in Mynt (change_member_role)" });
           return "role_restored";
         }
@@ -245,6 +284,10 @@ export class WorkspaceSync {
           const inv = await openInvite(tx, a.id);
           if (!inv) continue;
           const r = await acceptInvite(tx, inv, user, m.role);
+          if ("set_org_role" in r && r.set_org_role) {
+            const role = r.set_org_role;
+            after.push(() => this.dir.setMemberRole(orgId, subject, role));
+          }
           if ("void" in r) {
             await auditTx(tx, "void_workspace_invite", w.id, { invite_id: a.id, reason: "its sender can no longer invite to that role" });
             continue;
@@ -254,8 +297,8 @@ export class WorkspaceSync {
       }
       // Otherwise (an invitation made in the provider, or a Mynt invite that no longer stands): a member, nothing more.
       await tx.query(`INSERT INTO ${T}.workspace_members (workspace_id, user_id, role, org_synced_at) VALUES ($1, $2, 'member', now()) ON CONFLICT DO NOTHING`, [w.id, user.id]);
-      if (m.role === "admin") await this.dir.setMemberRole(orgId, subject, "member");
-      await auditTx(tx, "workspace_member_synced", w.id, { user_id: user.id, role: "member", via: "identity provider" });
+      if (m.role === "admin") after.push(() => this.dir.setMemberRole(orgId, subject, "member"));
+      await auditTx(tx, "workspace_member_synced", w.id, { user_id: user.id, role: "member" });
       return "joined";
     });
     for (const f of after) await f();
@@ -309,6 +352,20 @@ export class WorkspaceSync {
     const db = this.db;
     await db.query(`DELETE FROM ${T}.org_webhook_events WHERE received_at < now() - interval '30 days'`);
     await db.query(`INSERT INTO ${T}.org_sync_status (id, last_run_at) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET last_run_at = now()`);
+    // Workspaces whose making crashed before their organization was linked, with no apps yet: cleared away (an
+    // organization made for one is then an orphan, deleted below once it's as old). Ones with apps wait for
+    // mynt clerk sync-workspaces.
+    const abandoned = (
+      await db.query(
+        `SELECT id::text AS id FROM ${T}.workspaces w WHERE org_sync = 'creating' AND external_org_id IS NULL AND created_at < now() - make_interval(secs => $1::int)
+           AND NOT EXISTS (SELECT 1 FROM ${T}.apps a WHERE a.workspace_id = w.id)`,
+        [ABANDONED_MS / 1000],
+      )
+    ).rows as { id: string }[];
+    for (const a of abandoned) {
+      await dropNewWorkspace(db, a.id);
+      await this.store.audit(null, "workspace_creation_abandoned", a.id, {});
+    }
     const linked = (
       await db.query(
         `SELECT id::text AS id, external_org_id AS org_id FROM ${T}.workspaces

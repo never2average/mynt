@@ -17,6 +17,10 @@ export interface Org {
   // The Mynt workspace an organization was made for, from the organization's private metadata (null: made in the
   // provider itself).
   workspace_id: string | null;
+  // The Mynt installation that made it (private metadata), so one never touches another's organizations when they
+  // share a provider instance.
+  instance_id: string | null;
+  created_at: number | null; // ms since the epoch
 }
 
 export interface OrgInvitation {
@@ -27,6 +31,8 @@ export interface OrgInvitation {
 }
 
 export interface OrgDirectory {
+  // This Mynt installation's id, stamped on the organizations it makes.
+  readonly instanceId: string | null;
   // Made for a Mynt workspace (tagged with its id, so the provider's own event about it finds that workspace).
   createOrg(name: string, createdBy: string, workspaceId: string): Promise<Org>;
   getOrg(orgId: string): Promise<Org | null>; // null only when the provider says it doesn't exist
@@ -53,7 +59,10 @@ export interface OrgDirectory {
 
 // What the provider says changed. Only which organization, membership or invitation: Mynt reads its current state
 // back from the provider before acting, so an event delivered late, twice or out of order can't undo a newer change.
+// Where an event came from, for the audit log: the provider doesn't say who made a change, only the request's
+// address and client.
+export type OrgEventSource = { event_id: string; client_ip?: string | null; user_agent?: string | null };
 export type OrgEvent =
-  | { type: "org.changed"; orgId: string }
-  | { type: "membership.changed"; orgId: string; subject: string }
-  | { type: "invitation.accepted"; orgId: string; invitationId: string };
+  | { type: "org.changed"; orgId: string; source?: OrgEventSource }
+  | { type: "membership.changed"; orgId: string; subject: string; source?: OrgEventSource }
+  | { type: "invitation.accepted"; orgId: string; invitationId: string; source?: OrgEventSource };

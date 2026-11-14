@@ -970,12 +970,16 @@ When Clerk is the sign-in provider (`CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KE
   - An invite that stops standing (withdrawn, declined, lapsed or void) withdraws Clerk's invitation too.
 - **What Clerk changes, Mynt follows,** by a signed webhook and a reconcile worker. Each event is read back from Clerk before it's applied, so a late, repeated or out-of-order delivery can't undo a newer change.
   - Someone on Mynt who joins an organization in Clerk, not through a Mynt invite, is a member and nothing more.
-  - Someone not on Mynt who joins an organization in Clerk isn't let onto Mynt. It's a **join request** that the workspace's owners and admins see in `list_workspace_members` (`join_requests`); an invite from Mynt lets them in.
+  - Someone not on Mynt who joins an organization in Clerk isn't let onto Mynt. It's a **join request** that the workspace's owners and admins see in `list_workspace_members` (`join_requests`); an invite from Mynt lets them in. Until then they're kept an `org:member` in Clerk.
+  - So Clerk's `org:admin`s are only ever Mynt's owners and admins, and any removal or role change made in Clerk is one a Mynt owner or admin could have made (an owner's is undone anyway). Clerk's webhooks don't say who made a change, so the audit records the event id and the request's address and client (`via`, `event`).
   - A new organization made in Clerk (Clerk's "create your first organization" step at sign-in) becomes its creator's workspace, if they're on Mynt. Their platform roles don't change.
   - Someone a Mynt admin revoked is removed from the organization again (`workspace_member_refused`). That covers their Mynt address and every address Clerk verified as theirs.
   - A membership Clerk confirms is gone runs Mynt's offboarding. This applies only to someone Mynt has seen in the organization. A member who is in Mynt only so far (from before organizations, or not yet signed in through Clerk) is added to the organization instead, never taken out.
   - An organization Clerk confirms deleted (404) freezes its workspace. Nobody is removed and nobody new joins, `list_workspaces` and `ops_status` say so, and an owner either relinks it (`relink_workspace_org`: a new organization with its members) or archives it.
-- **Archiving** (`archive_workspace`, owners only) freezes the workspace. 7 days later, everyone is removed and offboarded (in one transaction with the archive's end) and its organization is deleted. Until then, `unarchive_workspace` undoes it. With `now: true` it happens at once.
+- **Archiving** (`archive_workspace`, owners only) freezes the workspace.
+  - It's refused while any of the workspace's apps is published or hosted: unpublish and undeploy them first.
+  - 7 days later, everyone is removed and offboarded (in one transaction with the archive's end) and its organization is deleted. Until then, any owner can undo it with `unarchive_workspace`. If an app has gone live meanwhile, the archive waits a day at a time and the audit says so.
+  - With `now: true` it happens at once, but only for a workspace's sole owner.
 - **The webhook,** `POST /webhooks/clerk`:
   - It takes `organization.created`, `organization.updated`, `organization.deleted`, `organizationMembership.created`, `organizationMembership.updated`, `organizationMembership.deleted` and `organizationInvitation.accepted`.
   - It's verified with Clerk's own library (`verifyWebhook`), which also refuses an old or replayed signature.
@@ -985,6 +989,8 @@ When Clerk is the sign-in provider (`CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KE
   - It reads everything before changing anything, and confirms each removal and each missing organization with Clerk one by one.
   - Its circuit breaker stops it and changes nothing when Clerk lists no organizations while workspaces are linked, or when more than a tenth of the linked organizations, or of the members Mynt has seen in them, would go in one run. `ops_status` then says why. One at a time always proceeds.
   - It leaves alone workspaces still being made or backfilled.
+  - A workspace whose making crashed more than an hour ago, with no apps, is cleared away. An organization this installation made for a workspace that doesn't exist (tagged with its id and this installation's `mynt_instance`) is deleted once it's an hour old. Another installation's organizations are never touched.
+- **Writes to Clerk** made by syncing happen only after Mynt's transaction commits, so a rate-limit wait never holds a workspace's row.
 - **Workspaces from before organizations** get theirs with `mynt clerk sync-workspaces`. It's a dry run unless `--apply` is given, and it prints counts only.
   - The organization is made for the workspace's owner, and its members are added (owners and admins as `org:admin`).
   - Each workspace stays marked as being backfilled until all its members are in, so a run that failed part-way is resumed by running it again, and the reconcile worker leaves it alone meanwhile.

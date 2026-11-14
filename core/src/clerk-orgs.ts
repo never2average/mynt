@@ -15,6 +15,8 @@ const toOrg = (o: Row): Org => ({
   name: String(o.name ?? ""),
   created_by: (o.created_by as string | null | undefined) ?? null,
   workspace_id: (((o.private_metadata ?? {}) as Row).mynt_workspace_id as string | undefined) ?? null,
+  instance_id: (((o.private_metadata ?? {}) as Row).mynt_instance as string | undefined) ?? null,
+  created_at: typeof o.created_at === "number" ? o.created_at : null,
 });
 const toMembership = (m: Row): OrgMembership | null => {
   const u = (m.public_user_data ?? {}) as Row;
@@ -30,14 +32,16 @@ const PAGE = 100;
 export class ClerkOrgDirectory implements OrgDirectory {
   private readonly api = "https://api.clerk.com/v1";
   private readonly portal: string | null;
+  readonly instanceId: string | null;
 
   constructor(
-    private readonly config: { secretKey: string; publishableKey: string; accountPortalUrl?: string },
+    private readonly config: { secretKey: string; publishableKey: string; accountPortalUrl?: string; instanceId?: string | null },
     private readonly fetchFn: typeof fetch = fetch,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   ) {
     const user = clerkAccountPortalUrl(frontendApiFromPublishableKey(config.publishableKey), config.accountPortalUrl);
     this.portal = user ? user.replace(/\/user\/?$/, "/organization") : null;
+    this.instanceId = config.instanceId ?? null;
   }
 
   // One Backend API call. Rate-limited (429): waited out (its Retry-After, else 1, 2, 4 s) and tried again, 4 times
@@ -80,7 +84,11 @@ export class ClerkOrgDirectory implements OrgDirectory {
   }
 
   async createOrg(name: string, createdBy: string, workspaceId: string) {
-    return toOrg(await this.call("POST", "/organizations", { name, created_by: createdBy, private_metadata: { mynt_workspace_id: workspaceId } }));
+    return toOrg(await this.call("POST", "/organizations", {
+        name,
+        created_by: createdBy,
+        private_metadata: { mynt_workspace_id: workspaceId, ...(this.instanceId ? { mynt_instance: this.instanceId } : {}) },
+      }));
   }
 
   async getOrg(orgId: string) {
@@ -118,9 +126,14 @@ export class ClerkOrgDirectory implements OrgDirectory {
     }
   }
 
+  // Clerk's user_id filter on an organization's memberships (GetOrganizationMembershipList: "Filters Organization
+  // memberships by user ID"). No rows: not a member. Rows that aren't this person mean the filter didn't apply: an
+  // error, never "not a member".
   async getMembership(orgId: string, subject: string) {
-    const r = await this.call("GET", `/organizations/${encodeURIComponent(orgId)}/memberships?user_id=${encodeURIComponent(subject)}&limit=1`);
-    const m = ((r.data as Row[] | undefined) ?? []).map(toMembership).find((x) => x?.subject === subject);
+    const r = await this.call("GET", `/organizations/${encodeURIComponent(orgId)}/memberships?user_id=${encodeURIComponent(subject)}&limit=10`);
+    const rows = ((r.data as Row[] | undefined) ?? []).map(toMembership);
+    const m = rows.find((x) => x?.subject === subject);
+    if (!m && rows.length) throw new Error("Clerk's membership filter returned other people; not taking that for 'not a member'");
     return m ?? null;
   }
 
@@ -203,27 +216,34 @@ export class ClerkOrgDirectory implements OrgDirectory {
 // bad or stale signature.
 export async function clerkWebhookEvent(request: Request, signingSecret: string): Promise<{ id: string; type: string; event: OrgEvent | null }> {
   const id = request.headers.get("svix-id") ?? request.headers.get("webhook-id") ?? "";
-  const evt = (await verifyWebhook(request, { signingSecret })) as unknown as { type: string; data: Row };
+  const evt = (await verifyWebhook(request, { signingSecret })) as unknown as {
+    type: string;
+    data: Row;
+    event_attributes?: { http_request?: { client_ip?: string; user_agent?: string } };
+  };
   if (!id) throw new Error("no event id");
   const d = evt.data ?? {};
+  // Clerk doesn't say who made the change; its request's address and client are what there is to record.
+  const req = evt.event_attributes?.http_request;
+  const source = { event_id: id, client_ip: req?.client_ip ?? null, user_agent: req?.user_agent?.slice(0, 200) ?? null };
   const orgId = (o: unknown) => (((o ?? {}) as Row).id as string | undefined) ?? null;
   let event: OrgEvent | null = null;
   switch (evt.type) {
     case "organization.created":
     case "organization.updated":
     case "organization.deleted":
-      if (d.id) event = { type: "org.changed", orgId: String(d.id) };
+      if (d.id) event = { type: "org.changed", orgId: String(d.id), source };
       break;
     case "organizationMembership.created":
     case "organizationMembership.updated":
     case "organizationMembership.deleted": {
       const m = toMembership(d);
       const o = orgId(d.organization);
-      if (m && o) event = { type: "membership.changed", orgId: o, subject: m.subject };
+      if (m && o) event = { type: "membership.changed", orgId: o, subject: m.subject, source };
       break;
     }
     case "organizationInvitation.accepted":
-      if (d.organization_id && d.id) event = { type: "invitation.accepted", orgId: String(d.organization_id), invitationId: String(d.id) };
+      if (d.organization_id && d.id) event = { type: "invitation.accepted", orgId: String(d.organization_id), invitationId: String(d.id), source };
       break;
   }
   return { id, type: evt.type, event };

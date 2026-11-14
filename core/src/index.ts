@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { ClerkOrgDirectory } from "./clerk-orgs.js";
-import { WorkspaceSync } from "./workspace-sync.js";
+import { orgInstanceId, WorkspaceSync } from "./workspace-sync.js";
 import { setOrgDirectory } from "./workspaces.js";
 import { finishArchives, releaseLapsedInvites, retryOffboards } from "./workspaces.js";
 import { offboardingServices } from "./server.js";
@@ -187,9 +187,14 @@ const parseEmail = (): string => {
 
 const clerkAdmin = () => (process.env.CLERK_SECRET_KEY ? new ClerkAdmin(process.env.CLERK_SECRET_KEY) : null);
 // Workspaces follow Clerk's organizations when Clerk is the sign-in provider (workspace-sync.ts).
-const orgDirectory = () =>
+const orgDirectory = async (store: Store) =>
   process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY
-    ? new ClerkOrgDirectory({ secretKey: process.env.CLERK_SECRET_KEY, publishableKey: process.env.CLERK_PUBLISHABLE_KEY, accountPortalUrl: process.env.CLERK_ACCOUNT_PORTAL_URL || undefined })
+    ? new ClerkOrgDirectory({
+        secretKey: process.env.CLERK_SECRET_KEY,
+        publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+        accountPortalUrl: process.env.CLERK_ACCOUNT_PORTAL_URL || undefined,
+        instanceId: await orgInstanceId(store.db),
+      })
     : null;
 
 // People's linked accounts (GitHub, wallets), read from Clerk when it's the sign-in provider.
@@ -230,7 +235,7 @@ if (values.help) {
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
   // Workspaces are Clerk organizations: Mynt's tools write there, its webhook and a reconcile worker read back.
-  const directory = orgDirectory();
+  const directory = await orgDirectory(store);
   setOrgDirectory(directory);
   const workspaceSync = directory ? new WorkspaceSync(store, directory, offboardingServices({ builds, hosting })) : null;
   if (workspaceSync) {
@@ -388,8 +393,9 @@ if (values.help) {
 } else if (command === "clerk" && sub === "sync-workspaces") {
   // Workspaces from before organizations get one each, with their members; a dry run unless --apply. Open invites
   // become Clerk invitations, which email people, only with --send-invites. Counts only; a rerun resumes.
-  const directory = orgDirectory() ?? die("CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY are required");
+  if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) die("CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY are required");
   const store = await openStore();
+  const directory = (await orgDirectory(store))!;
   const counts = await new WorkspaceSync(store, directory, {}, { register: false }).backfill(Boolean(values.apply), {
     sendInvites: Boolean(values["send-invites"]),
     redirectUrl: process.env.STUDIO_URL ?? null,

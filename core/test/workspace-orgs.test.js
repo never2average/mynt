@@ -16,47 +16,51 @@ import { CATALOG } from "./helpers.js";
 // fail. Its state is what Mynt reads back on every event.
 function fakeDirectory() {
   const d = {
-    orgs: new Map(), // id -> { id, name, created_by, workspace_id }
+    instanceId: "inst_this",
+    // Called before each write: a test can check Mynt isn't inside a transaction then.
+    beforeWrite: async () => {},
+    orgs: new Map(), // id -> { id, name, created_by, workspace_id, instance_id, created_at }
     members: new Map(), // org id -> Map(subject -> role)
     emails: new Map(), // subject -> verified addresses
     invitations: [],
     calls: [],
     fail: {},
     nextId: null,
-    log(name, ...a) {
+    async log(name, ...a) {
       d.calls.push([name, ...a]);
       if (d.fail[name]) throw new Error(`${name} failed`);
+      if (["addMember", "setMemberRole", "removeMember"].includes(name)) await d.beforeWrite(name);
     },
     called: (name, ...a) => d.calls.some((c) => c[0] === name && a.every((x, i) => x === undefined || c[i + 1] === x)),
     async createOrg(name, createdBy, workspaceId) {
-      d.log("createOrg", name, createdBy, workspaceId);
+      await d.log("createOrg", name, createdBy, workspaceId);
       const id = d.nextId ?? `org_${d.orgs.size + 1}_${randomUUID().slice(0, 4)}`;
       d.nextId = null;
-      d.orgs.set(id, { id, name, created_by: createdBy, workspace_id: workspaceId });
+      d.orgs.set(id, { id, name, created_by: createdBy, workspace_id: workspaceId, instance_id: d.instanceId, created_at: Date.now() });
       d.members.set(id, new Map([[createdBy, "admin"]]));
       return d.orgs.get(id);
     },
     // Made in the provider itself (its "create your first organization" step): no Mynt workspace behind it.
     providerOrg(id, name, createdBy) {
-      d.orgs.set(id, { id, name, created_by: createdBy, workspace_id: null });
+      d.orgs.set(id, { id, name, created_by: createdBy, workspace_id: null, instance_id: null, created_at: Date.now() });
       d.members.set(id, new Map([[createdBy, "admin"]]));
       return d.orgs.get(id);
     },
     async getOrg(id) {
-      d.log("getOrg", id);
+      await d.log("getOrg", id);
       return d.orgs.get(id) ?? null;
     },
     async renameOrg(id, name) {
-      d.log("renameOrg", id, name);
+      await d.log("renameOrg", id, name);
       d.orgs.get(id).name = name;
     },
     async deleteOrg(id) {
-      d.log("deleteOrg", id);
+      await d.log("deleteOrg", id);
       d.orgs.delete(id);
       d.members.delete(id);
     },
     async listOrgs(offset, limit) {
-      d.log("listOrgs");
+      await d.log("listOrgs");
       const all = [...d.orgs.values()];
       return { orgs: all.slice(offset, offset + limit), total: all.length };
     },
@@ -78,20 +82,20 @@ function fakeDirectory() {
       return hits.length === 1 ? hits[0][0] : null;
     },
     async addMember(id, subject, role) {
-      d.log("addMember", id, subject, role);
+      await d.log("addMember", id, subject, role);
       d.members.get(id).set(subject, role);
     },
     async setMemberRole(id, subject, role) {
-      d.log("setMemberRole", id, subject, role);
+      await d.log("setMemberRole", id, subject, role);
       if (!d.members.get(id)?.has(subject)) throw new Error("not a member");
       d.members.get(id).set(subject, role);
     },
     async removeMember(id, subject) {
-      d.log("removeMember", id, subject);
+      await d.log("removeMember", id, subject);
       d.members.get(id)?.delete(subject);
     },
     async invite(id, o) {
-      d.log("invite", id, o);
+      await d.log("invite", id, o);
       const inv = { id: `inv_${d.invitations.length + 1}`, org: id, status: "pending", ...o };
       d.invitations.push(inv);
       return { id: inv.id };
@@ -101,7 +105,7 @@ function fakeDirectory() {
       return i ? { id: i.id, status: i.status, email: i.email, metadata: i.metadata } : null;
     },
     async revokeInvitation(org, id) {
-      d.log("revokeInvitation", org, id);
+      await d.log("revokeInvitation", org, id);
       const i = d.invitations.find((x) => x.id === id);
       if (i?.status === "pending") i.status = "revoked";
     },
@@ -167,7 +171,8 @@ test("creating a workspace makes its organization, tagged with the workspace; if
   const ana = await w.person("Ana");
   const made = await ana.call("create_workspace", { name: "Team" });
   const orgId = await w.orgOf(made.id);
-  assert.deepEqual(w.dir.orgs.get(orgId), { id: orgId, name: "Team", created_by: ana.subject, workspace_id: made.id });
+  const org = w.dir.orgs.get(orgId);
+  assert.deepEqual([org.name, org.created_by, org.workspace_id, org.instance_id], ["Team", ana.subject, made.id, "inst_this"]);
   assert.equal(await w.role(made.id, ana.user.id), "owner");
   assert.equal((await w.wsById(made.id)).org_sync, "done");
   // The provider refuses: no workspace.
@@ -555,8 +560,8 @@ test("P5/P5b: the circuit breaker: an empty listing, or taking out more than a t
   assert.match((await w.sync.reconcileAll()).halted, /2 of 3/);
   for (const x of [a, b]) assert.equal((await w.wsById(x.id)).org_missing_at, null);
   // Members: two of three seen members gone at once.
-  w.dir.orgs.set(await w.orgOf(a.id), { id: await w.orgOf(a.id), name: "A", created_by: ana.subject, workspace_id: a.id });
-  w.dir.orgs.set(await w.orgOf(b.id), { id: await w.orgOf(b.id), name: "B", created_by: ana.subject, workspace_id: b.id });
+  w.dir.orgs.set(await w.orgOf(a.id), { id: await w.orgOf(a.id), name: "A", created_by: ana.subject, workspace_id: a.id, instance_id: "inst_this", created_at: Date.now() });
+  w.dir.orgs.set(await w.orgOf(b.id), { id: await w.orgOf(b.id), name: "B", created_by: ana.subject, workspace_id: b.id, instance_id: "inst_this", created_at: Date.now() });
   const ben = await w.person("Ben");
   const cy = await w.person("Cy");
   for (const p of [ben, cy]) await w.q("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role, org_synced_at) VALUES ($1, $2, 'member', now())", [c.id, p.user.id]);
@@ -622,17 +627,137 @@ test("backfill (P8/P8b): a dry run counts and changes nothing; --apply makes org
 test("the Clerk adapter waits out rate limits and takes only a 404 for 'gone'", async () => {
   const pk = `pk_test_${Buffer.from("example.clerk.accounts.dev$").toString("base64")}`;
   const replies = [];
-  const fetchFn = async (url) => {
+  const sentBodies = [];
+  const fetchFn = async (url, init) => {
+    sentBodies.push(init.body ? JSON.parse(init.body) : null);
     const [status, body] = replies.shift();
     return new Response(JSON.stringify(body), { status, headers: { "retry-after": "1" } });
   };
   const slept = [];
-  const clerk = new ClerkOrgDirectory({ secretKey: "test-key", publishableKey: pk }, fetchFn, async (ms) => void slept.push(ms));
-  replies.push([429, {}], [429, {}], [200, { id: "org_1", name: "A", created_by: "user_1", private_metadata: { mynt_workspace_id: "ws_1" } }]);
-  assert.deepEqual(await clerk.createOrg("A", "user_1", "ws_1"), { id: "org_1", name: "A", created_by: "user_1", workspace_id: "ws_1" });
+  const clerk = new ClerkOrgDirectory({ secretKey: "test-key", publishableKey: pk, instanceId: "inst_1" }, fetchFn, async (ms) => void slept.push(ms));
+  replies.push([429, {}], [429, {}], [200, { id: "org_1", name: "A", created_by: "user_1", created_at: 5, private_metadata: { mynt_workspace_id: "ws_1", mynt_instance: "inst_1" } }]);
+  assert.deepEqual(await clerk.createOrg("A", "user_1", "ws_1"), { id: "org_1", name: "A", created_by: "user_1", workspace_id: "ws_1", instance_id: "inst_1", created_at: 5 });
+  assert.deepEqual(sentBodies.at(-1).private_metadata, { mynt_workspace_id: "ws_1", mynt_instance: "inst_1" });
   assert.deepEqual(slept, [1000, 1000]);
+  // A membership filtered by user id: only that person's row counts; someone else's row is an error, not "not a member".
+  replies.push([200, { data: [{ role: "org:admin", public_user_data: { user_id: "user_1" } }] }]);
+  assert.deepEqual(await clerk.getMembership("org_1", "user_1"), { subject: "user_1", role: "admin" });
+  replies.push([200, { data: [] }]);
+  assert.equal(await clerk.getMembership("org_1", "user_1"), null);
+  replies.push([200, { data: [{ role: "org:member", public_user_data: { user_id: "user_2" } }] }]);
+  await assert.rejects(clerk.getMembership("org_1", "user_1"), /other people/);
   replies.push([404, { errors: [{ message: "not found" }] }]);
   assert.equal(await clerk.getOrg("org_x"), null);
   replies.push([500, { errors: [{ message: "down" }] }]);
   await assert.rejects(clerk.getOrg("org_x"), /down/);
+});
+
+// ---- re-review ----
+
+test("N1: someone not on Mynt is kept an org:member (so the provider's admins are Mynt's); a removal made in the provider records its event", async () => {
+  const w = await setup();
+  const ana = await w.person("Ana");
+  const ben = await w.person("Ben");
+  const made = await ana.call("create_workspace", { name: "T" });
+  const orgId = await w.orgOf(made.id);
+  await ana.call("invite_to_workspace", { workspace_id: made.id, email: ben.email, role: "admin" });
+  await ben.call("accept_workspace_invite", { invite_id: (await ben.call("list_my_invitations")).invitations[0].id });
+  w.dir.members.get(orgId).set("user_out", "admin");
+  w.dir.emails.set("user_out", ["out@elsewhere.test"]);
+  await w.changed(orgId, "user_out");
+  assert.equal(w.member(orgId, "user_out"), "member");
+  assert.equal((await w.q("SELECT count(*)::int AS n FROM financial_products.workspace_join_requests"))[0].n, 1, "the join request stays");
+  // Made an admin there again later: put back again.
+  w.dir.members.get(orgId).set("user_out", "admin");
+  await w.changed(orgId, "user_out");
+  assert.equal(w.member(orgId, "user_out"), "member");
+  // A removal reported by the webhook: the audit says which event, from where.
+  w.dir.members.get(orgId).delete(ben.subject);
+  const source = { event_id: "msg_123", client_ip: "203.0.113.9", user_agent: "test-agent" };
+  await w.sync.handle({ type: "membership.changed", orgId, subject: ben.subject, source });
+  const [removed] = await w.audits("workspace_member_removed_by_directory");
+  assert.deepEqual([removed.details.via, removed.details.event], ["provider webhook", source]);
+});
+
+test("N3: no archiving while apps are live; with other owners only the soft archive, which a co-owner can undo; one that goes live meanwhile waits", async () => {
+  const w = await setup();
+  const ana = await w.person("Ana");
+  const bo = await w.person("Bo");
+  const made = await ana.call("create_workspace", { name: "T" });
+  await ana.call("invite_to_workspace", { workspace_id: made.id, email: bo.email, role: "owner" });
+  await bo.call("accept_workspace_invite", { invite_id: (await bo.call("list_my_invitations")).invitations[0].id });
+  const appId = randomUUID();
+  await w.q(
+    "INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, workspace_id) VALUES ($1, $2, 'App', 'd', 'a', '{}', 'published', $3)",
+    [appId, ana.user.id, made.id],
+  );
+  assert.match((await bo.call("archive_workspace", { workspace_id: made.id })).error, /published or hosted/);
+  await w.q("UPDATE financial_products.apps SET status = 'draft' WHERE id = $1", [appId]);
+  assert.match((await bo.call("archive_workspace", { workspace_id: made.id, now: true })).error, /other owners/);
+  assert.ok((await bo.call("archive_workspace", { workspace_id: made.id })).archived);
+  assert.equal((await ana.call("unarchive_workspace", { workspace_id: made.id })).archived, false, "a co-owner undoes it");
+  // Archived again; its time comes while an app has gone live: it waits.
+  await bo.call("archive_workspace", { workspace_id: made.id });
+  await w.q("UPDATE financial_products.apps SET status = 'published' WHERE id = $1", [appId]);
+  await w.q("UPDATE financial_products.workspaces SET archive_offboard_at = now() - interval '1 minute' WHERE id = $1", [made.id]);
+  const { finishArchives } = await import("../dist/workspaces.js");
+  assert.equal(await finishArchives(w.store, {}), 0);
+  assert.equal(await w.role(made.id, ana.user.id), "owner");
+  assert.equal((await w.audits("workspace_archive_waiting")).length, 1);
+});
+
+test("N4: the provider is written to only after Mynt's transaction is over (owner restored, role put back)", async () => {
+  const w = await setup();
+  const ana = await w.person("Ana");
+  const made = await ana.call("create_workspace", { name: "T" });
+  const orgId = await w.orgOf(made.id);
+  const inTx = [];
+  w.dir.beforeWrite = async (name) => inTx.push([name, (await w.q("SELECT txid_current_if_assigned() AS x"))[0].x !== null]);
+  w.dir.members.get(orgId).delete(ana.subject);
+  await w.changed(orgId, ana.subject);
+  w.dir.members.get(orgId).set(ana.subject, "member");
+  await w.changed(orgId, ana.subject);
+  assert.deepEqual(inTx, [["addMember", false], ["setMemberRole", false]]);
+  assert.equal(w.member(orgId, ana.subject), "admin");
+});
+
+test("N6: an organization this installation made for a workspace that doesn't exist is deleted after an hour (never another installation's); abandoned half-made workspaces are cleared", async () => {
+  const w = await setup();
+  const ana = await w.person("Ana");
+  const old = Date.now() - 2 * 60 * 60_000;
+  const tagged = (id, instance_id, created_at) => {
+    w.dir.orgs.set(id, { id, name: "Lost", created_by: ana.subject, workspace_id: randomUUID(), instance_id, created_at });
+    w.dir.members.set(id, new Map([[ana.subject, "admin"]]));
+  };
+  tagged("org_orphan", "inst_this", old);
+  tagged("org_recent", "inst_this", Date.now());
+  tagged("org_theirs", "inst_other", old);
+  // A workspace whose making crashed two hours ago, with no apps.
+  const lost = randomUUID();
+  await w.q("INSERT INTO financial_products.workspaces (id, name, created_by, org_sync, created_at) VALUES ($1, 'Lost', $2, 'creating', now() - interval '2 hours')", [lost, ana.user.id]);
+  await w.q("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')", [lost, ana.user.id]);
+  await w.sync.reconcileAll();
+  assert.equal(w.dir.orgs.has("org_orphan"), false);
+  assert.equal(w.dir.orgs.has("org_recent"), true);
+  assert.equal(w.dir.orgs.has("org_theirs"), true);
+  assert.equal(await w.wsById(lost), undefined);
+  assert.equal((await w.audits("workspace_creation_abandoned")).length, 1);
+});
+
+test("a frozen workspace's role changes, removals and renames don't call its deleted organization", async () => {
+  const w = await setup();
+  const ana = await w.person("Ana");
+  const ben = await w.person("Ben");
+  const made = await ana.call("create_workspace", { name: "T" });
+  const orgId = await w.orgOf(made.id);
+  await ana.call("invite_to_workspace", { workspace_id: made.id, email: ben.email });
+  await ben.call("accept_workspace_invite", { invite_id: (await ben.call("list_my_invitations")).invitations[0].id });
+  w.dir.orgs.delete(orgId);
+  w.dir.members.delete(orgId);
+  await w.sync.handle({ type: "org.changed", orgId });
+  const before = w.dir.calls.length;
+  assert.equal((await ana.call("change_member_role", { workspace_id: made.id, user_id: ben.user.id, role: "admin" })).role, "admin");
+  assert.equal((await ana.call("rename_workspace", { workspace_id: made.id, name: "T2" })).name, "T2");
+  assert.ok((await ana.call("remove_workspace_member", { workspace_id: made.id, user_id: ben.user.id })).removed);
+  assert.deepEqual(w.dir.calls.slice(before).map((c) => c[0]), []);
 });
