@@ -124,7 +124,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerWorkspaceComplianceTools(server, store, user!);
     // Promotion between stages (promotions.ts) and what needs attention in a workspace (attention.ts).
     registerPromotionTools(server, store, user!);
-    registerAttentionTools(server, store, user!, { admin: has("admin") });
+    registerAttentionTools(server, store, user!);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
     if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);

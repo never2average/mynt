@@ -33,6 +33,12 @@ export const PROMOTION_TABLES = `
     decided_at timestamptz,
     note text
   );
+  -- What a promotion was for: the verified build's source, and the build its hosting ran.
+  ALTER TABLE ${T}.app_promotions ADD COLUMN IF NOT EXISTS source_sha256 text;
+  ALTER TABLE ${T}.app_promotions ADD COLUMN IF NOT EXISTS hosted_build_id uuid;
+  -- What made the sign-off necessary (programs beyond devnet, a build carrying programs, approved money rails): an
+  -- approval holds only while it stays the same.
+  ALTER TABLE ${T}.promotion_signoffs ADD COLUMN IF NOT EXISTS basis jsonb;
   CREATE UNIQUE INDEX IF NOT EXISTS promotion_signoffs_open_idx ON ${T}.promotion_signoffs (app_id) WHERE status = 'requested';
   CREATE INDEX IF NOT EXISTS promotion_signoffs_app_idx ON ${T}.promotion_signoffs (app_id, requested_at DESC);
   CREATE INDEX IF NOT EXISTS promotion_signoffs_status_idx ON ${T}.promotion_signoffs (status, requested_at DESC);

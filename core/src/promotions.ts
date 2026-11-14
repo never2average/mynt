@@ -4,14 +4,14 @@ import { z } from "zod";
 import { inTransaction, type Db } from "./db.js";
 import type { App, Store, User } from "./store.js";
 import { coveredStates, US_STATE_NAMES } from "./workspace-compliance.js";
-import { appRole, isUuid, memberApp, type AppStage } from "./workspaces.js";
+import { appRole, frozenReason, isUuid, memberApp, type AppStage } from "./workspaces.js";
 
 // Promoting an app between the studio's folders: idea → staging → production, one step at a time, and back down.
 //
 // Every check is computed here by Mynt from its own records (the builds Mynt verified in its clean sandbox and the
 // independent audit it ran, its hosting's state, the licences and sponsorships behind each product, the app's keys
 // and webhooks, the mainnet program gate, admins' sign-offs), never from anything an app or an agent reports. What
-// Mynt can't measure is "pending", never "pass", and blocks a promotion like a failure; "warn" is shown and doesn't.
+// Mynt can't measure is "pending", never "pass", and blocks a promotion like a failure; "warn" blocks too, except where it is advisory (every staging warning; in production, ADVISORY_PRODUCTION_CHECKS).
 //
 // Who may do what: every member of the app's workspace sees the checks (get_promotion_checks); only its owners and
 // admins promote, demote, set the states the app serves, or ask for an admin's sign-off. Members ask them, and see
@@ -21,7 +21,9 @@ import { appRole, isUuid, memberApp, type AppStage } from "./workspaces.js";
 // Sign-off: a production promotion needs a Mynt admin's sign-off when the app moves value: it has Solana programs
 // (beyond devnet, or its verified build carries programs) or a product it uses is covered by a firm with an approved
 // money rail. A sign-off is for one verified build (its id and source hash): a newer verified build needs a new one.
-// The admin who decides is never the one who asked.
+// The admin who decides is never the one who asked, nor anyone in the app's workspace. The sign-off is also bound to what made it
+// necessary (its basis: programs, rails): if that changes without a new build, it no longer counts. Production promotes
+// what runs: the hosted build must be the verified build the checks and sign-off are about.
 //
 // The stage is stored, and changes only by promotion and demotion: a new app starts as an idea, however far its builds
 // and hosting get. Apps from before promotions kept the stage Mynt derived for them then (seedAppStages).
@@ -133,10 +135,15 @@ function buildCheck(appId: string, s: State): PromotionCheck {
   return { ...base, status: "pass", detail };
 }
 
-function auditCheck(s: State): PromotionCheck {
+// `production`: a build with no independent audit only warns; `strict` (the app needs a sign-off: it moves value): fails.
+const NO_AUDIT = "No independent audit ran on this build: Mynt shipped it on its own checks (tests, types, secrets, static scan, dependencies, disclosures)";
+function auditCheck(s: State, o: { production: boolean; strict: boolean }): PromotionCheck {
   const base = { id: "audit_passed", label: "Independent audit passed" };
   if (!s.verified) return { ...base, status: "pending", detail: "Waits for a build Mynt verified" };
-  if (!s.verified.maxwell) return { ...base, status: "pass", detail: "Not required for this build: Mynt shipped it on its own checks (tests, types, secrets, static scan, dependencies, disclosures)" };
+  if (!s.verified.maxwell) {
+    if (o.strict) return { ...base, status: "fail", detail: `${NO_AUDIT}; an app that moves value needs one`, fix: { label: "Build again with the independent audit on", href: `/${s.verified.app_id}` } };
+    return o.production ? { ...base, status: "warn", detail: NO_AUDIT } : { ...base, status: "pass", detail: `Not required for this build. ${NO_AUDIT}` };
+  }
   const c = counts(s.verified);
   if (serious(s.verified) > 0) return { ...base, status: "fail", detail: `${serious(s.verified)} critical or high finding(s) in the independent audit` };
   return { ...base, status: "pass", detail: `Mynt's independent audit found no critical or high issues (medium ${c.medium ?? 0}, low ${c.low ?? 0})` };
@@ -155,8 +162,10 @@ function hostingCheck(appId: string, s: State, required: boolean): PromotionChec
   if (h.status === "deploying") return { ...base, status: "pending", detail: `Build ${short(h.build_id)} is still deploying` };
   if (h.status !== "running") return { ...base, status: "fail", detail: `Its deployment is ${h.status}${h.error ? `: ${String(h.error).slice(0, 300)}` : ""}`, fix: deploy };
   const ran = `Running on Mynt's hosting (commit ${String(h.commit_sha).slice(0, 12)}, as its VM last reported)`;
+  // Production promotes what runs: the hosted build must be the verified build every other check (and the sign-off)
+  // is about.
   if (s.verified && h.build_id !== s.verified.id)
-    return { ...base, status: "warn", detail: `${ran}, from build ${short(h.build_id)}, not the latest verified build ${short(s.verified.id)}`, fix: { label: "Deploy the latest build", href: `/${appId}`, tool: "deploy_app" } };
+    return { ...base, status: required ? "fail" : "warn", detail: `${ran}, from build ${short(h.build_id)}, not the latest verified build ${short(s.verified.id)}`, fix: { label: "Deploy the latest build", href: `/${appId}`, tool: "deploy_app" } };
   return { ...base, status: "pass", detail: ran };
 }
 
@@ -168,7 +177,17 @@ async function licenceCheck(store: Store, app: App, s: State): Promise<{ check: 
   const base = { id: "licences", label: "Every product licensed where the app serves" };
   const fix = { label: "See licences", href: "/licences" };
   const targets = ((s.promotion?.target_states as string[] | undefined) ?? []).map((x) => x.toLowerCase());
-  if (!app.product_ids.length) return { check: { ...base, status: "pass", detail: "The app uses no regulated products" }, moneyFirms: [] };
+  const setStates = { label: "Set the states this app serves", href: `/${app.id}`, tool: "set_app_target_states" };
+  if (!targets.length) {
+    // Still read the coverage: whose firms cover its products decides whether it moves money (sign-off).
+    const firms = new Set<string>();
+    for (const id of app.product_ids) {
+      const record = await store.getProduct(id);
+      if (record?.status === "published") for (const covers of (await coveredStates(store, record)).values()) for (const c of covers) firms.add(c.entity_id);
+    }
+    return { check: { ...base, status: "fail", detail: "Set the states this app serves: production checks every product is licensed in each", fix: setStates }, moneyFirms: [...firms] };
+  }
+  if (!app.product_ids.length) return { check: { ...base, status: "pass", detail: `The app uses no regulated products (it serves ${targets.length} state(s))` }, moneyFirms: [] };
   const problems: string[] = [];
   const covered: string[] = [];
   const firms = new Set<string>();
@@ -199,11 +218,6 @@ async function licenceCheck(store: Store, app: App, s: State): Promise<{ check: 
   }
   const moneyFirms = [...firms];
   if (problems.length) return { check: { ...base, status: "fail", detail: problems.join("; "), fix }, moneyFirms };
-  if (!targets.length)
-    return {
-      check: { ...base, status: "warn", detail: `No target states set, so only where each product is covered: ${covered.join("; ")}`, fix: { label: "Set target states", href: `/${app.id}`, tool: "set_app_target_states" } },
-      moneyFirms,
-    };
   return { check: { ...base, status: "pass", detail: `Covered by a licence in force for every target state: ${covered.join("; ")}` }, moneyFirms };
 }
 
@@ -240,7 +254,7 @@ async function webhookCheck(q: Q, app: App): Promise<PromotionCheck> {
   return { ...base, status: "pass", detail: `${hooks.length} webhook(s) on, each receiving deliveries signed with a secret a member holds` };
 }
 
-function findingsCheck(appId: string, s: State): PromotionCheck {
+function findingsCheck(appId: string, s: State, strict: boolean): PromotionCheck {
   const base = { id: "audit_findings", label: "No open blocking audit findings" };
   if (!s.verified) return { ...base, status: "pending", detail: "Waits for a build Mynt verified" };
   const latest = s.newestFinished;
@@ -249,7 +263,12 @@ function findingsCheck(appId: string, s: State): PromotionCheck {
     if (latest.status === "blocked" && /security gate/i.test(String(latest.error ?? ""))) return { ...base, status: "fail", detail: `The newest build, ${short(latest.id)}, was blocked: ${latest.error}`, fix: { label: "Open the build", href: `/${appId}` } };
   }
   if (serious(s.verified) > 0) return { ...base, status: "fail", detail: `${serious(s.verified)} critical or high finding(s)` };
-  return { ...base, status: "pass", detail: s.verified.maxwell ? "None in the latest audited build" : "No audit findings recorded (no independent audit was required)" };
+  if (!s.verified.maxwell)
+    // Nothing audited it, so there are no findings to read: not a pass.
+    return strict
+      ? { ...base, status: "fail", detail: "No independent audit ran on this build, so its findings are unknown; an app that moves value needs one", fix: { label: "Build again with the independent audit on", href: `/${appId}` } }
+      : { ...base, status: "warn", detail: "No independent audit ran on this build, so there are no findings to read" };
+  return { ...base, status: "pass", detail: "None in the latest audited build" };
 }
 
 async function programsOf(q: Q, appId: string, s: State) {
@@ -285,25 +304,45 @@ function programCheck(appId: string, s: State, programs: Row[]): PromotionCheck 
   return { ...base, status: "pass", detail: `${mainnet.length} mainnet program(s) passed the gate, with no open flags` };
 }
 
-// The sign-off for this build: none until one was asked for this very build (an older build's doesn't count).
+// The sign-off for this build: none until one was asked for this very build and source (an older build's doesn't
+// count).
 async function signoffFor(q: Q, appId: string, build: Row | undefined): Promise<Row | undefined> {
   if (!build) return undefined;
-  return one(q, `SELECT * FROM ${T}.promotion_signoffs WHERE app_id = $1 AND build_id = $2 AND status <> 'superseded' ORDER BY requested_at DESC LIMIT 1`, [appId, build.id]);
+  return one(
+    q,
+    `SELECT * FROM ${T}.promotion_signoffs WHERE app_id = $1 AND build_id = $2 AND source_sha256 IS NOT DISTINCT FROM $3 AND status <> 'superseded' ORDER BY requested_at DESC LIMIT 1`,
+    [appId, build.id, build.source_sha256 ?? null],
+  );
 }
 
-function signoffView(row: Row | undefined): NonNullable<PromotionChecks["signoff"]> {
-  if (!row) return { status: "none" };
+// What made a sign-off necessary, exactly: the app's programs beyond devnet, whether its build carries programs, and
+// the approved money rails of the firms covering its products. An approval holds only while this stays the same.
+export interface SignoffBasis {
+  programs: string[];
+  solana_build: boolean;
+  rails: string[];
+}
+const sameBasis = (a: unknown, b: SignoffBasis) => {
+  const x = a as Partial<SignoffBasis> | null;
+  return !!x && JSON.stringify([...(x.programs ?? [])].sort()) === JSON.stringify(b.programs) && !!x.solana_build === b.solana_build && JSON.stringify([...(x.rails ?? [])].sort()) === JSON.stringify(b.rails);
+};
+// An approval whose basis changed without a new build counts as none.
+const stale = (row: Row | undefined, basis: SignoffBasis) => row?.status === "approved" && !sameBasis(row.basis, basis);
+
+function signoffView(row: Row | undefined, basis: SignoffBasis): NonNullable<PromotionChecks["signoff"]> {
+  if (!row || stale(row, basis)) return { status: "none" };
   const status = row.status as SignoffStatus;
   return status === "requested"
     ? { status, by: row.requested_by as string, at: iso(row.requested_at) }
     : { status, by: (row.decided_by as string | null) ?? undefined, at: iso(row.decided_at) };
 }
 
-async function signoffCheck(q: Q, appId: string, s: State, row: Row | undefined, reasons: string[]): Promise<PromotionCheck> {
+async function signoffCheck(q: Q, appId: string, s: State, row: Row | undefined, reasons: string[], basis: SignoffBasis): Promise<PromotionCheck> {
   const base = { id: "admin_signoff", label: "Mynt admin sign-off" };
   const ask = { label: "Ask for sign-off", href: `/${appId}`, tool: "request_promotion_signoff" };
   const why = `Needed because ${reasons.join(" and ")}`;
   if (!s.verified) return { ...base, status: "pending", detail: `${why}; waits for a build Mynt verified` };
+  if (stale(row, basis)) return { ...base, status: "fail", detail: `${why}; what needed it (its programs or money rails) changed since it was approved, so it needs a new one`, fix: ask };
   if (!row) {
     const older = await one(q, `SELECT build_id FROM ${T}.promotion_signoffs WHERE app_id = $1 AND status = 'approved' ORDER BY decided_at DESC LIMIT 1`, [appId]);
     const was = older ? `; the last one was for build ${short(older.build_id)}, and a new build needs its own` : "";
@@ -315,14 +354,16 @@ async function signoffCheck(q: Q, appId: string, s: State, row: Row | undefined,
 }
 
 // Why a production promotion needs an admin's sign-off (empty: it doesn't).
-async function signoffReasons(q: Q, s: State, programs: Row[], moneyFirms: string[]): Promise<string[]> {
-  const out: string[] = [];
-  if (programs.some((p) => p.cluster !== "devnet") || s.verified?.solana) out.push("the app has Solana programs");
-  if (moneyFirms.length) {
-    const r = await one(q, `SELECT count(*)::int AS n FROM ${T}.money_rails WHERE status = 'approved' AND entity_id::text = ANY($1)`, [moneyFirms]);
-    if (Number(r?.n ?? 0) > 0) out.push("a product it uses moves money over an approved money rail");
-  }
-  return out;
+async function signoffReasons(q: Q, s: State, programs: Row[], moneyFirms: string[]): Promise<{ reasons: string[]; basis: SignoffBasis }> {
+  const reasons: string[] = [];
+  const beyondDevnet = programs.filter((p) => p.cluster !== "devnet").map((p) => `${p.cluster}:${p.program_id}`).sort();
+  const solanaBuild = !!s.verified?.solana;
+  if (beyondDevnet.length || solanaBuild) reasons.push("the app has Solana programs");
+  const rails = moneyFirms.length
+    ? (await rowsOf(q, `SELECT id::text AS id FROM ${T}.money_rails WHERE status = 'approved' AND entity_id::text = ANY($1) ORDER BY id`, [moneyFirms])).map((r) => r.id as string).sort()
+    : [];
+  if (rails.length) reasons.push("a product it uses moves money over an approved money rail");
+  return { reasons, basis: { programs: beyondDevnet, solana_build: solanaBuild, rails } };
 }
 
 // ---- the checks for one step ----
@@ -343,34 +384,66 @@ export async function promotionChecks(q: Q, store: Store, app: App, to: "staging
 // The checks of a stage, whatever stage the app is in now: what promotion to it needs, and what a production app
 // must go on meeting (get_workspace_attention).
 export async function stageChecks(q: Q, store: Store, app: App, from: AppStage, to: "staging" | "production"): Promise<PromotionChecks> {
+  return (await evaluate(q, store, app, from, to)).result;
+}
+
+// A warning that doesn't block. Staging: every warning is advisory. Production: only these (a newer build that failed
+// while the verified one runs; no independent audit, and so no findings to read, when the app moves no value).
+export const ADVISORY_PRODUCTION_CHECKS = ["build_verified", "audit_passed", "audit_findings"] as const;
+
+async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "staging" | "production") {
   const s = await readState(q, app.id);
-  const checks: PromotionCheck[] = [buildCheck(app.id, s), auditCheck(s)];
   let needs = false;
   let signoff: PromotionChecks["signoff"];
-  if (to === "staging") checks.push(hostingCheck(app.id, s, false));
+  let basis: SignoffBasis = { programs: [], solana_build: false, rails: [] };
+  let reasons: string[] = [];
+  let checks: PromotionCheck[];
+  if (to === "staging") checks = [buildCheck(app.id, s), auditCheck(s, { production: false, strict: false }), hostingCheck(app.id, s, false)];
   else {
-    checks.push(hostingCheck(app.id, s, true));
     const { check, moneyFirms } = await licenceCheck(store, app, s);
     const programs = await programsOf(q, app.id, s);
-    checks.push(check, await keyCheck(q, app), await webhookCheck(q, app), findingsCheck(app.id, s), programCheck(app.id, s, programs));
-    const reasons = await signoffReasons(q, s, programs, moneyFirms);
+    ({ reasons, basis } = await signoffReasons(q, s, programs, moneyFirms));
     needs = reasons.length > 0;
+    checks = [
+      buildCheck(app.id, s),
+      auditCheck(s, { production: true, strict: needs }),
+      hostingCheck(app.id, s, true),
+      check,
+      await keyCheck(q, app),
+      await webhookCheck(q, app),
+      findingsCheck(app.id, s, needs),
+      programCheck(app.id, s, programs),
+    ];
     const row = await signoffFor(q, app.id, s.verified);
-    signoff = signoffView(row);
-    if (needs) checks.push(await signoffCheck(q, app.id, s, row, reasons));
+    signoff = signoffView(row, basis);
+    if (needs) checks.push(await signoffCheck(q, app.id, s, row, reasons, basis));
   }
-  return {
+  const advisory = (c: PromotionCheck) => to === "staging" || (ADVISORY_PRODUCTION_CHECKS as readonly string[]).includes(c.id);
+  const result: PromotionChecks = {
     app_id: app.id,
     from_stage: from,
     to_stage: to,
     checks,
-    can_promote: checks.every((c) => c.status === "pass" || c.status === "warn"),
+    can_promote: checks.every((c) => c.status === "pass" || (c.status === "warn" && advisory(c))),
     needs_admin_signoff: needs,
     ...(signoff ? { signoff } : {}),
   };
+  return { result, s, basis, reasons };
+}
+
+// An approved sign-off for the app's current verified build whose basis has changed since (attention).
+export async function staleSignoff(store: Store, app: App): Promise<boolean> {
+  const { s, basis } = await evaluate(store.db, store, app, "staging", "production");
+  return stale(await signoffFor(store.db, app.id, s.verified), basis);
 }
 
 const lockApp = (q: Q, appId: string) => q.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`mynt.app_stage:${appId}`]);
+// A frozen workspace (its organization deleted in the identity provider) or one being archived moves no app's stage
+// and asks for no sign-off until an owner relinks or unarchives it.
+async function refuseFrozen(q: Q, app: Pick<App, "workspace_id">) {
+  const why = app.workspace_id ? await frozenReason(q, app.workspace_id) : null;
+  if (why) throw new PromotionError(`${why}; no app in it changes stage meanwhile`);
+}
 const auditIn = (q: Q, actor: string | null, action: string, target: string, details: unknown) =>
   q.query(`INSERT INTO ${T}.audit_log (id, actor_id, action, target, details) VALUES ($1, $2, $3, $4, $5)`, [randomUUID(), actor, action, target, JSON.stringify(details)]);
 
@@ -378,15 +451,31 @@ const auditIn = (q: Q, actor: string | null, action: string, target: string, det
 export async function promoteApp(store: Store, user: Pick<User, "id">, app: App, to: "staging" | "production") {
   return inTransaction(store.db, async (tx) => {
     await lockApp(tx, app.id);
+    await refuseFrozen(tx, app);
     const result = await promotionChecks(tx, store, app, to);
     if (!result.can_promote) return { promoted: false as const, ...result };
     const s = await readState(tx, app.id);
+    // What was promoted: the verified build, and the build its hosting runs (in production, always the same one).
+    const build = s.verified?.id ?? null;
+    const sha = (s.verified?.source_sha256 as string | null | undefined) ?? null;
+    const hosted = (s.hosted?.build_id as string | undefined) ?? null;
     await tx.query(
-      `INSERT INTO ${T}.app_promotions (app_id, stage, build_id, checks, updated_by, updated_at) VALUES ($1, $2, $3, $4, $5, now())
-       ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, build_id = EXCLUDED.build_id, checks = EXCLUDED.checks, updated_by = EXCLUDED.updated_by, updated_at = now()`,
-      [app.id, to, s.verified?.id ?? null, JSON.stringify(result.checks), user.id],
+      `INSERT INTO ${T}.app_promotions (app_id, stage, build_id, source_sha256, hosted_build_id, checks, updated_by, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+       ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, build_id = EXCLUDED.build_id, source_sha256 = EXCLUDED.source_sha256, hosted_build_id = EXCLUDED.hosted_build_id,
+         checks = EXCLUDED.checks, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+      [app.id, to, build, sha, hosted, JSON.stringify(result.checks), user.id],
     );
-    await auditIn(tx, user.id, "app_promoted", app.id, { app_id: app.id, workspace_id: app.workspace_id, from_stage: result.from_stage, to_stage: to, build_id: s.verified?.id ?? null, checks: result.checks, signoff: result.signoff ?? null });
+    await auditIn(tx, user.id, "app_promoted", app.id, {
+      app_id: app.id,
+      workspace_id: app.workspace_id,
+      from_stage: result.from_stage,
+      to_stage: to,
+      build_id: build,
+      source_sha256: sha,
+      hosted_build_id: hosted,
+      checks: result.checks,
+      signoff: result.signoff ?? null,
+    });
     return { promoted: true as const, ...result };
   });
 }
@@ -394,12 +483,13 @@ export async function promoteApp(store: Store, user: Pick<User, "id">, app: App,
 export async function demoteApp(store: Store, user: Pick<User, "id">, app: App, to: AppStage, reason: string) {
   return inTransaction(store.db, async (tx) => {
     await lockApp(tx, app.id);
+    await refuseFrozen(tx, app);
     const from = await stageOf(tx, app);
     if (ORDER.indexOf(to) !== ORDER.indexOf(from) - 1)
       throw new PromotionError(from === "idea" ? "The app is in idea, the first stage" : `Demote one step at a time: the app is in ${from}, so it goes down to ${ORDER[ORDER.indexOf(from) - 1]}`);
     await tx.query(
       `INSERT INTO ${T}.app_promotions (app_id, stage, build_id, checks, updated_by, updated_at) VALUES ($1, $2, NULL, NULL, $3, now())
-       ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, build_id = NULL, checks = NULL, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+       ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, build_id = NULL, source_sha256 = NULL, hosted_build_id = NULL, checks = NULL, updated_by = EXCLUDED.updated_by, updated_at = now()`,
       [app.id, to, user.id],
     );
     await auditIn(tx, user.id, "app_demoted", app.id, { app_id: app.id, workspace_id: app.workspace_id, from_stage: from, to_stage: to, reason });
@@ -412,25 +502,27 @@ export async function demoteApp(store: Store, user: Pick<User, "id">, app: App, 
 export async function requestSignoff(store: Store, user: Pick<User, "id">, app: App) {
   return inTransaction(store.db, async (tx) => {
     await lockApp(tx, app.id);
+    await refuseFrozen(tx, app);
     const from = await stageOf(tx, app);
     if (from !== "staging") throw new PromotionError(`Sign-off is for promoting to production, and the app is in ${from}`);
-    const result = await promotionChecks(tx, store, app, "production");
+    const { result, s, basis, reasons } = await evaluate(tx, store, app, from, "production");
     if (!result.needs_admin_signoff) throw new PromotionError("This app doesn't need an admin's sign-off to go to production");
-    const s = await readState(tx, app.id);
     if (!s.verified) throw new PromotionError("Sign-off is for a build Mynt verified, and the app has none yet");
+    // The sign-off is for what runs: the verified build must be the one deployed on Mynt's hosting.
+    if (s.hosted?.build_id !== s.verified.id)
+      throw new PromotionError(`Sign-off is for the build that runs: deploy build ${short(s.verified.id)} on Mynt's hosting first${s.hosted ? ` (it runs ${short(s.hosted.build_id)})` : ""}`);
     const current = await signoffFor(tx, app.id, s.verified);
-    if (current?.status === "requested" || current?.status === "approved") return { signoff: publicSignoff(current), already: true };
-    // An open request for an older build no longer applies.
-    await tx.query(`UPDATE ${T}.promotion_signoffs SET status = 'superseded' WHERE app_id = $1 AND status = 'requested'`, [app.id]);
-    const reasons = result.checks.find((c) => c.id === "admin_signoff")?.detail ?? "";
+    if (current?.status === "requested" || (current?.status === "approved" && !stale(current, basis))) return { signoff: publicSignoff(current), already: true };
+    // An open request for an older build, or an approval whose basis changed, no longer applies.
+    await tx.query(`UPDATE ${T}.promotion_signoffs SET status = 'superseded' WHERE app_id = $1 AND (status = 'requested' OR (status = 'approved' AND id = $2))`, [app.id, current?.id ?? null]);
     const id = randomUUID();
     const row = await one(
       tx,
-      `INSERT INTO ${T}.promotion_signoffs (id, app_id, workspace_id, build_id, source_sha256, commit_sha, status, reasons, requested_by)
-       VALUES ($1, $2, $3, $4, $5, $6, 'requested', $7, $8) RETURNING *`,
-      [id, app.id, app.workspace_id, s.verified.id, s.verified.source_sha256 ?? null, s.verified.commit_sha ?? null, JSON.stringify([reasons]), user.id],
+      `INSERT INTO ${T}.promotion_signoffs (id, app_id, workspace_id, build_id, source_sha256, commit_sha, status, reasons, basis, requested_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'requested', $7, $8, $9) RETURNING *`,
+      [id, app.id, app.workspace_id, s.verified.id, s.verified.source_sha256 ?? null, s.verified.commit_sha ?? null, JSON.stringify(reasons), JSON.stringify(basis), user.id],
     );
-    await auditIn(tx, user.id, "promotion_signoff_requested", app.id, { app_id: app.id, workspace_id: app.workspace_id, signoff_id: id, build_id: s.verified.id });
+    await auditIn(tx, user.id, "promotion_signoff_requested", app.id, { app_id: app.id, workspace_id: app.workspace_id, signoff_id: id, build_id: s.verified.id, basis });
     return { signoff: publicSignoff(row!), already: false };
   });
 }
@@ -445,6 +537,7 @@ function publicSignoff(r: Row) {
     commit_sha: (r.commit_sha as string | null) ?? null,
     status: r.status as string,
     reasons: (r.reasons as string[]) ?? [],
+    basis: (r.basis as SignoffBasis | null) ?? null,
     requested_by: (r.requested_by as string | null) ?? null,
     requested_at: iso(r.requested_at) ?? null,
     decided_by: (r.decided_by as string | null) ?? null,
@@ -482,8 +575,12 @@ export async function decideSignoff(store: Store, admin: Pick<User, "id">, id: s
     const r = await one(tx, `SELECT * FROM ${T}.promotion_signoffs WHERE id = $1`, [id]);
     if (r!.status !== "requested") throw new PromotionError(`This request is already ${r!.status}`);
     if (r!.requested_by === admin.id) throw new PromotionError("You asked for this sign-off; another Mynt admin decides it");
-    const s = await readState(tx, r!.app_id as string);
-    if (!s.verified || s.verified.id !== r!.build_id) {
+    // Nobody signs off their own workspace's app: a Mynt admin in it (in any role) leaves it to another.
+    if (await one(tx, `SELECT 1 FROM ${T}.workspace_members m JOIN ${T}.apps a ON a.workspace_id = m.workspace_id WHERE a.id = $1 AND m.user_id = $2`, [r!.app_id, admin.id]))
+      throw new PromotionError("You're a member of this app's workspace; a Mynt admin outside it decides");
+    const app = await store.getApp(r!.app_id as string);
+    const { s, basis } = await evaluate(tx, store, app!, "staging", "production");
+    if (!s.verified || s.verified.id !== r!.build_id || s.verified.source_sha256 !== r!.source_sha256 || !sameBasis(r!.basis, basis)) {
       // Recorded (the transaction commits), then refused.
       await tx.query(`UPDATE ${T}.promotion_signoffs SET status = 'superseded' WHERE id = $1`, [id]);
       return { superseded: true as const };
@@ -502,7 +599,7 @@ export async function decideSignoff(store: Store, admin: Pick<User, "id">, id: s
     });
     return publicSignoff(row!);
   });
-  if ("superseded" in out) throw new PromotionError("A newer build replaced the one this sign-off was for; the workspace asks again for the new one");
+  if ("superseded" in out) throw new PromotionError("A newer build, or a change to its programs or money rails, replaced what this sign-off was for; the workspace asks again");
   return out;
 }
 
@@ -553,7 +650,7 @@ export function registerPromotionTools(server: McpServer, store: Store, user: Us
     {
       title: "What an app needs to move up a stage",
       description:
-        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, healthy on Mynt's hosting, every product licensed (a licence in force covering its action) in each of the app's target states, an active live key, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value. Each check is pass, fail, warn (shown, doesn't block) or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes or warns.",
+        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, an active live key, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings).",
       inputSchema: { app_id: z.string(), to_stage: TO },
       annotations: { readOnlyHint: true },
     },

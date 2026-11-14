@@ -122,6 +122,8 @@ async function setup(store0) {
 }
 
 const check = (r, id) => r.data.checks.find((c) => c.id === id);
+// A build Mynt's independent audit passed (no critical or high findings).
+const AUDITED = { maxwell: { counts: { critical: 0, high: 0, medium: 0, low: 0 } } };
 const stageOf = async (call, appId) => (await call("list_my_apps")).data.find((a) => a.id === appId).stage;
 
 test("who may: non-members are refused everything; members see checks but don't promote, demote or ask for sign-off; owners and admins do", async () => {
@@ -268,10 +270,15 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
   assert.equal(r.data.from_stage, "staging");
   assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "live_key", "webhooks", "audit_findings", "program_gate"]);
   assert.equal(check(r, "hosting_healthy").status, "fail", "production runs on Mynt's hosting");
-  assert.equal(check(r, "licences").status, "pass", "no regulated products");
+  // No target states: production fails it, even for an app on no regulated products.
+  assert.equal(check(r, "licences").status, "fail");
+  assert.match(check(r, "licences").detail, /Set the states this app serves/);
+  assert.equal(check(r, "licences").fix.tool, "set_app_target_states");
   assert.equal(check(r, "live_key").status, "fail");
   assert.equal(check(r, "webhooks").status, "pass");
-  assert.equal(check(r, "audit_findings").status, "pass");
+  // No independent audit ran: no findings to read, so a warning (advisory for an app that moves no value), never a pass.
+  assert.equal(check(r, "audit_passed").status, "warn");
+  assert.equal(check(r, "audit_findings").status, "warn");
   assert.equal(check(r, "program_gate").status, "pass");
   assert.match(check(r, "program_gate").detail, /Not applicable/);
   assert.equal(r.data.needs_admin_signoff, false);
@@ -280,10 +287,21 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
 
   await w.host(app.id, b, "running");
   await w.liveKey(app.id);
+  await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
   r = await get();
   assert.equal(check(r, "hosting_healthy").status, "pass");
   assert.equal(check(r, "live_key").status, "pass");
-  assert.equal(r.data.can_promote, true);
+  assert.equal(check(r, "licences").status, "pass");
+  assert.equal(r.data.can_promote, true, JSON.stringify(r.data.checks.filter((c) => c.status !== "pass")));
+
+  // Production promotes what runs: a newer verified build that isn't deployed fails hosting (not a warning).
+  const newer = await w.build(app.id);
+  r = await get();
+  assert.equal(check(r, "hosting_healthy").status, "fail");
+  assert.match(check(r, "hosting_healthy").detail, new RegExp(`not the latest verified build ${newer.slice(0, 8)}`));
+  assert.equal(r.data.can_promote, false);
+  await w.host(app.id, newer, "running");
+  assert.equal((await get()).data.can_promote, true);
 
   // A webhook: pending until a delivery reaches it; failing or off fails; a secret nobody in the workspace holds fails.
   const { webhook } = await w.store.createWebhook(w.ana.user.id, { app_id: app.id, url: "https://hooks.example.com/a", events: ["handoff.completed"] });
@@ -316,7 +334,7 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
   assert.equal(check(r, "audit_findings").status, "fail");
   assert.match(check(r, "audit_findings").detail, new RegExp(blocked.slice(0, 8)));
   await w.pg.query("UPDATE financial_products.build_runs SET status = 'stopped', maxwell = NULL, error = NULL WHERE id = $1", [blocked]);
-  assert.equal(check(await get(), "audit_findings").status, "pass");
+  assert.equal(check(await get(), "audit_findings").status, "warn");
 
   // Programs: devnet only fails the gate; on mainnet, a review in progress is pending, deployed passes and needs sign-off.
   await w.program(app.id, "devnet");
@@ -338,11 +356,12 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
 test("sign-off: owners and admins ask, another Mynt admin decides, for that build only; a new build needs a new one", async () => {
   const w = await setup();
   const app = await w.newApp();
-  const b1 = await w.build(app.id);
+  const b1 = await w.build(app.id, "succeeded", AUDITED);
   await w.setStage(app.id, "staging");
   await w.host(app.id, b1);
   await w.liveKey(app.id);
   await w.program(app.id, "mainnet");
+  await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
   assert.equal((await get()).data.needs_admin_signoff, true);
   // An app that needs none can't ask.
@@ -379,7 +398,7 @@ test("sign-off: owners and admins ask, another Mynt admin decides, for that buil
   assert.match((await w.ada.call("decide_promotion_signoff", { id: asked.data.signoff.id, approve: false })).data.error, /already approved/);
 
   // A new verified build: the sign-off was for b1, so none for this one.
-  const b2 = await w.build(app.id);
+  const b2 = await w.build(app.id, "succeeded", AUDITED);
   await w.host(app.id, b2);
   r = await get();
   assert.equal(r.data.signoff.status, "none");
@@ -391,9 +410,9 @@ test("sign-off: owners and admins ask, another Mynt admin decides, for that buil
   // Asked for b2, then b3 lands before anyone decides: the decision is refused and the request is superseded.
   const ask2 = (await w.ana.call("request_promotion_signoff", { app_id: app.id })).data.signoff;
   assert.equal(ask2.build_id, b2);
-  const b3 = await w.build(app.id);
+  const b3 = await w.build(app.id, "succeeded", AUDITED);
   const stale = await w.ada.call("decide_promotion_signoff", { id: ask2.id, approve: true });
-  assert.match(stale.data.error, /newer build replaced/);
+  assert.match(stale.data.error, /newer build, or a change to its programs or money rails, replaced/);
   assert.equal((await w.pg.query("SELECT status FROM financial_products.promotion_signoffs WHERE id = $1", [ask2.id])).rows[0].status, "superseded");
 
   // A rejection fails the check; asked again and approved for b3, the promotion goes through.
@@ -404,6 +423,8 @@ test("sign-off: owners and admins ask, another Mynt admin decides, for that buil
   assert.equal(r.data.signoff.status, "rejected");
   assert.match(check(r, "admin_signoff").detail, /Show the vault's limits/);
   const ask4 = (await w.ana.call("request_promotion_signoff", { app_id: app.id })).data.signoff;
+  // A Mynt admin who is in the app's workspace (here its admin) never decides it, even someone else's request.
+  assert.match((await w.cara.call("decide_promotion_signoff", { id: ask4.id, approve: true })).data.error, /member of this app's workspace/);
   await w.ada.call("decide_promotion_signoff", { id: ask4.id, approve: true });
   const p = await w.ana.call("promote_app", { app_id: app.id, to_stage: "production" });
   assert.equal(p.data.promoted, true, JSON.stringify(p.data));
@@ -411,6 +432,10 @@ test("sign-off: owners and admins ask, another Mynt admin decides, for that buil
   const audit = (await w.pg.query("SELECT details FROM financial_products.audit_log WHERE action = 'app_promoted' AND target = $1", [app.id])).rows[0].details;
   assert.equal(audit.signoff.status, "approved");
   assert.equal(audit.build_id, b3);
+  assert.equal(audit.hosted_build_id, b3, "the build that runs is the one signed off");
+  assert.equal(audit.source_sha256, "ab".repeat(32));
+  const stored = (await w.pg.query("SELECT build_id::text AS b, hosted_build_id::text AS h, source_sha256 FROM financial_products.app_promotions WHERE app_id = $1", [app.id])).rows[0];
+  assert.deepEqual(stored, { b: b3, h: b3, source_sha256: "ab".repeat(32) });
 });
 
 test("demotion: owners and admins, one step down, always allowed, with the reason in the audit trail", async () => {
@@ -501,9 +526,9 @@ test("attention: for the caller's role in that workspace only", async () => {
   await w.pg.query("INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, status, cap_usd, finished_at) VALUES ($1, $2, $3, 'g', 'failed', 5, now())", [randomUUID(), w.eve.user.id, theirApp.id]);
 
   assert.deepEqual(await kinds(w.mem), ["build_blocked", "build_failed", "promotion_checks_failing", "repository_approval_pending"]);
-  assert.deepEqual(await kinds(w.ana), ["build_blocked", "build_failed", "offboard_failed", "promotion_checks_failing", "signoff_decided", "webhook_secret_rotation"]);
-  // The workspace's admin is a Mynt admin too: the sign-off waiting for an admin.
-  assert.deepEqual(await kinds(w.cara), ["build_blocked", "build_failed", "offboard_failed", "promotion_checks_failing", "signoff_awaiting", "signoff_decided", "webhook_secret_rotation"]);
+  assert.deepEqual(await kinds(w.ana), ["build_blocked", "build_failed", "offboard_failed", "promotion_checks_failing", "signoff_decided", "signoff_requested", "webhook_secret_rotation"]);
+  // The workspace's admin is a Mynt admin too, but nobody in the workspace decides its sign-offs: never shown as awaiting them.
+  assert.deepEqual(await kinds(w.cara), ["build_blocked", "build_failed", "offboard_failed", "promotion_checks_failing", "signoff_decided", "signoff_requested", "webhook_secret_rotation"]);
   const all = await items(w.cara);
   assert.ok(all.every((i) => ["high", "medium", "low"].includes(i.severity) && i.href.startsWith("/") && !Number.isNaN(Date.parse(i.at)) && i.id && i.title && i.detail));
   const rank = { high: 0, medium: 1, low: 2 };
@@ -517,6 +542,103 @@ test("attention: for the caller's role in that workspace only", async () => {
   // A later success clears a failed build.
   await w.build(failedApp.id);
   assert.equal((await kinds(w.mem)).includes("build_failed"), false);
+});
+
+test("apps that need sign-off need the independent audit; an approval lapses when its programs or rails change; requests only for the build that runs", async () => {
+  const w = await setup();
+  const app = await w.newApp();
+  const unaudited = await w.build(app.id);
+  await w.setStage(app.id, "staging");
+  await w.host(app.id, unaudited);
+  await w.liveKey(app.id);
+  await w.program(app.id, "mainnet");
+  await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
+  const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
+  let r = await get();
+  assert.equal(r.data.needs_admin_signoff, true);
+  assert.equal(check(r, "audit_passed").status, "fail", "moves value: no audit fails");
+  assert.equal(check(r, "audit_findings").status, "fail");
+
+  // An audited build, verified but not deployed yet: no sign-off can be asked for it.
+  const audited = await w.build(app.id, "succeeded", AUDITED);
+  assert.match((await w.ana.call("request_promotion_signoff", { app_id: app.id })).data.error, /deploy build .* first/);
+  await w.host(app.id, audited);
+  r = await get();
+  assert.equal(check(r, "audit_passed").status, "pass");
+  assert.equal(check(r, "audit_findings").status, "pass");
+  const asked = (await w.ana.call("request_promotion_signoff", { app_id: app.id })).data.signoff;
+  assert.equal(asked.basis.programs.length, 1);
+  assert.match(asked.basis.programs[0], /^mainnet:prog/);
+  await w.ada.call("decide_promotion_signoff", { id: asked.id, approve: true });
+  r = await get();
+  assert.equal(check(r, "admin_signoff").status, "pass");
+  assert.equal(r.data.can_promote, true, JSON.stringify(r.data.checks.filter((c) => c.status !== "pass")));
+
+  // Another mainnet program, same build: the approval no longer counts, and owners are told.
+  await w.program(app.id, "mainnet");
+  r = await get();
+  assert.equal(r.data.signoff.status, "none");
+  assert.equal(check(r, "admin_signoff").status, "fail");
+  assert.match(check(r, "admin_signoff").detail, /changed since it was approved/);
+  assert.equal(r.data.can_promote, false);
+  const att = (await w.ana.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items;
+  assert.ok(att.some((i) => i.kind === "signoff_stale" && i.href === `/${app.id}`), JSON.stringify(att));
+  assert.equal((await w.mem.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items.some((i) => i.kind === "signoff_stale"), false);
+
+  // Asked again: a new request (the stale approval is superseded). A change before the decision makes it moot too.
+  const again = await w.ana.call("request_promotion_signoff", { app_id: app.id });
+  assert.equal(again.data.already, false, JSON.stringify(again.data));
+  assert.equal((await w.pg.query("SELECT status FROM financial_products.promotion_signoffs WHERE id = $1", [asked.id])).rows[0].status, "superseded");
+  await w.pg.query("UPDATE financial_products.solana_programs SET cluster = 'devnet' WHERE id = (SELECT id FROM financial_products.solana_programs WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1)", [app.id]);
+  assert.match((await w.ada.call("decide_promotion_signoff", { id: again.data.signoff.id, approve: true })).data.error, /change to its programs or money rails/);
+});
+
+test("attention: a production app with no target states, or that lost licence coverage, is flagged", async () => {
+  const w = await setup();
+  const app = await w.newApp("Live");
+  const b = await w.build(app.id);
+  await w.host(app.id, b);
+  await w.liveKey(app.id);
+  await w.setStage(app.id, "production");
+  const failing = async () => (await w.mem.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items.find((i) => i.kind === "promotion_checks_failing");
+  assert.match((await failing()).detail, /Set the states this app serves/);
+  await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
+  assert.equal(await failing(), undefined, "advisory warnings alone don't flag it");
+});
+
+test("frozen or archiving workspaces: no stage changes or sign-off requests, and everyone is told; join requests go to owners and admins", async () => {
+  const w = await setup();
+  const app = await w.newApp();
+  const b = await w.build(app.id);
+  await w.host(app.id, b);
+  const kinds = async (who) => (await who.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items.map((i) => i.kind);
+
+  // Someone not on Mynt joined the organization: owners and admins see it, members don't.
+  await w.pg.query("INSERT INTO financial_products.workspace_join_requests (workspace_id, subject, email) VALUES ($1, 'user_ext', 'newcomer@example.com')", [w.ws.id]);
+  assert.ok((await kinds(w.ana)).includes("join_request"));
+  assert.ok((await kinds(w.cara)).includes("join_request"));
+  assert.equal((await kinds(w.mem)).includes("join_request"), false);
+
+  // Frozen: its organization deleted in the identity provider.
+  await w.pg.query("UPDATE financial_products.workspaces SET org_missing_at = now() WHERE id = $1", [w.ws.id]);
+  assert.equal((await w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "staging" })).data.can_promote, true, "the checks still read");
+  assert.match((await w.ana.call("promote_app", { app_id: app.id, to_stage: "staging" })).data.error, /frozen/);
+  await w.setStage(app.id, "staging");
+  await w.program(app.id, "mainnet");
+  assert.match((await w.ana.call("request_promotion_signoff", { app_id: app.id })).data.error, /frozen/);
+  assert.match((await w.ana.call("demote_app", { app_id: app.id, to_stage: "idea", reason: "x" })).data.error, /frozen/);
+  const frozen = (await w.mem.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items[0];
+  assert.deepEqual([frozen.kind, frozen.severity], ["workspace_frozen", "high"]);
+
+  // Being archived: the same, until it's undone.
+  await w.pg.query("UPDATE financial_products.workspaces SET org_missing_at = NULL, archived_at = now(), archive_offboard_at = now() + interval '7 days' WHERE id = $1", [w.ws.id]);
+  assert.match((await w.ana.call("demote_app", { app_id: app.id, to_stage: "idea", reason: "x" })).data.error, /archived/);
+  const archiving = (await w.mem.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items[0];
+  assert.deepEqual([archiving.kind, archiving.severity], ["workspace_archiving", "high"]);
+  assert.equal((await kinds(w.mem)).includes("workspace_frozen"), false);
+  await w.pg.query("UPDATE financial_products.workspaces SET archived_at = NULL, archive_offboard_at = NULL WHERE id = $1", [w.ws.id]);
+  assert.equal((await w.ana.call("demote_app", { app_id: app.id, to_stage: "idea", reason: "x" })).isError, false);
+  assert.equal((await w.pg.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'app_demoted'")).rows[0].n, 1, "only the one after it was undone");
 });
 
 // ---- licences, against a real sponsored US product (as workspace-compliance.test.js builds it) ----
@@ -552,9 +674,10 @@ test("licences: every product covered by a licence in force in each target state
   await w.host(app.id, b);
   await w.liveKey(app.id);
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
-  // No target states: only where it's covered, as a warning.
+  // No target states: production can't say where it serves, so it fails (even though New York and California are covered).
   let r = await get();
-  assert.equal(check(r, "licences").status, "warn", JSON.stringify(check(r, "licences")));
+  assert.equal(check(r, "licences").status, "fail", JSON.stringify(check(r, "licences")));
+  assert.equal(r.data.can_promote, false);
   assert.equal(check(r, "licences").fix.tool, "set_app_target_states");
   await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny", "us-ca"] });
   r = await get();
