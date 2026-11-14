@@ -6,30 +6,12 @@ import { cn } from "@/lib/utils";
 import type { ProjectItem } from "@/lib/project-types";
 import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { ProjectsProvider } from "@/lib/projects-context";
-import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  ChevronLeftIcon,
-  CodeIcon,
-  Loader2Icon,
-  MonitorIcon,
-  RotateCwIcon,
-} from "lucide-react";
+import { CodeIcon, Loader2Icon, MonitorIcon } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { AppTopBar, DEVICES, type Device } from "@/components/app-top-bar";
 
 /** Build statuses that are still changing, so the list refreshes while one runs. */
 const ACTIVE_BUILD = /^(queued|provisioning|coding|auditing|checking|previewing|pushing|verifying)$/;
-
-/** Keeps the preview URL's query (a token-gated preview needs it) on every path. */
-function withPreviewQuery(previewUrl: string, next: string): string {
-  try {
-    const url = new URL(next);
-    url.search = new URL(previewUrl).search;
-    return url.toString();
-  } catch {
-    return previewUrl;
-  }
-}
 
 type ThreadStateDetail = {
   projectId: string | null;
@@ -201,86 +183,37 @@ export function ProjectWorkspaceShell({
   );
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [device, setDevice] = useState<Device>("desktop");
+
+  const goBack = () => {
+    if (selectedConversationId) {
+      window.dispatchEvent(new CustomEvent("adorable:go-to-project", { detail: { projectId } }));
+      router.push(`/${projectId}`);
+    } else {
+      window.dispatchEvent(new Event("adorable:go-home"));
+      router.push("/");
+    }
+  };
 
   return (
     <ProjectsProvider value={projectsContextValue}>
       <ProjectConversationsProvider value={conversationsContextValue}>
-        <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
-          {/* Unified top bar */}
-          {projectId && selectedProject && (
-            <div
-              className={cn(
-                "shrink-0 border-b bg-background transition-[grid-template-columns] duration-500 ease-in-out",
-                isMobile ? "flex h-11 items-center" : "grid h-11",
-              )}
-              style={
-                isMobile ? undefined : { gridTemplateColumns: gridColumns }
-              }
-            >
-              {/* Left: back button */}
-              {(!isMobile || mobileView === "chat") && (
-                <div className="flex items-center px-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectedConversationId) {
-                        window.dispatchEvent(
-                          new CustomEvent("adorable:go-to-project", {
-                            detail: { projectId },
-                          }),
-                        );
-                        router.push(`/${projectId}`);
-                      } else {
-                        window.dispatchEvent(new Event("adorable:go-home"));
-                        router.push("/");
-                      }
-                    }}
-                    className="flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                    title={
-                      selectedConversationId ? "All builds" : "All apps"
-                    }
-                  >
-                    <ChevronLeftIcon className="size-3.5" />
-                    <span className="text-sm font-medium">
-                      {selectedConversationId ? "All Builds" : "All Apps"}
-                    </span>
-                  </button>
-                </div>
-              )}
-
-              {/* Mobile preview top bar: back to chat + publish */}
-              {isMobile && mobileView === "preview" && (
-                <div className="flex flex-1 items-center gap-1 px-2">
-                  <button
-                    type="button"
-                    onClick={() => setMobileView("chat")}
-                    className="flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                  >
-                    <ChevronLeftIcon className="size-3.5" />
-                    <span className="text-sm font-medium">Chat</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Right: browser controls + publish (desktop only) */}
-              {!isMobile && (
-                <div
-                  className={cn(
-                    "flex items-center gap-1 px-2 transition-opacity duration-500",
-                    showWorkspacePanel
-                      ? "opacity-100"
-                      : "pointer-events-none opacity-0",
-                  )}
-                >
-                  {showWorkspacePanel && previewUrl && (
-                    <BrowserControls
-                      previewUrl={previewUrl}
-                      iframeRef={iframeRef}
-                    />
-                  )}
-                </div>
-              )}
-            </div>
+        <div className="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden">
+          {/* The app's own top bar (in place of the page header) */}
+          {projectId && (
+            <AppTopBar
+              appName={selectedProject?.name ?? (projectsLoading ? null : "App")}
+              stage={selectedProject?.stage ?? null}
+              backLabel={selectedConversationId ? "All builds" : "All apps"}
+              onBack={goBack}
+              previewUrl={showWorkspacePanel ? previewUrl : null}
+              iframeRef={iframeRef}
+              device={device}
+              onDevice={setDevice}
+              isMobile={isMobile}
+              mobileView={mobileView}
+              onShowChat={() => setMobileView("chat")}
+            />
           )}
 
           {/* Main content grid */}
@@ -312,7 +245,7 @@ export function ProjectWorkspaceShell({
             >
               {showWorkspacePanel &&
                 (previewUrl ? (
-                  <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} />
+                  <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} width={isMobile ? null : DEVICES[device].width} />
                 ) : (
                   <PreviewPlaceholder />
                 ))}
@@ -395,9 +328,12 @@ function PreviewPlaceholder() {
 function AppPreview({
   previewUrl,
   iframeRef,
+  width,
 }: {
   previewUrl: string;
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
+  /** The top bar's device width in pixels; null fills the panel. */
+  width: number | null;
 }) {
   const [iframeLoaded, setIframeLoaded] = useState(false);
 
@@ -407,7 +343,11 @@ function AppPreview({
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <div className="relative min-h-0 flex-1 bg-muted/30">
+      <div
+        className={cn("relative mx-auto min-h-0 w-full flex-1 bg-muted/30", width !== null && "border-x shadow-sm")}
+        style={width !== null ? { maxWidth: width } : undefined}
+        data-preview-width={width ?? "full"}
+      >
         {!iframeLoaded && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
             <div className="flex flex-col items-center gap-3">
@@ -433,108 +373,5 @@ function AppPreview({
         />
       </div>
     </div>
-  );
-}
-
-function BrowserControls({
-  previewUrl,
-  iframeRef,
-}: {
-  previewUrl: string;
-  iframeRef: React.RefObject<HTMLIFrameElement | null>;
-}) {
-  const [urlValue, setUrlValue] = useState(() => {
-    try {
-      return new URL(previewUrl).pathname;
-    } catch {
-      return "/";
-    }
-  });
-
-  useEffect(() => {
-    try {
-      setUrlValue(new URL(previewUrl).pathname);
-    } catch {
-      setUrlValue("/");
-    }
-  }, [previewUrl]);
-
-  const baseUrl = (() => {
-    try {
-      const u = new URL(previewUrl);
-      return `${u.protocol}//${u.host}`;
-    } catch {
-      return previewUrl;
-    }
-  })();
-
-  const navigate = (path: string) => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    setUrlValue(normalizedPath);
-    iframe.src = withPreviewQuery(previewUrl, `${baseUrl}${normalizedPath}`);
-  };
-
-  const handleReload = () => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    iframe.src = iframe.src;
-  };
-
-  const handleBack = () => {
-    try {
-      iframeRef.current?.contentWindow?.history.back();
-    } catch {}
-  };
-
-  const handleForward = () => {
-    try {
-      iframeRef.current?.contentWindow?.history.forward();
-    } catch {}
-  };
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={handleBack}
-        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        title="Back"
-      >
-        <ArrowLeftIcon className="size-3.5" />
-      </button>
-      <button
-        type="button"
-        onClick={handleForward}
-        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        title="Forward"
-      >
-        <ArrowRightIcon className="size-3.5" />
-      </button>
-      <button
-        type="button"
-        onClick={handleReload}
-        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        title="Reload"
-      >
-        <RotateCwIcon className="size-3.5" />
-      </button>
-      <form
-        className="ml-1 flex-1"
-        onSubmit={(e) => {
-          e.preventDefault();
-          navigate(urlValue);
-        }}
-      >
-        <input
-          type="text"
-          value={urlValue}
-          onChange={(e) => setUrlValue(e.target.value)}
-          className="h-7 w-full rounded-md bg-muted/50 px-2.5 text-xs text-foreground transition-colors outline-none focus:bg-muted focus:ring-1 focus:ring-ring"
-          aria-label="URL path"
-        />
-      </form>
-    </>
   );
 }

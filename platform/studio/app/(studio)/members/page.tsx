@@ -4,7 +4,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { MembersView, type MembersActions, type MembersData } from "@/components/members-view";
-import { SiteHeader } from "@/components/site-header";
 import { useWorkspace } from "@/components/workspace-context";
 
 export default function MembersPage() {
@@ -46,7 +45,6 @@ export default function MembersPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <SiteHeader title={`Members · ${selected.name}`} />
       <div className="mx-auto w-full max-w-4xl p-4 lg:p-6">
         {error ? (
           <p role="alert" className="text-sm text-destructive">

@@ -4,7 +4,7 @@
 // workspace's apps in three folders by stage (Production, Staging, Ideas). Each app opens its
 // workspace view.
 import Link from "next/link"
-import { ChevronRight, Folder } from "lucide-react"
+import { ChevronRight, FlaskConical, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
 
 import {
   Collapsible,
@@ -22,6 +22,10 @@ import {
 } from "@/components/ui/sidebar"
 import { STAGE_LABELS, STAGES, type StagedApp, type Stage } from "@/lib/workspaces"
 
+// Each folder its own icon, expanded and collapsed (where the icon is all that shows, with the
+// folder's name as its tooltip).
+export const FOLDER_ICONS: Record<Stage, LucideIcon> = { production: Rocket, staging: FlaskConical, idea: Lightbulb }
+
 export function NavFolders({
   groups,
   activeAppId,
@@ -34,6 +38,7 @@ export function NavFolders({
       <SidebarMenu>
         {STAGES.map((stage) => {
           const apps = groups?.[stage] ?? []
+          const Icon = FOLDER_ICONS[stage]
           return (
             <Collapsible
               key={stage}
@@ -44,7 +49,7 @@ export function NavFolders({
               <SidebarMenuItem data-folder={stage}>
                 <CollapsibleTrigger asChild>
                   <SidebarMenuButton tooltip={STAGE_LABELS[stage]}>
-                    <Folder />
+                    <Icon data-folder-icon={stage} />
                     <span>{STAGE_LABELS[stage]}</span>
                     <span className="ml-auto text-xs text-muted-foreground tabular-nums">{groups ? apps.length : ""}</span>
                     <ChevronRight className="transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
