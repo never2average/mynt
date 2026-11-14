@@ -1,0 +1,88 @@
+{
+  "description": "Where the treasury template's code and patterns come from. No audited open-source program covers a pool vault with a FIFO withdrawal queue, allow-listed deposits and timelocked terms, so the template adapts the proven parts below, each at a fixed commit and under its own licence (LICENSES/). Code copied or adapted is marked at the top of the file it went into; a pattern is a design followed without copying code.",
+  "verified": "2026-11-14",
+  "sources": [
+    {
+      "name": "Jito Restaking: vault program",
+      "repo": "jito-foundation/restaking",
+      "url": "https://github.com/jito-foundation/restaking/tree/db9084012f7e520d9c68bcfaa502da415bd38278",
+      "commit": "db9084012f7e520d9c68bcfaa502da415bd38278",
+      "license": "Apache-2.0",
+      "license_file": "LICENSES/jito-restaking.LICENSE",
+      "audits": ["security_audits/ottersec_jito_restaking_audit.pdf", "security_audits/certora_jito_restaking_vault_audit_v1.pdf", "security_audits/certora_jito_restaking_vault_audit_v2.pdf", "security_audits/offside_jito_vault_audit.pdf"],
+      "use": "patterns",
+      "files": [
+        "vault_core/src/vault.rs",
+        "vault_core/src/vault_staker_withdrawal_ticket.rs",
+        "vault_program/src/initialize_vault.rs",
+        "vault_program/src/enqueue_withdrawal.rs",
+        "vault_program/src/burn_withdrawal_ticket.rs",
+        "vault_program/src/set_capacity.rs",
+        "vault_program/src/set_secondary_admin.rs",
+        "vault_program/src/delegate_token_account.rs"
+      ],
+      "patterns": [
+        "the vault's token account is owned by the vault's PDA and moves only by the program signing with its seeds",
+        "two-step exits: a withdrawal is enqueued as its own account and paid only after a cooldown (here, the notice period)",
+        "a deposit capacity (here, the commitment maximum per depositor)",
+        "split roles: the admin and narrower secondary admins (here, the authority and the health authority)",
+        "the vault's own mint can never be delegated away (here, there is no approve, set_authority or close instruction at all)"
+      ],
+      "not_adopted": ["Jito's set_is_paused pauses withdrawals too; here no authority can pause exits"]
+    },
+    {
+      "name": "OnRe: onre-sol",
+      "repo": "onre-finance/onre-sol",
+      "url": "https://github.com/onre-finance/onre-sol/tree/c0490831f438074562ebf51e437ca5f8e027596b",
+      "commit": "c0490831f438074562ebf51e437ca5f8e027596b",
+      "license": "MIT",
+      "license_file": "LICENSES/onre-sol.LICENSE.md",
+      "use": "adapted code and patterns",
+      "files": [
+        "programs/onreapp/src/utils/ed25519_parser.rs",
+        "programs/onreapp/src/utils/approver/approver_utils.rs",
+        "programs/onreapp/src/utils/approver/message.rs",
+        "programs/onreapp/src/instructions/redemption/create_redemption_request.rs",
+        "programs/onreapp/src/instructions/redemption/fulfill_redemption_request.rs",
+        "programs/onreapp/src/instructions/redemption/cancel_redemption_request.rs",
+        "programs/onreapp/src/instructions/state_operations/set_kill_switch.rs",
+        "programs/onreapp/src/instructions/state_operations/propose_boss.rs",
+        "programs/onreapp/src/instructions/state_operations/accept_boss.rs"
+      ],
+      "adapted_into": ["programs/mynt_treasury/src/attestation.rs"],
+      "patterns": [
+        "allow-listing by an approver's Ed25519 attestation with an expiry, verified from the precompile instruction just before (adapted code)",
+        "redemption requests as their own PDAs, filled in part or in full",
+        "a kill switch that only stops new business (here, the sponsor and health pauses stop deposits only)"
+      ],
+      "not_adopted": ["two-step ownership transfer (propose_boss/accept_boss): the authority is a Squads vault whose members change inside Squads; see README open questions"]
+    },
+    {
+      "name": "Squads v4",
+      "repo": "Squads-Protocol/v4",
+      "program_id": "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf",
+      "license": "AGPL-3.0",
+      "use": "called, never vendored",
+      "patterns": ["every pool authority is a Squads vault PDA with a time lock; the treasury only checks the authority's signature and never includes Squads code"]
+    },
+    {
+      "name": "Token ACL (sRFC-37)",
+      "repo": "solana-foundation/token-acl",
+      "url": "https://github.com/solana-foundation/token-acl/tree/c6941cec9602574ecd3cd24db843fe6f85fa6600",
+      "commit": "c6941cec9602574ecd3cd24db843fe6f85fa6600",
+      "program_id": "TACLkU6CiCdkQN2MjoyDkVg2yAH9zkxiHDsiztQ52TP",
+      "license": "MIT",
+      "use": "documented alternative, not built",
+      "patterns": ["KYC'd share tokens on Token-2022 default-frozen accounts thawed by an allow-list: the documented alternative to v1's attestations (README)"]
+    },
+    {
+      "name": "Circle CCTP V2 for Solana",
+      "repo": "circlefin/solana-cctp-contracts",
+      "url": "https://github.com/circlefin/solana-cctp-contracts/tree/ec16e95d28ee47f7832df4203ae07b5981d146fc",
+      "commit": "ec16e95d28ee47f7832df4203ae07b5981d146fc",
+      "license": "Apache-2.0",
+      "use": "integration point, not built",
+      "patterns": ["cross-chain USDC lands in the depositor's own token account first, then enters the vault through deposit and its allow-list (README)"]
+    }
+  ]
+}

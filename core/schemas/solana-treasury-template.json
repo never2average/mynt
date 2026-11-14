@@ -1,0 +1,15 @@
+{
+  "description": "Mynt's treasury template (workspaces/coding-build/templates/solana-treasury) as CI's solana-treasury job builds it: verifiably, in Anchor's pinned image, with Mynt's own build script. program_sha256 is the sha256 of the program's bytes with trailing zero bytes stripped, the way Mynt hashes a build and a deployed program. CI fails when the build doesn't match, so a change to the template, its Cargo.lock or the toolchain needs a review and a new hash here. Devnet only: the mainnet program gate refuses this program, and nothing reads this file to allow it yet.",
+  "template": "workspaces/coding-build/templates/solana-treasury",
+  "program": "mynt_treasury",
+  "declared_id": "DCw4DC1HrhApHAWMxNhrKxw7XGHWGHndAMqVFfp13bJz",
+  "toolchain": {
+    "agave": "2.3.13",
+    "anchor": "0.32.1",
+    "rust": "1.99.1",
+    "anchorImage": "solanafoundation/anchor:v0.32.1@sha256:facc4ebd0738ba7ebc1eb4ef000deab6b37e7747960d3f400c73c40c5421b5de"
+  },
+  "cargo_lock_sha256": "c51a670669ed92a2e055eaa370921df6e5a22bdde2b48369b3776892ba109347",
+  "program_sha256": "087326ee8350a51737dee8d1393bc7669b50ca6648082b19aa50ef4bccb177de",
+  "mainnet": false
+}
