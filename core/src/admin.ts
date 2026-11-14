@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { WorkspaceSync } from "./workspace-sync.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
 import { noticeFirm, recoverMembership } from "./firm-notices.js";
 import { z } from "zod";
@@ -51,6 +52,7 @@ const fail = (error: string) => ({ ...json({ error }), isError: true });
 export interface AdminContext {
   clerkAdmin?: ClerkAdmin | null; // keeps Clerk's allowlist in step with the whitelist
   identity?: LinkedAccountsService | null; // the signed-in user's linked accounts, from the identity provider
+  workspaceSync?: WorkspaceSync | null; // keeps workspaces in step with the identity provider's organizations
   builds?: BuildService | null; // coding-agent builds, when enabled
   bd?: BdService | null; // the business-development connector agent
   desk?: DeskService | null; // innovators' product desk: workspaces, term sheets, feasibility
