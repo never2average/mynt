@@ -2,7 +2,7 @@
 
 // The header's wallet control, right beside New app. A linked wallet shows its short address and
 // network; clicking it opens a menu with the full address (and Copy), the liquidity links for the
-// user's roles (Manage pools, Provide liquidity, to the Earn page's tabs) and Manage in Clerk
+// user's roles (Manage pools, Provide liquidity, to the Earn page's tabs) and Manage linked accounts
 // (the identity provider's account page, in the same tab, never embedded). With no wallet it's
 // Link wallet, to that same page. Given `linked` and `access` it renders from them (the tests);
 // otherwise it reads them itself.
@@ -125,13 +125,13 @@ export function WalletControl({
           <DropdownMenuItem asChild data-manage-wallet>
             <a href={accounts.manageUrl} rel="noreferrer">
               <ExternalLink />
-              Manage in Clerk
+              Manage linked accounts
             </a>
           </DropdownMenuItem>
         ) : (
           <DropdownMenuItem disabled title={NOT_YET} data-manage-wallet>
             <ExternalLink />
-            Manage in Clerk
+            Manage linked accounts
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

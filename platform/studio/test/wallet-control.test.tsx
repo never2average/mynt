@@ -101,7 +101,7 @@ describe("the header's wallet control", () => {
     expect(html.indexOf("data-wallet-control")).toBeLessThan(html.indexOf("data-new-app"));
   });
 
-  it("with a wallet: the short address and network; the menu has the full address, Copy, role links and Manage in Clerk", async () => {
+  it("with a wallet: the short address and network; the menu has the full address, Copy, role links and Manage linked accounts", async () => {
     const copied: string[] = [];
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: async (s: string) => void copied.push(s) } });
     render(<WalletControl linked={withWallet} access={both} />);
@@ -113,7 +113,7 @@ describe("the header's wallet control", () => {
     expect(menu.querySelector('[data-liquidity-link="Manage pools"]')?.getAttribute("href")).toBe("/earn?tab=my-pools");
     expect(menu.querySelector('[data-liquidity-link="Provide liquidity"]')?.getAttribute("href")).toBe("/earn?tab=opportunities");
     const manage = menu.querySelector("[data-manage-wallet]")!;
-    expect(manage.textContent).toContain("Manage in Clerk");
+    expect(manage.textContent).toContain("Manage linked accounts");
     expect(manage.getAttribute("href")).toBe(MANAGE);
     expect(manage.getAttribute("target")).toBeNull(); // the same tab, never embedded
     await act(async () => {
