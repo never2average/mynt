@@ -15,6 +15,7 @@ import { useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
+import { MyntMark } from "@/components/brand/mynt-logo"
 import { commitOutcome, EARN_DISCLOSURE, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -53,6 +54,7 @@ export function EarnLanding({ status, onAsk }: { status: EarnStatus; onAsk: (tex
   }
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-6 py-10" data-earn-landing>
+      <MyntMark size={40} />
       <h2 className="text-center text-3xl font-semibold tracking-tight sm:text-4xl">What do you want to earn?</h2>
       <form
         className="relative w-full"

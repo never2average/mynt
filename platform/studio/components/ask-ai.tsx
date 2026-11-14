@@ -14,6 +14,7 @@ import type { MouseEvent } from "react";
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown";
 import { Thread } from "@/components/assistant-ui/thread";
+import { MyntMark } from "@/components/brand/mynt-logo";
 import { isStudioPath } from "@/lib/studio-search";
 import { Button } from "@/components/ui/button";
 
@@ -80,6 +81,7 @@ function AskAiThread({ chat }: { chat: Chat }) {
         placeholder={chat.messages.length ? "Ask a follow-up…" : "Ask about your apps, builds, members or licences…"}
         welcome={
           <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col justify-center gap-1 px-2 pb-6">
+            <MyntMark size={28} className="mb-2" />
             <p className="text-base font-medium">What do you want to know?</p>
             <p className="text-sm text-muted-foreground">Ask AI reads your Mynt data as you, and can&apos;t change anything.</p>
           </div>

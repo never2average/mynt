@@ -1,5 +1,8 @@
 import { tabOf } from "@/lib/workspace-tabs";
 import { WorkspacePage } from "./workspace-page";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Settings" };
 
 // Settings (/settings?tab=members|invitations|apps|repositories|general): the selected workspace's details
 // and its members, invitations, apps, repositories and general settings. /workspace and

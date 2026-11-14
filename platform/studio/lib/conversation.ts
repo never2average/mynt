@@ -43,3 +43,34 @@ export async function loadConversation(appId: string, buildId: string): Promise<
       .catch(() => undefined);
   }
 }
+
+// The app's name for the browser tab, or "App" when it can't be read (not signed in, not one of
+// the user's apps, or Mynt unreachable). Never throws: a title isn't worth failing a page over.
+export async function loadAppName(appId: string): Promise<string> {
+  const session = await currentSession();
+  if (!session?.tokens) return "App";
+  try {
+    const mynt = await connectMynt(session);
+    try {
+      return appNameIn(await callStudioTool(mynt, "list_my_apps", {}), appId);
+    } finally {
+      await mynt.close().catch(() => undefined);
+    }
+  } catch (err) {
+    console.error(logLine("loading an app's name", err));
+    return "App";
+  } finally {
+    await sessionStore()
+      .save(session)
+      .catch(() => undefined);
+  }
+}
+
+// An app's name from list_my_apps' reply, else "App".
+export function appNameIn(appsReply: unknown, appId: string): string {
+  const app = Array.isArray(appsReply)
+    ? (appsReply.find((a) => a !== null && typeof a === "object" && (a as { id?: unknown }).id === appId) as { name?: unknown } | undefined)
+    : undefined;
+  const name = typeof app?.name === "string" ? app.name.trim() : "";
+  return name ? name.slice(0, 80) : "App";
+}
