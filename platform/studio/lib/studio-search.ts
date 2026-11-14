@@ -12,6 +12,7 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/licences?tab=coverage", label: "Coverage", keywords: "states map where serve licences" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
   { href: "/workspace", label: "Workspace", keywords: "members team invite invitations people roles apps settings rename" },
+  { href: "/liquidity", label: "Liquidity", keywords: "pools capital commit withdraw positions wallet" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
   { href: "/new", label: "New app", keywords: "create build start" },
 ];

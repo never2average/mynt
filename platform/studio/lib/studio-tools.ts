@@ -22,6 +22,11 @@ const auditDate = z.string().refine(isCalendarDate, "a real YYYY-MM-DD date");
 // Where an app can be promoted to, and moved back to.
 const promotionStage = z.enum(["staging", "production"]);
 const demotionStage = z.enum(["idea", "staging"]);
+// Liquidity: Mynt's pool ids, integer cents, a US state as ISO 3166-2 and an idempotency key.
+const uuid = z.string().uuid();
+const cents = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const usState = z.string().regex(/^us-[a-z]{2}$/);
+const idempotencyKey = z.string().regex(/^[A-Za-z0-9_-]{8,200}$/);
 const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
 
 export const STUDIO_TOOLS = {
@@ -127,6 +132,34 @@ export const STUDIO_TOOLS = {
   hosting_status: z.object({}).strict(),
   app_status: z.object({ app_id: id }).strict(),
   app_logs: z.object({ app_id: id, tail: z.number().int().min(1).max(2000).optional(), service }).strict(),
+  // Liquidity (/liquidity, lib/liquidity.ts): reading pools, positions, the withdrawal queue and
+  // health; a builder proposing a pool; a liquidity provider committing capital and asking for it
+  // back. Never the sponsor's or an admin's pool tools (approving, clearing offerings, pausing,
+  // reporting movements, resolving flags).
+  list_pools: z.object({ product_id: id.optional(), status: z.enum(["open", "paused", "closed"]).optional() }).strict(),
+  list_withdrawals: z
+    .object({ pool_id: uuid.optional(), status: z.enum(["queued", "paying", "paid", "paid_short", "returned", "cancelled", "no_balance", "parked"]).optional() })
+    .strict(),
+  list_my_positions: z.object({ pool_id: uuid.optional(), include_entries: z.boolean().optional() }).strict(),
+  list_pools_with_health: z.object({}).strict(),
+  list_product_health: z.object({ product_id: id.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
+  list_my_sponsorships: z.object({ product_id: id.optional() }).strict(),
+  create_pool: z
+    .object({
+      product_id: id,
+      component_key: id,
+      name: z.string().trim().min(1).max(200),
+      sandbox: z.boolean(),
+      min_reserve_bps: z.number().int().min(0).max(1_000_000),
+      min_reserve_floor_cents: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+      notice_period_days: z.number().int().min(0).max(3650),
+      min_commitment_cents: cents,
+      max_commitment_cents: cents,
+      sponsor_entity_id: uuid.optional(),
+    })
+    .strict(),
+  commit_to_pool: z.object({ pool_id: uuid, amount_cents: cents, state: usState, idempotency_key: idempotencyKey }).strict(),
+  request_withdrawal: z.object({ pool_id: uuid, amount_cents: cents, idempotency_key: idempotencyKey }).strict(),
 } as const;
 
 export type StudioTool = keyof typeof STUDIO_TOOLS;
