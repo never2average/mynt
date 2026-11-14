@@ -1,6 +1,6 @@
 # Mynt Studio
 
-A web app where developers build apps on Mynt by chatting with Mynt's coding agent, beside a live preview of what it builds. Developers sign in with their own Mynt account. The studio holds no model keys and no hosting-provider keys: everything goes through Mynt's MCP server as the signed-in user, and Mynt checks every call.
+A web app where developers build apps on Mynt by chatting with Mynt's coding agent, beside a live preview of what it builds. Developers sign in with their own Mynt account. The studio holds no hosting-provider keys: everything goes through Mynt's MCP server as the signed-in user, and Mynt checks every call. Its one optional model setting is for **Ask AI** (below), on the same model path as Mynt's sample chat; without it, Ask AI says it isn't configured.
 
 Its home page is a dashboard of how your apps are doing: money moved through them, customers, hand-offs and conversion, and build spend, with a chart and a table per app. **New app** takes what you want to build and the products it builds on, creates the app and starts its first build. Open an app to chat with Mynt's coding agent beside its live preview: a message steers the app's running build, or starts a new one. Shipping, deploying and the Files, Diff and Run panels come in the next steps.
 
@@ -53,6 +53,8 @@ The sidebar, the dashboard and its cards, chart and table are [shadcn/ui](https:
 - **Audits** (`/audits`) is the workspace's audit trail (`list_workspace_audit`), a page at a time by Mynt's cursor.
   - Mynt filters it by action, member, app and date range. The search box searches the page shown, and **Export CSV** exports it.
 - Each compliance page says "not available yet" until Mynt has its tool, and for a shared workspace the tool can't be scoped to yet. It never shows an empty map or table in that case.
+- **Header** (`components/site-header.tsx`): sticky on every page outside an app, with only the page's name (the switcher shows the workspace), **Search or ask AI** and **New app** (the `/new` flow). Inside an app, the app's own top bar takes its place (`components/app-top-bar.tsx`): back, the app's name and stage, the preview's back, forward, reload and path, its width (desktop, tablet, phone), open in a new tab, and search and New app as icon buttons.
+- **Search and Ask AI** (`components/studio-search.tsx`, `components/ask-ai.tsx`, `app/api/ask`): the header's search field (or Cmd+K / Ctrl+K) opens a modal that searches the studio's pages, the workspace's apps by name or stage, members, licences and audit actions, with the arrow keys and Enter (shadcn's Command, cmdk). **Ask AI** switches the modal to a streamed conversation (follow-ups, Stop, New chat) that reads the user's Mynt data through Mynt's tools as the signed-in user, never an app key, and only the read tools listed in `lib/ask.ts`. Questions and answers are never logged. With no model configured it says "AI is not configured" and search keeps working.
 - **Dashboard tiles** beside the money cards: active products, licences (linking to `/licences`), GitHub and crypto wallet.
   - GitHub and the wallet come from `get_linked_accounts`.
   - The wallet's network is shown only when its address fits: an EVM address (`0x` and 40 hex digits) on an EVM chain, or a Solana address (base58, 32 to 44 characters) on Solana. Anything else says "Unknown network".
@@ -92,6 +94,7 @@ The sidebar, the dashboard and its cards, chart and table are [shadcn/ui](https:
 | `MYNT_OAUTH_SCOPE` | Optional: the scopes to ask for. |
 | `MYNT_OAUTH_CLIENT_ID`, `MYNT_OAUTH_CLIENT_SECRET` | Optional, both or neither: the OAuth client registered for the studio with `mynt clerk first-party`, so users see no consent screen (see *Sign in without a consent screen*). Unset, the studio registers itself. Server-only. |
 | `MYNT_OAUTH_ISSUER` | Optional, with the client above: the only authorization server its secret may be sent to. |
+| `ANTHROPIC_API_KEY`, or `VERTEX_PROJECT_ID` and `VERTEX_REGION` | Optional: the model for **Ask AI**, set the same way as for Mynt's sample chat (`platform/chat`): Claude through the Claude API, or through Google Vertex AI. `CHAT_MODEL` picks the model. Unset, Ask AI says "AI is not configured" and search still works. Server-only. |
 
 The Redis client is [`@upstash/redis`](https://github.com/upstash/redis-js), Upstash's official client, which talks to Redis over HTTPS and so works from serverless functions. Without Redis settings, sessions stay in the server's memory, which is fine for `npm run dev`. On Vercel the studio refuses to start that way, because its function instances share no memory, and in production it refuses too unless `SESSION_STORE=memory` says it's wanted.
 

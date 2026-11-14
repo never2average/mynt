@@ -96,13 +96,13 @@ export function isAuthError(err: unknown): boolean {
 
 export const sessionIsDeveloper = (session: Session) => isDeveloper(session.roles ?? []);
 
-// Every tool this user's Mynt lists (names and input schemas), to see what it offers.
-export async function listMyntTools(client: Client): Promise<{ name: string; inputSchema?: unknown }[]> {
-  const tools: { name: string; inputSchema?: unknown }[] = [];
+// Every tool this user's Mynt lists (names, descriptions and input schemas), to see what it offers.
+export async function listMyntTools(client: Client): Promise<{ name: string; description?: string; inputSchema?: unknown }[]> {
+  const tools: { name: string; description?: string; inputSchema?: unknown }[] = [];
   let cursor: string | undefined;
   do {
     const page = await client.listTools(cursor ? { cursor } : undefined);
-    tools.push(...page.tools.map((t) => ({ name: t.name, inputSchema: t.inputSchema })));
+    tools.push(...page.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
     cursor = page.nextCursor;
   } while (cursor);
   return tools;

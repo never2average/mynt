@@ -5,7 +5,6 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { SiteHeader } from "@/components/site-header";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { ProjectItem } from "@/lib/project-types";
@@ -28,7 +27,6 @@ export default function BuildsPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <SiteHeader title="Builds" />
       <div className="p-4 lg:p-6">
         {rows === null ? (
           <p className="text-sm text-muted-foreground">Loading builds…</p>

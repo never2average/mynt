@@ -1,14 +1,10 @@
 "use client";
 
 // Home: the dashboard of how the user's apps are doing (components/dashboard-view.tsx).
-import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Plus } from "lucide-react";
 
 import { DashboardView } from "@/components/dashboard-view";
 import { InvitationsBanner } from "@/components/invitations";
-import { SiteHeader } from "@/components/site-header";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/components/workspace-context";
 import type { Dashboard } from "@/lib/dashboard";
@@ -71,14 +67,6 @@ export default function DashboardPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <SiteHeader title={`Dashboard · ${selected.name}`}>
-        <Button asChild size="sm">
-          <Link href="/new">
-            <Plus />
-            New app
-          </Link>
-        </Button>
-      </SiteHeader>
       <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
       {state === null ? (
         <div className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-5 lg:p-6">

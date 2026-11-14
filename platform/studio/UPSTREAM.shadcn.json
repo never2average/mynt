@@ -7,6 +7,7 @@
   "modified": true,
   "files": {
     "components/ui/sidebar.tsx": "as generated (the cn import pointed at lib/utils)",
+    "components/ui/command.tsx": "the registry's command component (ui.shadcn.com/r/styles/new-york-v4/command.json, cmdk), with its cn and dialog imports pointed at lib/utils and components/ui/dialog",
     "components/ui/sheet.tsx": "as generated (the cn import pointed at lib/utils)",
     "components/ui/separator.tsx": "as generated (the cn import pointed at lib/utils)",
     "components/ui/dropdown-menu.tsx": "as generated (the cn import pointed at lib/utils)",
@@ -14,14 +15,14 @@
     "components/ui/chart.tsx": "as generated (the cn import pointed at lib/utils)",
     "components/ui/table.tsx": "as generated (the cn import pointed at lib/utils)",
     "components/ui/badge.tsx": "as generated (the cn import pointed at lib/utils)",
-    "components/nav-user.tsx": "the one signed-in account with a Log out button in view (not inside a menu), lucide icons, initials",
+    "components/nav-user.tsx": "the one signed-in account, its Log out an icon button on the row shown on hover or focus (always on touch), lucide icons, initials",
     "components/section-cards.tsx": "the KPI cards, fed by the dashboard; unmeasured figures say so",
     "components/chart-area-interactive.tsx": "one series (money moved per day), no range picker, an unmeasured state",
-    "components/site-header.tsx": "a title and actions",
+    "components/site-header.tsx": "a sticky header: the page name, search and New app",
     "components/app-sidebar.tsx": "laid out as sidebar-07 (collapsible to icons): the workspace switcher, Dashboard, the folders, the account",
     "components/dashboard-view.tsx": "laid out as dashboard-01 (cards, chart, table), with the studio's apps table and empty state",
     "components/team-switcher.tsx": "sidebar-07's team switcher as the workspace switcher: the user's workspaces, Members, and Create workspace (a dialog)",
-    "components/nav-folders.tsx": "sidebar-07's nav-main (collapsible groups) as the Production, Staging and Ideas folders of the workspace's apps",
+    "components/nav-folders.tsx": "sidebar-07's nav-main (collapsible groups) as the Production, Staging and Ideas folders of the workspace's apps, each with its own icon",
     "components/account-tiles.tsx": "dashboard-01's card layout, for the active products, licences, GitHub and wallet tiles"
   }
 }

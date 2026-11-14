@@ -3,8 +3,9 @@
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
 // the workspace switcher at the top, Dashboard, Coverage, Licences and Audits, the workspace's
 // apps in three folders by stage
-// (Production, Staging, Ideas), and the signed-in account with a visible Log out at the foot.
-// New app and Builds aren't in the sidebar (their pages, /new and /builds, still work).
+// (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
+// foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
+// New app is in every page's header; Builds isn't in the sidebar (/builds still works).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"

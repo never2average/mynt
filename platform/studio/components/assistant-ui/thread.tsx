@@ -48,9 +48,10 @@ import {
 } from "lucide-react";
 import type { FC, ReactNode } from "react";
 
-export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string }> = ({
+export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; placeholder?: string }> = ({
   welcome,
   disabledNote,
+  placeholder,
 }) => {
   return (
     <ThreadPrimitive.Root
@@ -76,7 +77,7 @@ export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string }> = ({
 
         <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4 md:pb-6">
           <ThreadScrollToBottom />
-          <Composer />
+          <Composer placeholder={placeholder} />
           {disabledNote && (
             <p className="aui-composer-disabled-note -mt-2 text-center text-xs text-muted-foreground">
               {disabledNote}
@@ -101,12 +102,12 @@ const ThreadScrollToBottom: FC = () => {
     </ThreadPrimitive.ScrollToBottom>
   );
 };
-const Composer: FC = () => {
+const Composer: FC<{ placeholder?: string }> = ({ placeholder = "Tell the coding agent what to build or change..." }) => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col has-[textarea:disabled]:opacity-60">
       <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-2xl border border-input bg-background px-1 pt-2 transition-shadow outline-none has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-ring/20 data-[dragging=true]:border-dashed data-[dragging=true]:border-ring data-[dragging=true]:bg-accent/50">
         <ComposerPrimitive.Input
-          placeholder="Tell the coding agent what to build or change..."
+          placeholder={placeholder}
           className="aui-composer-input mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
           rows={1}
           aria-label="Message input"

@@ -1,6 +1,6 @@
-// All configuration comes from the environment. See .env.example. The studio holds no secrets
-// of its own: no model keys and no hosting-provider keys. Everything goes through Mynt as the
-// signed-in user.
+// All configuration comes from the environment. See .env.example. The studio holds no hosting
+// keys. Everything goes through Mynt as the signed-in user; Ask AI's optional model settings are
+// read in lib/llm.ts.
 
 import { preRegisteredClientFromEnv, type PreRegisteredClient } from "@mynt/auth/first-party-client";
 

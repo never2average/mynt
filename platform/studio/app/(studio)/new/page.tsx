@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Check, Loader2, Search } from "lucide-react";
 
-import { SiteHeader } from "@/components/site-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -60,7 +59,6 @@ export default function NewAppPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <SiteHeader title="New app" />
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 lg:p-6">
         <h2 className="text-2xl font-semibold tracking-tight">What do you want to build?</h2>
         <form

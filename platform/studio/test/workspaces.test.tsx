@@ -107,16 +107,17 @@ describe("sidebar", () => {
     expect(html).not.toContain('href="/new"');
   });
 
-  it("shows the one account, and a Log out button in view (not inside a menu)", () => {
+  it("shows the one account, with an icon-only Log out on its row (not inside a menu)", () => {
     const html = sidebar();
     expect(html).toContain("Ines Diaz");
     expect(html).toContain("ines@example.com");
-    // Rendered with the page, so it's on screen without opening anything; it posts to logout.
+    // Rendered with the page, on the account's row, without opening anything; it posts to logout.
     const form = html.slice(html.indexOf('action="/api/auth/logout"'));
     const inForm = form.slice(0, form.indexOf("</form>"));
     expect(html).toContain('method="post"');
     expect(inForm).toMatch(/<button[^>]*type="submit"/);
-    expect(inForm).toContain("Log out");
+    expect(inForm).toContain('aria-label="Log out"');
+    expect(inForm).not.toMatch(/>\s*Log out\s*</); // no visible label: the icon (and its tooltip) only
     expect(html).not.toMatch(/switch account|add account/i);
   });
 });

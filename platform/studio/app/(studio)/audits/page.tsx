@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AuditsView, NO_AUDIT_FILTERS, type AuditFilters, type Option } from "@/components/audits-view";
 import { NotReady } from "@/components/not-available";
-import { SiteHeader } from "@/components/site-header";
 import { useWorkspace } from "@/components/workspace-context";
 import type { AuditEvent, AuditPage } from "@/lib/compliance";
 import { useComplianceData } from "@/lib/use-compliance";
@@ -35,7 +34,9 @@ export default function AuditsPage() {
   const [apps, setApps] = useState<Option[]>([]);
   useEffect(() => {
     if (loading) return;
-    setFilters(NO_AUDIT_FILTERS);
+    // Search's "Audit actions" open the trail filtered to one (/audits?action=<action>).
+    const action = (new URLSearchParams(window.location.search).get("action") ?? "").trim().slice(0, 120);
+    setFilters({ ...NO_AUDIT_FILTERS, action });
     setCursors([]);
     setSeen([]);
     const ws = encodeURIComponent(selected.id);
@@ -65,7 +66,6 @@ export default function AuditsPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <SiteHeader title={`Audits · ${selected.name}`} />
       <div className="flex min-h-0 w-full flex-1 flex-col p-4 lg:p-6">
         {state.kind === "ready" || (state.kind === "loading" && cursors.length + Object.values(filters).filter(Boolean).length > 0) ? (
           <AuditsView
