@@ -117,7 +117,10 @@ export const OBLIGATION_LABELS: Record<ObligationStatus, string> = { met: "Met",
 
 export type Obligation = {
   licenceId: string | null;
-  partner: string | null;
+  licenceType: string | null;
+  partner: string | null; // the partner's name
+  partnerId: string | null; // its entity id: what the Partner filter matches
+  reason: string | null; // why an Unknown one is unknown
   regulator: string | null;
   obligationId: string;
   title: string;
@@ -130,7 +133,8 @@ export type Obligation = {
 const names = (v: unknown): string[] =>
   Array.isArray(v) ? v.flatMap((p) => (typeof p === "string" ? (str(p) ? [str(p)!] : []) : isObj(p) ? [str(p.name) ?? str(p.id)].filter((x): x is string => Boolean(x)) : [])) : [];
 
-/** get_workspace_obligations' answer: a list, or { obligations }. Kept in the regulator's terms. */
+/** get_workspace_obligations' answer: a list, or { obligations }. Kept in the regulator's terms.
+ * The partner is { entity_id, name }; evidence is a summary; an unknown one says why (reason). */
 export function fromObligations(raw: unknown): Obligation[] {
   const list = Array.isArray(raw) ? raw : isObj(raw) && Array.isArray(raw.obligations) ? raw.obligations : [];
   return list.filter(isObj).flatMap((o, i): Obligation[] => {
@@ -139,7 +143,10 @@ export function fromObligations(raw: unknown): Obligation[] {
     return [
       {
         licenceId: str(o.licence_id),
-        partner: str(o.partner),
+        licenceType: str(o.licence_type),
+        partner: typeof o.partner === "string" ? str(o.partner) : isObj(o.partner) ? str(o.partner.name) : null,
+        partnerId: isObj(o.partner) ? (str(o.partner.entity_id) ?? str(o.partner.name)) : str(o.partner),
+        reason: str(o.reason),
         regulator: str(o.regulator),
         obligationId: str(o.obligation_id) ?? `obligation-${i}`,
         title,
@@ -158,11 +165,11 @@ export const NO_OBLIGATION_FILTERS: ObligationFilters = { query: "", partner: ""
 export function filterObligations(list: Obligation[], f: ObligationFilters): Obligation[] {
   const words = f.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return list.filter((o) => {
-    if (f.partner && o.partner !== f.partner) return false;
+    if (f.partner && o.partnerId !== f.partner) return false;
     if (f.regulator && o.regulator !== f.regulator) return false;
     if (f.status && o.status !== f.status) return false;
     if (f.product && !o.products.includes(f.product)) return false;
-    const text = [o.title, o.partner, o.regulator, o.obligationId, o.evidence, ...o.products].filter(Boolean).join(" ").toLowerCase();
+    const text = [o.title, o.partner, o.regulator, o.licenceType, o.obligationId, o.evidence, o.reason, ...o.products].filter(Boolean).join(" ").toLowerCase();
     return words.every((w) => text.includes(w));
   });
 }

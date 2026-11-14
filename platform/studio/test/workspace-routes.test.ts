@@ -79,7 +79,7 @@ vi.mock("@/lib/tokens", () => ({
             });
           return ok({ events: [{ at: "2026-11-12T10:00:00Z", actor: { id: "u1", name: "Ines" }, action: "app.created", target: { type: "app", id: "a1" } }], next_cursor: "c2" });
         case "get_workspace_obligations":
-          return ok([{ licence_id: "l1", partner: "Harbor Bank", regulator: "CA DFPI", obligation_id: "o1", title: "Quarterly report", products: [{ name: "Cards" }], status: "overdue", due_at: "2026-10-01", evidence: null }]);
+          return ok([{ licence_id: "l1", partner: { entity_id: "e1", name: "Harbor Bank" }, licence_type: "Money transmitter", regulator: "CA DFPI", obligation_id: "o1", title: "Quarterly report", products: [{ name: "Cards" }], status: "overdue", evidence: null }]);
         case "create_app":
           return ok({ id: "new-app" });
         case "start_build":
@@ -419,6 +419,6 @@ describe("the Audits page's classes", () => {
     fake.tools = [...WITH_WORKSPACES, { name: "get_workspace_obligations", inputSchema: props("workspace_id") }];
     const body = await (await obligationsRoute.GET(get("/api/obligations?workspace=w1"))).json();
     expect(called("get_workspace_obligations")[0].args).toEqual({ workspace_id: "w1" });
-    expect(body.obligations[0]).toMatchObject({ partner: "Harbor Bank", obligationId: "o1", products: ["Cards"], status: "overdue", evidence: null });
+    expect(body.obligations[0]).toMatchObject({ partner: "Harbor Bank", partnerId: "e1", licenceType: "Money transmitter", obligationId: "o1", products: ["Cards"], status: "overdue", dueAt: null, evidence: null });
   });
 });

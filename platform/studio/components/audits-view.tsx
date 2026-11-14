@@ -252,10 +252,19 @@ export function AuditsView({
 
 const OBLIGATION_TONE: Record<ObligationStatus, "red" | "amber" | "green" | null> = { met: "green", at_risk: "amber", overdue: "red", unknown: null }
 
-export function ObligationStatusText({ status }: { status: ObligationStatus }) {
+export function ObligationStatusText({ status, reason = null }: { status: ObligationStatus; reason?: string | null }) {
   const tone = OBLIGATION_TONE[status]
-  return tone ? <StatusDot tone={tone} label={OBLIGATION_LABELS[status]} /> : <span className="text-xs text-muted-foreground">{OBLIGATION_LABELS[status]}</span>
+  return tone ? (
+    <StatusDot tone={tone} label={OBLIGATION_LABELS[status]} />
+  ) : (
+    <span className="text-xs text-muted-foreground" title={reason ?? undefined}>
+      {OBLIGATION_LABELS[status]}
+    </span>
+  )
 }
+
+const partnersOf = (list: Obligation[]) =>
+  [...new Map(list.flatMap((o) => (o.partnerId ? [[o.partnerId, o.partner ?? o.partnerId] as const] : []))).entries()].sort((a, b) => a[1].localeCompare(b[1]))
 
 export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }: { obligations: Obligation[]; initial?: ObligationFilters }) {
   const [f, setF] = useState<ObligationFilters>(initial)
@@ -266,8 +275,8 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
     downloadCsv(
       "licence-obligations.csv",
       toCsv(
-        ["Partner", "Regulator", "Licence", "Obligation", "Title", "Products", "Status", "Due", "Evidence"],
-        shown.map((o) => [o.partner, o.regulator, o.licenceId, o.obligationId, o.title, o.products.join("; "), OBLIGATION_LABELS[o.status], o.dueAt, o.evidence]),
+        ["Partner", "Regulator", "Licence", "Licence type", "Obligation", "Title", "Products", "Status", "Reason", "Due", "Evidence"],
+        shown.map((o) => [o.partner, o.regulator, o.licenceId, o.licenceType, o.obligationId, o.title, o.products.join("; "), OBLIGATION_LABELS[o.status], o.reason, o.dueAt, o.evidence]),
       ),
     )
   return (
@@ -285,8 +294,10 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
       <div className="flex flex-wrap items-center gap-2 text-sm" data-filters>
         <select className={selectClass} value={f.partner} onChange={set("partner")} aria-label="Partner">
           <option value="">All partners</option>
-          {distinct(obligations.map((o) => o.partner)).map((v) => (
-            <option key={v}>{v}</option>
+          {partnersOf(obligations).map(([id, name]) => (
+            <option key={id} value={id}>
+              {name}
+            </option>
           ))}
         </select>
         <select className={selectClass} value={f.regulator} onChange={set("regulator")} aria-label="Regulator">
@@ -322,6 +333,7 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
               <TableHead>Obligation</TableHead>
               <TableHead>Products</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Reason</TableHead>
               <TableHead>Due</TableHead>
               <TableHead>Evidence</TableHead>
             </TableRow>
@@ -331,7 +343,10 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
               shown.map((o) => (
                 <TableRow key={`${o.licenceId ?? ""}-${o.obligationId}`} data-obligation={o.obligationId} data-status={o.status}>
                   <TableCell className="font-medium">{o.partner ?? "—"}</TableCell>
-                  <TableCell>{o.regulator ?? "—"}</TableCell>
+                  <TableCell>
+                    <span className="block">{o.regulator ?? "—"}</span>
+                    {o.licenceType && <span className="text-xs text-muted-foreground">{o.licenceType}</span>}
+                  </TableCell>
                   <TableCell>
                     <span className="block">{o.title}</span>
                     <span className="font-mono text-xs text-muted-foreground">{o.obligationId}</span>
@@ -340,7 +355,10 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
                     {o.products.join(", ") || "—"}
                   </TableCell>
                   <TableCell>
-                    <ObligationStatusText status={o.status} />
+                    <ObligationStatusText status={o.status} reason={o.reason} />
+                  </TableCell>
+                  <TableCell className="max-w-56 truncate text-xs text-muted-foreground" title={o.reason ?? undefined} data-reason>
+                    {o.reason ?? "—"}
                   </TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">{o.dueAt ? o.dueAt.slice(0, 10) : "—"}</TableCell>
                   <TableCell className="max-w-64 truncate text-muted-foreground" title={o.evidence ?? undefined}>
@@ -350,7 +368,7 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                   {obligations.length ? "No obligations match these filters." : "No obligations yet. They appear here once a partner's licence covers one of your products."}
                 </TableCell>
               </TableRow>

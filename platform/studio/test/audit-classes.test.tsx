@@ -25,10 +25,10 @@ const page = fromClassAudit({
 });
 const obligations = fromObligations({
   obligations: [
-    { licence_id: "l1", partner: "Harbor Bank", regulator: "CA DFPI", obligation_id: "CA-MT-Q", title: "Quarterly transaction report", products: ["Cards", { name: "Savings" }], status: "met", due_at: "2026-10-15", evidence: "Filed 2026-10-10" },
-    { licence_id: "l1", partner: "Harbor Bank", regulator: "CA DFPI", obligation_id: "CA-MT-AUD", title: "Annual audit", products: ["Cards"], status: "at_risk", due_at: "2026-12-31" },
-    { licence_id: "l2", partner: "Prairie Trust", regulator: "TX DOB", obligation_id: "TX-1", title: "Surety bond renewal", products: [], status: "overdue" },
-    { title: "Something", status: "nonsense" },
+    { licence_id: "l1", partner: { entity_id: "e1", name: "Harbor Bank" }, licence_type: "Money transmitter", regulator: "CA DFPI", obligation_id: "CA-MT-Q", title: "Quarterly transaction report", products: ["Cards", { name: "Savings" }], status: "met", evidence: "Filed 2026-10-10" },
+    { licence_id: "l1", partner: { entity_id: "e1", name: "Harbor Bank" }, licence_type: "Money transmitter", regulator: "CA DFPI", obligation_id: "CA-MT-AUD", title: "Annual audit", products: ["Cards"], status: "at_risk" },
+    { licence_id: "l2", partner: { entity_id: "e2", name: "Prairie Trust" }, regulator: "TX DOB", obligation_id: "TX-1", title: "Surety bond renewal", products: [], status: "overdue" },
+    { partner: { entity_id: "e2", name: "Prairie Trust" }, title: "Something", status: "nonsense", reason: "No evidence source connected for this obligation" },
     { status: "met" },
   ],
 });
@@ -90,16 +90,24 @@ describe("audit classes", () => {
       ["TX-1", "overdue"],
       ["obligation-3", "unknown"],
     ]);
-    expect(obligations[0].products).toEqual(["Cards", "Savings"]);
+    expect(obligations[0]).toMatchObject({ partner: "Harbor Bank", partnerId: "e1", licenceType: "Money transmitter", products: ["Cards", "Savings"], dueAt: null });
+    expect(obligations[3].reason).toBe("No evidence source connected for this obligation");
     const html = renderToStaticMarkup(<ObligationsView obligations={obligations} />);
     expect(html).toMatch(/data-status="met"[\s\S]*?data-tone="green"[\s\S]*?Met/);
     expect(html).toMatch(/data-status="at_risk"[\s\S]*?data-tone="amber"[\s\S]*?At risk/);
     expect(html).toMatch(/data-status="overdue"[\s\S]*?data-tone="red"[\s\S]*?Overdue/);
-    for (const t of ["Filed 2026-10-10", "No evidence recorded", "Cards, Savings", "All partners", "All regulators", "All statuses", "All products", "Export CSV", "4 of 4"]) expect(html).toContain(t);
+    for (const t of ["Filed 2026-10-10", "No evidence recorded", "Cards, Savings", "Money transmitter", "All partners", "All regulators", "All statuses", "All products", "Export CSV", "4 of 4", "<th", "Reason"]) expect(html).toContain(t);
+    // The partner filter is by entity id, shown by name; due dates Mynt doesn't set read "—".
+    expect(html).toMatch(/<option value="e1">Harbor Bank<\/option>/);
+    expect(html).toMatch(/data-status="met"[\s\S]*?tabular-nums">—</);
+    // An Unknown one says why, in its own column and as the status's tooltip.
+    expect(html).toMatch(/title="No evidence source connected for this obligation"[^>]*>Unknown</);
+    expect(html).toMatch(/data-reason[^>]*>No evidence source connected for this obligation</);
     const f = (o: Partial<typeof NO_OBLIGATION_FILTERS>) => filterObligations(obligations, { ...NO_OBLIGATION_FILTERS, ...o }).map((x) => x.obligationId);
     expect(f({ status: "overdue" })).toEqual(["TX-1"]);
     expect(f({ product: "Savings" })).toEqual(["CA-MT-Q"]);
-    expect(f({ partner: "Harbor Bank", query: "audit" })).toEqual(["CA-MT-AUD"]);
+    expect(f({ partner: "e1", query: "audit" })).toEqual(["CA-MT-AUD"]);
+    expect(f({ partner: "e2" })).toEqual(["TX-1", "obligation-3"]);
     expect(renderToStaticMarkup(<ObligationsView obligations={[]} />)).toContain("No obligations yet");
   });
 });
