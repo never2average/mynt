@@ -56,7 +56,7 @@ export function fromPnl(reply: unknown): AppPnl | null {
       .filter((c) => c.key),
     revenue: lines(s.revenue),
     costs: lines(s.costs),
-    totals: { revenue: values(totals.revenue), costs: values(totals.costs), net: values(totals.net) },
+    totals: { revenue: values(totals.revenue), costs: values(totals.costs), net: values(totals["net"]) },
     unmeasured: arr(reply.unmeasured)
       .filter(isObj)
       .map((u) => ({ label: str(u.label) ?? str(u.key) ?? "", reason: str(u.reason) ?? "" }))
