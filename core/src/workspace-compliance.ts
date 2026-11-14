@@ -4,7 +4,9 @@ import { redact } from "./boxes.js";
 import type { Db } from "./db.js";
 import type { ProductRecord, Store, User } from "./store.js";
 import { productRegime } from "./regime.js";
+import { normalizeModel } from "./regulatory.js";
 import { workspaceRole } from "./workspaces.js";
+import { AUDIT_CLASSES, actionsOfClass, auditClass, classifiedActions, type AuditClass } from "./audit-classes.js";
 
 // What a workspace's apps rest on, for its members: where in the US its products are covered (by whose approved
 // sponsorship, under which licences, over which approved money rails), the licences behind that, and the workspace's
@@ -167,6 +169,102 @@ export async function licencesForProducts(store: Store, used: string[], filter: 
     .sort((a, b) => a.partner.name.localeCompare(b.partner.name) || a.type.localeCompare(b.type));
 }
 
+// ---- the obligations behind the workspace's products ----
+
+// Each obligation in the regulator's own register (the licence type's grc.registers.obligations, as the regulatory
+// model defines it) for every licence covering a product the workspace's apps use, with its status from what the
+// licence holder has recorded in Mynt against it: its obligation record (compliant: met; partially or non-compliant:
+// at risk) and the filings that evidence it (one recorded overdue: overdue). Anything Mynt can't tell (no record,
+// not assessed, marked not applicable) is unknown, with the reason, never met. Mynt records no due dates.
+export type ObligationStatus = "met" | "at_risk" | "overdue" | "unknown";
+export async function workspaceObligations(store: Store, workspaceId: string) {
+  const db = store.db;
+  const ours = await usedCoverage(store, await workspaceProductIds(db, workspaceId));
+  const productsOf = new Map<string, Map<string, string>>();
+  for (const p of ours)
+    for (const covers of p.states.values()) for (const c of covers) (productsOf.get(c.licence_id) ?? productsOf.set(c.licence_id, new Map()).get(c.licence_id)!).set(p.id, p.name);
+  const ids = [...productsOf.keys()];
+  if (!ids.length) return [];
+  const licences = await rows(
+    db,
+    `SELECT l.id::text AS id, l.region, l.license_id, l.regulator_id, l.entity_id::text AS entity_id, e.name AS partner
+     FROM ${T}.held_licenses l JOIN ${T}.entities e ON e.id = l.entity_id WHERE l.id::text = ANY($1)`,
+    [ids],
+  );
+  const used = ours.map((p) => p.id);
+  const records = await rows(
+    db,
+    `SELECT licence_id::text AS licence_id, section, ref, record, created_at FROM ${T}.grc_records
+     WHERE licence_id::text = ANY($1) AND status = 'current' AND section IN ('obligations', 'reporting_disclosure_filings')
+       AND (product_id IS NULL OR product_id = ANY($2))
+     ORDER BY created_at DESC`,
+    [ids, used],
+  );
+  const ref = await store.referenceData(true);
+  const day = (v: unknown) => (v ? new Date(v as string).toISOString().slice(0, 10) : null);
+  const out: {
+    licence_id: string;
+    licence_type: string;
+    partner: { entity_id: string; name: string };
+    regulator: string;
+    obligation_id: string;
+    title: string;
+    products: { id: string; name: string }[];
+    status: ObligationStatus;
+    due_at?: string;
+    evidence?: string;
+    reason?: string;
+  }[] = [];
+  for (const l of licences) {
+    const model = normalizeModel(ref.regions.find((r) => r.code === l.region)?.regulatory);
+    const registers = model.regulators.find((r) => r.id === l.regulator_id)?.license_types.find((t) => t._id === l.license_id)?.grc.registers;
+    if (!registers) continue;
+    const mine = records.filter((r) => r.licence_id === l.id);
+    const products = [...productsOf.get(l.id as string)!].map(([id, name]) => ({ id, name }));
+    for (const o of registers.obligations) {
+      const rec = mine.find((r) => r.section === "obligations" && r.ref === o.id);
+      const filings = registers.reporting_disclosure_filings.filter((f) => f.obligation_ref === o.id);
+      const filed = mine.filter((r) => r.section === "reporting_disclosure_filings" && filings.some((f) => f.id === r.ref));
+      const nameOf = (r: Row) => filings.find((f) => f.id === r.ref)?.name ?? (r.ref as string);
+      const late = filed.find((r) => (r.record as { status?: string }).status === "overdue");
+      let status: ObligationStatus;
+      let evidence: string | undefined;
+      let reason: string | undefined;
+      const rr = (rec?.record ?? {}) as { status?: string; assessed_on?: string; evidence?: unknown[] };
+      if (late) {
+        status = "overdue";
+        evidence = `${l.partner} recorded the filing "${nameOf(late)}" for ${(late.record as { period?: string }).period ?? "a period"} as overdue`;
+      } else if (rec && (rr.status === "compliant" || rr.status === "partially_compliant" || rr.status === "non_compliant")) {
+        status = rr.status === "compliant" ? "met" : "at_risk";
+        const items = Array.isArray(rr.evidence) ? rr.evidence.length : 0;
+        evidence = `${l.partner} recorded it ${rr.status.replace("_", " ")} on ${rr.assessed_on ?? day(rec.created_at)}${items ? `, with ${items} evidence item${items === 1 ? "" : "s"}` : ""}`;
+        const lastFiled = filed.find((r) => (r.record as { status?: string }).status === "filed");
+        if (lastFiled) evidence += `; filing "${nameOf(lastFiled)}" for ${(lastFiled.record as { period?: string }).period} filed`;
+      } else {
+        status = "unknown";
+        reason = !rec
+          ? `${l.partner} hasn't recorded its compliance with this obligation in Mynt`
+          : rr.status === "not_applicable"
+            ? `${l.partner} recorded it as not applicable; Mynt can't confirm that`
+            : `${l.partner} recorded it as not assessed yet`;
+      }
+      out.push({
+        licence_id: l.id as string,
+        licence_type: l.license_id as string,
+        partner: { entity_id: l.entity_id as string, name: l.partner as string },
+        regulator: l.regulator_id as string,
+        obligation_id: o.id,
+        title: o.title,
+        products,
+        status,
+        ...(evidence ? { evidence: redact(evidence) } : {}),
+        ...(reason ? { reason } : {}),
+      });
+    }
+  }
+  return out.sort((a, b) => a.partner.name.localeCompare(b.partner.name) || a.licence_type.localeCompare(b.licence_type) || a.obligation_id.localeCompare(b.obligation_id));
+}
+
 // ---- the workspace's audit trail ----
 
 // Details are shown through redact(), and these keys never: whatever an action recorded under them.
@@ -210,13 +308,49 @@ export function validTime(v: string): boolean {
 
 export class AuditQueryError extends Error {}
 
+// A row's severity and status, from what Mynt recorded with it: an audit's worst finding, how a build, money
+// movement or hand-off ended, a breach or flag raised. Nothing is guessed: a row without them has neither.
+const SEVERITIES = ["critical", "high", "medium", "low"] as const;
+const HIGH = new Set(["covenant_breached", "covenant_paused_product", "program_review_flagged", "repository_access_withdrawn"]);
+const MEDIUM = new Set(["pool_flag_raised", "money_movement_refused", "money_movement_amount_differs", "money_movement_stale"]);
+function rowFacts(action: string, d: Record<string, unknown>): { severity?: string; status?: string } {
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  if (action === "build_audit") {
+    const counts = (d.counts ?? {}) as Record<string, unknown>;
+    return { severity: SEVERITIES.find((k) => Number(counts[k] ?? 0) > 0) ?? "none", status: str(d.build_status) };
+  }
+  if (action === "money_movement" || action === "handoff") return { status: str(d.status) };
+  if (HIGH.has(action)) return { severity: "high" };
+  if (MEDIUM.has(action)) return { severity: "medium" };
+  return {};
+}
+
+// One plain sentence for the row.
+function summaryOf(action: string, name: string | null, d: Record<string, unknown>): string {
+  const on = name ? ` (${name})` : "";
+  if (action === "build_audit") {
+    const counts = (d.counts ?? {}) as Record<string, unknown>;
+    const found = SEVERITIES.filter((k) => Number(counts[k] ?? 0) > 0).map((k) => `${counts[k]} ${k}`);
+    return `Independent security audit of a build${on}: ${found.length ? found.join(", ") : "no critical, high, medium or low findings"}`;
+  }
+  if (action === "money_movement") {
+    const cents = d.settled_amount_cents ?? d.amount_cents;
+    const amount = cents == null ? "money" : `US$${(Number(cents) / 100).toFixed(2)}`;
+    const dir = String(d.direction ?? "movement").replace("_", "-");
+    return `${dir.charAt(0).toUpperCase()}${dir.slice(1)} of ${amount}${on}: ${d.status}`;
+  }
+  if (action === "handoff") return `Hand-off to ${d.product_id}${on}: ${d.status}`;
+  const words = action.replace(/_/g, " ");
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}${on}`;
+}
+
 // Events about the workspace, chosen by what they're about, never by searching text: the workspace itself (its
 // members and invites), its apps (and what's done to them: keys and webhooks, by the app they name, deploys,
 // hosting commands, releases), their builds, and decisions on its members' connections to its apps' repositories.
 export async function workspaceAudit(
   db: Db,
   workspaceId: string,
-  o: { cursor?: string; action?: string; user_id?: string; app_id?: string; from?: string; to?: string; limit: number; manager: boolean },
+  o: { cursor?: string; action?: string; user_id?: string; app_id?: string; from?: string; to?: string; class?: AuditClass; limit: number; manager: boolean },
 ) {
   const after = o.cursor ? decodeCursor(o.cursor) : null;
   if (o.cursor && !after) throw new AuditQueryError("That cursor isn't one this tool gave out");
@@ -234,6 +368,14 @@ export async function workspaceAudit(
     ? `SELECT r.repository FROM ${T}.app_repositories r WHERE r.app_id IN (SELECT id FROM apps)
        UNION SELECT r.managed_repository FROM ${T}.app_repositories r WHERE r.app_id IN (SELECT id FROM apps) AND r.managed_repository IS NOT NULL`
     : "SELECT NULL::text AS repository WHERE false";
+  // Mynt's independent audit of each build of its apps, once one ran: a security row of its own.
+  const audits = present.has("build_runs")
+    ? `SELECT b.id::text AS id, COALESCE(b.finished_at, b.updated_at) AS created_at, COALESCE(b.finished_at, b.updated_at)::text AS at_text, 'build_audit'::text AS action,
+         b.id::text AS target, jsonb_build_object('build_id', b.id::text, 'build_status', b.status, 'counts', COALESCE(b.maxwell->'counts', '{}'::jsonb)) AS details,
+         NULL::text AS actor_id, 'build'::text AS target_type, b.app_id::text AS app_id
+       FROM ${T}.build_runs b WHERE b.app_id IN (SELECT id FROM apps) AND b.maxwell IS NOT NULL`
+    : "SELECT NULL::text AS id, NULL::timestamptz AS created_at, NULL::text AS at_text, NULL::text AS action, NULL::text AS target, NULL::jsonb AS details, NULL::text AS actor_id, NULL::text AS target_type, NULL::text AS app_id WHERE false";
+  const classActions = o.class ? actionsOfClass(o.class) : [];
   let filtered: Row[];
   try {
     filtered = (
@@ -261,6 +403,20 @@ export async function workspaceAudit(
                        AND l.details->>'kind' = 'developer'
                        AND l.details->>'repository' IN (SELECT repository FROM repos)
                        AND l.details->>'user_id' IN (SELECT user_id::text FROM members))
+                UNION ALL ${audits}
+                -- Live money movements and hand-offs through its apps: financial rows of their own (never customer
+                -- or rail references, only what moved and how it ended).
+                UNION ALL
+                SELECT m.id::text, m.created_at, m.created_at::text, 'money_movement', m.id::text,
+                  jsonb_build_object('product_id', m.product_id, 'direction', m.direction, 'amount_cents', m.amount_cents,
+                    'settled_amount_cents', m.settled_amount_cents, 'status', m.status),
+                  NULL::text, 'money_movement', m.app_id::text
+                FROM ${T}.money_movements m WHERE m.app_id IN (SELECT id FROM apps) AND NOT m.sandbox
+                UNION ALL
+                SELECT h.id::text, h.created_at, h.created_at::text, 'handoff', h.id::text,
+                  jsonb_build_object('product_id', h.product_id, 'action', h.action, 'status', h.status),
+                  NULL::text, 'handoff', h.app_id::text
+                FROM ${T}.handoffs h WHERE h.app_id IN (SELECT id FROM apps) AND NOT h.sandbox
               )
          SELECT e.*, u.name AS actor_name,
            COALESCE((SELECT a.name FROM apps a WHERE a.id::text = e.target),
@@ -275,9 +431,23 @@ export async function workspaceAudit(
            AND ($5::timestamptz IS NULL OR e.created_at < $5)
            AND ($6::timestamptz IS NULL OR (e.created_at, e.id) < ($6::timestamptz, $7::text))
            AND ($8::text IS NULL OR e.app_id = $8)
+           AND ($10::text IS NULL OR e.action = ANY($11::text[]) OR ($10::text = 'workspace' AND NOT (e.action = ANY($12::text[]))))
          ORDER BY e.created_at DESC, e.id DESC
          LIMIT $9`,
-        [workspaceId, o.action ?? null, o.user_id ?? null, o.from ?? null, o.to ?? null, after?.[0] ?? null, after?.[1] ?? null, o.app_id ?? null, o.limit + 1],
+        [
+          workspaceId,
+          o.action ?? null,
+          o.user_id ?? null,
+          o.from ?? null,
+          o.to ?? null,
+          after?.[0] ?? null,
+          after?.[1] ?? null,
+          o.app_id ?? null,
+          o.limit + 1,
+          o.class ?? null,
+          classActions,
+          classifiedActions(),
+        ],
       )
     ).rows as Row[];
   } catch (e) {
@@ -285,13 +455,26 @@ export async function workspaceAudit(
     throw new AuditQueryError("The audit trail couldn't be read with those filters");
   }
   const page = filtered.slice(0, o.limit);
-  const events = page.map((x) => ({
-    at: iso(x.created_at),
-    actor: x.actor_id ? { id: x.actor_id as string, name: (x.actor_name as string | null) ?? null } : { id: null, name: "Mynt" },
-    action: x.action as string,
-    target: { type: x.target_type as string, id: x.target as string, name: (x.target_name as string | null) ?? null },
-    details: scrub(x.details ?? {}, o.manager),
-  }));
+  const events = page.map((x) => {
+    const action = x.action as string;
+    const details = scrub(x.details ?? {}, o.manager) as Record<string, unknown>;
+    const target = { type: x.target_type as string, id: x.target as string, name: (x.target_name as string | null) ?? null };
+    const { severity, status } = rowFacts(action, details);
+    return {
+      id: x.id as string,
+      at: iso(x.created_at),
+      class: auditClass(action),
+      kind: action,
+      actor: x.actor_id ? { id: x.actor_id as string, name: (x.actor_name as string | null) ?? null } : { id: null, name: "Mynt" },
+      ...(x.app_id ? { app_id: x.app_id as string } : {}),
+      action,
+      target,
+      summary: summaryOf(action, target.name, details),
+      ...(severity ? { severity } : {}),
+      ...(status ? { status } : {}),
+      details,
+    };
+  });
   const last = page.at(-1);
   return { events, next_cursor: filtered.length > o.limit && last ? encodeCursor(last.at_text as string, last.id as string) : null };
 }
@@ -337,6 +520,18 @@ export function registerWorkspaceComplianceTools(server: McpServer, store: Store
   );
 
   server.registerTool(
+    "get_workspace_obligations",
+    {
+      title: "Obligations behind a workspace's products",
+      description:
+        "Developer: each obligation in the regulator's register for the licences covering the products the workspace's apps use (as list_workspace_licences counts them), with its products and status from what the licence holder recorded in Mynt: met (recorded compliant), at_risk (partially or non-compliant), overdue (a filing evidencing it recorded overdue), or unknown with the reason (nothing recorded, not assessed, or marked not applicable). Never met without a record.",
+      inputSchema: { workspace_id: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspace_id }) => ((await role(workspace_id)) ? json(await workspaceObligations(store, workspace_id)) : notYours(workspace_id)),
+  );
+
+  server.registerTool(
     "list_workspace_audit",
     {
       title: "A workspace's audit trail",
@@ -350,6 +545,12 @@ export function registerWorkspaceComplianceTools(server: McpServer, store: Store
         app_id: z.string().optional().describe("Only events about this app or its builds"),
         from: day.optional(),
         to: day.optional().describe("Before this time (a date means its start)"),
+        class: z
+          .enum(AUDIT_CLASSES)
+          .optional()
+          .describe(
+            "security: build audits, repository access, the program gate, secrets. obligations: licences, coverage, covenants, sign-offs. financial: money movements, hand-offs, liquidity, rails. workspace: members, roles, invites, keys, settings, promotions. Omitted: all",
+          ),
         limit: z.number().int().min(1).max(100).default(50),
       },
       annotations: { readOnlyHint: true },
