@@ -234,12 +234,12 @@ const actions = { invite: async () => null, changeRole: async () => null, remove
 const settings = { rename: async () => null, archive: async () => null, unarchive: async () => null, relink: async () => null };
 
 describe("the Settings page (once Workspace)", () => {
-  it("has a details card on top: name, your role, created, members, apps by stage and Manage in Clerk", () => {
+  it("has a details card on top: name, your role, created, members, apps by stage and Manage organization", () => {
     const html = renderToStaticMarkup(<WorkspaceCard info={info} members={membersData} apps={appsRows} />);
     for (const s of ["Workspace name", "Your role", "Created", "Sep 1, 2026", "Members", "Apps by stage", "Production 1", "Staging 0", "Ideas 1"]) expect(html).toContain(s);
-    expect(html).toMatch(/href="https:\/\/accounts\.example\.test\/organization"[^>]*>Manage in Clerk/);
+    expect(html).toMatch(/href="https:\/\/accounts\.example\.test\/organization"[^>]*>Manage organization/);
     // No manage_url from Mynt: no link.
-    expect(renderToStaticMarkup(<WorkspaceCard info={info} members={{ ...membersData, manageUrl: null }} apps={appsRows} />)).not.toContain("Manage in Clerk");
+    expect(renderToStaticMarkup(<WorkspaceCard info={info} members={{ ...membersData, manageUrl: null }} apps={appsRows} />)).not.toContain("Manage organization");
     // Not recorded by Mynt: said so, never made up.
     expect(renderToStaticMarkup(<WorkspaceCard info={{ ...info, workspace: { id: "w1", name: "Acme", role: "owner" } }} members={null} apps={null} />)).toContain("Not recorded");
   });
