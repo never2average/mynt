@@ -1,4 +1,6 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { clerkWebhookEvent } from "./clerk-orgs.js";
+import type { WorkspaceSync } from "./workspace-sync.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
@@ -113,6 +115,8 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   if (meta && req.method === "GET" && url.pathname.startsWith("/.well-known/oauth-authorization-server")) {
     return sendJson(res, 200, await meta(), { "Cache-Control": "public, max-age=3600" });
   }
+  // The identity provider's organization events (workspaces follow them): verified, each handled once.
+  if (url.pathname === ORG_WEBHOOK_PATH && req.method === "POST") return orgWebhook(store, ctx.workspaceSync ?? null, req, res);
   // A ramp partner's webhooks, for an offering Mynt runs through an adapter: verified with the partner's own scheme.
   if (url.pathname.startsWith(RAMP_ADAPTER_WEBHOOK_PATH)) return rampAdapterWebhook(store, req, res, url);
   // The runtime API for developers' apps authenticates with app keys, not Clerk.
@@ -188,4 +192,38 @@ export function createMcpHttpServer(
       res.end(JSON.stringify({ error: "Internal server error" }));
     }),
   );
+}
+
+// POST /webhooks/clerk: the identity provider's organization, membership and invitation events, signed with
+// CLERK_WEBHOOK_SECRET (off when that isn't set). Verified by the provider's own library, which also refuses an old
+// or replayed signature; each event id is handled once, and a failure lets the provider deliver it again.
+export const ORG_WEBHOOK_PATH = "/webhooks/clerk";
+async function orgWebhook(store: Store, sync: WorkspaceSync | null, req: IncomingMessage, res: ServerResponse) {
+  const secret = process.env.CLERK_WEBHOOK_SECRET;
+  if (!secret || !sync) return void res.writeHead(404).end();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > 1_000_000) return void res.writeHead(413).end();
+    chunks.push(c as Buffer);
+  }
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(req.headers)) if (typeof v === "string") headers.set(k, v);
+  let parsed: Awaited<ReturnType<typeof clerkWebhookEvent>>;
+  try {
+    parsed = await clerkWebhookEvent(new Request("http://localhost" + ORG_WEBHOOK_PATH, { method: "POST", headers, body: Buffer.concat(chunks) }), secret);
+  } catch {
+    return void res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid signature" }));
+  }
+  const fresh = await store.db.query("INSERT INTO financial_products.org_webhook_events (id, type) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id", [parsed.id, parsed.event?.type ?? null]);
+  if (!fresh.rows.length) return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ duplicate: true }));
+  try {
+    if (parsed.event) await sync.handle(parsed.event);
+  } catch (e) {
+    await store.db.query("DELETE FROM financial_products.org_webhook_events WHERE id = $1", [parsed.id]).catch(() => undefined);
+    console.error(`organization webhook: ${(e as Error).message}`);
+    return void res.writeHead(500).end();
+  }
+  return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
 }

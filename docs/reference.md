@@ -953,6 +953,31 @@ Developers build apps in **workspaces**: teams. Every app belongs to one workspa
 - **The dashboard's product figures.** `get_developer_dashboard` also gives `active_products`, the published products its apps use, and `licences`, the licences behind them (as `list_workspace_licences` counts them).
 - **Existing apps.** When Mynt first starts with workspaces, each developer with apps gets one workspace, "<their name>'s workspace", which they own and which holds all their apps. Nothing else changes for them.
 
+### Workspaces are the identity provider's organizations
+
+When Clerk is the sign-in provider (`CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY` set), each workspace is one Clerk organization, and Clerk is the source of truth for who belongs. The core is provider-neutral (`OrgDirectory` in `org-directory.ts`, `WorkspaceSync` in `workspace-sync.ts`); the Clerk adapter is `clerk-orgs.ts`. A workspace's organization is `workspaces.external_org_id` (null until backfilled).
+
+- **Making one.** `create_workspace` (and the studio's Create workspace) creates the organization first, with the caller as its creator, then the workspace. If the organization can't be made there is no workspace, and if the workspace can't be made the organization is deleted again. The first workspace someone makes is their default one. Renaming a workspace renames its organization.
+- **Roles.** Clerk's `org:admin` is a workspace `admin` and `org:member` a `member`. Clerk has no owner: owners are Mynt's (the organization's creator is its first), shown in Clerk as `org:admin`, and ownership still changes only in Mynt. Changing a role, removing someone or leaving in Mynt changes Clerk first; if Clerk refuses, nothing changes in Mynt.
+- **Invitations** are Clerk organization invitations, sent with the same rules for who may invite whom. Their metadata carries the Mynt role (`mynt_role`: `developer` or `user`) and the workspace role, and they link back to the studio (`STUDIO_URL`). The invitee accepts with Clerk or in Mynt (`accept_workspace_invite`, which adds the Clerk membership). Withdrawing an invite withdraws Clerk's.
+- **What Clerk changes, Mynt follows,** by a signed webhook and a reconcile worker:
+  - Someone new joining an organization gets onto Mynt as a `developer`, or a user (Mynt's consumer role) when the invite said `user`, never anything more, and joins the workspace at their first sign-in.
+  - Someone a Mynt admin revoked is removed from the organization again, and that's audited (`workspace_member_refused`).
+  - A membership deleted runs Mynt's offboarding, as for someone removed in Mynt.
+  - An organization deleted archives its workspace and offboards everyone in it.
+- **The webhook,** `POST /webhooks/clerk`, takes `organization.created`, `organization.updated`, `organization.deleted`, `organizationMembership.created`, `organizationMembership.updated`, `organizationMembership.deleted` and `organizationInvitation.accepted`. It's verified with Clerk's own library (`verifyWebhook`), which also refuses an old or replayed signature. Each event id is handled once; one that fails isn't recorded, so Clerk delivers it again. It's off (404) while `CLERK_WEBHOOK_SECRET` isn't set.
+- **The reconcile worker** compares every organization's members with the workspace's every 15 minutes (paged, backing off up to 2 hours while Clerk fails), and each person's own memberships when they sign in (at most every 5 minutes). A workspace is archived for a missing organization only after a complete listing.
+- **Workspaces from before organizations** get theirs with `mynt clerk sync-workspaces`. It's a dry run unless `--apply` is given, it's idempotent, and it prints counts only. The organization is created for the workspace's owner, its members are added (owners and admins as `org:admin`), and its open invites become Clerk invitations. Members who never signed in through Clerk are counted, and join when they do.
+- **The studio's Members page** keeps working, and `list_workspace_members` gives `manage_url`, the organization's own page in Clerk's account portal.
+
+**Turning it on (operator steps).** Clerk's Organizations setting stays on with "membership required": its "create your first organization" step becomes "create your first workspace".
+
+1. In the Clerk dashboard, open **Webhooks**, choose **Add Endpoint**, and give it `<Mynt's public URL>/webhooks/clerk`. Subscribe it to `organization.created`, `organization.updated`, `organization.deleted`, `organizationMembership.created`, `organizationMembership.updated`, `organizationMembership.deleted` and `organizationInvitation.accepted`, then create it.
+2. Copy the endpoint's **Signing Secret** and set it yourself on the server as `CLERK_WEBHOOK_SECRET`, then restart Mynt. Never paste it into a chat or a command.
+3. Optionally, set `STUDIO_URL` to the studio's address so that invitations link back to it.
+4. On the server, run `node dist/index.js clerk sync-workspaces` and read the counts, then run `node dist/index.js clerk sync-workspaces --apply`. Running it again should show `workspaces_without_org: 0`.
+
+
 ## Linked accounts
 
 `get_linked_accounts` (anyone signed in through the identity provider) shows the GitHub account and crypto wallets linked to the caller's sign-in, as the identity provider knows them: `{ git: { provider: "github", username, verified } | null, wallets: [{ chain: "solana" | "ethereum", address, verified }], manage_url }`. `manage_url` is where they link or unlink them: Clerk's Account Portal user page (`https://accounts.<domain>/user` for a production instance, `https://<slug>.accounts.dev/user` for a development one; `CLERK_ACCOUNT_PORTAL_URL` overrides it for a custom domain, and must be a valid https URL or Mynt won't start).

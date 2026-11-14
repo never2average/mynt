@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { ClerkOrgDirectory } from "./clerk-orgs.js";
+import { WorkspaceSync } from "./workspace-sync.js";
+import { setOrgDirectory } from "./workspaces.js";
 import { releaseLapsedInvites, retryOffboards } from "./workspaces.js";
 import { offboardingServices } from "./server.js";
 import { parseArgs } from "node:util";
@@ -45,6 +48,8 @@ const USAGE = `Usage:
   mynt users add --name <name> --role <role> [--role ...]   Local token (stdio, or HTTP without Clerk)
   mynt users list
   mynt clerk setup                     Turn on Clerk's allowlist and MCP client registration
+  mynt clerk sync-workspaces [--apply]  Give each workspace from before organizations its Clerk organization, members and
+                                       open invites (a dry run without --apply; prints counts only)
   mynt clerk first-party --update-scopes <name or client id>     Repair an existing first-party app's scopes (openid profile email);
                                        keeps its secret, prints only its name and client id
   mynt clerk first-party <name> <redirect-uri> [--file <path>]   Register one of Mynt's own apps (no consent screen);
@@ -94,6 +99,7 @@ const { positionals, values } = parseArgs({
     "program-id": { type: "string" },
     file: { type: "string" },
     "update-scopes": { type: "string" },
+    apply: { type: "boolean" },
   },
 });
 
@@ -177,6 +183,12 @@ const parseEmail = (): string => {
 };
 
 const clerkAdmin = () => (process.env.CLERK_SECRET_KEY ? new ClerkAdmin(process.env.CLERK_SECRET_KEY) : null);
+// Workspaces follow Clerk's organizations when Clerk is the sign-in provider (workspace-sync.ts).
+const orgDirectory = () =>
+  process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY
+    ? new ClerkOrgDirectory({ secretKey: process.env.CLERK_SECRET_KEY, publishableKey: process.env.CLERK_PUBLISHABLE_KEY, accountPortalUrl: process.env.CLERK_ACCOUNT_PORTAL_URL || undefined })
+    : null;
+
 // People's linked accounts (GitHub, wallets), read from Clerk when it's the sign-in provider.
 const identity = (store: { db: ConstructorParameters<typeof ClerkIdentityProvider>[1] }) => {
   const c = process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY ? process.env : null;
@@ -214,7 +226,24 @@ if (values.help) {
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
   const config = clerkConfigFromEnv();
   const clerk = config ? new ClerkAuth(config, store) : null;
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
+  // Workspaces are Clerk organizations: Mynt's tools write there, its webhook and a reconcile worker read back.
+  const directory = orgDirectory();
+  setOrgDirectory(directory);
+  const workspaceSync = directory ? new WorkspaceSync(store, directory, offboardingServices({ builds, hosting })) : null;
+  if (workspaceSync) {
+    let wait = 15 * 60_000;
+    const tick = () =>
+      workspaceSync
+        .reconcileAll()
+        .then(() => (wait = 15 * 60_000))
+        .catch((e) => {
+          wait = Math.min(wait * 2, 2 * 60 * 60_000); // back off while the provider is unhappy
+          console.error(`workspace reconcile: ${(e as Error).message}; next in ${Math.round(wait / 60_000)} min`);
+        })
+        .finally(() => setTimeout(tick, wait));
+    setTimeout(tick, 60_000);
+  }
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
@@ -352,6 +381,14 @@ if (values.help) {
   const app = await registerFirstPartyApp(admin, name, redirectUri, { file: values.file }).catch((e) => die((e as Error).message));
   console.log(`Registered '${name}' with Clerk: client id ${app.client_id}. Its secret is in ${app.path} (readable only by you); give it to that app's server, then delete the file.`);
   if (app.consent_screen_enabled) console.error("warning: Clerk kept the consent screen on for it; check the application in Clerk's dashboard");
+} else if (command === "clerk" && sub === "sync-workspaces") {
+  // Workspaces from before organizations get one each, with their members and open invites; a dry run unless --apply.
+  // Counts only.
+  const directory = orgDirectory() ?? die("CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY are required");
+  const store = await openStore();
+  const counts = await new WorkspaceSync(store, directory, {}, { register: false }).backfill(Boolean(values.apply), process.env.STUDIO_URL ?? null);
+  console.log(JSON.stringify({ ...(values.apply ? {} : { dry_run: true }), ...counts }, null, 2));
+  await store.close();
 } else if (command === "clerk" && sub === "setup") {
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");
   // Keep Clerk's allowlist in step with the whitelist (e.g. on a new production instance), and off

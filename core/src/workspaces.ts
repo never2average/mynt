@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { inTransaction, type Db } from "./db.js";
 import type { App, Store, User } from "./store.js";
+import type { OrgDirectory, OrgRole } from "./org-directory.js";
 
 // Workspaces: the teams developers build apps in. Every app belongs to one workspace, and everyone in it may see and
 // work on its apps and their builds (build, steer, deploy). Only its owners and admins manage who is in it.
@@ -62,6 +63,15 @@ export const WORKSPACE_TABLES = `
   -- Who let someone onto Mynt, when it wasn't an admin: the workspace member whose invite did.
   ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS invited_by uuid REFERENCES ${T}.users(id);
   CREATE INDEX IF NOT EXISTS apps_workspace_idx ON ${T}.apps (workspace_id);
+  -- Each workspace is one organization of the identity provider (org-directory.ts), which decides who belongs; null
+  -- until backfilled (mynt clerk sync-workspaces). Archived when the organization is deleted.
+  ALTER TABLE ${T}.workspaces ADD COLUMN IF NOT EXISTS external_org_id text UNIQUE;
+  ALTER TABLE ${T}.workspaces ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+  ALTER TABLE ${T}.workspace_invites ADD COLUMN IF NOT EXISTS external_invitation_id text;
+  -- A Mynt invite written because someone joined an organization (workspace-sync.ts).
+  ALTER TABLE ${T}.invites ADD COLUMN IF NOT EXISTS admitted_via text;
+  -- The provider's webhook events already handled (once each).
+  CREATE TABLE IF NOT EXISTS ${T}.org_webhook_events (id text PRIMARY KEY, type text, received_at timestamptz NOT NULL DEFAULT now());
   ALTER TABLE ${T}.workspace_invites ADD COLUMN IF NOT EXISTS declined_at timestamptz;
   -- Each person's own workspace, at most one: where their apps go by default (and the migration put their old ones).
   ALTER TABLE ${T}.workspaces ADD COLUMN IF NOT EXISTS personal boolean NOT NULL DEFAULT false;
@@ -114,9 +124,33 @@ const one = async (q: Q, sql: string, params: unknown[] = []) => (await q.query(
 
 const personalName = (u: { name?: string | null; email?: string | null }) => `${(u.name || u.email || "My").trim().slice(0, 180)}'s workspace`;
 
-async function insertWorkspace(q: Q, name: string, ownerId: string, personal = false): Promise<string> {
+// The identity provider's organizations, when Mynt's workspaces follow them (set at startup; null: Mynt's own).
+let orgs: OrgDirectory | null = null;
+export function setOrgDirectory(d: OrgDirectory | null) {
+  orgs = d;
+}
+const orgRole = (r: string): OrgRole => (r === "member" ? "member" : "admin"); // the provider has no owner role
+const subjectOf = async (q: Q, userId: string) => ((await one(q, `SELECT clerk_user_id FROM ${T}.users WHERE id::text = $1`, [userId]))?.clerk_user_id as string | null) ?? null;
+const orgOf = async (q: Q, workspaceId: string) => ((await one(q, `SELECT external_org_id FROM ${T}.workspaces WHERE id::text = $1`, [workspaceId]))?.external_org_id as string | null) ?? null;
+
+// A workspace and its organization, made together: the organization first, then the workspace, and the organization
+// deleted again if the workspace can't be made. Without a directory (or for someone not signed in through it), just
+// the workspace.
+async function withOrg<R>(db: Q, userId: string, name: string, make: (orgId: string | null) => Promise<R>): Promise<R> {
+  const subject = orgs ? await subjectOf(db, userId) : null;
+  if (!orgs || !subject) return make(null);
+  const org = await orgs.createOrg(name, subject);
+  try {
+    return await make(org.id);
+  } catch (e) {
+    await orgs.deleteOrg(org.id).catch(() => undefined);
+    throw e;
+  }
+}
+
+async function insertWorkspace(q: Q, name: string, ownerId: string, personal = false, orgId: string | null = null): Promise<string> {
   const id = randomUUID();
-  await q.query(`INSERT INTO ${T}.workspaces (id, name, created_by, personal) VALUES ($1, $2, $3, $4)`, [id, name, ownerId, personal]);
+  await q.query(`INSERT INTO ${T}.workspaces (id, name, created_by, personal, external_org_id) VALUES ($1, $2, $3, $4, $5)`, [id, name, ownerId, personal, orgId]);
   await q.query(`INSERT INTO ${T}.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')`, [id, ownerId]);
   return id;
 }
@@ -165,19 +199,25 @@ export async function personalWorkspace(db: Db, userId: string): Promise<string>
   const mine = await createdWorkspaces(db, userId);
   if (mine.length) return mine[0];
   const u = (await one(db, `SELECT name, email FROM ${T}.users WHERE id = $1`, [userId])) as { name: string | null; email: string | null } | undefined;
-  const made = await one(
-    db,
-    `INSERT INTO ${T}.workspaces (id, name, created_by, personal) VALUES ($1, $2, $3, true) ON CONFLICT (created_by) WHERE personal DO NOTHING RETURNING id`,
-    [randomUUID(), personalName(u ?? {}), userId],
-  );
-  const id = (made?.id as string | undefined) ?? ((await one(db, `SELECT id FROM ${T}.workspaces WHERE created_by = $1 AND personal`, [userId]))!.id as string);
+  const made = await withOrg(db, userId, personalName(u ?? {}), async (orgId) => {
+    const r = await one(
+      db,
+      `INSERT INTO ${T}.workspaces (id, name, created_by, personal, external_org_id) VALUES ($1, $2, $3, true, $4) ON CONFLICT (created_by) WHERE personal DO NOTHING RETURNING id`,
+      [randomUUID(), personalName(u ?? {}), userId, orgId],
+    );
+    if (!r && orgId) throw new Error("someone else made it"); // the organization goes again
+    return r;
+  }).catch(() => undefined);
+  const existing = made ? undefined : await one(db, `SELECT id FROM ${T}.workspaces WHERE created_by = $1 AND personal`, [userId]);
+  if (!made && !existing) throw new Error("Your workspace couldn't be made just now (the identity provider didn't answer); try again");
+  const id = (made?.id as string | undefined) ?? (existing!.id as string);
   // Its first member is its maker, as its owner (and nobody is put back into one they left).
   await db.query(
     `INSERT INTO ${T}.workspace_members (workspace_id, user_id, role) SELECT $1, $2, 'owner'
      WHERE NOT EXISTS (SELECT 1 FROM ${T}.workspace_members WHERE workspace_id = $1)`,
     [id, userId],
   );
-  return (await workspaceRole(db, id, userId)) ? id : inTransaction(db, (tx) => insertWorkspace(tx, personalName(u ?? {}), userId));
+  return (await workspaceRole(db, id, userId)) ? id : withOrg(db, userId, personalName(u ?? {}), (orgId) => inTransaction(db, (tx) => insertWorkspace(tx, personalName(u ?? {}), userId, false, orgId)));
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -680,7 +720,8 @@ export function registerWorkspaceTools(
       inputSchema: { name: z.string().trim().min(1).max(200) },
     },
     async ({ name }) => {
-      const id = await inTransaction(db, (tx) => insertWorkspace(tx, name, user.id));
+      // With the identity provider's organizations, it's one of those too (made first, and deleted again on failure).
+      const id = await withOrg(db, user.id, name, (orgId) => inTransaction(db, (tx) => insertWorkspace(tx, name, user.id, false, orgId)));
       await audit("create_workspace", id, { name });
       return json({ id, name, role: "owner" });
     },
@@ -699,6 +740,8 @@ export function registerWorkspaceTools(
           manager(role);
           const r = await one(tx, `SELECT name FROM ${T}.workspaces WHERE id::text = $1`, [workspace_id]);
           await tx.query(`UPDATE ${T}.workspaces SET name = $2 WHERE id::text = $1`, [workspace_id, name]);
+          const org = orgs ? await orgOf(tx, workspace_id) : null;
+          if (org) await orgs!.renameOrg(org, name);
           return r!.name as string;
         });
         await audit("rename_workspace", workspace_id, { from: before, to: name });
@@ -734,7 +777,8 @@ export function registerWorkspaceTools(
                 [workspace_id],
               )
             ).rows;
-      return json({ workspace_id, your_role: role, members, ...(invites ? { open_invites: invites } : {}) });
+      const manage = orgs && (await orgOf(db, workspace_id)) ? orgs.manageUrl() : null;
+      return json({ workspace_id, your_role: role, members, ...(invites ? { open_invites: invites } : {}), ...(manage ? { manage_url: manage } : {}) });
     },
   );
 
@@ -790,6 +834,23 @@ export function registerWorkspaceTools(
           ]);
           return { id, workspace_id, email: lower, role, mynt_role };
         });
+        // An organization's invitation, which the invitee accepts with the identity provider (or in Mynt).
+        const org = orgs ? await orgOf(db, workspace_id) : null;
+        if (org) {
+          try {
+            const sent = await orgs!.invite(org, {
+              email: lower,
+              role: orgRole(role),
+              inviter: await subjectOf(db, user.id),
+              metadata: { mynt_role, mynt_workspace_role: role, mynt_invite_id: invite.id },
+              redirectUrl: process.env.STUDIO_URL ?? null,
+            });
+            await db.query(`UPDATE ${T}.workspace_invites SET external_invitation_id = $2 WHERE id::text = $1`, [invite.id, sent.id]);
+          } catch (e) {
+            await db.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite.id]);
+            throw new Refused(`The invitation couldn't be sent just now (${(e as Error).message.slice(0, 120)}); try again`);
+          }
+        }
         await audit("invite_to_workspace", workspace_id, { invite_id: invite.id, email: lower, role, mynt_role });
         // Someone new may now sign in to Mynt (as a user), unless an admin revoked them.
         const mynt = await admitWorkspaceInvitee(store, lower, { id: invite.id, invited_by: user.id }, clerk);
@@ -824,6 +885,9 @@ export function registerWorkspaceTools(
           if (!r) throw new Refused(`No open invite with id '${invite_id}'`);
           if (r.invited_by !== user.id) manager(mine);
           if (r.role === "owner" && mine !== "owner") throw new Refused("Only an owner can withdraw an invite for an owner");
+          const ext = (await one(tx, `SELECT external_invitation_id FROM ${T}.workspace_invites WHERE id::text = $1`, [invite_id]))?.external_invitation_id as string | null;
+          const org = orgs && ext ? await orgOf(tx, ws) : null;
+          if (org) await orgs!.revokeInvitation(org, ext!, await subjectOf(tx, user.id));
           await tx.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite_id]);
           return r;
         });
@@ -851,6 +915,10 @@ export function registerWorkspaceTools(
           if ((current === "owner" || role === "owner") && mine !== "owner") throw new Refused("Only an owner can make or unmake an owner");
           if (current === "owner" && role !== "owner" && (await owners(tx, workspace_id)) <= 1)
             throw new Refused("A workspace needs an owner: make someone else an owner first");
+          // The organization agrees first (an owner is its admin): if that fails, nothing changes.
+          const org = orgs ? await orgOf(tx, workspace_id) : null;
+          const subject = org ? await subjectOf(tx, user_id) : null;
+          if (org && subject) await orgs!.setMemberRole(org, subject, orgRole(role));
           await tx.query(`UPDATE ${T}.workspace_members SET role = $3 WHERE workspace_id::text = $1 AND user_id::text = $2`, [workspace_id, user_id, role]);
           return current;
         });
@@ -878,6 +946,9 @@ export function registerWorkspaceTools(
           if (!current) throw new Refused(`'${user_id}' isn't a member of this workspace`);
           if (current === "owner" && mine !== "owner") throw new Refused("Only an owner can remove an owner");
           if (current === "owner" && (await owners(tx, workspace_id)) <= 1) throw new Refused("A workspace needs an owner: it can't lose its last one");
+          const org = orgs ? await orgOf(tx, workspace_id) : null;
+          const subject = org ? await subjectOf(tx, user_id) : null;
+          if (org && subject) await orgs!.removeMember(org, subject);
           await tx.query(`DELETE FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND user_id::text = $2`, [workspace_id, user_id]);
           return current;
         });
@@ -900,6 +971,9 @@ export function registerWorkspaceTools(
         const was = await locked(workspace_id, async (tx, mine) => {
           if (mine === "owner" && (await owners(tx, workspace_id)) <= 1)
             throw new Refused("You're this workspace's last owner: make someone else an owner first");
+          const org = orgs ? await orgOf(tx, workspace_id) : null;
+          const subject = org ? await subjectOf(tx, user.id) : null;
+          if (org && subject) await orgs!.removeMember(org, subject);
           await tx.query(`DELETE FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND user_id = $2`, [workspace_id, user.id]);
           return mine;
         });
@@ -984,6 +1058,14 @@ export function registerInvitationTools(server: McpServer, store: Store, user: U
           return { void: true as const, workspace_id: inv.workspace_id };
         }
         await tx.query(`UPDATE ${T}.workspace_invites SET accepted_at = now(), accepted_by = $2 WHERE id::text = $1`, [invite_id, user.id]);
+        // With an organization behind it: joined there too (its invitation is then spent), or nothing changes.
+        const org = orgs ? await orgOf(tx, inv.workspace_id) : null;
+        const subject = org ? await subjectOf(tx, user.id) : null;
+        if (org && subject) {
+          await orgs!.addMember(org, subject, orgRole(inv.role));
+          const ext = (await one(tx, `SELECT external_invitation_id FROM ${T}.workspace_invites WHERE id::text = $1`, [invite_id]))?.external_invitation_id as string | null;
+          if (ext) await orgs!.revokeInvitation(org, ext, null).catch(() => undefined);
+        }
         // Someone already in keeps the role they have.
         const joined =
           (
