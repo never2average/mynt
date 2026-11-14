@@ -39,10 +39,6 @@ export const STUDIO_TOOLS = {
   get_product: z.object({ id }).strict(),
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
-  // An app's P&L tab: the workspace's profit and loss for that one app (reading only).
-  get_workspace_pnl: z
-    .object({ workspace_id: workspaceId, app_id: id.optional(), granularity: z.enum(["month", "week"]).optional(), periods: z.number().int().min(1).max(24).optional() })
-    .strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({
@@ -76,7 +72,7 @@ export const STUDIO_TOOLS = {
   relink_workspace_org: z.object({ workspace_id: workspaceId }).strict(),
   // What needs the workspace's attention (the dashboard's Needs attention card).
   get_workspace_attention: z.object({ workspace_id: workspaceId }).strict(),
-  // The dashboard's P&L: revenue against costs per period, and the statement.
+  // The dashboard's P&L, and an app's P&L tab (with app_id): revenue against costs per period, and the statement.
   get_workspace_pnl: z
     .object({ workspace_id: workspaceId, granularity: z.enum(["month", "week"]), periods: z.number().int().min(1).max(24), app_id: id.optional() })
     .strict(),

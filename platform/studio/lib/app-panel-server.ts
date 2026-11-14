@@ -79,7 +79,7 @@ export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): P
     case "pnl": {
       if (!tool("get_workspace_pnl")) return NOT_YET("The app's P&L comes with Mynt's next update.");
       if (!app.workspaceId) return NOT_YET("The P&L is per workspace, and this app isn't in one.");
-      const pnl = fromPnl(await read("get_workspace_pnl", { workspace_id: app.workspaceId, app_id: app.id }));
+      const pnl = fromPnl(await read("get_workspace_pnl", { workspace_id: app.workspaceId, granularity: "month", periods: 6, app_id: app.id }));
       return pnl ?? NOT_YET("Mynt's P&L for this app wasn't readable.");
     }
     case "licences": {

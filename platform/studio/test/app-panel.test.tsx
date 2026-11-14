@@ -133,7 +133,7 @@ describe("the app panel route", () => {
 
   it("P&L: this app's, from get_workspace_pnl; not available yet without the tool", async () => {
     const { body } = await get("pnl");
-    expect(fake.calls.find((c) => c.name === "get_workspace_pnl")?.args).toEqual({ workspace_id: WS, app_id: APP });
+    expect(fake.calls.find((c) => c.name === "get_workspace_pnl")?.args).toEqual({ workspace_id: WS, granularity: "month", periods: 6, app_id: APP });
     expect(body.data).toMatchObject({ available: true, unmeasured: [{ label: "Take-rate fees" }] });
     scoped();
     fake.tools = ALL.filter((t) => t.name !== "get_workspace_pnl");
@@ -187,7 +187,7 @@ describe("the app panel route", () => {
   });
 
   it("the allow-list takes the new reads strictly", () => {
-    expect(parseStudioCall("get_workspace_pnl", { workspace_id: WS, app_id: APP })).toHaveProperty("tool");
+    expect(parseStudioCall("get_workspace_pnl", { workspace_id: WS, granularity: "month", periods: 6, app_id: APP })).toHaveProperty("tool");
     expect(parseStudioCall("get_workspace_pnl", { app_id: APP })).toHaveProperty("error");
     expect(parseStudioCall("get_product_sdk", { product_id: "p1" })).toHaveProperty("tool");
     expect(parseStudioCall("list_workspace_audit", { app_id: APP, class: "security" })).toHaveProperty("tool");
