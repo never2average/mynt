@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
-import { z } from "zod";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { ChatBody, readCapped, TOO_LARGE } from "@/lib/ai-route";
 import { askToolDefs, historyFrom, runAsk, type AskTool } from "@/lib/ask";
 import { askConfigured, askModel, createLlm } from "@/lib/llm";
 import { NotAllowedError } from "@/lib/mynt-client";
@@ -32,52 +32,8 @@ export const MAX_BODY_BYTES = 64 * 1024;
 export const ASK_PER_HOUR = 20;
 export const ASK_WINDOW_SECONDS = 60 * 60;
 
-const TOO_LARGE = Symbol("too large");
-
-// The body as text, read no further than `max` bytes: a declared length over it, or a stream that
-// goes past it, is refused before anything is parsed.
-async function readCapped(req: Request, max: number): Promise<string | typeof TOO_LARGE> {
-  const declared = Number(req.headers.get("content-length") ?? NaN);
-  if (Number.isFinite(declared) && declared > max) return TOO_LARGE;
-  if (!req.body) return "";
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) {
-      await reader.cancel().catch(() => undefined);
-      return TOO_LARGE;
-    }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const c of chunks) {
-    all.set(c, at);
-    at += c.byteLength;
-  }
-  return new TextDecoder().decode(all);
-}
-
 const noStore = { "Cache-Control": "no-store" };
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: noStore });
-
-const Body = z.object({
-  messages: z
-    .array(
-      z
-        .object({
-          role: z.string(),
-          parts: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()).optional(),
-        })
-        .passthrough(),
-    )
-    .min(1)
-    .max(200),
-});
 
 // Whether Ask AI can answer here (the search modal shows "AI is not configured" otherwise).
 export async function GET() {
@@ -102,7 +58,7 @@ export async function POST(req: Request) {
   } catch {
     body = null;
   }
-  const parsed = Body.safeParse(body);
+  const parsed = ChatBody.safeParse(body);
   const history = parsed.success ? historyFrom(parsed.data.messages) : null;
   if (!history) return json({ error: "bad_request" }, 400);
 
@@ -169,7 +125,7 @@ export async function POST(req: Request) {
             if (ev.type === "text-start") writer.write({ type: "text-start", id: `t${++textId}` });
             else if (ev.type === "text") writer.write({ type: "text-delta", id: `t${textId}`, delta: ev.delta });
             else if (ev.type === "text-end") writer.write({ type: "text-end", id: `t${textId}` });
-            else {
+            else if (ev.type === "tool") {
               // The browser sees which reads ran, not what Mynt answered.
               writer.write({ type: "tool-input-available", toolCallId: ev.id, toolName: ev.name, input: ev.input });
               writer.write({ type: "tool-output-available", toolCallId: ev.id, output: { ok: ev.ok } });

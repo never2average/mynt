@@ -106,7 +106,7 @@ export function AppsByStage({ state }: { state: Loaded<StagesData> }) {
         <CardTitle>Apps by stage</CardTitle>
         <CardDescription>Each app moves Ideas → Staging → Production through Mynt&apos;s checks</CardDescription>
         <CardAction>
-          <Link href="/workspace?tab=apps" className="inline-flex items-center gap-1 text-sm font-medium hover:underline">
+          <Link href="/settings?tab=apps" className="inline-flex items-center gap-1 text-sm font-medium hover:underline">
             All apps
             <ArrowRight className="size-3.5" />
           </Link>
@@ -143,7 +143,7 @@ export function AppsByStage({ state }: { state: Loaded<StagesData> }) {
                       ))}
                       {apps.length > 5 && (
                         <li>
-                          <Link href="/workspace?tab=apps" className="text-xs text-muted-foreground hover:underline">
+                          <Link href="/settings?tab=apps" className="text-xs text-muted-foreground hover:underline">
                             {apps.length - 5} more
                           </Link>
                         </li>

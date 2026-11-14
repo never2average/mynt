@@ -1,10 +1,11 @@
 "use client"
 
-// The Liquidity page's content (/liquidity), by role. A metadata card on top, a tab selector,
-// and each tab a table with a full-width search, labelled filters and its own CTA:
+// The Earn page's content (/earn), by role. A metadata card on top, a tab selector, the
+// investing assistant first (components/earn-assistant.tsx), then a table per tab with a
+// full-width search, labelled filters and its own CTA:
 // - My pools (builders): their products' pools, each one's state, terms, latest verified
 //   health and withdrawal queue; "Propose pool" on a sponsored component of their firm's product.
-// - Open pools (liquidity providers): pools open to commitments, their health and terms, and
+// - Opportunities (liquidity providers): pools open to commitments, their health and terms, and
 //   "Commit capital".
 // - My positions (liquidity providers): committed, settled, queued and paid, "Request
 //   withdrawal", and the firm's requests in each pool's queue.
@@ -42,7 +43,7 @@ import {
   withdrawalRefusal,
   withdrawalTerms,
   type LiquidityData,
-  type LiquidityTab,
+  type EarnTab,
   type PoolFilters,
   type PoolRow,
   type PoolStage,
@@ -51,6 +52,11 @@ import {
   type Sponsored,
   type Withdrawal,
 } from "@/lib/liquidity"
+
+// What Earn says about money, everywhere it shows pools: where money moves today, what's coming,
+// and that it explains terms rather than recommending anything. No yields or returns are shown.
+export const EARN_DISCLOSURE =
+  "Money moves only on rails a pool's sponsoring licence provider approved, and Mynt never holds your funds or keys. An on-chain USDC treasury per app is coming (on devnet first). Real commitments wait until a Mynt admin clears a pool's offering; sandbox pools move test money only. Earn explains pool terms and matches them to what you ask: it isn't investment advice and shows no promised returns, only figures Mynt measures."
 
 export type ActionResult = { ok: true; reply: unknown } | { error: string; refused?: boolean }
 export type LiquidityActions = {
@@ -62,7 +68,7 @@ export type OpenForm = { kind: "propose" } | { kind: "commit"; poolId?: string }
 
 const selectClass =
   "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20"
-const newIdempotencyKey = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`).replace(/[^A-Za-z0-9_-]/g, "")
+export const newIdempotencyKey = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`).replace(/[^A-Za-z0-9_-]/g, "")
 const dateOf = (iso: string | null) => (iso ? iso.slice(0, 10) : "—")
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null
 
@@ -82,7 +88,7 @@ export function StageBadge({ stage }: { stage: PoolStage }) {
   )
 }
 
-function Money({ sandbox }: { sandbox: boolean }) {
+export function Money({ sandbox }: { sandbox: boolean }) {
   return (
     <Badge variant="outline" data-money={sandbox ? "sandbox" : "real"}>
       {sandbox ? "Sandbox" : "Real money"}
@@ -560,7 +566,7 @@ function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { po
   const anyOpen = pools.some((p) => !poolCommitBlock(p, position(p.id)))
 
   return (
-    <div className="flex flex-col gap-4" data-tab-panel="open-pools">
+    <div className="flex flex-col gap-4" data-tab-panel="opportunities">
       <div className="flex flex-wrap items-center gap-2">
         <SearchBox value={f.query} onChange={(query) => (setF({ ...f, query }), setPage(0))} label="Search open pools" placeholder="Search pool, product or product line" />
         <Button onClick={() => setForm(form?.kind === "commit" ? null : { kind: "commit" })} disabled={!canCommit || !anyOpen} title={!canCommit ? "Committing capital comes with Mynt's next update" : !anyOpen ? "No pool is taking commitments right now" : undefined} data-cta="commit">
@@ -783,17 +789,29 @@ function Stat({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function LiquidityView({ data, actions, initialTab, initialForm = null }: { data: LiquidityData; actions: LiquidityActions; initialTab?: string | null; initialForm?: OpenForm }) {
+export function EarnView({
+  data,
+  actions,
+  initialTab,
+  initialForm = null,
+  assistant = null,
+}: {
+  data: LiquidityData
+  actions: LiquidityActions
+  initialTab?: string | null
+  initialForm?: OpenForm
+  assistant?: React.ReactNode // the Assistant tab's content
+}) {
   const tabs = tabsFor(data.access)
-  const [tab, setTab] = useState<LiquidityTab | undefined>(tabs.includes(initialTab as LiquidityTab) ? (initialTab as LiquidityTab) : tabs[0])
+  const [tab, setTab] = useState<EarnTab | undefined>(tabs.includes(initialTab as EarnTab) ? (initialTab as EarnTab) : tabs[0])
   const [form, setForm] = useState<OpenForm>(initialForm)
 
   if (!tabs.length || !tab)
     return (
       <Card data-empty="no-role">
         <CardHeader>
-          <CardTitle>Liquidity</CardTitle>
-          <CardDescription>Liquidity is for builders of products with pools and for liquidity providers. Ask a Mynt admin if you should have one of those roles.</CardDescription>
+          <CardTitle>Earn</CardTitle>
+          <CardDescription>Earn is for builders of products with pools and for liquidity providers. Ask a Mynt admin if you should have one of those roles.</CardDescription>
         </CardHeader>
       </Card>
     )
@@ -808,7 +826,7 @@ export function LiquidityView({ data, actions, initialTab, initialForm = null }:
       <Card data-metadata>
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center gap-2">
-            Liquidity
+            Earn
             {roles.map((r) => (
               <Badge key={r} variant="secondary" data-role={r}>
                 {r}
@@ -816,21 +834,20 @@ export function LiquidityView({ data, actions, initialTab, initialForm = null }:
             ))}
           </CardTitle>
           <CardDescription>
-            Money only moves on rails a pool&apos;s sponsoring licence provider approved, and Mynt never holds your funds or keys. Real commitments wait until a Mynt admin clears a pool&apos;s offering;
-            sandbox pools move test money only.
+            {EARN_DISCLOSURE}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {b && <Stat label="My pools" value={String(b.pools.length)} />}
           {b && <Stat label="Awaiting sponsor approval" value={String(b.pools.filter((p) => stageOf(p) === "awaiting_approval").length)} />}
-          {lp && <Stat label="Open pools" value={String(lp.pools.length)} />}
+          {lp && <Stat label="Opportunities" value={String(lp.pools.length)} />}
           {lp && <Stat label="Committed" value={usd(sum("committedCents"))} />}
           {lp && <Stat label="Settled" value={usd(sum("settledCents"))} />}
           {lp && <Stat label="Queued withdrawals" value={usd(sum("queuedCents"))} />}
         </CardContent>
       </Card>
 
-      <div role="tablist" aria-label="Liquidity" className="flex gap-1 border-b">
+      <div role="tablist" aria-label="Earn" className="flex gap-1 border-b">
         {tabs.map((t) => (
           <button
             key={t}
@@ -849,8 +866,9 @@ export function LiquidityView({ data, actions, initialTab, initialForm = null }:
         ))}
       </div>
 
+      {tab === "assistant" && <div className="flex min-h-0 flex-1 flex-col" data-tab-panel="assistant">{assistant}</div>}
       {tab === "my-pools" && b && <BuilderPools pools={b.pools} proposable={b.proposable} withdrawalsShown={b.withdrawalsShown} actions={actions} form={form} setForm={setForm} />}
-      {tab === "open-pools" && lp && <OpenPools pools={lp.pools} positions={lp.positions} canCommit={lp.canCommit} actions={actions} form={form} setForm={setForm} />}
+      {tab === "opportunities" && lp && <OpenPools pools={lp.pools} positions={lp.positions} canCommit={lp.canCommit} actions={actions} form={form} setForm={setForm} />}
       {tab === "my-positions" && lp && <MyPositions positions={lp.positions} withdrawals={lp.withdrawals} pools={lp.pools} canWithdraw={lp.canWithdraw} actions={actions} form={form} setForm={setForm} />}
     </div>
   )

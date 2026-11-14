@@ -9,7 +9,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Building2, Droplets, FileBadge, History, LayoutDashboard } from "lucide-react"
+import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -39,10 +39,10 @@ const PAGES = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/licences", label: "Licences", icon: FileBadge },
   { href: "/audits", label: "Audits", icon: History },
-  { href: "/workspace", label: "Workspace", icon: Building2 },
+  { href: "/settings", label: "Settings", icon: Settings },
 ] as const
-// Only for builders and liquidity providers, after Workspace.
-const LIQUIDITY_PAGE = { href: "/liquidity", label: "Liquidity", icon: Droplets } as const
+// Only for builders and liquidity providers, after Settings.
+const EARN_PAGE = { href: "/earn", label: "Earn", icon: Coins } as const
 
 export type SidebarViewProps = {
   workspaces: Workspace[]
@@ -77,7 +77,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            {[...PAGES, ...(liquidity ? [LIQUIDITY_PAGE] : [])].map(({ href, label, icon: Icon }) => (
+            {[...PAGES, ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
                   <Link href={href}>

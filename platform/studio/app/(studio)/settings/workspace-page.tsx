@@ -1,6 +1,6 @@
 "use client";
 
-// The Workspace page's data: the selected workspace (as list_workspaces describes it, with which
+// The Settings page's data: the selected workspace (as list_workspaces describes it, with which
 // settings this Mynt offers), its members and invites, and its apps. Each part loads on its own;
 // Mynt checks every change again.
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -59,7 +59,7 @@ export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
 
   const onTab = (t: WorkspaceTab) => {
     setTab(t);
-    window.history.replaceState(null, "", `/workspace?tab=${t}`);
+    window.history.replaceState(null, "", `/settings?tab=${t}`);
   };
 
   const send = useCallback(async (url: string, method: string, payload: unknown) => {

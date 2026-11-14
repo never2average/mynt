@@ -233,7 +233,7 @@ const appsRows = [
 const actions = { invite: async () => null, changeRole: async () => null, remove: async () => null, revoke: async () => null };
 const settings = { rename: async () => null, archive: async () => null, unarchive: async () => null, relink: async () => null };
 
-describe("the Workspace page", () => {
+describe("the Settings page (once Workspace)", () => {
   it("has a details card on top: name, your role, created, members, apps by stage and Manage in Clerk", () => {
     const html = renderToStaticMarkup(<WorkspaceCard info={info} members={membersData} apps={appsRows} />);
     for (const s of ["Workspace name", "Your role", "Created", "Sep 1, 2026", "Members", "Apps by stage", "Production 1", "Staging 0", "Ideas 1"]) expect(html).toContain(s);
@@ -244,13 +244,15 @@ describe("the Workspace page", () => {
     expect(renderToStaticMarkup(<WorkspaceCard info={{ ...info, workspace: { id: "w1", name: "Acme", role: "owner" } }} members={null} apps={null} />)).toContain("Not recorded");
   });
 
-  it("has Members, Invitations, Apps and Settings tabs, from ?tab=", () => {
-    expect([tabOf("members"), tabOf("invitations"), tabOf("apps"), tabOf("settings"), tabOf("nope"), tabOf(undefined)]).toEqual(["members", "invitations", "apps", "settings", "members", "members"]);
-    const view = (tab: "members" | "invitations" | "apps" | "settings") =>
+  it("has Members, Invitations, Apps, Repositories and General tabs, from ?tab= (the old Settings tab is General)", () => {
+    expect([tabOf("members"), tabOf("invitations"), tabOf("apps"), tabOf("general"), tabOf("settings"), tabOf("nope"), tabOf(undefined)]).toEqual(["members", "invitations", "apps", "general", "general", "members", "members"]);
+    const view = (tab: "members" | "invitations" | "apps" | "general") =>
       renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} settingsActions={settings} />);
     const html = view("apps");
     const tabs = [...html.matchAll(/role="tab" aria-selected="(true|false)" data-tab="(\w+)"/g)].map((m) => [m[2], m[1]]);
-    expect(tabs).toEqual([["members", "false"], ["invitations", "false"], ["apps", "true"], ["repositories", "false"], ["settings", "false"]]);
+    expect(tabs).toEqual([["members", "false"], ["invitations", "false"], ["apps", "true"], ["repositories", "false"], ["general", "false"]]);
+    expect(html).toContain(">General<");
+    expect(html).toContain('role="tablist" aria-label="Settings"');
     expect(html).toContain('data-tab-panel="apps"');
     expect(html).toContain('href="/a1/b1"');
     expect(html).toContain(">Open app<");
@@ -258,7 +260,8 @@ describe("the Workspace page", () => {
     expect(html).toMatch(/>\s*New app\s*</);
     expect(view("members")).toContain('data-tab-panel="members"');
     expect(view("invitations")).toContain('data-tab-panel="invitations"');
-    expect(view("settings")).toContain("data-rename-form");
+    expect(view("general")).toContain("data-rename-form");
+    expect(view("general")).toContain('data-tab-panel="general"');
   });
 
   it("shows archive controls only to owners, and only where Mynt has the tools", () => {
@@ -277,10 +280,12 @@ describe("the Workspace page", () => {
   });
 
   it("is in the header's titles and search, and /members is still a page (it redirects), not an app", () => {
-    expect(pageTitle("/workspace")).toBe("Workspace");
+    expect(pageTitle("/settings")).toBe("Settings");
+    expect(pageTitle("/workspace")).toBe("Settings");
+    expect(isAppPath("/workspace")).toBe(false);
     expect(isAppPath("/members")).toBe(false);
     const index = searchIndex({ members: [{ userId: "u1", name: "Ines", email: "ines@example.com", role: "owner" }] });
-    expect(index.find((i) => i.id === "member:u1")?.href).toBe("/workspace?tab=members");
+    expect(index.find((i) => i.id === "member:u1")?.href).toBe("/settings?tab=members");
     expect(index.some((i) => i.href === "/members")).toBe(false);
   });
 
@@ -302,7 +307,7 @@ describe("the Workspace page", () => {
 });
 
 describe("/members", () => {
-  it("redirects to the Workspace page's Members tab", async () => {
+  it("redirects to the Settings page's Members tab", async () => {
     const { default: MembersPage } = await import("@/app/(studio)/members/page");
     let to: string | undefined;
     try {
@@ -310,7 +315,24 @@ describe("/members", () => {
     } catch (e) {
       to = (e as { digest?: string }).digest;
     }
-    expect(to).toContain("/workspace?tab=members");
+    expect(to).toContain("/settings?tab=members");
+  });
+});
+
+describe("/workspace", () => {
+  it("redirects to Settings on the same tab, its old Settings tab to General", async () => {
+    const { default: WorkspacePage } = await import("@/app/(studio)/workspace/page");
+    const to = async (tab?: string) => {
+      try {
+        await WorkspacePage({ searchParams: Promise.resolve(tab ? { tab } : {}) });
+      } catch (e) {
+        return (e as { digest?: string }).digest;
+      }
+    };
+    expect(await to("apps")).toContain("/settings?tab=apps");
+    expect(await to("repositories")).toContain("/settings?tab=repositories");
+    expect(await to("settings")).toContain("/settings?tab=general");
+    expect(await to()).toContain("/settings?tab=members");
   });
 });
 
