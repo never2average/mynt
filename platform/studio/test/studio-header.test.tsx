@@ -18,7 +18,8 @@ const { SearchResults } = await import("@/components/studio-search");
 const { Command, CommandInput, CommandList } = await import("@/components/ui/command");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
-const { isAppPath, pageTitle, searchIndex, searchStudio } = await import("@/lib/studio-search");
+const { isAppPath, isStudioPath, pageTitle, searchIndex, searchStudio } = await import("@/lib/studio-search");
+const { AnswerLink } = await import("@/components/ask-ai-markdown");
 const { groupByStage } = await import("@/lib/workspaces");
 
 beforeAll(() => {
@@ -316,6 +317,45 @@ describe("search", () => {
       fireEvent.keyDown(input, { key: "Enter" });
     });
     expect(asked).toBe(0);
+  });
+});
+
+describe("links in Ask AI's answers", () => {
+  it("only same-origin relative paths count as studio links", () => {
+    for (const ok of ["/", "/coverage", "/audits?action=app.created", "/app-1/build-2#x"]) expect(isStudioPath(ok)).toBe(true);
+    for (const bad of ["//evil.example/x", "/\\evil.example", "https://evil.example", "javascript:alert(1)", "mailto:a@b.c", "coverage", "", " /coverage", "/a b", "/a\nb", null, undefined])
+      expect(isStudioPath(bad)).toBe(false);
+  });
+
+  it("render a studio path as a link and anything else as plain text", () => {
+    const { container } = render(
+      <div>
+        <AnswerLink href="/coverage">Coverage</AnswerLink>
+        <AnswerLink href="https://evil.example">phish</AnswerLink>
+        <AnswerLink href="//evil.example">proto-relative</AnswerLink>
+        <AnswerLink href="javascript:alert(1)">js</AnswerLink>
+      </div>,
+    );
+    const links = [...container.querySelectorAll("a")];
+    expect(links.map((a) => a.getAttribute("href"))).toEqual(["/coverage"]);
+    expect(container.textContent).toContain("phish");
+    expect(container.innerHTML).not.toContain("evil.example");
+    expect(container.innerHTML).not.toContain("javascript:");
+  });
+
+  it("a click on a studio link navigates in place; anything else goes nowhere", () => {
+    const chat = { messages: [], setMessages: () => undefined, stop: async () => undefined } as unknown as Parameters<typeof AskAiPanel>[0]["chat"];
+    const went: string[] = [];
+    const { container } = render(<AskAiPanel chat={chat} status="disabled" onBack={() => undefined} onClose={() => undefined} onNavigate={(h) => went.push(h)} />);
+    const panel = container.querySelector("[data-ask-ai-panel]")!;
+    const studio = document.createElement("a");
+    studio.setAttribute("href", "/licences");
+    const outside = document.createElement("a");
+    outside.setAttribute("href", "//evil.example/");
+    panel.append(studio, outside);
+    expect(fireEvent.click(studio)).toBe(false); // default prevented
+    expect(fireEvent.click(outside)).toBe(false);
+    expect(went).toEqual(["/licences"]);
   });
 });
 

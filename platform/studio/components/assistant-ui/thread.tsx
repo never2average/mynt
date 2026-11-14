@@ -46,14 +46,19 @@ import {
   PencilIcon,
   SquareIcon,
 } from "lucide-react";
-import type { FC, ReactNode } from "react";
+import { createContext, useContext, type FC, type ReactNode } from "react";
 
-export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; placeholder?: string }> = ({
+// How an answer's text is drawn: MarkdownText (no clickable links) unless the thread names its own.
+const TextRenderer = createContext<FC>(MarkdownText);
+
+export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; placeholder?: string; Text?: FC }> = ({
   welcome,
   disabledNote,
   placeholder,
+  Text = MarkdownText,
 }) => {
   return (
+    <TextRenderer.Provider value={Text}>
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
       style={{
@@ -86,6 +91,7 @@ export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; placeholde
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+    </TextRenderer.Provider>
   );
 };
 
@@ -168,6 +174,7 @@ const MessageError: FC = () => {
 };
 
 const AssistantMessage: FC = () => {
+  const Text = useContext(TextRenderer);
   return (
     <MessagePrimitive.Root
       className="aui-assistant-message-root relative mx-auto w-full max-w-(--thread-max-width) animate-in py-3 duration-150 fade-in slide-in-from-bottom-1"
@@ -177,7 +184,7 @@ const AssistantMessage: FC = () => {
         <MessagePrimitive.Unstable_PartsGrouped
           groupingFunction={groupConsecutiveToolCalls}
           components={{
-            Text: MarkdownText,
+            Text,
             Reasoning,
             Group: ToolCallGroup,
             tools: {

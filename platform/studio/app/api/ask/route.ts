@@ -27,6 +27,41 @@ export const maxDuration = 120;
 // One answer at a time per user (a second tab or a double send waits for the first).
 export const BUSY_SECONDS = 130;
 
+// The request body's limit (the conversation as text is far smaller), and questions per user per hour.
+export const MAX_BODY_BYTES = 64 * 1024;
+export const ASK_PER_HOUR = 20;
+export const ASK_WINDOW_SECONDS = 60 * 60;
+
+const TOO_LARGE = Symbol("too large");
+
+// The body as text, read no further than `max` bytes: a declared length over it, or a stream that
+// goes past it, is refused before anything is parsed.
+async function readCapped(req: Request, max: number): Promise<string | typeof TOO_LARGE> {
+  const declared = Number(req.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > max) return TOO_LARGE;
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return TOO_LARGE;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
 const noStore = { "Cache-Control": "no-store" };
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: noStore });
 
@@ -59,7 +94,15 @@ export async function POST(req: Request) {
   const session = await currentSession();
   if (!session?.tokens) return json({ error: "auth_required" }, 401);
   if (!askConfigured()) return json({ error: "not_configured", message: "AI is not configured." }, 503);
-  const parsed = Body.safeParse(await req.json().catch(() => null));
+  const raw = await readCapped(req, MAX_BODY_BYTES);
+  if (raw === TOO_LARGE) return json({ error: "too_large", message: "That conversation is too long. Start a new chat." }, 413);
+  let body: unknown = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = null;
+  }
+  const parsed = Body.safeParse(body);
   const history = parsed.success ? historyFrom(parsed.data.messages) : null;
   if (!history) return json({ error: "bad_request" }, 400);
 
@@ -86,10 +129,20 @@ export async function POST(req: Request) {
     await done();
     return json({ error: "not_developer", message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." }, 403);
   }
-  const release = await sessionStore().claim("ask-busy", session.userId ?? session.id, BUSY_SECONDS);
+  const who = session.userId ?? session.id;
+  const release = await sessionStore().claim("ask-busy", who, BUSY_SECONDS);
   if (!release) {
     await done();
     return json({ error: "busy", message: "Ask AI is still answering your last question." }, 429);
+  }
+  // Questions per user per hour, counted in the session store (shared by every instance).
+  if ((await sessionStore().count("ask", who, ASK_WINDOW_SECONDS)) > ASK_PER_HOUR) {
+    await release().catch(() => undefined);
+    await done();
+    return NextResponse.json(
+      { error: "rate_limited", message: `You've asked ${ASK_PER_HOUR} questions in the last hour. Ask AI will answer again shortly; search still works.` },
+      { status: 429, headers: { ...noStore, "Retry-After": String(ASK_WINDOW_SECONDS) } },
+    );
   }
 
   const stream = createUIMessageStream({

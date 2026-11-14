@@ -12,7 +12,9 @@ import type { UIMessage } from "ai";
 import { Loader2, MessageSquarePlus, Search, Sparkles, X } from "lucide-react";
 import type { MouseEvent } from "react";
 
+import { AskAiMarkdownText } from "@/components/ask-ai-markdown";
 import { Thread } from "@/components/assistant-ui/thread";
+import { isStudioPath } from "@/lib/studio-search";
 import { Button } from "@/components/ui/button";
 
 export type AskStatus = "loading" | "enabled" | "disabled";
@@ -74,6 +76,7 @@ function AskAiThread({ chat }: { chat: Chat }) {
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <Thread
+        Text={AskAiMarkdownText}
         placeholder={chat.messages.length ? "Ask a follow-up…" : "Ask about your apps, builds, members or licences…"}
         welcome={
           <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col justify-center gap-1 px-2 pb-6">
@@ -103,10 +106,11 @@ export function AskAiPanel({
   const onClickCapture = (e: MouseEvent<HTMLDivElement>) => {
     const a = (e.target as HTMLElement).closest("a");
     const href = a?.getAttribute("href") ?? "";
-    if (!a || !href.startsWith("/") || href.startsWith("//") || a.target === "_blank" || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    // Only a studio page is followed, in place; any other link (there shouldn't be one) goes nowhere.
     e.preventDefault();
     e.stopPropagation();
-    onNavigate(href);
+    if (isStudioPath(href)) onNavigate(href);
   };
   const newChat = () => {
     void chat.stop();

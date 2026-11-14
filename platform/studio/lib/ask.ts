@@ -28,15 +28,16 @@ export const ASK_TOOLS = [
   "list_workspace_audit",
   "list_builds",
   "get_build",
-  "hosting_status",
-  "app_status",
 ] as const satisfies readonly StudioTool[];
+// Left out though they only read: app_status runs a status command on the app's VM (and queues
+// and audits it), and hosting_status asks the hosting provider about every VM. Ask AI reads only
+// what Mynt has stored (get_linked_accounts' one lookup at the sign-in provider is cached).
 
 export type AskTool = (typeof ASK_TOOLS)[number];
 const ASK_SET = new Set<string>(ASK_TOOLS);
 export const isAskTool = (name: string): name is AskTool => ASK_SET.has(name) && Object.prototype.hasOwnProperty.call(STUDIO_TOOLS, name);
 
-export const ASK_SYSTEM_PROMPT = `You are Ask AI in Mynt Studio, where developers build finance apps on Mynt. You answer the signed-in developer's questions about their own Mynt data: their apps and their stages, builds, workspaces and members, invitations, where their products can serve customers (coverage), the partner licences behind them, the audit trail, hosting, and the products they can build on.
+export const ASK_SYSTEM_PROMPT = `You are Ask AI in Mynt Studio, where developers build finance apps on Mynt. You answer the signed-in developer's questions about their own Mynt data: their apps and their stages, builds, workspaces and members, invitations, where their products can serve customers (coverage), the partner licences behind them, the audit trail, and the products they can build on.
 
 How to answer:
 - Look things up with the tools before answering; never guess names, numbers, dates or statuses. If a tool doesn't return something, say you couldn't find it.
@@ -60,8 +61,15 @@ export function askToolDefs(tools: { name: string; description?: string; title?:
 export const MAX_QUESTION = 4000;
 const MAX_HISTORY = 20;
 const MAX_ANSWER_KEPT = 8000;
-export const MAX_TOOL_RESULT = 30_000;
+// Limits on one question, so a model asking for much (or a question asked to make it) can't run
+// up Mynt calls or the model bill: output tokens per step, steps, reads per step and per
+// question (run a few at a time), and how much of each reply goes back to the model.
+export const MAX_OUTPUT_TOKENS = 4000;
+export const MAX_TOOL_RESULT = 8000;
 export const MAX_STEPS = 8;
+export const MAX_CALLS_PER_STEP = 8;
+export const MAX_CALLS_PER_QUESTION = 24;
+export const CALL_CONCURRENCY = 4;
 
 type UiMessage = { role: string; parts?: { type: string; text?: string }[] };
 
@@ -123,12 +131,13 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
     { type: "text" as const, text: ASK_SYSTEM_PROMPT, cache_control: { type: "ephemeral" as const } },
     { type: "text" as const, text: deps.workspaceId ? `Selected workspace id: ${deps.workspaceId}` : "Selected workspace: the user's Personal one (no workspace_id)." },
   ];
+  let callsMade = 0;
   for (let step = 0; step < MAX_STEPS; step++) {
     if (deps.signal?.aborted) return;
     const stream = deps.llm.stream(
       {
         model: deps.model,
-        max_tokens: 16000,
+        max_tokens: MAX_OUTPUT_TOKENS,
         thinking: { type: "adaptive" },
         output_config: { effort: "low" },
         system,
@@ -160,10 +169,34 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
     messages.push({ role: "assistant", content: message.content });
     if (message.stop_reason === "pause_turn") continue;
     if (calls.length === 0) return;
-    const results = await Promise.all(calls.map((call) => runTool(call, deps)));
+    // The first reads of this step within both caps run; the rest are answered with an error.
+    const allowed = Math.max(0, Math.min(MAX_CALLS_PER_STEP, MAX_CALLS_PER_QUESTION - callsMade));
+    callsMade += Math.min(calls.length, allowed);
+    const results = await mapLimited(calls, CALL_CONCURRENCY, (call, i) => (i < allowed ? runTool(call, deps) : overCap(call, deps)));
     messages.push({ role: "user", content: results });
   }
   emitText(deps, TOO_MANY_STEPS);
+}
+
+export const OVER_CAP = `Not run: Ask AI makes at most ${MAX_CALLS_PER_STEP} reads at a time and ${MAX_CALLS_PER_QUESTION} per question. Answer with what you have, or ask for fewer.`;
+
+function overCap(call: ToolUse, deps: AskDeps): Promise<ToolResult> {
+  deps.emit({ type: "tool", id: call.id, name: call.name, input: call.input ?? {}, ok: false });
+  return Promise.resolve({ type: "tool_result", tool_use_id: call.id, is_error: true, content: OVER_CAP });
+}
+
+/** Runs `fn` over `items`, at most `limit` at once, keeping their order. */
+export async function mapLimited<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 function emitText(deps: AskDeps, text: string) {

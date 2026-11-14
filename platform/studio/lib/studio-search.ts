@@ -31,6 +31,21 @@ export function pageTitle(pathname: string): string | null {
   return PAGE_BY_SEGMENT.get(first)?.label ?? "Mynt Studio";
 }
 
+/**
+ * Whether an answer's link may be followed: a same-origin relative path only ("/coverage",
+ * "/<app id>"). Not "//host", "/\host" (browsers read both as another host), a scheme
+ * ("https:", "javascript:"), a bare word, or anything with spaces or control characters.
+ */
+export function isStudioPath(href: unknown): href is string {
+  if (typeof href !== "string" || href.length > 500) return false;
+  if (!/^\/(?![/\\])/.test(href) || /[\s\\\u0000-\u001f\u007f]/.test(href)) return false;
+  try {
+    return new URL(href, "https://studio.invalid").origin === "https://studio.invalid";
+  } catch {
+    return false;
+  }
+}
+
 export type SearchGroup = "Pages" | "Apps" | "Members" | "Licences" | "Audit actions";
 export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Members", "Licences", "Audit actions"];
 
