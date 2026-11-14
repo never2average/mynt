@@ -69,6 +69,7 @@ export function toProjects(appsReply: unknown, buildsReply: unknown): ProjectIte
         description: str(a.description),
         status: str(a.status, "draft"),
         stage: stageOf(a, conversations[0] ?? null),
+        ownerId: str(a.owner_id) || null,
         previewUrl: conversations.find((c) => c.previewUrl)?.previewUrl ?? null,
         conversations,
         updatedAt: str(a.updated_at),

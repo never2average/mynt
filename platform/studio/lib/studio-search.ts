@@ -8,15 +8,23 @@ export type StudioPage = { href: string; label: string; keywords?: string };
 // Every fixed page, in the order search lists them.
 export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/", label: "Dashboard", keywords: "home money customers spend" },
-  { href: "/coverage", label: "Coverage", keywords: "states map where serve" },
-  { href: "/licences", label: "Licences", keywords: "licenses partners regulators" },
+  { href: "/licences", label: "Licences", keywords: "licenses partners regulators coverage states map where serve" },
+  { href: "/licences?tab=coverage", label: "Coverage", keywords: "states map where serve licences" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
-  { href: "/members", label: "Members", keywords: "team invite people roles" },
+  { href: "/workspace", label: "Workspace", keywords: "members team invite invitations people roles apps settings rename" },
+  { href: "/liquidity", label: "Liquidity", keywords: "pools capital commit withdraw positions wallet" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
   { href: "/new", label: "New app", keywords: "create build start" },
 ];
 
-const PAGE_BY_SEGMENT = new Map(STUDIO_PAGES.map((p) => [p.href.split("/")[1] ?? "", p]));
+// Old pages that now redirect elsewhere: still fixed pages, never an app's id.
+const MOVED: readonly StudioPage[] = [
+  { href: "/members", label: "Workspace" },
+  { href: "/coverage", label: "Licences" },
+];
+
+// A tab of a page (/licences?tab=coverage) is that page.
+const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
 
 /** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page. */
 export function isAppPath(pathname: string): boolean {
@@ -69,7 +77,7 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
   }
   for (const m of sources.members ?? []) {
     const label = m.name ?? m.email ?? "Member";
-    items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/members", text: lower(m.name, m.email, m.role) });
+    items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/workspace?tab=members", text: lower(m.name, m.email, m.role) });
   }
   (sources.licences ?? []).forEach((l, i) => {
     const label = [l.partner, l.type].filter(Boolean).join(" · ") || l.number || "Licence";

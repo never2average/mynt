@@ -202,6 +202,7 @@ export function ProjectWorkspaceShell({
           {/* The app's own top bar (in place of the page header) */}
           {projectId && (
             <AppTopBar
+              appId={selectedProject ? projectId : null}
               appName={selectedProject?.name ?? (projectsLoading ? null : "App")}
               stage={selectedProject?.stage ?? null}
               backLabel={selectedConversationId ? "All builds" : "All apps"}

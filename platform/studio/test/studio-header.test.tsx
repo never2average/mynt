@@ -108,12 +108,12 @@ describe("the sidebar's folders", () => {
 
 describe("page titles", () => {
   it("are only the page's name, never the workspace", () => {
-    expect(["/", "/coverage", "/licences", "/audits", "/members", "/builds", "/new"].map(pageTitle)).toEqual([
+    expect(["/", "/coverage", "/licences", "/audits", "/workspace", "/builds", "/new"].map(pageTitle)).toEqual([
       "Dashboard",
-      "Coverage",
+      "Licences", // /coverage redirects to the Licences page's Coverage tab
       "Licences",
       "Audits",
-      "Members",
+      "Workspace",
       "Builds",
       "New app",
     ]);
@@ -126,10 +126,9 @@ describe("page titles", () => {
 describe("the studio's header", () => {
   const pages: [string, string][] = [
     ["/", "Dashboard"],
-    ["/coverage", "Coverage"],
     ["/licences", "Licences"],
     ["/audits", "Audits"],
-    ["/members", "Members"],
+    ["/workspace", "Workspace"],
     ["/builds", "Builds"],
     ["/new", "New app"],
   ];
@@ -144,7 +143,8 @@ describe("the studio's header", () => {
       expect(header.className).toContain("sticky");
       expect(header.className).toContain("top-0");
       expect(header.querySelector("h1")?.textContent).toBe(title);
-      expect(header.textContent).not.toMatch(/·|workspace/i);
+      // The workspace's name is never repeated here (the Workspace page's own title aside).
+      expect(header.textContent!.replace(title, "")).not.toMatch(/·|workspace|Personal/i);
       const newApp = header.querySelector("[data-new-app]");
       expect(newApp?.getAttribute("href")).toBe("/new");
       expect(newApp?.textContent).toContain("New app");
@@ -241,7 +241,8 @@ describe("search", () => {
     expect(labels("ines")).toEqual(["Members:Ines Diaz"]);
     expect(labels("nydfs")).toEqual(["Licences:Lead Bank · Money transmitter"]);
     expect(labels("invited")).toEqual(["Audit actions:member.invited"]);
-    expect(labels("cover")).toEqual(["Pages:Coverage"]);
+    expect(labels("cover")).toEqual(["Pages:Coverage", "Pages:Licences"]); // Coverage is a tab of Licences
+    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?tab=coverage");
     expect(labels("zzz")).toEqual([]);
     // Every word must match; empty lists the pages and apps.
     expect(labels("round savings")).toEqual(["Apps:Round-up savings"]);

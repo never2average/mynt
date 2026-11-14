@@ -1,15 +1,15 @@
 "use client"
 
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
-// the workspace switcher at the top, Dashboard, Coverage, Licences and Audits, the workspace's
-// apps in three folders by stage
+// the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
+// members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
 // foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
 // New app is in every page's header; Builds isn't in the sidebar (/builds still works).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { FileBadge, History, LayoutDashboard, Map as MapIcon } from "lucide-react"
+import { Building2, Droplets, FileBadge, History, LayoutDashboard } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -27,17 +27,22 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import type { Invitation } from "@/lib/invitations"
+import { hasLiquidity } from "@/lib/liquidity"
+import { useLiquidityAccess } from "@/lib/use-liquidity-access"
 import { groupByStage, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
 
-// The fixed pages, above the app folders.
+// The fixed pages, above the Apps folders, in order. A new fixed page is one entry here (and one
+// in STUDIO_PAGES, lib/studio-search.ts, for its title and search).
 const PAGES = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/coverage", label: "Coverage", icon: MapIcon },
   { href: "/licences", label: "Licences", icon: FileBadge },
   { href: "/audits", label: "Audits", icon: History },
+  { href: "/workspace", label: "Workspace", icon: Building2 },
 ] as const
+// Only for builders and liquidity providers, after Workspace.
+const LIQUIDITY_PAGE = { href: "/liquidity", label: "Liquidity", icon: Droplets } as const
 
 export type SidebarViewProps = {
   workspaces: Workspace[]
@@ -50,10 +55,11 @@ export type SidebarViewProps = {
   onCreateWorkspace: (name: string) => Promise<string | null>
   invitations?: Invitation[]
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
+  liquidity?: boolean
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -71,7 +77,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            {PAGES.map(({ href, label, icon: Icon }) => (
+            {[...PAGES, ...(liquidity ? [LIQUIDITY_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
                   <Link href={href}>
@@ -98,6 +104,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const { workspaces, selected, supported, select, reload, invitations, answerInvitation } = useWorkspace()
   const [groups, setGroups] = useState<Record<Stage, StagedApp[]> | null>(null)
   const [account, setAccount] = useState<Account>({ name: null, email: null })
+  const liquidity = hasLiquidity(useLiquidityAccess())
 
   // The selected workspace's apps (the API routes scope to it through the switcher's cookie).
   const loadApps = useCallback(async () => {
@@ -150,6 +157,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       onCreateWorkspace={create}
       invitations={invitations}
       onAnswerInvitation={answerInvitation}
+      liquidity={liquidity}
     />
   )
 }

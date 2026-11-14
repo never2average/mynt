@@ -1,13 +1,17 @@
 // The dashboard's second row of tiles, beside the money cards (same Card layout as shadcn/ui's
 // dashboard-01 section cards): active products, licences, the linked GitHub account and crypto
-// wallet. Link GitHub and Link wallet go to the identity provider's account page in the same
+// wallet. The GitHub tile also lists up to five of the developer's connected repositories with
+// their approval, View all, and Connect repository (components/repositories.tsx). Link GitHub and Link wallet go to the identity provider's account page in the same
 // tab (never an embedded sign-in); the page reads the accounts again when the user comes back.
 import Link from "next/link"
 import { ArrowRight, Github, Link2, Wallet } from "lucide-react"
 
+import { ConnectRepository, RepoTileList, type ReposState } from "@/components/repositories"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { LiquidityLinks } from "@/components/liquidity-links"
+import type { LiquidityAccess } from "@/lib/liquidity"
 import { count, type Dashboard } from "@/lib/dashboard"
 import { shortAddress, type LinkedAccounts } from "@/lib/linked-accounts"
 
@@ -32,7 +36,19 @@ function LinkOut({ href, label }: { href: string | null; label: string }) {
 const valueClass = (measured: boolean) =>
   measured ? "text-2xl font-semibold tabular-nums @[250px]/card:text-3xl" : "text-lg font-medium text-muted-foreground"
 
-export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; linked: LinkedAccounts | null }) {
+export function AccountTiles({
+  dashboard,
+  linked,
+  repos = { kind: "loading" },
+  onReposChanged,
+  liquidity,
+}: {
+  dashboard: Dashboard
+  linked: LinkedAccounts | null
+  repos?: ReposState // the developer's connected repositories, on the GitHub tile
+  onReposChanged?: () => void
+  liquidity?: LiquidityAccess | null // the wallet tile's liquidity links; read by the tile itself when not given
+}) {
   return (
     <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4">
       <Card className="@container/card" data-tile="active-products">
@@ -65,7 +81,13 @@ export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; link
           </CardDescription>
           <CardTitle className={valueClass(Boolean(linked?.github))}>{linked?.github ?? (linked ? "Not linked" : "…")}</CardTitle>
         </CardHeader>
-        <CardFooter>{linked && !linked.github && <LinkOut href={linked.manageUrl} label="Link GitHub" />}</CardFooter>
+        <CardFooter className="flex flex-col items-start gap-3 text-sm">
+          <RepoTileList state={repos} />
+          <div className="flex flex-wrap gap-2">
+            {linked && !linked.github && <LinkOut href={linked.manageUrl} label="Link GitHub" />}
+            <ConnectRepository enabled={repos.kind === "ready" && repos.connect} onConnected={onReposChanged} />
+          </div>
+        </CardFooter>
       </Card>
 
       <Card className="@container/card" data-tile="wallet">
@@ -85,7 +107,10 @@ export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; link
             </CardAction>
           )}
         </CardHeader>
-        <CardFooter>{linked && !linked.wallet && <LinkOut href={linked.manageUrl} label="Link wallet" />}</CardFooter>
+        <CardFooter className="flex flex-wrap gap-2">
+          {linked && !linked.wallet && <LinkOut href={linked.manageUrl} label="Link wallet" />}
+          <LiquidityLinks access={liquidity} />
+        </CardFooter>
       </Card>
     </div>
   )

@@ -35,8 +35,8 @@ export async function GET(_req: Request, { params }: Params) {
     const { workspace, supported } = await theirWorkspace(mynt, workspaceId);
     if (!supported) return json({ supported: false, message: UNSUPPORTED, members: [], invites: [], canManage: false });
     if (!workspace) return json({ error: "not_found", message: "That workspace isn't one of yours." }, 404);
-    const { members, invites } = fromListMembers(await callStudioTool(mynt, "list_workspace_members", { workspace_id: workspaceId }));
-    return json({ supported: true, role: workspace.role, canManage: canManageMembers(workspace.role), members, invites });
+    const { members, invites, manageUrl } = fromListMembers(await callStudioTool(mynt, "list_workspace_members", { workspace_id: workspaceId }));
+    return json({ supported: true, role: workspace.role, canManage: canManageMembers(workspace.role), members, invites, manageUrl });
   });
 }
 

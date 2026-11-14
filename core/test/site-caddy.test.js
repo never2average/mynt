@@ -40,6 +40,7 @@ const MYNT_PATHS = [
   "/ramp-sandbox/session",
   "/agent/v1/messages",
   "/bd/unsubscribe",
+  "/webhooks/clerk",
 ];
 const STUDIO_PATHS = ["/", "/2b0c6a52-app", "/2b0c6a52-app/9f1e-build", "/api/chat", "/api/auth/login", "/api/auth/callback", "/api/session", "/_next/static/chunks/main.js", "/favicon.ico"];
 

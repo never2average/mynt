@@ -12,7 +12,6 @@ describe("STUDIO_TOOLS", () => {
       "open_sandbox_editor",
       "reopen_sandbox",
       "update_app",
-      "connect_repository",
       "request_hosting",
       "deploy_app",
       "undeploy_app",
@@ -126,5 +125,18 @@ describe("STUDIO_TOOLS", () => {
     expect(isDeveloper(["consumer", "developer"])).toBe(true);
     expect(isDeveloper(["innovator"])).toBe(true);
     expect(isDeveloper(["consumer"])).toBe(false);
+  });
+});
+
+describe("promotions, attention and workspace settings on the allow-list", () => {
+  it("check stages, reasons and that archiving can't skip its 7 days", () => {
+    expect(parseStudioCall("get_promotion_checks", { app_id: "a1", to_stage: "production" })).toEqual({ tool: "get_promotion_checks", args: { app_id: "a1", to_stage: "production" } });
+    expect(parseStudioCall("promote_app", { app_id: "a1", to_stage: "idea" })).toHaveProperty("error");
+    expect(parseStudioCall("demote_app", { app_id: "a1", to_stage: "production", reason: "nope" })).toHaveProperty("error");
+    expect(parseStudioCall("demote_app", { app_id: "a1", to_stage: "idea" })).toHaveProperty("error");
+    expect(parseStudioCall("request_promotion_signoff", { app_id: "a1" })).toHaveProperty("tool");
+    expect(parseStudioCall("get_workspace_attention", { workspace_id: "w1" })).toHaveProperty("tool");
+    expect(parseStudioCall("archive_workspace", { workspace_id: "w1", now: true })).toHaveProperty("error");
+    for (const t of ["unarchive_workspace", "relink_workspace_org"]) expect(parseStudioCall(t, { workspace_id: "w1" })).toHaveProperty("tool");
   });
 });
