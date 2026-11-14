@@ -22,8 +22,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // A local validator can drop a transaction whose blockhash it hasn't caught up with ("Blockhash not found") or let
 // one expire while it's busy. Those never reached the program, so they are sent again with a fresh blockhash.
-const TRANSIENT = /Blockhash not found|BlockhashNotFound|block height exceeded|BlockheightExceeded|TransactionExpired|has expired/i;
-const transient = (e: any) => TRANSIENT.test(`${e}\n${(e?.logs ?? e?.transactionLogs ?? []).join("\n")}`);
+const TRANSIENT = /Blockhash not found|BlockhashNotFound|block height exceeded|Node is behind|\b429\b|Too Many Requests/i;
+// The program's own error, if it answered: from the AnchorError, or "Error Code: X" in the logs or the message.
+const programError = (e: any): string | null => {
+  const logs: string[] = e?.logs ?? e?.transactionLogs ?? [];
+  return (
+    e?.error?.errorCode?.code ??
+    anchor.AnchorError.parse(logs)?.error.errorCode.code ??
+    /Error Code: (\w+)/.exec(`${e}\n${logs.join("\n")}`)?.[1] ??
+    null
+  );
+};
+// Transient only when the program never answered and the RPC said one of these.
+const transient = (e: any) => programError(e) === null && TRANSIENT.test(`${e}\n${(e?.logs ?? e?.transactionLogs ?? []).join("\n")}`);
 async function retry<T>(send: () => Promise<T>, attempts = 3): Promise<T> {
   for (let i = 1; ; i++) {
     try {
@@ -89,7 +100,7 @@ describe("mynt_treasury", () => {
   const failure = async (e: any) => {
     let logs: string[] = e?.logs ?? e?.transactionLogs ?? [];
     if (!logs.length && typeof e?.getLogs === "function") logs = (await e.getLogs(connection).catch(() => [])) ?? [];
-    const code = e?.error?.errorCode?.code ?? anchor.AnchorError.parse(logs)?.error.errorCode.code ?? "";
+    const code = programError(e) ?? anchor.AnchorError.parse(logs)?.error.errorCode.code ?? /Error Code: (\w+)/.exec(logs.join("\n"))?.[1] ?? "";
     return { code, text: `${code}\n${logs.join("\n")}\n${e}` };
   };
   const fails = async (p: Promise<unknown>, re: RegExp) => {
