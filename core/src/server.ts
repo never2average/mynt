@@ -59,6 +59,7 @@ import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
 import { createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
 import { registerWorkspaceComplianceTools } from "./workspace-compliance.js";
+import { registerWorkspacePnlTools } from "./workspace-pnl.js";
 import { registerLinkedAccountsTools } from "./linked-accounts.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
@@ -123,6 +124,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).
     registerWorkspaceTools(server, store, user!, { clerk: ctx.clerkAdmin ?? null, offboarding: offboardingServices(ctx) });
     registerWorkspaceComplianceTools(server, store, user!);
+    // The workspace's profit and loss: its apps' money against building and running them (workspace-pnl.ts).
+    registerWorkspacePnlTools(server, store, user!);
     // Promotion between stages (promotions.ts) and what needs attention in a workspace (attention.ts).
     registerPromotionTools(server, store, user!);
     registerAttentionTools(server, store, user!);

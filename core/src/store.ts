@@ -1547,6 +1547,9 @@ const TABLES = `
   );
   CREATE INDEX IF NOT EXISTS money_movements_daily_idx ON financial_products.money_movements (rail_id, limit_day) WHERE NOT sandbox AND status <> 'failed';
   CREATE INDEX IF NOT EXISTS money_movements_product_idx ON financial_products.money_movements (product_id, created_at);
+  -- Live money settled through an app over a range of days (get_developer_dashboard, get_workspace_pnl).
+  CREATE INDEX IF NOT EXISTS money_movements_app_settled_idx ON financial_products.money_movements (app_id, (COALESCE(settled_at, updated_at)))
+    WHERE status = 'settled' AND NOT sandbox;
   CREATE INDEX IF NOT EXISTS money_movements_answer_idx ON financial_products.money_movements (subscription_id, request_id);
   CREATE INDEX IF NOT EXISTS money_movements_earlier_requests_idx ON financial_products.money_movements USING gin (earlier_request_ids);
   CREATE INDEX IF NOT EXISTS money_movements_open_idx ON financial_products.money_movements (updated_at) WHERE status IN ('requested', 'submitted');
