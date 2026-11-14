@@ -372,6 +372,78 @@ jobs:
       - name: Logs
         if: failure()
         run: for f in "$RUNNER_TEMP"/out*/*.log; do echo "::group::$f"; tail -n 120 "$f"; echo "::endgroup::"; done
+  # Mynt's treasury template (devnet only): built verifiably with the same pinned toolchain and scripts as a build's
+  # programs, then its tests on a local validator. The build must match the hash recorded in
+  # schemas/solana-treasury-template.json, and the mainnet program gate's hard rules must still refuse it.
+  solana-treasury:
+    runs-on: ubuntu-24.04
+    # The MCP server and everything it ships live in core/.
+    defaults:
+      run:
+        working-directory: core
+    timeout-minutes: 75
+    env:
+      TREASURY_ID: DCw4DC1HrhApHAWMxNhrKxw7XGHWGHndAMqVFfp13bJz
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci --workspaces=false
+      - run: npm run build
+      - name: Mynt's scripts, from its source
+        run: |
+          mkdir -p "$RUNNER_TEMP/mynt"
+          node -e 'import("./dist/solana/toolchain.js").then((m) => { const fs = require("fs"); fs.writeFileSync(process.argv[1] + "/solana-toolchain.sh", m.SOLANA_TOOLCHAIN_SCRIPT); fs.writeFileSync(process.argv[1] + "/solana-verify.sh", m.SOLANA_VERIFY_SCRIPT); })' "$RUNNER_TEMP/mynt"
+      - name: Install the pinned toolchain
+        run: bash "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+      - name: Verifiable build in a container, then the treasury's tests on a local validator
+        run: |
+          out="$RUNNER_TEMP/treasury-out"
+          mkdir -p "$RUNNER_TEMP/treasury"
+          cp -r workspaces/coding-build/templates/solana-treasury "$RUNNER_TEMP/treasury/solana"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/treasury" "$out" "$PWD/schemas/solana-crate-allowlist.json"
+          cp "$out/checks.jsonl" "$RUNNER_TEMP/treasury-checks.jsonl"
+          cat "$out/checks.jsonl"
+          grep -q '"name": "solana_build", "status": "pass"' "$out/checks.jsonl" || exit 1
+          sha256sum "$out"/*.so | tee "$RUNNER_TEMP/treasury.sha"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" test "$RUNNER_TEMP/treasury" "$out" "$RUNNER_TEMP/treasury-checks.jsonl" "$RUNNER_TEMP/mynt/solana-toolchain.sh"
+          sha256sum -c "$RUNNER_TEMP/treasury.sha"
+          cat "$RUNNER_TEMP/treasury-checks.jsonl"
+          tail -n 120 "$out/solana.test.log"
+          grep -q '"name": "solana_tests", "status": "pass"' "$RUNNER_TEMP/treasury-checks.jsonl"
+      - name: The build is the one recorded in the manifest
+        run: |
+          python3 - "$RUNNER_TEMP/treasury-out" schemas/solana-treasury-template.json <<'PY'
+          import json, sys
+          out, path = sys.argv[1], sys.argv[2]
+          manifest = json.load(open(path))
+          progs = {p["name"]: p for p in json.load(open(f"{out}/programs.json"))}
+          assert sorted(progs) == ["extension_probe", "mynt_treasury"], sorted(progs)
+          t = progs[manifest["program"]]
+          print(json.dumps({k: t.get(k) for k in ("sha256", "size", "declared_id", "cargo_lock_sha256", "cargo_lock_committed")}, indent=2))
+          print(f"::notice title=Treasury build hash::{t['sha256']}")
+          assert t["declared_id"] == manifest["declared_id"], t
+          assert t["cargo_lock_committed"], "the treasury commits its Cargo.lock"
+          assert t["cargo_lock_sha256"] == manifest["cargo_lock_sha256"], f"the Cargo.lock the build used isn't the recorded one: {t['cargo_lock_sha256']}"
+          assert t["sha256"] == manifest["program_sha256"], f"the treasury built to {t['sha256']}, not the {manifest['program_sha256']} recorded in {path}"
+          PY
+      - name: The mainnet program gate still refuses the treasury
+        run: |
+          out="$RUNNER_TEMP/treasury-out"
+          set +e
+          node scripts/program-rules.mjs --sources "$out/solana.sources.json" --program-id "$TREASURY_ID" --so "$out/mynt_treasury.so" --idl "$out/mynt_treasury.build-idl.json" \
+            --deps "$out/solana.deps.json" > "$RUNNER_TEMP/treasury-rules.json"
+          code=$?
+          set -e
+          python3 -c 'import json,sys; r = json.load(open(sys.argv[1])); print(json.dumps({"passed": r["passed"], "refusals": r.get("rules", {}).get("refusals", r.get("refusals"))}, indent=2)[:4000])' "$RUNNER_TEMP/treasury-rules.json" || cat "$RUNNER_TEMP/treasury-rules.json"
+          [ "$code" = 1 ] || { echo "program-rules exited $code, not 1 (refused)"; exit 1; }
+          grep -q "anchor_spl::token" "$RUNNER_TEMP/treasury-rules.json"
+      - name: Logs
+        if: failure()
+        run: for f in "$RUNNER_TEMP"/treasury-out/*.log; do echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"; done
   # The apps under platform/ (chat: mynt-chat's chat and developer console; studio: Mynt Studio), the repository's npm
   # workspaces, each installed on its own from the root lockfile with the sign-in code both import (@mynt/auth,
   # platform/packages/auth): each app's tests, type check and production build. For the studio, also: it and the

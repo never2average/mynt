@@ -33,7 +33,8 @@ reserved for this app (`name`, `cluster`, `program_id`); `solana.toolchain` the 
   `python3 scripts/scaffold_program.py ~/workspace/app/solana` (it takes the first reserved program; `--name`
   picks another). It writes the reserved address into `declare_id!` and `Anchor.toml`. Never change that
   address and never generate a program keypair to replace it: Mynt deploys only a program that declares its
-  reserved address.
+  reserved address. `templates/solana-treasury/` is Mynt's own reviewed treasury program for liquidity pools, not
+  a starting point: never copy it into an app or change it.
 - **Toolchain:** Mynt installs it when the sandbox starts (Agave, Anchor, Rust, pinned). Wait for
   `~/.mynt-solana/env` to exist, then `. ~/.mynt-solana/env` in each shell. Use exactly the versions in
   `solana.toolchain` and `docs/solana/README.md` (the template already does; `anchor test` on
