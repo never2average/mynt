@@ -1,8 +1,15 @@
 import { Assistant } from "../assistant";
 import { ProjectWelcome } from "@/components/assistant-ui/project-welcome";
-import { loadConversation } from "@/lib/conversation";
+import type { Metadata } from "next";
+import { loadAppName, loadConversation } from "@/lib/conversation";
 
 export const dynamic = "force-dynamic";
+
+// The tab title is the app's name.
+export async function generateMetadata({ params }: { params: Promise<{ projectId: string }> }): Promise<Metadata> {
+  const { projectId } = await params;
+  return { title: await loadAppName(projectId) };
+}
 
 // One build of a project, as a conversation with Mynt's coding agent, beside its preview.
 export default async function ConversationPage({

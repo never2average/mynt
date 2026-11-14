@@ -1,5 +1,8 @@
 import { licencesViewOf, regionOf } from "@/lib/licences-tabs";
 import { LicencesPage } from "./licences-page";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Licences" };
 
 // Licences (/licences?view=table|map&region=us|world): the partner licences table, or the
 // coverage map in its place. ?tab=coverage (the old Coverage tab) opens the map.

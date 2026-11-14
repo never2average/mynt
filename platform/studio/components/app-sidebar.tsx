@@ -1,7 +1,7 @@
 "use client"
 
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
-// the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
+// Mynt's logo and the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
 // members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
 // foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
@@ -11,6 +11,7 @@ import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
 import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
+import { MyntLogo } from "@/components/brand/mynt-logo"
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
@@ -64,6 +65,15 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
+        {/* Mynt's logo: the mark and wordmark, the mark alone on the collapsed icon rail. */}
+        <Link
+          href="/"
+          aria-label="Mynt Studio home"
+          className="flex h-8 items-center px-2 text-sidebar-foreground group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
+          data-sidebar-logo
+        >
+          <MyntLogo size={20} wordmarkClassName="group-data-[collapsible=icon]:hidden" />
+        </Link>
         <TeamSwitcher
           workspaces={workspaces}
           selected={selected}
