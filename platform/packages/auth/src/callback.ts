@@ -5,6 +5,17 @@ import { appUrlWithPath, safeReturnPath } from "./return-path";
 import type { RouteDeps } from "./routes";
 import type { AuthSession } from "./types";
 
+// What the authorization server's ?error means for the person: they declined (access_denied), or sign-in is set up
+// wrongly on Mynt's side (an unknown scope, client, request...), which only an admin can fix. The code and a short,
+// cleaned description go to the server's log for that admin; state and code never do.
+export function authorizationError(params: URLSearchParams): "denied" | "config" {
+  const error = params.get("error") ?? "";
+  if (error === "access_denied") return "denied";
+  const clean = (v: string | null, max: number) => (v ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, max);
+  console.error(`sign-in refused by the authorization server: ${clean(error, 64)}${params.get("error_description") ? `: ${clean(params.get("error_description"), 300)}` : ""}`);
+  return "config";
+}
+
 function sameState(a: string | undefined, b: string | null): boolean {
   if (!a || !b) return false;
   const x = Buffer.from(a);
@@ -25,7 +36,7 @@ export function callbackRoute<S extends AuthSession>({ config, sessions, session
     const expected = session.oauthState;
     session.oauthState = undefined; // single use
     await sessionStore().save(session);
-    if (params.get("error")) return fail("denied");
+    if (params.get("error")) return fail(authorizationError(params));
     if (!sameState(expected, params.get("state"))) return fail("state");
     const code = params.get("code");
     if (!code) return fail("code");

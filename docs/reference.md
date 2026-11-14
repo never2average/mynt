@@ -1444,6 +1444,13 @@ Operator steps, once per app (the domain is a placeholder for that app's own):
 2. It prints the client id. The client id and its secret go to `~/.mynt/oauth-mynt-studio.json`, a file only you can read (or the path you give with `--file`); `~/.mynt` itself is kept at 700. The secret is never printed. If the file can't be written, the Clerk application is deleted again (its secret would otherwise be lost), and the error says whether that worked or which application to delete by hand.
 3. Give the client id and secret to that app's server as its OAuth client, in place of registering itself: `MYNT_OAUTH_CLIENT_ID` and `MYNT_OAUTH_CLIENT_SECRET` for Mynt Studio and mynt-chat (see their READMEs). Then delete the file.
 4. Registering the same name again is refused, because the secret can't be read back. To replace the secret, rotate it in Clerk's dashboard.
+5. Each one allows the scopes Mynt's apps ask for: `openid profile email` (the same list Mynt's protected-resource metadata publishes). An app registered before `openid` was included makes every sign-in fail with `invalid_scope`; repair it in place, keeping its secret, with:
+   ```bash
+   node dist/index.js clerk first-party --update-scopes mynt-studio
+   ```
+   (by name or client id; it says whether anything changed, and prints only the name and client id).
+
+When the authorization server refuses a sign-in, the apps tell the person why only as far as they can act on it: declining (`access_denied`) shows "Sign-in was cancelled"; any other refusal (`invalid_scope`, `invalid_client`, `invalid_request`, `server_error`...) shows "Sign-in isn't set up correctly on Mynt's side. Please tell your admin." and logs the error code and a short, cleaned description on the app's server (never the state or code).
 
 Connect a client with just the URL; it will open Clerk's sign-in page:
 

@@ -8,4 +8,5 @@ export { preRegisteredClientFromEnv, type PreRegisteredClient } from "./first-pa
 export { createSessions, type Sessions } from "./session";
 export { createConnectMynt, callMyntTool, NotAllowedError, NotSignedInError, type ToolOutcome } from "./mynt-client";
 export { loginRoute, callbackRoute, logoutRoute, type RouteDeps } from "./routes";
+export { authorizationError } from "./callback";
 export { appUrlWithPath, safeReturnPath } from "./return-path";

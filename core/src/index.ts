@@ -45,6 +45,8 @@ const USAGE = `Usage:
   mynt users add --name <name> --role <role> [--role ...]   Local token (stdio, or HTTP without Clerk)
   mynt users list
   mynt clerk setup                     Turn on Clerk's allowlist and MCP client registration
+  mynt clerk first-party --update-scopes <name or client id>     Repair an existing first-party app's scopes (openid profile email);
+                                       keeps its secret, prints only its name and client id
   mynt clerk first-party <name> <redirect-uri> [--file <path>]   Register one of Mynt's own apps (no consent screen);
                                        prints its client id, writes id and secret to a file readable only by the
                                        user who runs it (the secret is never printed)
@@ -91,6 +93,7 @@ const { positionals, values } = parseArgs({
     cluster: { type: "string" },
     "program-id": { type: "string" },
     file: { type: "string" },
+    "update-scopes": { type: "string" },
   },
 });
 
@@ -338,6 +341,12 @@ if (values.help) {
   // One of Mynt's own apps, pre-registered with no consent screen (ClerkAdmin.firstPartyApp). The secret goes only to a
   // file only this user can read; it's never printed.
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");
+  if (values["update-scopes"]) {
+    // An app registered before its scopes included openid: fixed in place, its secret untouched.
+    const r = await admin.updateFirstPartyScopes(values["update-scopes"]).catch((e) => die((e as Error).message));
+    console.log(`${r.changed ? "Updated" : "Already right:"} '${r.name ?? "?"}' (client id ${r.client_id ?? "?"}) allows scopes: ${r.scopes}`);
+    process.exit(0);
+  }
   const [, , name, redirectUri] = positionals;
   if (!name || !redirectUri) die("usage: mynt clerk first-party <name> <redirect-uri> [--file <path>]");
   const app = await registerFirstPartyApp(admin, name, redirectUri, { file: values.file }).catch((e) => die((e as Error).message));

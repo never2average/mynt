@@ -211,6 +211,44 @@ describe("login and callback", () => {
     expect(res.headers.get("location")).toBe("https://mynt.example.com/new");
   });
 
+  it("the authorization server's refusals: declining is 'cancelled'; anything else is set up wrongly, logged for an admin", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((m: unknown) => void errors.push(String(m)));
+    try {
+      const h = harness();
+      await loginRoute(h.deps as never)(new NextRequest("https://mynt.example.com/api/auth/login"));
+      let state = h.current!.oauthState!;
+      let res = await callbackRoute(h.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/callback?error=access_denied&state=${state}`));
+      expect(res.headers.get("location")).toBe("https://mynt.example.com/signin-error?auth_error=denied");
+      expect(errors).toEqual([]);
+
+      await loginRoute(h.deps as never)(new NextRequest("https://mynt.example.com/api/auth/login"));
+      state = h.current!.oauthState!;
+      const description = encodeURIComponent("The OAuth 2.0 Client is not allowed to request scope 'openid'.\n\u0007" + "x".repeat(1000));
+      res = await callbackRoute(h.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/callback?error=invalid_scope&error_description=${description}&state=${state}&code=secretcode`));
+      expect(res.headers.get("location")).toBe("https://mynt.example.com/signin-error?auth_error=config");
+      expect(errors.length).toBe(1);
+      expect(errors[0]).toMatch(/invalid_scope: The OAuth 2\.0 Client is not allowed to request scope 'openid'\./);
+      expect(errors[0]).not.toMatch(/[\u0000-\u001f]/);
+      expect(errors[0].length).toBeLessThan(450);
+      expect(errors[0]).not.toContain(state);
+      expect(errors[0]).not.toContain("secretcode");
+      for (const code of ["invalid_client", "invalid_request", "server_error", "unauthorized_client"]) {
+        await loginRoute(h.deps as never)(new NextRequest("https://mynt.example.com/api/auth/login"));
+        const r = await callbackRoute(h.deps as never)(new NextRequest(`https://mynt.example.com/api/auth/callback?error=${code}&state=${h.current!.oauthState}`));
+        expect(r.headers.get("location"), code).toBe("https://mynt.example.com/signin-error?auth_error=config");
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("the sign-in error page names the set-up problem", async () => {
+    const { default: Page } = await import("@/app/signin-error/page");
+    const el = await Page({ searchParams: Promise.resolve({ auth_error: "config" }) });
+    expect(JSON.stringify(el)).toContain("Sign-in isn't set up correctly on Mynt's side. Please tell your admin.");
+  });
+
   it("a failed sign-in lands on the error page, which isn't gated (no loop)", async () => {
     const h = harness();
     await loginRoute(h.deps as never)(new NextRequest("https://mynt.example.com/api/auth/login"));
