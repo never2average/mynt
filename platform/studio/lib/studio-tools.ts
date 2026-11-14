@@ -37,6 +37,12 @@ export const STUDIO_TOOLS = {
     .object({ product_line: z.string().max(80).optional(), query: z.string().max(200).optional(), access_mode: z.string().max(40).optional() })
     .strict(),
   get_product: z.object({ id }).strict(),
+  // An app's SDK tab: the integration kit of each product the app uses (reading only).
+  get_product_sdk: z.object({ product_id: id }).strict(),
+  // An app's P&L tab: the workspace's profit and loss for that one app (reading only).
+  get_workspace_pnl: z
+    .object({ workspace_id: workspaceId, app_id: id.optional(), granularity: z.enum(["month", "week"]).optional(), periods: z.number().int().min(1).max(24).optional() })
+    .strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({
@@ -96,6 +102,8 @@ export const STUDIO_TOOLS = {
       app_id: id.optional(),
       from: auditDate.optional(),
       to: auditDate.optional(),
+      // Mynt's audit classes; sent only where its tool takes it (an app's Security tab).
+      class: z.enum(["security", "obligations", "financial", "workspace"]).optional(),
     })
     .strict(),
   // Invitations to other people's workspaces: joining is always the user's explicit choice.

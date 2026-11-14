@@ -18,8 +18,11 @@ const { SidebarProvider } = await import("@/components/ui/sidebar");
 beforeAll(() => {
   window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false })) as unknown as typeof window.matchMedia;
 });
+const fetched: string[] = [];
 beforeEach(() => {
+  fetched.length = 0;
   vi.stubGlobal("fetch", async (url: string) => {
+    fetched.push(String(url));
     if (String(url).startsWith("/api/projects"))
       return new Response(JSON.stringify({ projects: [{ id: "app-1", name: "Round-up savings", stage: "idea", previewUrl: null, conversations: [] }] }), { status: 200 });
     return new Response(JSON.stringify({}), { status: 200 });
@@ -64,8 +67,8 @@ describe("ChatWorkspaceShell", () => {
 });
 
 describe("an app's builder", () => {
-  it("renders the shared shell with its Preview tab, the default and only one, beside the chat", async () => {
-    expect(BUILDER_TABS.map((t) => t.label)).toEqual(["Preview"]);
+  it("renders the shared shell with Preview (the default), P&L, Licences, Security, SDK and Activity beside the chat; Promote is an action, not a tab", async () => {
+    expect(BUILDER_TABS.map((t) => t.label)).toEqual(["Preview", "P&L", "Licences", "Security", "SDK", "Activity"]);
     const { container } = render(
       <TooltipProvider>
         <SidebarProvider>
@@ -77,7 +80,20 @@ describe("an app's builder", () => {
     );
     await act(async () => undefined);
     expect(container.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
-    expect([...container.querySelectorAll("[data-panel-tab]")].map((b) => [b.getAttribute("data-panel-tab"), b.getAttribute("aria-selected")])).toEqual([["preview", "true"]]);
+    expect([...container.querySelectorAll("[data-panel-tab]")].map((b) => [b.getAttribute("data-panel-tab"), b.getAttribute("aria-selected")])).toEqual([
+      ["preview", "true"],
+      ["pnl", "false"],
+      ["licences", "false"],
+      ["security", "false"],
+      ["sdk", "false"],
+      ["activity", "false"],
+    ]);
+    expect(container.querySelector('[data-panel-tab="promote"]')).toBeNull();
+    // Only the Preview is read until another tab is opened: no app tab was fetched.
+    expect(fetched.filter((u) => u.includes("/panel?"))).toEqual([]);
+    fireEvent.click(container.querySelector('[data-panel-tab="licences"]')!);
+    await act(async () => undefined);
+    expect(fetched.filter((u) => u.includes("/panel?"))).toEqual(["/api/apps/app-1/panel?tab=licences"]);
     expect(container.querySelector('[data-panel-content="preview"]')?.textContent).toContain("No preview yet");
     expect(container.querySelector("[data-chat-side]")?.textContent).toContain("the chat");
     expect(container.textContent).toContain("Round-up savings");

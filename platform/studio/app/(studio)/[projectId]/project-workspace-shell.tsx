@@ -11,8 +11,13 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { AppTopBar, DEVICES, type Device } from "@/components/app-top-bar";
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell";
 
-// The builder's right-hand tabs: the live preview (the default). Its controls are in the top bar.
-export const BUILDER_TABS = [{ id: "preview", label: "Preview" }] as const;
+import { AppInfoTab } from "@/components/app-panel-tabs";
+import { APP_TABS, APP_TAB_LABELS, type AppTab } from "@/lib/app-panel";
+
+// The builder's right-hand tabs: the live preview (the default; its controls are in the top bar),
+// then the app's P&L, Licences, Security, SDK and Activity, each live and for this app only.
+// Promoting is an action (the top bar's button and its sheet), not a tab.
+export const BUILDER_TABS = APP_TABS.map((id) => ({ id, label: APP_TAB_LABELS[id] }));
 
 /** Build statuses that are still changing, so the list refreshes while one runs. */
 const ACTIVE_BUILD = /^(queued|provisioning|coding|auditing|checking|previewing|pushing|verifying)$/;
@@ -181,6 +186,12 @@ export function ProjectWorkspaceShell({
   );
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [panelTab, setPanelTab] = useState<AppTab>("preview");
+  // Another app opens on its preview.
+  useEffect(() => {
+    setPanelTab("preview");
+  }, [projectId]);
+  const panelVisible = !isMobile || mobileView === "preview";
   const [device, setDevice] = useState<Device>("desktop");
 
   const goBack = () => {
@@ -220,10 +231,19 @@ export function ProjectWorkspaceShell({
           showPanel={showWorkspacePanel}
           tabs={BUILDER_TABS.map((t) => ({
             ...t,
-            content: previewUrl ? <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} width={isMobile ? null : DEVICES[device].width} /> : <PreviewPlaceholder />,
+            content:
+              t.id === "preview" ? (
+                previewUrl ? (
+                  <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} width={isMobile ? null : DEVICES[device].width} />
+                ) : (
+                  <PreviewPlaceholder />
+                )
+              ) : projectId ? (
+                <AppInfoTab key={`${projectId}:${t.id}`} appId={projectId} tab={t.id} active={panelTab === t.id && panelVisible} />
+              ) : null,
           }))}
-          tab="preview"
-          onTab={() => undefined}
+          tab={panelTab}
+          onTab={(id) => setPanelTab(id as AppTab)}
           isMobile={isMobile}
           mobileView={mobileView === "preview" ? "panel" : "chat"}
           onMobileView={(v) => setMobileView(v === "panel" ? "preview" : "chat")}
