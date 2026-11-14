@@ -272,7 +272,7 @@ describe("search", () => {
     expect(labels("nydfs")).toEqual(["Licences:Lead Bank · Money transmitter"]);
     expect(labels("invited")).toEqual(["Audit actions:member.invited"]);
     expect(labels("cover")).toEqual(["Pages:Coverage", "Pages:Licences"]); // Coverage is a tab of Licences
-    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?tab=coverage");
+    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?view=map&region=us");
     expect(labels("zzz")).toEqual([]);
     // Every word must match; empty lists the pages and apps.
     expect(labels("round savings")).toEqual(["Apps:Round-up savings"]);

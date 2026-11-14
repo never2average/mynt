@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createRef } from "react";
 
 // The sidebar's icon rail, the toggle separators, the Apps folders (one open at a time), and
-// Coverage as a tab of Licences.
+// the Licences page: only the table, with the coverage map in its place.
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
@@ -21,7 +21,7 @@ const { NavFolders, FOLDER_KEY, initialFolder } = await import("@/components/nav
 const { SiteHeader } = await import("@/components/site-header");
 const { AppTopBar } = await import("@/components/app-top-bar");
 const { LicencesPageView } = await import("@/components/licences-page-view");
-const { licencesTabOf } = await import("@/lib/licences-tabs");
+const { licencesViewOf, regionOf } = await import("@/lib/licences-tabs");
 const { groupByStage } = await import("@/lib/workspaces");
 const { fromCoverage, fromLicences } = await import("@/lib/compliance");
 
@@ -141,30 +141,36 @@ describe("the Apps folders", () => {
 const coverage = fromCoverage({ states: [{ code: "CA", status: "unlocked", partners: [{ name: "Harbor Bank" }] }, { code: "NY", status: "available" }] });
 const licences = fromLicences({ licences: [{ partner: "Harbor Bank", number: "MT-1", states: ["CA"], status: "verified", expires_at: "2020-01-01" }] });
 
-describe("Licences, with Coverage as a tab", () => {
-  const view = (tab: "coverage" | "licences", c: Parameters<typeof LicencesPageView>[0]["coverage"] = { kind: "ready", data: coverage }) =>
-    renderToStaticMarkup(<LicencesPageView tab={tab} onTab={() => undefined} coverage={c} licences={{ kind: "ready", data: licences }} />);
+describe("Licences: only the table, the map in its place", () => {
+  const view = (v: "table" | "map", c: Parameters<typeof LicencesPageView>[0]["coverage"] = { kind: "ready", data: coverage }) =>
+    renderToStaticMarkup(<LicencesPageView view={v} onView={() => undefined} coverage={c} licences={{ kind: "ready", data: licences }} />);
 
-  it("has a summary card on top, then Coverage and Licences tabs; Coverage opens first", () => {
-    expect([licencesTabOf(undefined), licencesTabOf("licences"), licencesTabOf("x")]).toEqual(["coverage", "licences", "coverage"]);
-    const html = view("coverage");
-    expect(html.indexOf("data-licences-summary")).toBeLessThan(html.indexOf('role="tablist"'));
-    expect([...html.matchAll(/role="tab" aria-selected="(true|false)" data-tab="(\w+)"/g)].map((m) => [m[2], m[1]])).toEqual([["coverage", "true"], ["licences", "false"]]);
-    expect(html).toContain('data-tab-panel="coverage"');
-    expect(html).toMatch(/Unlocked states<\/dt><dd[^>]*>1</);
-    expect(html).toMatch(/Expired<\/dt><dd[^>]*>1</);
-    const table = view("licences");
-    expect(table).toContain('data-tab-panel="licences"');
-    expect(table).toContain("MT-1");
+  it("has no summary card and no tabs: the table, with the view toggle", () => {
+    const html = view("table");
+    expect(html).not.toContain("data-licences-summary");
+    expect(html).not.toContain('role="tablist"');
+    expect(html).not.toContain('data-slot="card"');
+    expect(html).toContain("data-table-view");
+    expect(html).toContain("MT-1");
+    expect(html).toMatch(/aria-label="Map view"/);
   });
 
-  it("says what isn't available yet, never 0", () => {
-    const html = view("coverage", { kind: "unsupported" });
-    expect(html).toMatch(/Unlocked states<\/dt><dd[^>]*>Not available yet</);
+  it("the map view replaces the table in the same place; ?tab=coverage and ?view=map open it", () => {
+    expect([licencesViewOf({}), licencesViewOf({ tab: "coverage" }), licencesViewOf({ tab: "licences" }), licencesViewOf({ view: "map" }), licencesViewOf({ view: "table", tab: "coverage" })]).toEqual(["table", "map", "table", "map", "table"]);
+    expect([regionOf(undefined), regionOf("world"), regionOf("mars")]).toEqual(["us", "world", "us"]);
+    const html = view("map");
+    expect(html).toContain("data-map-view");
+    expect(html).not.toContain("data-table-view");
+    expect(html).toContain('data-region-shown="us"');
+  });
+
+  it("says what isn't available yet, never an empty map", () => {
+    const html = view("map", { kind: "unsupported" });
     expect(html).toContain('data-empty="not-available"');
+    expect(html).not.toContain("data-map-view");
   });
 
-  it("/coverage redirects to its tab", async () => {
+  it("/coverage opens the map view (US)", async () => {
     const { default: CoveragePage } = await import("@/app/(studio)/coverage/page");
     let to: string | undefined;
     try {
@@ -172,6 +178,6 @@ describe("Licences, with Coverage as a tab", () => {
     } catch (e) {
       to = (e as { digest?: string }).digest;
     }
-    expect(to).toContain("/licences?tab=coverage");
+    expect(to).toContain("/licences?view=map&region=us");
   });
 });
