@@ -69,16 +69,18 @@ export function NeedsAttention({ state }: { state: Loaded<AttentionItem[]> }) {
                   {i.detail && <span className="text-sm text-muted-foreground">{i.detail}</span>}
                 </div>
                 {when(i.at) && <span className="shrink-0 text-xs text-muted-foreground">{when(i.at)}</span>}
-                {i.href &&
-                  (i.external ? (
-                    <a href={i.href} target="_blank" rel="noopener noreferrer" className="shrink-0 text-sm font-medium hover:underline">
-                      Open
-                    </a>
-                  ) : (
-                    <Link href={i.href} className="shrink-0 text-sm font-medium hover:underline">
-                      Open
-                    </Link>
-                  ))}
+                {/* Only studio pages are links; any other address Mynt gives is shown, not followed. */}
+                {i.href ? (
+                  <Link href={i.href} className="shrink-0 text-sm font-medium hover:underline">
+                    Open
+                  </Link>
+                ) : (
+                  i.linkText && (
+                    <span className="max-w-48 shrink-0 truncate text-xs text-muted-foreground" title={i.linkText} data-plain-link>
+                      {i.linkText}
+                    </span>
+                  )
+                )}
               </li>
             ))}
           </ul>

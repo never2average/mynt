@@ -110,7 +110,7 @@ describe("page titles", () => {
   it("are only the page's name, never the workspace", () => {
     expect(["/", "/coverage", "/licences", "/audits", "/workspace", "/builds", "/new"].map(pageTitle)).toEqual([
       "Dashboard",
-      "Coverage",
+      "Licences", // /coverage redirects to the Licences page's Coverage tab
       "Licences",
       "Audits",
       "Workspace",
@@ -126,7 +126,6 @@ describe("page titles", () => {
 describe("the studio's header", () => {
   const pages: [string, string][] = [
     ["/", "Dashboard"],
-    ["/coverage", "Coverage"],
     ["/licences", "Licences"],
     ["/audits", "Audits"],
     ["/workspace", "Workspace"],
@@ -242,7 +241,8 @@ describe("search", () => {
     expect(labels("ines")).toEqual(["Members:Ines Diaz"]);
     expect(labels("nydfs")).toEqual(["Licences:Lead Bank · Money transmitter"]);
     expect(labels("invited")).toEqual(["Audit actions:member.invited"]);
-    expect(labels("cover")).toEqual(["Pages:Coverage"]);
+    expect(labels("cover")).toEqual(["Pages:Coverage", "Pages:Licences"]); // Coverage is a tab of Licences
+    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?tab=coverage");
     expect(labels("zzz")).toEqual([]);
     // Every word must match; empty lists the pages and apps.
     expect(labels("round savings")).toEqual(["Apps:Round-up savings"]);

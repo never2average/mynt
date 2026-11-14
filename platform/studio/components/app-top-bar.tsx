@@ -71,7 +71,7 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
   return (
     <header className="sticky top-0 z-20 flex h-11 shrink-0 items-center gap-1 border-b bg-background px-2" data-app-top-bar>
       <SidebarTrigger className="size-7" />
-      <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-4" />
+      <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" data-toggle-separator />
       {isMobile && mobileView === "preview" ? (
         <button type="button" onClick={onShowChat} className="flex items-center gap-1 rounded-md px-1.5 py-1 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground">
           <ChevronLeftIcon className="size-3.5" /> Chat

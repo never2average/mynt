@@ -8,8 +8,8 @@ export type StudioPage = { href: string; label: string; keywords?: string };
 // Every fixed page, in the order search lists them.
 export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/", label: "Dashboard", keywords: "home money customers spend" },
-  { href: "/coverage", label: "Coverage", keywords: "states map where serve" },
-  { href: "/licences", label: "Licences", keywords: "licenses partners regulators" },
+  { href: "/licences", label: "Licences", keywords: "licenses partners regulators coverage states map where serve" },
+  { href: "/licences?tab=coverage", label: "Coverage", keywords: "states map where serve licences" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
   { href: "/workspace", label: "Workspace", keywords: "members team invite invitations people roles apps settings rename" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
@@ -17,9 +17,13 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
 ];
 
 // Old pages that now redirect elsewhere: still fixed pages, never an app's id.
-const MOVED: readonly StudioPage[] = [{ href: "/members", label: "Workspace" }];
+const MOVED: readonly StudioPage[] = [
+  { href: "/members", label: "Workspace" },
+  { href: "/coverage", label: "Licences" },
+];
 
-const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].map((p) => [p.href.split("/")[1] ?? "", p]));
+// A tab of a page (/licences?tab=coverage) is that page.
+const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
 
 /** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page. */
 export function isAppPath(pathname: string): boolean {
