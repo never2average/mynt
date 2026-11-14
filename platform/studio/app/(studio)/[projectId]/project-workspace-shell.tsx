@@ -6,9 +6,13 @@ import { cn } from "@/lib/utils";
 import type { ProjectItem } from "@/lib/project-types";
 import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { ProjectsProvider } from "@/lib/projects-context";
-import { CodeIcon, Loader2Icon, MonitorIcon } from "lucide-react";
+import { Loader2Icon } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { AppTopBar, DEVICES, type Device } from "@/components/app-top-bar";
+import { ChatWorkspaceShell } from "@/components/chat-workspace-shell";
+
+// The builder's right-hand tabs: the live preview (the default). Its controls are in the top bar.
+export const BUILDER_TABS = [{ id: "preview", label: "Preview" }] as const;
 
 /** Build statuses that are still changing, so the list refreshes while one runs. */
 const ACTIVE_BUILD = /^(queued|provisioning|coding|auditing|checking|previewing|pushing|verifying)$/;
@@ -152,12 +156,6 @@ export function ProjectWorkspaceShell({
     if (!projectId) setMobileView("chat");
   }, [projectId]);
 
-  // On mobile, compute which panel to show
-  const gridColumns = (() => {
-    if (!showWorkspacePanel) return "1fr 0fr";
-    if (isMobile) return mobileView === "chat" ? "1fr 0fr" : "0fr 1fr";
-    return "2fr 3fr";
-  })();
 
   const conversationsContextValue = useMemo(
     () => ({
@@ -198,79 +196,38 @@ export function ProjectWorkspaceShell({
   return (
     <ProjectsProvider value={projectsContextValue}>
       <ProjectConversationsProvider value={conversationsContextValue}>
-        <div className="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden">
-          {/* The app's own top bar (in place of the page header) */}
-          {projectId && (
-            <AppTopBar
-              appId={selectedProject ? projectId : null}
-              appName={selectedProject?.name ?? (projectsLoading ? null : "App")}
-              stage={selectedProject?.stage ?? null}
-              backLabel={selectedConversationId ? "All builds" : "All apps"}
-              onBack={goBack}
-              previewUrl={showWorkspacePanel ? previewUrl : null}
-              iframeRef={iframeRef}
-              device={device}
-              onDevice={setDevice}
-              isMobile={isMobile}
-              mobileView={mobileView}
-              onShowChat={() => setMobileView("chat")}
-            />
-          )}
-
-          {/* Main content grid */}
-          <div
-            className={cn(
-              "grid min-h-0 flex-1 pb-2",
-              !isMobile &&
-                "transition-[grid-template-columns] duration-500 ease-in-out",
-            )}
-            style={isMobile ? undefined : { gridTemplateColumns: gridColumns }}
-          >
-            <div
-              className={cn(
-                "relative min-w-0 overflow-hidden",
-                isMobile && mobileView === "preview" && "hidden",
-              )}
-            >
-              {children}
-            </div>
-            <div
-              className={cn(
-                "min-w-0 overflow-hidden",
-                !isMobile && "transition-opacity duration-500",
-                showWorkspacePanel && (!isMobile || mobileView === "preview")
-                  ? "opacity-100"
-                  : !isMobile && "pointer-events-none opacity-0",
-                isMobile && mobileView === "chat" && "hidden",
-              )}
-            >
-              {showWorkspacePanel &&
-                (previewUrl ? (
-                  <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} width={isMobile ? null : DEVICES[device].width} />
-                ) : (
-                  <PreviewPlaceholder />
-                ))}
-            </div>
-          </div>
-
-          {/* Mobile floating toggle button */}
-          {isMobile && showWorkspacePanel && (
-            <button
-              type="button"
-              onClick={() =>
-                setMobileView((v) => (v === "chat" ? "preview" : "chat"))
-              }
-              className="fixed right-4 bottom-20 z-50 flex size-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform active:scale-95"
-              title={mobileView === "chat" ? "Show preview" : "Show chat"}
-            >
-              {mobileView === "chat" ? (
-                <MonitorIcon className="size-5" />
-              ) : (
-                <CodeIcon className="size-5" />
-              )}
-            </button>
-          )}
-        </div>
+        <ChatWorkspaceShell
+          // The app's own top bar (in place of the page header)
+          topBar={
+            projectId && (
+              <AppTopBar
+                appId={selectedProject ? projectId : null}
+                appName={selectedProject?.name ?? (projectsLoading ? null : "App")}
+                stage={selectedProject?.stage ?? null}
+                backLabel={selectedConversationId ? "All builds" : "All apps"}
+                onBack={goBack}
+                previewUrl={showWorkspacePanel ? previewUrl : null}
+                iframeRef={iframeRef}
+                device={device}
+                onDevice={setDevice}
+                isMobile={isMobile}
+                mobileView={mobileView}
+                onShowChat={() => setMobileView("chat")}
+              />
+            )
+          }
+          chat={children}
+          showPanel={showWorkspacePanel}
+          tabs={BUILDER_TABS.map((t) => ({
+            ...t,
+            content: previewUrl ? <AppPreview previewUrl={previewUrl} iframeRef={iframeRef} width={isMobile ? null : DEVICES[device].width} /> : <PreviewPlaceholder />,
+          }))}
+          tab="preview"
+          onTab={() => undefined}
+          isMobile={isMobile}
+          mobileView={mobileView === "preview" ? "panel" : "chat"}
+          onMobileView={(v) => setMobileView(v === "panel" ? "preview" : "chat")}
+        />
       </ProjectConversationsProvider>
     </ProjectsProvider>
   );
