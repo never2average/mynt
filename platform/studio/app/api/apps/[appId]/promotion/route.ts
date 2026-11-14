@@ -29,11 +29,12 @@ export async function GET(req: Request, { params }: Params) {
     if (!ps.checks || !ps.promote) return json({ supported: false });
     const app = await appAndRole(mynt, appId, workspaceSupport(tools));
     if (!app) return json({ error: "not_found", message: NOT_YOURS }, 404);
-    const base = { supported: true, app: { id: app.id, name: app.name, stage: app.stage }, role: app.role, canChange: canChangeStage(app.role), tools: { demote: ps.demote, signoff: ps.signoff } };
+    const summary = { id: app.id, name: app.name, stage: app.stage };
+    const base = { supported: true, app: summary, role: app.role, canChange: canChangeStage(app.role), tools: { demote: ps.demote, signoff: ps.signoff } };
     if (!target) return json(base);
     const checks = fromPromotionChecks(await callStudioTool(mynt, "get_promotion_checks", { app_id: appId, to_stage: target.data }), target.data);
     if (!checks) return json({ error: "unreadable", message: "Mynt's checks weren't readable. Please try again." }, 502);
-    return json({ ...base, app: { ...base.app, stage: checks.fromStage ?? app.stage }, checks });
+    return json({ ...base, app: { ...summary, stage: checks.fromStage ?? app.stage }, checks });
   });
 }
 
