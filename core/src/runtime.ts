@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appRole, memberApp, workspaceRole } from "./workspaces.js";
+import { isProduction, NOT_PRODUCTION } from "./promotion-schema.js";
 import { licencesForProducts } from "./workspace-compliance.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
@@ -413,6 +414,8 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
       if (!app) return fail(`No app with id '${app_id}'`);
       // A live key reaches real customers' data: only the workspace's owners and admins make one.
       if (environment === "live" && (await appRole(store, user, app)) === "member") return fail("Only the workspace's owners and admins create live keys; members create sandbox keys");
+      // Production gates real money: ideas and staging run on sandbox keys only.
+      if (environment === "live" && !(await isProduction(store.db, app.id))) return fail(NOT_PRODUCTION);
       const { key, secret } = await store.createApiKey(user.id, { app_id: app.id, environment, label, allowed_origins });
       await audit("create_api_key", key.id, { app_id: app.id, environment, label });
       return json({
@@ -452,6 +455,7 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
       if (!key) return fail(`No API key '${key_id}'`);
       if ((await appRole(store, user, (await store.getApp(key.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate keys");
       if (key.status !== "active") return fail("The key is revoked; create a new one");
+      if (key.environment === "live" && !(await isProduction(store.db, key.app_id))) return fail(NOT_PRODUCTION);
       const rotated = await store.rotateApiKey(key.id, key.environment, user.id);
       await audit("rotate_api_key", key.id, { app_id: key.app_id });
       return json({ ...rotated.key, key: rotated.secret, note: "Save this key now; it can't be shown again." });
@@ -635,6 +639,8 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
       if (!app) return fail(`No app with id '${app_id}'`);
       const latest = (await store.appReleases(app.id)).map((r) => r.version).sort(compareSemver).at(-1);
       if (latest && compareSemver(version, latest) <= 0) return fail(`Version must be greater than the latest release, ${latest}`);
+      // Publishing reaches real customers: production apps only.
+      if (!(await isProduction(store.db, app.id))) return fail(NOT_PRODUCTION);
       const blocked = notReady(await readiness(app));
       if (blocked) return blocked;
       await store.saveApp({ ...app, status: "published" });

@@ -9,7 +9,7 @@ import { createServer } from "../dist/server.js";
 import { createMcpHttpServer } from "../dist/http.js";
 import { checkWebhookUrl, compareSemver, deliverDueWebhooks, emitEvent, retryDelay, webhookUrlProblem } from "../dist/runtime.js";
 import { Store } from "../dist/store.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, inProduction, licensed } from "./helpers.js";
 
 const SANDBOX_ORIGIN = "https://mynt.test";
 
@@ -101,6 +101,8 @@ async function devWithApp(ctx, name = "Dev", fields = {}) {
   const client = await ctx.connect(user);
   const app = (await ctx.call(client, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["green-fd", "ppf"], ...fields })).data;
   assert.ok(app.id, JSON.stringify(app));
+  // These tests are about what a production app does with live keys (production gates real money).
+  await inProduction(ctx.store, app.id);
   return { user, client, app };
 }
 

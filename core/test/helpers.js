@@ -51,3 +51,12 @@ export async function licensed(store, user, { region = "IN", category = "deposit
   await store.reviewLicense(held.id, "verified", user.id, "test");
   return held;
 }
+
+// Puts an app in Production, as promote_app would once Mynt's checks pass (production gates real money: live keys,
+// live runtime calls and publishing). For tests about what a production app does, not about promotion itself.
+export async function inProduction(store, appId) {
+  await store.db.query(
+    "INSERT INTO financial_products.app_promotions (app_id, stage) VALUES ($1, 'production') ON CONFLICT (app_id) DO UPDATE SET stage = 'production'",
+    [appId],
+  );
+}

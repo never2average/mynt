@@ -5,7 +5,7 @@ import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
 import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
-import { PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
+import { grandfatherLiveApps, PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
@@ -2155,6 +2155,7 @@ export class Store {
     await store.migrateComponents();
     await migrateAppWorkspaces(db);
     await seedAppStages(db);
+    await grandfatherLiveApps(db);
     return store;
   }
 

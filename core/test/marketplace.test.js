@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, inProduction, licensed } from "./helpers.js";
 
 async function setup() {
   const pg = new PGlite();
@@ -140,6 +140,7 @@ test("open, approval and private products, and the innovator's inbox", async () 
   const devUser = await ctx.as("Dev", ["developer"]);
   const dev = await ctx.connect(devUser);
   const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["green-fd"] })).data;
+  await inProduction(ctx.store, app.id);
 
   // Approval (default): rejected first, then approved.
   let req = (await ctx.call(dev, "request_product_access", { app_id: app.id, product_id: "green-fd", note: "Savings app" })).data;
@@ -154,6 +155,7 @@ test("open, approval and private products, and the innovator's inbox", async () 
   // Open: no request needed.
   await ctx.call(inno, "set_product_access", { id: "green-fd", access_mode: "open" });
   const app2 = (await ctx.call(dev, "create_app", { name: "Saver 2", description: "More", audience: "Savers", product_ids: ["green-fd"] })).data;
+  await inProduction(ctx.store, app2.id);
   assert.equal((await ctx.call(dev, "publish_app", { app_id: app2.id })).data.status, "published");
 
   // Private: hidden and closed until invited.
@@ -163,6 +165,7 @@ test("open, approval and private products, and the innovator's inbox", async () 
   assert.equal((await ctx.call(other, "create_app", { name: "X", description: "X", audience: "X", product_ids: ["green-fd"] })).isError, true);
   await ctx.call(inno, "invite_developer", { product_id: "green-fd", developer_email: "other@example.com" });
   const app3 = (await ctx.call(other, "create_app", { name: "X", description: "X", audience: "X", product_ids: ["green-fd"] })).data;
+  await inProduction(ctx.store, app3.id);
   assert.equal((await ctx.call(other, "publish_app", { app_id: app3.id })).data.status, "published");
   assert.equal((await ctx.call(other, "get_product_sdk", { product_id: "green-fd" })).data.access.status, "invited");
 });
@@ -180,6 +183,7 @@ test("experiences must meet the product's build terms", async () => {
   assert.equal(sdk.integration.actions.initiate_onboarding, "not permitted");
 
   const app = (await ctx.call(dev, "create_app", { name: "Risk-free savings", description: "Save", audience: "Savers", product_ids: ["green-fd"], actions: ["display", "initiate_onboarding"] })).data;
+  await inProduction(ctx.store, app.id);
   const refused = await ctx.call(dev, "publish_app", { app_id: app.id });
   assert.deepEqual(refused.data.failed_checks.map((c) => c.name).sort(), ["actions", "banned_phrases", "disclosures"]);
 
@@ -194,6 +198,7 @@ test("innovators can revoke access or pull a product from every experience at on
   const guest = await ctx.connect(null);
   const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
   const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["green-fd", "ppf"] })).data;
+  await inProduction(ctx.store, app.id);
   const req = (await ctx.call(dev, "request_product_access", { app_id: app.id, product_id: "green-fd" })).data;
   await ctx.call(inno, "review_request", { request_id: req.id, decision: "approve" });
   await ctx.call(dev, "publish_app", { app_id: app.id });

@@ -221,12 +221,7 @@ async function licenceCheck(store: Store, app: App, s: State): Promise<{ check: 
   return { check: { ...base, status: "pass", detail: `Covered by a licence in force for every target state: ${covered.join("; ")}` }, moneyFirms };
 }
 
-async function keyCheck(q: Q, app: App): Promise<PromotionCheck> {
-  const base = { id: "live_key", label: "A live API key" };
-  const n = Number((await one(q, `SELECT count(*)::int AS n FROM ${T}.api_keys WHERE app_id = $1 AND environment = 'live' AND status = 'active'`, [app.id]))?.n ?? 0);
-  if (n) return { ...base, status: "pass", detail: `${n} active live key(s)${app.status === "published" ? "" : "; they work once the app is published"}` };
-  return { ...base, status: "fail", detail: "No active live key", fix: { label: "Create a live key", href: `/${app.id}`, tool: "create_api_key" } };
-}
+// No live-key check: live keys come after promotion (production gates real money), so an app can't hold one before.
 
 async function webhookCheck(q: Q, app: App): Promise<PromotionCheck> {
   const base = { id: "webhooks", label: "Webhooks verified" };
@@ -409,7 +404,6 @@ async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "stagi
       auditCheck(s, { production: true, strict: needs }),
       hostingCheck(app.id, s, true),
       check,
-      await keyCheck(q, app),
       await webhookCheck(q, app),
       findingsCheck(app.id, s, needs),
       programCheck(app.id, s, programs),
@@ -487,13 +481,24 @@ export async function demoteApp(store: Store, user: Pick<User, "id">, app: App, 
     const from = await stageOf(tx, app);
     if (ORDER.indexOf(to) !== ORDER.indexOf(from) - 1)
       throw new PromotionError(from === "idea" ? "The app is in idea, the first stage" : `Demote one step at a time: the app is in ${from}, so it goes down to ${ORDER[ORDER.indexOf(from) - 1]}`);
+    // Out of production, nothing may still reach real money: refused while it has active live keys (the caller revokes
+    // them first, deliberately; demotion never revokes them itself), and the app stops being published.
+    let unpublished = false;
+    if (from === "production") {
+      const keys = (await rowsOf(tx, `SELECT id::text AS id, label FROM ${T}.api_keys WHERE app_id = $1 AND environment = 'live' AND status = 'active' ORDER BY created_at`, [app.id])) as { id: string; label: string }[];
+      if (keys.length)
+        throw new PromotionError(
+          `The app still has ${keys.length} active live key(s) (${keys.map((k) => `${k.label}: ${k.id}`).join(", ")}): revoke them first (revoke_api_key; a hosted app's runtime key too, after undeploying it or before redeploying it on a sandbox key)`,
+        );
+      unpublished = (await rowsOf(tx, `UPDATE ${T}.apps SET status = 'draft', updated_at = now() WHERE id = $1 AND status = 'published' RETURNING id`, [app.id])).length > 0;
+    }
     await tx.query(
       `INSERT INTO ${T}.app_promotions (app_id, stage, build_id, checks, updated_by, updated_at) VALUES ($1, $2, NULL, NULL, $3, now())
        ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, build_id = NULL, source_sha256 = NULL, hosted_build_id = NULL, checks = NULL, updated_by = EXCLUDED.updated_by, updated_at = now()`,
       [app.id, to, user.id],
     );
-    await auditIn(tx, user.id, "app_demoted", app.id, { app_id: app.id, workspace_id: app.workspace_id, from_stage: from, to_stage: to, reason });
-    return { app_id: app.id, from_stage: from, to_stage: to, reason };
+    await auditIn(tx, user.id, "app_demoted", app.id, { app_id: app.id, workspace_id: app.workspace_id, from_stage: from, to_stage: to, reason, unpublished });
+    return { app_id: app.id, from_stage: from, to_stage: to, reason, ...(unpublished ? { unpublished: true } : {}) };
   });
 }
 
@@ -650,7 +655,7 @@ export function registerPromotionTools(server: McpServer, store: Store, user: Us
     {
       title: "What an app needs to move up a stage",
       description:
-        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, an active live key, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings).",
+        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
       inputSchema: { app_id: z.string(), to_stage: TO },
       annotations: { readOnlyHint: true },
     },
@@ -689,7 +694,7 @@ export function registerPromotionTools(server: McpServer, store: Store, user: Us
     {
       title: "Move an app down one stage",
       description:
-        "Developer (the workspace's owners and admins): move an app down one stage (production → staging, staging → idea), always allowed, with the reason, recorded in the workspace's audit trail (app_demoted). It changes the app's folder only: its hosting, keys and webhooks stay as they are.",
+        "Developer (the workspace's owners and admins): move an app down one stage (production → staging, staging → idea), with the reason, recorded in the workspace's audit trail (app_demoted). Out of production nothing may reach real money: demoting a production app is refused while it has active live keys (revoke them first with revoke_api_key; demotion never revokes them for you), and it unpublishes the app. Its hosting and webhooks stay as they are.",
       inputSchema: { app_id: z.string(), to_stage: z.enum(["idea", "staging"]), reason: z.string().min(1).max(1000) },
     },
     async ({ app_id, to_stage, reason }) => {
