@@ -8,6 +8,8 @@ import { ArrowRight, Github, Link2, Wallet } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { LiquidityLinks } from "@/components/liquidity-links"
+import type { LiquidityAccess } from "@/lib/liquidity"
 import { count, type Dashboard } from "@/lib/dashboard"
 import { shortAddress, type LinkedAccounts } from "@/lib/linked-accounts"
 
@@ -32,7 +34,7 @@ function LinkOut({ href, label }: { href: string | null; label: string }) {
 const valueClass = (measured: boolean) =>
   measured ? "text-2xl font-semibold tabular-nums @[250px]/card:text-3xl" : "text-lg font-medium text-muted-foreground"
 
-export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; linked: LinkedAccounts | null }) {
+export function AccountTiles({ dashboard, linked, liquidity }: { dashboard: Dashboard; linked: LinkedAccounts | null; liquidity?: LiquidityAccess | null }) {
   return (
     <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4">
       <Card className="@container/card" data-tile="active-products">
@@ -85,7 +87,10 @@ export function AccountTiles({ dashboard, linked }: { dashboard: Dashboard; link
             </CardAction>
           )}
         </CardHeader>
-        <CardFooter>{linked && !linked.wallet && <LinkOut href={linked.manageUrl} label="Link wallet" />}</CardFooter>
+        <CardFooter className="flex flex-wrap gap-2">
+          {linked && !linked.wallet && <LinkOut href={linked.manageUrl} label="Link wallet" />}
+          <LiquidityLinks access={liquidity} />
+        </CardFooter>
       </Card>
     </div>
   )
