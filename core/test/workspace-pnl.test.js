@@ -37,6 +37,8 @@ async function setup({ builds = true } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
+  // Mynt has been recording money movements since well before any period these tests read.
+  await pg.query("UPDATE financial_products.settings SET value = to_jsonb('2020-01-01T00:00:00Z'::timestamptz) WHERE key = 'money_ledger_started_at'");
   if (builds) {
     await BuildService.open(db, store, idleSandboxes, null, { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" } });
     await HostingService.open(db, null, null);
@@ -96,7 +98,7 @@ async function setup({ builds = true } = {}) {
        VALUES ($1, $2, $3, 'build it', 'succeeded', $4, 10, $5, $5)`,
       [randomUUID(), ana.user.id, appId, costUsd, at],
     );
-  return { pg, store, ana, mem, eve, ws, other, saver, starter, theirs, moved, build };
+  return { pg, db, store, ana, mem, eve, ws, other, saver, starter, theirs, moved, build };
 }
 
 const line = (lines, key) => lines.find((l) => l.key === key);
@@ -194,7 +196,7 @@ test("each measured line from Mynt's records; unmeasured lines null with reasons
   const hosted = (await w.ana.call("get_workspace_pnl", { workspace_id: w.ws.id })).data;
   assert.equal(line(hosted.statement.costs, "hosting").measured, false);
   assert.equal(line(hosted.statement.costs, "hosting").values.this_period, null);
-  assert.match(hosted.unmeasured.find((u) => u.key === "hosting").reason, /hosting costs per workspace/);
+  assert.match(hosted.unmeasured.find((u) => u.key === "hosting").reason, /can't meter per app/);
 });
 
 test("app_id narrows every line to that app", async () => {
@@ -243,4 +245,112 @@ test("periods are UTC calendar months or Monday weeks; last period and year to d
   const wk = await workspacePnl(w.store, w.ws.id, [app], { granularity: "week", periods: 3, now });
   assert.deepEqual(wk.statement.columns.map((c) => c.start.slice(0, 10)), ["2026-03-16", "2026-03-09", "2026-01-01"]);
   assert.equal(wk.series.at(-1).revenue_cents, 0);
+});
+
+const setStart = (pg, key, at) =>
+  pg.query(
+    `INSERT INTO financial_products.settings (key, value) VALUES ($1, to_jsonb($2::timestamptz))
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [key, at],
+  );
+
+test("hosting and sandboxes after a build are recorded per app, and measured from when recording started", async () => {
+  const w = await setup();
+  process.env.FREESTYLE_USD_PER_HOUR = "0.5";
+  // Recording has run since long before these periods.
+  await setStart(w.pg, "usage_recording_started_at:hosting", "2020-01-01T00:00:00Z");
+  await setStart(w.pg, "usage_recording_started_at:sandbox", "2020-01-01T00:00:00Z");
+
+  // Hosting: the Saver app on a VM of its own, on a provider that reports run time.
+  let seconds = 600;
+  const provider = { direct: true, usage: async () => ({ seconds }) };
+  const hosting = await HostingService.open(w.db, provider, null);
+  const tenant = randomUUID();
+  await w.pg.query("INSERT INTO financial_products.hosting_tenants (id, workspace_id, provider, status) VALUES ($1, $2, 'test', 'running')", [tenant, w.ws.id]);
+  await w.pg.query(
+    `INSERT INTO financial_products.hosted_apps (app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status, vm_id)
+     VALUES ($1, $2, $3, 'acme/app', $4, 3001, 'sealed', 'running', 'vm-saver')`,
+    [w.saver.id, tenant, randomUUID(), "c".repeat(40)],
+  );
+  await hosting.sampleUsage(); // the first sample of a VM already running is its baseline
+  seconds = 600 + 7200; // two more hours
+  await hosting.sampleUsage();
+  // Another workspace's VM never counts here.
+  await w.pg.query("INSERT INTO financial_products.usage_samples (id, kind, resource_id, app_id, total, delta_usd) VALUES ($1, 'hosting', 'vm-theirs', $2, 1, 99)", [randomUUID(), w.theirs.id]);
+
+  // Sandboxes: a build of Starter that has ended, its sandboxes still up, and one reopened on it.
+  const cost = { "sbx-build": 1, "sbx-verify": 0.5, "sbx-box": 0.1 };
+  const host = {
+    async createSandbox() {
+      return { id: "x", state: "provisioning" };
+    },
+    async getSandbox() {
+      return undefined;
+    },
+    async stop() {},
+    async readFile() {
+      return null;
+    },
+    async exec() {
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    async costDollars(id) {
+      return cost[id] ?? 0;
+    },
+  };
+  const builds = await BuildService.open(w.db, w.store, host, null, { ...buildConfigFromEnv({}), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" } });
+  await w.pg.query(
+    `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, status, cost_usd, cap_usd, sandbox_id, verify_sandbox_id, box_sandbox_id, box_until, finished_at)
+     VALUES ($1, $2, $3, 'build it', 'succeeded', 3, 10, 'sbx-build', 'sbx-verify', 'sbx-box', now() + interval '2 hours', now())`,
+    [randomUUID(), w.ana.user.id, w.starter.id],
+  );
+  await builds.sampleUsage(); // baselines
+  cost["sbx-build"] = 1.25;
+  cost["sbx-verify"] = 0.75;
+  cost["sbx-box"] = 0.35;
+  await builds.sampleUsage();
+  await builds.sampleUsage(); // nothing new: nothing added
+
+  const r = (await w.ana.call("get_workspace_pnl", { workspace_id: w.ws.id })).data;
+  const s = r.statement;
+  const h = line(s.costs, "hosting");
+  assert.deepEqual([h.measured, h.values.this_period], [true, 100], "2 hours at US$0.50");
+  assert.equal(h.values.last_period, 0);
+  const sb = line(s.costs, "sandboxes");
+  assert.deepEqual([sb.measured, sb.values.this_period], [true, 75], "0.25 + 0.25 + 0.25 dollars after the build ended");
+  assert.equal(r.series.at(-1).costs_cents, null, "Mynt's fees are still unmeasured, so total costs are too");
+  assert.ok(!r.unmeasured.some((u) => u.key === "hosting" || u.key === "sandboxes"));
+  // One app: only its own machines.
+  const starter = (await w.ana.call("get_workspace_pnl", { workspace_id: w.ws.id, app_id: w.starter.id })).data;
+  assert.deepEqual([line(starter.statement.costs, "sandboxes").values.this_period, line(starter.statement.costs, "hosting").values.this_period], [75, 0]);
+
+  // Recording that started inside the periods shown: earlier periods are null, with when it started.
+  const thisMonth = r.statement.columns[0].start;
+  const later = new Date(Date.parse(thisMonth) + 86_400_000).toISOString();
+  await setStart(w.pg, "usage_recording_started_at:hosting", later);
+  await setStart(w.pg, "money_ledger_started_at", thisMonth);
+  const partial = (await w.ana.call("get_workspace_pnl", { workspace_id: w.ws.id })).data;
+  const hp = line(partial.statement.costs, "hosting");
+  assert.deepEqual(hp.values, { this_period: null, last_period: null, year_to_date: null }, "every period shown began before recording did");
+  assert.equal(hp.measured, true);
+  assert.match(partial.unmeasured.find((u) => u.key === "hosting").reason, new RegExp(`Recording started ${later.slice(0, 10)}`));
+  assert.equal(partial.series.at(-1).costs_cents, null);
+  // The money ledger started at this month's start: this month is measured, last month isn't.
+  assert.equal(partial.statement.totals.revenue.this_period, 0);
+  assert.equal(partial.statement.totals.revenue.last_period, null);
+  assert.match(partial.unmeasured.find((u) => u.key === "revenue").reason, /Recording started/);
+  delete process.env.FREESTYLE_USD_PER_HOUR;
+});
+
+test("a machine Mynt makes counts from zero; one first seen running is only a baseline; a lower reading never subtracts", async () => {
+  const w = await setup();
+  await setStart(w.pg, "usage_recording_started_at:hosting", "2020-01-01T00:00:00Z");
+  const { UsageMeter } = await import("../dist/usage-meter.js");
+  const meter = await UsageMeter.open(w.db);
+  await meter.record("hosting", "vm-new", w.saver.id, 0, (s) => s, { fromZero: true });
+  await meter.record("hosting", "vm-new", w.saver.id, 30, (s) => s);
+  await meter.record("hosting", "vm-old", w.saver.id, 1000, (s) => s); // first sight: a baseline only
+  await meter.record("hosting", "vm-old", w.saver.id, 900, (s) => s); // a provider reading lower never subtracts
+  const rows = (await w.pg.query("SELECT resource_id, delta_usd::float AS d FROM financial_products.usage_samples ORDER BY sampled_at")).rows;
+  assert.deepEqual(rows.map((x) => [x.resource_id, x.d]), [["vm-new", 0], ["vm-new", 30], ["vm-old", 0], ["vm-old", 0]]);
 });

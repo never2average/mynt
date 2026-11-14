@@ -37,7 +37,7 @@ const DEVELOPER_TOOLS = [
   "change_member_role", "create_workspace", "invite_to_workspace", "leave_workspace", "list_workspace_members", "list_workspaces",
   "remove_workspace_member", "rename_workspace", "revoke_workspace_invite",
   "archive_workspace", "relink_workspace_org", "unarchive_workspace",
-  "get_compliance_coverage", "list_workspace_audit", "list_workspace_licences",
+  "get_compliance_coverage", "get_workspace_obligations", "list_workspace_audit", "list_workspace_licences",
   // the workspace's profit and loss
   "get_workspace_pnl",
   // promotion between stages, and what needs attention

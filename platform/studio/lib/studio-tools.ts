@@ -102,10 +102,12 @@ export const STUDIO_TOOLS = {
       app_id: id.optional(),
       from: auditDate.optional(),
       to: auditDate.optional(),
-      // Mynt's audit classes; sent only where its tool takes it (an app's Security tab).
+      // Mynt's audit classes: the Audits page's tabs, and an app's Security tab.
       class: z.enum(["security", "obligations", "financial", "workspace"]).optional(),
     })
     .strict(),
+  // The Audits page's Licence obligations tab: each licence's regulatory obligations.
+  get_workspace_obligations: z.object({ workspace_id: workspaceId }).strict(),
   // Invitations to other people's workspaces: joining is always the user's explicit choice.
   list_my_invitations: z.object({}).strict(),
   accept_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),

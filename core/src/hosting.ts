@@ -3,6 +3,8 @@ import type { Db } from "./db.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
+import { UsageMeter, usageSampleMs } from "./usage-meter.js";
+import { serialLoop } from "./worker.js";
 import { EDGE_KEY_HEADER, edgePlaceholder, FreestyleProvider, isDirect, type DirectHostingProvider } from "./freestyle.js";
 import { CA_BUNDLE, checkCompose, composeOverride, COMPOSE_FILES, type ComposeCheck } from "./compose.js";
 
@@ -483,6 +485,7 @@ export class HostingService {
     readonly provider: HostingProvider | DirectHostingProvider | null,
     readonly config: HostingConfig | null,
     private readonly sourceToken: (developerId: string, repository: string) => Promise<string | null>,
+    readonly meter: UsageMeter,
   ) {}
 
   static async open(
@@ -492,7 +495,35 @@ export class HostingService {
     sourceToken: (developerId: string, repository: string) => Promise<string | null> = async () => null,
   ) {
     await db.exec(TABLES);
-    return new HostingService(db, provider, config, sourceToken);
+    return new HostingService(db, provider, config, sourceToken, await UsageMeter.open(db));
+  }
+
+  // ---- what each hosted app's VM costs, over time (usage-meter.ts) ----
+
+  private usdPerHour = () => Number(process.env.FREESTYLE_USD_PER_HOUR ?? 0.2);
+  private async sampleVm(appId: string, vmId: string, fromZero = false) {
+    if (!isDirect(this.provider)) return;
+    const { seconds } = fromZero ? { seconds: 0 } : await this.provider.usage(vmId);
+    const rate = this.usdPerHour();
+    await this.meter.record("hosting", vmId, appId, seconds, (s) => (s / 3600) * rate, { fromZero });
+  }
+
+  // Every hosted app's VM, once. Only a direct provider (a VM per app) reports run time; recording starts with it.
+  async sampleUsage() {
+    if (!isDirect(this.provider)) return;
+    await this.meter.start("hosting");
+    const rows = (await this.db.query("SELECT app_id::text AS app_id, vm_id FROM financial_products.hosted_apps WHERE vm_id IS NOT NULL")).rows as { app_id: string; vm_id: string }[];
+    for (const r of rows) await this.sampleVm(r.app_id, r.vm_id).catch((e) => console.error(`Hosting usage of ${r.app_id}: ${(e as Error).message}`));
+  }
+
+  private usageTimer: NodeJS.Timeout | null = null;
+  startUsageWorker(intervalMs = usageSampleMs()) {
+    if (this.usageTimer || !isDirect(this.provider)) return;
+    this.usageTimer = serialLoop(() => this.sampleUsage(), intervalMs, "hosting usage");
+  }
+  stopUsageWorker() {
+    if (this.usageTimer) clearInterval(this.usageTimer);
+    this.usageTimer = null;
   }
 
   get enabled() {
@@ -628,6 +659,8 @@ export class HostingService {
     if (row?.vm_id) return { vmId: row.vm_id as string, runtime: String(row.runtime ?? "runc") };
     const vm = await p.createVm(`mynt-a-${hosted.app_id.slice(0, 8)}`);
     await this.db.query("UPDATE financial_products.hosted_apps SET vm_id = $2 WHERE app_id = $1", [hosted.app_id, vm.id]);
+    // A new machine: its run time counts from zero.
+    await this.sampleVm(hosted.app_id, vm.id, true).catch(() => undefined);
     await p.setEgress(vm.id, [GVISOR_HOST]);
     const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 240_000 });
     if (r.exitCode !== 0) throw new Error(`VM setup failed: ${boxOutput(r.stderr || r.stdout).slice(-300)}`);
@@ -866,6 +899,8 @@ export class HostingService {
     if (isDirect(p)) {
       // Deleting the app's VM ends it, its rules (egress, the key) and its routes.
       for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(appId)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
+      // Its last run time, before the VM (and its usage) goes.
+      if (r.vm_id) await this.sampleVm(appId, r.vm_id).catch(() => undefined);
       if (r.vm_id) await p.deleteVm(r.vm_id).catch(() => undefined);
     }
     return true;

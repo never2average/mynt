@@ -143,19 +143,29 @@ export function expiryOf(l: Licence, now = Date.now()): Expiry {
   return at - now <= EXPIRING_DAYS * 86_400_000 ? "expiring" : null;
 }
 
-export type LicenceFilters = { query: string; status: string; regulator: string; state: string };
-export const NO_LICENCE_FILTERS: LicenceFilters = { query: "", status: "", regulator: "", state: "" };
+// `within`: only licences expiring within that many days from now (not yet expired), "" for any.
+export type LicenceFilters = { query: string; partner: string; status: string; regulator: string; state: string; within: string };
+export const NO_LICENCE_FILTERS: LicenceFilters = { query: "", partner: "", status: "", regulator: "", state: "", within: "" };
+export const EXPIRY_WINDOWS = [30, 60, 90, 180] as const;
+
+export const licenceFiltersOn = (f: LicenceFilters) => Object.values(f).some((v) => v.trim() !== "");
 
 export function filterLicences(list: Licence[], f: LicenceFilters, now = Date.now()): Licence[] {
   const q = f.query.trim().toLowerCase();
+  const days = Number(f.within);
   return list.filter((l) => {
     if (q && ![l.partner, l.type, l.regulator, l.number, ...l.states].some((v) => v?.toLowerCase().includes(q))) return false;
+    if (f.partner && l.partner !== f.partner) return false;
     if (f.status) {
       const e = expiryOf(l, now);
       if (f.status === "expired" || f.status === "expiring" ? e !== f.status : l.status !== f.status) return false;
     }
     if (f.regulator && l.regulator !== f.regulator) return false;
     if (f.state && !l.states.includes(f.state)) return false;
+    if (f.within && Number.isFinite(days) && days > 0) {
+      const at = l.expiresAt ? Date.parse(l.expiresAt) : NaN;
+      if (Number.isNaN(at) || at <= now || at - now > days * 86_400_000) return false;
+    }
     return true;
   });
 }
