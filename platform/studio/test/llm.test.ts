@@ -6,7 +6,7 @@ import { askConfigured, createLlm, vertexAuth } from "@/lib/llm";
 // A made-up key: the shape of a service-account JSON key, never a real one.
 const FAKE_KEY = JSON.stringify({
   type: "service_account",
-  client_email: "ask-ai@example-project.iam.gserviceaccount.com",
+  client_email: "ask-ai@example.com",
   private_key: "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
 });
 
