@@ -100,7 +100,7 @@ export function WorkspaceCard({ info, members, apps }: { info: WorkspaceInfo; me
           {members?.manageUrl && (
             <Field label="Identity provider">
               <a href={members.manageUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline" data-manage-url>
-                Manage in Clerk
+                Manage organization
                 <ExternalLink className="size-3.5" />
               </a>
             </Field>
