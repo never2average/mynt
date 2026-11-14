@@ -15,10 +15,14 @@ import { chartRows, changeText, hasGaps, anyMeasured, money, moneyShort, NOT_MEA
 import type { Loaded } from "@/lib/use-compliance"
 import { cn } from "@/lib/utils"
 
+// Until Mynt measures earnings, the top line is money moved: gross settled live movements through
+// the apps, not what the developer earns. It's named that way everywhere it shows.
+export const REVENUE_LABEL = "Money moved through your apps"
+
 export const PNL_NOT_AVAILABLE = "P&L isn't available yet. It comes with Mynt's next update."
 
 const chartConfig = {
-  revenue: { label: "Revenue", color: "var(--chart-2)" },
+  revenue: { label: "Money moved", color: "var(--chart-2)" },
   costs: { label: "Costs", color: "var(--chart-1)" },
   netIncome: { label: "Net", color: "var(--foreground)" },
 } satisfies ChartConfig
@@ -53,15 +57,15 @@ export function PnlStats({ state }: { state: Loaded<Pnl> }) {
   if (state.kind !== "ready") return <PnlNotReady state={state} height="h-24" />
   const t = state.data.totals
   const label = state.data.columns.find((c) => c.key === "this_period")?.label ?? "This period"
-  const rows: [string, Values, boolean][] = [
-    ["Revenue", t.revenue, false],
-    ["Costs", t.costs, false],
-    ["Net", t.netIncome, true],
+  const rows: [string, string, Values, boolean][] = [
+    ["revenue", REVENUE_LABEL, t.revenue, false],
+    ["costs", "Costs", t.costs, false],
+    ["net", "Net", t.netIncome, true],
   ]
   return (
     <dl className="grid grid-cols-3 divide-x rounded-md border" data-pnl-stats>
-      {rows.map(([name, v, net]) => (
-        <div key={name} className="flex min-w-0 flex-col gap-0.5 px-3 py-2" data-stat={name.toLowerCase()}>
+      {rows.map(([id, name, v, net]) => (
+        <div key={id} className="flex min-w-0 flex-col gap-0.5 px-3 py-2" data-stat={id}>
           <dt className="truncate text-xs text-muted-foreground">
             {name} · {label}
           </dt>
@@ -238,11 +242,11 @@ export function PnlStatement({ state }: { state: Loaded<Pnl> }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              <GroupRow label="Revenue" empty={state.data.revenue.length ? null : "No revenue lines yet"} />
+              <GroupRow label={REVENUE_LABEL} empty={state.data.revenue.length ? null : "No lines yet"} />
               {state.data.revenue.map((l) => (
                 <LineRow key={l.key} line={l} />
               ))}
-              <TotalRow id="revenue" label="Total revenue" values={state.data.totals.revenue} />
+              <TotalRow id="revenue" label="Total money moved" values={state.data.totals.revenue} />
               <GroupRow label="Costs" empty={state.data.costs.length ? null : "No cost lines yet"} />
               {state.data.costs.map((l) => (
                 <LineRow key={l.key} line={l} />

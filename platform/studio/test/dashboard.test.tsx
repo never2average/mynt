@@ -141,7 +141,8 @@ describe("the P&L", () => {
 
   it("statement: revenue and cost lines, totals, Not measured cells and the footnote; negative net in red", () => {
     const html = renderToStaticMarkup(<PnlStatement state={{ kind: "ready", data: pnl }} />);
-    for (const label of ["This month", "Last month", "Year to date", "Round-up savings", "Coding agents", "Hosting", "Total revenue", "Total costs", "Net"]) expect(html).toContain(label);
+    for (const label of ["This month", "Last month", "Year to date", "Round-up savings", "Coding agents", "Hosting", "Money moved through your apps", "Total money moved", "Total costs", "Net"]) expect(html).toContain(label);
+    expect(html).not.toContain("Total revenue"); // money moved isn't earnings
     const hosting = html.slice(html.indexOf('data-line="hosting"'), html.indexOf("</tr>", html.indexOf('data-line="hosting"')));
     expect(hosting.match(/>Not measured</g)).toHaveLength(3);
     expect(hosting).not.toContain("$0");
