@@ -58,6 +58,8 @@ vi.mock("@/lib/tokens", () => ({
             can_promote: fake.canPromote,
             needs_admin_signoff: false,
           });
+        case "get_workspace_pnl":
+          return ok({ currency: "USD", series: [{ start: "2026-11-01", end: "2026-11-30", revenue_cents: 5000, costs_cents: null, net_cents: null }], statement: { columns: [], revenue: [], costs: [], totals: {} }, unmeasured: [] });
         case "get_workspace_attention":
           return ok({ items: [{ id: "x", severity: "high", title: "Build failed", href: "/a1" }] });
         default:
@@ -71,6 +73,7 @@ vi.mock("@/lib/tokens", () => ({
 const promotion = await import("@/app/api/apps/[appId]/promotion/route");
 const attentionRoute = await import("@/app/api/attention/route");
 const stagesRoute = await import("@/app/api/stages/route");
+const pnlRoute = await import("@/app/api/pnl/route");
 const workspaceRoute = await import("@/app/api/workspaces/[workspaceId]/route");
 
 const req = (path: string, method = "GET", body?: unknown, origin = "http://localhost:3000") =>
@@ -153,6 +156,19 @@ describe("attention and stages routes", () => {
     expect(body.items[0]).toMatchObject({ id: "x", severity: "high", href: "/a1" });
     await attentionRoute.GET(req("/api/attention?workspace=personal"));
     expect(called("get_workspace_attention")[1].args).toEqual({ workspace_id: "me" });
+  });
+
+  it("pnl: not supported until Mynt has get_workspace_pnl; then the workspace's, with the period and range checked", async () => {
+    expect(await (await pnlRoute.GET(req("/api/pnl?workspace=w1&granularity=month&periods=6"))).json()).toEqual({ supported: false });
+    expect(called("get_workspace_pnl")).toHaveLength(0);
+    fake.tools = [...BASE, { name: "get_workspace_pnl", inputSchema: props("workspace_id", "granularity", "periods", "app_id") }];
+    const body = await (await pnlRoute.GET(req("/api/pnl?workspace=w1&granularity=week&periods=12"))).json();
+    expect(called("get_workspace_pnl")[0].args).toEqual({ workspace_id: "w1", granularity: "week", periods: 12 });
+    expect(body.pnl.series[0]).toMatchObject({ revenue: 5000, costs: null, net: null });
+    expect(body.pnl.columns.map((c: { label: string }) => c.label)).toEqual(["This period", "Last period", "Year to date"]);
+    // Anything else falls back to a month over 6; Personal is the user's own workspace.
+    await pnlRoute.GET(req("/api/pnl?workspace=personal&granularity=year&periods=99"));
+    expect(called("get_workspace_pnl")[1].args).toEqual({ workspace_id: "me", granularity: "month", periods: 6 });
   });
 
   it("stages: the apps by stage, with readiness only where Mynt has promotion checks", async () => {

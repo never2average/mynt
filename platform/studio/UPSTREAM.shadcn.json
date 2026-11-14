@@ -15,14 +15,12 @@
     "components/ui/chart.tsx": "as generated (the cn import pointed at lib/utils)",
     "components/ui/table.tsx": "as generated (the cn import pointed at lib/utils)",
     "components/ui/badge.tsx": "as generated (the cn import pointed at lib/utils)",
-    "components/nav-user.tsx": "the one signed-in account, its Log out an icon button on the row shown on hover or focus (always on touch), lucide icons, initials",
-    "components/section-cards.tsx": "the KPI cards, fed by the dashboard; unmeasured figures say so",
-    "components/chart-area-interactive.tsx": "one series (money moved per day), no range picker, an unmeasured state",
-    "components/site-header.tsx": "a sticky header: the page name, search and New app",
+    "components/nav-user.tsx": "the one signed-in account: one row with Log out always shown; collapsed, the avatar alone; the avatar opens nav-user's account menu with name, email and Log out",
+    "components/site-header.tsx": "a sticky header: the page name, search, the wallet control and New app",
     "components/app-sidebar.tsx": "laid out as sidebar-07 (collapsible to icons): the workspace switcher, Dashboard, Licences, Audits, Workspace, the Apps folders (one open at a time), the account",
-    "components/dashboard-view.tsx": "laid out as dashboard-01 (cards, chart, table), with the studio's apps table and empty state",
+    "components/dashboard-view.tsx": "dashboard-01's page, relaid as a P&L statement: sections with headings, dividers and tables instead of cards",
     "components/team-switcher.tsx": "sidebar-07's team switcher as the workspace switcher: the user's workspaces, Invitations, and Create workspace (a dialog)",
     "components/nav-folders.tsx": "sidebar-07's nav-main (collapsible groups) as the Production, Staging and Ideas folders of the workspace's apps under an Apps label, each with its own icon, exactly one open at a time",
-    "components/account-tiles.tsx": "dashboard-01's card layout, for the active products, licences, GitHub and wallet tiles"
+    "components/pnl.tsx": "dashboard-01's chart (shadcn chart and recharts) as the P&L chart: revenue and costs as bars, net as a line, month or week over 3, 6 or 12 periods, gaps for unmeasured periods"
   }
 }

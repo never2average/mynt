@@ -1,10 +1,9 @@
 "use client"
 
-// The developer's connected GitHub repositories: up to five on the dashboard's GitHub tile, all
-// of them on the Settings page's Repositories tab, each with its approval (approved, waiting for
+// The developer's connected GitHub repositories: how many on the dashboard's workspace facts
+// line (with Connect repository), all of them on the Settings page's Repositories tab, each with its approval (approved, waiting for
 // an admin and why, or rejected), and Connect repository, which calls connect_repository with an
 // owner/name and shows what Mynt answered. Server-renderable for the tests.
-import Link from "next/link"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { ExternalLink, GitBranchPlus } from "lucide-react"
 
@@ -19,7 +18,6 @@ import { APPROVAL_LABELS, APPROVAL_TONE, connectResultText, REPOSITORY, type Con
 
 export type ReposState = { kind: "loading" } | { kind: "unsupported" } | { kind: "error"; message: string } | { kind: "ready"; repos: Repo[]; connect: boolean }
 
-export const TILE_REPOS = 5
 
 /** Loads the developer's repositories (/api/repositories); `reload` after connecting one. */
 export function useRepositories(): { state: ReposState; reload: () => void } {
@@ -148,32 +146,6 @@ export function ConnectRepository({ enabled, onConnected }: { enabled: boolean; 
         </DialogContent>
       </Dialog>
     </>
-  )
-}
-
-/** The GitHub tile's list: up to five repositories with their status, then View all. */
-export function RepoTileList({ state }: { state: ReposState }) {
-  if (state.kind === "loading") return <p className="text-xs text-muted-foreground">Loading repositories…</p>
-  if (state.kind === "unsupported") return <p className="text-xs text-muted-foreground" data-repos="unsupported">Connected repositories aren&apos;t available yet</p>
-  if (state.kind === "error") return <p className="text-xs text-destructive">{state.message}</p>
-  if (!state.repos.length) return <p className="text-xs text-muted-foreground" data-repos="none">No repositories connected yet</p>
-  return (
-    <div className="flex w-full flex-col gap-1.5" data-repos="list">
-      <ul className="flex flex-col gap-1.5">
-        {state.repos.slice(0, TILE_REPOS).map((r) => (
-          <li key={r.repository} className="flex flex-col gap-0.5" data-repo={r.repository} data-approval={r.approval}>
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate font-mono text-xs text-foreground">{r.repository}</span>
-              <RepoStatus repo={r} />
-            </div>
-            {r.approval !== "approved" && r.note && <span className="text-xs text-muted-foreground">{r.note}</span>}
-          </li>
-        ))}
-      </ul>
-      <Link href="/settings?tab=repositories" className="text-xs font-medium text-foreground hover:underline">
-        View all{state.repos.length > TILE_REPOS ? ` (${state.repos.length})` : ""}
-      </Link>
-    </div>
   )
 }
 

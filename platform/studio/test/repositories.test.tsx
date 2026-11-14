@@ -34,8 +34,8 @@ vi.mock("@/lib/tokens", () => ({
   }),
 }));
 
-const { AccountTiles } = await import("@/components/account-tiles");
-const { RepoTileList, RepositoriesTab, ConnectResultView, TILE_REPOS } = await import("@/components/repositories");
+const { DashboardView } = await import("@/components/dashboard-view");
+const { RepositoriesTab, ConnectResultView } = await import("@/components/repositories");
 const { fromConnectRepository, fromListRepositories } = await import("@/lib/repositories");
 const { fromDashboardTool } = await import("@/lib/dashboard");
 const route = await import("@/app/api/repositories/route");
@@ -54,29 +54,20 @@ const repos = [
 const dashboard = fromDashboardTool({});
 const linked = { supported: true, github: "ines", wallet: null, manageUrl: "https://accounts.example.test/user" };
 
-describe("the GitHub tile", () => {
-  it("shows the username and each repository with its status in words", () => {
-    const html = renderToStaticMarkup(<AccountTiles dashboard={dashboard} linked={linked} repos={{ kind: "ready", repos, connect: true }} />);
-    const tile = html.slice(html.indexOf('data-tile="github"'), html.indexOf('data-tile="wallet"'));
-    expect(tile).toContain(">ines<");
-    expect(tile).toMatch(/data-repo="ines\/savings" data-approval="approved"[\s\S]*?data-tone="green"[\s\S]*?Approved/);
-    expect(tile).toMatch(/data-approval="pending"[\s\S]*?Waiting for an admin[\s\S]*?Link your GitHub account so Mynt can check you can push/);
-    expect(tile).toMatch(/data-approval="rejected"[\s\S]*?data-tone="red"[\s\S]*?Rejected/);
-    expect(tile).toContain('href="/settings?tab=repositories"');
-    expect(tile).toMatch(/>\s*Connect repository\s*</);
+describe("the dashboard's workspace facts", () => {
+  it("show the GitHub username, how many repositories are connected (listed in Settings) and Connect repository", () => {
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboard} linked={linked} repos={{ kind: "ready", repos, connect: true }} />);
+    const line = html.slice(html.indexOf('data-facts="workspace"'));
+    expect(line).toMatch(/data-fact="github"[\s\S]*?ines/);
+    expect(line).toMatch(/href="\/settings\?tab=repositories"[^>]*>3 connected</);
+    expect(line).toMatch(/>\s*Connect repository\s*</);
+    // The list itself is on Settings > Repositories, not the dashboard.
+    expect(html).not.toContain("data-repo=");
   });
 
-  it("shows at most five, with View all counting the rest", () => {
-    const many = Array.from({ length: 8 }, (_, i) => repo(`ines/r${i}`, "approved"));
-    const html = renderToStaticMarkup(<RepoTileList state={{ kind: "ready", repos: many, connect: true }} />);
-    expect(html.match(/data-repo=/g)).toHaveLength(TILE_REPOS);
-    expect(html).toContain("View all (8)");
-  });
-
-  it("says when there are none, or when Mynt doesn't list them yet, and disables Connect then", () => {
-    expect(renderToStaticMarkup(<RepoTileList state={{ kind: "ready", repos: [], connect: true }} />)).toContain("No repositories connected yet");
-    const html = renderToStaticMarkup(<AccountTiles dashboard={dashboard} linked={linked} repos={{ kind: "unsupported" }} />);
-    expect(html).toContain("Connected repositories aren&#x27;t available yet");
+  it("say when Mynt doesn't list repositories yet, and disable Connect then", () => {
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboard} linked={linked} repos={{ kind: "unsupported" }} />);
+    expect(html).toMatch(/data-fact="repositories"[\s\S]*?Not available yet/);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-connect-repository/);
   });
 
@@ -87,7 +78,7 @@ describe("the GitHub tile", () => {
       return new Response(JSON.stringify({ result: { kind: "pending", repository: "ines/cards", why: "read-only access", manageUrl: "https://accounts.example.test/user" } }), { status: 200 });
     });
     const connected: string[] = [];
-    render(<AccountTiles dashboard={dashboard} linked={linked} repos={{ kind: "ready", repos: [], connect: true }} onReposChanged={() => connected.push("x")} />);
+    render(<DashboardView dashboard={dashboard} linked={linked} repos={{ kind: "ready", repos: [], connect: true }} onReposChanged={() => connected.push("x")} />);
     fireEvent.click(screen.getByRole("button", { name: "Connect repository" }));
     const input = screen.getByLabelText("Repository (owner/name)");
     fireEvent.change(input, { target: { value: "not a repo" } });

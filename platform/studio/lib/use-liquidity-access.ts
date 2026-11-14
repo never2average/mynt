@@ -1,7 +1,7 @@
 "use client";
 
 // The signed-in user's liquidity roles (builder, liquidity provider), read once per page load
-// and shared by the sidebar and the wallet tile. Null until known; no roles if it can't be read.
+// and shared by the sidebar and the header's wallet control. Null until known; no roles if it can't be read.
 import { useEffect, useState } from "react";
 import { NO_ACCESS, type LiquidityAccess } from "./liquidity";
 

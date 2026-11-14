@@ -166,3 +166,32 @@ export function count(v: Figure, missing = NOT_MEASURED): string {
 export function percent(v: Figure, missing = NOT_MEASURED): string {
   return v === null ? missing : `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`;
 }
+
+// The dashboard's operating facts (one line under the P&L stats): what moved through the apps,
+// who they serve, hand-offs and build spend. Each says when it isn't measured, never 0.
+export type Fact = { label: string; value: string; measured: boolean; note: string };
+
+export function facts(d: Dashboard): Fact[] {
+  const period = d.periodDays ? `last ${d.periodDays} days` : "once Mynt reports it";
+  return [
+    {
+      label: "Money moved",
+      value: usd(d.moneyMoved),
+      measured: d.moneyMoved !== null,
+      note: d.moneyMoved !== null ? `Settled, ${d.live ? "live" : "sandbox"}, ${period}` : "Settled payments, live apps only",
+    },
+    { label: "Customers", value: count(d.customers), measured: d.customers !== null, note: "Active enrollments across your apps" },
+    {
+      label: "Hand-offs",
+      value: d.handoffs === null ? count(null) : `${count(d.handoffs)} · ${percent(d.conversion)}`,
+      measured: d.handoffs !== null,
+      note: d.handoffs !== null && d.converted !== null ? `${count(d.converted)} converted, ${period}` : "Hand-offs to providers, and how many converted",
+    },
+    {
+      label: "Build spend this month",
+      value: usd(d.buildSpend),
+      measured: d.buildSpend !== null,
+      note: d.buildCap !== null ? `Of ${usd(d.buildCap)} monthly budget` : "Coding-agent builds",
+    },
+  ];
+}

@@ -347,7 +347,7 @@ const attention = fromAttention({
 });
 const dashboard = fromDashboardTool({ apps: [{ app_id: "a1", name: "Cards", status: "published" }] });
 
-describe("the dashboard's lower cards", () => {
+describe("the dashboard's sections", () => {
   it("Needs attention lists items, most severe first, with a severity dot, detail and link", () => {
     expect(attention.map((i) => i.id)).toEqual(["x2", "x3", "x1", "x5"]); // x4 has no title
     const html = renderToStaticMarkup(<NeedsAttention state={{ kind: "ready", data: attention }} />);
@@ -362,15 +362,17 @@ describe("the dashboard's lower cards", () => {
     expect(attention.find((i) => i.id === "x5")).toMatchObject({ href: null, linkText: "https://partner.example.test/review" });
   });
 
-  it("Needs attention says nothing needs you, or that it isn't available yet, never an empty list", () => {
-    expect(renderToStaticMarkup(<NeedsAttention state={{ kind: "ready", data: [] }} />)).toContain("Nothing needs you right now");
+  it("Needs attention is one line when nothing needs you, or says it isn't available yet, never an empty list", () => {
+    const nothing = renderToStaticMarkup(<NeedsAttention state={{ kind: "ready", data: [] }} />);
+    expect(nothing).toContain("Nothing needs you right now");
+    expect(nothing).not.toContain("<ul");
     const unsupported = renderToStaticMarkup(<NeedsAttention state={{ kind: "unsupported" }} />);
     expect(unsupported).toContain('data-empty="not-available"');
     expect(unsupported).toContain("isn&#x27;t available yet");
     expect(renderToStaticMarkup(<NeedsAttention state={{ kind: "unavailable", message: "This workspace's data comes with Mynt's next update." }} />)).toContain("next update");
   });
 
-  it("Apps by stage counts each stage, links each app, and shows its readiness for the next stage", () => {
+  it("Apps by stage is a compact table: counts per stage, each app's stage, readiness, last build and Open app", () => {
     const ready = readinessOf(passing);
     const blocked = readinessOf(checks);
     expect(readinessText(ready)).toBe("Ready for Production");
@@ -393,6 +395,12 @@ describe("the dashboard's lower cards", () => {
     expect(html).toContain("2 checks failing for Production");
     expect(html).toContain("Not checked yet");
     expect(html).toContain("Live");
+    expect(html.match(/data-stage-row=/g)).toHaveLength(4);
+    expect(html.match(/>Open app</g)).toHaveLength(4); // labelled, never icon-only
+    expect(html.indexOf('data-stage-row="production"')).toBeLessThan(html.indexOf('data-stage-row="idea"'));
+    expect(html).toContain("<table");
+    const withBuild = renderToStaticMarkup(<AppsByStage state={{ kind: "ready", data }} apps={fromDashboardTool({ apps: [{ app_id: "a2", name: "Budgeting", last_build: { id: "b7", status: "succeeded", at: "2026-11-10T00:00:00Z" } }] }).apps} />);
+    expect(withBuild).toMatch(/href="\/a2\/b7"[^>]*>succeeded · Nov 10</);
     // Before Mynt has promotion checks: the counts, and readiness says it isn't available.
     const before = renderToStaticMarkup(<AppsByStage state={{ kind: "ready", data: { checks: false, apps: data.apps.map((a) => ({ ...a, readiness: null })) } }} />);
     expect(before).toContain("Promotion checks aren&#x27;t available yet");
@@ -408,7 +416,7 @@ describe("the dashboard's lower cards", () => {
     expect(renderToStaticMarkup(<RecentActivity state={{ kind: "unsupported" }} />)).toContain('data-empty="not-available"');
   });
 
-  it("all sit on the dashboard with the tiles and the money cards kept", () => {
+  it("all sit on the dashboard, with no cards", () => {
     const html = renderToStaticMarkup(
       <DashboardView
         dashboard={dashboard}
@@ -417,8 +425,9 @@ describe("the dashboard's lower cards", () => {
         activity={{ kind: "unsupported" }}
       />,
     );
-    for (const card of ['data-card="attention"', 'data-card="apps-by-stage"', 'data-card="recent-activity"', 'data-tile="active-products"']) expect(html).toContain(card);
-    expect(html).toContain("Money moved through your apps");
+    for (const marker of ['data-strip="attention"', 'data-section="apps-by-stage"', 'data-section="recent-activity"', 'data-fact="active-products"']) expect(html).toContain(marker);
+    expect(html).toContain("Money moved");
     expect(html).toContain("Nothing needs you right now");
+    expect(html).not.toContain('data-slot="card"');
   });
 });
