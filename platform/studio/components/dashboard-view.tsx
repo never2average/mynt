@@ -1,10 +1,13 @@
 // The dashboard (home page): shadcn/ui's dashboard-01 layout (KPI cards, an area chart and a
-// table), fed by lib/dashboard.ts. Server-renderable, so the tests render it without a browser.
+// table), fed by lib/dashboard.ts, with Needs attention, Apps by stage and Recent activity
+// (components/dashboard-panels.tsx). Server-renderable, so the tests render it without a browser.
 import Link from "next/link"
 import { Plus } from "lucide-react"
 
 import { AccountTiles } from "@/components/account-tiles"
 import { ChartAreaInteractive } from "@/components/chart-area-interactive"
+import { AppsByStage, NeedsAttention, RecentActivity, type StagesData } from "@/components/dashboard-panels"
+import type { ReposState } from "@/components/repositories"
 import { SectionCards } from "@/components/section-cards"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -12,6 +15,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { count, percent, usd, type Dashboard, type DashboardApp } from "@/lib/dashboard"
 import type { LinkedAccounts } from "@/lib/linked-accounts"
+import type { AttentionItem } from "@/lib/attention"
+import type { AuditEvent } from "@/lib/compliance"
+import type { Loaded } from "@/lib/use-compliance"
 
 const when = (at: string | null) =>
   at ? new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : ""
@@ -93,15 +99,39 @@ function EmptyState() {
   )
 }
 
-export function DashboardView({ dashboard, linked = null }: { dashboard: Dashboard; linked?: LinkedAccounts | null }) {
+const LOADING = { kind: "loading" } as const
+
+export function DashboardView({
+  dashboard,
+  linked = null,
+  attention = LOADING,
+  stages = LOADING,
+  activity = LOADING,
+  repos = LOADING,
+  onReposChanged,
+}: {
+  dashboard: Dashboard
+  linked?: LinkedAccounts | null
+  attention?: Loaded<AttentionItem[]>
+  stages?: Loaded<StagesData>
+  activity?: Loaded<AuditEvent[]>
+  repos?: ReposState
+  onReposChanged?: () => void
+}) {
   return (
     <div className="@container/main flex flex-1 flex-col gap-4 py-4 md:gap-6 md:py-6">
       <SectionCards dashboard={dashboard} />
-      <AccountTiles dashboard={dashboard} linked={linked} />
+      <AccountTiles dashboard={dashboard} linked={linked} repos={repos} onReposChanged={onReposChanged} />
+      <div className="px-4 lg:px-6">
+        <NeedsAttention state={attention} />
+      </div>
       {dashboard.apps.length === 0 ? (
         <EmptyState />
       ) : (
         <>
+          <div className="px-4 lg:px-6">
+            <AppsByStage state={stages} />
+          </div>
           <div className="px-4 lg:px-6">
             <ChartAreaInteractive daily={dashboard.daily} periodDays={dashboard.periodDays} />
           </div>
@@ -110,6 +140,9 @@ export function DashboardView({ dashboard, linked = null }: { dashboard: Dashboa
           </div>
         </>
       )}
+      <div className="px-4 lg:px-6">
+        <RecentActivity state={activity} />
+      </div>
     </div>
   )
 }

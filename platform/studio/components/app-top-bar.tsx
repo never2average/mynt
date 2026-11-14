@@ -4,8 +4,9 @@
 // lays it out (back to the app's builds or all apps, then the preview's browser controls) with
 // what Lovable-style builders add: the app's name and stage, the preview's width (desktop,
 // tablet, phone) and opening the preview in a new tab. Search and New app stay at the right as
-// icon buttons. Sticky. The studio has no code view and no publish action of its own yet, so
-// neither is offered here.
+// icon buttons. Sticky. Beside the stage is the stage control: Promote to Staging or Production
+// (and Move back, for owners and admins), which opens the promotion checks
+// (components/promotion-view.tsx). The studio has no code view yet.
 import { useEffect, useState } from "react";
 import {
   ArrowLeftIcon,
@@ -18,6 +19,7 @@ import {
   TabletIcon,
 } from "lucide-react";
 
+import { StageControl } from "@/components/promotion-view";
 import { NewAppButton } from "@/components/site-header";
 import { SearchTrigger } from "@/components/studio-search";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +50,8 @@ const iconButton =
   "flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none";
 
 export type AppTopBarProps = {
+  /** The app's id once it has loaded: the stage control (promotions) needs it. */
+  appId?: string | null;
   appName: string | null; // null while the app loads
   stage: Stage | null;
   backLabel: string;
@@ -62,7 +66,7 @@ export type AppTopBarProps = {
   onShowChat?: () => void;
 };
 
-export function AppTopBar({ appName, stage, backLabel, onBack, previewUrl, iframeRef, device, onDevice, isMobile = false, mobileView = "chat", onShowChat }: AppTopBarProps) {
+export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, previewUrl, iframeRef, device, onDevice, isMobile = false, mobileView = "chat", onShowChat }: AppTopBarProps) {
   const showPreviewControls = Boolean(previewUrl) && (!isMobile || mobileView === "preview");
   return (
     <header className="sticky top-0 z-20 flex h-11 shrink-0 items-center gap-1 border-b bg-background px-2" data-app-top-bar>
@@ -92,6 +96,8 @@ export function AppTopBar({ appName, stage, backLabel, onBack, previewUrl, ifram
             {STAGE_LABELS[stage]}
           </Badge>
         )}
+        {/* Promote / Move back: a screen with Mynt's checks, never a drag between folders. */}
+        {appId && appName && stage && !(isMobile && mobileView === "preview") && <StageControl appId={appId} appName={appName} stage={stage} />}
       </div>
 
       {showPreviewControls && previewUrl ? (
