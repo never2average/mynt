@@ -208,11 +208,29 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
         `SELECT workspace_id::text AS workspace_id, user_id::text AS user_id, kind, attempts, error FROM financial_products.workspace_offboards WHERE status = 'failed' ORDER BY started_at`,
       )).rows as { workspace_id: string; user_id: string; kind: string; attempts: number; error: string | null }[])
     : [];
+  // Workspaces and the identity provider's organizations: ones whose organization was deleted there (frozen until an
+  // owner acts), backfills left part-way, and the reconcile worker stopped by its circuit breaker.
+  const orgMissing = (await exists("workspaces"))
+    ? ((await db.query(
+        `SELECT id::text AS workspace_id, name, org_missing_at FROM financial_products.workspaces WHERE org_missing_at IS NOT NULL AND archived_at IS NULL ORDER BY org_missing_at`,
+      )).rows as { workspace_id: string; name: string; org_missing_at: string }[])
+    : [];
+  const backfillPending = (await exists("workspaces"))
+    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.workspaces WHERE org_sync = 'backfill' AND archived_at IS NULL`)).rows[0]?.n ?? 0)
+    : 0;
+  const orgSync = (await exists("org_sync_status"))
+    ? (((await db.query(`SELECT last_run_at, last_ok_at, halted_at, halted_reason FROM financial_products.org_sync_status WHERE id = 1`)).rows[0] as
+        | { last_run_at: string | null; last_ok_at: string | null; halted_at: string | null; halted_reason: string | null }
+        | undefined) ?? null)
+    : null;
   const rotatedOnOffboard = (await exists("audit_log"))
     ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'webhook_secret_rotated_on_offboard' AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
     : 0;
   const attention = [
     ...(offboards.length ? [`workspaces: ${offboards.length} offboarding(s) gave up after repeated failures (someone may keep access): retry_offboard once the provider is back`] : []),
+    ...(orgMissing.length ? [`workspaces: ${orgMissing.length} workspace(s) frozen because their organization was deleted in the identity provider; their owners relink (relink_workspace_org) or archive (archive_workspace) them`] : []),
+    ...(orgSync?.halted_at ? [`workspaces: the organization reconcile stopped itself (${orgSync.halted_reason}); nothing was changed. Check the identity provider; it resumes on its own once the numbers look normal`] : []),
+    ...(backfillPending ? [`workspaces: ${backfillPending} workspace(s) part-way through getting an organization; run mynt clerk sync-workspaces --apply again`] : []),
     ...(rotatedOnOffboard ? [`workspaces: ${rotatedOnOffboard} webhook secret(s) rotated in the last ${hours}h because someone holding them left; their workspaces' owners must give receivers the new secret (rotate_webhook_secret)`] : []),
     ...(quota ? ["sandbox provider: the account's allowance is used up, so no build, agent run or hosted app can start; add billing in the provider's dashboard"] : []),
     ...Object.entries(agents).flatMap(([name, a]) => {
@@ -240,7 +258,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard }, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {
