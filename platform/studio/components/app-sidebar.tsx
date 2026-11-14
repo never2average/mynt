@@ -31,7 +31,8 @@ import { groupByStage, type Stage, type StagedApp, type Workspace } from "@/lib/
 
 type Account = { name: string | null; email: string | null }
 
-// The fixed pages, above the app folders.
+// The fixed pages, above the Apps folders, in order. A new fixed page is one entry here (and one
+// in STUDIO_PAGES, lib/studio-search.ts, for its title and search).
 const PAGES = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/licences", label: "Licences", icon: FileBadge },

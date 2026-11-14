@@ -4,6 +4,14 @@
 	request_header -X-Mynt-Client-IP
 	header X-Content-Type-Options nosniff
 	# Mynt's own paths that the blocks above don't name go to Mynt; everything else is the studio.
+	# Signed event deliveries from the sign-in provider (POST /webhooks/clerk); Mynt caps them at 1 MB itself.
+	@mynt_webhooks path /webhooks/*
+	handle @mynt_webhooks {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:@PORT@
+	}
 	@mynt path /v1 /llms.txt /llms-full.txt /.well-known/* /ramp-sandbox/*
 	handle @mynt {
 		request_body {
