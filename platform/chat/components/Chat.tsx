@@ -17,6 +17,7 @@ const DRAFT_KEY = "mynt-chat-draft"; // a suggestion picked before signing in
 const AUTH_ERRORS: Record<string, string> = {
   start: "Couldn't start sign-in with Mynt. Please try again.",
   denied: "Sign-in was cancelled.",
+  config: "Sign-in isn't set up correctly on Mynt's side. Please tell your admin.",
   state: "Sign-in expired. Please try again.",
   session: "Sign-in expired. Please try again.",
   code: "Sign-in didn't complete. Please try again.",

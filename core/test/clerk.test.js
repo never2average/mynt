@@ -292,7 +292,7 @@ test("Mynt's own apps are registered with Clerk with no consent screen: confiden
     assert.deepEqual(created.body, {
       name: "mynt-studio",
       redirect_uris: ["https://studio.example/api/auth/callback"],
-      scopes: "profile email",
+      scopes: "openid profile email", // what Mynt's apps ask for: Clerk refuses a scope the client isn't allowed
       public: false,
       pkce_required: true,
       consent_screen_enabled: false,
@@ -409,5 +409,45 @@ test("mynt clerk first-party writes a file only its user can read, keeps ~/.mynt
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a first-party app registered without openid is repaired in place: scopes only, its secret untouched and never shown", async () => {
+  const { ClerkAdmin, MYNT_OAUTH_SCOPES } = await import("../dist/auth.js");
+  assert.deepEqual([...MYNT_OAUTH_SCOPES], ["openid", "profile", "email"]);
+  const admin = new ClerkAdmin("sk_test_x");
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  const apps = [
+    { id: "oa_1", client_id: "cid_studio", name: "mynt-studio", scopes: "profile email", client_secret: "never-shown" },
+    { id: "oa_2", client_id: "cid_dup", name: "twin", scopes: "openid" },
+    { id: "oa_3", client_id: "cid_dup2", name: "twin", scopes: "openid" },
+  ];
+  globalThis.fetch = async (url, init = {}) => {
+    const body = init.body ? JSON.parse(init.body) : null;
+    sent.push({ url: String(url), method: init.method, body });
+    if (init.method === "GET") return new Response(JSON.stringify({ data: apps }), { status: 200 });
+    if (init.method === "PATCH") {
+      const app = apps.find((a) => String(url).endsWith(`/oauth_applications/${a.id}`));
+      app.scopes = body.scopes;
+      return new Response(JSON.stringify(app), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+  try {
+    const r = await admin.updateFirstPartyScopes("mynt-studio");
+    assert.deepEqual(r, { id: "oa_1", client_id: "cid_studio", name: "mynt-studio", scopes: "openid profile email", changed: true });
+    assert.ok(!JSON.stringify(r).includes("never-shown"));
+    const patch = sent.find((x) => x.method === "PATCH");
+    assert.equal(patch.url, "https://api.clerk.com/v1/oauth_applications/oa_1");
+    assert.deepEqual(patch.body, { scopes: "openid profile email" }, "only the scopes: no secret rotation");
+    // Again: nothing to do. By client id works too.
+    const n = sent.length;
+    assert.equal((await admin.updateFirstPartyScopes("cid_studio")).changed, false);
+    assert.ok(!sent.slice(n).some((x) => x.method === "PATCH"));
+    await assert.rejects(admin.updateFirstPartyScopes("nope"), /No OAuth application/);
+    await assert.rejects(admin.updateFirstPartyScopes("twin"), /Several OAuth applications/);
+  } finally {
+    globalThis.fetch = realFetch;
   }
 });

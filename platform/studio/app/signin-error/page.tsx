@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 // Where a failed sign-in lands (it doesn't need one, so a failure can't loop back to sign-in).
 const REASONS: Record<string, string> = {
   denied: "Sign-in was cancelled.",
+  config: "Sign-in isn't set up correctly on Mynt's side. Please tell your admin.",
   state: "Sign-in took too long. Please try again.",
   session: "Sign-in took too long. Please try again.",
   exchange: "Mynt couldn't finish signing you in. Please try again.",

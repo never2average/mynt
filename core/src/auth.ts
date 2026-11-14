@@ -23,6 +23,10 @@ export interface ClerkLike {
   };
 }
 
+// The scopes Mynt's sign-in serves (protected-resource metadata) and its own apps ask for: Mynt's first-party OAuth
+// applications must allow every one of them, or Clerk refuses the sign-in (invalid_scope).
+export const MYNT_OAUTH_SCOPES = ["openid", "profile", "email"] as const;
+
 // Roles granted in Clerk: public metadata { "mynt_roles": ["admin"] } on the user (or on a Clerk
 // invitation, which Clerk copies onto the user at sign-up). Only Clerk dashboard owners and the
 // Backend API can set public metadata; users can't edit their own.
@@ -158,7 +162,7 @@ export class ClerkAuth {
       resource: this.resource,
       authorization_servers: [this.issuer],
       bearer_methods_supported: ["header"],
-      scopes_supported: ["openid", "profile", "email"],
+      scopes_supported: [...MYNT_OAUTH_SCOPES],
       resource_name: "Mynt",
     };
   }
@@ -218,6 +222,8 @@ export class ClerkAuth {
   }
 }
 
+type OAuthAppRow = { id?: string; client_id?: string; name?: string; scopes?: string };
+
 // Clerk Backend API calls used by `clerk setup` and the whitelist CLI.
 export class ClerkAdmin {
   private readonly api = "https://api.clerk.com/v1";
@@ -259,7 +265,7 @@ export class ClerkAdmin {
     const app = (await this.call("POST", "/oauth_applications", {
       name,
       redirect_uris: [exact],
-      scopes: "profile email",
+      scopes: MYNT_OAUTH_SCOPES.join(" "),
       public: false,
       pkce_required: true,
       consent_screen_enabled: false,
@@ -267,6 +273,25 @@ export class ClerkAdmin {
     if (!app.client_id || !app.client_secret) throw new Error("Clerk didn't return a client id and secret");
     // Kept on (an older instance or plan): the caller still gets the secret, and says so.
     return { ...(app.id ? { id: app.id } : {}), client_id: app.client_id, client_secret: app.client_secret, consent_screen_enabled: app.consent_screen_enabled !== false };
+  }
+
+  // Repairs an existing first-party application's scopes to the ones Mynt's apps ask for (MYNT_OAUTH_SCOPES), found by
+  // its name, client id or id. Idempotent; the secret is neither rotated nor read: only the id, client id, name and
+  // scopes come back.
+  async updateFirstPartyScopes(nameOrId: string): Promise<{ id: string; client_id: string | null; name: string | null; scopes: string; changed: boolean }> {
+    const existing = (await this.call("GET", "/oauth_applications?limit=500")) as { data?: OAuthAppRow[] } | OAuthAppRow[];
+    const list = Array.isArray(existing) ? existing : (existing.data ?? []);
+    const matches = list.filter((a) => a.id === nameOrId || a.client_id === nameOrId || a.name === nameOrId);
+    if (!matches.length) throw new Error(`No OAuth application named or with the id '${nameOrId}'`);
+    if (matches.length > 1) throw new Error(`Several OAuth applications match '${nameOrId}'; give its client id`);
+    const app = matches[0];
+    if (!app.id) throw new Error("Clerk didn't say the application's id");
+    const want = MYNT_OAUTH_SCOPES.join(" ");
+    const has = new Set(String(app.scopes ?? "").split(/\s+/).filter(Boolean));
+    if (MYNT_OAUTH_SCOPES.every((s) => has.has(s)) && has.size === MYNT_OAUTH_SCOPES.length)
+      return { id: app.id, client_id: app.client_id ?? null, name: app.name ?? null, scopes: want, changed: false };
+    const updated = (await this.call("PATCH", `/oauth_applications/${encodeURIComponent(app.id)}`, { scopes: want })) as OAuthAppRow;
+    return { id: app.id, client_id: updated.client_id ?? app.client_id ?? null, name: updated.name ?? app.name ?? null, scopes: String(updated.scopes ?? want), changed: true };
   }
 
   async deleteOAuthApplication(id: string): Promise<void> {
