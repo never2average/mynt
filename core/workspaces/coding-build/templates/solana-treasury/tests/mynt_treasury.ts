@@ -18,12 +18,49 @@ const { PublicKey, Keypair, SystemProgram, Ed25519Program, SYSVAR_INSTRUCTIONS_P
 type PublicKeyT = anchor.web3.PublicKey;
 type KeypairT = anchor.web3.Keypair;
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// A local validator can drop a transaction whose blockhash it hasn't caught up with ("Blockhash not found") or let
+// one expire while it's busy. Those never reached the program, so they are sent again with a fresh blockhash.
+const TRANSIENT = /Blockhash not found|BlockhashNotFound|block height exceeded|Node is behind|\b429\b|Too Many Requests/i;
+// The program's own error, if it answered: from the AnchorError, or "Error Code: X" in the logs or the message.
+const programError = (e: any): string | null => {
+  const logs: string[] = e?.logs ?? e?.transactionLogs ?? [];
+  return (
+    e?.error?.errorCode?.code ??
+    anchor.AnchorError.parse(logs)?.error.errorCode.code ??
+    /Error Code: (\w+)/.exec(`${e}\n${logs.join("\n")}`)?.[1] ??
+    null
+  );
+};
+// Transient only when the program never answered and the RPC said one of these.
+const transient = (e: any) => programError(e) === null && TRANSIENT.test(`${e}\n${(e?.logs ?? e?.transactionLogs ?? []).join("\n")}`);
+async function retry<T>(send: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await send();
+    } catch (e) {
+      if (i >= attempts || !transient(e)) throw e;
+      await sleep(500 * i);
+    }
+  }
+}
+
+// Every transaction is read, simulated and confirmed at "confirmed", with a blockhash fetched for it (AnchorProvider
+// takes a fresh one on each send), and sent again on a transient failure.
+class TestProvider extends anchor.AnchorProvider {
+  async sendAndConfirm(tx: any, signers?: any, opts?: any): Promise<string> {
+    return retry(() => super.sendAndConfirm(tx, signers, { ...opts, commitment: "confirmed", preflightCommitment: "confirmed" }));
+  }
+}
+
 // Runs on the local validator `anchor test` starts. Mynt runs these again, in its own clean sandbox, against the
 // programs it built verifiably. Each rule of the treasury has its own pool here, so the cases don't share state.
 describe("mynt_treasury", () => {
-  const provider = anchor.AnchorProvider.env();
+  const env = anchor.AnchorProvider.env();
+  const connection = new anchor.web3.Connection(env.connection.rpcEndpoint, { commitment: "confirmed" });
+  const provider = new TestProvider(connection, env.wallet, { commitment: "confirmed", preflightCommitment: "confirmed" });
   anchor.setProvider(provider);
-  const connection = provider.connection;
   const payer = (provider.wallet as anchor.Wallet).payer;
   const program = anchor.workspace.myntTreasury as Program<MyntTreasury>;
   const probe = anchor.workspace.extensionProbe as Program<ExtensionProbe>;
@@ -43,24 +80,46 @@ describe("mynt_treasury", () => {
   const pda = (seeds: (string | Buffer | PublicKeyT)[], programId = program.programId) =>
     PublicKey.findProgramAddressSync(seeds.map((s) => (typeof s === "string" ? Buffer.from(s) : Buffer.isBuffer(s) ? s : s.toBuffer())), programId)[0];
   const ata = (owner: PublicKeyT) => getAssociatedTokenAddressSync(mint, owner, true);
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const chainNow = async () => Number((await connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY, "confirmed"))!.data.readBigInt64LE(32));
+  const ready = async () => {
+    for (;;) {
+      const health = await (connection as any)._rpcRequest("getHealth", []).catch(() => null);
+      if (health?.result === "ok") break;
+      await sleep(400);
+    }
+    const start = await connection.getSlot("confirmed");
+    while ((await connection.getSlot("confirmed")) < start + 2) await sleep(200);
+  };
   const waitUntil = async (t: number) => {
     while ((await chainNow()) < t) await sleep(400);
+    await ready();
   };
   const balance = async (account: PublicKeyT) => Number((await getAccount(connection, account, "confirmed")).amount);
+  // What a failed transaction's program said: the Anchor error code (from the error, or parsed from the simulation
+  // logs), the logs themselves (runtime errors such as a privilege escalation live there), then the message.
+  const failure = async (e: any) => {
+    let logs: string[] = e?.logs ?? e?.transactionLogs ?? [];
+    if (!logs.length && typeof e?.getLogs === "function") logs = (await e.getLogs(connection).catch(() => [])) ?? [];
+    const code = programError(e) ?? anchor.AnchorError.parse(logs)?.error.errorCode.code ?? /Error Code: (\w+)/.exec(logs.join("\n"))?.[1] ?? "";
+    return { code, text: `${code}\n${logs.join("\n")}\n${e}` };
+  };
   const fails = async (p: Promise<unknown>, re: RegExp) => {
     try {
       await p;
     } catch (e: any) {
-      const text = `${e}\n${(e?.logs ?? e?.transactionLogs ?? []).join("\n")}`;
+      const { text } = await failure(e);
+      assert.ok(!transient(e), `a transient RPC failure, not the program's answer: ${e}`);
       assert.match(text, re);
       return;
     }
     assert.fail(`expected a failure matching ${re}`);
   };
   const events = async (signature: string) => {
-    const tx = await connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+    let tx = await connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+    for (let i = 0; !tx && i < 20; i++) {
+      await sleep(250);
+      tx = await connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+    }
     const parser = new anchor.EventParser(program.programId, new anchor.BorshCoder(program.idl));
     return [...parser.parseLogs(tx?.meta?.logMessages ?? [])].map((e) => ({ name: e.name.toLowerCase(), data: e.data as any }));
   };
@@ -72,7 +131,7 @@ describe("mynt_treasury", () => {
   const tokenAccount = async (owner: PublicKeyT, amount = 0) => {
     const address = ata(owner);
     await provider.sendAndConfirm(new Transaction().add(createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, address, owner, mint)), [], confirmed);
-    if (amount) await mintTo(connection, payer, mint, address, payer, amount, [], confirmed);
+    if (amount) await retry(() => mintTo(connection, payer, mint, address, payer, amount, [], confirmed));
     return address;
   };
   const depositor = async (amount = 1_000) => {
@@ -238,13 +297,14 @@ describe("mynt_treasury", () => {
       .rpc(confirmed);
 
   before(async () => {
-    // A fresh local validator can refuse the first transactions ("Blockhash not found"); wait until it has produced
-    // some blocks, as Anchor 0.32.2's own test runner does.
+    // A fresh local validator can refuse the first transactions ("Blockhash not found"); wait until it's healthy and
+    // has produced some blocks, as Anchor 0.32.2's own test runner does.
+    await ready();
     while ((await connection.getBlockHeight("confirmed")) < 25) await sleep(400);
     cluster = Array.from(anchor.utils.bytes.bs58.decode(await connection.getGenesisHash()));
     await fund(authority.publicKey, healthAuthority.publicKey, stranger.publicKey);
     // The mint can freeze accounts, as USDC's issuer can.
-    mint = await createMint(connection, payer, payer.publicKey, payer.publicKey, 6, undefined, confirmed);
+    mint = await retry(() => createMint(connection, payer, payer.publicKey, payer.publicKey, 6, undefined, confirmed));
     await tokenAccount(authority.publicKey);
     await tokenAccount(stranger.publicKey);
   });
@@ -593,7 +653,7 @@ describe("mynt_treasury", () => {
         .rpc(confirmed);
 
     await fails(park(), /NotFrozen/);
-    await freezeAccount(connection, payer, ata(x.publicKey), mint, payer, [], confirmed);
+    await retry(() => freezeAccount(connection, payer, ata(x.publicKey), mint, payer, [], confirmed));
     await fails(processQueue(p), /frozen/i);
     const parked = await park();
     assert.include((await events(parked)).map((e) => e.name), "requestparked");
@@ -602,7 +662,7 @@ describe("mynt_treasury", () => {
     assert.equal(await balance(ata(y.publicKey)), yHeld + 50);
     await fails(claim(), /frozen/i);
 
-    await thawAccount(connection, payer, ata(x.publicKey), mint, payer, [], confirmed);
+    await retry(() => thawAccount(connection, payer, ata(x.publicKey), mint, payer, [], confirmed));
     const xHeld = await balance(ata(x.publicKey));
     const claimed = await claim();
     assert.equal(await balance(ata(x.publicKey)), xHeld + 100);
@@ -619,7 +679,7 @@ describe("mynt_treasury", () => {
     const y = await depositor();
     const dx = await deposit(p, x, 100);
     const dy = await deposit(p, y, 50);
-    await mintTo(connection, payer, mint, p.vault, payer, 30, [], confirmed); // a surplus above principal
+    await retry(() => mintTo(connection, payer, mint, p.vault, payer, 30, [], confirmed)); // a surplus above principal
     await fails(request(p, x, dx.record, 100), /DepositLocked/);
 
     await fails(authorityCall("proposeWindDown", p, [new BN((await chainNow()) + 1)]), /TimelockTooShort/);
@@ -667,7 +727,7 @@ describe("mynt_treasury", () => {
       last = await deposit(p, cycler, 100);
     }
     assert.equal((await program.account.position.fetch(last.position, "confirmed")).deposited.toNumber(), 400);
-    await mintTo(connection, payer, mint, p.vault, payer, 30, [], confirmed); // the surplus
+    await retry(() => mintTo(connection, payer, mint, p.vault, payer, 30, [], confirmed)); // the surplus
 
     const at = (await chainNow()) + 4;
     const proposed = await authorityCall("proposeWindDown", p, [new BN(at)]);
