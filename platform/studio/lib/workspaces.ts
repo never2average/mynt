@@ -16,7 +16,22 @@ export const ASSIGNABLE_ROLES = ["admin", "member"] as const;
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
 
 // `personal`: the user's own workspace on Mynt (where their apps go unless they pick another).
-export type Workspace = { id: string; name: string; role: Role; implicit?: boolean; personal?: boolean };
+// The rest is what list_workspaces says about it, when it says so (the Workspace page's card):
+// when it was made, how many members and apps it has, and whether it's archived (an owner can
+// undo that until `offboardingAt`) or frozen because its organization was deleted.
+export type Workspace = {
+  id: string;
+  name: string;
+  role: Role;
+  implicit?: boolean;
+  personal?: boolean;
+  createdAt?: string;
+  memberCount?: number;
+  appCount?: number;
+  archivedAt?: string;
+  offboardingAt?: string;
+  orgMissingSince?: string;
+};
 
 export const PERSONAL_ID = "personal";
 export const PERSONAL: Workspace = { id: PERSONAL_ID, name: "Personal", role: "owner", implicit: true };
@@ -35,9 +50,18 @@ export function fromListWorkspaces(reply: unknown): Workspace[] {
     const id = str(w.id) ?? str(w.workspace_id);
     if (!id || !WORKSPACE_ID.test(id)) return [];
     const personal = w.personal === true || w.kind === "personal" || w.type === "personal";
-    return [{ id, name: str(w.name) ?? "Untitled workspace", role: role(w.role ?? w.my_role), ...(personal ? { personal } : {}) }];
+    const extra: Partial<Workspace> = {};
+    if (str(w.created_at)) extra.createdAt = str(w.created_at);
+    if (countOf(w.members) !== undefined) extra.memberCount = countOf(w.members);
+    if (countOf(w.apps) !== undefined) extra.appCount = countOf(w.apps);
+    if (str(w.archived_at)) extra.archivedAt = str(w.archived_at);
+    if (str(w.offboarding_at)) extra.offboardingAt = str(w.offboarding_at);
+    if (str(w.org_missing_since)) extra.orgMissingSince = str(w.org_missing_since);
+    return [{ id, name: str(w.name) ?? "Untitled workspace", role: role(w.role ?? w.my_role), ...(personal ? { personal } : {}), ...extra }];
   });
 }
+
+const countOf = (v: unknown): number | undefined => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined);
 
 // The workspace to show: the remembered one if it's still the user's, else their own, else the
 // first.
@@ -73,20 +97,35 @@ export function groupByStage(apps: StagedApp[]): Record<Stage, StagedApp[]> {
 
 // --- members -----------------------------------------------------------------------------------
 
-export type Member = { userId: string; name: string | null; email: string | null; role: Role };
-export type Invite = { id: string; email: string; role: Role; expiresAt: string | null };
+export type Member = { userId: string; name: string | null; email: string | null; role: Role; joinedAt?: string };
+export type Invite = { id: string; email: string; role: Role; expiresAt: string | null; sentAt?: string };
 
-// list_workspace_members' reply: { members: [...], invites: [...] }.
-export function fromListMembers(reply: unknown): { members: Member[]; invites: Invite[] } {
+// The identity provider's page for managing the workspace's organization: https only.
+export function safeManageUrl(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" && !u.username && !u.password ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+// list_workspace_members' reply: { members: [...], open_invites: [...] (owners and admins only),
+// manage_url? }. `invites` is read too.
+export function fromListMembers(reply: unknown): { members: Member[]; invites: Invite[]; manageUrl: string | null } {
   const r = isObj(reply) ? reply : {};
   const members = (Array.isArray(r.members) ? r.members : []).filter(isObj).flatMap((m) => {
     const userId = str(m.user_id) ?? str(m.id);
-    return userId ? [{ userId, name: str(m.name) ?? null, email: str(m.email) ?? null, role: role(m.role) }] : [];
+    const joinedAt = str(m.joined_at);
+    return userId ? [{ userId, name: str(m.name) ?? null, email: str(m.email) ?? null, role: role(m.role), ...(joinedAt ? { joinedAt } : {}) }] : [];
   });
-  const invites = (Array.isArray(r.invites) ? r.invites : []).filter(isObj).flatMap((i) => {
+  const rawInvites = Array.isArray(r.open_invites) ? r.open_invites : Array.isArray(r.invites) ? r.invites : [];
+  const invites = rawInvites.filter(isObj).flatMap((i) => {
     const id = str(i.id) ?? str(i.invite_id);
     const email = str(i.email);
-    return id && email ? [{ id, email, role: role(i.role), expiresAt: str(i.expires_at) ?? null }] : [];
+    const sentAt = str(i.created_at);
+    return id && email ? [{ id, email, role: role(i.role), expiresAt: str(i.expires_at) ?? null, ...(sentAt ? { sentAt } : {}) }] : [];
   });
-  return { members, invites };
+  return { members, invites, manageUrl: safeManageUrl(r.manage_url) };
 }

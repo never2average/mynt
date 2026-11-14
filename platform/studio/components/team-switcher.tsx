@@ -2,10 +2,10 @@
 
 // From shadcn/ui's sidebar-07 block (team-switcher.tsx, MIT): the workspace switcher at the top
 // of the sidebar. Its menu lists the user's workspaces, then Invitations (N) when they have
-// pending ones, Members (the selected workspace's) and Create workspace.
+// pending ones, and Create workspace. The workspace's members are on the Workspace page, a fixed
+// item in the sidebar.
 import * as React from "react"
-import Link from "next/link"
-import { ChevronsUpDown, Mail, Plus, Users } from "lucide-react"
+import { ChevronsUpDown, Mail, Plus } from "lucide-react"
 
 import { InvitationsList } from "@/components/invitations"
 
@@ -120,14 +120,6 @@ export function TeamSwitcher({
                 <div className="font-medium">Invitations ({invitations.length})</div>
               </DropdownMenuItem>
             )}
-            <DropdownMenuItem asChild className="gap-2 p-2">
-              <Link href="/members">
-                <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
-                  <Users className="size-4" />
-                </div>
-                <div className="font-medium">Members</div>
-              </Link>
-            </DropdownMenuItem>
             <DropdownMenuItem className="gap-2 p-2" onSelect={() => setCreating(true)}>
               <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
                 <Plus className="size-4" />

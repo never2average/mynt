@@ -9,11 +9,31 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/components/workspace-context";
 import type { Dashboard } from "@/lib/dashboard";
 import type { LinkedAccounts } from "@/lib/linked-accounts";
+import type { StagesData } from "@/components/dashboard-panels";
+import type { AttentionItem } from "@/lib/attention";
+import type { AuditEvent } from "@/lib/compliance";
+import { useComplianceData } from "@/lib/use-compliance";
+import { useRepositories } from "@/components/repositories";
 
 type State = { dashboard: Dashboard } | { unavailable: string } | { error: string } | null;
 
+// What each lower card reads from its route's answer (stable, for useComplianceData).
+const pickAttention = (b: Record<string, unknown>) => (Array.isArray(b.items) ? (b.items as AttentionItem[]) : undefined);
+const pickStages = (b: Record<string, unknown>) => (Array.isArray(b.apps) ? ({ checks: b.checks === true, apps: b.apps } as StagesData) : undefined);
+const pickActivity = (b: Record<string, unknown>) => (b.page as { events?: AuditEvent[] } | undefined)?.events;
+
 export default function DashboardPage() {
   const [state, setState] = useState<State>(null);
+  const { state: attention } = useComplianceData("/api/attention", pickAttention);
+  const { state: stages, reload: reloadStages } = useComplianceData("/api/stages", pickStages);
+  const { state: activity } = useComplianceData("/api/audit", pickActivity);
+  const { state: repos, reload: reloadRepos } = useRepositories();
+
+  // A promotion elsewhere moves apps between stages.
+  useEffect(() => {
+    window.addEventListener("adorable:projects-updated", reloadStages);
+    return () => window.removeEventListener("adorable:projects-updated", reloadStages);
+  }, [reloadStages]);
   const [linked, setLinked] = useState<LinkedAccounts | null>(null);
   const { selected, loading, invitations, answerInvitation } = useWorkspace();
 
@@ -81,7 +101,7 @@ export default function DashboardPage() {
           {state.error}
         </p>
       ) : (
-        <DashboardView dashboard={state.dashboard} linked={linked} />
+        <DashboardView dashboard={state.dashboard} linked={linked} attention={attention} stages={stages} activity={activity} repos={repos} onReposChanged={reloadRepos} />
       )}
     </div>
   );

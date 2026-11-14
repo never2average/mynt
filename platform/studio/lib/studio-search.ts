@@ -11,12 +11,15 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/coverage", label: "Coverage", keywords: "states map where serve" },
   { href: "/licences", label: "Licences", keywords: "licenses partners regulators" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
-  { href: "/members", label: "Members", keywords: "team invite people roles" },
+  { href: "/workspace", label: "Workspace", keywords: "members team invite invitations people roles apps settings rename" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
   { href: "/new", label: "New app", keywords: "create build start" },
 ];
 
-const PAGE_BY_SEGMENT = new Map(STUDIO_PAGES.map((p) => [p.href.split("/")[1] ?? "", p]));
+// Old pages that now redirect elsewhere: still fixed pages, never an app's id.
+const MOVED: readonly StudioPage[] = [{ href: "/members", label: "Workspace" }];
+
+const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].map((p) => [p.href.split("/")[1] ?? "", p]));
 
 /** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page. */
 export function isAppPath(pathname: string): boolean {
@@ -69,7 +72,7 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
   }
   for (const m of sources.members ?? []) {
     const label = m.name ?? m.email ?? "Member";
-    items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/members", text: lower(m.name, m.email, m.role) });
+    items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/workspace?tab=members", text: lower(m.name, m.email, m.role) });
   }
   (sources.licences ?? []).forEach((l, i) => {
     const label = [l.partner, l.type].filter(Boolean).join(" · ") || l.number || "Licence";
