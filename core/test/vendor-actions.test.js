@@ -10,6 +10,7 @@ import { createServer } from "../dist/server.js";
 import { signBody } from "../dist/vendor-call.js";
 import { sweepVendorActionRuns } from "../dist/vendors.js";
 import { definitionFor, publishDefined, setup } from "./v2-helpers.js";
+import { inProduction } from "./helpers.js";
 
 // A product's client action served by its bound vendor service: a device starts a PAN check or an e-sign, Mynt
 // calls the vendor (test endpoint for sandbox sessions, live for live), keeps the result sealed, sends it in full
@@ -261,6 +262,7 @@ test("client actions served by the bound vendor: the device gets a status, the i
   const { user: devUser } = await store.createUser("Dev", ["developer"]);
   const dev = await connect(devUser);
   const app = await ok(dev, "create_app", { name: "Saver", description: "Daily saving", audience: "Savers", product_ids: ["everyday-rd"] });
+  await inProduction(store, app.id); // it publishes and goes live below: production gates real money
   const key = (await ok(dev, "create_api_key", { app_id: app.id, environment: "sandbox", label: "test" })).key;
   await ok(dev, "create_webhook", { app_id: app.id, url: `${appHook.url}/hook`, events: ["handoff.completed", "handoff.failed"] });
   const runtimeServer = async (extra = {}) => {

@@ -624,6 +624,10 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   const developer = await session(devUser);
   await must(builder, "set_product_access", { id: PRODUCT, access_mode: "open", build_terms: { permitted_actions: ["display", "deep_link"], handoff_url: "https://example.com/start" } });
   const app = await must(developer, "create_app", { name: "Dollar transfers (demo)", description: "Send dollars in and out", audience: "US individuals", product_ids: [PRODUCT] });
+  // Production gates real money: only a production app publishes and holds live keys. A real app gets there with
+  // promote_app, on its verified, hosted build; this demo has no build, so it puts the app there directly.
+  await store.db.query("INSERT INTO financial_products.app_promotions (app_id, stage) VALUES ($1, 'production')", [app.id]);
+  note("The demo put the app in Production directly (a real app is promoted with promote_app, after Mynt's checks on its verified, hosted build).");
   await must(developer, "publish_app", { app_id: app.id });
   const apiKey = (await must(developer, "create_api_key", { app_id: app.id, environment: "live", label: "demo" })).key;
   note(`A developer published the app '${app.name}' on it and made a live key.`);

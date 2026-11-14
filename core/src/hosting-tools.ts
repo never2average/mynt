@@ -7,6 +7,7 @@ import { connectionApproval, requireApproved } from "./repo-approvals.js";
 import { appProducts, buildTerms } from "./runtime.js";
 import type { BuildService } from "./builds.js";
 import type { Store, User } from "./store.js";
+import { isProduction } from "./promotion-schema.js";
 import { canSeeBuild, createdWorkspaces, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -135,7 +136,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Host an app",
       description:
-        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it.",
+        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it.",
       inputSchema: { app_id: z.string(), build_id: z.string() },
     },
     async ({ app_id, build_id }) => {
@@ -157,7 +158,8 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       } catch (e) {
         return fail((e as Error).message);
       }
-      const environment = app.status === "published" ? "live" : "sandbox";
+      // A live key only for a published app in Production (production gates real money); else sandbox.
+      const environment = app.status === "published" && (await isProduction(store.db, app.id)) ? "live" : "sandbox";
       let plan;
       try {
         plan = await hosting.planSource(user.id, found.build.repository, found.build.commit_sha);

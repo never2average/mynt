@@ -134,6 +134,21 @@ test("hosting: a locked-down VM per developer, apps from verified builds, a poli
     assert.equal(deployed.isError, false, JSON.stringify(deployed.data));
     assert.equal(deployed.data.port, 9000);
     assert.equal(deployed.data.environment, "sandbox");
+    // Production gates real money: published but not in production, it still gets a sandbox key; in production, live.
+    await w.store.db.query("UPDATE financial_products.apps SET status = 'published' WHERE id = $1", [w.app.id]);
+    assert.equal((await call(dev, "deploy_app", { app_id: w.app.id, build_id: ok })).data.environment, "sandbox");
+    await w.store.db.query("INSERT INTO financial_products.app_promotions (app_id, stage) VALUES ($1, 'production') ON CONFLICT (app_id) DO UPDATE SET stage = 'production'", [w.app.id]);
+    // A live key is sealed with the live vault key: set one for this deploy only.
+    const vault = process.env.MYNT_VAULT_KEY;
+    process.env.MYNT_VAULT_KEY = Buffer.alloc(32, 7).toString("base64");
+    const live = await call(dev, "deploy_app", { app_id: w.app.id, build_id: ok });
+    if (vault === undefined) delete process.env.MYNT_VAULT_KEY;
+    else process.env.MYNT_VAULT_KEY = vault;
+    assert.equal(live.data.environment, "live", JSON.stringify(live.data));
+    await w.store.db.query("UPDATE financial_products.apps SET status = 'draft' WHERE id = $1", [w.app.id]);
+    await w.store.db.query("DELETE FROM financial_products.app_promotions WHERE app_id = $1", [w.app.id]);
+    await w.store.db.query("UPDATE financial_products.api_keys SET status = 'revoked' WHERE app_id = $1 AND environment = 'live'", [w.app.id]);
+    await call(dev, "deploy_app", { app_id: w.app.id, build_id: ok });
     assert.ok(deployed.data.egress.includes("bank.example.com") && deployed.data.egress.includes("mynt.example.com") && !deployed.data.egress.includes("evil.example.com"));
 
     // The agent's policy: the verified commit, a read-only token to fetch it, the app's dedicated key.

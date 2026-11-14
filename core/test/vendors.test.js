@@ -8,6 +8,7 @@ import { createMcpHttpServer } from "../dist/http.js";
 import { createServer } from "../dist/server.js";
 import { callVendor, resolveVendorUrl } from "../dist/vendor-call.js";
 import { publishDefined, setup } from "./v2-helpers.js";
+import { inProduction } from "./helpers.js";
 
 // Vendors offer standard services (here a CKYC search) that innovators plug into their products. Mynt tests a
 // vendor's endpoint itself before it's listed, keeps the subscriber's credential in its key vault, and calls
@@ -364,6 +365,7 @@ test("vendors: roles, service types per region, Mynt's conformance test, subscri
   const { user: devUser } = await store.createUser("Dev", ["developer"]);
   const dev = await w.connect(devUser);
   const app = await ok(dev, "create_app", { name: "Saver", description: "Daily saving", audience: "Savers", product_ids: ["everyday-rd"] });
+  await inProduction(store, app.id); // it publishes below: production gates real money
   const key = (await ok(dev, "create_api_key", { app_id: app.id, environment: "sandbox", label: "test" })).key;
   const httpServer = createMcpHttpServer(store, null, { vendors: VENDOR_OPTS }, { publicUrl: "https://mynt.test", vendors: VENDOR_OPTS }).listen(0, "127.0.0.1");
   await new Promise((r) => httpServer.once("listening", r));

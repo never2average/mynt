@@ -68,6 +68,7 @@ import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
 import { effectiveStages, registerPromotionAdminTools, registerPromotionTools } from "./promotions.js";
 import { registerAttentionTools } from "./attention.js";
+import { isProduction, NOT_PRODUCTION } from "./promotion-schema.js";
 
 // The name MCP clients show for this server.
 export const SERVER_NAME = "mynt";
@@ -991,12 +992,14 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "Publish an app experience",
       description:
-        "Developer: make one of your app experiences visible to everyone via list_apps. You need access to every product and the experience must meet each product's build terms (see check_experience).",
+        "Developer: make one of your app experiences visible to everyone via list_apps. Only an app in Production (promote_app): publishing reaches real customers. You need access to every product and the experience must meet each product's build terms (see check_experience).",
       inputSchema: { app_id: z.string() },
     },
     async ({ app_id }) => {
       const app = await ownApp(app_id);
       if (!app) return fail(`No app with id '${app_id}'`);
+      // Publishing reaches real customers: production apps only.
+      if (!(await isProduction(store.db, app.id))) return fail(NOT_PRODUCTION);
       const r = await readiness(app);
       const blocked = r.access.filter((a) => !a.granted);
       if (blocked.length || !r.lint.passed || !r.structure.passed) {

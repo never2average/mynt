@@ -9,6 +9,7 @@ import { egressFor } from "./hosting-tools.js";
 import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { masked, open, sandboxPrefill, seal, validateValue, vaultAvailable } from "./vault.js";
 import type { ApiKey, App, ProductRecord, Store } from "./store.js";
+import { isProduction, NOT_PRODUCTION } from "./promotion-schema.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 import { eraseCustomerVerification, requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
@@ -214,6 +215,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     }
     const wait = limiter.take(`session:${session.id}`);
     if (wait) throw new ApiError(429, "rate_limited", "Too many requests for this session", { "Retry-After": String(wait) });
+    if (!session.sandbox && !(await isProduction(store.db, app.id))) throw new ApiError(403, "app_not_in_production", NOT_PRODUCTION);
     if (!session.sandbox && app.status !== "published") throw new ApiError(403, "app_not_published", "Live sessions work once the app is published");
 
     type Contracted = ProductRecord & { pins: { contract: DeveloperContract } };
@@ -583,6 +585,8 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     const wait = limiter.take(key.id);
     if (wait) throw new ApiError(429, "rate_limited", "Too many requests for this key", { "Retry-After": String(wait) });
     const sandbox = key.environment === "sandbox";
+    // Production gates real money: a live call (real customers, real money) only from an app in Production.
+    if (!sandbox && !(await isProduction(store.db, app.id))) throw new ApiError(403, "app_not_in_production", NOT_PRODUCTION);
     if (!sandbox && app.status !== "published") throw new ApiError(403, "app_not_published", "Live keys work once the app is published; use a sandbox key until then");
 
     const available = async (productId: string) => {

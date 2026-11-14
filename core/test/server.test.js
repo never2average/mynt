@@ -11,7 +11,7 @@ import { createMcpHttpServer } from "../dist/http.js";
 import { Store } from "../dist/store.js";
 import { runProductTests } from "../dist/product-tests.js";
 import { PRODUCT_LINES } from "../dist/catalog.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, inProduction, licensed } from "./helpers.js";
 
 const CATALOG_TOOLS = ["find_licenses", "get_product", "get_product_regime", "get_region", "get_regulator", "get_template", "list_apps", "list_categories", "list_legal_instruments", "list_product_categories", "list_products", "list_regions", "list_regulated_product_types", "list_template_defaults", "whoami"];
 // Anyone signed in may have been invited to a workspace, and answers it themselves.
@@ -217,6 +217,9 @@ test("innovator creates, tests and publishes; consumer and developer then use it
     audience: "Eco-conscious savers in India",
     product_ids: ["green-fd", "ppf"],
   })).data;
+  // Publishing reaches real customers: only a production app publishes.
+  assert.match((await call(dev, "publish_app", { app_id: app.id })).data.error, /Promote this app to Production first/);
+  await inProduction(store, app.id);
   // green-fd is approval-only (the default): the developer asks, the innovator approves.
   const blocked = await call(dev, "publish_app", { app_id: app.id });
   assert.deepEqual(blocked.data.access_needed.map((a) => a.product_id), ["green-fd"]);

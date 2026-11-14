@@ -268,13 +268,12 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
   let r = await get();
   assert.equal(r.data.from_stage, "staging");
-  assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "live_key", "webhooks", "audit_findings", "program_gate"]);
+  assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "webhooks", "audit_findings", "program_gate"]);
   assert.equal(check(r, "hosting_healthy").status, "fail", "production runs on Mynt's hosting");
   // No target states: production fails it, even for an app on no regulated products.
   assert.equal(check(r, "licences").status, "fail");
   assert.match(check(r, "licences").detail, /Set the states this app serves/);
   assert.equal(check(r, "licences").fix.tool, "set_app_target_states");
-  assert.equal(check(r, "live_key").status, "fail");
   assert.equal(check(r, "webhooks").status, "pass");
   // No independent audit ran: no findings to read, so a warning (advisory for an app that moves no value), never a pass.
   assert.equal(check(r, "audit_passed").status, "warn");
@@ -286,11 +285,9 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
   assert.equal(r.data.can_promote, false);
 
   await w.host(app.id, b, "running");
-  await w.liveKey(app.id);
   await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
   r = await get();
   assert.equal(check(r, "hosting_healthy").status, "pass");
-  assert.equal(check(r, "live_key").status, "pass");
   assert.equal(check(r, "licences").status, "pass");
   assert.equal(r.data.can_promote, true, JSON.stringify(r.data.checks.filter((c) => c.status !== "pass")));
 
@@ -359,7 +356,6 @@ test("sign-off: owners and admins ask, another Mynt admin decides, for that buil
   const b1 = await w.build(app.id, "succeeded", AUDITED);
   await w.setStage(app.id, "staging");
   await w.host(app.id, b1);
-  await w.liveKey(app.id);
   await w.program(app.id, "mainnet");
   await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
@@ -550,7 +546,6 @@ test("apps that need sign-off need the independent audit; an approval lapses whe
   const unaudited = await w.build(app.id);
   await w.setStage(app.id, "staging");
   await w.host(app.id, unaudited);
-  await w.liveKey(app.id);
   await w.program(app.id, "mainnet");
   await w.ana.call("set_app_target_states", { app_id: app.id, states: ["us-ny"] });
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
@@ -598,7 +593,6 @@ test("attention: a production app with no target states, or that lost licence co
   const app = await w.newApp("Live");
   const b = await w.build(app.id);
   await w.host(app.id, b);
-  await w.liveKey(app.id);
   await w.setStage(app.id, "production");
   const failing = async () => (await w.mem.call("get_workspace_attention", { workspace_id: w.ws.id })).data.items.find((i) => i.kind === "promotion_checks_failing");
   assert.match((await failing()).detail, /Set the states this app serves/);
@@ -672,7 +666,6 @@ test("licences: every product covered by a licence in force in each target state
   const b = await w.build(app.id);
   await w.setStage(app.id, "staging");
   await w.host(app.id, b);
-  await w.liveKey(app.id);
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
   // No target states: production can't say where it serves, so it fails (even though New York and California are covered).
   let r = await get();

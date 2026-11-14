@@ -10,7 +10,7 @@ import { BuildService, buildConfigFromEnv } from "../dist/builds.js";
 import { ClerkAuth } from "../dist/auth.js";
 import { appStages, releaseLapsedInvites } from "../dist/workspaces.js";
 import { opsStatus } from "../dist/ops.js";
-import { CATALOG } from "./helpers.js";
+import { CATALOG, inProduction } from "./helpers.js";
 
 // A sandbox host that never gets past queueing: these tests are about who may reach a build, not running one.
 const idleSandboxes = {
@@ -599,6 +599,7 @@ test("leaving cuts access at once: the leaver's keys revoked, webhooks disabled,
   const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
   await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", [ws.id, ben.user.id]);
   const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
+  await inProduction(store, a.id); // live keys are for production apps
   // Members make sandbox keys only, and don't rotate.
   assert.match((await call(ben.client, "create_api_key", { app_id: a.id, environment: "live", label: "prod" })).data.error, /owners and admins create live keys/);
   const live = (await call(ana.client, "create_api_key", { app_id: a.id, environment: "live", label: "prod" })).data;
@@ -705,6 +706,7 @@ test("secrets someone was handed go with them: keys whose secret they rotated ar
   const ws = (await call(ana.client, "create_workspace", { name: "Team" })).data;
   await pg.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'member')", [ws.id, ben.user.id, mem.user.id]);
   const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
+  await inProduction(store, a.id); // live keys are for production apps
   const key = (await call(ana.client, "create_api_key", { app_id: a.id, environment: "live", label: "prod" })).data;
   const hook = (await call(ana.client, "create_webhook", { app_id: a.id, url: "http://127.0.0.1:9/ana", events: ["product.version_published"] })).data;
   assert.match((await call(mem.client, "rotate_webhook_secret", { webhook_id: hook.id })).data.error, /owners and admins rotate/);

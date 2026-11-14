@@ -12,7 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, inProduction, licensed } from "./helpers.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -400,6 +400,7 @@ test("SDK releases go stale when products change, terms change, products leave o
 
   // Revoked access on an approval product.
   const app = (await ctx.call(ctx.dev, "create_app", { name: "Funds", description: "Funds", audience: "Investors", product_ids: ["index-fund-x"] })).data;
+  await inProduction(ctx.store, app.id);
   await ctx.call(ctx.amc.client, "set_product_access", { id: "index-fund-x", access_mode: "approval", build_terms: FUND_TERMS });
   const req = (await ctx.call(ctx.dev, "request_product_access", { app_id: app.id, product_id: "index-fund-x" })).data;
   await ctx.call(ctx.amc.client, "review_request", { request_id: req.id, decision: "approve" });
@@ -419,7 +420,9 @@ const disclose = (product_id) => ({ type: "disclosure_block", product_id });
 const cta = (product_id, action, label = "Open an account") => ({ type: "handoff_cta", product_id, action, label });
 
 async function appWith(ctx, product_ids = ["green-fd", "index-fund-x"]) {
-  return (await ctx.call(ctx.dev, "create_app", { name: "Goal saver", description: "Savings and investing for goals", audience: "Salaried savers", product_ids })).data;
+  const app = (await ctx.call(ctx.dev, "create_app", { name: "Goal saver", description: "Savings and investing for goals", audience: "Salaried savers", product_ids })).data;
+  await inProduction(ctx.store, app.id); // these publish: production gates real money
+  return app;
 }
 
 test("experience definitions are validated", async () => {

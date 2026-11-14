@@ -18,7 +18,7 @@ import { normalizeModel } from "../dist/regulatory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { signBody } from "../dist/vendor-call.js";
-import { CATALOG, licensed } from "./helpers.js";
+import { CATALOG, inProduction, licensed } from "./helpers.js";
 import { publishDefined, setup } from "./v2-helpers.js";
 
 // Approved money rails: money moves only through a rail an admin approved for the product's licence provider, in
@@ -1178,6 +1178,7 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const { user: devUser } = await store.createUser("Dev", ["developer"]);
   const dev = await connectV(devUser);
   const app = await must(dev, "create_app", { name: "Dollars", description: "In and out", audience: "Savers", product_ids: [P] });
+  await inProduction(store, app.id); // production gates real money
   await store.db.query("UPDATE financial_products.apps SET status = 'published' WHERE id = $1", [app.id]);
   const key = (await must(dev, "create_api_key", { app_id: app.id, environment: "live", label: "live" })).key;
   const s = createMcpHttpServer(store, null, VENDOR, { publicUrl: "https://mynt.test", vendors: VENDOR_OPTS }).listen(0, "127.0.0.1");

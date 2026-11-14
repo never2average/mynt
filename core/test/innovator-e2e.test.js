@@ -6,7 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpHttpServer } from "../dist/http.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
-import { CATALOG } from "./helpers.js";
+import { CATALOG, inProduction } from "./helpers.js";
 import { TEMPLATE } from "./v2-helpers.js";
 
 // An innovator mints a financial product end to end, through nothing but Mynt's MCP tools, as each
@@ -305,6 +305,7 @@ test("an innovator mints a recurring deposit end to end through MCP tools, and a
     disclosures: ["Deposits are subject to RBI rules on premature withdrawal."],
     actions: ["display", "initiate_onboarding"],
   });
+  await inProduction(store, app.id); // production gates real money: publishing and live keys
   assert.equal((await call(developer, "publish_app", { app_id: app.id })).isError, true, "can't go live before the innovator approves");
   const asked = await ok(developer, "request_product_access", { app_id: app.id, product_id: PRODUCT, note: "A monthly saving app" });
 
@@ -351,5 +352,6 @@ test("an innovator mints a recurring deposit end to end through MCP tools, and a
   await ok(innovator, "invite_developer", { product_id: PRODUCT, developer_email: "dana@apps.example" });
   assert.equal(await sees(), true, "and shows once they are");
   const danaApp = await ok(dana.client, "create_app", danaAppInput);
+  await inProduction(store, danaApp.id);
   await ok(dana.client, "publish_app", { app_id: danaApp.id });
 });
