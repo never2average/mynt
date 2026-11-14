@@ -64,7 +64,8 @@ pub mod mynt_treasury {
         pool.wind_down_started = false;
         pool.surplus = 0;
         pool.surplus_paid = 0;
-        pool.deposited_at_wind_down = 0;
+        pool.principal_at_wind_down = 0;
+        pool.wind_down_epoch = 0;
         pool.bump = ctx.bumps.pool;
         pool.vault_bump = ctx.bumps.vault;
         emit!(PoolInitialized {
@@ -100,7 +101,8 @@ pub mod mynt_treasury {
         }
         {
             let pool = &ctx.accounts.pool;
-            require!(!winding_down(pool, now), TreasuryError::WindingDown);
+            // Closed from the moment a wind-down is proposed, so nobody can buy a bigger share of its surplus.
+            require!(pool.wind_down_at == 0, TreasuryError::WindingDown);
             require!(!pool.sponsor_paused, TreasuryError::DepositsPaused);
             if pool.health_paused {
                 require!(pool.terms.topups_when_health_paused, TreasuryError::DepositsPausedForHealth);
@@ -205,12 +207,19 @@ pub mod mynt_treasury {
         deposit.remaining = 0;
         deposit.rejected = true;
         let position = &mut ctx.accounts.position;
+        let pool: &mut Pool = &mut ctx.accounts.pool;
+        snapshot_position(pool, position);
+        if pool.wind_down_at != 0 {
+            // Refused money never shares in a surplus.
+            position.principal_at_wind_down = position.principal_at_wind_down.checked_sub(refund).ok_or(TreasuryError::Overflow)?;
+            pool.principal_at_wind_down = pool.principal_at_wind_down.checked_sub(refund).ok_or(TreasuryError::Overflow)?;
+        }
         position.principal = position.principal.checked_sub(refund).ok_or(TreasuryError::Overflow)?;
         position.deposited = position.deposited.checked_sub(refund).ok_or(TreasuryError::Overflow)?;
         position.nonce = position.nonce.checked_add(1).ok_or(TreasuryError::Overflow)?;
-        let pool = &mut ctx.accounts.pool;
         pool.total_principal = pool.total_principal.checked_sub(refund).ok_or(TreasuryError::Overflow)?;
         pool.total_deposited = pool.total_deposited.checked_sub(refund).ok_or(TreasuryError::Overflow)?;
+        let position = &ctx.accounts.position;
         emit!(DepositRejected { pool: pool_key, depositor: deposit.depositor, deposit: deposit.key(), seq: deposit.seq, refunded: refund, nonce: position.nonce });
         Ok(())
     }
@@ -454,7 +463,8 @@ pub mod mynt_treasury {
 
     /// Proposes new terms within the product floor. They take effect no sooner than the pool's timelock and the
     /// notice in force, so anyone who dislikes them can be out first; terms that raise the reserve or the minimum
-    /// request (which bind deposits already made) wait at least the floor's longest lock-in plus its longest notice.
+    /// request (which bind deposits already made) wait at least the floor's longest lock-in (or its review window, if
+    /// longer) plus its longest notice.
     /// Lock-in and notice bind only deposits made after the change.
     pub fn propose_terms(ctx: Context<AuthorityOnly>, terms: Terms, effective_at: i64) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
@@ -462,7 +472,8 @@ pub mod mynt_treasury {
         validate_terms(&terms, &pool.floor)?;
         let mut wait = pool.min_timelock_seconds.max(pool.terms.notice_seconds);
         if terms.min_reserve > pool.terms.min_reserve || terms.min_reserve_bps > pool.terms.min_reserve_bps || terms.min_request > pool.terms.min_request {
-            let exits = pool.floor.max_lock_in_seconds.checked_add(pool.floor.max_notice_seconds).ok_or(TreasuryError::Overflow)?;
+            let held = pool.floor.max_lock_in_seconds.max(pool.floor.review_window_seconds);
+            let exits = held.checked_add(pool.floor.max_notice_seconds).ok_or(TreasuryError::Overflow)?;
             wait = wait.max(exits);
         }
         require!(effective_at >= now.checked_add(wait).ok_or(TreasuryError::Overflow)?, TreasuryError::TimelockTooShort);
@@ -517,8 +528,9 @@ pub mod mynt_treasury {
         Ok(())
     }
 
-    /// The authority proposes winding the pool down, no sooner than its timelock and notice. From then on deposits
-    /// are closed, the reserve floor is zero and lock-ins no longer hold, so the queue can pay everyone out.
+    /// The authority proposes winding the pool down, effective no sooner than its timelock and notice. Deposits close
+    /// at once, and the principal outstanding now is what the surplus will be shared by. From `effective_at` the
+    /// reserve floor is zero and lock-ins no longer hold, so the queue can pay everyone out.
     pub fn propose_wind_down(ctx: Context<AuthorityOnly>, effective_at: i64) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let pool = &mut ctx.accounts.pool;
@@ -526,11 +538,13 @@ pub mod mynt_treasury {
         let wait = pool.min_timelock_seconds.max(pool.terms.notice_seconds);
         require!(effective_at >= now.checked_add(wait).ok_or(TreasuryError::Overflow)?, TreasuryError::TimelockTooShort);
         pool.wind_down_at = effective_at;
-        emit!(WindDownProposed { pool: pool.key(), effective_at });
+        pool.wind_down_epoch = pool.wind_down_epoch.checked_add(1).ok_or(TreasuryError::Overflow)?;
+        pool.principal_at_wind_down = pool.total_principal;
+        emit!(WindDownProposed { pool: pool.key(), effective_at, principal: pool.principal_at_wind_down });
         Ok(())
     }
 
-    /// The authority withdraws a wind-down that hasn't taken effect.
+    /// The authority withdraws a wind-down that hasn't taken effect; deposits reopen.
     pub fn cancel_wind_down(ctx: Context<AuthorityOnly>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let pool = &mut ctx.accounts.pool;
@@ -541,8 +555,7 @@ pub mod mynt_treasury {
     }
 
     /// Permissionless, once a wind-down has taken effect: records the surplus (what the vault holds above all
-    /// principal still owed) and the deposits it's shared over. Deposits and rejections are closed by then, so the
-    /// shares can't change.
+    /// principal still owed). The shares were fixed when the wind-down was proposed.
     pub fn start_wind_down(ctx: Context<StartWindDown>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let pool = &mut ctx.accounts.pool;
@@ -550,19 +563,21 @@ pub mod mynt_treasury {
         require!(!pool.wind_down_started, TreasuryError::WindingDown);
         pool.wind_down_started = true;
         pool.surplus = ctx.accounts.vault.amount.saturating_sub(pool.total_principal);
-        pool.deposited_at_wind_down = pool.total_deposited;
-        emit!(WindDownStarted { pool: pool.key(), surplus: pool.surplus, deposited: pool.deposited_at_wind_down, principal: pool.total_principal });
+        emit!(WindDownStarted { pool: pool.key(), surplus: pool.surplus, principal_at_proposal: pool.principal_at_wind_down, principal: pool.total_principal });
         Ok(())
     }
 
-    /// Permissionless: pays a depositor their pro rata share of the wind-down's surplus (by what they deposited and
-    /// wasn't refused), once, to their own associated token account. Never out of principal still owed.
+    /// Permissionless: pays a depositor their pro rata share of the wind-down's surplus, by the principal they had
+    /// outstanding when it was proposed (refusals since excluded), once, to their own associated token account.
+    /// Never out of principal still owed.
     pub fn claim_surplus(ctx: Context<ClaimSurplus>) -> Result<()> {
         let pool_key = ctx.accounts.pool.key();
         require!(ctx.accounts.pool.wind_down_started, TreasuryError::NotWindingDown);
         require!(!ctx.accounts.position.surplus_claimed, TreasuryError::SurplusClaimed);
-        let (surplus, deposited) = (ctx.accounts.pool.surplus, ctx.accounts.pool.deposited_at_wind_down);
-        let share = if deposited == 0 { 0 } else { (surplus as u128 * ctx.accounts.position.deposited as u128 / deposited as u128) as u64 };
+        let (surplus, total) = (ctx.accounts.pool.surplus, ctx.accounts.pool.principal_at_wind_down);
+        let position = &ctx.accounts.position;
+        let base = if position.snapshot_epoch == ctx.accounts.pool.wind_down_epoch { position.principal_at_wind_down } else { position.principal };
+        let share = if total == 0 { 0 } else { (surplus as u128 * base as u128 / total as u128) as u64 };
         let owed = ctx.accounts.pool.total_principal;
         require!(ctx.accounts.vault.amount.saturating_sub(owed) >= share, TreasuryError::ReserveFloor);
         if share > 0 {
@@ -604,6 +619,8 @@ pub mod mynt_treasury {
 // ---- rules ----
 
 pub const MAX_BPS: u16 = 10_000;
+/// The longest review window a product floor may set: 30 days.
+pub const MAX_REVIEW_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 pub const DEPOSIT_APPROVAL_DOMAIN: [u8; 8] = *b"MYNTDEP2";
 pub const OBLIGATIONS_DOMAIN: [u8; 8] = *b"MYNTOBL2";
 /// sha256("global:on_treasury_event")[..8]: an Anchor extension handles the hook as `on_treasury_event`.
@@ -662,8 +679,10 @@ fn validate_floor(f: &ProductFloor) -> Result<()> {
     require!(f.min_lock_in_seconds >= 0 && f.max_lock_in_seconds >= f.min_lock_in_seconds, TreasuryError::InvalidTerms);
     require!(f.min_notice_seconds >= 0 && f.max_notice_seconds >= f.min_notice_seconds, TreasuryError::InvalidTerms);
     require!(f.max_min_reserve >= f.min_reserve, TreasuryError::InvalidTerms);
-    require!(f.max_reserve_bps <= MAX_BPS && f.min_reserve_bps <= f.max_reserve_bps, TreasuryError::InvalidTerms);
-    require!(f.max_obligations_staleness > 0 && f.review_window_seconds >= 0, TreasuryError::InvalidTerms);
+    // Under 100%, so the reserve floor always leaves something of the principal payable.
+    require!(f.max_reserve_bps < MAX_BPS && f.min_reserve_bps <= f.max_reserve_bps, TreasuryError::InvalidTerms);
+    require!(f.max_obligations_staleness > 0, TreasuryError::InvalidTerms);
+    require!(f.review_window_seconds >= 0 && f.review_window_seconds <= MAX_REVIEW_WINDOW_SECONDS, TreasuryError::InvalidTerms);
     require!(f.max_commitment > 0 && f.min_commitment <= f.max_commitment, TreasuryError::InvalidTerms);
     Ok(())
 }
@@ -720,7 +739,17 @@ fn pay_from_vault<'info>(
     )
 }
 
+/// Before a position's principal first changes after a wind-down is proposed, keeps what it was then: its share of
+/// the surplus. (Deposits are closed from the proposal, so only payments and refusals change it.)
+fn snapshot_position(pool: &Pool, position: &mut Position) {
+    if pool.wind_down_at != 0 && position.snapshot_epoch != pool.wind_down_epoch {
+        position.principal_at_wind_down = position.principal;
+        position.snapshot_epoch = pool.wind_down_epoch;
+    }
+}
+
 fn record_payment(pool: &mut Pool, request: &mut WithdrawalRequest, deposit: &mut DepositRecord, position: &mut Position, pay: u64) -> Result<()> {
+    snapshot_position(pool, position);
     request.remaining = request.remaining.checked_sub(pay).ok_or(TreasuryError::Overflow)?;
     request.paid = request.paid.checked_add(pay).ok_or(TreasuryError::Overflow)?;
     deposit.remaining = deposit.remaining.checked_sub(pay).ok_or(TreasuryError::Overflow)?;
@@ -1086,7 +1115,10 @@ pub struct Pool {
     pub wind_down_started: bool,
     pub surplus: u64,
     pub surplus_paid: u64,
-    pub deposited_at_wind_down: u64,
+    /// The principal outstanding when the wind-down was proposed, less refusals since: what the surplus is shared by.
+    pub principal_at_wind_down: u64,
+    /// Counts proposals, so a position's snapshot from a cancelled wind-down isn't reused.
+    pub wind_down_epoch: u64,
     pub bump: u8,
     pub vault_bump: u8,
 }
@@ -1103,6 +1135,9 @@ pub struct Position {
     pub deposits: u64,
     /// Signed into the deposit approval; a refused deposit moves it on.
     pub nonce: u64,
+    /// The principal when a wind-down was proposed, kept before it first changes (valid for `snapshot_epoch`).
+    pub principal_at_wind_down: u64,
+    pub snapshot_epoch: u64,
     pub surplus_claimed: bool,
     pub bump: u8,
 }
@@ -1287,6 +1322,7 @@ pub struct ObligationsAttested {
 pub struct WindDownProposed {
     pub pool: Pubkey,
     pub effective_at: i64,
+    pub principal: u64,
 }
 
 #[event]
@@ -1298,7 +1334,7 @@ pub struct WindDownCancelled {
 pub struct WindDownStarted {
     pub pool: Pubkey,
     pub surplus: u64,
-    pub deposited: u64,
+    pub principal_at_proposal: u64,
     pub principal: u64,
 }
 
