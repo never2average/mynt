@@ -37,6 +37,8 @@ export const STUDIO_TOOLS = {
     .object({ product_line: z.string().max(80).optional(), query: z.string().max(200).optional(), access_mode: z.string().max(40).optional() })
     .strict(),
   get_product: z.object({ id }).strict(),
+  // An app's SDK tab: the integration kit of each product the app uses (reading only).
+  get_product_sdk: z.object({ product_id: id }).strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({
@@ -70,7 +72,7 @@ export const STUDIO_TOOLS = {
   relink_workspace_org: z.object({ workspace_id: workspaceId }).strict(),
   // What needs the workspace's attention (the dashboard's Needs attention card).
   get_workspace_attention: z.object({ workspace_id: workspaceId }).strict(),
-  // The dashboard's P&L: revenue against costs per period, and the statement.
+  // The dashboard's P&L, and an app's P&L tab (with app_id): revenue against costs per period, and the statement.
   get_workspace_pnl: z
     .object({ workspace_id: workspaceId, granularity: z.enum(["month", "week"]), periods: z.number().int().min(1).max(24), app_id: id.optional() })
     .strict(),
@@ -100,7 +102,7 @@ export const STUDIO_TOOLS = {
       app_id: id.optional(),
       from: auditDate.optional(),
       to: auditDate.optional(),
-      // The Audits page's tabs, where Mynt classifies its records.
+      // Mynt's audit classes: the Audits page's tabs, and an app's Security tab.
       class: z.enum(["security", "obligations", "financial", "workspace"]).optional(),
     })
     .strict(),

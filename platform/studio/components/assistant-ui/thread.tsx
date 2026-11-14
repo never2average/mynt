@@ -51,9 +51,10 @@ import { createContext, useContext, type FC, type ReactNode } from "react";
 // How an answer's text is drawn: MarkdownText (no clickable links) unless the thread names its own.
 const TextRenderer = createContext<FC>(MarkdownText);
 
-export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; placeholder?: string; Text?: FC }> = ({
+export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; note?: ReactNode; placeholder?: string; Text?: FC }> = ({
   welcome,
   disabledNote,
+  note,
   placeholder,
   Text = MarkdownText,
 }) => {
@@ -88,6 +89,7 @@ export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; placeholde
               {disabledNote}
             </p>
           )}
+          {note && <div className="aui-composer-note -mt-2 text-center text-xs text-muted-foreground" data-composer-note>{note}</div>}
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>

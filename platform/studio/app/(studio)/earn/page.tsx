@@ -1,13 +1,14 @@
 "use client";
 
-// Earn (/earn): the investing assistant first, then Opportunities, My positions and, for
-// builders, My pools (components/earn-view.tsx, components/earn-assistant.tsx).
-// ?tab=assistant|opportunities|my-positions|my-pools picks the first tab.
+// Earn (/earn): the investing assistant in the studio's chat workspace, with Pools, Opportunities,
+// My positions, My pools (builders) and Drafts on the right (components/earn-assistant.tsx).
+// ?tab=pools|opportunities|my-positions|my-pools|drafts picks the right-hand tab; a table or the
+// drafts opens the panel at once. Old links (?tab=assistant, /liquidity) keep working.
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { EarnAssistant, type EarnStatus } from "@/components/earn-assistant";
-import { EarnView, type ActionResult, type LiquidityActions } from "@/components/earn-view";
+import { EarnWorkspace, type EarnStatus } from "@/components/earn-assistant";
+import type { ActionResult, LiquidityActions } from "@/components/earn-view";
 import { NotReady } from "@/components/not-available";
 import type { LiquidityData } from "@/lib/liquidity";
 import type { Loaded } from "@/lib/use-compliance";
@@ -66,14 +67,16 @@ export default function EarnPage() {
     withdraw: (input) => after(post("/api/liquidity/withdraw", input)),
   };
 
+  if (state.kind === "ready")
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <EarnWorkspace chat={chat} status={status} data={state.data} actions={actions} initialTab={tab} />
+      </div>
+    );
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       <div className="flex w-full flex-1 flex-col p-4 lg:p-6">
-        {state.kind === "ready" ? (
-          <EarnView data={state.data} actions={actions} initialTab={tab} assistant={<EarnAssistant chat={chat} status={status} data={state.data} actions={actions} />} />
-        ) : (
-          <NotReady state={state} what="Earn" />
-        )}
+        <NotReady state={state} what="Earn" />
       </div>
     </div>
   );
