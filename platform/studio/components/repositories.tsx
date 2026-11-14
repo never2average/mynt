@@ -1,7 +1,7 @@
 "use client"
 
 // The developer's connected GitHub repositories: up to five on the dashboard's GitHub tile, all
-// of them on the Workspace page's Repositories tab, each with its approval (approved, waiting for
+// of them on the Settings page's Repositories tab, each with its approval (approved, waiting for
 // an admin and why, or rejected), and Connect repository, which calls connect_repository with an
 // owner/name and shows what Mynt answered. Server-renderable for the tests.
 import Link from "next/link"
@@ -170,7 +170,7 @@ export function RepoTileList({ state }: { state: ReposState }) {
           </li>
         ))}
       </ul>
-      <Link href="/workspace?tab=repositories" className="text-xs font-medium text-foreground hover:underline">
+      <Link href="/settings?tab=repositories" className="text-xs font-medium text-foreground hover:underline">
         View all{state.repos.length > TILE_REPOS ? ` (${state.repos.length})` : ""}
       </Link>
     </div>

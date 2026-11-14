@@ -1,6 +1,6 @@
 "use client"
 
-// The Workspace page (/workspace), laid out as the studio's detail pages are: a card with the
+// The Settings page (/settings), laid out as the studio's detail pages are: a card with the
 // workspace's details on top, then a tab selector, each tab a table. Members and Invitations
 // (components/members-view.tsx), Apps (every app with its stage, owner and last build),
 // Repositories (the developer's own connected GitHub repositories) and
@@ -88,7 +88,7 @@ export function WorkspaceCard({ info, members, apps }: { info: WorkspaceInfo; me
             {byStage ? (
               <span className="flex flex-wrap gap-x-3 gap-y-1" data-apps-by-stage>
                 {byStage.map(([s, n]) => (
-                  <Link key={s} href="/workspace?tab=apps" className="hover:underline" data-stage-count={s}>
+                  <Link key={s} href="/settings?tab=apps" className="hover:underline" data-stage-count={s}>
                     {STAGE_LABELS[s]} {n}
                   </Link>
                 ))}
@@ -113,7 +113,7 @@ export function WorkspaceCard({ info, members, apps }: { info: WorkspaceInfo; me
 
 export function TabSelector({ tab, onTab }: { tab: WorkspaceTab; onTab: (t: WorkspaceTab) => void }) {
   return (
-    <div role="tablist" aria-label="Workspace" className="inline-flex w-fit items-center gap-1 rounded-lg bg-muted p-1">
+    <div role="tablist" aria-label="Settings" className="inline-flex w-fit items-center gap-1 rounded-lg bg-muted p-1">
       {WORKSPACE_TABS.map((t) => (
         <button
           key={t}
@@ -224,7 +224,7 @@ export function SettingsTab({ info, actions }: { info: WorkspaceInfo; actions: S
 
   if (!info.supported)
     return (
-      <p className="rounded-lg border border-dashed px-6 py-10 text-center text-sm text-muted-foreground" data-tab-panel="settings" data-empty="not-available">
+      <p className="rounded-lg border border-dashed px-6 py-10 text-center text-sm text-muted-foreground" data-tab-panel="general" data-empty="not-available">
         {info.message ?? "Workspace settings come with Mynt's workspaces."}
       </p>
     )
@@ -240,7 +240,7 @@ export function SettingsTab({ info, actions }: { info: WorkspaceInfo; actions: S
   const ownerTools = info.isOwner && !w.personal && (info.tools.archive || info.tools.unarchive || info.tools.relink)
 
   return (
-    <div className="flex flex-col gap-4" data-tab-panel="settings">
+    <div className="flex flex-col gap-4" data-tab-panel="general">
       {message && (
         <p role={message.error ? "alert" : "status"} className={cn("text-sm", message.error ? "text-destructive" : "font-medium")}>
           {message.text}
@@ -362,7 +362,7 @@ export function WorkspaceView({
       {tab === "invitations" && (members ? <InvitationsTab workspace={info.workspace} data={members} actions={memberActions} /> : loading)}
       {tab === "apps" && (apps ? <AppsTab workspace={info.workspace} apps={apps} /> : loading)}
       {tab === "repositories" && <RepositoriesTab state={repos} onConnected={onReposChanged} />}
-      {tab === "settings" && <SettingsTab info={info} actions={settingsActions} />}
+      {tab === "general" && <SettingsTab info={info} actions={settingsActions} />}
     </div>
   )
 }

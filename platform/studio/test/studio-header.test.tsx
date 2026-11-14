@@ -108,12 +108,15 @@ describe("the sidebar's folders", () => {
 
 describe("page titles", () => {
   it("are only the page's name, never the workspace", () => {
-    expect(["/", "/coverage", "/licences", "/audits", "/workspace", "/builds", "/new"].map(pageTitle)).toEqual([
+    expect(["/", "/coverage", "/licences", "/audits", "/settings", "/workspace", "/earn", "/liquidity", "/builds", "/new"].map(pageTitle)).toEqual([
       "Dashboard",
       "Licences", // /coverage redirects to the Licences page's Coverage tab
       "Licences",
       "Audits",
-      "Workspace",
+      "Settings",
+      "Settings", // /workspace redirects to Settings
+      "Earn",
+      "Earn", // /liquidity redirects to Earn
       "Builds",
       "New app",
     ]);
@@ -128,7 +131,7 @@ describe("the studio's header", () => {
     ["/", "Dashboard"],
     ["/licences", "Licences"],
     ["/audits", "Audits"],
-    ["/workspace", "Workspace"],
+    ["/settings", "Settings"],
     ["/builds", "Builds"],
     ["/new", "New app"],
   ];

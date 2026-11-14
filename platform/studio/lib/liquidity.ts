@@ -29,15 +29,24 @@ export const hasLiquidity = (a: LiquidityAccess | null | undefined) => Boolean(a
 // Whether the studio's liquidity routes serve this session at all (Mynt checks every call again).
 export const canUseLiquidity = (roles: readonly string[]) => hasLiquidity(accessFrom(roles));
 
-export type LiquidityTab = "my-pools" | "open-pools" | "my-positions";
-export const TAB_LABELS: Record<LiquidityTab, string> = { "my-pools": "My pools", "open-pools": "Open pools", "my-positions": "My positions" };
-export function tabsFor(a: LiquidityAccess): LiquidityTab[] {
-  return [...(a.builder ? (["my-pools"] as const) : []), ...(a.liquidityProvider ? (["open-pools", "my-positions"] as const) : [])];
+// The Earn page's tabs (/earn?tab=...): the assistant first, then the detailed tables by role.
+export type LiquidityTab = "opportunities" | "my-positions" | "my-pools";
+export type EarnTab = "assistant" | LiquidityTab;
+export const TAB_LABELS: Record<EarnTab, string> = { assistant: "Assistant", opportunities: "Opportunities", "my-positions": "My positions", "my-pools": "My pools" };
+export function tabsFor(a: LiquidityAccess): EarnTab[] {
+  if (!hasLiquidity(a)) return [];
+  return ["assistant", ...(a.liquidityProvider ? (["opportunities", "my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : [])];
+}
+// /liquidity's old tabs, on Earn.
+export function earnTabFromLiquidity(tab: unknown): EarnTab {
+  if (tab === "open-pools" || tab === "opportunities") return "opportunities";
+  if (tab === "my-positions" || tab === "my-pools") return tab;
+  return "assistant";
 }
 // The wallet tile's links, by role.
 export function walletLinksFor(a: LiquidityAccess | null | undefined): { label: string; href: string }[] {
   if (!a) return [];
-  return [...(a.builder ? [{ label: "Manage pools", href: "/liquidity?tab=my-pools" }] : []), ...(a.liquidityProvider ? [{ label: "Provide liquidity", href: "/liquidity?tab=open-pools" }] : [])];
+  return [...(a.builder ? [{ label: "Manage pools", href: "/earn?tab=my-pools" }] : []), ...(a.liquidityProvider ? [{ label: "Provide liquidity", href: "/earn?tab=opportunities" }] : [])];
 }
 
 // ---- money ----
@@ -72,7 +81,8 @@ export type Pool = {
   holdReason: string | null;
   minReserveBps: number;
   minReserveFloorCents: number;
-  noticePeriodDays: number;
+  noticePeriodDays: number; // the wait after a withdrawal request before it can be paid
+  lockInDays: number | null; // the least time after a deposit settles before it can be withdrawn; null when Mynt doesn't set one
   minCommitmentCents: number;
   maxCommitmentCents: number;
   depositRailId: string | null;
@@ -100,6 +110,7 @@ export function fromPools(reply: unknown): Pool[] {
       minReserveBps: cents(p.min_reserve_bps),
       minReserveFloorCents: cents(p.min_reserve_floor_cents),
       noticePeriodDays: cents(p.notice_period_days),
+      lockInDays: num(p.lock_in_days),
       minCommitmentCents: cents(p.min_commitment_cents),
       maxCommitmentCents: cents(p.max_commitment_cents),
       depositRailId: str(p.deposit_rail_id),
@@ -134,6 +145,8 @@ export function statusText(p: Pool): string {
 }
 export const reserveText = (p: Pool) => `${percentOfBps(p.minReserveBps)} of obligations, at least ${usd(p.minReserveFloorCents)}`;
 export const noticeText = (days: number) => (days === 0 ? "No notice" : `${days} day${days === 1 ? "" : "s"}`);
+// Lock-in and notice are different things: lock-in runs from when a deposit settles, notice from when a withdrawal is asked for.
+export const lockInText = (days: number | null) => (days === null ? "Not set" : days === 0 ? "None" : `${days} day${days === 1 ? "" : "s"}`);
 export const limitsText = (p: Pool) => `${usd(p.minCommitmentCents)} – ${usd(p.maxCommitmentCents)} per firm`;
 
 // ---- health ----
