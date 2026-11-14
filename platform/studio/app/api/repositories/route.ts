@@ -6,7 +6,7 @@ import { asDeveloper, json } from "@/lib/studio-route";
 
 export const dynamic = "force-dynamic";
 
-// The developer's own connected repositories (list_repositories), for the GitHub tile and the
+// The developer's own connected repositories (list_repositories), for the dashboard's workspace facts and the
 // Workspace page's Repositories tab. They're the developer's, not the workspace's. `connect`
 // says whether this Mynt offers connect_repository.
 export async function GET() {

@@ -238,6 +238,8 @@ const TABLES = `
     finished_at timestamptz
   );
   CREATE INDEX IF NOT EXISTS build_runs_developer_idx ON financial_products.build_runs (developer_id, created_at DESC);
+  -- A workspace's build spend over a range of periods (get_workspace_pnl).
+  CREATE INDEX IF NOT EXISTS build_runs_app_created_idx ON financial_products.build_runs (app_id, created_at);
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS sandbox_key_id text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS box_sandbox_id text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS box_until timestamptz;
