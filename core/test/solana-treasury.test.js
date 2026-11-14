@@ -30,6 +30,17 @@ test("the treasury is built with exactly the pinned toolchain its manifest names
   assert.equal(JSON.parse(read("package-lock.json")).packages[`node_modules/${SOLANA_TOOLCHAIN.anchorTs.package}`].version, SOLANA_TOOLCHAIN.anchorTs.version);
 });
 
+test("the committed Cargo.lock resolves every Anchor crate to the pinned release", () => {
+  // anchor-lang and anchor-spl are pinned with "=" in Cargo.toml; their attribute, derive and syn crates come in
+  // through them, so the lock is what holds those to the same release.
+  const lock = read("Cargo.lock");
+  const anchors = [...lock.matchAll(/\[\[package\]\]\nname = "(anchor-[a-z-]+)"\nversion = "([^"]+)"/g)].map((m) => [m[1], m[2]]);
+  const release = anchors.filter(([name]) => !name.startsWith("anchor-lang-idl"));
+  assert.ok(release.length >= 10, JSON.stringify(anchors));
+  for (const [name, version] of release) assert.equal(version, SOLANA_TOOLCHAIN.anchor.version, name);
+  for (const name of ["anchor-lang", "anchor-spl", "anchor-syn", "anchor-attribute-program", "anchor-derive-accounts"]) assert.ok(release.some(([n]) => n === name), name);
+});
+
 test("the manifest names the program's address and the Cargo.lock it commits", () => {
   assert.equal(manifest.program, "mynt_treasury");
   assert.equal(manifest.mainnet, false);

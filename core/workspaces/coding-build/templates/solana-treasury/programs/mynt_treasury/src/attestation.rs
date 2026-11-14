@@ -41,20 +41,25 @@ pub fn parse_ed25519_ix(data: &[u8]) -> Option<ParsedEd25519> {
     Some(ParsedEd25519 { pubkey, message: data[msg_offset..msg_offset + msg_size].to_vec() })
 }
 
-/// Checks that the instruction just before this one is an Ed25519 verification, by one of `attesters`, of exactly
-/// `expected`. The precompile has already checked the signature itself, or the transaction wouldn't be running.
-/// Returns the attester that signed.
-pub fn verify_attestation(instructions: &AccountInfo, attesters: &[Pubkey; 2], expected: &[u8]) -> Result<Pubkey> {
-    let current = load_current_index_checked(instructions).map_err(|_| error!(TreasuryError::MissingAttestation))?;
-    require!(current > 0, TreasuryError::MissingAttestation);
-    let ix = load_instruction_at_checked((current - 1) as usize, instructions).map_err(|_| error!(TreasuryError::MissingAttestation))?;
-    require_keys_eq!(ix.program_id, ED25519_PROGRAM_ID, TreasuryError::MissingAttestation);
-    require!(ix.accounts.is_empty(), TreasuryError::MalformedAttestation);
-    let parsed = parse_ed25519_ix(&ix.data).ok_or(error!(TreasuryError::MalformedAttestation))?;
-    let signer = attesters
-        .iter()
-        .find(|a| **a != Pubkey::default() && a.to_bytes() == parsed.pubkey)
-        .ok_or(error!(TreasuryError::UnknownAttester))?;
-    require!(parsed.message == expected, TreasuryError::AttestationMismatch);
-    Ok(*signer)
+/// Checks that the `count` instructions just before this one are each an Ed25519 verification of exactly `expected`,
+/// each by a different one of `attesters`. The precompile has already checked the signatures themselves, or the
+/// transaction wouldn't be running. Returns the attesters that signed, nearest first.
+pub fn verify_attestations(instructions: &AccountInfo, attesters: &[Pubkey; 2], expected: &[u8], count: usize) -> Result<Vec<Pubkey>> {
+    let current = load_current_index_checked(instructions).map_err(|_| error!(TreasuryError::MissingAttestation))? as usize;
+    require!(count > 0 && current >= count, TreasuryError::MissingAttestation);
+    let mut signers: Vec<Pubkey> = Vec::with_capacity(count);
+    for k in 1..=count {
+        let ix = load_instruction_at_checked(current - k, instructions).map_err(|_| error!(TreasuryError::MissingAttestation))?;
+        require_keys_eq!(ix.program_id, ED25519_PROGRAM_ID, TreasuryError::MissingAttestation);
+        require!(ix.accounts.is_empty(), TreasuryError::MalformedAttestation);
+        let parsed = parse_ed25519_ix(&ix.data).ok_or(error!(TreasuryError::MalformedAttestation))?;
+        let signer = *attesters
+            .iter()
+            .find(|a| **a != Pubkey::default() && a.to_bytes() == parsed.pubkey)
+            .ok_or(error!(TreasuryError::UnknownAttester))?;
+        require!(parsed.message == expected, TreasuryError::AttestationMismatch);
+        require!(!signers.contains(&signer), TreasuryError::NeedsTwoAttesters);
+        signers.push(signer);
+    }
+    Ok(signers)
 }

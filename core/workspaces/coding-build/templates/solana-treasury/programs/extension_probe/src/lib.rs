@@ -4,6 +4,9 @@ use anchor_lang::solana_program::program::invoke;
 
 declare_id!("5dsKLv4kGHG57V29AP23UNunJGvfPoen1CCXYYFE7anb");
 
+/// The treasury this probe extends (the template's placeholder address).
+pub const TREASURY_ID: Pubkey = pubkey!("DCw4DC1HrhApHAWMxNhrKxw7XGHWGHndAMqVFfp13bJz");
+
 /// A test fixture, never deployed: the treasury's extension contract seen from the extension's side. In mode 0 it
 /// records each hook it gets (what a well-behaved extension does). In mode 1 it is hostile: it tries to move the
 /// vault's USDC to an account of its choosing, with the pool (the vault's owner) as the authority, which the runtime
@@ -36,6 +39,9 @@ pub mod extension_probe {
         seq: u64,
     ) -> Result<()> {
         require_keys_eq!(ctx.accounts.pool.key(), pool);
+        // What every extension should do: accept the hook only when the treasury's hook PDA for this pool signed it.
+        let (hook, _) = Pubkey::find_program_address(&[b"hook", pool.as_ref()], &TREASURY_ID);
+        require_keys_eq!(ctx.accounts.hook.key(), hook, ProbeError::NotTheTreasury);
         require_keys_eq!(ctx.accounts.record.key(), record);
         let probe = &mut ctx.accounts.probe;
         probe.calls += 1;
@@ -44,6 +50,7 @@ pub mod extension_probe {
         probe.last_seq = seq;
         probe.last_depositor = depositor;
         probe.pool_was_signer = ctx.accounts.pool.is_signer;
+        probe.hook_was_signer = ctx.accounts.hook.is_signer;
         probe.pool_was_writable = ctx.accounts.pool.is_writable;
         if probe.mode == 1 {
             // remaining: [vault, destination token account, token program]
@@ -78,6 +85,8 @@ pub struct SetMode<'info> {
 
 #[derive(Accounts)]
 pub struct OnTreasuryEvent<'info> {
+    /// The treasury's hook PDA for the pool, the only signer of the call.
+    pub hook: Signer<'info>,
     /// CHECK: the treasury's pool, read-only.
     pub pool: UncheckedAccount<'info>,
     /// CHECK: the deposit or request record, read-only.
@@ -97,6 +106,7 @@ pub struct Probe {
     pub last_depositor: Pubkey,
     pub pool_was_signer: bool,
     pub pool_was_writable: bool,
+    pub hook_was_signer: bool,
     pub bump: u8,
 }
 
@@ -104,4 +114,6 @@ pub struct Probe {
 pub enum ProbeError {
     #[msg("expected the vault, a destination and the token program")]
     Accounts,
+    #[msg("the hook wasn't signed by the treasury's hook PDA for this pool")]
+    NotTheTreasury,
 }
