@@ -10,6 +10,6 @@
     "anchorImage": "solanafoundation/anchor:v0.32.1@sha256:facc4ebd0738ba7ebc1eb4ef000deab6b37e7747960d3f400c73c40c5421b5de"
   },
   "cargo_lock_sha256": "c51a670669ed92a2e055eaa370921df6e5a22bdde2b48369b3776892ba109347",
-  "program_sha256": "087326ee8350a51737dee8d1393bc7669b50ca6648082b19aa50ef4bccb177de",
+  "program_sha256": "29b7ae0496c6f8b4d334a64a477aa1d4a5005fb460b18c2205f0c950eaa90988",
   "mainnet": false
 }

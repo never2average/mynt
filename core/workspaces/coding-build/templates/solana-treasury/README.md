@@ -86,7 +86,8 @@ then enters through `deposit` and its allow-list like any other USDC. Nothing he
   keeps its claim, and the queue moves on. `claim_parked` pays it once the account is thawed, under the same checks.
 - `cancel_request` lets the depositor leave the queue; the queue skips a cancelled request.
 - **Reserve floor:** `max(min_reserve, ⌈obligations × min_reserve_bps / 10000⌉)`, capped at `max_reserve_bps` of the
-  principal still owed, and zero in a wind-down. `attest_obligations` takes Ed25519 attestations over `"MYNTOBL2" ‖
+  principal still owed (always under 100%, so the floor never holds every exit shut: as principal is paid out, the
+  floor falls with it), and zero in a wind-down. `attest_obligations` takes Ed25519 attestations over `"MYNTOBL2" ‖
   program id ‖ cluster ‖ pool ‖ obligations (u64 LE) ‖ as_of (i64 LE)`, newer than the last and no older than
   `obligations_max_staleness`. A figure that **rises needs both attesters** (two Ed25519 instructions just before,
   distinct keys); one that falls or holds needs one. A stale figure is kept, not dropped, so the floor never falls
@@ -104,18 +105,22 @@ then enters through `deposit` and its allow-list like any other USDC. Nothing he
 `propose_terms(terms, effective_at)` (the authority) needs terms within the floor and `effective_at ≥ now +
 max(min_timelock_seconds, notice_seconds)`. Lock-in and notice changes bind only deposits made afterwards (each
 deposit keeps its own). A change that binds existing deposits, a higher `min_reserve`, `min_reserve_bps` or
-`min_request`, must also wait at least the floor's `max_lock_in_seconds + max_notice_seconds`, so every depositor
-can be out first. `apply_terms` is permissionless once `effective_at` has passed; `cancel_terms` withdraws a
+`min_request`, must also wait at least `max(max_lock_in_seconds, review_window_seconds) + max_notice_seconds` of the
+floor, so every depositor, including one still under review, can be out first. `apply_terms` is permissionless once `effective_at` has passed; `cancel_terms` withdraws a
 proposal.
 
 ## Wind-down
 
 `propose_wind_down(effective_at)` (the authority, no sooner than the timelock and notice; `cancel_wind_down` until
-then). From `effective_at`: deposits and refusals are closed, lock-ins no longer hold and the reserve floor is zero,
-so the queue pays everyone out. `start_wind_down` (anyone) records the surplus, what the vault holds above all
-principal still owed, and `claim_surplus` (anyone, once per depositor) pays each depositor
-`surplus × their deposits / all deposits` (deposits not refused), never out of principal still owed. Rounding dust
-and anything sent to the vault after `start_wind_down` stay in the vault.
+then, which reopens deposits). **Deposits close the moment it's proposed**, and the principal outstanding then is
+what the surplus is shared by: each position's principal is kept (lazily, before its first payment or refusal after
+the proposal), and refusals since come off both the position's and the pool's figure. So cycling money through
+deposit, request and payment before a wind-down buys no bigger share, and nothing can be added after it's announced.
+From `effective_at`: refusals are closed, lock-ins no longer hold and the reserve floor is zero, so the queue pays
+everyone out. `start_wind_down` (anyone) records the surplus, what the vault holds above all principal still owed,
+and `claim_surplus` (anyone, once per depositor) pays `surplus × principal at the proposal / all principal at the
+proposal`, never out of principal still owed. Rounding dust and anything sent to the vault after `start_wind_down`
+stay in the vault.
 
 ## The extension contract
 
@@ -162,7 +167,8 @@ chain, only the sha256. The treasury doesn't call product-health itself, so a he
   its own, which changes the bytes. The gate should rebuild the template at the app's address and compare.
 - **Admission checks (L2).** Who may open a pool, with which floor, authority, attesters and cluster, isn't the
   program's to judge: Mynt's gate and indexer must check each pool's initial state against the product it serves
-  before treating it as that product's treasury.
+  before treating it as that product's treasury. See the checklist below.
+
 - **Events through logs (L6).** `emit!` events ride on program logs, which can be truncated. Moving to `emit_cpi!`
   (Anchor's `event-cpi`) adds an event-authority account to every instruction; not done here.
 - **Health pause (L3, fixed).** The authority and the health authority each keep their own health-pause flag, and
@@ -177,8 +183,24 @@ chain, only the sha256. The treasury doesn't call product-health itself, so a he
   - Events link allow-listed (KYC'd) depositor wallets to amounts, publicly.
   - The program's upgrade authority is the ultimate custody key: deploy each version immutable, or keep the upgrade
     authority behind a Squads vault with a time lock.
-- **Surplus share** is by deposits not refused, whenever they were made; a time-weighted share would need more state.
+- **Surplus share** is by principal outstanding when the wind-down was proposed, not time-weighted (principal-seconds
+  would need an accumulator on every principal change).
 - **No authority hand-over instruction:** the authority is a Squads vault, whose members change inside Squads.
 - **Audit focus:** the payment paths' accounting (`record_payment`, parked claims, surplus against principal still
   owed), the Ed25519 instruction parsing and the two-attester rule, rounding in the reserve floor and the surplus
   share, the hook PDA's signature being the extension's only privilege, and compute use with an extension attached.
+
+## Mynt's gate: what to check before treating a pool as a product's treasury
+
+The program enforces some of these bounds itself (marked "program"); the gate checks all of them against the product.
+
+- The deployed program matches the template's verifiable build, rebuilt at the app's reserved address, and its
+  upgrade authority is none (immutable) or a Squads vault with a time lock.
+- `usdc_mint` is the cluster's USDC; `cluster` is the cluster's genesis hash.
+- `authority` is the product's Squads vault (with a time lock); `attesters` and `health_authority` are the keys the
+  product names; `extension_program`, if any, is a reviewed program that checks the hook PDA's signature.
+- The floor is the product's: lock-in, notice, reserve, commitment and staleness bounds as agreed.
+  - `max_reserve_bps` is under 10000 (program).
+  - `review_window_seconds` is at most 30 days (program), and no longer than the product allows.
+  - `min_timelock_seconds` is at least the notice (program) and what the product requires.
+- The pool's terms at initialisation are the product's terms.

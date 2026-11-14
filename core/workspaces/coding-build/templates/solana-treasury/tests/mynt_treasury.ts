@@ -105,7 +105,7 @@ describe("mynt_treasury", () => {
     minReserve: new BN(0),
     maxMinReserve: new BN(1_000_000_000_000),
     minReserveBps: 0,
-    maxReserveBps: 10_000,
+    maxReserveBps: 9_999,
     maxObligationsStaleness: new BN(86_400),
     minCommitment: new BN(0),
     maxCommitment: new BN(10_000_000_000),
@@ -266,6 +266,9 @@ describe("mynt_treasury", () => {
     await fails(createPool({ lockInSeconds: new BN(5) }, { minLockInSeconds: new BN(10) }), /TermsBelowFloor/);
     await fails(createPool({ lockInSeconds: new BN(50) }, { maxLockInSeconds: new BN(40) }), /TermsAboveMaximum/);
     await fails(createPool({ noticeSeconds: new BN(10) }, {}, 5), /TimelockTooShort/);
+    // Admission bounds: a reserve that could hold all the principal, or a review window over 30 days.
+    await fails(createPool({}, { maxReserveBps: 10_000 }), /InvalidTerms/);
+    await fails(createPool({}, { reviewWindowSeconds: new BN(30 * 86_400 + 1) }), /InvalidTerms/);
   });
 
   it("takes deposits only from depositors an attester allowed, at the lock-in they agreed to, each its own record", async () => {
@@ -405,6 +408,7 @@ describe("mynt_treasury", () => {
       maxCommitment: new BN(1_000_000),
       maxObligationsStaleness: new BN(3600),
       topupsWhenHealthPausedAllowed: false,
+      reviewWindowSeconds: new BN(35),
     }, 3);
     const d = await depositor();
     const early = await deposit(p, d, 10);
@@ -424,9 +428,10 @@ describe("mynt_treasury", () => {
     for (const tight of [{ lockInSeconds: new BN(31) }, { noticeSeconds: new BN(21) }, { minReserveBps: 2001 }]) {
       await fails(authorityCall("proposeTerms", p, [terms({ ...base, ...tight }), new BN(later)]), /TermsAboveMaximum/);
     }
-    // A higher reserve binds deposits already made, so it waits out the floor's longest lock-in and notice (30 + 20).
-    await fails(authorityCall("proposeTerms", p, [terms({ ...base, minReserveBps: 200 }), new BN((await chainNow()) + 40)]), /TimelockTooShort/);
-    await authorityCall("proposeTerms", p, [terms({ ...base, minReserveBps: 200 }), new BN((await chainNow()) + 55)]);
+    // A higher reserve binds deposits already made, so it waits out the longer of the floor's longest lock-in and its
+    // review window, plus its longest notice: max(30, 35) + 20.
+    await fails(authorityCall("proposeTerms", p, [terms({ ...base, minReserveBps: 200 }), new BN((await chainNow()) + 52)]), /TimelockTooShort/);
+    await authorityCall("proposeTerms", p, [terms({ ...base, minReserveBps: 200 }), new BN((await chainNow()) + 60)]);
     await authorityCall("cancelTerms", p, []);
     await fails(applyTerms(p), /NoPendingTerms/);
 
@@ -449,14 +454,15 @@ describe("mynt_treasury", () => {
     const f = await program.account.depositRecord.fetch(fresh.record, "confirmed");
     assert.equal(f.unlockAt.toNumber(), f.settledAt.toNumber() + 20);
     // The early deposit's request gets its own 1s notice, not the new 3s.
-    await waitUntil(earlyUnlock);
+    await waitUntil(Math.max(earlyUnlock, e.reviewUntil.toNumber()));
     const r = await request(p, d, early.record, 10, 1);
     const req = await program.account.withdrawalRequest.fetch(r.request, "confirmed");
     assert.equal(req.payableAt.toNumber() - req.requestedAt.toNumber(), 1);
   });
 
   it("(d)(e) pays strictly from the head, keeps a partly paid request at the head, and never goes below the reserve floor", async () => {
-    const p = await createPool({ minReserve: new BN(120) });
+    // The fixed floor is 60, capped at 50% of the principal still owed.
+    const p = await createPool({ minReserve: new BN(60) }, { maxReserveBps: 5000 });
     const x = await depositor();
     const y = await depositor();
     const z = await depositor();
@@ -466,37 +472,44 @@ describe("mynt_treasury", () => {
     const ry = await request(p, y, dy.record, 50);
 
     await fails(processQueue(p, { seq: ry.seq }), /ConstraintSeeds|seeds constraint/i);
+    const paid = async () => (await events(await processQueue(p))).find((e) => e.name === "withdrawalpaid")!.data;
 
     const xHeld = await balance(ata(x.publicKey));
-    const first = await processQueue(p);
-    const paid = (await events(first)).find((e) => e.name === "withdrawalpaid")!;
-    assert.equal(paid.data.amount.toNumber(), 30);
-    assert.equal(paid.data.partial, true);
-    assert.equal(paid.data.reserveFloor.toNumber(), 120);
-    assert.equal(await balance(p.vault), 120);
-    assert.equal(await balance(ata(x.publicKey)), xHeld + 30);
+    const yHeld = await balance(ata(y.publicKey));
+    let pay = await paid(); // principal 150: floor min(60, 75) = 60
+    assert.equal(pay.amount.toNumber(), 90);
+    assert.equal(pay.partial, true);
+    assert.equal(pay.reserveFloor.toNumber(), 60);
+    assert.equal(pay.vaultAfter.toNumber(), 60, "paid down to the floor, no further");
     let state = await program.account.pool.fetch(p.pool, "confirmed");
     assert.equal(state.headSeq.toNumber(), rx.seq.toNumber(), "a partial fill stays at the head");
-    assert.equal((await program.account.withdrawalRequest.fetch(rx.request, "confirmed")).remaining.toNumber(), 70);
-    await fails(processQueue(p), /ReserveFloor/);
+    assert.equal((await program.account.withdrawalRequest.fetch(rx.request, "confirmed")).remaining.toNumber(), 70 - 60);
+    assert.equal(await balance(ata(y.publicKey)), yHeld, "nothing behind the head is paid");
 
-    await deposit(p, z, 100);
-    await processQueue(p);
+    pay = await paid(); // principal 60: floor min(60, 30) = 30
+    assert.equal(pay.amount.toNumber(), 10);
+    assert.equal(pay.partial, false);
     assert.equal(await balance(ata(x.publicKey)), xHeld + 100);
     state = await program.account.pool.fetch(p.pool, "confirmed");
     assert.equal(state.headSeq.toNumber(), ry.seq.toNumber());
-    const yHeld = await balance(ata(y.publicKey));
-    await processQueue(p);
-    assert.equal(await balance(ata(y.publicKey)), yHeld + 30);
-    assert.equal(await balance(p.vault), 120, "the vault stops at the floor");
-    await fails(processQueue(p), /ReserveFloor/);
+
+    pay = await paid(); // principal 50: floor min(60, 25) = 25
+    assert.equal(pay.amount.toNumber(), 25);
+    assert.equal(pay.partial, true);
+    assert.equal(pay.vaultAfter.toNumber(), pay.reserveFloor.toNumber());
 
     const snap = await program.methods.snapshot().accountsPartial({ pool: p.pool, vault: p.vault }).rpc(confirmed);
     const s = (await events(snap))[0];
     assert.equal(s.name, "poolsnapshot");
-    assert.equal(s.data.vaultBalance.toNumber(), 120);
-    assert.equal(s.data.reserveFloor.toNumber(), 120);
-    assert.equal(s.data.totalQueued.toNumber(), 20);
+    assert.equal(s.data.vaultBalance.toNumber(), 25);
+    assert.equal(s.data.reserveFloor.toNumber(), 12);
+    assert.equal(s.data.totalQueued.toNumber(), 25);
+
+    await deposit(p, z, 100); // principal 125: floor min(60, 62) = 60
+    pay = await paid();
+    assert.equal(pay.amount.toNumber(), 25);
+    assert.equal(await balance(ata(y.publicKey)), yHeld + 50);
+    assert.equal(await balance(p.vault), 100);
   });
 
   it("(e) measures the reserve against attested obligations: rises need both attesters, and the floor is capped", async () => {
@@ -613,6 +626,7 @@ describe("mynt_treasury", () => {
     await fails(authorityCall("proposeWindDown", p, [new BN((await chainNow()) + 60)], stranger), /ConstraintHasOne|has.one/i);
     const at = (await chainNow()) + 4;
     await authorityCall("proposeWindDown", p, [new BN(at)]);
+    await fails(deposit(p, x, 10), /WindingDown/); // closed from the proposal, not from when it takes effect
     await fails(program.methods.startWindDown().accountsPartial({ pool: p.pool, vault: p.vault }).rpc(confirmed), /NotWindingDown/);
     await waitUntil(at);
     await fails(deposit(p, x, 10), /WindingDown/);
@@ -638,6 +652,43 @@ describe("mynt_treasury", () => {
     assert.equal(await balance(ata(x.publicKey)), xHeld + 100 + 20);
     assert.equal(await balance(ata(y.publicKey)), yHeld + 50 + 10);
     assert.equal(await balance(p.vault), 0);
+  });
+
+  it("shares a wind-down's surplus by principal at the proposal, so cycling deposits through the queue buys nothing", async () => {
+    const p = await createPool({}, {}, 2);
+    const honest = await depositor();
+    const cycler = await depositor(1_000);
+    await deposit(p, honest, 100);
+    // Deposit, withdraw, deposit again: 400 deposited in all, never more than 100 outstanding.
+    let last = await deposit(p, cycler, 100);
+    for (let i = 0; i < 3; i++) {
+      await request(p, cycler, last.record, 100);
+      await processQueue(p);
+      last = await deposit(p, cycler, 100);
+    }
+    assert.equal((await program.account.position.fetch(last.position, "confirmed")).deposited.toNumber(), 400);
+    await mintTo(connection, payer, mint, p.vault, payer, 30, [], confirmed); // the surplus
+
+    const at = (await chainNow()) + 4;
+    const proposed = await authorityCall("proposeWindDown", p, [new BN(at)]);
+    assert.equal((await events(proposed))[0].data.principal.toNumber(), 200);
+    await fails(deposit(p, cycler, 100), /WindingDown/);
+    // Paid out before the wind-down starts: the share still counts what was outstanding at the proposal.
+    await request(p, cycler, last.record, 100);
+    await processQueue(p);
+    await waitUntil(at);
+    await program.methods.startWindDown().accountsPartial({ pool: p.pool, vault: p.vault }).rpc(confirmed);
+    const claim = (who: KeypairT) =>
+      program.methods
+        .claimSurplus()
+        .accountsPartial({ pool: p.pool, position: pda(["position", p.pool, who.publicKey]), vault: p.vault, depositorToken: ata(who.publicKey), usdcMint: mint, tokenProgram: TOKEN_PROGRAM_ID })
+        .rpc(confirmed);
+    const shares = [];
+    for (const who of [honest, cycler]) {
+      const sig = await claim(who);
+      shares.push((await events(sig)).find((e) => e.name === "surplusclaimed")!.data.amount.toNumber());
+    }
+    assert.deepEqual(shares, [15, 15], "by principal at the proposal (100 each), not by everything ever deposited (100 vs 400)");
   });
 
   it("(g) calls an extension, signed only by the pool's hook PDA, but the extension can never sign for the vault", async () => {
