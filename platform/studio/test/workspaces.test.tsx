@@ -87,16 +87,18 @@ function sidebar(over: Partial<Parameters<typeof SidebarView>[0]> = {}) {
 }
 
 describe("sidebar", () => {
-  it("shows the selected workspace in the switcher, then Dashboard, Coverage, Licences, Audits and Workspace, then the three folders", () => {
+  it("shows the selected workspace in the switcher, then Dashboard, Licences, Audits and Workspace, then the Apps folders", () => {
     const html = sidebar();
     expect(html).toContain("Acme");
     expect(html).toContain('aria-label="Switch workspace"');
-    for (const href of ["/coverage", "/licences", "/audits", "/workspace"]) expect(html).toContain(`href="${href}"`);
-    const order = ["Switch workspace", ">Dashboard<", ">Coverage<", ">Licences<", ">Audits<", ">Workspace<", ">Production<", ">Staging<", ">Ideas<"].map((s) => html.indexOf(s));
+    for (const href of ["/licences", "/audits", "/workspace"]) expect(html).toContain(`href="${href}"`);
+    expect(html).not.toContain('href="/coverage"'); // Coverage is a tab of Licences now
+    const order = ["Switch workspace", ">Dashboard<", ">Licences<", ">Audits<", ">Workspace<", ">Apps<", ">Production<", ">Staging<", ">Ideas<"].map((s) => html.indexOf(s));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(html).toContain('href="/app-p"');
-    expect(html).toContain('href="/app-s"');
+    // One folder open at a time: Production, with no app open and nothing remembered.
+    expect(html).not.toContain('href="/app-s"');
   });
 
   it("has no Builds or New app item", () => {

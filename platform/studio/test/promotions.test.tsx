@@ -319,6 +319,7 @@ const attention = fromAttention({
     { id: "x1", kind: "licence", severity: "low", title: "Licence renews in 50 days", detail: "Harbor Bank, CA", href: "/licences", at: "2026-11-01T00:00:00Z" },
     { id: "x2", kind: "build", severity: "high", title: "Cards' build failed", detail: "Typecheck failed", href: "/a1", at: "2026-11-12T00:00:00Z" },
     { id: "x3", severity: "medium", title: "Bad link", href: "javascript:alert(1)" },
+    { id: "x5", severity: "low", title: "Partner portal", href: "https://partner.example.test/review" },
     { id: "x4", severity: "high" },
   ],
 });
@@ -326,12 +327,17 @@ const dashboard = fromDashboardTool({ apps: [{ app_id: "a1", name: "Cards", stat
 
 describe("the dashboard's lower cards", () => {
   it("Needs attention lists items, most severe first, with a severity dot, detail and link", () => {
-    expect(attention.map((i) => i.id)).toEqual(["x2", "x3", "x1"]); // x4 has no title
+    expect(attention.map((i) => i.id)).toEqual(["x2", "x3", "x1", "x5"]); // x4 has no title
     const html = renderToStaticMarkup(<NeedsAttention state={{ kind: "ready", data: attention }} />);
     expect(html).toMatch(/data-severity="high"[\s\S]*?data-tone="red"[\s\S]*?High/);
     expect(html).toContain("Typecheck failed");
     expect(html).toContain('href="/a1"');
-    expect(html).not.toContain("javascript:");
+    // Only studio pages are links: another site (even https) or javascript: is plain text, never clickable.
+    expect(html.match(/>Open</g)).toHaveLength(2);
+    expect(html).not.toMatch(/href="(javascript|https):/);
+    expect(html).not.toContain("target=\"_blank\"");
+    expect(html).toMatch(/data-plain-link[^>]*>https:\/\/partner\.example\.test\/review</);
+    expect(attention.find((i) => i.id === "x5")).toMatchObject({ href: null, linkText: "https://partner.example.test/review" });
   });
 
   it("Needs attention says nothing needs you, or that it isn't available yet, never an empty list", () => {

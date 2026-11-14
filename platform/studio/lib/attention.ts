@@ -1,6 +1,6 @@
 // What needs the workspace's attention (get_workspace_attention), for the dashboard's Needs
 // attention card. Read defensively: an item without a title is left out, and only links to a
-// studio page or an https page are kept.
+// studio page are kept as links (anything else is shown as plain text).
 import { isStudioPath } from "./studio-search";
 
 type Obj = Record<string, unknown>;
@@ -18,21 +18,16 @@ export type AttentionItem = {
   title: string;
   detail: string | null;
   href: string | null;
-  external: boolean;
+  linkText: string | null; // a link that isn't a studio page, shown as plain text
   at: string | null;
 };
 
-function link(v: unknown): { href: string | null; external: boolean } {
+// Only a studio page is a link; anything else (another site, even over https) shows as plain text.
+function link(v: unknown): { href: string | null; linkText: string | null } {
   const raw = str(v);
-  if (!raw) return { href: null, external: false };
-  if (isStudioPath(raw)) return { href: raw, external: false };
-  try {
-    const u = new URL(raw);
-    if (u.protocol === "https:" && !u.username && !u.password) return { href: u.toString(), external: true };
-  } catch {
-    // not a link
-  }
-  return { href: null, external: false };
+  if (!raw) return { href: null, linkText: null };
+  const shown = raw.slice(0, 300); // isStudioPath narrows raw, so take the text first
+  return isStudioPath(raw) ? { href: raw, linkText: null } : { href: null, linkText: shown };
 }
 
 // Most severe first, then newest.
