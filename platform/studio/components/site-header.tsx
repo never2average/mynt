@@ -1,6 +1,6 @@
 // From shadcn/ui's dashboard-01 block (site-header.tsx, MIT): the page's name beside the
 // sidebar's toggle, then search (Search or ask AI, Cmd+K) and New app, on every page outside an
-// app. Sticky: it stays at the top while the page scrolls. The workspace isn't repeated here; the
+// app, with the wallet control (components/wallet-control.tsx) right beside New app. Sticky: it stays at the top while the page scrolls. The workspace isn't repeated here; the
 // sidebar's switcher shows it.
 import Link from "next/link"
 import { Plus } from "lucide-react"
@@ -9,6 +9,7 @@ import { SearchTrigger } from "@/components/studio-search"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
+import { WalletControl } from "@/components/wallet-control"
 
 /** New app, everywhere: the /new flow. `compact`: an icon button with a tooltip-style title. */
 export function NewAppButton({ compact = false }: { compact?: boolean }) {
@@ -35,6 +36,7 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {children}
           <SearchTrigger />
+          <WalletControl />
           <NewAppButton />
         </div>
       </div>

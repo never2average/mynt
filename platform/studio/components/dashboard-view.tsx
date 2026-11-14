@@ -1,101 +1,99 @@
-// The dashboard (home page): shadcn/ui's dashboard-01 layout (KPI cards, an area chart and a
-// table), fed by lib/dashboard.ts, with Needs attention, Apps by stage and Recent activity
-// (components/dashboard-panels.tsx). Server-renderable, so the tests render it without a browser.
+// The dashboard (home page), laid out like a P&L statement rather than a grid of cards: Needs
+// attention as a strip, then the top row (left: revenue, costs and net this period, the
+// operating facts and the workspace facts; right: the P&L chart), the statement table, and Apps
+// by stage beside Recent activity (stacked on narrow screens). Sections with headings,
+// dividers and tables; no cards. The P&L comes from get_workspace_pnl (components/pnl.tsx) and
+// degrades on its own; everything else works without it. Server-renderable for the tests.
 import Link from "next/link"
-import { Plus } from "lucide-react"
+import { Github, Plus } from "lucide-react"
 
-import { AccountTiles } from "@/components/account-tiles"
-import { ChartAreaInteractive } from "@/components/chart-area-interactive"
 import { AppsByStage, NeedsAttention, RecentActivity, type StagesData } from "@/components/dashboard-panels"
-import type { ReposState } from "@/components/repositories"
-import { SectionCards } from "@/components/section-cards"
-import { Badge } from "@/components/ui/badge"
+import { PnlChart, PnlStatement, PnlStats } from "@/components/pnl"
+import { ConnectRepository, type ReposState } from "@/components/repositories"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { count, percent, usd, type Dashboard, type DashboardApp } from "@/lib/dashboard"
+import { count, facts, type Dashboard } from "@/lib/dashboard"
 import type { LinkedAccounts } from "@/lib/linked-accounts"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditEvent } from "@/lib/compliance"
+import type { Granularity, Pnl, Range } from "@/lib/pnl"
 import type { Loaded } from "@/lib/use-compliance"
+import { cn } from "@/lib/utils"
 
-const when = (at: string | null) =>
-  at ? new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : ""
-
-function AppsTable({ apps }: { apps: DashboardApp[] }) {
+function Fact({ label, children, measured = true, title, id }: { label: string; children: React.ReactNode; measured?: boolean; title?: string; id: string }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Your apps</CardTitle>
-        <CardDescription>What each app moved, who it serves, and its latest build</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>App</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Money moved</TableHead>
-              <TableHead className="text-right">Customers</TableHead>
-              <TableHead className="text-right">Conversion</TableHead>
-              <TableHead>Last build</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {apps.map((a) => (
-              <TableRow key={a.id}>
-                <TableCell className="font-medium">
-                  <Link className="hover:underline" href={`/${encodeURIComponent(a.id)}`}>
-                    {a.name}
-                  </Link>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline">{a.status}</Badge>
-                </TableCell>
-                <TableCell className="text-right tabular-nums">{usd(a.moneyMoved, "—")}</TableCell>
-                <TableCell className="text-right tabular-nums">{count(a.customers, "—")}</TableCell>
-                <TableCell className="text-right tabular-nums">{percent(a.conversion, "—")}</TableCell>
-                <TableCell className="text-muted-foreground">
-                  {a.lastBuild ? (
-                    <Link className="hover:underline" href={`/${encodeURIComponent(a.id)}/${encodeURIComponent(a.lastBuild.id)}`}>
-                      {a.lastBuild.status}
-                      {a.lastBuild.at ? ` · ${when(a.lastBuild.at)}` : ""}
-                    </Link>
-                  ) : (
-                    "None yet"
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-        {apps.some((a) => a.moneyMoved === null || a.customers === null) && (
-          <p className="mt-3 text-xs text-muted-foreground">— Not measured yet.</p>
+    <span className="inline-flex min-w-0 items-baseline gap-1.5" title={title} data-fact={id}>
+      <span className="text-muted-foreground">{label}</span>
+      <span className={cn("font-medium tabular-nums", !measured && "font-normal text-muted-foreground")}>{children}</span>
+    </span>
+  )
+}
+
+/** The operating facts: money moved, customers, hand-offs and build spend, on one wrapping line. */
+function OperatingFacts({ dashboard }: { dashboard: Dashboard }) {
+  return (
+    <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs" data-facts="operating">
+      {facts(dashboard).map((f) => (
+        <Fact key={f.label} id={f.label} label={f.label} measured={f.measured} title={f.note}>
+          {f.value}
+        </Fact>
+      ))}
+    </p>
+  )
+}
+
+const repoCount = (r: ReposState) => (r.kind === "ready" ? r.repos.length : null)
+
+/** The workspace facts: GitHub, repositories (listed in Settings), active products and licences. */
+function WorkspaceFacts({ dashboard, linked, repos, onReposChanged }: { dashboard: Dashboard; linked: LinkedAccounts | null; repos: ReposState; onReposChanged?: () => void }) {
+  const n = repoCount(repos)
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-2 text-xs" data-facts="workspace">
+      <Fact id="github" label="GitHub">
+        <span className="inline-flex items-center gap-1">
+          <Github className="size-3.5" />
+          {linked?.github ?? (linked ? "Not linked" : "…")}
+        </span>
+      </Fact>
+      <Fact id="repositories" label="Repositories" measured={n !== null}>
+        <Link href="/settings?tab=repositories" className="hover:underline">
+          {n === null ? (repos.kind === "unsupported" ? "Not available yet" : "…") : `${n} connected`}
+        </Link>
+      </Fact>
+      <Fact id="active-products" label="Active products" measured={dashboard.activeProducts !== null}>
+        {count(dashboard.activeProducts)}
+      </Fact>
+      <Fact id="licences" label="Licences" measured={dashboard.licences !== null}>
+        <Link href="/licences" className="hover:underline">
+          {count(dashboard.licences)}
+        </Link>
+      </Fact>
+      <span className="ml-auto flex flex-wrap gap-2">
+        {linked && !linked.github && linked.manageUrl && (
+          <Button size="sm" variant="outline" asChild>
+            <a href={linked.manageUrl} rel="noreferrer">
+              <Github />
+              Link GitHub
+            </a>
+          </Button>
         )}
-      </CardContent>
-    </Card>
+        <ConnectRepository enabled={repos.kind === "ready" && repos.connect} onConnected={onReposChanged} />
+      </span>
+    </div>
   )
 }
 
 function EmptyState() {
   return (
-    <Card className="mx-4 lg:mx-6">
-      <CardHeader>
-        <CardTitle>No apps yet</CardTitle>
-        <CardDescription>
-          Describe an app and pick the products it builds on. Mynt&apos;s coding agent builds it, and this page shows
-          how it does.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <Button asChild>
-          <Link href="/new">
-            <Plus />
-            New app
-          </Link>
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="flex flex-wrap items-center gap-3 rounded-md border border-dashed px-3 py-3 text-sm" data-empty="no-apps">
+      <span className="font-medium">No apps yet</span>
+      <span className="text-muted-foreground">Describe an app and pick the products it builds on. Mynt&apos;s coding agent builds it, and this page shows how it does.</span>
+      <Button asChild size="sm" className="ml-auto">
+        <Link href="/new">
+          <Plus />
+          New app
+        </Link>
+      </Button>
+    </div>
   )
 }
 
@@ -109,6 +107,11 @@ export function DashboardView({
   activity = LOADING,
   repos = LOADING,
   onReposChanged,
+  pnl = LOADING,
+  granularity = "month",
+  periods = 6,
+  onGranularity,
+  onPeriods,
 }: {
   dashboard: Dashboard
   linked?: LinkedAccounts | null
@@ -117,30 +120,35 @@ export function DashboardView({
   activity?: Loaded<AuditEvent[]>
   repos?: ReposState
   onReposChanged?: () => void
+  pnl?: Loaded<Pnl>
+  granularity?: Granularity
+  periods?: Range
+  onGranularity?: (g: Granularity) => void
+  onPeriods?: (p: Range) => void
 }) {
   return (
-    <div className="@container/main flex flex-1 flex-col gap-4 py-4 md:gap-6 md:py-6">
-      <SectionCards dashboard={dashboard} />
-      <AccountTiles dashboard={dashboard} linked={linked} repos={repos} onReposChanged={onReposChanged} />
-      <div className="px-4 lg:px-6">
-        <NeedsAttention state={attention} />
+    <div className="@container/main flex flex-1 flex-col gap-6 p-4 lg:p-6" data-dashboard>
+      <NeedsAttention state={attention} />
+      {dashboard.apps.length === 0 && <EmptyState />}
+
+      <div className="grid grid-cols-1 gap-6 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]" data-row="top">
+        <section className="flex min-w-0 flex-col gap-3" data-section="summary" aria-labelledby="section-summary">
+          <div className="border-b pb-2">
+            <h2 id="section-summary" className="text-sm font-semibold">
+              How the workspace is doing
+            </h2>
+          </div>
+          <PnlStats state={pnl} />
+          <OperatingFacts dashboard={dashboard} />
+          <WorkspaceFacts dashboard={dashboard} linked={linked} repos={repos} onReposChanged={onReposChanged} />
+        </section>
+        <PnlChart state={pnl} granularity={granularity} periods={periods} onGranularity={onGranularity} onPeriods={onPeriods} />
       </div>
-      {dashboard.apps.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <>
-          <div className="px-4 lg:px-6">
-            <AppsByStage state={stages} />
-          </div>
-          <div className="px-4 lg:px-6">
-            <ChartAreaInteractive daily={dashboard.daily} periodDays={dashboard.periodDays} />
-          </div>
-          <div className="px-4 lg:px-6">
-            <AppsTable apps={dashboard.apps} />
-          </div>
-        </>
-      )}
-      <div className="px-4 lg:px-6">
+
+      <PnlStatement state={pnl} />
+
+      <div className="grid grid-cols-1 gap-6 @5xl/main:grid-cols-2" data-row="apps-and-activity">
+        <AppsByStage state={stages} apps={dashboard.apps} />
         <RecentActivity state={activity} />
       </div>
     </div>
