@@ -7,8 +7,9 @@ import { isCalendarDate } from "./compliance";
 // called from the studio at all.
 //
 // Writing tools join the list with the screens that use them. The chat starts and steers
-// builds; shipping (finish_build), stopping, sandbox commands, creating apps, connecting
-// repositories and hosting changes come later.
+// builds, New app creates apps, the GitHub tile connects repositories and the app's stage
+// control promotes; shipping (finish_build), stopping, sandbox commands and hosting changes
+// come later.
 
 const id = z.string().trim().min(1).max(200);
 // A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
@@ -18,12 +19,15 @@ const workspaceName = z.string().trim().min(1).max(80);
 // Roles given from the studio; ownership isn't handed over here.
 const memberRole = z.enum(["admin", "member"]);
 const auditDate = z.string().refine(isCalendarDate, "a real YYYY-MM-DD date");
+// Where an app can be promoted to, and moved back to.
+const promotionStage = z.enum(["staging", "production"]);
+const demotionStage = z.enum(["idea", "staging"]);
 // Liquidity: Mynt's pool ids, integer cents, a US state as ISO 3166-2 and an idempotency key.
 const uuid = z.string().uuid();
 const cents = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const usState = z.string().regex(/^us-[a-z]{2}$/);
 const idempotencyKey = z.string().regex(/^[A-Za-z0-9_-]{8,200}$/);
-const repository =z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
+const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -59,6 +63,19 @@ export const STUDIO_TOOLS = {
   change_member_role: z.object({ workspace_id: workspaceId, user_id: id, role: memberRole }).strict(),
   remove_workspace_member: z.object({ workspace_id: workspaceId, user_id: id }).strict(),
   leave_workspace: z.object({ workspace_id: workspaceId }).strict(),
+  // The Workspace page's Settings tab, for owners: archiving (undoable for 7 days) and giving a
+  // workspace whose organization was deleted a new one. Offered only where Mynt lists them.
+  archive_workspace: z.object({ workspace_id: workspaceId }).strict(),
+  unarchive_workspace: z.object({ workspace_id: workspaceId }).strict(),
+  relink_workspace_org: z.object({ workspace_id: workspaceId }).strict(),
+  // What needs the workspace's attention (the dashboard's Needs attention card).
+  get_workspace_attention: z.object({ workspace_id: workspaceId }).strict(),
+  // Promotions: an app moves Ideas -> Staging -> Production only through Mynt's checks. Mynt
+  // decides whether it may move (can_promote); the studio shows the checks and asks.
+  get_promotion_checks: z.object({ app_id: id, to_stage: promotionStage }).strict(),
+  promote_app: z.object({ app_id: id, to_stage: promotionStage }).strict(),
+  demote_app: z.object({ app_id: id, to_stage: demotionStage, reason: z.string().trim().min(3).max(1000) }).strict(),
+  request_promotion_signoff: z.object({ app_id: id }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
   // (no workspace_id for the implicit Personal one).
   get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),
@@ -87,6 +104,9 @@ export const STUDIO_TOOLS = {
   decline_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),
   // repositories
   list_repositories: z.object({}).strict(),
+  // The dashboard's GitHub tile: connect one of the developer's own repositories. Mynt approves
+  // it at once when their linked GitHub account can push to it, else an admin decides.
+  connect_repository: z.object({ repository }).strict(),
   // builds
   list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional(), workspace_id: workspaceId.optional() }).strict(),
   get_build: z.object({ build_id: id }).strict(),

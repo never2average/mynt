@@ -26,6 +26,8 @@ export type ProjectItem = {
   status: string; // the app's status (draft, published)
   /** Where the app stands, for the sidebar's folders: Mynt's own, else from status and last build. */
   stage: Stage;
+  /** Who created it (Mynt's owner_id), when Mynt says. */
+  ownerId?: string | null;
   /** The newest build's preview that exists, if any. */
   previewUrl: string | null;
   conversations: ProjectConversationSummary[];

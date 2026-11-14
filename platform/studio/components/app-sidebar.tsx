@@ -1,15 +1,15 @@
 "use client"
 
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
-// the workspace switcher at the top, Dashboard, Coverage, Licences and Audits, the workspace's
-// apps in three folders by stage
+// the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
+// members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
 // foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
 // New app is in every page's header; Builds isn't in the sidebar (/builds still works).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Droplets, FileBadge, History, LayoutDashboard, Map as MapIcon } from "lucide-react"
+import { Building2, Droplets, FileBadge, History, LayoutDashboard } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -33,14 +33,15 @@ import { groupByStage, type Stage, type StagedApp, type Workspace } from "@/lib/
 
 type Account = { name: string | null; email: string | null }
 
-// The fixed pages, above the app folders.
+// The fixed pages, above the Apps folders, in order. A new fixed page is one entry here (and one
+// in STUDIO_PAGES, lib/studio-search.ts, for its title and search).
 const PAGES = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/coverage", label: "Coverage", icon: MapIcon },
   { href: "/licences", label: "Licences", icon: FileBadge },
   { href: "/audits", label: "Audits", icon: History },
+  { href: "/workspace", label: "Workspace", icon: Building2 },
 ] as const
-// Only for builders and liquidity providers, after Audits.
+// Only for builders and liquidity providers, after Workspace.
 const LIQUIDITY_PAGE = { href: "/liquidity", label: "Liquidity", icon: Droplets } as const
 
 export type SidebarViewProps = {

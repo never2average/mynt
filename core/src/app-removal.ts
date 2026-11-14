@@ -60,6 +60,9 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   { table: "repo_connections", where: `t.repository IN (SELECT managed_repository FROM ${T}.app_repositories WHERE app_id = $1)`, list: "repository" },
   // Which repository the app's builds pushed to. The repository itself (and its code) stays where it is.
   { table: "app_repositories", where: "t.app_id = $1", list: "repository" },
+  // Its stage, target states and production sign-off requests (promotions.ts).
+  { table: "promotion_signoffs", where: "t.app_id = $1", list: "id" },
+  { table: "app_promotions", where: "t.app_id = $1" },
   { table: "apps", where: "t.id = $1", list: "id" },
 ];
 
