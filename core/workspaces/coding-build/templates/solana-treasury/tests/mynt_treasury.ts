@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { BN, Program } from "@coral-xyz/anchor";
 import { assert } from "chai";
-import { TOKEN_PROGRAM_ID, createMint, getAccount, getAssociatedTokenAddressSync, getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
+import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, createMint, getAccount, getAssociatedTokenAddressSync, mintTo } from "@solana/spl-token";
 import { MyntTreasury } from "../target/types/mynt_treasury";
 import { ExtensionProbe } from "../target/types/extension_probe";
 
@@ -59,9 +59,10 @@ describe("mynt_treasury", () => {
     await provider.sendAndConfirm(tx, [], confirmed);
   };
   const tokenAccount = async (owner: PublicKeyT, amount = 0) => {
-    const account = await getOrCreateAssociatedTokenAccount(connection, payer, mint, owner, true, "confirmed");
-    if (amount) await mintTo(connection, payer, mint, account.address, payer, amount, [], { commitment: "confirmed" });
-    return account.address;
+    const address = getAssociatedTokenAddressSync(mint, owner, true);
+    await provider.sendAndConfirm(new Transaction().add(createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, address, owner, mint)), [], confirmed);
+    if (amount) await mintTo(connection, payer, mint, address, payer, amount, [], confirmed);
+    return address;
   };
   const depositor = async (amount = 1_000) => {
     const kp = Keypair.generate();
@@ -475,10 +476,6 @@ describe("mynt_treasury", () => {
 
     await fails(deposit(p, d, 100), /ExtensionMissing/);
     await fails(deposit(p, d, 100, { extension: TOKEN_PROGRAM_ID, remaining: own }), /WrongExtension/);
-    await fails(
-      deposit(p, d, 100, { extension: probe.programId, remaining: [...own, { pubkey: p.vault, isSigner: false, isWritable: true }] }),
-      /ExtensionAccountNotWritable/,
-    );
     const ok = await deposit(p, d, 100, { extension: probe.programId, remaining: own });
     let state = await probe.account.probe.fetch(probeState, "confirmed");
     assert.equal(state.calls.toNumber(), 1);
@@ -491,7 +488,8 @@ describe("mynt_treasury", () => {
     // Hostile: it tries to move the vault's USDC with the pool as authority. The runtime refuses: the pool never signed.
     await setMode(1);
     const thief = ata(stranger.publicKey);
-    const attack = [...own, { pubkey: p.vault, isSigner: false, isWritable: false }, { pubkey: thief, isSigner: false, isWritable: false }, { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }];
+    // Even asked for writable, the vault and the thief's account reach the extension read-only, and the pool never as a signer.
+    const attack = [...own, { pubkey: p.vault, isSigner: false, isWritable: true }, { pubkey: thief, isSigner: false, isWritable: true }, { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }];
     await fails(deposit(p, d, 50, { extension: probe.programId, remaining: attack }), /unauthorized signer or writable account|PrivilegeEscalation|privilege/i);
     await request(p, d, ok.record, 100);
     await fails(processQueue(p, { extension: probe.programId, remaining: attack }), /unauthorized signer or writable account|PrivilegeEscalation|privilege/i);

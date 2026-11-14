@@ -539,7 +539,7 @@ pub struct HookArgs {
 
 /// Calls the pool's extension, if it has one, with plain `invoke`: no signer seeds, so it can never sign as the pool
 /// (the vault's owner). The pool and the record go read-only; the caller's extra accounts are forwarded never as
-/// signers, and writable only when the extension itself owns them. The vault and every token account it could
+/// signers, and writable only when the extension itself owns them (anything else goes read-only). The vault and every token account it could
 /// touch are therefore read-only to it.
 fn run_extension<'info>(
     extension: Pubkey,
@@ -562,8 +562,9 @@ fn run_extension<'info>(
     let mut metas = vec![AccountMeta::new_readonly(pool.key(), false), AccountMeta::new_readonly(record.key(), false)];
     let mut infos = vec![pool, record];
     for a in forwarded {
-        if a.is_writable {
-            require_keys_eq!(*a.owner, extension, TreasuryError::ExtensionAccountNotWritable);
+        // Writable in this transaction (an account the treasury itself writes, like the vault, is) is not enough:
+        // only an account the extension owns is passed on writable.
+        if a.is_writable && *a.owner == extension {
             metas.push(AccountMeta::new(a.key(), false));
         } else {
             metas.push(AccountMeta::new_readonly(a.key(), false));
@@ -1037,8 +1038,6 @@ pub enum TreasuryError {
     ExtensionMissing,
     #[msg("That isn't the pool's extension program")]
     WrongExtension,
-    #[msg("An extension may only get write access to accounts it owns")]
-    ExtensionAccountNotWritable,
     #[msg("Arithmetic overflow")]
     Overflow,
 }

@@ -99,8 +99,8 @@ An extension **can**: read the pool and the record (written back before the call
 owns, and refuse a deposit by failing (deposits must pass it when one is set).
 
 An extension **can't**: sign as the pool (so it can't move the vault, which the runtime enforces), get any account as a
-signer (the depositor's signature is never passed on), write to any account it doesn't own (the treasury refuses
-the call), or hold up an exit: on payments the hook is best effort, and whoever cranks the queue may leave the
+signer (the depositor's signature is never passed on), write to any account it doesn't own (the treasury passes
+every other account read-only, however the caller marked it), or hold up an exit: on payments the hook is best effort, and whoever cranks the queue may leave the
 extension out (`ExtensionHook.called` is false).
 
 `programs/extension_probe` is a test fixture, a hostile extension that tries to move the vault with the pool as
