@@ -39,6 +39,17 @@ export const LIQUIDITY_TABLES = `
     updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK (min_commitment_cents <= max_commitment_cents)
   );
+  -- Lock-in and top-ups. Pools from before these existed keep what they had: no lock-in, top-ups taken while paused for
+  -- health. lock_in_days: how long each commitment stays in from its settlement. topups_when_health_paused: whether new
+  -- capital comes in while the worker has the pool paused for health (a sponsor's or admin's pause, and a closed pool,
+  -- refuse it whatever this says). product_lock_in_days: the product's own lock-in when the terms were last set, the
+  -- floor they can't go below. approved_terms: what the sponsor approved (null for pools approved before it was
+  -- recorded). proposed_terms: a builder's change since, waiting for the sponsor's new approval.
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS lock_in_days integer NOT NULL DEFAULT 0 CHECK (lock_in_days >= 0);
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS topups_when_health_paused boolean NOT NULL DEFAULT true;
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS product_lock_in_days integer;
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS approved_terms jsonb;
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS proposed_terms jsonb;
   CREATE INDEX IF NOT EXISTS liquidity_pools_product_idx ON ${T}.liquidity_pools (product_id);
   -- What needs a person, until a person has dealt with it: not a note that ages out. negative_balance: a settlement or
   -- return took a firm below zero. double_claim: a settlement refused because the amount was re-paid another way.
@@ -127,6 +138,9 @@ export const LIQUIDITY_TABLES = `
     refusal text,
     claimed_at timestamptz NOT NULL
   );
+  -- A deposit's lock-in, taken from the pool's terms when it was made: a later change of terms never moves an existing
+  -- commitment's. Null (withdrawals, and deposits from before lock-ins) is none.
+  ALTER TABLE ${T}.pool_movements ADD COLUMN IF NOT EXISTS lock_in_days integer;
   CREATE INDEX IF NOT EXISTS pool_movements_position_idx ON ${T}.pool_movements (pool_id, lp_entity_id);
   CREATE INDEX IF NOT EXISTS pool_movements_withdrawal_idx ON ${T}.pool_movements (withdrawal_id);
   CREATE INDEX IF NOT EXISTS pool_movements_claimed_idx ON ${T}.pool_movements (claimed_at) WHERE state = 'claimed';
@@ -144,7 +158,10 @@ export const LIQUIDITY_TABLES = `
         WHEN m.status = 'reversed' THEN 'reversed'
         WHEN m.status = 'failed' AND m.status_detail IN ('stale_no_answer', 'mynt_gave_up') THEN 'unresolved'
         ELSE 'released'
-      END AS ledger_state
+      END AS ledger_state,
+      pm.lock_in_days,
+      -- When a settled deposit can be withdrawn: lock_in_days after it settled (null: no lock-in, never locked).
+      CASE WHEN pm.kind = 'deposit' AND COALESCE(pm.lock_in_days, 0) > 0 AND m.settled_at IS NOT NULL THEN m.settled_at + COALESCE(pm.lock_in_days, 0) * interval '1 day' END AS unlocks_at
     FROM ${T}.pool_movements pm LEFT JOIN ${T}.money_movements m ON m.id = pm.movement_id;
   -- Each firm's position in cents, from settled movements only. A movement reversed after settling is no longer
   -- settled, so it leaves contributed or withdrawn by itself.
@@ -192,9 +209,14 @@ export const LIQUIDITY_TABLES = `
       RETURN QUERY SELECT 'offering_not_cleared'::text, NULL::uuid, NULL::text, NULL::bigint;
       RETURN;
     END IF;
-    -- A health pause stops payments, not new capital: new capital is how a pool gets back above its reserve.
+    -- A health pause stops payments, not new capital: new capital is how a pool gets back above its reserve, unless the
+    -- pool's terms say it takes none while paused for health. Every other pause, and a closed pool, takes none.
     IF p.status = 'closed' OR (p.status = 'paused' AND p.pause_kind IS DISTINCT FROM 'health') THEN
       RETURN QUERY SELECT 'pool_not_open'::text, NULL::uuid, NULL::text, NULL::bigint;
+      RETURN;
+    END IF;
+    IF p.status = 'paused' AND NOT p.topups_when_health_paused THEN
+      RETURN QUERY SELECT 'topups_closed'::text, NULL::uuid, NULL::text, NULL::bigint;
       RETURN;
     END IF;
     IF seen THEN
@@ -220,15 +242,17 @@ export const LIQUIDITY_TABLES = `
       RETURN QUERY SELECT 'under_minimum'::text, NULL::uuid, NULL::text, x;
       RETURN;
     END IF;
-    INSERT INTO ${T}.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, amount_cents, customer_state, state, claimed_at)
-      VALUES (p_id, p_key, p_pool, p_lp, 'deposit', p_amount, p_state, 'claimed', p_now);
+    INSERT INTO ${T}.pool_movements (id, idempotency_key, pool_id, lp_entity_id, kind, amount_cents, customer_state, state, claimed_at, lock_in_days)
+      VALUES (p_id, p_key, p_pool, p_lp, 'deposit', p_amount, p_state, 'claimed', p_now, p.lock_in_days);
     -- The state itself only changes once this deposit is authorised (authorizePoolMovement).
     INSERT INTO ${T}.pool_commitments (pool_id, lp_entity_id, state, committed_by) VALUES (p_pool, p_lp, p_state, p_by)
       ON CONFLICT (pool_id, lp_entity_id) DO UPDATE SET committed_by = EXCLUDED.committed_by; -- exited_at clears once money settles
     RETURN QUERY SELECT 'reserved'::text, p_id, 'claimed'::text, x + p_amount;
   END $fn$;
 
-  -- Joining the queue: only what the firm holds, settled, less what it's already asked for or has on the way out.
+  -- Joining the queue: only what the firm holds, settled and past its lock-in, less what it's already asked for or has on
+  -- the way out. What's gone out came from unlocked money (nothing else could be asked for), so the locked part is all
+  -- still there. 'locked': the request would fit if nothing were locked.
   CREATE OR REPLACE FUNCTION ${T}.request_pool_withdrawal(p_id uuid, p_key text, p_pool uuid, p_lp uuid, p_amount bigint, p_by uuid, p_now timestamptz, p_eligible timestamptz)
   RETURNS TABLE (o_outcome text, o_id uuid, o_available bigint) LANGUAGE plpgsql AS $fn$
   DECLARE
@@ -237,6 +261,7 @@ export const LIQUIDITY_TABLES = `
     balance bigint;
     open_requests bigint;
     available bigint;
+    locked bigint;
   BEGIN
     SELECT * INTO p FROM ${T}.liquidity_pools WHERE id = p_pool FOR UPDATE;
     IF NOT FOUND THEN
@@ -258,9 +283,11 @@ export const LIQUIDITY_TABLES = `
       FROM ${T}.pool_withdrawals w
       LEFT JOIN LATERAL (SELECT sum(amount_cents) AS consumed FROM ${T}.pool_movement_states s WHERE s.withdrawal_id = w.id AND s.ledger_state <> 'released') c ON true
       WHERE w.pool_id = p_pool AND w.lp_entity_id = p_lp AND w.status IN ('queued', 'parked');
-    available := balance - open_requests;
+    SELECT COALESCE(sum(amount_settled_cents), 0) INTO locked FROM ${T}.pool_movement_states
+      WHERE pool_id = p_pool AND lp_entity_id = p_lp AND kind = 'deposit' AND ledger_state = 'settled' AND unlocks_at > p_now;
+    available := balance - open_requests - locked;
     IF p_amount > available THEN
-      RETURN QUERY SELECT 'insufficient'::text, NULL::uuid, GREATEST(available, 0);
+      RETURN QUERY SELECT CASE WHEN locked > 0 AND p_amount <= balance - open_requests THEN 'locked' ELSE 'insufficient' END::text, NULL::uuid, GREATEST(available, 0);
       RETURN;
     END IF;
     INSERT INTO ${T}.pool_withdrawals (id, idempotency_key, pool_id, lp_entity_id, amount_cents, status, requested_by, requested_at, eligible_at)

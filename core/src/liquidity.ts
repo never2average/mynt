@@ -94,9 +94,120 @@ export const toPool = (r: Row) => ({
   offering_cleared_at: iso(r.offering_cleared_at),
   offering_legal_basis: (r.offering_legal_basis as string | null) ?? null,
   paused_by_admin: Boolean(r.paused_by_admin),
+  // Lock-in and top-ups: what the sponsor approved (approved_terms), and any change the builder has proposed since that
+  // waits for the sponsor's new approval (proposed_terms). See productLockIn for product_lock_in_days.
+  lock_in_days: num(r.lock_in_days ?? 0),
+  topups_when_health_paused: r.topups_when_health_paused == null ? true : Boolean(r.topups_when_health_paused),
+  product_lock_in_days: r.product_lock_in_days == null ? null : num(r.product_lock_in_days),
+  approved_terms: (r.approved_terms as ApprovedPoolTerms | null) ?? null,
+  proposed_terms: (r.proposed_terms as ProposedPoolTerms | null) ?? null,
   created_at: iso(r.created_at)!,
 });
 export type Pool = ReturnType<typeof toPool>;
+
+// The terms a sponsor approved, recorded with the approval: committed firms can see exactly what was agreed, and a term
+// changes after approval only through a new one (approve_pool_terms).
+export interface ApprovedPoolTerms {
+  lock_in_days: number;
+  topups_when_health_paused: boolean;
+  notice_period_days: number;
+  min_reserve_bps: number;
+  min_reserve_floor_cents: number;
+  min_commitment_cents: number;
+  max_commitment_cents: number;
+  approved_by: string;
+  approved_at: string;
+}
+export interface ProposedPoolTerms {
+  lock_in_days: number;
+  topups_when_health_paused: boolean;
+  reason: string | null;
+  proposed_by: string;
+  proposed_at: string;
+}
+export const approvedTermsOf = (p: Pick<Pool, "lock_in_days" | "topups_when_health_paused" | "notice_period_days" | "min_reserve_bps" | "min_reserve_floor_cents" | "min_commitment_cents" | "max_commitment_cents">, by: string, at: Date): ApprovedPoolTerms => ({
+  lock_in_days: p.lock_in_days,
+  topups_when_health_paused: p.topups_when_health_paused,
+  notice_period_days: p.notice_period_days,
+  min_reserve_bps: p.min_reserve_bps,
+  min_reserve_floor_cents: p.min_reserve_floor_cents,
+  min_commitment_cents: p.min_commitment_cents,
+  max_commitment_cents: p.max_commitment_cents,
+  approved_by: by,
+  approved_at: at.toISOString(),
+});
+
+// ---- the product's lock-in ----
+
+// A product definition states a lock-in on a wraps connection (attributes.lock_in in financial-product.v2.schema.json):
+// a wrapper's lock-in applies to withdrawals of the wrapper and, through it, of the component it wraps, so it's relevant
+// to a pool of either end. It's turned into whole days, rounding up so a pool is never laxer than its product:
+// - an ISO 8601 duration ("P30D", "P1Y6M"): a year counts 366 days, a month 31, a week 7, and any hours, minutes or
+//   seconds make one more day;
+// - a bare number: days;
+// - null or false: no lock-in;
+// - a term reference ({"$term": id}): that term's value. Its stated value (default) is the pool's default; the shortest
+//   the product lets it be (the lowest of allowed, or range.min, else the default) is the floor a pool can't go below.
+//   A number term reads its unit (day, week, month or year, singular or plural; none means days).
+// Where several wraps connections touch the component, the longest wins. Anything else (money, a list, true, a term
+// that isn't there or has no value) can't be read as days: Mynt refuses to guess, and the pool can't be created until
+// the product's lock_in is one of the above.
+export type ProductLockIn = { stated: false } | { stated: true; default_days: number; floor_days: number; connections: string[] } | { stated: "unreadable"; reason: string };
+
+const UNIT_DAYS: Record<string, number> = { d: 1, day: 1, days: 1, w: 7, week: 7, weeks: 7, m: 31, month: 31, months: 31, y: 366, year: 366, years: 366 };
+
+export function isoDurationDays(v: string): number | null {
+  const m = v.match(/^P(?!$)(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?=\d)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!m) return null;
+  const n = (i: number) => Number(m[i] ?? 0);
+  const time = n(5) * 3600 + n(6) * 60 + n(7);
+  return n(1) * 366 + n(2) * 31 + n(3) * 7 + n(4) + Math.ceil(time / 86_400);
+}
+
+function valueDays(v: unknown, unit?: unknown): number | null | undefined {
+  if (v === null || v === false) return 0;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
+    const per = unit == null ? 1 : UNIT_DAYS[String(unit).trim().toLowerCase()];
+    return per === undefined ? undefined : Math.ceil(v * per);
+  }
+  if (typeof v === "string") return isoDurationDays(v.trim()) ?? undefined;
+  return undefined;
+}
+
+export function productLockIn(definition: Record<string, unknown> | null | undefined, componentKey: string): ProductLockIn {
+  if (!definition) return { stated: false };
+  const conns = Array.isArray(definition.connections) ? (definition.connections as { _id?: string; type?: string; from?: { kind?: string; id?: string }; to?: { kind?: string; id?: string }; attributes?: Record<string, unknown> }[]) : [];
+  const terms = Array.isArray(definition.terms) ? (definition.terms as Record<string, unknown>[]) : [];
+  let out = null as { default_days: number; floor_days: number; connections: string[] } | null;
+  for (const c of conns) {
+    if (c?.type !== "wraps" || !c.attributes || !("lock_in" in c.attributes)) continue;
+    if (c.from?.id !== componentKey && c.to?.id !== componentKey) continue;
+    const at = `connection '${c._id ?? "?"}'`;
+    const raw = c.attributes.lock_in;
+    let stated: number, floor: number;
+    if (raw && typeof raw === "object" && !Array.isArray(raw) && "$term" in raw) {
+      const id = (raw as { $term: unknown }).$term;
+      const term = terms.find((t) => t._id === id);
+      if (!term) return { stated: "unreadable", reason: `${at}: lock_in refers to term '${String(id)}', which the product doesn't define` };
+      const allowed = Array.isArray(term.allowed) ? term.allowed.map((a) => valueDays(a, term.unit)) : [];
+      if (allowed.some((a) => a == null)) return { stated: "unreadable", reason: `${at}: term '${String(id)}' allows a value that can't be read as days` };
+      const range = term.range as { min?: unknown } | undefined;
+      const min = range?.min !== undefined ? valueDays(range.min, term.unit) : undefined;
+      const def = term.default !== undefined ? valueDays(term.default, term.unit) : undefined;
+      if (term.default !== undefined && def == null) return { stated: "unreadable", reason: `${at}: term '${String(id)}' has a value that can't be read as days` };
+      const lowest = allowed.length ? Math.min(...(allowed as number[])) : (min ?? def);
+      if (lowest == null) return { stated: "unreadable", reason: `${at}: term '${String(id)}' states no value, allowed values or minimum` };
+      floor = lowest;
+      stated = Math.max(def ?? lowest, lowest);
+    } else {
+      const d = valueDays(raw);
+      if (d == null) return { stated: "unreadable", reason: `${at}: lock_in ${JSON.stringify(raw).slice(0, 80)} can't be read as days (use an ISO 8601 duration such as "P90D", a number of days, or a term)` };
+      stated = floor = d;
+    }
+    out = { default_days: Math.max(out?.default_days ?? 0, stated), floor_days: Math.max(out?.floor_days ?? 0, floor), connections: [...(out?.connections ?? []), c._id ?? "?"] };
+  }
+  return out ? { stated: true, ...out } : { stated: false };
+}
 
 export const toWithdrawal = (r: Row) => ({
   id: r.id as string,

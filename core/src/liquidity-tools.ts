@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { productsAnsweredBy } from "./access.js";
-import { correctionDisputeMs, getPool, liquidityConfigFromEnv, evaluatePool, withdrawalRefusal, minimumReserve, OFFERING_NOT_CLEARED, POOL_STATUSES, refreshPool, reportPoolMovement, toPool, toWithdrawal, WITHDRAWAL_STATUSES, authorizePoolMovement, type Pool } from "./liquidity.js";
+import { approvedTermsOf, correctionDisputeMs, getPool, productLockIn, liquidityConfigFromEnv, evaluatePool, withdrawalRefusal, minimumReserve, OFFERING_NOT_CLEARED, POOL_STATUSES, refreshPool, reportPoolMovement, toPool, toWithdrawal, WITHDRAWAL_STATUSES, authorizePoolMovement, type Pool } from "./liquidity.js";
 import { US_STATES } from "./money-rails.js";
 import type { ProductHealthService } from "./product-health.js";
 import { effectiveRoles, type Store, type User } from "./store.js";
@@ -44,9 +44,12 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     return (await store.getEntity(firm))?.status === "active" ? ({ firm } as const) : ({ error: "Your firm isn't active on Mynt" } as const);
   };
 
+  // A settled deposit is locked until its unlocks_at (lock_in_days from its settlement); what's gone out came from
+  // unlocked money, so locked_cents is all still in the position.
   const positionsOf = async (firm: string, poolId?: string) => {
     const { rows } = await store.db.query(
-      `SELECT c.pool_id, c.state, c.state_source, c.created_at, c.exited_at, p.name, p.product_id, p.sandbox, p.status AS pool_status,
+      `SELECT c.pool_id, c.state, c.state_source, c.created_at, c.exited_at, p.name, p.product_id, p.sandbox, p.status AS pool_status, p.lock_in_days, p.topups_when_health_paused,
+         lk.locked_cents, lk.next_unlock_at, lk.locked_until,
          COALESCE(s.contributed_cents, 0) AS contributed_cents, COALESCE(s.withdrawn_cents, 0) AS withdrawn_cents,
          COALESCE(s.pending_in_cents, 0) AS pending_in_cents, COALESCE(s.pending_out_cents, 0) AS pending_out_cents,
          COALESCE(s.unresolved_in_cents, 0) AS unresolved_in_cents, COALESCE(s.unresolved_out_cents, 0) AS unresolved_out_cents,
@@ -54,14 +57,19 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
          (SELECT COALESCE(sum(w.amount_cents - COALESCE((SELECT sum(m.amount_cents) FROM ${T}.pool_movement_states m WHERE m.withdrawal_id = w.id AND m.ledger_state <> 'released'), 0)), 0)
             FROM ${T}.pool_withdrawals w WHERE w.pool_id = c.pool_id AND w.lp_entity_id = c.lp_entity_id AND w.status IN ('queued', 'parked')) AS queued_cents
        FROM ${T}.pool_commitments c JOIN ${T}.liquidity_pools p ON p.id = c.pool_id LEFT JOIN ${T}.pool_positions s ON s.pool_id = c.pool_id AND s.lp_entity_id = c.lp_entity_id
+       LEFT JOIN LATERAL (SELECT COALESCE(sum(m.amount_settled_cents), 0) AS locked_cents, min(m.unlocks_at) AS next_unlock_at, max(m.unlocks_at) AS locked_until
+         FROM ${T}.pool_movement_states m WHERE m.pool_id = c.pool_id AND m.lp_entity_id = c.lp_entity_id AND m.kind = 'deposit' AND m.ledger_state = 'settled' AND m.unlocks_at > $3::timestamptz) lk ON true
        WHERE c.lp_entity_id = $1 AND ($2::uuid IS NULL OR c.pool_id = $2) ORDER BY c.created_at, c.pool_id`,
-      [firm, poolId ?? null],
+      [firm, poolId ?? null, now().toISOString()],
     );
     const { rows: corrections } = await store.db.query(`SELECT id, pool_id, from_state, to_state, source, status, reason, created_at FROM ${T}.pool_state_corrections WHERE lp_entity_id = $1 AND status IN ('pending', 'applied') ORDER BY created_at`, [firm]);
     return rows.map((r) => {
       const n = (k: string) => Number(r[k]);
       const balance = n("contributed_cents") - n("withdrawn_cents");
       const queued = n("queued_cents");
+      const locked = n("locked_cents");
+      const unlocked = Math.max(0, balance - locked);
+      const at = (k: string) => (r[k] == null ? null : new Date(r[k] as string).toISOString());
       return {
         pool_id: r.pool_id as string,
         name: r.name as string,
@@ -79,7 +87,13 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         pending_in_cents: n("pending_in_cents"),
         pending_out_cents: n("pending_out_cents"),
         queued_withdrawal_cents: queued,
-        available_to_withdraw_cents: Math.max(0, balance - n("pending_out_cents") - n("unresolved_out_cents") - queued),
+        lock_in_days: n("lock_in_days"), // the pool's for new commitments; each commitment keeps the one it was made under
+        topups_when_health_paused: r.topups_when_health_paused as boolean,
+        locked_cents: locked, // settled, still inside its lock-in
+        locked_until: at("locked_until"), // when the last of it unlocks; null: nothing locked
+        next_unlock_at: at("next_unlock_at"), // when the next of it unlocks
+        unlocked_settled_cents: unlocked, // settled and past its lock-in
+        available_to_withdraw_cents: Math.max(0, unlocked - n("pending_out_cents") - n("unresolved_out_cents") - queued),
         unresolved_in_cents: n("unresolved_in_cents"),
         unresolved_out_cents: n("unresolved_out_cents"),
         reversed_in_cents: n("reversed_in_cents"),
@@ -96,6 +110,19 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
 
   // A firm may see a pool's terms if it's approved and either sandbox or cleared, or if the firm is already in it.
   const canSee = (p: Pool, committedPools: Set<string>) => committedPools.has(p.id) || (p.approved_at !== null && (p.sandbox || p.offering_cleared) && p.status !== "closed");
+  // The product's own lock-in for a component, and whether a pool's lock-in would be laxer than it.
+  const lockInCheck = (definition: Record<string, unknown> | null | undefined, componentKey: string, lockInDays: number | undefined) => {
+    const product = productLockIn(definition, componentKey);
+    if (product.stated === "unreadable") return { error: `The product states a lock-in Mynt can't read as days, so the pool's can't be checked against it: ${product.reason}`, code: "product_lock_in_unreadable", ok: false } as const;
+    const floor = product.stated ? product.floor_days : null;
+    const days = lockInDays ?? (product.stated ? product.default_days : 0);
+    if (product.stated && floor !== null && days < floor)
+      return { error: `A pool can't be laxer than its product: the product locks this component in for at least ${floor} days (wraps connection ${product.connections.join(", ")}), and ${days} days is shorter`, code: "lock_in_shorter_than_product", product_lock_in_days: floor, ok: false } as const;
+    return { ok: true, days, floor } as const;
+  };
+  const lockInRefusal = (c: { error: string; code: string; product_lock_in_days?: number }) => fail(c.error, { code: c.code, ...(c.product_lock_in_days !== undefined ? { product_lock_in_days: c.product_lock_in_days } : {}) });
+  const LockInDays = z.number().int().min(0).max(36_600);
+
   const committedPools = async (firm: string) => {
     const { rows } = await store.db.query(`SELECT pool_id FROM ${T}.pool_commitments WHERE lp_entity_id = $1`, [firm]);
     return new Set(rows.map((r) => r.pool_id as string));
@@ -109,7 +136,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       {
         title: "Create a liquidity pool for a product",
         description:
-          "Builder: propose a pool that liquidity providers can put capital into, on a product of your firm whose component is sponsored by an approved licence provider (with no approved sponsorship, it's refused). A minimum reserve (basis points of the pool's obligations plus a floor in cents), a notice period in days (0 allowed), and per-firm commitment limits in cents. Sandbox pools move no real money. The sponsor must approve it (approve_pool) and name its rails before it can take commitments.",
+          "Builder: propose a pool that liquidity providers can put capital into, on a product of your firm whose component is sponsored by an approved licence provider (with no approved sponsorship, it's refused). A minimum reserve (basis points of the pool's obligations plus a floor in cents), a notice period in days (0 allowed), and per-firm commitment limits in cents. lock_in_days: how long each commitment stays in from its settlement before any of it can be withdrawn (the notice period runs after that); by default the product's own lock-in for this component (a wraps connection's lock_in in its definition), else 0, and never shorter than the product's. topups_when_health_paused (default true): whether new capital is taken while the pool is paused for health; a sponsor's or admin's pause always refuses it. Sandbox pools move no real money. The sponsor must approve it (approve_pool), terms included, and name its rails before it can take commitments.",
         inputSchema: {
           product_id: z.string().min(1),
           component_key: z.string().min(1).describe("The sponsored component this pool serves"),
@@ -120,10 +147,12 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           notice_period_days: z.number().int().min(0).max(3650),
           min_commitment_cents: Cents.default(1).describe("A firm's smallest total position in this pool, integer cents"),
           max_commitment_cents: Cents.describe("A firm's largest total position in this pool, integer cents"),
+          lock_in_days: LockInDays.optional().describe("Days each commitment stays in from its settlement; default the product's lock-in, else 0; never shorter than the product's"),
+          topups_when_health_paused: z.boolean().default(true).describe("Whether new capital is taken while the pool is paused for health"),
           sponsor_entity_id: z.string().uuid().optional().describe("If more than one licence provider sponsors the component"),
         },
       },
-      async ({ product_id, component_key, name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, sponsor_entity_id }) => {
+      async ({ product_id, component_key, name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, lock_in_days, topups_when_health_paused, sponsor_entity_id }) => {
         const u = await me();
         if (!u.entity_id) return fail(noFirm);
         if (min_commitment_cents > max_commitment_cents) return fail("min_commitment_cents can't be more than max_commitment_cents");
@@ -136,14 +165,61 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           return fail(`Component '${component_key}' of product '${product_id}' has no approved sponsorship, so it can't have a pool: a licence provider must sponsor it first`);
         }
         if (sponsors.length > 1) return fail("More than one licence provider sponsors that component: name the pool's sponsor with sponsor_entity_id", { sponsors });
+        const lockIn = lockInCheck(record.definition, component_key, lock_in_days);
+        if (!lockIn.ok) {
+          await audit("create_pool_refused", product_id, { component_key, reason: lockIn.code, lock_in_days: lock_in_days ?? null });
+          return lockInRefusal(lockIn);
+        }
         const id = randomUUID();
         await store.db.query(
-          `INSERT INTO ${T}.liquidity_pools (id, product_id, component_key, sponsor_entity_id, name, sandbox, status, pause_kind, pause_reason, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, 'paused', 'awaiting_approval', 'Waiting for the sponsoring licence provider to approve it', $7, $8, $9, $10, $11, $12)`,
-          [id, product_id, component_key, sponsors[0], name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, user.id],
+          `INSERT INTO ${T}.liquidity_pools (id, product_id, component_key, sponsor_entity_id, name, sandbox, status, pause_kind, pause_reason, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, created_by, lock_in_days, topups_when_health_paused, product_lock_in_days)
+           VALUES ($1, $2, $3, $4, $5, $6, 'paused', 'awaiting_approval', 'Waiting for the sponsoring licence provider to approve it', $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+          [id, product_id, component_key, sponsors[0], name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, user.id, lockIn.days, topups_when_health_paused, lockIn.floor],
         );
-        await audit("create_pool", id, { product_id, component_key, sponsor: sponsors[0], sandbox });
+        await audit("create_pool", id, { product_id, component_key, sponsor: sponsors[0], sandbox, lock_in_days: lockIn.days, topups_when_health_paused, product_lock_in_days: lockIn.floor });
         return json(await getPool(store, id));
+      },
+    );
+
+  if (roles.builder)
+    server.registerTool(
+      "propose_pool_terms",
+      {
+        title: "Change a pool's lock-in or top-up terms",
+        description:
+          "Builder: change a pool's lock_in_days or topups_when_health_paused, on a product of your firm. Before the sponsor has approved the pool, the change applies at once (the sponsor approves the terms with the pool). After, it's only a proposal (proposed_terms in list_pools): nothing changes for anyone until the sponsor approves it (approve_pool_terms). A new lock-in applies to commitments made after it takes effect; each existing commitment keeps the lock-in it was made under. Never shorter than the product's own lock-in. A new proposal replaces one not yet decided. Audited.",
+        inputSchema: { pool_id: z.string().uuid(), lock_in_days: LockInDays.optional(), topups_when_health_paused: z.boolean().optional(), reason: z.string().max(1000).optional() },
+      },
+      async ({ pool_id, lock_in_days, topups_when_health_paused, reason }) => {
+        const u = await me();
+        if (!u.entity_id) return fail(noFirm);
+        const pool = await getPool(store, pool_id);
+        const record = pool && (await productsAnsweredBy(store, u)).find((p) => p.product.id === pool.product_id);
+        if (!pool || !record || record.entity_id !== u.entity_id) return fail(`No pool '${pool_id}' on a product of your firm`);
+        if (pool.status === "closed") return fail("This pool is closed");
+        if (lock_in_days === undefined && topups_when_health_paused === undefined) return fail("Say what changes: lock_in_days, topups_when_health_paused or both");
+        const base = pool.proposed_terms ?? pool;
+        const next = { lock_in_days: lock_in_days ?? base.lock_in_days, topups_when_health_paused: topups_when_health_paused ?? base.topups_when_health_paused };
+        const lockIn = lockInCheck(record.definition, pool.component_key, next.lock_in_days);
+        if (!lockIn.ok) {
+          await audit("propose_pool_terms_refused", pool_id, { reason: lockIn.code, ...next });
+          return lockInRefusal(lockIn);
+        }
+        if (!pool.approved_at) {
+          const { rows } = await store.db.query(
+            `UPDATE ${T}.liquidity_pools SET lock_in_days = $2, topups_when_health_paused = $3, product_lock_in_days = $4, proposed_terms = NULL, updated_at = now() WHERE id = $1 AND approved_at IS NULL RETURNING *`,
+            [pool_id, next.lock_in_days, next.topups_when_health_paused, lockIn.floor],
+          );
+          if (rows[0]) {
+            await audit("propose_pool_terms", pool_id, { ...next, applied: true, reason: reason ?? null });
+            return json({ ...toPool(rows[0]), note: "Applied: the pool isn't approved yet, so the sponsor approves these terms with it (approve_pool)." });
+          }
+        }
+        const proposed = { ...next, reason: reason ?? null, proposed_by: user.id, proposed_at: now().toISOString() };
+        const { rows } = await store.db.query(`UPDATE ${T}.liquidity_pools SET proposed_terms = $2, updated_at = now() WHERE id = $1 AND approved_at IS NOT NULL AND status <> 'closed' RETURNING *`, [pool_id, JSON.stringify(proposed)]);
+        if (!rows[0]) return fail("The pool was changed by another call just now");
+        await audit("propose_pool_terms", pool_id, { ...next, applied: false, reason: reason ?? null });
+        return json({ ...toPool(rows[0]), note: "Proposed: nothing changes until the pool's sponsor approves it (approve_pool_terms)." });
       },
     );
 
@@ -155,15 +231,17 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       {
         title: "Approve a liquidity pool",
         description:
-          "Licence provider: approve a pool on a product your firm sponsors, naming the approved money rails its capital moves on: a deposit rail (direction deposit or on_ramp) and a withdrawal rail (direction payout or off_ramp), both your firm's and approved. Every state the deposit rail serves must also be served by the withdrawal rail, so capital that came in can get out. Deposits and withdrawals are refused without them, and later refused at the chokepoint if a named rail is suspended or revoked: a pool never follows a replacement rail.",
+          "Licence provider: approve a pool on a product your firm sponsors, with its terms as list_pools shows them (reserve, notice period, commitment limits, lock_in_days, topups_when_health_paused), naming the approved money rails its capital moves on: a deposit rail (direction deposit or on_ramp) and a withdrawal rail (direction payout or off_ramp), both your firm's and approved. Every state the deposit rail serves must also be served by the withdrawal rail, so capital that came in can get out. Give lock_in_days and topups_when_health_paused as you read them: if the pool's don't match, it isn't approved (terms_changed). The approval records the terms it approved (approved_terms); they change after that only through a new approval of yours (approve_pool_terms). Deposits and withdrawals are refused without the rails, and later refused at the chokepoint if a named rail is suspended or revoked: a pool never follows a replacement rail.",
         inputSchema: {
           pool_id: z.string().uuid(),
           deposit_rail_id: z.string().uuid(),
           withdrawal_rail_id: z.string().uuid(),
+          lock_in_days: LockInDays.optional().describe("The lock-in you're approving; refused if the pool's differs"),
+          topups_when_health_paused: z.boolean().optional().describe("The top-up term you're approving; refused if the pool's differs"),
           note: z.string().max(2000).optional(),
         },
       },
-      async ({ pool_id, deposit_rail_id, withdrawal_rail_id, note }) => {
+      async ({ pool_id, deposit_rail_id, withdrawal_rail_id, lock_in_days, topups_when_health_paused, note }) => {
         const firm = await myFirm();
         if (!firm) return fail(noFirm);
         const pool = await getPool(store, pool_id);
@@ -172,6 +250,11 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         if (pool.status === "closed") return fail("This pool is closed");
         const sponsored = (await store.sponsorships({ product_id: pool.product_id, provider_entity_id: firm, status: "approved" })).some((s) => s.component_key === pool.component_key);
         if (!sponsored) return fail("Your firm no longer has an approved sponsorship of this pool's component");
+        const termsNow = { lock_in_days: pool.lock_in_days, topups_when_health_paused: pool.topups_when_health_paused };
+        if ((lock_in_days !== undefined && lock_in_days !== pool.lock_in_days) || (topups_when_health_paused !== undefined && topups_when_health_paused !== pool.topups_when_health_paused)) {
+          await audit("approve_pool_refused", pool_id, { reason: "terms_changed", approving: { lock_in_days: lock_in_days ?? null, topups_when_health_paused: topups_when_health_paused ?? null }, pool: termsNow });
+          return fail("The pool's terms aren't the ones you're approving: read them again (list_pools) and approve what's there", { code: "terms_changed", terms: termsNow });
+        }
         const railRow = async (id: string) => (await store.db.query(`SELECT * FROM ${T}.money_rails WHERE id = $1`, [id])).rows[0];
         const [depositRail, withdrawalRail] = await Promise.all([railRow(deposit_rail_id), railRow(withdrawal_rail_id)]);
         const rails = (r: typeof depositRail, id: string, directions: string[], label: string) => {
@@ -189,14 +272,60 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           await audit("approve_pool_refused", pool_id, { reason: bad });
           return fail(bad);
         }
+        const approved = approvedTermsOf(pool, user.id, now());
         const { rows } = await store.db.query(
           // A live pool stays paused until the worker has looked at its health once; a sandbox pool has nothing to protect.
-          `UPDATE ${T}.liquidity_pools SET status = CASE WHEN sandbox THEN 'open' ELSE 'paused' END, pause_kind = CASE WHEN sandbox THEN NULL ELSE 'health' END, pause_reason = CASE WHEN sandbox THEN NULL ELSE 'Approved; waiting for the worker to check its health for the first time' END, deposit_rail_id = $2, withdrawal_rail_id = $3, approved_by = $4, approved_at = now(), updated_at = now()
-           WHERE id = $1 AND approved_at IS NULL AND status = 'paused' AND pause_kind = 'awaiting_approval' RETURNING *`,
-          [pool_id, deposit_rail_id, withdrawal_rail_id, user.id],
+          // Only on the terms that were read: one changed meanwhile means reading and approving again.
+          `UPDATE ${T}.liquidity_pools SET status = CASE WHEN sandbox THEN 'open' ELSE 'paused' END, pause_kind = CASE WHEN sandbox THEN NULL ELSE 'health' END, pause_reason = CASE WHEN sandbox THEN NULL ELSE 'Approved; waiting for the worker to check its health for the first time' END, deposit_rail_id = $2, withdrawal_rail_id = $3, approved_by = $4, approved_at = now(), approved_terms = $5, updated_at = now()
+           WHERE id = $1 AND approved_at IS NULL AND status = 'paused' AND pause_kind = 'awaiting_approval' AND lock_in_days = $6 AND topups_when_health_paused = $7 RETURNING *`,
+          [pool_id, deposit_rail_id, withdrawal_rail_id, user.id, JSON.stringify(approved), pool.lock_in_days, pool.topups_when_health_paused],
         );
-        if (!rows[0]) return fail("The pool was approved by another call just now");
-        await audit("approve_pool", pool_id, { deposit_rail_id, withdrawal_rail_id, note: note ?? null });
+        if (!rows[0]) return fail("The pool was approved, or its terms changed, by another call just now: read it again (list_pools)");
+        await audit("approve_pool", pool_id, { deposit_rail_id, withdrawal_rail_id, note: note ?? null, approved_terms: approved });
+        return json(toPool(rows[0]));
+      },
+    );
+
+  if (roles.licenceProvider)
+    server.registerTool(
+      "approve_pool_terms",
+      {
+        title: "Approve or decline a change of a pool's terms",
+        description:
+          "Licence provider: decide a change of lock_in_days or topups_when_health_paused that the builder proposed (propose_pool_terms) on a pool your firm sponsors and has approved: the pool's proposed_terms in list_pools. Give the terms you're deciding as you read them: if the proposal has changed since, nothing is decided (terms_changed). Approving applies them and records them as the pool's approved_terms; a new lock-in applies only to commitments made from then on. Declining leaves the pool as it was. Audited.",
+        inputSchema: { pool_id: z.string().uuid(), approve: z.boolean(), lock_in_days: LockInDays, topups_when_health_paused: z.boolean(), note: z.string().max(2000).optional() },
+      },
+      async ({ pool_id, approve, lock_in_days, topups_when_health_paused, note }) => {
+        const firm = await myFirm();
+        if (!firm) return fail(noFirm);
+        const pool = await getPool(store, pool_id);
+        if (!pool || pool.sponsor_entity_id !== firm) return fail(`No pool '${pool_id}' sponsored by your firm`);
+        const p = pool.proposed_terms;
+        if (!pool.approved_at || !p) return fail("This pool has no proposed change of terms waiting for you", { code: "no_proposal" });
+        if (p.lock_in_days !== lock_in_days || p.topups_when_health_paused !== topups_when_health_paused) {
+          await audit("approve_pool_terms_refused", pool_id, { reason: "terms_changed", approving: { lock_in_days, topups_when_health_paused }, proposed: p });
+          return fail("The proposed terms aren't the ones you're deciding: read them again (list_pools)", { code: "terms_changed", proposed_terms: p });
+        }
+        if (approve && pool.status === "closed") return fail("This pool is closed");
+        if (approve) {
+          // The product may have changed since the proposal: its lock-in is checked again.
+          const lockIn = lockInCheck((await store.getProduct(pool.product_id))?.definition, pool.component_key, p.lock_in_days);
+          if (!lockIn.ok) {
+            await audit("approve_pool_terms_refused", pool_id, { reason: lockIn.code, proposed: p });
+            return lockInRefusal(lockIn);
+          }
+          const approved = approvedTermsOf({ ...pool, lock_in_days: p.lock_in_days, topups_when_health_paused: p.topups_when_health_paused }, user.id, now());
+          const { rows } = await store.db.query(
+            `UPDATE ${T}.liquidity_pools SET lock_in_days = $2, topups_when_health_paused = $3, product_lock_in_days = $4, approved_terms = $5, proposed_terms = NULL, updated_at = now() WHERE id = $1 AND proposed_terms = $6::jsonb RETURNING *`,
+            [pool_id, p.lock_in_days, p.topups_when_health_paused, lockIn.floor, JSON.stringify(approved), JSON.stringify(p)],
+          );
+          if (!rows[0]) return fail("The proposal was changed by another call just now: read it again (list_pools)");
+          await audit("approve_pool_terms", pool_id, { approved: true, was: { lock_in_days: pool.lock_in_days, topups_when_health_paused: pool.topups_when_health_paused }, approved_terms: approved, note: note ?? null });
+          return json(toPool(rows[0]));
+        }
+        const { rows } = await store.db.query(`UPDATE ${T}.liquidity_pools SET proposed_terms = NULL, updated_at = now() WHERE id = $1 AND proposed_terms = $2::jsonb RETURNING *`, [pool_id, JSON.stringify(p)]);
+        if (!rows[0]) return fail("The proposal was changed by another call just now: read it again (list_pools)");
+        await audit("approve_pool_terms", pool_id, { approved: false, declined: p, note: note ?? null });
         return json(toPool(rows[0]));
       },
     );
@@ -417,7 +546,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       {
         title: "Liquidity pools",
         description:
-          "Liquidity pools you may see: an admin all of them; a builder its own products'; a licence provider those it sponsors; a liquidity provider those approved and either sandbox or with a cleared offering, plus any it's committed to. Each with its reserve terms, notice period, commitment limits, status and pause reason, in integer cents.",
+          "Liquidity pools you may see: an admin all of them; a builder its own products'; a licence provider those it sponsors; a liquidity provider those approved and either sandbox or with a cleared offering, plus any it's committed to. Each with its reserve terms, notice period, commitment limits, lock_in_days (from each commitment's settlement), topups_when_health_paused, product_lock_in_days (the product's own, the floor), the terms the sponsor approved (approved_terms) and any change waiting for its approval (proposed_terms), status and pause reason, in integer cents.",
         inputSchema: { product_id: z.string().optional(), status: z.enum(POOL_STATUSES).optional() },
         annotations: { readOnlyHint: true },
       },
@@ -489,7 +618,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     {
       title: "Commit capital to a pool",
       description:
-        "Liquidity provider: commit capital to a pool. This asks for a deposit, in integer cents, on the pool's approved rail; your position counts only what has settled. Real (non-sandbox) commitments are refused until an admin records that the pool's offering was cleared and on what legal basis, because pooled investor capital with withdrawal rights may be a securities offering. Mynt never holds your funds. state: the US state your capital moves from, which the rail must serve.",
+        "Liquidity provider: commit capital to a pool. This asks for a deposit, in integer cents, on the pool's approved rail; your position counts only what has settled. Each commitment is locked in for the pool's lock_in_days from its settlement (it keeps that lock-in even if the pool's terms change later). While the pool is paused for health, it's taken only if the pool's topups_when_health_paused is true; a sponsor's or admin's pause, or a closed pool, always refuses it. Real (non-sandbox) commitments are refused until an admin records that the pool's offering was cleared and on what legal basis, because pooled investor capital with withdrawal rights may be a securities offering. Mynt never holds your funds. state: the US state your capital moves from, which the rail must serve.",
       inputSchema: { pool_id: z.string().uuid(), amount_cents: Cents, state: StateCode, idempotency_key: IdemKey },
     },
     async ({ pool_id, amount_cents, state, idempotency_key }) => {
@@ -519,6 +648,9 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       // Real capital comes in only when a snapshot Mynt trusts says the pool is healthy or short of its reserve: otherwise
       // there's no telling what it could pay back.
       if (!pool.sandbox && !pool.offering_cleared) return refuse(OFFERING_NOT_CLEARED, "offering_not_cleared");
+      const terms = { lock_in_days: pool.lock_in_days, topups_when_health_paused: pool.topups_when_health_paused };
+      const topupsClosed = () => refuse(`This pool is paused for health (${pool.pause_reason ?? "no reason given"}) and its terms take no new capital while it is (topups_when_health_paused: false). It takes commitments again once its health recovers`, "topups_closed_while_health_paused", { pause_kind: "health", ...terms });
+      if (pool.status === "paused" && pool.pause_kind === "health" && !pool.topups_when_health_paused) return topupsClosed();
       if (!pool.sandbox && (pool.status === "open" || (pool.status === "paused" && pool.pause_kind === "health"))) {
         const gate = await evaluatePool(store, health, pool, now(), healthAgeMs());
         if (!gate.ok && !gate.shortfall) return refuse(`This pool isn't taking commitments right now: ${gate.reason}`, "health_unconfirmed");
@@ -526,7 +658,11 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       const { rows } = await store.db.query(`SELECT * FROM ${T}.reserve_pool_deposit($1, $2, $3, $4, $5, $6, $7, $8)`, [id, key, pool_id, firm, amount_cents, state, user.id, now().toISOString()]);
       const r = rows[0] as { o_outcome: string; o_id: string | null; o_state: string | null; o_exposure: unknown };
       if (r.o_outcome === "offering_not_cleared") return refuse(OFFERING_NOT_CLEARED, "offering_not_cleared");
-      if (r.o_outcome === "pool_not_open") return refuse(`This pool isn't taking commitments right now (${pool.status}${pool.pause_reason ? `: ${pool.pause_reason}` : ""})`, "pool_not_open");
+      if (r.o_outcome === "topups_closed") return topupsClosed();
+      if (r.o_outcome === "pool_not_open") {
+        const why = pool.status === "closed" ? "it's closed" : pool.pause_kind === "manual" ? `its ${pool.paused_by_admin ? "admin" : "sponsor"} paused it, and such a pause takes no new capital whatever its top-up terms` : pool.pause_kind === "governance" ? "it's paused because its sponsorship or product needs attention" : pool.pause_kind === "awaiting_approval" ? "it's waiting for its sponsor's approval" : `it's ${pool.status}`;
+        return refuse(`This pool isn't taking commitments right now: ${why}${pool.pause_reason ? ` (${pool.pause_reason})` : ""}`, "pool_not_open", { status: pool.status, pause_kind: pool.pause_kind, ...terms });
+      }
       if (r.o_outcome === "over_limit") return refuse(`That would take your position to more than this pool's limit of ${pool.max_commitment_cents} cents per firm`, "over_limit", { exposure_cents: Number(r.o_exposure), limit_cents: pool.max_commitment_cents });
       if (r.o_outcome === "under_minimum") return refuse(`A firm's position in this pool must be at least ${pool.min_commitment_cents} cents`, "under_minimum");
       if (r.o_outcome === "idempotency_conflict") return refuse("That idempotency key was already used for a different commitment", "idempotency_conflict");
@@ -539,7 +675,9 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         return refuse(verdict.message, verdict.code);
       }
       await audit("commit_to_pool", pool_id, { amount_cents, movement_id: verdict.movement_id, state, sandbox: pool.sandbox, replay: r.o_outcome === "replay" });
-      return json({ pool_id, amount_cents, sandbox: pool.sandbox, movement_id: verdict.movement_id, movement_status: verdict.status, replay: r.o_outcome === "replay", note: "Your position counts this only once the movement settles.", position: (await positionsOf(firm, pool_id))[0] });
+      const { rows: lk } = await store.db.query(`SELECT lock_in_days FROM ${T}.pool_movements WHERE id = $1`, [pmId]);
+      const lockIn = Number(lk[0]?.lock_in_days ?? 0);
+      return json({ pool_id, amount_cents, sandbox: pool.sandbox, movement_id: verdict.movement_id, movement_status: verdict.status, replay: r.o_outcome === "replay", lock_in_days: lockIn, note: `Your position counts this only once the movement settles.${lockIn ? ` It can't be withdrawn until ${lockIn} days after it settles.` : ""}`, position: (await positionsOf(firm, pool_id))[0] });
     },
   );
 
@@ -548,7 +686,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     {
       title: "Ask to take capital out of a pool",
       description:
-        "Liquidity provider: join a pool's withdrawal queue for up to what you have settled there. First in, first out, nobody jumps it; each request is paid only after the pool's notice period and only as far as the latest verified health snapshot keeps the pool above its minimum reserve, partly if that's all it allows.",
+        "Liquidity provider: join a pool's withdrawal queue for up to what you have settled there and is past its lock-in (each commitment is locked in for lock_in_days from its settlement; list_my_positions shows unlocked_settled_cents and locked_until). First in, first out, nobody jumps it; each request is paid only after the pool's notice period, which starts when you ask, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve, partly if that's all it allows.",
       inputSchema: { pool_id: z.string().uuid(), amount_cents: Cents, idempotency_key: IdemKey },
     },
     async ({ pool_id, amount_cents, idempotency_key }) => {
@@ -561,9 +699,15 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       const eligible = new Date(now().getTime() + pool.notice_period_days * 86_400_000);
       const { rows } = await store.db.query(`SELECT * FROM ${T}.request_pool_withdrawal($1, $2, $3, $4, $5, $6, $7, $8)`, [id, `pool-withdrawal-request:${pool_id}:${firm}:${idempotency_key}`, pool_id, firm, amount_cents, user.id, now().toISOString(), eligible.toISOString()]);
       const r = rows[0] as { o_outcome: string; o_id: string | null; o_available: unknown };
+      if (r.o_outcome === "locked") {
+        const pos = (await positionsOf(firm, pool_id))[0];
+        const available = Number(r.o_available);
+        await audit("request_withdrawal_refused", pool_id, { amount_cents, available_cents: available, code: "locked_in", locked_cents: pos?.locked_cents ?? null });
+        return fail(`Part of your position is still locked in: ${pos?.locked_cents ?? "some"} cents can't be withdrawn until its lock-in ends (the next at ${pos?.next_unlock_at ?? "unknown"}, all of it by ${pos?.locked_until ?? "unknown"}). You can withdraw at most ${available} cents now: what has settled and is past its lock-in, less what's already on its way out or queued. The notice period still runs after you ask`, { code: "locked_in", available_cents: available, locked_cents: pos?.locked_cents ?? null, next_unlock_at: pos?.next_unlock_at ?? null, locked_until: pos?.locked_until ?? null, lock_in_days: pool.lock_in_days, sandbox: pool.sandbox });
+      }
       if (r.o_outcome === "insufficient") {
         await audit("request_withdrawal_refused", pool_id, { amount_cents, available_cents: Number(r.o_available) });
-        return fail(`You can withdraw at most ${Number(r.o_available)} cents from this pool right now: what has settled, less what's already on its way out or queued`, { available_cents: Number(r.o_available) });
+        return fail(`You can withdraw at most ${Number(r.o_available)} cents from this pool right now: what has settled and is past its lock-in, less what's already on its way out or queued`, { code: "insufficient", available_cents: Number(r.o_available) });
       }
       if (r.o_outcome === "idempotency_conflict") return fail("That idempotency key was already used for a different request");
       if (r.o_outcome === "no_pool") return fail(`No pool '${pool_id}'`);
@@ -665,7 +809,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
 
   // The side-by-side row for one pool. Numbers need entitlement, which product health decides.
   async function poolHealthRow(pool: Pool) {
-    const base = { pool_id: pool.id, name: pool.name, product_id: pool.product_id, status: pool.status, pause_kind: pool.pause_kind, pause_reason: pool.pause_reason, hold_reason: pool.hold_reason, sandbox: pool.sandbox, min_reserve_bps: pool.min_reserve_bps, min_reserve_floor_cents: pool.min_reserve_floor_cents, notice_period_days: pool.notice_period_days };
+    const base = { pool_id: pool.id, name: pool.name, product_id: pool.product_id, status: pool.status, pause_kind: pool.pause_kind, pause_reason: pool.pause_reason, hold_reason: pool.hold_reason, sandbox: pool.sandbox, min_reserve_bps: pool.min_reserve_bps, min_reserve_floor_cents: pool.min_reserve_floor_cents, notice_period_days: pool.notice_period_days, lock_in_days: pool.lock_in_days, topups_when_health_paused: pool.topups_when_health_paused, approved_terms: pool.approved_terms, proposed_terms: pool.proposed_terms };
     const blank = (reason: string) => ({ ...base, coverage_bps: null, coverage_reason: reason, reserves_cents: null, obligations_cents: null, headroom_cents: null, headroom_reason: reason, trend: { direction: null, reason, coverage_series_bps: [] as number[] }, gaps: null, gaps_reason: reason, verified: null, verified_reason: reason, snapshot: null });
     if (!health) return blank("Product health isn't running on this Mynt");
     if (!(await health.entitlement(user, pool.product_id))) return blank("Commit to a pool of this product to read its health");

@@ -1444,3 +1444,232 @@ test("a sponsor's pending correction doesn't take away the firm's right to dispu
   assert.equal(stale.isError, true);
   assert.equal((await t.position(t.fundA)).state, "us-ny");
 });
+
+// ---- lock-ins and top-ups ----
+
+const { isoDurationDays, productLockIn } = await import("../dist/liquidity.js");
+const wraps = (lock_in, ends = { from: "wrapper", to: "account" }, terms = []) => ({ components: [], terms, connections: [{ _id: "wrap", type: "wraps", from: { kind: "component", id: ends.from }, to: { kind: "component", id: ends.to }, attributes: { mode: "statutory_wrapper", lock_in } }] });
+
+test("a product's lock-in reads as whole days, rounded up, and only for the components it wraps", () => {
+  assert.equal(isoDurationDays("P90D"), 90);
+  assert.equal(isoDurationDays("P1Y"), 366);
+  assert.equal(isoDurationDays("P1M"), 31);
+  assert.equal(isoDurationDays("P2W"), 14);
+  assert.equal(isoDurationDays("P1DT1H"), 2, "any part of a day is a day more");
+  assert.equal(isoDurationDays("30 days"), null);
+  assert.deepEqual(productLockIn(null, "account"), { stated: false });
+  assert.deepEqual(productLockIn(wraps("P30D"), "account"), { stated: true, default_days: 30, floor_days: 30, connections: ["wrap"] });
+  assert.equal(productLockIn(wraps("P30D"), "wrapper").stated, true, "the wrapper itself is locked in");
+  assert.deepEqual(productLockIn(wraps("P30D", { from: "wrapper", to: "other" }), "account"), { stated: false });
+  assert.equal(productLockIn(wraps(45), "account").default_days, 45, "a bare number is days");
+  assert.equal(productLockIn(wraps(null), "account").default_days, 0);
+  const term = { _id: "lock", type: "integer", unit: "months", default: 6, range: { min: 3 }, set_by: ["template"], negotiable: "customer_choice", post_issue: { rule: "immutable" } };
+  assert.deepEqual(productLockIn(wraps({ $term: "lock" }, undefined, [term]), "account"), { stated: true, default_days: 186, floor_days: 93, connections: ["wrap"] });
+  assert.deepEqual(productLockIn(wraps({ $term: "lock" }, undefined, [{ ...term, type: "duration", unit: undefined, default: "P1Y", range: undefined, allowed: ["P6M", "P1Y"] }]), "account"), { stated: true, default_days: 366, floor_days: 186, connections: ["wrap"] });
+  assert.equal(productLockIn(wraps({ $term: "missing" }), "account").stated, "unreadable");
+  assert.equal(productLockIn(wraps({ amount: "100.00", currency: "USD" }), "account").stated, "unreadable");
+  assert.equal(productLockIn(wraps(true), "account").stated, "unreadable");
+});
+
+test("a lock-in keeps each commitment in from its settlement; only the unlocked settled part can be withdrawn, and the notice period runs after", async () => {
+  const s = await world({ makePool: false, notice: 1 });
+  const pool = await s.createPool({ lock_in_days: 10 });
+  assert.equal(pool.lock_in_days, 10);
+  const first = await s.commit(s.fundA, 10_000, pool.id);
+  assert.equal(first.lock_in_days, 10);
+  await s.settle(first.movement_id);
+  const early = await callTool(s.fundA.client, "request_withdrawal", { pool_id: pool.id, amount_cents: 1, idempotency_key: "out-locked" });
+  assert.equal(early.isError, true);
+  assert.equal(early.data.code, "locked_in");
+  assert.equal(early.data.available_cents, 0);
+  assert.equal(early.data.locked_cents, 10_000);
+  assert.match(early.data.error, /locked in/);
+  let pos = await s.position(s.fundA, pool.id);
+  assert.equal(pos.locked_cents, 10_000);
+  assert.equal(pos.unlocked_settled_cents, 0);
+  assert.equal(pos.available_to_withdraw_cents, 0);
+  const { rows: [settledRow] } = await s.db.query("SELECT settled_at FROM financial_products.money_movements WHERE id = $1", [first.movement_id]);
+  assert.equal(pos.locked_until, new Date(new Date(settledRow.settled_at).getTime() + 10 * DAY).toISOString(), "ten days from settlement");
+
+  // Eleven days on for the first commitment (as if it settled then), and a second one that settled just now.
+  await s.db.query("UPDATE financial_products.money_movements SET settled_at = $2 WHERE id = $1", [first.movement_id, new Date(s.getClock() - 11 * DAY).toISOString()]);
+  await s.funded(s.fundA, 5_000, pool.id);
+  pos = await s.position(s.fundA, pool.id);
+  assert.equal(pos.balance_cents, 15_000);
+  assert.equal(pos.locked_cents, 5_000);
+  assert.equal(pos.unlocked_settled_cents, 10_000);
+  assert.equal(pos.available_to_withdraw_cents, 10_000);
+  const partial = await callTool(s.fundA.client, "request_withdrawal", { pool_id: pool.id, amount_cents: 10_001, idempotency_key: "out-partly-locked" });
+  assert.equal(partial.data.code, "locked_in");
+  assert.equal(partial.data.available_cents, 10_000);
+  const out = await s.requestOut(s.fundA, 10_000, pool.id);
+  assert.equal(new Date(out.eligible_at).getTime() - new Date(out.requested_at).getTime(), DAY, "the notice period still runs, from the request");
+  // More than there is, locked or not, is plainly too much.
+  assert.equal((await callTool(s.fundA.client, "request_withdrawal", { pool_id: pool.id, amount_cents: 5_001, idempotency_key: "out-too-much-anyway" })).data.code, "insufficient");
+
+  // Once the second commitment's lock-in is over, it can be asked for too.
+  s.advance(11 * DAY);
+  pos = await s.position(s.fundA, pool.id);
+  assert.equal(pos.locked_cents, 0);
+  assert.equal(pos.locked_until, null);
+  assert.equal(pos.available_to_withdraw_cents, 5_000);
+  await s.requestOut(s.fundA, 5_000, pool.id);
+});
+
+test("a change of terms after approval waits for the sponsor's new approval and never moves an existing commitment's lock-in", async () => {
+  const s = await world({ makePool: false });
+  const pool = await s.createPool({ lock_in_days: 30 });
+  assert.equal((await s.poolRow(pool.id)).approved_terms.lock_in_days, 30);
+  const c = await s.commit(s.fundA, 2_000, pool.id);
+  await s.settle(c.movement_id);
+
+  const proposed = await ok(s.builder.client, "propose_pool_terms", { pool_id: pool.id, lock_in_days: 0, topups_when_health_paused: false, reason: "shorter lock-in" });
+  assert.equal(proposed.lock_in_days, 30, "nothing changes yet");
+  assert.equal(proposed.topups_when_health_paused, true);
+  assert.deepEqual([proposed.proposed_terms.lock_in_days, proposed.proposed_terms.topups_when_health_paused], [0, false]);
+  // The committed firm sees what's proposed.
+  const seen = (await ok(s.fundA.client, "list_pools", {})).find((p) => p.id === pool.id);
+  assert.equal(seen.proposed_terms.lock_in_days, 0);
+  // Only the sponsor approves it, and only as it read it.
+  assert.equal((await callTool(s.fundA.client, "approve_pool_terms", { pool_id: pool.id, approve: true, lock_in_days: 0, topups_when_health_paused: false })).isError, true);
+  const stale = await callTool(s.provider.client, "approve_pool_terms", { pool_id: pool.id, approve: true, lock_in_days: 0, topups_when_health_paused: true });
+  assert.equal(stale.data.code, "terms_changed");
+  const approved = await ok(s.provider.client, "approve_pool_terms", { pool_id: pool.id, approve: true, lock_in_days: 0, topups_when_health_paused: false, note: "fine" });
+  assert.equal(approved.lock_in_days, 0);
+  assert.equal(approved.topups_when_health_paused, false);
+  assert.equal(approved.proposed_terms, null);
+  assert.equal(approved.approved_terms.lock_in_days, 0);
+  assert.equal(approved.approved_terms.topups_when_health_paused, false);
+  assert.equal(approved.approved_terms.approved_by, s.provider.user.id);
+  // The commitment made under 30 days keeps them; one made now has none.
+  assert.equal((await callTool(s.fundA.client, "request_withdrawal", { pool_id: pool.id, amount_cents: 1, idempotency_key: "out-still-locked" })).data.code, "locked_in");
+  await s.funded(s.fundA, 700, pool.id);
+  assert.equal((await s.position(s.fundA, pool.id)).available_to_withdraw_cents, 700);
+  // A declined proposal changes nothing.
+  await ok(s.builder.client, "propose_pool_terms", { pool_id: pool.id, lock_in_days: 5 });
+  const declined = await ok(s.provider.client, "approve_pool_terms", { pool_id: pool.id, approve: false, lock_in_days: 5, topups_when_health_paused: false });
+  assert.equal(declined.lock_in_days, 0);
+  assert.equal(declined.proposed_terms, null);
+  assert.equal((await callTool(s.provider.client, "approve_pool_terms", { pool_id: pool.id, approve: true, lock_in_days: 5, topups_when_health_paused: false })).data.code, "no_proposal");
+  const { rows } = await s.db.query("SELECT action FROM financial_products.audit_log WHERE target = $1 AND action LIKE '%pool_terms%' ORDER BY created_at", [pool.id]);
+  assert.deepEqual(rows.map((r) => r.action), ["propose_pool_terms", "approve_pool_terms_refused", "approve_pool_terms", "propose_pool_terms", "approve_pool_terms"]);
+});
+
+test("the sponsor approves a pool on the terms it read, and the approval records them", async () => {
+  const s = await world({ makePool: false });
+  const base = { product_id: s.productId, component_key: "account", name: "Terms", sandbox: false, min_reserve_bps: 100, min_reserve_floor_cents: 0, notice_period_days: 3, max_commitment_cents: 1000 };
+  const pool = await ok(s.builder.client, "create_pool", base);
+  assert.equal(pool.lock_in_days, 0, "no lock-in when the product states none");
+  assert.equal(pool.topups_when_health_paused, true);
+  assert.equal(pool.approved_terms, null);
+  const rails = { pool_id: pool.id, deposit_rail_id: s.depositRail.id, withdrawal_rail_id: s.payoutRail.id };
+  // Before approval the builder's change applies at once, and an approval of what was there before is refused.
+  const changed = await ok(s.builder.client, "propose_pool_terms", { pool_id: pool.id, lock_in_days: 14, topups_when_health_paused: false });
+  assert.equal(changed.lock_in_days, 14);
+  assert.equal(changed.proposed_terms, null);
+  const stale = await callTool(s.provider.client, "approve_pool", { ...rails, lock_in_days: 0, topups_when_health_paused: true });
+  assert.equal(stale.data.code, "terms_changed");
+  assert.deepEqual(stale.data.terms, { lock_in_days: 14, topups_when_health_paused: false });
+  assert.equal((await s.poolRow(pool.id)).approved_at, null);
+  const approved = await ok(s.provider.client, "approve_pool", { ...rails, lock_in_days: 14, topups_when_health_paused: false });
+  const t = approved.approved_terms;
+  assert.deepEqual({ ...t, approved_at: typeof t.approved_at }, { lock_in_days: 14, topups_when_health_paused: false, notice_period_days: 3, min_reserve_bps: 100, min_reserve_floor_cents: 0, min_commitment_cents: 1, max_commitment_cents: 1000, approved_by: s.provider.user.id, approved_at: "string" });
+  const { rows: [a] } = await s.db.query("SELECT details FROM financial_products.audit_log WHERE action = 'approve_pool' AND target = $1", [pool.id]);
+  assert.equal(a.details.approved_terms.lock_in_days, 14);
+});
+
+test("while paused for health a pool takes top-ups only if its terms say so; a sponsor's or admin's pause always refuses them", async () => {
+  const s = await world({ makePool: false });
+  const open = await s.createPool();
+  const shut = await s.createPool({ topups_when_health_paused: false });
+  await s.funded(s.fundA, 1_000, open.id);
+  await s.funded(s.fundA, 1_000, shut.id);
+  // A trusted shortfall pauses both for health.
+  await s.snapshot({ reserves: 500_000, obligations: 1_000_000 });
+  await s.tick();
+  assert.equal((await s.poolRow(open.id)).pause_kind, "health");
+  assert.equal((await s.poolRow(shut.id)).pause_kind, "health");
+  await ok(s.fundB.client, "commit_to_pool", { pool_id: open.id, amount_cents: 1000, state: "us-ny", idempotency_key: "topup-allowed" });
+  const refused = await callTool(s.fundB.client, "commit_to_pool", { pool_id: shut.id, amount_cents: 1000, state: "us-ny", idempotency_key: "topup-refused" });
+  assert.equal(refused.isError, true);
+  assert.equal(refused.data.code, "topups_closed_while_health_paused");
+  assert.equal(refused.data.topups_when_health_paused, false);
+  assert.match(refused.data.error, /paused for health.*topups_when_health_paused: false/);
+  // The database's own check refuses it too, whatever the caller checked first.
+  const { rows: [direct] } = await s.db.query("SELECT * FROM financial_products.reserve_pool_deposit($1, $2, $3, $4, $5, $6, $7, $8)", [randomUUID(), `direct-${randomUUID()}`, shut.id, s.fundB.entity.id, 1000, "us-ny", s.fundB.user.id, new Date(s.getClock()).toISOString()]);
+  assert.equal(direct.o_outcome, "topups_closed");
+
+  // Healthy again: both take capital.
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.tick();
+  await ok(s.fundB.client, "commit_to_pool", { pool_id: shut.id, amount_cents: 1000, state: "us-ny", idempotency_key: "topup-after-recovery" });
+
+  // A sponsor's pause and an admin's refuse it, even on a pool whose terms take top-ups under a health pause.
+  await ok(s.provider.client, "pause_pool", { pool_id: open.id, reason: "investigating" });
+  const bySponsor = await callTool(s.fundB.client, "commit_to_pool", { pool_id: open.id, amount_cents: 1000, state: "us-ny", idempotency_key: "topup-sponsor-paused" });
+  assert.equal(bySponsor.data.code, "pool_not_open");
+  assert.match(bySponsor.data.error, /sponsor paused it/);
+  await ok(s.provider.client, "resume_pool", { pool_id: open.id });
+  await ok(s.admin, "pause_pool", { pool_id: open.id, reason: "regulator asked" });
+  const byAdmin = await callTool(s.fundB.client, "commit_to_pool", { pool_id: open.id, amount_cents: 1000, state: "us-ny", idempotency_key: "topup-admin-paused" });
+  assert.equal(byAdmin.data.code, "pool_not_open");
+  assert.match(byAdmin.data.error, /admin paused it/);
+  await ok(s.admin, "pause_pool", { pool_id: open.id, reason: "wound down", close: true });
+  assert.match((await callTool(s.fundB.client, "commit_to_pool", { pool_id: open.id, amount_cents: 1000, state: "us-ny", idempotency_key: "topup-closed" })).data.error, /closed/);
+  // Both terms are shown side by side and on each position.
+  const side = await ok(s.fundA.client, "list_pools_with_health", {});
+  assert.deepEqual(side.filter((p) => [open.id, shut.id].includes(p.pool_id)).map((p) => [p.lock_in_days, p.topups_when_health_paused]).sort(), [[0, false], [0, true]]);
+  assert.equal((await s.position(s.fundA, shut.id)).topups_when_health_paused, false);
+});
+
+test("a pool can't be laxer than its product's lock-in, which is its default", async () => {
+  const s = await world({ makePool: false });
+  const base = { product_id: s.productId, component_key: "account", name: "Locked", sandbox: true, min_reserve_bps: 100, min_reserve_floor_cents: 0, notice_period_days: 0, max_commitment_cents: 1000 };
+  const define = (d) => s.db.query("UPDATE financial_products.products SET definition = $2 WHERE id = $1", [s.productId, JSON.stringify(d)]);
+  await define(wraps("P1M"));
+  const byDefault = await ok(s.builder.client, "create_pool", base);
+  assert.equal(byDefault.lock_in_days, 31, "the product's lock-in is the default");
+  assert.equal(byDefault.product_lock_in_days, 31);
+  const lax = await callTool(s.builder.client, "create_pool", { ...base, lock_in_days: 30 });
+  assert.equal(lax.isError, true);
+  assert.equal(lax.data.code, "lock_in_shorter_than_product");
+  assert.equal(lax.data.product_lock_in_days, 31);
+  assert.equal((await ok(s.builder.client, "create_pool", { ...base, lock_in_days: 60 })).lock_in_days, 60, "stricter is fine");
+  // Nor can a later change make it laxer.
+  const shorter = await callTool(s.builder.client, "propose_pool_terms", { pool_id: byDefault.id, lock_in_days: 7 });
+  assert.equal(shorter.data.code, "lock_in_shorter_than_product");
+  // A term with a range: its value is the default and its minimum the floor.
+  await define(wraps({ $term: "lock" }, undefined, [{ _id: "lock", type: "integer", unit: "days", default: 90, range: { min: 60 }, set_by: ["template"], negotiable: "customer_choice", post_issue: { rule: "immutable" } }]));
+  assert.equal((await ok(s.builder.client, "create_pool", base)).lock_in_days, 90);
+  assert.equal((await ok(s.builder.client, "create_pool", { ...base, lock_in_days: 60 })).lock_in_days, 60);
+  assert.equal((await callTool(s.builder.client, "create_pool", { ...base, lock_in_days: 59 })).data.code, "lock_in_shorter_than_product");
+  // What can't be read as days isn't guessed at.
+  await define(wraps({ amount: "10.00", currency: "USD" }));
+  const unreadable = await callTool(s.builder.client, "create_pool", base);
+  assert.equal(unreadable.data.code, "product_lock_in_unreadable");
+  // A lock-in on another component's wrapper doesn't bind this one.
+  await define(wraps("P1Y", { from: "wrapper", to: "elsewhere" }));
+  assert.equal((await ok(s.builder.client, "create_pool", base)).lock_in_days, 0);
+  const { rows } = await s.db.query("SELECT details->>'reason' AS reason FROM financial_products.audit_log WHERE action = 'create_pool_refused' ORDER BY created_at");
+  assert.deepEqual(rows.map((r) => r.reason), ["lock_in_shorter_than_product", "lock_in_shorter_than_product", "product_lock_in_unreadable"]);
+});
+
+test("pools and commitments from before lock-ins get none, and top-ups under a health pause", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 3_000);
+  // The database as it was: none of the new columns.
+  await s.db.exec(`DROP VIEW financial_products.pool_positions; DROP VIEW financial_products.pool_movement_states;
+    ALTER TABLE financial_products.pool_movements DROP COLUMN lock_in_days;
+    ALTER TABLE financial_products.liquidity_pools DROP COLUMN lock_in_days, DROP COLUMN topups_when_health_paused, DROP COLUMN product_lock_in_days, DROP COLUMN approved_terms, DROP COLUMN proposed_terms;`);
+  await Store.open(s.db, CATALOG);
+  const pool = await s.poolRow();
+  assert.equal(pool.lock_in_days, 0);
+  assert.equal(pool.topups_when_health_paused, true);
+  assert.equal(pool.product_lock_in_days, null);
+  assert.equal(pool.approved_terms, null, "approved before terms were recorded");
+  assert.equal(pool.proposed_terms, null);
+  const pos = await s.position(s.fundA);
+  assert.equal(pos.locked_cents, 0);
+  assert.equal(pos.available_to_withdraw_cents, 3_000);
+  await s.requestOut(s.fundA, 3_000);
+});
