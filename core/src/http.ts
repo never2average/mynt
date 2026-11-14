@@ -216,7 +216,7 @@ async function orgWebhook(store: Store, sync: WorkspaceSync | null, req: Incomin
   } catch {
     return void res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid signature" }));
   }
-  const fresh = await store.db.query("INSERT INTO financial_products.org_webhook_events (id, type) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id", [parsed.id, parsed.event?.type ?? null]);
+  const fresh = await store.db.query("INSERT INTO financial_products.org_webhook_events (id, type) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id", [parsed.id, parsed.type]);
   if (!fresh.rows.length) return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ duplicate: true }));
   try {
     if (parsed.event) await sync.handle(parsed.event);

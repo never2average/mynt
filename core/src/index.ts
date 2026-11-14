@@ -2,7 +2,7 @@
 import { ClerkOrgDirectory } from "./clerk-orgs.js";
 import { WorkspaceSync } from "./workspace-sync.js";
 import { setOrgDirectory } from "./workspaces.js";
-import { releaseLapsedInvites, retryOffboards } from "./workspaces.js";
+import { finishArchives, releaseLapsedInvites, retryOffboards } from "./workspaces.js";
 import { offboardingServices } from "./server.js";
 import { parseArgs } from "node:util";
 import { AgentMeter } from "./agent-meter.js";
@@ -48,8 +48,10 @@ const USAGE = `Usage:
   mynt users add --name <name> --role <role> [--role ...]   Local token (stdio, or HTTP without Clerk)
   mynt users list
   mynt clerk setup                     Turn on Clerk's allowlist and MCP client registration
-  mynt clerk sync-workspaces [--apply]  Give each workspace from before organizations its Clerk organization, members and
-                                       open invites (a dry run without --apply; prints counts only)
+  mynt clerk sync-workspaces [--apply] [--send-invites]
+                                       Give each workspace from before organizations its Clerk organization and members
+                                       (a dry run without --apply; prints counts only; a rerun resumes). --send-invites
+                                       also turns open invites into Clerk invitations, which email the invitees
   mynt clerk first-party --update-scopes <name or client id>     Repair an existing first-party app's scopes (openid profile email);
                                        keeps its secret, prints only its name and client id
   mynt clerk first-party <name> <redirect-uri> [--file <path>]   Register one of Mynt's own apps (no consent screen);
@@ -100,6 +102,7 @@ const { positionals, values } = parseArgs({
     file: { type: "string" },
     "update-scopes": { type: "string" },
     apply: { type: "boolean" },
+    "send-invites": { type: "boolean" },
   },
 });
 
@@ -251,6 +254,7 @@ if (values.help) {
   const workspaceSweep = setInterval(() => {
     retryOffboards(store, offboardingServices({ builds, hosting })).catch((e) => console.error("offboarding retry:", e));
     releaseLapsedInvites(store, clerkAdmin()).catch((e) => console.error("lapsed invites:", e));
+    finishArchives(store, offboardingServices({ builds, hosting })).catch((e) => console.error("archived workspaces:", e));
   }, 5 * 60 * 1000);
   void workspaceSweep;
   // Sends queued webhook deliveries (events from any process sharing the database).
@@ -382,12 +386,15 @@ if (values.help) {
   console.log(`Registered '${name}' with Clerk: client id ${app.client_id}. Its secret is in ${app.path} (readable only by you); give it to that app's server, then delete the file.`);
   if (app.consent_screen_enabled) console.error("warning: Clerk kept the consent screen on for it; check the application in Clerk's dashboard");
 } else if (command === "clerk" && sub === "sync-workspaces") {
-  // Workspaces from before organizations get one each, with their members and open invites; a dry run unless --apply.
-  // Counts only.
+  // Workspaces from before organizations get one each, with their members; a dry run unless --apply. Open invites
+  // become Clerk invitations, which email people, only with --send-invites. Counts only; a rerun resumes.
   const directory = orgDirectory() ?? die("CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY are required");
   const store = await openStore();
-  const counts = await new WorkspaceSync(store, directory, {}, { register: false }).backfill(Boolean(values.apply), process.env.STUDIO_URL ?? null);
-  console.log(JSON.stringify({ ...(values.apply ? {} : { dry_run: true }), ...counts }, null, 2));
+  const counts = await new WorkspaceSync(store, directory, {}, { register: false }).backfill(Boolean(values.apply), {
+    sendInvites: Boolean(values["send-invites"]),
+    redirectUrl: process.env.STUDIO_URL ?? null,
+  });
+  console.log(JSON.stringify({ ...(values.apply ? {} : { dry_run: true }), sends_invitation_emails: Boolean(values.apply && values["send-invites"]), ...counts }, null, 2));
   await store.close();
 } else if (command === "clerk" && sub === "setup") {
   const admin = clerkAdmin() ?? die("CLERK_SECRET_KEY is required");

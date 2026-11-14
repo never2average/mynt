@@ -36,6 +36,7 @@ const DEVELOPER_TOOLS = [
   // workspaces: the teams apps belong to
   "change_member_role", "create_workspace", "invite_to_workspace", "leave_workspace", "list_workspace_members", "list_workspaces",
   "remove_workspace_member", "rename_workspace", "revoke_workspace_invite",
+  "archive_workspace", "relink_workspace_org", "unarchive_workspace",
   "get_compliance_coverage", "list_workspace_audit", "list_workspace_licences",
   "enable_webhook",
 ];
