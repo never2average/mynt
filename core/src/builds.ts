@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
+import { UsageMeter, usageSampleMs } from "./usage-meter.js";
 import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentBackend } from "./agent-host.js";
 import { CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -429,13 +430,49 @@ export class BuildService {
     readonly repos: RepoAccess | null,
     readonly config: BuildConfig,
     readonly solanaEnv: SolanaBuildEnv,
+    readonly usage: UsageMeter,
   ) {}
 
   static async open(db: Db, store: Store, sandboxes: SandboxHost | null, repos: RepoAccess | null, config: BuildConfig) {
     await db.exec(TABLES);
     const solanaEnv = await SolanaBuildEnv.open(db, sandboxes, { enabled: config.solanaSnapshot ?? true, sandboxType: config.sandboxType, maxAgeDays: config.solanaSnapshotMaxAgeDays });
-    return new BuildService(db, store, sandboxes, repos, config, solanaEnv);
+    return new BuildService(db, store, sandboxes, repos, config, solanaEnv, await UsageMeter.open(db));
   }
+
+  // ---- what a build's sandboxes cost once it has ended (usage-meter.ts) ----
+  // While a build runs, its sandboxes' time is in its own cost. After it ends they stay up (its preview) until their
+  // time limit, and a reopened sandbox runs for hours: that time is sampled here, from the provider's own dollars.
+
+  private async sampleSandbox(sandboxId: string, appId: string, fromZero = false) {
+    if (!this.sandboxes) return;
+    const total = fromZero ? 0 : await this.sandboxes.costDollars(sandboxId);
+    await this.usage.record("sandbox", sandboxId, appId, total, (d) => d, { fromZero });
+  }
+
+  // The build has just ended: its sandboxes' totals now are the baseline its later time counts from.
+  private async baselineSandboxes(id: string) {
+    const b = (await this.db.query("SELECT app_id::text AS app_id, sandbox_id, verify_sandbox_id FROM financial_products.build_runs WHERE id = $1", [id])).rows[0] as Row | undefined;
+    if (!b?.app_id) return;
+    for (const sid of [b.sandbox_id, b.verify_sandbox_id]) if (sid) await this.sampleSandbox(sid as string, b.app_id as string).catch(() => undefined);
+  }
+
+  // Ended builds' sandboxes within their time limit, and reopened sandboxes, once.
+  async sampleUsage() {
+    if (!this.sandboxes) return;
+    await this.usage.start("sandbox");
+    const rows = (
+      await this.db.query(
+        `SELECT app_id::text AS app_id, sandbox_id, verify_sandbox_id, box_sandbox_id, finished_at FROM financial_products.build_runs
+         WHERE app_id IS NOT NULL AND ((status = ANY($1) AND finished_at > now() - make_interval(secs => $2)) OR (box_sandbox_id IS NOT NULL AND box_until > now() - interval '1 hour'))`,
+        [TERMINAL, this.config.ttlSeconds + 3600],
+      )
+    ).rows as Row[];
+    for (const r of rows) {
+      const ids = [...(r.finished_at ? [r.sandbox_id, r.verify_sandbox_id] : []), r.box_sandbox_id].filter(Boolean) as string[];
+      for (const sid of ids) await this.sampleSandbox(sid, r.app_id as string).catch((e) => console.error(`Sandbox usage of ${sid}: ${(e as Error).message}`));
+    }
+  }
+  private usageTimer: NodeJS.Timeout | null = null;
 
   get enabled() {
     return this.sandboxes !== null && !!this.config.agentBackend && !!this.config.publicUrl;
@@ -638,6 +675,7 @@ export class BuildService {
       } RETURNING id`,
       reviving ? [id, ...values, TERMINAL] : [id, ...values],
     );
+    if (terminal && r.rows.length) await this.baselineSandboxes(id).catch(() => undefined);
     return r.rows.length > 0;
   }
 
@@ -1211,6 +1249,8 @@ export class BuildService {
     });
     const until = new Date(Date.now() + ttl * 1000).toISOString();
     await this.db.query("UPDATE financial_products.build_runs SET box_sandbox_id = $2, box_until = $3, updated_at = now() WHERE id = $1", [build.id, s.id, until]);
+    // A new machine: its cost counts from zero.
+    if (build.app_id) await this.sampleSandbox(s.id, build.app_id, true).catch(() => undefined);
     await this.event(build.id, "box", "The developer reopened the build's sandbox on its branch", { until });
     return { sandbox: "provisioning", until };
   }
@@ -1241,6 +1281,8 @@ export class BuildService {
 
   async closeBox(build: Build) {
     if (!build.box_sandbox_id) throw new Error("No reopened sandbox for this build");
+    // Its last cost, before the sandbox goes.
+    if (build.app_id) await this.sampleSandbox(build.box_sandbox_id, build.app_id).catch(() => undefined);
     if (this.sandboxes) await this.sandboxes.stop(build.box_sandbox_id).catch(() => undefined);
     await this.db.query("UPDATE financial_products.build_runs SET box_sandbox_id = NULL, box_until = NULL, updated_at = now() WHERE id = $1", [build.id]);
     await this.event(build.id, "box", "The developer closed the reopened sandbox");
@@ -1251,11 +1293,14 @@ export class BuildService {
   startWorker(intervalMs = Number(process.env.BUILD_POLL_MS ?? 5000)) {
     if (this.timer || !this.sandboxes) return;
     this.timer = serialLoop(() => this.tick(), intervalMs, "build worker");
+    this.usageTimer = serialLoop(() => this.sampleUsage(), usageSampleMs(), "sandbox usage");
   }
 
   stopWorker() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.usageTimer) clearInterval(this.usageTimer);
+    this.usageTimer = null;
   }
 
   // A provider's passing hiccup (a 5xx, a rate limit, a dropped connection) mustn't throw away a build that

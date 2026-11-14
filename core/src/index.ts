@@ -224,6 +224,7 @@ if (values.help) {
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
+  hosting.startUsageWorker(); // what each hosted app's VM costs per period (usage-meter.ts)
   bd.startWorker();
   desk.startWorker();
   explore.startWorker();
