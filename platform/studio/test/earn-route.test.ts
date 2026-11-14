@@ -152,6 +152,24 @@ describe("/api/earn", () => {
     expect(JSON.stringify(fake.requests[1].messages)).toContain("Draft refused: That pool isn't one open to this user.");
   });
 
+  it("reads pools and positions once per answer, however many panel tools it calls, and afresh for the next answer", async () => {
+    fake.steps = [
+      { tool: { name: "show_pools", input: { pool_ids: [POOL] } } },
+      { tool: { name: "draft_commitment", input: { pool_id: POOL, amount_cents: 500_000, state: "us-ny" } } },
+      { tool: { name: "draft_withdrawal", input: { pool_id: POOL, amount_cents: 100_000 } } },
+      { text: "Both drafts are in the panel." },
+    ];
+    const parts = await chunks(await ask("show and draft"));
+    expect(parts.filter((p) => p.type === "data-earn-draft")).toHaveLength(2);
+    const reads = (name: string) => fake.calls.filter((c) => c.name === name).length;
+    expect(reads("list_pools")).toBe(1);
+    expect(reads("list_my_positions")).toBe(1);
+    expect(reads("get_product")).toBe(1);
+    fake.steps = [{ tool: { name: "show_pools", input: { pool_ids: [] } } }, { text: "ok" }];
+    await chunks(await ask("again"));
+    expect(reads("list_pools")).toBe(2);
+  });
+
   it("show_pools draws only pools the user can see", async () => {
     fake.steps = [{ tool: { name: "show_pools", input: { pool_ids: [POOL, "not-a-pool", POOL] } } }, { text: "Here they are." }];
     const parts = await chunks(await ask("90-day lock-in"));

@@ -24,6 +24,7 @@ import {
   commitRefusal,
   healthText,
   limitsText,
+  lockInText,
   noticeText,
   percentOfBps,
   reserveText,
@@ -117,8 +118,10 @@ export function PoolCard({ pool }: { pool: PoolRow }) {
           <Money sandbox={pool.sandbox} />
         </div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-          <dt className="text-muted-foreground">Lock-in (notice)</dt>
-          <dd>{noticeText(pool.noticePeriodDays)}</dd>
+          <dt className="text-muted-foreground">Lock-in</dt>
+          <dd data-lock-in>{lockInText(pool.lockInDays)}</dd>
+          <dt className="text-muted-foreground">Notice period</dt>
+          <dd data-notice>{noticeText(pool.noticePeriodDays)}</dd>
           <dt className="text-muted-foreground">Minimum reserve</dt>
           <dd>{reserveText(pool)}</dd>
           <dt className="text-muted-foreground">Limits</dt>
@@ -175,18 +178,30 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
         <CardDescription>Proposed by the assistant. Nothing has been sent: review it, then confirm it yourself.</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-1 px-4 text-sm">
-        <div>
-          <span className="text-muted-foreground">Pool:</span> {draft.poolName} {draft.sandbox && <Money sandbox />}
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Pool</span>
+          <span className="max-w-60 truncate rounded border bg-muted px-1.5 py-0.5 font-mono text-xs" title={draft.poolName} data-draft-pool>
+            {draft.poolName}
+          </span>
+          {draft.sandbox && <Money sandbox />}
         </div>
         <div className="tabular-nums">
-          <span className="text-muted-foreground">Amount:</span> {usd(draft.amountCents)}
+          <span className="text-muted-foreground">Amount</span> <span className="text-base font-semibold" data-draft-amount>{usd(draft.amountCents)}</span>
         </div>
+        {pool && (
+          <div className="grid grid-cols-[auto_1fr] gap-x-3">
+            <span className="text-muted-foreground">Lock-in</span>
+            <span data-lock-in>{lockInText(pool.lockInDays)}</span>
+            <span className="text-muted-foreground">Notice period</span>
+            <span data-notice>{noticeText(pool.noticePeriodDays)}</span>
+          </div>
+        )}
         {draft.kind === "commit" && (
           <div>
             <span className="text-muted-foreground">From:</span> {draft.state.slice(3).toUpperCase()}
           </div>
         )}
-        {pool && <div className="text-muted-foreground">{commit ? `${limitsText(pool)}; notice ${noticeText(pool.noticePeriodDays).toLowerCase()}.` : `Paid first in, first out after the notice period (${noticeText(pool.noticePeriodDays).toLowerCase()}), and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</div>}
+        {pool && <div className="text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</div>}
         {refusal && state.kind !== "done" && (
           <p className="text-amber-600 dark:text-amber-300" data-refusal>
             {refusal}

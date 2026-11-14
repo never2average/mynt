@@ -81,7 +81,8 @@ export type Pool = {
   holdReason: string | null;
   minReserveBps: number;
   minReserveFloorCents: number;
-  noticePeriodDays: number;
+  noticePeriodDays: number; // the wait after a withdrawal request before it can be paid
+  lockInDays: number | null; // the least time after a deposit settles before it can be withdrawn; null when Mynt doesn't set one
   minCommitmentCents: number;
   maxCommitmentCents: number;
   depositRailId: string | null;
@@ -109,6 +110,7 @@ export function fromPools(reply: unknown): Pool[] {
       minReserveBps: cents(p.min_reserve_bps),
       minReserveFloorCents: cents(p.min_reserve_floor_cents),
       noticePeriodDays: cents(p.notice_period_days),
+      lockInDays: num(p.lock_in_days),
       minCommitmentCents: cents(p.min_commitment_cents),
       maxCommitmentCents: cents(p.max_commitment_cents),
       depositRailId: str(p.deposit_rail_id),
@@ -143,6 +145,8 @@ export function statusText(p: Pool): string {
 }
 export const reserveText = (p: Pool) => `${percentOfBps(p.minReserveBps)} of obligations, at least ${usd(p.minReserveFloorCents)}`;
 export const noticeText = (days: number) => (days === 0 ? "No notice" : `${days} day${days === 1 ? "" : "s"}`);
+// Lock-in and notice are different things: lock-in runs from when a deposit settles, notice from when a withdrawal is asked for.
+export const lockInText = (days: number | null) => (days === null ? "Not set" : days === 0 ? "None" : `${days} day${days === 1 ? "" : "s"}`);
 export const limitsText = (p: Pool) => `${usd(p.minCommitmentCents)} – ${usd(p.maxCommitmentCents)} per firm`;
 
 // ---- health ----

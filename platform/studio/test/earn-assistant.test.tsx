@@ -92,6 +92,9 @@ describe("the panel beside the chat", () => {
     expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(1);
     const card = document.querySelector(`[data-pool-card="${UNCLEARED}"]`)!.textContent!;
     for (const s of ["Uncleared float", "credit", "Sandbox only — not yet cleared for real commitments", "90 days", "$1,000.00 – $100,000.00 per firm", "Not available yet"]) expect(card).toContain(s);
+    // Lock-in and notice period are separate lines; Mynt sets no lock-in on this pool.
+    expect(document.querySelector(`[data-pool-card="${UNCLEARED}"] [data-lock-in]`)!.textContent).toBe("Not set");
+    expect(document.querySelector(`[data-pool-card="${UNCLEARED}"] [data-notice]`)!.textContent).toBe("90 days");
     expect(document.querySelector("[data-earn-positions]")!.textContent).toContain("$5,000.00 settled · $2,000.00 available");
     // Nothing matched yet: every pool open to the user.
     cleanup();
@@ -112,6 +115,16 @@ describe("the panel beside the chat", () => {
     // Done: a second click sends nothing.
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Commit capital" })));
     expect(calls).toHaveLength(1);
+  });
+
+  it("a draft shows the pool's lock-in when Mynt sets one, the notice period apart, and the pool name in its own field, never as the amount", () => {
+    const locked = fromPools([{ ...base, id: POOL, name: "$1,000.00", lock_in_days: 30 }]).map((p) => ({ ...p, queueLength: null, health: null }));
+    render(<EarnPanel data={{ ...data, provider: { ...data.provider!, pools: locked } }} poolIds={null} drafts={[draft({ poolName: "$1,000.00" })]} actions={actions().a} />);
+    const card = document.querySelector('[data-draft="commit"]')!;
+    expect(card.querySelector("[data-lock-in]")!.textContent).toBe("30 days");
+    expect(card.querySelector("[data-notice]")!.textContent).toBe("90 days");
+    expect(card.querySelector("[data-draft-pool]")!.textContent).toBe("$1,000.00");
+    expect(card.querySelector("[data-draft-amount]")!.textContent).toBe("$50,000.00");
   });
 
   it("a draft the page's terms refuse can't be confirmed (an uncleared pool, over the limit)", async () => {

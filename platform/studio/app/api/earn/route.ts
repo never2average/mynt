@@ -97,9 +97,12 @@ export async function POST(req: Request) {
 
   const stream = createUIMessageStream({
     execute: async ({ writer }) => {
-      // Pools and positions as Mynt answers them now: read afresh for every draft, so a draft is
-      // checked against the pool's current terms.
-      const visible = async () => {
+      // Pools and positions as Mynt answers them during this answer: read once, on the first panel
+      // tool call, and shared by the rest of it (each read is several Mynt calls). The next answer
+      // reads them again, so a draft is checked against terms no older than the question.
+      let loaded: ReturnType<typeof load> | null = null;
+      const visible = () => (loaded ??= load());
+      const load = async () => {
         const data: LiquidityData = await loadLiquidity(mynt, access);
         return { pools: [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])], lpPools: data.provider?.pools ?? [], positions: data.provider?.positions ?? [], canCommit: data.provider?.canCommit ?? false, canWithdraw: data.provider?.canWithdraw ?? false };
       };
