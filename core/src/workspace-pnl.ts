@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import type { App, Store, User } from "./store.js";
 import { isUuid, workspaceRole } from "./workspaces.js";
+import { usageStartedSetting } from "./usage-meter.js";
+import { LEDGER_STARTED_SETTING as LEDGER_STARTED } from "./money-rails.js";
 
 // A workspace's profit and loss, for its members: what its apps bring in after launch against what building and
 // running them costs, per period (UTC) and as a statement (this period, last period, year to date). Every figure is
@@ -15,7 +17,10 @@ import { isUuid, workspaceRole } from "./workspaces.js";
 // Costs: each build's metered spend (its coding agents' model use and its sandboxes' machine time while it runs, as
 // build_runs.cost_usd counts against BUILD_CAP_USD and the monthly caps), dated by when the build started, as the
 // monthly caps count it. Mynt's independent audits are paid by Mynt (their own meter, never in build spend), so they
-// cost the workspace nothing. Hosting, sandboxes kept or reopened after a build, and fees aren't recorded per period.
+// cost the workspace nothing. Hosting (each app's VM) and sandboxes after a build (previews kept up, reopened ones)
+// come from usage-meter.ts's samples. Each recorded line counts from when Mynt started recording it (the money
+// ledger's start, the meters' starts): a period that began before then is null, never a partial figure. Mynt
+// charges no fees and sees no app's own cut, so those stay unmeasured.
 
 const T = "financial_products";
 const DAY = 86_400_000;
@@ -94,7 +99,15 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
   // Per-day sums in SQL (bounded by the periods asked for), bucketed here into periods and columns.
   const ids = apps.map((a) => a.id);
   const range = [ids, iso(from), iso(thisEnd)];
-  const [money, builds, hosting] = await Promise.all([
+  const usage = (kind: string) =>
+    optional(
+      store.db,
+      `SELECT app_id::text AS app_id, to_char(sampled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, (SUM(delta_usd) * 100)::text AS cents
+       FROM ${T}.usage_samples WHERE kind = '${kind}' AND app_id = ANY($1::uuid[]) AND sampled_at >= $2::timestamptz AND sampled_at < $3::timestamptz
+       GROUP BY 1, 2`,
+      range,
+    );
+  const [money, builds, hosted, tenant, hostingUsage, sandboxUsage, started] = await Promise.all([
     optional(
       store.db,
       `SELECT app_id::text AS app_id, product_id, to_char(COALESCE(settled_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
@@ -112,22 +125,27 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
        GROUP BY 1, 2`,
       range,
     ),
-    // Whether Mynt hosts any of it at all: no hosting is a real 0; hosting is a cost Mynt doesn't record per period.
-    optional(
-      store.db,
-      `SELECT 1 AS hosted FROM ${T}.hosted_apps WHERE app_id = ANY($1::uuid[])
-       UNION ALL SELECT 1 FROM ${T}.hosting_tenants WHERE $2::boolean AND workspace_id::text = $3 LIMIT 1`,
-      [ids, !o.app_id, workspaceId],
-    ),
+    optional(store.db, `SELECT app_id::text AS app_id, (vm_id IS NOT NULL)::text AS metered FROM ${T}.hosted_apps WHERE app_id = ANY($1::uuid[])`, [ids]),
+    optional(store.db, `SELECT 1 AS t FROM ${T}.hosting_tenants WHERE $1::boolean AND workspace_id::text = $2 LIMIT 1`, [!o.app_id, workspaceId]),
+    usage("hosting"),
+    usage("sandbox"),
+    optional(store.db, `SELECT key, value #>> '{}' AS at FROM ${T}.settings WHERE key = ANY($1)`, [
+      [LEDGER_STARTED, usageStartedSetting("hosting"), usageStartedSetting("sandbox")],
+    ]),
   ]);
+  const startOf = (key: string) => {
+    const r = started?.find((x) => x.key === key);
+    return r ? Date.parse(r.at) : null;
+  };
 
   const dayT = (d: string) => Date.parse(`${d}T00:00:00Z`);
   const seriesIndex = (t: number) => {
     for (let i = seriesStarts.length - 1; i >= 0; i--) if (t >= seriesStarts[i]) return t < shiftPeriod(seriesStarts[i], g, 1) ? i : -1;
     return -1;
   };
-  type Acc = { series: number[]; cols: Record<ColumnKey, number> };
-  const acc = (): Acc => ({ series: seriesStarts.map(() => 0), cols: { this_period: 0, last_period: 0, year_to_date: 0 } });
+  // A line's sums, and when Mynt started recording it: a period that began before then isn't measured (null).
+  type Acc = { series: number[]; cols: Record<ColumnKey, number>; from: number };
+  const acc = (from = -Infinity): Acc => ({ series: seriesStarts.map(() => 0), cols: { this_period: 0, last_period: 0, year_to_date: 0 }, from });
   const add = (a: Acc, day: string, cents: number) => {
     const t = dayT(day);
     const i = seriesIndex(t);
@@ -135,8 +153,17 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
     for (const c of columns) if (t >= c.start && t < c.end) a.cols[c.key] += cents;
   };
   const whole = (n: number) => Math.round(n);
-  const valuesOf = (a: Acc | null): Values =>
-    Object.fromEntries(COLUMN_KEYS.map((k) => [k, a ? whole(a.cols[k]) : null])) as Values;
+  const colStart = Object.fromEntries(columns.map((c) => [c.key, c.start])) as Record<ColumnKey, number>;
+  const colValue = (a: Acc | null, k: ColumnKey) => (a && colStart[k] >= a.from ? whole(a.cols[k]) : null);
+  const seriesValue = (a: Acc | null, i: number) => (a && seriesStarts[i] >= a.from ? whole(a.series[i]) : null);
+  const valuesOf = (a: Acc | null): Values => Object.fromEntries(COLUMN_KEYS.map((k) => [k, colValue(a, k)])) as Values;
+  const day = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const unmeasured: { key: string; label: string; reason: string }[] = [];
+  // Recording started inside the periods shown: the earlier ones say so.
+  const startedNote = (key: string, label: string, a: Acc | null) => {
+    if (a && Number.isFinite(a.from) && a.from > Math.min(seriesStarts[0], ...columns.map((c) => c.start)))
+      unmeasured.push({ key, label, reason: `Recording started ${day(a.from)}; periods that began before then aren't measured` });
+  };
 
   // ---- revenue: one line per app and product ----
   const names = new Map<string, string>();
@@ -144,11 +171,12 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
     if (!names.has(id)) names.set(id, (await store.getProduct(id))?.product.name ?? id);
     return names.get(id)!;
   };
+  const ledgerFrom = startOf(LEDGER_STARTED) ?? -Infinity;
   const revenue: (Line & { acc: Acc | null })[] = [];
   for (const app of apps) {
     const products = [...new Set([...app.product_ids, ...(money ?? []).filter((m) => m.app_id === app.id).map((m) => m.product_id)])];
     for (const product_id of products.length ? products : [null]) {
-      const a = money === null ? null : acc();
+      const a = money === null ? null : acc(ledgerFrom);
       if (a) for (const m of money!) if (m.app_id === app.id && (product_id === null || m.product_id === product_id)) add(a, m.day, Number(m.cents));
       revenue.push({
         key: product_id ? `app:${app.id}:product:${product_id}` : `app:${app.id}`,
@@ -165,13 +193,20 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
       });
     }
   }
+  if (revenue[0]) startedNote("revenue", "Revenue", revenue[0].acc);
 
   // ---- costs ----
-  const unmeasured: { key: string; label: string; reason: string }[] = [];
   const costs: (Line & { acc: Acc | null })[] = [];
-  const cost = (key: string, lbl: string, a: Acc | null, source: string, reason?: string) => {
+  const cost = (key: string, lbl: string, a: Acc | null, source: string) => {
     costs.push({ key, label: lbl, values: valuesOf(a), measured: a !== null, source, acc: a });
-    if (a === null) unmeasured.push({ key, label: lbl, reason: reason ?? source });
+    if (a === null) unmeasured.push({ key, label: lbl, reason: source });
+    else startedNote(key, lbl, a);
+  };
+  const fromUsage = (rows: Row[] | null, from: number | null) => {
+    if (rows === null || from === null) return null;
+    const a = acc(from);
+    for (const r of rows) add(a, r.day, Number(r.cents));
+    return a;
   };
   let buildAcc: Acc | null = null;
   if (builds !== null) {
@@ -186,11 +221,14 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
       ? "Each build of the workspace's apps, at its metered cost: the coding agents' model use through Mynt's agent proxy plus its sandboxes' machine time while it runs (what counts against BUILD_CAP_USD and the monthly caps), dated when the build started"
       : "This Mynt doesn't run builds, so it records no build spend",
   );
+  const sandboxAcc = builds === null ? null : fromUsage(sandboxUsage, startOf(usageStartedSetting("sandbox")));
   cost(
     "sandboxes",
     "Sandboxes after a build",
-    null,
-    "A build's sandbox time while it runs is in the build line. Mynt doesn't record what a sandbox costs once its build has ended (a preview kept up, or one reopened with reopen_sandbox) yet",
+    sandboxAcc,
+    sandboxAcc
+      ? "What a build's sandboxes cost after it ends (its preview kept up until their time limit) and sandboxes reopened on a finished build (reopen_sandbox), sampled from the provider's own cost"
+      : "Mynt isn't recording sandbox time after builds here (it runs no builds or sandboxes)",
   );
   const auditAcc = acc();
   cost(
@@ -199,38 +237,47 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
     auditAcc,
     "Mynt pays for its own independent audits (on their own meter and BUILD_AUDIT_CAP_USD budget, never in build spend), so they cost the workspace nothing",
   );
-  if (hosting !== null && hosting.length === 0)
+  const hostingFrom = startOf(usageStartedSetting("hosting"));
+  const anyHosting = (hosted?.length ?? 0) > 0 || (tenant?.length ?? 0) > 0;
+  if (hosted === null || (!anyHosting && hostingFrom === null))
     cost("hosting", "Hosting", acc(), o.app_id ? "Mynt doesn't host this app, so there's no hosting cost" : "Mynt doesn't host any of this workspace's apps, so there's no hosting cost");
-  else
+  else if (hostingFrom === null || hosted.some((h) => h.metered !== "true"))
     cost(
       "hosting",
       "Hosting",
       null,
-      "Mynt doesn't record hosting costs per workspace yet: it reads its hosting VMs' machine time live from the provider as a running total (at FREESTYLE_USD_PER_HOUR), not per period",
+      "This workspace's hosting runs on a provider Mynt can't meter per app (only a VM per app reports its run time), so Mynt doesn't record its cost",
+    );
+  else
+    cost(
+      "hosting",
+      "Hosting",
+      fromUsage(hostingUsage, hostingFrom),
+      "Each hosted app's VM, its run time sampled from the provider and priced at FREESTYLE_USD_PER_HOUR",
     );
   cost(
     "mynt_fees",
     "Mynt's fees",
     null,
-    "Mynt sets take rates on product lines (define_take_rate), but doesn't record any fee charged to a workspace yet",
+    "Mynt doesn't charge workspaces anything yet: take rates are set per product line (define_take_rate) but there's no billing, so no fee is ever charged or recorded",
   );
   unmeasured.push({
     key: "app_earnings",
     label: "What the apps keep",
-    reason: "Revenue here is the money settled through the apps. Mynt doesn't record what an app keeps from it (its own fees or margin) yet",
+    reason:
+      "Revenue here is the money settled through the apps. Apps don't charge their customers through Mynt, and a product's fees (its definition) are the provider's, so Mynt has no record of an app's own cut",
   });
 
-  // ---- totals and series: a side is measured only when every line on it is ----
-  const sum = (lines: { acc: Acc | null }[], f: (a: Acc) => number): number | null =>
-    lines.some((l) => l.acc === null) ? null : whole(lines.reduce((t, l) => t + f(l.acc!), 0));
+  // ---- totals and series: a total is measured only when every line under it is ----
+  const sum = (vals: (number | null)[]): number | null => (vals.some((v) => v === null) ? null : vals.reduce<number>((t, v) => t + v!, 0));
   const totalValues = (lines: { acc: Acc | null }[]): Values =>
-    Object.fromEntries(COLUMN_KEYS.map((k) => [k, sum(lines, (a) => a.cols[k])])) as Values;
+    Object.fromEntries(COLUMN_KEYS.map((k) => [k, sum(lines.map((l) => colValue(l.acc, k)))])) as Values;
   const net = (r: number | null, c: number | null) => (r === null || c === null ? null : r - c);
   const rev = totalValues(revenue);
   const cst = totalValues(costs);
   const series = seriesStarts.map((start, i) => {
-    const r = sum(revenue, (a) => a.series[i]);
-    const c = sum(costs, (a) => a.series[i]);
+    const r = sum(revenue.map((l) => seriesValue(l.acc, i)));
+    const c = sum(costs.map((l) => seriesValue(l.acc, i)));
     return { start: iso(start), end: iso(shiftPeriod(start, g, 1)), revenue_cents: r, costs_cents: c, net_cents: net(r, c) };
   });
   const strip = ({ acc: _, ...l }: Line & { acc: Acc | null }): Line => l;
