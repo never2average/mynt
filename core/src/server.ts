@@ -57,7 +57,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
-import { appStages, createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
+import { createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
 import { registerWorkspaceComplianceTools } from "./workspace-compliance.js";
 import { registerLinkedAccountsTools } from "./linked-accounts.js";
 import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools.js";
@@ -66,6 +66,8 @@ import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
 import { registerOpsTools } from "./ops.js";
 import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
+import { effectiveStages, registerPromotionAdminTools, registerPromotionTools } from "./promotions.js";
+import { registerAttentionTools } from "./attention.js";
 
 // The name MCP clients show for this server.
 export const SERVER_NAME = "mynt";
@@ -120,6 +122,9 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).
     registerWorkspaceTools(server, store, user!, { clerk: ctx.clerkAdmin ?? null, offboarding: offboardingServices(ctx) });
     registerWorkspaceComplianceTools(server, store, user!);
+    // Promotion between stages (promotions.ts) and what needs attention in a workspace (attention.ts).
+    registerPromotionTools(server, store, user!);
+    registerAttentionTools(server, store, user!, { admin: has("admin") });
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
     if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);
@@ -184,6 +189,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("developer") && ctx.solana && ctx.gate) registerMainnetGateTools(server, store, user!, ctx.gate, ctx.solana, { admin: has("admin") });
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
+    registerPromotionAdminTools(server, store, user!);
     server.registerTool(
       "retry_offboard",
       {
@@ -885,14 +891,14 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "List my app experiences",
       description:
-        "Developer: the app experiences of every workspace you belong to (or of one, with workspace_id), drafts included, each with its stage: idea (no verified build yet), staging (a verified build or a deployment that isn't live) or production (published and running on Mynt's hosting).",
+        "Developer: the app experiences of every workspace you belong to (or of one, with workspace_id), drafts included, each with its stage: idea, staging or production. A new app starts as an idea; its stage changes only when the workspace's owners or admins promote it (promote_app, after Mynt's checks: get_promotion_checks) or demote it (demote_app).",
       inputSchema: { workspace_id: z.string().optional().describe("Only this workspace's apps") },
       annotations: { readOnlyHint: true },
     },
     async ({ workspace_id }) => {
       if (workspace_id && !(await workspaceRole(store.db, workspace_id, user.id))) return fail(`No workspace of yours with id '${workspace_id}'`);
       const apps = await store.appsVisibleTo(user.id, workspace_id);
-      const stages = await appStages(store.db, apps);
+      const stages = await effectiveStages(store.db, apps);
       return json(apps.map((a) => ({ ...a, stage: stages.get(a.id) ?? "idea" })));
     },
   );
