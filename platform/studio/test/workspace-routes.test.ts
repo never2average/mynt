@@ -72,7 +72,14 @@ vi.mock("@/lib/tokens", () => ({
         case "list_workspace_licences":
           return ok({ licences: [{ partner: "Harbor Bank", number: "MT-1", states: ["CA"], status: "active" }] });
         case "list_workspace_audit":
+          if (args.class)
+            return ok({
+              rows: [{ id: "r1", at: "2026-11-12T10:00:00Z", class: args.class, kind: "build.audit_finding", actor: { id: "u1", name: "Ines" }, app_id: "a1", target: { type: "build", id: "b1" }, summary: "Secret in logs", severity: "high", status: "open", details: { file: "a.ts" } }],
+              next_cursor: null,
+            });
           return ok({ events: [{ at: "2026-11-12T10:00:00Z", actor: { id: "u1", name: "Ines" }, action: "app.created", target: { type: "app", id: "a1" } }], next_cursor: "c2" });
+        case "get_workspace_obligations":
+          return ok([{ licence_id: "l1", partner: "Harbor Bank", regulator: "CA DFPI", obligation_id: "o1", title: "Quarterly report", products: [{ name: "Cards" }], status: "overdue", due_at: "2026-10-01", evidence: null }]);
         case "create_app":
           return ok({ id: "new-app" });
         case "start_build":
@@ -100,6 +107,7 @@ const apps = await import("@/app/api/apps/route");
 const coverageRoute = await import("@/app/api/coverage/route");
 const licencesRoute = await import("@/app/api/licences/route");
 const auditRoute = await import("@/app/api/audit/route");
+const obligationsRoute = await import("@/app/api/obligations/route");
 const { complianceRead } = await import("@/lib/compliance-server");
 const invitationsRoute = await import("@/app/api/invitations/route");
 const invitationRoute = await import("@/app/api/invitations/[inviteId]/route");
@@ -378,5 +386,39 @@ describe("invitations (always explicit)", () => {
     fake.tools = WITH_WORKSPACES;
     expect(await (await invitationsRoute.GET()).json()).toEqual({ supported: false, invitations: [] });
     expect((await answer("inv1", { action: "accept" })).status).toBe(501);
+  });
+});
+
+describe("the Audits page's classes", () => {
+  const AUDIT = (classed: boolean) => ({ name: "list_workspace_audit", inputSchema: props("workspace_id", "cursor", "action", "user_id", "app_id", "from", "to", ...(classed ? ["class"] : [])) });
+
+  it("where Mynt classifies its records: each tab asks for its class and gets rows", async () => {
+    fake.tools = [...WITH_WORKSPACES, AUDIT(true)];
+    const body = await (await auditRoute.GET(get("/api/audit?workspace=w1&class=security&app_id=a1"))).json();
+    expect(called("list_workspace_audit")[0].args).toEqual({ workspace_id: "w1", app_id: "a1", class: "security" });
+    expect(body.classes).toBe(true);
+    expect(body.page.rows[0]).toMatchObject({ id: "r1", class: "security", kind: "build.audit_finding", appId: "a1", summary: "Secret in logs", severity: "high", status: "open", details: '{"file":"a.ts"}' });
+    expect((await auditRoute.GET(get("/api/audit?workspace=w1&class=made-up"))).status).toBe(400);
+  });
+
+  it("before it does: Workspace activity is the whole trail as it is, the other classes aren't supported yet", async () => {
+    fake.tools = [...WITH_WORKSPACES, AUDIT(false)];
+    const ws = await (await auditRoute.GET(get("/api/audit?workspace=w1&class=workspace"))).json();
+    expect(called("list_workspace_audit")[0].args).toEqual({ workspace_id: "w1" }); // no class sent to a Mynt that doesn't take it
+    expect(ws).toMatchObject({ supported: true, classes: false });
+    expect(ws.page.rows[0]).toMatchObject({ kind: "app.created", class: "workspace", appId: "a1" });
+    for (const c of ["security", "obligations", "financial"]) expect(await (await auditRoute.GET(get(`/api/audit?workspace=w1&class=${c}`))).json(), c).toEqual({ supported: false });
+    expect(called("list_workspace_audit")).toHaveLength(1);
+    // Without class (the dashboard's Recent activity), as before.
+    expect((await (await auditRoute.GET(get("/api/audit?workspace=w1"))).json()).page.events[0].action).toBe("app.created");
+  });
+
+  it("obligations: not supported until Mynt has get_workspace_obligations; then the workspace's", async () => {
+    fake.tools = WITH_WORKSPACES;
+    expect(await (await obligationsRoute.GET(get("/api/obligations?workspace=w1"))).json()).toEqual({ supported: false });
+    fake.tools = [...WITH_WORKSPACES, { name: "get_workspace_obligations", inputSchema: props("workspace_id") }];
+    const body = await (await obligationsRoute.GET(get("/api/obligations?workspace=w1"))).json();
+    expect(called("get_workspace_obligations")[0].args).toEqual({ workspace_id: "w1" });
+    expect(body.obligations[0]).toMatchObject({ partner: "Harbor Bank", obligationId: "o1", products: ["Cards"], status: "overdue", evidence: null });
   });
 });
