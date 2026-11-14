@@ -4,6 +4,7 @@ import { z } from "zod";
 import { inTransaction, type Db } from "./db.js";
 import type { App, Store, User } from "./store.js";
 import { coveredStates, US_STATE_NAMES } from "./workspace-compliance.js";
+import { lockAppStage } from "./promotion-schema.js";
 import { appRole, frozenReason, isUuid, memberApp, type AppStage } from "./workspaces.js";
 
 // Promoting an app between the studio's folders: idea → staging → production, one step at a time, and back down.
@@ -431,7 +432,7 @@ export async function staleSignoff(store: Store, app: App): Promise<boolean> {
   return stale(await signoffFor(store.db, app.id, s.verified), basis);
 }
 
-const lockApp = (q: Q, appId: string) => q.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`mynt.app_stage:${appId}`]);
+const lockApp = lockAppStage;
 // A frozen workspace (its organization deleted in the identity provider) or one being archived moves no app's stage
 // and asks for no sign-off until an owner relinks or unarchives it.
 async function refuseFrozen(q: Q, app: Pick<App, "workspace_id">) {

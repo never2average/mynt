@@ -84,39 +84,64 @@ export async function seedAppStages(db: Db): Promise<number> {
 export const NOT_PRODUCTION = "Promote this app to Production first (get_promotion_checks, promote_app); until then it runs on sandbox keys only";
 
 type Q = Pick<Db, "query">;
+// The app's stage lock, held by promotion, demotion and live-key issuance alike, so a demotion and a new live key
+// can't interleave (one waits for the other's transaction).
+export const lockAppStage = (q: Q, appId: string) => q.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`mynt.app_stage:${appId}`]);
+// Runs `f` (which issues or rotates a live key) only if the app is in production, under its stage lock.
+export async function whileProduction<T>(db: Db, appId: string, f: () => Promise<T>): Promise<T | null> {
+  return inTransaction(db, async (tx) => {
+    await lockAppStage(tx, appId);
+    return (await isProduction(tx, appId)) ? f() : null;
+  });
+}
 export async function isProduction(q: Q, appId: string): Promise<boolean> {
   return (await q.query(`SELECT 1 FROM ${T}.app_promotions WHERE app_id::text = $1 AND stage = 'production'`, [appId])).rows.length > 0;
 }
 
-// Once, when the gate arrives, so nothing live breaks: an app with an active live key, published, or with real
-// (non-sandbox) customers' sessions or hand-offs goes to production, recorded in the audit trail with why.
+// Once, when the gate arrives, so nothing live breaks, and nothing skips the promotion checks it needn't skip:
+// - an app live right now (published, and with an active live key or an unexpired real customer session) goes to
+//   production;
+// - an app that was ever live in some way (a live key, even revoked; published; real customers' sessions or
+//   hand-offs, however old) but isn't now goes to staging, so it reaches production only through promote_app;
+// - the rest stay as they are. Each move is in the audit trail with why.
 export async function grandfatherLiveApps(db: Db): Promise<number> {
   if ((await db.query(`SELECT 1 FROM ${T}.app_live_grandfathered`)).rows.length) return 0;
   return inTransaction(db, async (tx) => {
     await tx.query("SELECT pg_advisory_xact_lock(hashtext('mynt.app_live_grandfathered'))");
     if ((await tx.query(`SELECT 1 FROM ${T}.app_live_grandfathered`)).rows.length) return 0;
-    const live = (
+    const rows = (
       await tx.query(
-        `SELECT a.id::text AS id, p.stage,
+        `SELECT a.id::text AS id, p.stage, a.status = 'published' AS published,
            EXISTS (SELECT 1 FROM ${T}.api_keys k WHERE k.app_id = a.id AND k.environment = 'live' AND k.status = 'active') AS live_key,
-           a.status = 'published' AS published,
+           EXISTS (SELECT 1 FROM ${T}.api_keys k WHERE k.app_id = a.id AND k.environment = 'live') AS ever_live_key,
+           EXISTS (SELECT 1 FROM ${T}.client_sessions s WHERE s.app_id = a.id AND NOT s.sandbox AND s.revoked_at IS NULL AND s.expires_at > now()) AS live_session,
            (EXISTS (SELECT 1 FROM ${T}.client_sessions s WHERE s.app_id = a.id AND NOT s.sandbox)
              OR EXISTS (SELECT 1 FROM ${T}.handoffs h WHERE h.app_id = a.id AND NOT h.sandbox)) AS real_customers
          FROM ${T}.apps a LEFT JOIN ${T}.app_promotions p ON p.app_id = a.id
          WHERE p.stage IS DISTINCT FROM 'production'`,
       )
-    ).rows as { id: string; stage: string | null; live_key: boolean; published: boolean; real_customers: boolean }[];
+    ).rows as { id: string; stage: string | null; published: boolean; live_key: boolean; ever_live_key: boolean; live_session: boolean; real_customers: boolean }[];
     let n = 0;
-    for (const a of live) {
-      const why = [a.live_key && "an active live key", a.published && "published", a.real_customers && "real customers"].filter((x): x is string => !!x);
-      if (!why.length) continue;
+    for (const a of rows) {
+      const liveNow = a.published && (a.live_key || a.live_session);
+      const why = liveNow
+        ? ["published", a.live_key && "an active live key", a.live_session && "an unexpired real customer session"].filter((x): x is string => !!x)
+        : [a.ever_live_key && (a.live_key ? "an active live key" : "a live key, since revoked"), a.published && "published", a.real_customers && "real customers"].filter((x): x is string => !!x);
+      const to = liveNow ? "production" : why.length && (a.stage ?? "idea") === "idea" ? "staging" : null;
+      if (!to) continue;
       await tx.query(
-        `INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'production') ON CONFLICT (app_id) DO UPDATE SET stage = 'production', updated_at = now()`,
-        [a.id],
+        `INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, $2) ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, updated_at = now()`,
+        [a.id, to],
       );
       await tx.query(`INSERT INTO ${T}.audit_log (id, actor_id, action, target, details) VALUES (gen_random_uuid(), NULL, 'app_stage_grandfathered', $1, $2)`, [
         a.id,
-        JSON.stringify({ app_id: a.id, from_stage: a.stage ?? "idea", to_stage: "production", why, note: "Already live when production began gating real money" }),
+        JSON.stringify({
+          app_id: a.id,
+          from_stage: a.stage ?? "idea",
+          to_stage: to,
+          why,
+          note: liveNow ? "Live when production began gating real money" : "Live before, not now, when production began gating real money: it reaches production through promote_app",
+        }),
       ]);
       n++;
     }
@@ -124,3 +149,4 @@ export async function grandfatherLiveApps(db: Db): Promise<number> {
     return n;
   });
 }
+

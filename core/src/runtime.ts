@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appRole, memberApp, workspaceRole } from "./workspaces.js";
-import { isProduction, NOT_PRODUCTION } from "./promotion-schema.js";
+import { isProduction, NOT_PRODUCTION, whileProduction } from "./promotion-schema.js";
 import { licencesForProducts } from "./workspace-compliance.js";
 import { z } from "zod";
 import { accessStatus, BuildTermsSchema, productsAnsweredBy, type ExperienceCheck } from "./access.js";
@@ -414,9 +414,12 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
       if (!app) return fail(`No app with id '${app_id}'`);
       // A live key reaches real customers' data: only the workspace's owners and admins make one.
       if (environment === "live" && (await appRole(store, user, app)) === "member") return fail("Only the workspace's owners and admins create live keys; members create sandbox keys");
-      // Production gates real money: ideas and staging run on sandbox keys only.
-      if (environment === "live" && !(await isProduction(store.db, app.id))) return fail(NOT_PRODUCTION);
-      const { key, secret } = await store.createApiKey(user.id, { app_id: app.id, environment, label, allowed_origins });
+      // Production gates real money: ideas and staging run on sandbox keys only. A live key is made under the app's
+      // stage lock, so a demotion can't slip in between the check and the key.
+      const create = () => store.createApiKey(user.id, { app_id: app.id, environment, label, allowed_origins });
+      const made = environment === "live" ? await whileProduction(store.db, app.id, create) : await create();
+      if (!made) return fail(NOT_PRODUCTION);
+      const { key, secret } = made;
       await audit("create_api_key", key.id, { app_id: app.id, environment, label });
       return json({
         ...key,
@@ -455,8 +458,9 @@ export function registerRuntimeTools(server: McpServer, store: Store, user: User
       if (!key) return fail(`No API key '${key_id}'`);
       if ((await appRole(store, user, (await store.getApp(key.app_id))!)) === "member") return fail("Only the workspace's owners and admins rotate keys");
       if (key.status !== "active") return fail("The key is revoked; create a new one");
-      if (key.environment === "live" && !(await isProduction(store.db, key.app_id))) return fail(NOT_PRODUCTION);
-      const rotated = await store.rotateApiKey(key.id, key.environment, user.id);
+      const rotate = () => store.rotateApiKey(key.id, key.environment, user.id);
+      const rotated = key.environment === "live" ? await whileProduction(store.db, key.app_id, rotate) : await rotate();
+      if (!rotated) return fail(NOT_PRODUCTION);
       await audit("rotate_api_key", key.id, { app_id: key.app_id });
       return json({ ...rotated.key, key: rotated.secret, note: "Save this key now; it can't be shown again." });
     },
