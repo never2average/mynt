@@ -1,4 +1,4 @@
-// Liquidity pools, as the studio shows them (the /liquidity page and the wallet tile's links).
+// Liquidity pools, as the studio shows them (the /liquidity page and the header wallet control's links).
 // Pure: reads Mynt's liquidity tools' replies (core/src/liquidity-tools.ts, product-health-tools.ts,
 // sponsorships.ts) into the page's rows, and the checks the page makes before it sends anything.
 // Mynt checks everything again. Amounts are integer cents from Mynt, shown as US dollars.
@@ -49,7 +49,7 @@ export function earnTabFromQuery(tab: unknown): EarnTab {
 export const earnTabFromLiquidity = earnTabFromQuery;
 // A link that names a table or the drafts opens the panel straight away, before any message.
 export const tabOpensPanel = (tab: unknown) => earnTabFromQuery(tab) !== "pools";
-// The wallet tile's links, by role.
+// The header wallet control's links, by role.
 export function walletLinksFor(a: LiquidityAccess | null | undefined): { label: string; href: string }[] {
   if (!a) return [];
   return [...(a.builder ? [{ label: "Manage pools", href: "/earn?tab=my-pools" }] : []), ...(a.liquidityProvider ? [{ label: "Provide liquidity", href: "/earn?tab=opportunities" }] : [])];

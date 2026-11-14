@@ -2,7 +2,7 @@
 // (connect_repository). A repository is approved at once when the GitHub account linked to the
 // sign-in can push to it, or by an admin; otherwise it waits for an admin, and Mynt says why.
 // Mynt-managed repositories (one per app) are left out: they're reached through each app.
-// Pure, for the route, the dashboard tile, the Workspace page and the tests.
+// Pure, for the route, the dashboard, the Workspace page and the tests.
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);

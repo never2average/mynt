@@ -7,7 +7,7 @@ import { isCalendarDate } from "./compliance";
 // called from the studio at all.
 //
 // Writing tools join the list with the screens that use them. The chat starts and steers
-// builds, New app creates apps, the GitHub tile connects repositories and the app's stage
+// builds, New app creates apps, the dashboard's Connect repository connects repositories and the app's stage
 // control promotes; shipping (finish_build), stopping, sandbox commands and hosting changes
 // come later.
 
@@ -57,7 +57,7 @@ export const STUDIO_TOOLS = {
   get_developer_dashboard: z
     .object({ days: z.union([z.literal(7), z.literal(30), z.literal(90)]).optional(), workspace_id: workspaceId.optional() })
     .strict(),
-  // The dashboard's GitHub and wallet tiles.
+  // The dashboard's GitHub facts and the header's wallet control.
   get_linked_accounts: z.object({}).strict(),
   // Workspaces: the switcher, Create workspace and the Members page.
   list_workspaces: z.object({}).strict(),
@@ -76,6 +76,10 @@ export const STUDIO_TOOLS = {
   relink_workspace_org: z.object({ workspace_id: workspaceId }).strict(),
   // What needs the workspace's attention (the dashboard's Needs attention card).
   get_workspace_attention: z.object({ workspace_id: workspaceId }).strict(),
+  // The dashboard's P&L: revenue against costs per period, and the statement.
+  get_workspace_pnl: z
+    .object({ workspace_id: workspaceId, granularity: z.enum(["month", "week"]), periods: z.number().int().min(1).max(24), app_id: id.optional() })
+    .strict(),
   // Promotions: an app moves Ideas -> Staging -> Production only through Mynt's checks. Mynt
   // decides whether it may move (can_promote); the studio shows the checks and asks.
   get_promotion_checks: z.object({ app_id: id, to_stage: promotionStage }).strict(),
@@ -112,7 +116,7 @@ export const STUDIO_TOOLS = {
   decline_workspace_invite: z.object({ invite_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) }).strict(),
   // repositories
   list_repositories: z.object({}).strict(),
-  // The dashboard's GitHub tile: connect one of the developer's own repositories. Mynt approves
+  // The dashboard's Connect repository: connect one of the developer's own repositories. Mynt approves
   // it at once when their linked GitHub account can push to it, else an admin decides.
   connect_repository: z.object({ repository }).strict(),
   // builds
