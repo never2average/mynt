@@ -91,7 +91,7 @@ export function SearchResults({
     <>
       <CommandGroup heading="Ask AI">
         <CommandItem value="ask-ai" onSelect={onAsk} disabled={off} data-ask-ai>
-          <Sparkles className="text-primary" />
+          <Sparkles className="text-link" />
           <span className="truncate">{query.trim() ? `Ask AI: “${query.trim()}”` : "Ask AI about your apps"}</span>
           <CommandShortcut className="tracking-normal">{off ? "AI is not configured" : "Enter"}</CommandShortcut>
         </CommandItem>

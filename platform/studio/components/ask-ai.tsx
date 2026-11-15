@@ -27,7 +27,7 @@ type Chat = UseChatHelpers<UIMessage>;
 export function AskAiHeader({ onBack, onNewChat, onClose, canClear }: { onBack: () => void; onNewChat: () => void; onClose: () => void; canClear: boolean }) {
   return (
     <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3" data-ask-header>
-      <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
+      <Sparkles className="size-4 shrink-0 text-link" aria-hidden />
       <span className="text-sm font-medium">Ask AI</span>
       <div className="ml-auto flex shrink-0 items-center gap-0.5">
         <Button type="button" variant="ghost" size="sm" onClick={onBack} data-ask-back>

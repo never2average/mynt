@@ -23,6 +23,7 @@
   --color-chart-2: var(--chart-2);
   --color-chart-1: var(--chart-1);
   --color-ring: var(--ring);
+  --color-link: var(--link);
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
@@ -56,7 +57,8 @@
 
 :root {
   /* shadcn's neutral (zinc) palette, with the app icon's mint (#3DDC97, lib/brand.ts) only as the
-     accent: primary buttons, focus rings, the active nav item and the first chart colour. Text
+     accent: primary buttons, focus rings, links and the first chart colour. The active sidebar
+     row is shadcn's neutral sidebar-accent, never mint. Text
      pairs are checked for WCAG AA in test/branding.test.tsx. */
   --radius: 0.625rem;
   --background: #ffffff;
@@ -76,8 +78,9 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: #e4e4e7;
   --input: #e4e4e7;
-  /* Mint itself is too light to see as a ring on white; its deeper shade is. */
+  /* Mint itself is too light to see as a ring or as link text on white; its deeper shade is. */
   --ring: #13805a;
+  --link: #13805a;
   --chart-1: #13805a;
   --chart-2: #2563eb;
   --chart-3: #d97706;
@@ -117,6 +120,7 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: #3ddc97;
+  --link: #3ddc97;
   /* Mint first, then a blue, an amber, a neutral grey and a pink: not a wall of greens. */
   --chart-1: #3ddc97;
   --chart-2: #60a5fa;
@@ -151,12 +155,6 @@
 
   body {
     @apply bg-background text-foreground;
-  }
-
-  /* The active sidebar item is marked with the accent: a thin mint bar on its leading edge. */
-  [data-sidebar="menu-button"][data-active="true"],
-  [data-sidebar="menu-sub-button"][data-active="true"] {
-    box-shadow: inset 2px 0 0 var(--sidebar-primary);
   }
 
   /* Headings in Space Grotesk, body in DM Sans (app/layout.tsx). */

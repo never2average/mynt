@@ -170,13 +170,14 @@ describe("dashboard page", () => {
     expect(html).toMatch(/data-stat="net"[\s\S]*?\$1,100\.00/);
   });
 
-  it("keeps the operating and workspace facts: money moved, customers, GitHub, repositories, products, licences", () => {
-    const linked = { supported: true, github: "ines", wallet: null, manageUrl: "https://accounts.example.test/user" };
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} linked={linked} repos={{ kind: "ready", repos: [], connect: true }} />);
+  it("keeps the operating and workspace facts: money moved, customers, repositories, products, licences (GitHub is in the header)", () => {
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} repos={{ kind: "ready", repos: [], connect: true }} />);
     expect(html).toContain(usd(125430.5));
     expect(html).toContain("812");
     expect(html).toContain("25%");
-    expect(html).toMatch(/data-fact="github"[\s\S]*?ines/);
+    expect(html).not.toContain('data-fact="github"');
+    expect(html).not.toContain("Link GitHub");
+    expect(html).toMatch(/data-fact="active-products"/);
     expect(html).toMatch(/data-fact="repositories"[\s\S]*?href="\/settings\?tab=repositories"[^>]*>0 connected</);
     expect(html).toMatch(/data-fact="licences"[\s\S]*?href="\/licences"/);
     expect(html).toMatch(/>\s*Connect repository\s*</);

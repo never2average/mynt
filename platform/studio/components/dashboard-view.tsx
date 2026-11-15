@@ -5,14 +5,13 @@
 // dividers and tables; no cards. The P&L comes from get_workspace_pnl (components/pnl.tsx) and
 // degrades on its own; everything else works without it. Server-renderable for the tests.
 import Link from "next/link"
-import { Github, Plus } from "lucide-react"
+import { Plus } from "lucide-react"
 
 import { AppsByStage, NeedsAttention, RecentActivity, type StagesData } from "@/components/dashboard-panels"
 import { PnlChart, PnlStatement, PnlStats } from "@/components/pnl"
 import { ConnectRepository, type ReposState } from "@/components/repositories"
 import { Button } from "@/components/ui/button"
 import { count, facts, type Dashboard } from "@/lib/dashboard"
-import type { LinkedAccounts } from "@/lib/linked-accounts"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditEvent } from "@/lib/compliance"
 import type { Granularity, Pnl, Range } from "@/lib/pnl"
@@ -43,17 +42,11 @@ function OperatingFacts({ dashboard }: { dashboard: Dashboard }) {
 
 const repoCount = (r: ReposState) => (r.kind === "ready" ? r.repos.length : null)
 
-/** The workspace facts: GitHub, repositories (listed in Settings), active products and licences. */
-function WorkspaceFacts({ dashboard, linked, repos, onReposChanged }: { dashboard: Dashboard; linked: LinkedAccounts | null; repos: ReposState; onReposChanged?: () => void }) {
+/** The workspace facts: repositories (listed in Settings), active products and licences. GitHub is in the header. */
+function WorkspaceFacts({ dashboard, repos, onReposChanged }: { dashboard: Dashboard; repos: ReposState; onReposChanged?: () => void }) {
   const n = repoCount(repos)
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-2 text-xs" data-facts="workspace">
-      <Fact id="github" label="GitHub">
-        <span className="inline-flex items-center gap-1">
-          <Github className="size-3.5" />
-          {linked?.github ?? (linked ? "Not linked" : "…")}
-        </span>
-      </Fact>
       <Fact id="repositories" label="Repositories" measured={n !== null}>
         <Link href="/settings?tab=repositories" className="hover:underline">
           {n === null ? (repos.kind === "unsupported" ? "Not available yet" : "…") : `${n} connected`}
@@ -68,14 +61,6 @@ function WorkspaceFacts({ dashboard, linked, repos, onReposChanged }: { dashboar
         </Link>
       </Fact>
       <span className="ml-auto flex flex-wrap gap-2">
-        {linked && !linked.github && linked.manageUrl && (
-          <Button size="sm" variant="outline" asChild>
-            <a href={linked.manageUrl} rel="noreferrer">
-              <Github />
-              Link GitHub
-            </a>
-          </Button>
-        )}
         <ConnectRepository enabled={repos.kind === "ready" && repos.connect} onConnected={onReposChanged} />
       </span>
     </div>
@@ -101,7 +86,6 @@ const LOADING = { kind: "loading" } as const
 
 export function DashboardView({
   dashboard,
-  linked = null,
   attention = LOADING,
   stages = LOADING,
   activity = LOADING,
@@ -114,7 +98,6 @@ export function DashboardView({
   onPeriods,
 }: {
   dashboard: Dashboard
-  linked?: LinkedAccounts | null
   attention?: Loaded<AttentionItem[]>
   stages?: Loaded<StagesData>
   activity?: Loaded<AuditEvent[]>
@@ -140,7 +123,7 @@ export function DashboardView({
           </div>
           <PnlStats state={pnl} />
           <OperatingFacts dashboard={dashboard} />
-          <WorkspaceFacts dashboard={dashboard} linked={linked} repos={repos} onReposChanged={onReposChanged} />
+          <WorkspaceFacts dashboard={dashboard} repos={repos} onReposChanged={onReposChanged} />
         </section>
         <PnlChart state={pnl} granularity={granularity} periods={periods} onGranularity={onGranularity} onPeriods={onPeriods} />
       </div>

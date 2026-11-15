@@ -9,7 +9,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/components/workspace-context";
 import type { Dashboard } from "@/lib/dashboard";
 import type { Granularity, Pnl, Range } from "@/lib/pnl";
-import { useLinkedAccounts } from "@/lib/use-linked-accounts";
 import type { StagesData } from "@/components/dashboard-panels";
 import type { AttentionItem } from "@/lib/attention";
 import type { AuditEvent } from "@/lib/compliance";
@@ -37,7 +36,6 @@ export default function DashboardPage() {
     window.addEventListener("adorable:projects-updated", reloadStages);
     return () => window.removeEventListener("adorable:projects-updated", reloadStages);
   }, [reloadStages]);
-  const linked = useLinkedAccounts();
   const { selected, loading, invitations, answerInvitation } = useWorkspace();
 
   // The P&L: per month or week, over the last 3, 6 or 12 (read again when either changes).
@@ -87,7 +85,7 @@ export default function DashboardPage() {
           {state.error}
         </p>
       ) : (
-        <DashboardView dashboard={state.dashboard} linked={linked} attention={attention} stages={stages} activity={activity} repos={repos} onReposChanged={reloadRepos}
+        <DashboardView dashboard={state.dashboard} attention={attention} stages={stages} activity={activity} repos={repos} onReposChanged={reloadRepos}
           pnl={pnl}
           granularity={granularity}
           periods={periods}

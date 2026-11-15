@@ -1,7 +1,7 @@
 "use client"
 
-// The developer's connected GitHub repositories: how many on the dashboard's workspace facts
-// line (with Connect repository), all of them on the Settings page's Repositories tab, each with its approval (approved, waiting for
+// The developer's connected GitHub repositories: up to five in the header's GitHub menu (with
+// Connect repository; components/github-control.tsx), all of them on the Settings page's Repositories tab, each with its approval (approved, waiting for
 // an admin and why, or rejected), and Connect repository, which calls connect_repository with an
 // owner/name and shows what Mynt answered. Server-renderable for the tests.
 import { useCallback, useEffect, useMemo, useState } from "react"
@@ -63,9 +63,26 @@ export function ConnectResultView({ result }: { result: ConnectResult }) {
   )
 }
 
-/** Connect repository: a labelled button and its dialog. */
-export function ConnectRepository({ enabled, onConnected }: { enabled: boolean; onConnected?: () => void }) {
-  const [open, setOpen] = useState(false)
+/**
+ * Connect repository: a labelled button and its dialog. Given `open` and `onOpenChange` (the
+ * header's GitHub menu), the dialog is opened from outside and `trigger={false}` drops the button.
+ */
+export function ConnectRepository({
+  enabled,
+  onConnected,
+  open: openProp,
+  onOpenChange,
+  trigger = true,
+}: {
+  enabled: boolean
+  onConnected?: () => void
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  trigger?: boolean
+}) {
+  const [openState, setOpenState] = useState(false)
+  const open = openProp ?? openState
+  const setOpen = (o: boolean) => (onOpenChange ? onOpenChange(o) : setOpenState(o))
   const [repository, setRepository] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ConnectResult | null>(null)
@@ -85,9 +102,17 @@ export function ConnectRepository({ enabled, onConnected }: { enabled: boolean; 
     } else setError(body?.message ?? "Couldn't connect it. Please try again.")
   }
 
+  // Opened from outside: start from an empty form.
+  useEffect(() => {
+    if (openProp) {
+      setResult(null)
+      setError(null)
+    }
+  }, [openProp])
+
   return (
     <>
-      <Button
+      {trigger && <Button
         size="sm"
         variant="outline"
         disabled={!enabled}
@@ -101,7 +126,7 @@ export function ConnectRepository({ enabled, onConnected }: { enabled: boolean; 
       >
         <GitBranchPlus />
         Connect repository
-      </Button>
+      </Button>}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>

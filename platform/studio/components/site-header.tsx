@@ -1,6 +1,7 @@
 // From shadcn/ui's dashboard-01 block (site-header.tsx, MIT): the page's name beside the
 // sidebar's toggle, then search (Search or ask AI, Cmd+K) and New app, on every page outside an
-// app, with the wallet control (components/wallet-control.tsx) right beside New app. Sticky: it stays at the top while the page scrolls. The workspace isn't repeated here; the
+// app, with the GitHub and wallet controls (components/github-control.tsx, wallet-control.tsx) right beside New app
+// (GitHub hidden on phones), and the theme switcher at the far right. Sticky: it stays at the top while the page scrolls. The workspace isn't repeated here; the
 // sidebar's switcher shows it.
 import Link from "next/link"
 import { Plus } from "lucide-react"
@@ -9,6 +10,8 @@ import { SearchTrigger } from "@/components/studio-search"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
+import { GithubControl } from "@/components/github-control"
+import { ThemeSwitcher } from "@/components/theme-switcher"
 import { WalletControl } from "@/components/wallet-control"
 
 /** New app, everywhere: the /new flow. `compact`: an icon button with a tooltip-style title. */
@@ -36,8 +39,12 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {children}
           <SearchTrigger />
+          <span className="hidden md:flex">
+            <GithubControl />
+          </span>
           <WalletControl />
           <NewAppButton />
+          <ThemeSwitcher />
         </div>
       </div>
     </header>
