@@ -8,7 +8,7 @@
 // capital and ask for it back. Money only ever moves on a rail the pool's sponsoring licence
 // provider approved; Mynt never holds anyone's funds or keys.
 
-import { treasuryFrom, type Treasury } from "./wallets";
+import { onChainPositionFrom, treasuryFrom, usdcBaseUnitsToCents, type OnChainPosition, type Treasury } from "./wallets";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -276,29 +276,39 @@ export type Position = {
   exited: boolean;
   onChain: boolean; // list_my_positions' source: "on-chain"
   cluster: string | null;
-  deposit: string | null; // the on-chain deposit a withdrawal draws from, when Mynt names it
+  // On-chain rows are one per pool and wallet, in USDC base units (lib/wallets.ts); their cents
+  // above are those amounts rounded down, for the totals and the assistant's drafts.
+  wallet: string | null;
+  chain: OnChainPosition | null;
 };
+// One key per row: an on-chain pool can have a row per wallet.
+export const positionKey = (p: Position) => (p.wallet ? `${p.poolId}|${p.wallet}` : p.poolId);
 export function fromPositions(reply: unknown): Position[] {
   return list(reply, "positions")
     .filter(isObj)
-    .map((p) => ({
-      poolId: str(p.pool_id) ?? "",
-      name: str(p.name) ?? "Unnamed pool",
-      productId: str(p.product_id) ?? "",
-      sandbox: p.sandbox === true,
-      poolStatus: str(p.pool_status) ?? "unknown",
-      state: str(p.state),
-      committedCents: cents(p.contributed_cents) + cents(p.pending_in_cents),
-      settledCents: cents(p.balance_cents),
-      pendingInCents: cents(p.pending_in_cents),
-      queuedCents: cents(p.queued_withdrawal_cents),
-      paidCents: cents(p.withdrawn_cents),
-      availableCents: cents(p.available_to_withdraw_cents),
-      exited: p.exited === true,
-      onChain: p.source === "on-chain",
-      cluster: str(p.cluster),
-      deposit: str(p.deposit) ?? str(p.deposit_address),
-    }))
+    .map((p): Position => {
+      const chain = p.source === "on-chain" ? onChainPositionFrom(p) : null;
+      const c = (v: bigint) => usdcBaseUnitsToCents(v);
+      return {
+        poolId: str(p.pool_id) ?? "",
+        name: str(p.name) ?? "Unnamed pool",
+        productId: str(p.product_id) ?? "",
+        sandbox: p.sandbox === true,
+        poolStatus: str(p.pool_status) ?? "unknown",
+        state: str(p.state),
+        committedCents: chain ? c(chain.principal) : cents(p.contributed_cents) + cents(p.pending_in_cents),
+        settledCents: chain ? c(chain.principal) : cents(p.balance_cents),
+        pendingInCents: chain ? 0 : cents(p.pending_in_cents),
+        queuedCents: chain ? c(chain.queued) : cents(p.queued_withdrawal_cents),
+        paidCents: chain ? c(chain.paid) : cents(p.withdrawn_cents),
+        availableCents: chain ? c(chain.availableToRequest) : cents(p.available_to_withdraw_cents),
+        exited: p.exited === true,
+        onChain: p.source === "on-chain",
+        cluster: str(p.cluster),
+        wallet: chain?.wallet ?? null,
+        chain,
+      };
+    })
     .filter((p) => p.poolId);
 }
 
@@ -373,6 +383,7 @@ export function proposalFrom(f: { option: Sponsored | null; name: string; sandbo
 // Why the pool can't take a commitment at all right now, whatever the amount, or null.
 export function poolCommitBlock(p: Pool, position: Position | null | undefined): string | null {
   const stage = stageOf(p);
+  if (p.treasury) return "This pool's capital is held on-chain (devnet): ask the assistant to draft a deposit, which you sign in your own wallet.";
   if (stage === "awaiting_approval") return "This pool isn't approved yet: its sponsoring licence provider must approve it and name its money rails first.";
   if (stage === "uncleared") return `${STAGE_LABELS.uncleared}. A Mynt admin must clear this pool's offering before it takes real money.`;
   if (!railsApproved(p)) return "This pool has no approved money rails yet.";

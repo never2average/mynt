@@ -4,11 +4,11 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import bs58 from "bs58";
 import type { Wallet } from "@wallet-standard/base";
 import { DraftsTab, PoolsTab } from "@/components/earn-assistant";
-import type { LiquidityActions } from "@/components/earn-view";
-import { EARN_DISCLOSURE, EARN_DISCLOSURE_DETAILS, EarnDisclosure, EarnWalletProvider, WalletPicker, type EarnWalletState, type PrepareInput, type TreasuryActions } from "@/components/earn-wallet";
-import { earnContext, validateDraft, type Draft } from "@/lib/earn";
+import { EarnTable, type LiquidityActions } from "@/components/earn-view";
+import { EARN_DISCLOSURE, EARN_DISCLOSURE_DETAILS, EarnDisclosure, EarnWalletProvider, OnChainAction, WalletPicker, type EarnWalletState, type PrepareInput, type TreasuryActions } from "@/components/earn-wallet";
+import { depositFor, earnContext, validateDraft, type Draft } from "@/lib/earn";
 import { fromPools, fromPositions, type LiquidityData } from "@/lib/liquidity";
-import { balancesFrom, CHOSEN_KEY, chosenWallet, explorerTxUrl, preparedFrom, rememberWallet, usdcText, walletsFrom, type EarnWallets, type Prepared } from "@/lib/wallets";
+import { balancesFrom, baseUnitsOf, CHOSEN_KEY, depositStanding, parseUsdc, treasuryRefusal, txStatusFrom, chosenWallet, explorerTxUrl, preparedFrom, rememberWallet, usdcText, walletsFrom, type EarnWallets, type Prepared } from "@/lib/wallets";
 
 // Earn's wallet: the one-line disclaimer and its tooltip, the chat bar's wallet picker (no wallets,
 // wallets with balances, balances unavailable, Mynt without the tools), the choice remembered per
@@ -53,7 +53,8 @@ const prepared = (over: Partial<Prepared["summary"]> = {}): Prepared => ({
   cluster: "devnet",
   transactionBase64: TX,
   expiresAt: "2099-01-01T00:00:00Z",
-  summary: { pool: "On-chain float", amount: "500 USDC", lockInSeconds: 30 * 86_400, noticeSeconds: 7 * 86_400, wallet: SOL, ...over },
+  lastValidBlockHeight: 1_000,
+  summary: { pool: "On-chain float", amount: "500 USDC", lockInSeconds: 30 * 86_400, noticeSeconds: 7 * 86_400, reviewWindowSeconds: 86_400, wallet: SOL, verifiedBuild: false, ...over },
 });
 
 // A browser wallet, as the Wallet Standard registers one, connected to `account`.
@@ -85,7 +86,7 @@ function state(over: Partial<EarnWalletState> = {}): TestState {
     choose: () => undefined,
     treasury: {
       prepare: async (input) => (prepares.push(input), { prepared: prepared() }),
-      status: vi.fn<TreasuryActions["status"]>().mockResolvedValueOnce({ status: "pending", error: null }).mockResolvedValue({ status: "confirmed", error: null }),
+      status: vi.fn<TreasuryActions["status"]>().mockResolvedValueOnce({ status: "pending", stage: "not_found", error: null }).mockResolvedValue({ status: "confirmed", stage: "confirmed", error: null }),
     },
     browserWallets: () => [] as Wallet[],
     onSettled: () => void s.settled++,
@@ -107,9 +108,33 @@ const base = {
   max_commitment_cents: 10_000_000,
   approved_at: "2026-11-01T00:00:00Z",
 };
-const TREASURY = { cluster: "devnet", program_id: "Prog111111111111111111111111111111111111111", pool_address: SOL2, verified_build: true, on_chain_terms: { lock_in_seconds: 2_592_000, notice_seconds: 604_800 } };
+const TREASURY = { cluster: "devnet", program_id: "Prog111111111111111111111111111111111111111", pool_address: SOL2, verified_build: false, build_status: "unverified build", on_chain_terms: { lock_in_seconds: 2_592_000, notice_seconds: 604_800, min_request: 1_000_000 } };
+const DEP1 = "Dep1111111111111111111111111111111111111111";
+const DEP2 = "Dep2222222222222222222222222222222222222222";
+const DEP3 = "Dep3333333333333333333333333333333333333333";
+// Core's on-chain row: one per pool and wallet, amounts in USDC base units (a string above 2^53).
+const onChainRow = {
+  source: "on-chain",
+  cluster: "devnet",
+  pool_id: POOL,
+  name: "On-chain float",
+  product_id: "card-credit",
+  wallet: SOL,
+  sandbox: true,
+  principal: "1300000000",
+  deposited: 1_300_000_000,
+  paid: 0,
+  queued: 300_000_000,
+  available_to_request: 200_000_000,
+  deposits: [
+    { deposit: DEP1, address: DEP1, seq: 1, amount: 500_000_000, remaining: 500_000_000, queued: 300_000_000, settled_at: "2026-10-01T00:00:00Z", review_until: "2026-10-02T00:00:00Z", unlock_at: "2026-11-01T00:00:00Z", unlocks_at: "2026-11-01T00:00:00Z", lock_in_seconds: 2_678_400, unlocked: true, rejected: false, signature: "s1" },
+    { deposit: DEP2, address: DEP2, seq: 2, amount: "800000000", remaining: "800000000", queued: 0, settled_at: "2026-11-14T00:00:00Z", review_until: "2026-11-15T00:00:00Z", unlock_at: "2099-12-14T00:00:00Z", unlocks_at: "2099-12-14T00:00:00Z", lock_in_seconds: 2_592_000, unlocked: false, rejected: false, signature: "s2" },
+    { deposit: DEP3, address: DEP3, seq: 3, amount: 100, remaining: 100, queued: 0, settled_at: "2099-01-01T00:00:00Z", review_until: "2099-01-02T00:00:00Z", unlock_at: "2099-02-01T00:00:00Z", unlocks_at: "2099-02-01T00:00:00Z", lock_in_seconds: 2_678_400, unlocked: false, rejected: false, signature: "s3" },
+  ],
+  requests: [{ address: "Req1111111111111111111111111111111111111111", seq: 1, deposit: DEP1, amount: 300_000_000, remaining: 300_000_000, paid: 0, payable_at: "2026-11-20T00:00:00Z", status: "open", signature: "s4" }],
+};
 const onChainPools = fromPools([{ ...base, id: POOL, name: "On-chain float", treasury: TREASURY }]).map((p) => ({ ...p, productLine: "credit", queueLength: null, health: null }));
-const onChainPositions = fromPositions([{ pool_id: POOL, name: "On-chain float", product_id: "card-credit", sandbox: true, balance_cents: 100_000, available_to_withdraw_cents: 50_000, source: "on-chain", cluster: "devnet", deposit: "dep-1" }]);
+const onChainPositions = fromPositions([onChainRow]);
 const data: LiquidityData = { supported: true, access: { builder: false, liquidityProvider: true }, provider: { pools: onChainPools, positions: onChainPositions, withdrawals: [], canCommit: true, canWithdraw: true } };
 const railCalls: string[] = [];
 const rails: LiquidityActions = {
@@ -118,7 +143,7 @@ const rails: LiquidityActions = {
   withdraw: async () => (railCalls.push("withdraw"), { ok: true, reply: null }),
 };
 const depositDraft: Draft = { kind: "commit", id: "d1", poolId: POOL, poolName: "On-chain float", amountCents: 50_000, state: null, sandbox: true, onChain: true, wallet: SOL };
-const withdrawDraft: Draft = { kind: "withdraw", id: "w1", poolId: POOL, poolName: "On-chain float", amountCents: 20_000, sandbox: true, onChain: true, wallet: SOL };
+const withdrawDraft: Draft = { kind: "withdraw", id: "w1", poolId: POOL, poolName: "On-chain float", amountCents: 20_000, sandbox: true, onChain: true, wallet: SOL, deposit: DEP1 };
 
 const renderDrafts = (s: EarnWalletState, drafts: Draft[] = [depositDraft]) =>
   render(
@@ -259,6 +284,11 @@ describe("the on-chain deposit", () => {
     render(<PoolsTab data={data} poolIds={null} />);
     expect(document.querySelector(`[data-pool-card="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
     expect(document.querySelector(`[data-pool-card="${POOL}"] [data-devnet]`)).toBeTruthy();
+    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
+    cleanup();
+    const verified = fromPools([{ ...base, id: POOL, name: "Verified", treasury: { ...TREASURY, verified_build: true } }]).map((p) => ({ ...p, productLine: null, queueLength: null, health: null }));
+    render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: verified } }} poolIds={null} />);
+    expect(document.querySelector("[data-unverified-build]")).toBeNull();
   });
 
   it("signs only after the user's clicks: prepare, Mynt's summary, then the user's own wallet, with the transaction untouched", async () => {
@@ -271,7 +301,7 @@ describe("the on-chain deposit", () => {
     expect(screen.queryByRole("button", { name: "Commit capital" })).toBeNull();
     const prepare = screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" });
     await click(prepare);
-    expect(s.prepares).toEqual([{ kind: "deposit", pool_id: POOL, wallet: SOL, amount_cents: 50_000, idempotency_key: expect.stringMatching(/^[A-Za-z0-9_-]{8,200}$/) }]);
+    expect(s.prepares).toEqual([{ kind: "deposit", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 500_000_000, idempotency_key: expect.stringMatching(/^[A-Za-z0-9_-]{8,200}$/) }]);
     // Mynt's summary, not the assistant's words; still nothing signed.
     expect(document.querySelector("[data-summary-amount]")!.textContent).toContain("500 USDC");
     expect(document.querySelector("[data-summary-wallet]")!.textContent).toBe(SOL);
@@ -320,7 +350,7 @@ describe("the on-chain deposit", () => {
   it("shows a failed transaction with its signature", async () => {
     const { wallet } = fakeWallet(SOL);
     const s = state({ browserWallets: () => [wallet] });
-    s.treasury.status = async () => ({ status: "failed", error: "Lock-in longer than you agreed to" });
+    s.treasury.status = async () => ({ status: "failed", stage: "failed", error: "Lock-in longer than you agreed to" });
     renderDrafts(s);
     await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
@@ -335,7 +365,7 @@ describe("the on-chain deposit", () => {
     renderDrafts(s, [withdrawDraft]);
     expect(screen.queryByRole("button", { name: "Request withdrawal" })).toBeNull();
     await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV · devnet" }));
-    expect(s.prepares[0]).toMatchObject({ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_cents: 20_000 });
+    expect(s.prepares[0]).toMatchObject({ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 200_000_000, deposit: DEP1 });
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
     expect(signAndSendTransaction).toHaveBeenCalledTimes(1);
@@ -363,5 +393,162 @@ describe("the on-chain deposit", () => {
     );
     expect((screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(document.body.textContent).toContain("devnet only");
+  });
+});
+
+describe("the treasury contract", () => {
+  it("parses base units exactly, above 2^53 too", () => {
+    expect(baseUnitsOf("9007199254740993")).toBe(9007199254740993n);
+    expect(baseUnitsOf(12)).toBe(12n);
+    expect(baseUnitsOf(1.5)).toBeNull();
+    expect(baseUnitsOf("-1")).toBeNull();
+    expect(usdcText(baseUnitsOf("9007199254740993")!)).toBe("9,007,199,254.740993 USDC");
+    expect(parseUsdc("12.5")).toBe(12_500_000n);
+    expect(parseUsdc("1,000.000001 USDC")).toBe(1_000_000_001n);
+    expect(parseUsdc("0.0000001")).toBeNull();
+    expect(parseUsdc("0")).toBeNull();
+    const big = fromPositions([{ ...onChainRow, principal: "90071992547409930000" }])[0];
+    expect(big.chain!.principal).toBe(90071992547409930000n);
+  });
+
+  it("reads an on-chain row per pool and wallet, with each deposit's standing", () => {
+    const [p] = onChainPositions;
+    expect(p).toMatchObject({ onChain: true, wallet: SOL, settledCents: 130_000, availableCents: 20_000, queuedCents: 30_000 });
+    expect(p.chain!.deposits.map((d) => depositStanding(d, Date.parse("2026-11-15T12:00:00Z")).kind)).toEqual(["available", "locked", "in_review"]);
+    expect(depositStanding(p.chain!.deposits[0]).free).toBe(200_000_000n);
+    expect(depositStanding({ ...p.chain!.deposits[0], queued: 500_000_000n }).kind).toBe("queued");
+    expect(depositStanding({ ...p.chain!.deposits[0], rejected: true }).kind).toBe("rejected");
+  });
+
+  it("draws an assistant's withdrawal from a deposit with enough available, or says why not", () => {
+    const deps = onChainPositions[0].chain!.deposits;
+    expect(depositFor(deps, 100_000_000n)).toEqual({ deposit: DEP1 });
+    expect(depositFor(deps, 300_000_000n)).toEqual({ error: "No single deposit has that much available: the most one has is 200 USDC." });
+    expect(depositFor(deps, 1n, DEP2)).toEqual({ error: expect.stringContaining("locked until 2099-12-14") });
+  });
+
+  it("maps Mynt's refusal codes to plain words, with the date they name", () => {
+    for (const code of ["offering_not_cleared", "under_minimum", "terms_changed", "insufficient_usdc", "attester_removed", "rpc_unavailable", "deposit_not_found", "deposit_rejected", "in_review", "deposit_locked", "below_min_request"])
+      expect(treasuryRefusal(JSON.stringify({ error: "x", code }))?.message, code).toBeTruthy();
+    expect(treasuryRefusal(JSON.stringify({ error: "x", code: "deposit_locked", unlock_at: "2026-12-01T00:00:00Z" }))!.message).toBe("That deposit is still locked in until 2026-12-01.");
+    expect(treasuryRefusal(JSON.stringify({ error: "x", code: "something_new" }))).toBeNull();
+    expect(treasuryRefusal("not json")).toBeNull();
+  });
+
+  it("reads every transaction status", () => {
+    expect(["not_found", "processed", "confirmed", "finalized", "failed"].map((status) => txStatusFrom({ status })?.status)).toEqual(["pending", "pending", "confirmed", "confirmed", "failed"]);
+    expect(txStatusFrom({ status: "failed", error: { InstructionError: [1, "Custom"] } })!.error).toBe("The transaction failed on devnet.");
+    expect(txStatusFrom({ status: "weird" })).toBeNull();
+    expect(preparedFrom({ cluster: "devnet", transaction_base64: TX, expires_at: null, last_valid_block_height: 42, summary: { pool: "P", amount: "9007199254740993", wallet: SOL, verified_build: false, review_window_seconds: 60 } }, SOL)).toMatchObject({ lastValidBlockHeight: 42, summary: { amount: "9,007,199,254.740993 USDC", verifiedBuild: false, reviewWindowSeconds: 60 } });
+  });
+});
+
+describe("a prepared transaction older than its blockhash", () => {
+  const action = (s: EarnWalletState, clock: { t: number }) =>
+    render(
+      <EarnWalletProvider value={s}>
+        <OnChainAction kind="deposit" poolId={POOL} amountBaseUnits={500_000_000n} wallet={SOL} blocked={null} newKey={() => `k-${Math.random().toString(36).slice(2)}`} now={() => clock.t} />
+      </EarnWalletProvider>,
+    );
+
+  it("is prepared again before signing, showing Refreshing…, and the fresh one is signed", async () => {
+    const clock = { t: 0 };
+    const { wallet, signAndSendTransaction } = fakeWallet(SOL);
+    const FRESH = btoa("fresh transaction bytes, prepared again");
+    let release: () => void = () => undefined;
+    const s = state({ browserWallets: () => [wallet] });
+    let n = 0;
+    s.treasury.prepare = async (input) => {
+      s.prepares.push(input);
+      if (n++ === 0) return { prepared: prepared() };
+      await new Promise<void>((r) => (release = r));
+      return { prepared: { ...prepared(), transactionBase64: FRESH } };
+    };
+    action(s, clock);
+    await click(screen.getByRole("button", { name: /Deposit from/ }));
+    clock.t = 60_000;
+    await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
+    expect(document.querySelector("[data-refreshing]")!.textContent).toContain("Refreshing…");
+    expect(signAndSendTransaction).not.toHaveBeenCalled();
+    await act(async () => release());
+    await settle();
+    expect(s.prepares).toHaveLength(2);
+    expect(s.prepares[0].idempotency_key).not.toBe(s.prepares[1].idempotency_key);
+    expect(signAndSendTransaction).toHaveBeenCalledTimes(1);
+    expect(btoa(String.fromCharCode(...signAndSendTransaction.mock.calls[0][0].transaction))).toBe(FRESH);
+  });
+
+  it("isn't signed if the refreshed summary differs: the new one is shown to confirm again", async () => {
+    const clock = { t: 0 };
+    const { wallet, signAndSendTransaction } = fakeWallet(SOL);
+    const s = state({ browserWallets: () => [wallet] });
+    let n = 0;
+    s.treasury.prepare = async () => ({ prepared: n++ === 0 ? prepared() : prepared({ lockInSeconds: 60 * 86_400 }) });
+    action(s, clock);
+    await click(screen.getByRole("button", { name: /Deposit from/ }));
+    clock.t = 60_000;
+    await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
+    await settle();
+    expect(signAndSendTransaction).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-terms-changed]")).toBeTruthy();
+    expect(document.querySelector("[data-prepared]")!.textContent).toContain("60 days");
+  });
+
+  it("a fresh one is signed without preparing again; the summary shows an unverified build", async () => {
+    const clock = { t: 0 };
+    const { wallet, signAndSendTransaction } = fakeWallet(SOL);
+    const s = state({ browserWallets: () => [wallet] });
+    action(s, clock);
+    await click(screen.getByRole("button", { name: /Deposit from/ }));
+    expect(document.querySelector("[data-prepared] [data-unverified-build]")).toBeTruthy();
+    clock.t = 10_000;
+    await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
+    await settle();
+    expect(s.prepares).toHaveLength(1);
+    expect(signAndSendTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("My positions on-chain", () => {
+  it("lists each deposit with amount, remaining, queued, unlock date and standing, and the requests", () => {
+    render(
+      <EarnWalletProvider value={state()}>
+        <EarnTable tab="my-positions" data={data} actions={rails} />
+      </EarnWalletProvider>,
+    );
+    const section = document.querySelector("[data-on-chain-positions]")!;
+    expect(section.querySelector("[data-devnet]")).toBeTruthy();
+    expect(section.querySelector("[data-unverified-build]")).toBeTruthy();
+    const d1 = section.querySelector(`[data-deposit="${DEP1}"]`)!;
+    for (const t of ["500 USDC", "300 USDC", "2026-11-01", "Available"]) expect(d1.textContent).toContain(t);
+    const d2 = section.querySelector(`[data-deposit="${DEP2}"]`)!;
+    expect(d2.textContent).toContain("800 USDC");
+    expect(d2.textContent).toContain("Locked until 2099-12-14");
+    expect((d2.querySelector("[data-withdraw-deposit]") as HTMLButtonElement).disabled).toBe(true);
+    expect(section.querySelector(`[data-deposit="${DEP3}"]`)!.textContent).toContain("In review until 2099-01-02");
+    expect(section.querySelector("[data-on-chain-requests]")!.textContent).toContain("300 USDC asked, 0 USDC paid · open");
+    // Not in the rails table.
+    expect(document.querySelector(`[data-position="${POOL}"]`)).toBeNull();
+  });
+
+  it("Withdraw on a deposit prepares a withdrawal from that deposit, for what's available by default", async () => {
+    const s = state({ browserWallets: () => [fakeWallet(SOL).wallet] });
+    render(
+      <EarnWalletProvider value={s}>
+        <EarnTable tab="my-positions" data={data} actions={rails} />
+      </EarnWalletProvider>,
+    );
+    await click(document.querySelector(`[data-withdraw-deposit="${DEP1}"]`)!);
+    const form = document.querySelector(`[data-withdraw-form="${DEP1}"]`)!;
+    const input = form.querySelector("input") as HTMLInputElement;
+    expect(input.value).toBe("200");
+    fireEvent.change(input, { target: { value: "250" } });
+    expect(form.textContent).toContain("This deposit has 200 USDC available.");
+    fireEvent.change(input, { target: { value: "0.5" } });
+    expect(form.textContent).toContain("smallest withdrawal request is 1 USDC");
+    fireEvent.change(input, { target: { value: "150.25" } });
+    await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV · devnet" }));
+    expect(s.prepares).toEqual([{ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 150_250_000, deposit: DEP1, idempotency_key: expect.any(String) }]);
+    expect(railCalls).toHaveLength(0);
   });
 });

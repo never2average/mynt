@@ -11,6 +11,8 @@
 // Nothing here moves money: Mynt records a request, and the pool's sponsor moves the money on its
 // approved rail. Server-renderable for the tests.
 import { useMemo, useState } from "react"
+import { OnChainPositions } from "@/components/earn-wallet"
+import { newIdempotencyKey } from "@/lib/idempotency"
 import { Search } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -59,7 +61,7 @@ export type OpenForm = { kind: "propose" } | { kind: "commit"; poolId?: string }
 
 const selectClass =
   "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20"
-export const newIdempotencyKey = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`).replace(/[^A-Za-z0-9_-]/g, "")
+export { newIdempotencyKey }
 const dateOf = (iso: string | null) => (iso ? iso.slice(0, 10) : "—")
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null
 
@@ -640,7 +642,10 @@ function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { po
   )
 }
 
-function MyPositions({ positions, withdrawals, pools, canWithdraw, actions, form, setForm }: { positions: Position[]; withdrawals: Withdrawal[]; pools: PoolRow[]; canWithdraw: boolean; actions: LiquidityActions; form: OpenForm; setForm: (f: OpenForm) => void }) {
+function MyPositions({ positions: all, withdrawals, pools, canWithdraw, actions, form, setForm }: { positions: Position[]; withdrawals: Withdrawal[]; pools: PoolRow[]; canWithdraw: boolean; actions: LiquidityActions; form: OpenForm; setForm: (f: OpenForm) => void }) {
+  // Positions on rails in the table; on-chain ones (devnet, per wallet and deposit) below it.
+  const positions = all.filter((p) => !p.onChain)
+  const onChain = all.filter((p) => p.onChain && p.chain)
   const [query, setQuery] = useState("")
   const [page, setPage] = useState(0)
   const [done, setDone] = useState<string | null>(null)
@@ -717,7 +722,7 @@ function MyPositions({ positions, withdrawals, pools, canWithdraw, actions, form
             ) : (
               <TableRow>
                 <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
-                  {positions.length ? "No positions match this search." : "No positions yet. Commit capital to an open pool to start one."}
+                  {positions.length ? "No positions match this search." : onChain.length ? "No positions on rails." : "No positions yet. Commit capital to an open pool to start one."}
                 </TableCell>
               </TableRow>
             )}
@@ -725,6 +730,7 @@ function MyPositions({ positions, withdrawals, pools, canWithdraw, actions, form
         </Table>
       </div>
       <Pager page={view.page} pages={view.pages} total={shown.length} onPage={setPage} />
+      <OnChainPositions positions={onChain} pools={pools} />
 
       <h3 className="mt-2 text-sm font-medium">Your withdrawal requests</h3>
       <div className="overflow-auto rounded-lg border">
