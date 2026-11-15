@@ -89,7 +89,7 @@ vi.mock("@/lib/tokens", () => ({
           return ok(fake.prepareReply ?? { cluster: "devnet", transaction_base64: TX, expires_at: "2099-01-01T00:00:00Z", summary: { pool: "Pool 1", amount: args.amount_usdc_base_units, lock_in_seconds: 2_592_000, notice_seconds: 604_800, wallet: args.wallet } });
         case "get_treasury_tx_status":
           if (fake.refusal) return { isError: true, content: [{ type: "text", text: JSON.stringify(fake.refusal) }] };
-          return ok({ status: fake.txStatus });
+          return ok({ status: fake.txStatus, queued_pools: [POOL] });
         default:
           return ok({});
       }
@@ -227,6 +227,14 @@ describe("POST /api/earn/treasury/prepare", () => {
     expect((await prepare.POST(deposit({ idempotency_key: key }))).status).toBe(200);
     expect((await prepare.POST(deposit({ idempotency_key: key }))).status).toBe(409);
     expect(called("prepare_treasury_deposit")).toHaveLength(1);
+  });
+
+  it("refuses a deposit to a pool whose approvers changed, without asking Mynt to prepare it", async () => {
+    fake.pools = [pool(POOL, { treasury: { ...TREASURY, attesters_flag: "attesters changed" } })];
+    const res = await prepare.POST(deposit());
+    expect(res.status).toBe(409);
+    expect((await res.json()).message).toBe("This pool's approvers changed; deposits are paused until its builder re-registers it.");
+    expect(called("prepare_treasury_deposit")).toHaveLength(0);
   });
 
   it("says on-chain deposits are coming soon until Mynt has the tool", async () => {

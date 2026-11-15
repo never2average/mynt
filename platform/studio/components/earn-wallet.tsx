@@ -19,7 +19,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { devnetWallets, signAndSend, type BrowserWallet } from "@/lib/browser-wallet"
 import { shortAddress } from "@/lib/linked-accounts"
-import { positionKey, type PoolRow, type Position } from "@/lib/liquidity"
+import { positionKey, type LiquidityData, type PoolRow, type Position } from "@/lib/liquidity"
 import { newIdempotencyKey } from "@/lib/idempotency"
 import {
   balancesText,
@@ -82,8 +82,12 @@ export type EarnWalletState = {
   choose(address: string): void
   treasury: TreasuryActions
   browserWallets: () => BrowserWallet[]
-  onSettled(): void // read positions again
+  // Read positions again; the page's answer lets a confirmed transaction wait until Mynt shows it.
+  onSettled(): void | Promise<LiquidityData | null>
   pollMs?: number
+  // After "confirmed", Mynt indexes the pool in the background: positions are read again after
+  // these waits (2s, then 5s, then 10s from confirming) until the deposit or request shows.
+  settleDelaysMs?: number[]
 }
 const NO_STATE: EarnWalletState = {
   list: null,
@@ -190,7 +194,7 @@ type Flow =
   | { kind: "refreshing"; prepared: Prepared }
   | { kind: "signing"; prepared: Prepared; wallet: string }
   | { kind: "sent"; signature: string; stage: string | null }
-  | { kind: "confirmed"; signature: string }
+  | { kind: "confirmed"; signature: string; updating: "yes" | "done" | "late" }
   | { kind: "failed"; signature: string; error: string }
   | { kind: "error"; message: string }
 
@@ -246,7 +250,7 @@ export function OnChainAction({
   newKey: () => string
   now?: () => number
 }) {
-  const { list, chosen, treasury, browserWallets, onSettled, pollMs = 2000 } = useEarnWallet()
+  const { list, chosen, treasury, browserWallets, onSettled, pollMs = 2000, settleDelaysMs = SETTLE_DELAYS_MS } = useEarnWallet()
   const [flow, setFlow] = useState<Flow>({ kind: "idle" })
   const live = useRef(true)
   useEffect(() => {
@@ -286,14 +290,27 @@ export function OnChainAction({
     setFlow("error" in r ? { kind: "error", message: r.error } : { kind: "review", prepared: r.prepared, at: now() })
   }
 
+  // Confirmed on chain; Mynt indexes it in the background, so positions are read again a few
+  // times until a deposit or request with this signature shows ("Updating positions…").
+  const settle = async (signature: string) => {
+    setFlow({ kind: "confirmed", signature, updating: "yes" })
+    let waited = 0
+    for (const at of settleDelaysMs) {
+      await new Promise((r) => setTimeout(r, Math.max(0, at - waited)))
+      waited = at
+      if (!live.current) return
+      const data = await onSettled()
+      if (!live.current) return
+      if (data && showsTransaction(data, signature)) return setFlow({ kind: "confirmed", signature, updating: "done" })
+    }
+    setFlow({ kind: "confirmed", signature, updating: "late" })
+  }
+
   const follow = async (signature: string) => {
     for (let i = 0; i < 60 && live.current; i++) {
       const s = await treasury.status(signature)
       if (!live.current) return
-      if ("status" in s && s.status === "confirmed") {
-        setFlow({ kind: "confirmed", signature })
-        return onSettled()
-      }
+      if ("status" in s && s.status === "confirmed") return void (await settle(signature))
       if ("status" in s && s.status === "failed") return setFlow({ kind: "failed", signature, error: s.error ?? "The transaction failed on devnet." })
       if ("status" in s) setFlow({ kind: "sent", signature, stage: s.stage })
       await new Promise((r) => setTimeout(r, pollMs))
@@ -430,7 +447,20 @@ export function OnChainAction({
       )}
       {flow.kind === "confirmed" && (
         <p role="status" className="flex flex-col gap-1 text-sm" data-tx="confirmed">
-          <span>Confirmed on devnet. Your positions are being read again.</span>
+          <span>Confirmed on devnet.</span>
+          {flow.updating === "yes" ? (
+            <span className="flex items-center gap-2 text-muted-foreground" data-updating-positions>
+              <Loader2 className="size-4 animate-spin" /> Updating positions…
+            </span>
+          ) : flow.updating === "done" ? (
+            <span className="text-muted-foreground" data-positions-updated>
+              Your positions show it.
+            </span>
+          ) : (
+            <span className="text-muted-foreground" data-positions-late>
+              Mynt is still catching up: it&apos;ll show in My positions shortly.
+            </span>
+          )}
           <Signature signature={flow.signature} />
         </p>
       )}
@@ -441,6 +471,20 @@ export function OnChainAction({
         </p>
       )}
     </div>
+  )
+}
+
+export const SETTLE_DELAYS_MS = [2_000, 5_000, 10_000]
+
+// Whether positions show a deposit or withdrawal request made by this transaction.
+export const showsTransaction = (data: LiquidityData, signature: string) =>
+  (data.provider?.positions ?? []).some((p) => p.chain?.deposits.some((d) => d.signature === signature) || p.chain?.requests.some((r) => r.signature === signature))
+
+export function DepositsPausedBadge({ reason }: { reason: string }) {
+  return (
+    <Badge variant="outline" className="border-amber-500/60 whitespace-normal text-left" title={reason} data-attesters-flag>
+      Deposits paused: approvers changed
+    </Badge>
   )
 }
 
@@ -468,6 +512,7 @@ export function OnChainPositions({ positions, pools }: { positions: Position[]; 
                 {shortAddress(c.wallet)}
               </span>
               {pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
+              {pool?.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
               <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                 {usdcText(c.principal)} held · {usdcText(c.queued)} queued · {usdcText(c.availableToRequest)} available
               </span>

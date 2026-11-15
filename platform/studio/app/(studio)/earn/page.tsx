@@ -111,6 +111,16 @@ export default function EarnPage() {
     };
   }, [tick]);
 
+  // A confirmed on-chain transaction: read the positions again now and hand them back, so its
+  // card can tell whether Mynt shows it yet. A failed read keeps what's on screen.
+  const refreshPositions = useCallback(async (): Promise<LiquidityData | null> => {
+    const res = await fetch("/api/liquidity", { cache: "no-store" }).catch(() => null);
+    const body = (await res?.json().catch(() => null)) as LiquidityData | null;
+    if (!res?.ok || !body || body.supported === false) return null;
+    setState({ kind: "ready", data: body });
+    return body;
+  }, []);
+
   // After a change, read everything again (positions and queues move only on Mynt's side).
   const after = useCallback(async (p: Promise<ActionResult>) => {
     const r = await p;
@@ -133,8 +143,8 @@ export default function EarnPage() {
     treasury,
     browserWallets: () => devnetWallets(),
     onSettled: () => {
-      setTick((t) => t + 1);
       reloadWallets();
+      return refreshPositions();
     },
   };
 
