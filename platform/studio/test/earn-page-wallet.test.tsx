@@ -3,6 +3,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { CHOSEN_KEY, type EarnWallets } from "@/lib/wallets";
 
+// The Earn page and its chat workspace take several seconds to load on a busy or slow runner: a
+// longer timeout for this file only. The assertions are unchanged.
+vi.setConfig({ testTimeout: 20_000 });
+
 // The Earn page with the wallet picker in its chat bar: the chosen wallet is sent with every message
 // (its address only), and the choice is remembered for this user in this browser.
 

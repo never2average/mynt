@@ -2,6 +2,7 @@ import { z } from "zod";
 import { AUDIT_CLASSES, fromClassAudit, rowsFromEvents } from "@/lib/audit-classes";
 import { fromAudit, isCalendarDate } from "@/lib/compliance";
 import { complianceRead, takes } from "@/lib/compliance-server";
+import { sessionCanUseLiquidity } from "@/lib/liquidity-server";
 import { json } from "@/lib/studio-route";
 
 export const dynamic = "force-dynamic";
@@ -25,14 +26,16 @@ const Filters = z
 // action, member, app and date range, and paged by Mynt's cursor. Without `class` it's the trail
 // as before (the dashboard's Recent activity). With `class` (the Audits page's tabs) it's that
 // class's rows, where Mynt classifies them; until it does, Workspace activity is the whole trail
-// as it is (`classes: false`) and the other classes aren't supported yet.
+// as it is (`classes: false`) and the other classes aren't supported yet. Liquidity providers may
+// ask too (the dashboard's investor view reads the financial class); Mynt's tool decides what each
+// caller may read (workspace membership, classes).
 export async function GET(req: Request) {
   // Every filter sent must be valid: an empty one (even an empty cursor) is refused, not ignored.
   const query = Object.fromEntries([...new URL(req.url).searchParams].filter(([k]) => k !== "workspace"));
   const filters = Filters.safeParse(query);
   if (!filters.success) return json({ error: "bad_request", message: filters.error.issues[0]?.message ?? "Those filters aren't valid." }, 400);
   const { class: cls, ...rest } = filters.data;
-  if (!cls) return complianceRead(req, "list_workspace_audit", "loading the audit trail", (reply) => ({ page: fromAudit(reply) }), rest);
+  if (!cls) return complianceRead(req, "list_workspace_audit", "loading the audit trail", (reply) => ({ page: fromAudit(reply) }), rest, sessionCanUseLiquidity);
   return complianceRead(
     req,
     "list_workspace_audit",
@@ -43,5 +46,6 @@ export async function GET(req: Request) {
       return { classes: false, page: { rows: rowsFromEvents(page.events), nextCursor: page.nextCursor } };
     },
     (found) => (takes(found, "class") ? { ...rest, class: cls } : cls === "workspace" ? rest : null),
+    sessionCanUseLiquidity,
   );
 }
