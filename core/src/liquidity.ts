@@ -180,14 +180,34 @@ export async function openWithdrawalRequests(store: Store, productId: string, po
 // ---- the reserve gate ----
 
 // shortfall: a snapshot Mynt trusts says the pool is short of its reserve, which new capital can fix.
-export type Gate = { ok: true; headroom_cents: number; as_of: Date; sequence: number } | { ok: false; kind: "governance" | "health"; reason: string; shortfall?: true };
+// missing: there's no health reading at all (no snapshot yet, or product health isn't running), as opposed to one that fails.
+export type Gate = { ok: true; headroom_cents: number; as_of: Date; sequence: number } | { ok: false; kind: "governance" | "health"; reason: string; shortfall?: true; missing?: true };
 const health = (reason: string): Gate => ({ ok: false, kind: "health", reason });
+export const NO_SNAPSHOT_REASON = "No finished health snapshot of this pool exists yet";
+export const HEALTH_NOT_RUNNING_REASON = "Product health isn't running on this Mynt, so the reserve can't be checked";
+const missing = (reason: string): Gate => ({ ok: false, kind: "health", reason, missing: true });
+
+// A sandbox pool whose capital sits in a registered on-chain treasury (treasury.ts) isn't held to Mynt's health
+// snapshots while there are none: the treasury program enforces its own reserve floor and pauses on chain. It's the
+// only exemption: never a real-money pool, never a pool on rails, never one whose attesters changed (flagged), and
+// never against a snapshot that exists and fails. Its pool row says why (hold_reason).
+export const TREASURY_HEALTH_EXEMPT = "Health checks not configured; the on-chain treasury enforces reserves";
+export async function treasuryHealthExempt(store: Store, pool: Pick<Pool, "id" | "sandbox">): Promise<boolean> {
+  if (!pool.sandbox) return false;
+  const { rows: t } = await store.db.query(`SELECT to_regclass('${T}.treasury_pools') AS t`);
+  if (!t[0]?.t) return false;
+  const { rows } = await store.db.query(`SELECT attesters_flag FROM ${T}.treasury_pools WHERE pool_id = $1`, [pool.id]);
+  return !!rows[0] && rows[0].attesters_flag == null;
+}
+// Whether a pause is one only the missing health reading caused (so the exemption may lift it).
+export const pausedOnlyForMissingHealth = (pool: Pick<Pool, "status" | "pause_kind" | "pause_reason">) =>
+  pool.status === "paused" && pool.pause_kind === "health" && (pool.pause_reason === NO_SNAPSHOT_REASON || pool.pause_reason === HEALTH_NOT_RUNNING_REASON);
 
 // What the latest health snapshot lets a pool pay out. Fails closed: whatever Mynt can't confirm stops payment and
 // says why. Sandbox pools run on sandbox figures, so "verified" (which a sandbox snapshot can never be) applies only to
 // live pools.
 export function reserveGate(pool: Pick<Pool, "sandbox" | "sponsor_entity_id" | "min_reserve_bps" | "min_reserve_floor_cents">, r: PoolHealthReading | null, now: Date, maxAgeMs: number): Gate {
-  if (!r) return health("No finished health snapshot of this pool exists yet");
+  if (!r) return missing(NO_SNAPSHOT_REASON);
   if (r.status === "missed") return health(`The latest health snapshot (sequence ${r.sequence}) is a missed period, so there's nothing to check the reserve against`);
   if (!pool.sandbox) {
     if (r.source === "sandbox") return health(`The latest health snapshot (sequence ${r.sequence}) is sandbox figures, and this is a live pool`);
@@ -228,7 +248,7 @@ export async function evaluatePool(store: Store, service: ProductHealthService |
   const sponsored = (await store.sponsorships({ product_id: pool.product_id, provider_entity_id: pool.sponsor_entity_id, status: "approved" })).some((s) => s.component_key === pool.component_key);
   if (!sponsored) return { ok: false, kind: "governance", reason: "The pool's sponsorship is no longer approved" };
   if ((await store.getEntity(pool.sponsor_entity_id))?.status !== "active") return { ok: false, kind: "governance", reason: "The pool's sponsor isn't active on Mynt" };
-  if (!service) return health("Product health isn't running on this Mynt, so the reserve can't be checked");
+  if (!service) return missing(HEALTH_NOT_RUNNING_REASON);
   let reading: PoolHealthReading | null;
   try {
     reading = await service.latestFinished(pool.product_id, pool.id);
@@ -420,6 +440,18 @@ export class LiquidityWorker {
     if (rows.length && !(pool.status === "paused" && pool.pause_kind === kind && pool.pause_reason === reason)) await this.store.audit(null, "pool_auto_paused", pool.id, { kind, reason });
   }
 
+  // The exemption above: a pool the worker paused only for the missing reading opens again (audited), and its row
+  // says why its queue isn't paid from Mynt's side. An admin's or sponsor's pause stays.
+  private async treasuryExempt(pool: Pool) {
+    const { rows } = await this.store.db.query(
+      `UPDATE ${T}.liquidity_pools SET status = 'open', pause_kind = NULL, pause_reason = NULL, paused_at = NULL, hold_reason = $2, updated_at = now()
+       WHERE id = $1 AND status = 'paused' AND pause_kind = 'health' AND pause_reason = ANY($3::text[]) RETURNING id`,
+      [pool.id, TREASURY_HEALTH_EXEMPT, [NO_SNAPSHOT_REASON, HEALTH_NOT_RUNNING_REASON]],
+    );
+    if (rows.length) await this.store.audit(null, "pool_auto_resumed", pool.id, { reason: TREASURY_HEALTH_EXEMPT, was: pool.pause_reason });
+    else if (pool.status !== "paused") await this.hold(pool, TREASURY_HEALTH_EXEMPT);
+  }
+
   private async autoResume(pool: Pool) {
     const { rows } = await this.store.db.query(`UPDATE ${T}.liquidity_pools SET status = 'open', pause_kind = NULL, pause_reason = NULL, paused_at = NULL, updated_at = now() WHERE id = $1 AND status = 'paused' AND pause_kind IN ('governance', 'health') RETURNING id`, [pool.id]);
     if (rows.length) await this.store.audit(null, "pool_auto_resumed", pool.id, {});
@@ -509,6 +541,7 @@ export class LiquidityWorker {
     await this.linkCrashRows(pool);
     await refreshPool(this.store, pool.id, now);
     const gate = await this.evaluate(pool);
+    if (!gate.ok && gate.kind === "health" && gate.missing && (await treasuryHealthExempt(this.store, pool))) return this.treasuryExempt(pool);
     if (!gate.ok) return this.autoPause(pool, gate.kind, gate.reason);
     await this.autoResume(pool);
     const current = await getPool(this.store, pool.id);
