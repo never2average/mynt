@@ -32,6 +32,7 @@ import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { CovenantService } from "./covenants.js";
+import { TreasuryService, treasuryConfigFromEnv } from "./treasury.js";
 import { partnerLedgerFor } from "./partner-kit.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
 import { Keypair } from "./solana/codec.js";
@@ -84,6 +85,9 @@ Environment:
   SOLANA_RPC_URL_DEVNET     Solana programs: devnet RPC (default the public devnet endpoint); keys sealed with MYNT_VAULT_KEY
   SOLANA_RPC_URL_MAINNET    Mainnet RPC (no default). Mainnet also needs an admin's configure_solana_signer, and for
                             the mainnet-vault backend SOLANA_MAINNET_VAULT_SIGNER=enabled
+  SOLANA_DEVNET_USDC_MINT   Treasury pools (devnet only): the USDC mint pools must hold (default Circle's devnet USDC);
+                            TREASURY_INDEX_POLL_MS (default 30000), TREASURY_INDEX_PER_POLL (default 200). The deposit
+                            attester is generated in the vault (MYNT_VAULT_KEY) on first use
   PRODUCT_HEALTH_PROGRAM_ID The deployed product-health program (devnet); unset, the worker doesn't run. PRODUCT_HEALTH_INTERVAL_MINUTES (default 60)
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
                             (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)`;
@@ -168,7 +172,9 @@ const openServices = async () => {
   const liquidity = new LiquidityWorker(store, productHealth, liquidityConfigFromEnv(process.env, healthConfig.intervalMs));
   // Licence providers' rules on those records: evaluated on each snapshot and on their own timer.
   const covenants = await CovenantService.open(db, store, productHealth);
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants };
+  // Pools' on-chain treasuries (devnet): the registry, Mynt's deposit attester and the indexer.
+  const treasury = await TreasuryService.open(db, store, solana, treasuryConfigFromEnv());
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury };
 };
 
 const parseRoles = (): Role[] => {
@@ -214,13 +220,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -252,7 +258,7 @@ if (values.help) {
         .finally(() => setTimeout(tick, wait));
     setTimeout(tick, 60_000);
   }
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
@@ -283,7 +289,11 @@ if (values.help) {
   // Deployed Solana programs' new events go to their firms' webhooks.
   const programEvents = setInterval(() => solana.pollEvents().catch((e) => console.error("solana indexer:", (e as Error).message)), Number(process.env.SOLANA_INDEX_POLL_MS ?? 30_000));
   programEvents.unref();
+  // Registered pools' devnet treasuries: their deposits, requests and payments into Mynt's records.
+  const treasuryEvents = setInterval(() => treasury.index().catch((e) => console.error("treasury indexer:", (e as Error).message)), Number(process.env.TREASURY_INDEX_POLL_MS ?? 30_000));
+  treasuryEvents.unref();
   process.on("SIGTERM", () => {
+    clearInterval(treasuryEvents);
     clearInterval(drift);
     clearInterval(firmChecks);
     clearInterval(vendorRuns);

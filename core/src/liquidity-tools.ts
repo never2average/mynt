@@ -6,6 +6,9 @@ import { correctionDisputeMs, getPool, liquidityConfigFromEnv, evaluatePool, wit
 import { US_STATES } from "./money-rails.js";
 import type { ProductHealthService } from "./product-health.js";
 import { effectiveRoles, type Store, type User } from "./store.js";
+import type { LinkedAccountsService } from "./linked-accounts.js";
+import type { TreasuryService } from "./treasury.js";
+import { treasuryStanding } from "./treasury-tools.js";
 
 // The tools of liquidity pools. See liquidity.ts for what a pool is and why money only ever moves on an approved rail.
 
@@ -28,7 +31,14 @@ export interface LiquidityRoles {
 
 export const hasLiquidityRole = (roles: LiquidityRoles) => roles.admin || roles.licenceProvider || roles.builder || roles.liquidityProvider;
 
-export function registerLiquidityTools(server: McpServer, store: Store, user: User, roles: LiquidityRoles, health: ProductHealthService | null) {
+export function registerLiquidityTools(server: McpServer, store: Store, user: User, roles: LiquidityRoles, health: ProductHealthService | null, onChain: { treasury?: TreasuryService | null; identity?: LinkedAccountsService | null } = {}) {
+  const treasury = onChain.treasury ?? null;
+  // Pools with an on-chain treasury (treasury.ts) carry it, read from devnet.
+  const withTreasury = async <R extends { id?: string; pool_id?: string }>(rows: R[]) => {
+    if (!treasury) return rows;
+    const views = await treasury.views(rows.map((r) => (r.id ?? r.pool_id)!));
+    return rows.map((r) => (views.has((r.id ?? r.pool_id)!) ? { ...r, treasury: views.get((r.id ?? r.pool_id)!) } : r));
+  };
   const now = () => (health ? health.clock() : new Date());
   const healthAgeMs = () => liquidityConfigFromEnv(process.env, health?.config.intervalMs ?? 3_600_000).maxHealthAgeMs;
   const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
@@ -428,7 +438,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         const owned = roles.builder && firm ? new Set((await productsAnsweredBy(store, await me())).filter((p) => p.entity_id === firm).map((p) => p.product.id)) : new Set<string>();
         const pools = rows.map(toPool).filter((p) => roles.admin || (roles.builder && owned.has(p.product_id)) || (roles.licenceProvider && p.sponsor_entity_id === firm) || (roles.liquidityProvider && canSee(p, committed)));
         await audit("list_pools", product_id ?? "all", { returned: pools.length });
-        return json(pools);
+        return json(await withTreasury(pools));
       },
     );
 
@@ -635,9 +645,16 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     async ({ pool_id, include_entries }) => {
       const firm = await myFirm();
       if (!firm) return fail(noFirm);
-      const positions = await positionsOf(firm, pool_id);
-      await audit("list_my_positions", pool_id ?? "all", { returned: positions.length });
-      return json(include_entries ? await Promise.all(positions.map(async (p) => ({ ...p, entries: await entriesOf(firm, p.pool_id, p.sandbox) }))) : positions);
+      const positions = (await positionsOf(firm, pool_id)).map((p) => ({ source: "off-chain" as const, ...p }));
+      const off = include_entries ? await Promise.all(positions.map(async (p) => ({ ...p, entries: await entriesOf(firm, p.pool_id, p.sandbox) }))) : positions;
+      // On-chain positions (devnet treasuries), from the indexer: every wallet the firm's people prepared from, and yours.
+      let on: unknown[] = [];
+      if (treasury) {
+        const linked = await treasuryStanding(store, user, onChain.identity ?? null);
+        on = await treasury.positions(await treasury.walletsOf(firm, Array.isArray(linked.wallets) ? linked.wallets : []), pool_id);
+      }
+      await audit("list_my_positions", pool_id ?? "all", { returned: positions.length + on.length });
+      return json([...off, ...on]);
     },
   );
 
@@ -659,7 +676,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       const out = [];
       for (const pool of pools) out.push(await poolHealthRow(pool));
       await audit("list_pools_with_health", "all", { returned: out.length });
-      return json(out);
+      return json(await withTreasury(out));
     },
   );
 

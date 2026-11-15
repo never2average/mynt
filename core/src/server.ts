@@ -47,6 +47,7 @@ import { registerProductHealthTools } from "./product-health-tools.js";
 import { registerPartnerKitTools } from "./partner-kit.js";
 import { registerFirmNoticeTools } from "./firm-notices.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
+import { registerTreasuryTools } from "./treasury-tools.js";
 import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
@@ -163,7 +164,11 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
-  if (user && hasLiquidityRole(rolesFrom(user))) registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null);
+  if (user && hasLiquidityRole(rolesFrom(user))) {
+    registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null, { treasury: ctx.treasury ?? null, identity: ctx.identity ?? null });
+    // On-chain treasuries (devnet): Mynt prepares unsigned transactions; the person's own wallet signs them.
+    if (ctx.treasury) registerTreasuryTools(server, store, user, rolesFrom(user), ctx.treasury, ctx.identity ?? null);
+  }
   if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
   // Every signed-in account reads its firm notices, and can block a recovery at a firm it has been a licence provider at.
   if (user) registerFirmNoticeTools(server, store, user);

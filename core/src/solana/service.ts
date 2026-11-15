@@ -6,6 +6,7 @@ import { canSeeBuild } from "../workspaces.js";
 import { open, seal, vaultAvailable } from "../vault.js";
 import { anchorDiscriminator, base58Encode, executableHash, findProgramAddress, isAddress, Keypair, pubkeyBytes } from "./codec.js";
 import { HealthPublisher, healthIx } from "./product-health-chain.js";
+import { TreasuryAttester } from "./treasury-chain.js";
 import { CLUSTERS, GenesisCheckedRpc, HttpSolanaRpc, RateLimiter, rpcMaxRetryMsFromEnv, rpcPaceFromEnv, rpcUrlsFromEnv, type Cluster, type SolanaRpc } from "./rpc.js";
 import {
   CustodyServiceSigner,
@@ -285,6 +286,7 @@ const SIGNATURE_FEE = 5_000; // lamports per signature, Solana's base fee
 // Custody deploys: Mynt's deploy payer (SOL only, no program) and each deploy's temporary buffer key.
 const DEPLOY_PAYER = "deploy-payer";
 const HEALTH_PUBLISHER_ROLE = "health_publisher";
+const TREASURY_ATTESTER_ROLE = "treasury_attester";
 const BUFFER_KEY = "buffer-authority";
 const BUFFER_ACCOUNT = "buffer"; // the buffer a buffer key is writing, so a crash's leftover can be closed
 const VAULT_BUFFER = "vault-buffer"; // the buffer a vault-signed deploy is writing, so a failure's leftover can be closed
@@ -534,6 +536,14 @@ export class SolanaService {
     if (!vaultAvailable(false)) throw new SignerNotConfigured("The product-health publisher needs MYNT_VAULT_KEY set on the server");
     const key = (await this.vaultKey("devnet", HEALTH_PUBLISHER_ROLE, "")) ?? (await this.createKey("devnet", HEALTH_PUBLISHER_ROLE, ""));
     return new HealthPublisher(key, programId);
+  }
+
+  // Devnet's treasury attester: its own role in the vault, separate from every other key, generated once. It holds no
+  // funds and signs only deposit approvals (TreasuryAttester); nothing hands it out to sign a transaction.
+  async treasuryAttester(): Promise<TreasuryAttester> {
+    if (!vaultAvailable(false)) throw new SignerNotConfigured("The treasury attester needs MYNT_VAULT_KEY set on the server");
+    const key = (await this.vaultKey("devnet", TREASURY_ATTESTER_ROLE, "")) ?? (await this.createKey("devnet", TREASURY_ATTESTER_ROLE, ""));
+    return new TreasuryAttester(key);
   }
 
   // Sends a publisher-signed transaction on devnet, through the RPC client's retries and backoff.
