@@ -1,16 +1,13 @@
-// Mynt's visual identity, in one place for the logo, the icons, the share image, the manifest
-// and the page metadata. The theme's CSS variables (app/globals.css) use the same colours.
+// The studio's few brand values, for the icons, the share image, the manifest and the page
+// metadata. The UI is shadcn's neutral palette (app/globals.css); the app icon's mint is its only
+// accent.
 
 export const BRAND = {
-  forest: "#0F2A23", // deep forest green: dark backgrounds
-  panel: "#153C31", // darker panels on the forest background
-  outline: "#2E8C66", // outline ring
-  mint: "#3DDC97", // the mark, and the accent
-  deepGreen: "#13805A", // labels and links on light backgrounds
-  light: "#F2F6F3", // light background
-  ink: "#10241D", // body text on light
-  muted: "#5E7169", // muted text on light
-  white: "#FFFFFF",
+  mint: "#3DDC97", // the app icon's circle, and the UI's accent
+  deepMint: "#13805A", // the accent where mint is too light to see (focus rings on white)
+  dark: "#09090B", // the dark theme's background, behind the app icon
+  light: "#FFFFFF", // the light theme's background
+  mutedOnDark: "#A1A1AA", // muted text on the dark background
 } as const;
 
 export const SITE_NAME = "Mynt Studio";
