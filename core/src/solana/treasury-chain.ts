@@ -1,5 +1,6 @@
 import { anchorDiscriminator, base58Decode, base58Encode, findProgramAddress, Keypair, pubkeyBytes } from "./codec.js";
 import { SYSTEM_PROGRAM, shortVec, type AccountMeta, type Instruction } from "./tx.js";
+import { GENESIS_HASH } from "./rpc.js";
 
 // The per-app treasury program (workspaces/coding-build/templates/solana-treasury, program mynt_treasury) from
 // Mynt's side: its account layouts, its events, the deposit and request_withdrawal instructions, the Ed25519
@@ -335,6 +336,8 @@ export type TreasuryEvent =
   | { name: "WithdrawalRequested"; pool: string; depositor: string; deposit: string; request: string; seq: bigint; amount: bigint; payable_at: bigint }
   | { name: "WithdrawalPaid"; pool: string; depositor: string; request: string; seq: bigint; amount: bigint; remaining: bigint; partial: boolean; parked: boolean; reserve_floor: bigint; vault_after: bigint }
   | { name: "RequestCancelled" | "RequestVoided" | "RequestParked"; pool: string; depositor: string; request: string; seq: bigint; amount: bigint }
+  | { name: "TermsApplied"; pool: string; attesters: [string, string] }
+  | { name: "AttesterRemoved"; pool: string; attester: string }
   | { name: "other"; event: string };
 
 const EVENTS = ["DepositMade", "DepositRejected", "WithdrawalRequested", "WithdrawalPaid", "RequestCancelled", "RequestVoided", "RequestParked"] as const;
@@ -378,6 +381,12 @@ export function decodeEvent(data: Uint8Array): TreasuryEvent | null {
       case "RequestVoided":
       case "RequestParked":
         return { name, pool: r.key(), depositor: r.key(), request: r.key(), seq: r.u64(), amount: r.u64() };
+      case "TermsApplied": {
+        const pool = r.key();
+        return { name, pool, attesters: readTerms(r).attesters };
+      }
+      case "AttesterRemoved":
+        return { name, pool: r.key(), attester: r.key() };
       default:
         return { name: "other", event: name };
     }
@@ -387,7 +396,7 @@ export function decodeEvent(data: Uint8Array): TreasuryEvent | null {
 }
 
 // The Borsh bytes of an event, for fixtures: the inverse of decodeEvent for the events positions are built from.
-export function encodeEvent(e: Exclude<TreasuryEvent, { name: "other" }>): Uint8Array {
+export function encodeEvent(e: Exclude<TreasuryEvent, { name: "other" | "TermsApplied" | "AttesterRemoved" }>): Uint8Array {
   const k = (a: string) => Buffer.from(pubkeyBytes(a));
   const b = (v: boolean) => Buffer.from([v ? 1 : 0]);
   const head = Buffer.from(anchorDiscriminator("event", e.name));
@@ -547,7 +556,8 @@ export class AttesterRefused extends Error {}
 
 // Devnet's treasury attester, sealed in the vault under its own role. It holds no funds and no other authority, and
 // it signs one thing only: a deposit approval it builds itself, in the program's layout, expiring within ten minutes.
-// It never signs a transaction message, so no code holding this object can make it pay, transfer or call a program.
+// It never signs a transaction message, so no code holding this object can make it pay, transfer or call a program,
+// and it signs only for devnet: an approval naming any other cluster's genesis hash is refused.
 export class TreasuryAttester {
   readonly #key: Keypair;
   constructor(key: Keypair) {
@@ -562,6 +572,7 @@ export class TreasuryAttester {
   signDepositApproval(o: { programId: string; cluster: Uint8Array; pool: string; depositor: string; nonce: bigint; expiry: bigint }, nowSeconds: number): { message: Uint8Array; signature: Uint8Array } {
     const expiry = Number(o.expiry);
     if (!(expiry > nowSeconds) || expiry - nowSeconds > MAX_APPROVAL_SECONDS) throw new AttesterRefused(`A deposit approval expires within ${MAX_APPROVAL_SECONDS / 60} minutes`);
+    if (!Buffer.from(o.cluster).equals(Buffer.from(base58Decode(GENESIS_HASH.devnet)))) throw new AttesterRefused("The treasury attester signs devnet approvals only");
     const message = depositApprovalMessage(o);
     return { message, signature: this.#key.sign(message) };
   }

@@ -76,6 +76,7 @@ const FINANCIAL = [
   "prepare_treasury_deposit_refused",
   "prepare_treasury_withdrawal",
   "prepare_treasury_withdrawal_refused",
+  "treasury_attesters_flagged",
   "request_withdrawal",
   "request_withdrawal_refused",
   "cancel_withdrawal",

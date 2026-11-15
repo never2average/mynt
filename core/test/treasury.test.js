@@ -184,10 +184,12 @@ class FakeDevnet {
       case "getBalance":
         return { value: 3_000_000_000 };
       case "getSignaturesForAddress": {
-        const all = this.signatures.get(params[0]) ?? [];
-        const until = params[1]?.until;
+        // Newest first: after `before`, down to (not including) `until`, at most `limit`.
+        let all = this.signatures.get(params[0]) ?? [];
+        const { until, before, limit = 1000 } = params[1] ?? {};
+        if (before) all = all.slice(all.findIndex((s) => s.signature === before) + 1);
         const i = until ? all.findIndex((s) => s.signature === until) : -1;
-        return (i >= 0 ? all.slice(0, i) : all).map((s) => ({ ...s, err: null }));
+        return (i >= 0 ? all.slice(0, i) : all).slice(0, limit).map((s) => ({ err: null, ...s }));
       }
       case "getTransaction":
         return this.transactions.get(params[0]) ?? null;
@@ -200,14 +202,14 @@ class FakeDevnet {
 }
 
 // One builder's product with a sponsored, approved pool on it; two liquidity-provider firms; a devnet treasury.
-async function world() {
+async function world(config = {}) {
   const pg = new PGlite();
   closers.push(() => pg.close().catch(() => {}));
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const devnet = new FakeDevnet();
   const solana = await SolanaService.open(db, store, solanaConfigFromEnv({}), { rpc: () => devnet, custody: null });
-  const treasury = await TreasuryService.open(db, store, solana, { usdcMint: chain.DEVNET_USDC_MINT, indexPerPoll: 200 });
+  const treasury = await TreasuryService.open(db, store, solana, { usdcMint: chain.DEVNET_USDC_MINT, indexPerPoll: 200, ...config });
   const linked = new Map(); // user id -> wallets
   const identity = new LinkedAccountsService({ subjectOf: async (id) => id, linkedAccounts: async (id) => ({ git: null, wallets: linked.get(id) ?? [] }), manageUrl: () => null }, 0, Date.now, 0);
   const connect = async (user) => {
@@ -246,6 +248,8 @@ async function world() {
   devnet.set(programId, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(2), key(programData)]), true);
   devnet.set(programData, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(3), u64(1), bool(true), key(addr(41)), Buffer.from("not the template's bytes"), Buffer.alloc(16)]));
   const creator = addr(42);
+  // The builder holds the pool's creator key, as a verified wallet linked to their sign-in.
+  linked.set(builder.user.id, [{ chain: "solana", address: creator, verified: true }]);
   let nextPoolNumber = 1;
   const treasuryPool = (o = {}) => {
     const poolId = nextPoolNumber++;
@@ -256,7 +260,7 @@ async function world() {
     write();
     return { address, vault, write, p };
   };
-  return { db, store, devnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, treasuryPool, connect, productId: seed.id };
+  return { db, store, devnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, treasuryPool, connect, firm, productId: seed.id, creator };
 }
 
 const callTool = async (client, name, args = {}) => {
@@ -307,6 +311,22 @@ test("registering a treasury: the builder's own pool, devnet only, a real treasu
   await refused(await s.connect(user), "register_treasury_pool", args, "not_builder");
   const noAttester = s.treasuryPool({ terms: { attesters: [addr(50), chain.ZERO_KEY] } });
   await refused(s.builder.client, "register_treasury_pool", { ...args, pool_address: noAttester.address }, "attester_missing");
+  // Mynt's attester and another: someone else could admit depositors Mynt never checked.
+  const extra = s.treasuryPool({ terms: { attesters: [s.attester, addr(53)] } });
+  await refused(s.builder.client, "register_treasury_pool", { ...args, pool_address: extra.address }, "unexpected_attesters");
+  const swapped = s.treasuryPool({ terms: { attesters: [chain.ZERO_KEY, s.attester] } });
+  await refused(s.builder.client, "register_treasury_pool", { ...args, pool_address: swapped.address }, "unexpected_attesters");
+  // The pool must be the builder's: its creator or authority a wallet linked to them.
+  s.linked.set(s.builder.user.id, []);
+  await refused(s.builder.client, "register_treasury_pool", args, "not_pool_owner");
+  s.linked.set(s.builder.user.id, [{ chain: "solana", address: addr(40), verified: true }]); // the pool's authority
+  await ok(s.builder.client, "register_treasury_pool", args);
+  s.linked.set(s.builder.user.id, [{ chain: "solana", address: s.creator, verified: false }]);
+  await refused(s.builder.client, "register_treasury_pool", args, "not_pool_owner");
+  // An admin may register it for them.
+  const { user: adminUser } = await s.store.createUser("Ada", ["admin"]);
+  await ok(await s.connect(adminUser), "register_treasury_pool", args);
+  s.linked.set(s.builder.user.id, [{ chain: "solana", address: s.creator, verified: true }]);
   const otherMint = s.treasuryPool({ mint: addr(51) });
   await refused(s.builder.client, "register_treasury_pool", { ...args, pool_address: otherMint.address }, "wrong_mint");
   const mainnetCluster = s.treasuryPool({ cluster: Buffer.from(base58Decode(GENESIS_HASH.mainnet)) });
@@ -529,7 +549,8 @@ test("the indexer turns the treasury's events into on-chain positions, once, and
   s.devnet.statuses.set(sig(3), { slot: 10, err: null, confirmationStatus: "confirmed" });
   s.devnet.transactions.get(sig(3)).transaction = { message: { accountKeys: [wallet, address] } };
   const st = await ok(s.fundA.client, "get_treasury_tx_status", { signature: sig(3) });
-  assert.deepEqual({ status: st.status, indexed: st.indexed_pools }, { status: "confirmed", indexed: [poolId] });
+  assert.deepEqual({ status: st.status, queued: st.queued_pools }, { status: "confirmed", queued: [poolId] });
+  await s.treasury.idle();
   s.devnet.statuses.set(sig(5), { slot: 11, err: { InstructionError: [1, { Custom: 6012 }] } });
   assert.equal((await ok(s.fundA.client, "get_treasury_tx_status", { signature: sig(5) })).status, "failed");
 });
@@ -543,4 +564,166 @@ test("events decode from the program's layouts and pool accounts from its size",
   assert.equal(pool.length, chain.POOL_SIZE, "8 + Pool::INIT_SPACE");
   assert.equal(chain.decodePool(pool.subarray(0, pool.length - 1)), null);
   assert.equal(chain.decodePool(pool).terms.health_authority, addr(44));
+});
+
+// ---- the review's fixes ----
+
+const { opsStatus } = await import("../dist/ops.js");
+const sigN = (n) => base58Encode(Buffer.concat([Buffer.from("treasury-sig"), u32(n), Buffer.alloc(48)]));
+const eventLine = (bytes) => `Program data: ${Buffer.from(bytes).toString("base64")}`;
+const txOf = (programId, ...datas) => ({ slot: 10, meta: { err: null, logMessages: [`Program ${programId} invoke [1]`, ...datas.map(eventLine), `Program ${programId} success`] } });
+const termsApplied = (pool, attesters) => Buffer.concat([Buffer.from(anchorDiscriminator("event", "TermsApplied")), key(pool), encodeTerms(terms({ attesters }))]);
+const depositMade = (pool, depositor, seq, amount, at) =>
+  chain.encodeEvent({ name: "DepositMade", pool, depositor, deposit: chain.depositAddress(addr(1), pool, seq), seq: BigInt(seq), amount: BigInt(amount), settled_at: BigInt(at), review_until: BigInt(at), unlock_at: BigInt(at), principal_after: BigInt(amount) });
+
+test("approvals are only ever for devnet: the attester refuses another cluster, and a pool that names one is refused", async () => {
+  const attester = new chain.TreasuryAttester(Keypair.generate());
+  const now = 1_700_000_000;
+  const o = { programId: addr(1), pool: addr(2), depositor: addr(3), nonce: 0n, expiry: BigInt(now + 60) };
+  assert.throws(() => attester.signDepositApproval({ ...o, cluster: Buffer.from(base58Decode(GENESIS_HASH.mainnet)) }, now), /devnet approvals only/);
+  assert.throws(() => attester.signDepositApproval({ ...o, cluster: Buffer.alloc(32) }, now), /devnet approvals only/);
+  assert.ok(attester.signDepositApproval({ ...o, cluster: DEVNET }, now).signature.length === 64);
+
+  const s = await world();
+  const { poolId, write } = await registered(s);
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  // The account now names mainnet's genesis hash: refused, nothing signed.
+  write({ cluster: Buffer.from(base58Decode(GENESIS_HASH.mainnet)) });
+  await refused(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 0 }, "wrong_cluster");
+});
+
+test("an attester change on chain stops Mynt's approvals for the pool and flags it, from the indexer or a fresh read", async () => {
+  const s = await world();
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  const args = (poolId) => ({ pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 0 });
+
+  // The indexer reads a TermsApplied that adds a second attester.
+  const a = await registered(s);
+  await ok(s.fundA.client, "prepare_treasury_deposit", args(a.poolId));
+  s.devnet.transactions.set(sigN(1), txOf(s.programId, termsApplied(a.address, [s.attester, chain.ZERO_KEY])));
+  s.devnet.transactions.set(sigN(2), txOf(s.programId, termsApplied(a.address, [s.attester, addr(70)])));
+  s.devnet.signatures.set(a.address, [{ signature: sigN(2), slot: 2 }, { signature: sigN(1), slot: 1 }]);
+  await s.treasury.index();
+  const flagged = await refused(s.fundA.client, "prepare_treasury_deposit", args(a.poolId), "attesters_changed");
+  assert.match(flagged.error, /attesters/);
+  const row = (await ok(s.builder.client, "list_pools", {})).find((p) => p.id === a.poolId);
+  assert.match(row.treasury.attesters_flag, /a terms change set the attesters/);
+  assert.ok((await opsStatus(s.db)).attention.some((l) => /treasury pools: 1 devnet treasury/.test(l)));
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'treasury_attesters_flagged'")).rows[0].n, 1);
+  // Registering again with the attesters put back clears it.
+  await ok(s.builder.client, "register_treasury_pool", { pool_id: a.poolId, cluster: "devnet", program_id: s.programId, pool_address: a.address });
+  await ok(s.fundA.client, "prepare_treasury_deposit", args(a.poolId));
+
+  // No event read yet, but the fresh read before signing shows the change: refused and flagged.
+  const b = await registered(s);
+  b.write({ terms: terms({ attesters: [s.attester, addr(71)] }) });
+  await refused(s.fundA.client, "prepare_treasury_deposit", args(b.poolId), "attesters_changed");
+  assert.ok((await s.db.query("SELECT attesters_flag FROM financial_products.treasury_pools WHERE pool_id = $1", [b.poolId])).rows[0].attesters_flag);
+  // An AttesterRemoved event flags too.
+  const c = await registered(s);
+  s.devnet.transactions.set(sigN(3), txOf(s.programId, Buffer.concat([Buffer.from(anchorDiscriminator("event", "AttesterRemoved")), key(c.address), key(s.attester)])));
+  s.devnet.signatures.set(c.address, [{ signature: sigN(3), slot: 3 }]);
+  await s.treasury.index();
+  await refused(s.fundA.client, "prepare_treasury_deposit", args(c.poolId), "attesters_changed");
+});
+
+test("the indexer pages back to its cursor across polls, a bounded amount each time, and skips nothing", async () => {
+  // One page of signatures a poll and 500 transactions read a poll, so a backlog takes many polls.
+  const s = await world({ indexPagesPerPoll: 1, indexPerPoll: 500 });
+  const { address } = await registered(s);
+  const wallet = Keypair.generate().address;
+  const list = [];
+  // 2500 signatures, newest first; deposits at the oldest, in the second page and the newest.
+  const at = Math.floor(Date.now() / 1000) - 10;
+  for (let n = 0; n < 2500; n++) list.unshift({ signature: sigN(1000 + n), slot: 100 + n });
+  const withDeposit = { 0: 1, 1500: 2, 2499: 3 };
+  for (const [n, seq] of Object.entries(withDeposit)) s.devnet.transactions.set(sigN(1000 + Number(n)), txOf(s.programId, depositMade(address, wallet, seq, 1_000 * seq, at)));
+  s.devnet.signatures.set(address, list);
+  const deposits = async () => (await s.db.query("SELECT seq::int AS seq FROM financial_products.treasury_deposits ORDER BY seq")).rows.map((r) => r.seq);
+  const cursor = async () => (await s.db.query("SELECT index_cursor, scan_before FROM financial_products.treasury_pools")).rows[0];
+
+  // Polls 1 and 2 only scan (a page each); nothing is read until the scan reaches the cursor (none yet: the start).
+  await s.treasury.index();
+  assert.deepEqual(await deposits(), []);
+  assert.equal((await cursor()).scan_before, sigN(1000 + 1500));
+  // Meanwhile, a newer transaction arrives: the next scan finds it.
+  list.unshift({ signature: sigN(9000), slot: 9000 });
+  s.devnet.transactions.set(sigN(9000), txOf(s.programId, depositMade(address, wallet, 4, 4_000, at)));
+  await s.treasury.index();
+  assert.deepEqual(await deposits(), []);
+  // Poll 3 reaches the start: then the oldest 500 are read, oldest first.
+  await s.treasury.index();
+  assert.deepEqual(await deposits(), [1]);
+  assert.equal((await cursor()).index_cursor, sigN(1000 + 2499), "the cursor is the newest signature the scan started from");
+  for (let i = 0; i < 4; i++) await s.treasury.index();
+  assert.deepEqual(await deposits(), [1, 2, 3]);
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_pending")).rows[0].n, 0);
+  // The next scan, from the cursor, picks up what arrived in the meantime.
+  await s.treasury.index();
+  assert.deepEqual(await deposits(), [1, 2, 3, 4]);
+  assert.equal((await cursor()).index_cursor, sigN(9000));
+});
+
+test("status checks and prepares are rate-limited per person, and a confirmed status queues its pools for the indexer", async () => {
+  const s = await world();
+  const { poolId, address } = await registered(s);
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.statuses.set(sigN(1), { slot: 5, err: null, confirmationStatus: "finalized" });
+  s.devnet.transactions.set(sigN(1), { ...txOf(s.programId, depositMade(address, wallet, 0, 7_000, Math.floor(Date.now() / 1000))), transaction: { message: { accountKeys: [wallet, address] } } });
+  s.devnet.signatures.set(address, [{ signature: sigN(1), slot: 5 }]);
+  const st = await ok(s.fundA.client, "get_treasury_tx_status", { signature: sigN(1) });
+  assert.deepEqual(st.queued_pools, [poolId]);
+  await s.treasury.idle();
+  assert.equal((await ok(s.fundA.client, "list_my_positions", {})).find((p) => p.source === "on-chain")?.principal, 7_000);
+  for (let i = 1; i < 30; i++) await ok(s.fundA.client, "get_treasury_tx_status", { signature: sigN(2) });
+  await refused(s.fundA.client, "get_treasury_tx_status", { signature: sigN(2) }, "rate_limited");
+  // Someone else isn't held up.
+  await ok(s.fundB.client, "get_treasury_tx_status", { signature: sigN(2) });
+  // Prepares: twenty a minute, refused or not.
+  const args = { pool_id: poolId, wallet, amount_usdc_base_units: 1, max_lock_in_seconds: 0 };
+  for (let i = 0; i < 20; i++) await refused(s.fundB.client, "prepare_treasury_deposit", args, "wallet_not_linked");
+  await refused(s.fundB.client, "prepare_treasury_deposit", args, "rate_limited");
+  await refused(s.fundB.client, "prepare_treasury_withdrawal", { pool_id: poolId, wallet, deposit: addr(5), amount_usdc_base_units: 1, max_notice_seconds: 0 }, "rate_limited");
+});
+
+test("positions and the firm's limit follow each wallet's current link: unlinked or gone from the firm, it stops counting", async () => {
+  const s = await world();
+  const { poolId, address } = await registered(s);
+  const wallet = Keypair.generate().address;
+  // Two people at Fund A; the first prepares from their wallet.
+  const second = await s.store.createUser("Fund A second person", ["liquidity_provider"]);
+  await s.store.setUserEntity(second.user.id, s.fundA.entity.id);
+  second.user.entity_id = s.fundA.entity.id;
+  const colleague = await s.connect(second.user);
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  await ok(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 0 });
+  s.devnet.transactions.set(sigN(1), txOf(s.programId, depositMade(address, wallet, 0, 4_000_000, Math.floor(Date.now() / 1000))));
+  s.devnet.signatures.set(address, [{ signature: sigN(1), slot: 1 }]);
+  await s.treasury.index();
+  const onChain = async (client) => (await ok(client, "list_my_positions", {})).filter((p) => p.source === "on-chain");
+  assert.equal((await onChain(colleague)).length, 1, "the colleague sees the firm's wallet while it's linked");
+  // Its 4 USDC counts toward the firm's limit for the colleague's own wallet: 500 cents is 5 USDC.
+  const own = Keypair.generate().address;
+  s.linked.set(second.user.id, [{ chain: "solana", address: own, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(own, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, own, 50_000_000));
+  await s.db.query("UPDATE financial_products.liquidity_pools SET max_commitment_cents = 500 WHERE id = $1", [poolId]);
+  const ownArgs = { pool_id: poolId, wallet: own, amount_usdc_base_units: 2_000_000, max_lock_in_seconds: 0 };
+  await refused(colleague, "prepare_treasury_deposit", ownArgs, "over_limit");
+  // The first person unlinks it: it no longer counts, and its record is dropped.
+  s.linked.set(s.fundA.user.id, []);
+  assert.equal((await onChain(colleague)).length, 0);
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_wallets WHERE wallet = $1", [wallet])).rows[0].n, 0);
+  await ok(colleague, "prepare_treasury_deposit", ownArgs);
+  // Someone who leaves the firm takes their wallets with them.
+  const other = await s.store.createEntity(null, { name: "Elsewhere", registration_numbers: {}, regions: ["US"] });
+  await s.store.setUserEntity(second.user.id, other.id);
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_wallets WHERE user_id = $1", [second.user.id])).rows[0].n, 1);
+  await onChain(s.fundA.client);
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_wallets WHERE user_id = $1", [second.user.id])).rows[0].n, 0);
 });

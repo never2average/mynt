@@ -24,13 +24,19 @@ export async function treasuryStanding(store: Store, user: User, identity: Linke
   if (!me.entity_id) firmProblem = "You don't belong to a firm yet; an admin adds your firm (register_firm) and you to it (add_entity_member)";
   else if ((await store.getEntity(me.entity_id))?.status !== "active") firmProblem = "Your firm isn't active on Mynt";
   else firm = me.entity_id;
+  // Anyone's verified Solana wallets as the identity provider has them now; null when that can't be read.
+  const linkedOf = async (userId: string): Promise<string[] | null> => {
+    if (!identity) return null;
+    const r = await identity.forUser(userId);
+    return r.wallets === null ? null : r.wallets.filter((w) => w.chain === "solana" && w.verified).map((w) => w.address);
+  };
   let wallets: Standing["wallets"];
   if (!identity) wallets = { unavailable: "No identity provider is connected to this Mynt, so linked wallets can't be read" };
   else {
     const r = await identity.forUser(user.id);
     wallets = r.wallets === null ? { unavailable: "unavailable" in r ? r.unavailable : "Your linked wallets couldn't be read" } : r.wallets.filter((w) => w.chain === "solana" && w.verified).map((w) => w.address);
   }
-  return { user: me, firm, firmProblem, wallets };
+  return { user: me, firm, firmProblem, wallets, linkedOf };
 }
 
 export function registerTreasuryTools(server: McpServer, store: Store, user: User, roles: LiquidityRoles, treasury: TreasuryService, identity: LinkedAccountsService | null) {
@@ -71,7 +77,7 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Register a pool's on-chain treasury",
         description:
-          "Builder of the pool's product: name the devnet treasury (a program built from Mynt's treasury template, and its pool account) that holds this pool's capital. Mynt reads both from devnet and refuses a pool account that isn't a mynt_treasury pool at its own address, for devnet, holding devnet USDC, with Mynt's attester (get_treasury_attester) among its attesters. The program's executable hash is recorded; a build Mynt hasn't rebuilt from the template at this address is shown as an unverified build (devnet takes it). Devnet only: mainnet is refused (mainnet_disabled). Registering again replaces it.",
+          "Builder of the pool's product: name the devnet treasury (a program built from Mynt's treasury template, and its pool account) that holds this pool's capital. Mynt reads both from devnet and refuses a pool account that isn't a mynt_treasury pool at its own address, for devnet, holding devnet USDC, whose attesters are exactly [Mynt's attester (get_treasury_attester), none] (attester_missing, unexpected_attesters), and whose creator or authority is a verified Solana wallet linked to you (not_pool_owner; an admin may register any). The program's executable hash is recorded; a build Mynt hasn't rebuilt from the template at this address is shown as an unverified build (devnet takes it). Devnet only: mainnet is refused (mainnet_disabled). Registering again replaces it.",
         inputSchema: { pool_id: z.string().uuid(), cluster: z.enum(TREASURY_CLUSTERS), program_id: Address, pool_address: Address },
       },
       async (input) => {
@@ -84,7 +90,7 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
           if (!owned) return fail("Only the builder of the pool's product can register its treasury", { code: "not_builder" });
         }
         const details = { program_id: input.program_id, pool_address: input.pool_address };
-        const o = await attempt(() => treasury.register(user, input));
+        const o = await attempt(async () => treasury.register(user, input, { admin: roles.admin, wallets: (await treasuryStanding(store, user, identity)).wallets }));
         if ("value" in o) await store.audit(user.id, "register_treasury_pool", input.pool_id, details);
         else if ("refusal" in o) await store.audit(user.id, "register_treasury_pool_refused", input.pool_id, { ...details, code: codeOf(o) });
         return reply(o);
@@ -98,7 +104,7 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Prepare a deposit into a pool's on-chain treasury",
         description:
-          "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, rpc_unavailable.",
+          "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, attesters_changed, wrong_cluster, rate_limited (20 prepares a minute), rpc_unavailable.",
         inputSchema: { pool_id: z.string().uuid(), wallet: Address, amount_usdc_base_units: BaseUnits, max_lock_in_seconds: Seconds },
       },
       async (input) => {
@@ -115,7 +121,7 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Prepare a withdrawal request from a pool's on-chain treasury",
         description:
-          "Liquidity provider, devnet only: an unsigned request_withdrawal transaction against one of your deposits (deposit: its record's address, from list_my_positions), for your wallet to sign and send. It joins the pool's first-in-first-out queue and is paid to the wallet's own USDC account after the notice period, never below the reserve floor. max_notice_seconds is the longest notice you accept. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, deposit_not_found, deposit_rejected, in_review, deposit_locked, over_limit, below_min_request, terms_changed, not_on_chain, mainnet_disabled, rpc_unavailable.",
+          "Liquidity provider, devnet only: an unsigned request_withdrawal transaction against one of your deposits (deposit: its record's address, from list_my_positions), for your wallet to sign and send. It joins the pool's first-in-first-out queue and is paid to the wallet's own USDC account after the notice period, never below the reserve floor. max_notice_seconds is the longest notice you accept. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, deposit_not_found, deposit_rejected, in_review, deposit_locked, over_limit, below_min_request, terms_changed, not_on_chain, mainnet_disabled, rate_limited, rpc_unavailable.",
         inputSchema: { pool_id: z.string().uuid(), wallet: Address, deposit: Address, amount_usdc_base_units: BaseUnits, max_notice_seconds: Seconds },
       },
       async (input) => {
@@ -155,13 +161,13 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Has a treasury transaction landed?",
         description:
-          "Whether a transaction you sent on devnet landed: not_found, processed, confirmed, finalized or failed (with the cluster's error). Once confirmed, Mynt reads the registered treasury pools it touched straight away, so list_my_positions shows it.",
+          "Whether a transaction you sent on devnet landed: not_found, processed, confirmed, finalized or failed (with the cluster's error). Once confirmed, the registered treasury pools it touched are queued for indexing (queued_pools), so list_my_positions shows it within moments. At most 30 calls a minute (rate_limited).",
         inputSchema: { signature: z.string().min(64).max(100) },
         annotations: { readOnlyHint: true },
       },
       async ({ signature }) => {
         try {
-          return json(await treasury.txStatus(signature));
+          return json(await treasury.txStatus(user, signature));
         } catch (e) {
           return e instanceof TreasuryRefusal ? fail(e.message, { code: e.code }) : fail((e as Error).message.slice(0, 300));
         }

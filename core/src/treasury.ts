@@ -110,7 +110,25 @@ const TABLES = `
     lp_entity_id uuid NOT NULL,
     user_id uuid NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (wallet, lp_entity_id)
+    PRIMARY KEY (wallet, lp_entity_id, user_id)
+  );
+  -- A pool whose attesters changed on chain from [Mynt's attester, none]: Mynt stops approving deposits to it.
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS attesters_flag text;
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS attesters_flagged_at timestamptz;
+  -- Asked to be indexed soon (a transaction it touched was confirmed).
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS index_requested_at timestamptz;
+  -- A scan of new signatures part-way: the page to read before, the newest signature it started from, pages read.
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS scan_before text;
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS scan_newest text;
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS scan_pages integer NOT NULL DEFAULT 0;
+  -- Signatures a completed scan found and the indexer hasn't read yet, oldest first by (slot, pos DESC).
+  CREATE TABLE IF NOT EXISTS ${T}.treasury_pending (
+    pool_id uuid NOT NULL,
+    signature text NOT NULL,
+    slot bigint NOT NULL,
+    pos bigint NOT NULL,
+    failed boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (pool_id, signature)
   );
 `;
 
@@ -125,11 +143,14 @@ const MANIFEST = JSON.parse(readFileSync(fileURLToPath(new URL("../schemas/solan
 export interface TreasuryConfig {
   usdcMint: string; // SOLANA_DEVNET_USDC_MINT, default Circle's devnet USDC
   indexPerPoll: number; // TREASURY_INDEX_PER_POLL: transactions read per pool per poll
+  indexPagesPerPoll?: number; // signature pages (1000 each) scanned per pool per poll; the scan resumes where it stopped
+  prepareLimitPerMinute?: number; // prepare_* calls per person a minute (20)
+  statusLimitPerMinute?: number; // get_treasury_tx_status calls per person a minute (30)
 }
 export function treasuryConfigFromEnv(env = process.env): TreasuryConfig {
   const mint = env.SOLANA_DEVNET_USDC_MINT && isAddress(env.SOLANA_DEVNET_USDC_MINT) ? env.SOLANA_DEVNET_USDC_MINT : DEVNET_USDC_MINT;
   const per = Number(env.TREASURY_INDEX_PER_POLL);
-  return { usdcMint: mint, indexPerPoll: env.TREASURY_INDEX_PER_POLL && per >= 1 ? Math.floor(per) : 200 };
+  return { usdcMint: mint, indexPerPoll: env.TREASURY_INDEX_PER_POLL && per >= 1 ? Math.floor(per) : 200, indexPagesPerPoll: 5, prepareLimitPerMinute: 20, statusLimitPerMinute: 30 };
 }
 
 // What the treasury needs of Mynt's Solana service: a cluster's RPC (checked against its genesis hash) and the
@@ -156,6 +177,9 @@ function refuse(code: string, message: string, extra: Record<string, unknown> = 
 export const units = (v: bigint) => (v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v.toString());
 const big = (v: unknown) => BigInt(String(v ?? 0));
 const iso = (seconds: bigint | number) => new Date(Number(seconds) * 1000).toISOString();
+const DEVNET_GENESIS = Buffer.from(base58Decode(GENESIS_HASH.devnet));
+// The only attester set Mynt approves deposits under: its own attester in the first slot, the second empty.
+export const exactAttesters = (attesters: readonly string[], mynt: string) => attesters.length === 2 && attesters[0] === mynt && attesters[1] === ZERO_KEY;
 
 type Row = Record<string, unknown>;
 export interface TreasuryRow {
@@ -171,6 +195,10 @@ export interface TreasuryRow {
   verified_build: boolean;
   build_note: string | null;
   index_cursor: string | null;
+  attesters_flag: string | null;
+  scan_before: string | null;
+  scan_newest: string | null;
+  scan_pages: number;
 }
 
 interface AccountInfo {
@@ -186,10 +214,15 @@ export interface Standing {
   firmProblem: string | null;
   // The caller's verified Solana wallets linked to their sign-in, or why they couldn't be read.
   wallets: string[] | { unavailable: string };
+  // Anyone's verified Solana wallets as linked now; null when that can't be read. Wallets are attributed to a firm only
+  // through their current link.
+  linkedOf: (userId: string) => Promise<string[] | null>;
 }
 
 export class TreasuryService {
   private cache = new Map<string, { at: number; pool: PoolAccount }>();
+  private calls = new Map<string, number[]>(); // per person and kind: the times of their calls in the last minute
+  private kicking: Promise<void> | null = null;
 
   private constructor(
     private readonly db: Db,
@@ -206,6 +239,17 @@ export class TreasuryService {
 
   private rpc() {
     return this.chain.rpc("devnet");
+  }
+
+  // At most `max` calls a minute per person and kind (in this process), or rate_limited.
+  private limit(userId: string, kind: string, max: number) {
+    const key = `${kind}:${userId}`;
+    const t = Date.now();
+    const recent = (this.calls.get(key) ?? []).filter((x) => t - x < 60_000);
+    if (recent.length >= max) refuse("rate_limited", `Too many ${kind} calls: at most ${max} a minute; try again shortly`);
+    recent.push(t);
+    this.calls.set(key, recent);
+    if (this.calls.size > 10_000) this.calls.delete(this.calls.keys().next().value!);
   }
 
   private async call<R>(method: string, params: unknown[]): Promise<R> {
@@ -242,7 +286,7 @@ export class TreasuryService {
   // upgradeable program, whose executable hash is recorded and compared with the template's verifiable build), and the
   // pool account (a mynt_treasury Pool at its own address, for this cluster, holding devnet USDC, with Mynt's attester
   // among its attesters). A build Mynt hasn't rebuilt at this address is recorded as unverified; devnet takes it.
-  async register(user: User, input: { pool_id: string; cluster: string; program_id: string; pool_address: string }) {
+  async register(user: User, input: { pool_id: string; cluster: string; program_id: string; pool_address: string }, who: { admin: boolean; wallets: string[] | { unavailable: string } }) {
     if (input.cluster !== "devnet") refuse("mainnet_disabled", MAINNET_DISABLED);
     const pool = await getPool(this.store, input.pool_id);
     if (!pool) refuse("no_pool", `No pool '${input.pool_id}'`);
@@ -272,6 +316,13 @@ export class TreasuryService {
     if (p.usdc_mint !== this.config.usdcMint) refuse("wrong_mint", `The pool holds ${p.usdc_mint}, not devnet USDC (${this.config.usdcMint})`);
     const attester = await this.attesterAddress();
     if (!p.terms.attesters.includes(attester)) refuse("attester_missing", `Mynt's attester ${attester} isn't one of the pool's attesters, so Mynt can't approve deposits to it`, { mynt_attester: attester });
+    if (!exactAttesters(p.terms.attesters, attester)) refuse("unexpected_attesters", `The pool's attesters must be exactly [Mynt's attester ${attester}, none]: another attester could admit depositors Mynt never checked`, { mynt_attester: attester, attesters: p.terms.attesters });
+    // The pool is the builder's: its creator or its authority is a verified wallet linked to them (or an admin registers it).
+    if (!who.admin) {
+      const mine = Array.isArray(who.wallets) ? who.wallets : [];
+      if (!mine.includes(p.creator) && !mine.includes(p.authority))
+        refuse("not_pool_owner", `The pool's creator (${p.creator}) or authority (${p.authority}) must be a verified Solana wallet linked to your sign-in${Array.isArray(who.wallets) ? "" : ` (your linked wallets couldn't be read: ${who.wallets.unavailable})`}; or an admin registers it`, { creator: p.creator, authority: p.authority });
+    }
     const { rows: taken } = await this.db.query(`SELECT pool_id FROM ${T}.treasury_pools WHERE pool_address = $1 AND pool_id <> $2`, [input.pool_address, input.pool_id]);
     if (taken[0]) refuse("already_registered", "That pool account is already another pool's treasury");
     const verified = input.program_id === MANIFEST.declared_id && programHash === MANIFEST.program_sha256;
@@ -281,7 +332,10 @@ export class TreasuryService {
        VALUES ($1, 'devnet', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (pool_id) DO UPDATE SET program_id = EXCLUDED.program_id, pool_address = EXCLUDED.pool_address, vault = EXCLUDED.vault, usdc_mint = EXCLUDED.usdc_mint, creator = EXCLUDED.creator,
          program_hash = EXCLUDED.program_hash, upgrade_authority = EXCLUDED.upgrade_authority, verified_build = EXCLUDED.verified_build, build_note = EXCLUDED.build_note, registered_by = EXCLUDED.registered_by,
-         index_cursor = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.index_cursor ELSE NULL END, updated_at = now()`,
+         index_cursor = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.index_cursor ELSE NULL END,
+         scan_before = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.scan_before ELSE NULL END,
+         scan_newest = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.scan_newest ELSE NULL END,
+         attesters_flag = NULL, attesters_flagged_at = NULL, updated_at = now()`,
       [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, verified, note, user.id],
     );
     this.cache.set(input.pool_address, { at: Date.now(), pool: p });
@@ -307,6 +361,8 @@ export class TreasuryService {
       program_id: row.program_id,
       pool_address: row.pool_address,
       verified_build: row.verified_build,
+      // Set when the pool's attesters changed on chain: Mynt approves no deposits to it until it's registered again.
+      attesters_flag: row.attesters_flag ?? null,
       build_status: row.verified_build ? "verified build" : "unverified build",
       build_note: row.build_note,
       program_hash: row.program_hash,
@@ -393,17 +449,16 @@ export class TreasuryService {
     await this.db.query(`INSERT INTO ${T}.treasury_wallets (wallet, lp_entity_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [wallet, firm, userId]);
   }
 
-  // The firm's on-chain principal in a pool, from the indexer, over the wallets its people used, other than `except`.
-  private async firmPrincipal(firm: string, poolAddress: string, except: string): Promise<bigint> {
-    const { rows } = await this.db.query(
-      `SELECT COALESCE(sum(d.remaining), 0) AS n FROM ${T}.treasury_deposits d WHERE d.pool_address = $1 AND NOT d.rejected AND d.depositor <> $3
-         AND d.depositor IN (SELECT wallet FROM ${T}.treasury_wallets WHERE lp_entity_id = $2)`,
-      [poolAddress, firm, except],
-    );
+  // The firm's on-chain principal in a pool, from the indexer, over the firm's wallets as linked now, other than `except`.
+  private async firmPrincipal(wallets: string[], poolAddress: string, except: string): Promise<bigint> {
+    const others = wallets.filter((w) => w !== except);
+    if (!others.length) return 0n;
+    const { rows } = await this.db.query(`SELECT COALESCE(sum(d.remaining), 0) AS n FROM ${T}.treasury_deposits d WHERE d.pool_address = $1 AND NOT d.rejected AND d.depositor = ANY($2::text[])`, [poolAddress, others]);
     return big(rows[0]?.n);
   }
 
   async prepareDeposit(s: Standing, input: { pool_id: string; wallet: string; amount_usdc_base_units: number; max_lock_in_seconds: number }) {
+    this.limit(s.user.id, "prepare", this.config.prepareLimitPerMinute ?? 20);
     const { pool, row, firm } = await this.eligible(s, input.pool_id);
     this.linked(s, input.wallet);
     const amount = BigInt(input.amount_usdc_base_units);
@@ -411,7 +466,17 @@ export class TreasuryService {
     if (pool.status !== "open") refuse("pool_paused", `This pool isn't taking deposits right now (${pool.status}${pool.pause_reason ? `: ${pool.pause_reason}` : ""})`);
     const p = await this.poolAccount(row, true);
     const attester = await this.chain.treasuryAttester();
-    if (!p.terms.attesters.includes(attester.address)) refuse("attester_removed", "Mynt's attester is no longer one of this pool's attesters, so Mynt can't approve deposits to it");
+    if (row.attesters_flag) refuse("attesters_changed", `Mynt has stopped approving deposits to this pool: ${row.attesters_flag}. Its builder registers it again once its attesters are [Mynt's, none]`);
+    if (!p.terms.attesters.includes(attester.address)) {
+      await this.flag(row, "Mynt's attester is no longer one of the pool's attesters");
+      refuse("attester_removed", "Mynt's attester is no longer one of this pool's attesters, so Mynt can't approve deposits to it");
+    }
+    if (!exactAttesters(p.terms.attesters, attester.address)) {
+      await this.flag(row, "the pool's attesters are no longer exactly [Mynt's attester, none]");
+      refuse("attesters_changed", "The pool's attesters changed on chain: Mynt has stopped approving deposits to it");
+    }
+    // Every approval Mynt signs is for devnet, whatever the account says: a pool for another cluster is refused.
+    if (!Buffer.from(p.cluster).equals(DEVNET_GENESIS)) refuse("wrong_cluster", "The pool's attestations are for another cluster than devnet");
     if (p.wind_down_at !== 0n) refuse("pool_paused", "The pool is winding down: it takes no new deposits");
     if (p.sponsor_paused) refuse("pool_paused", "The pool's authority has paused new deposits");
     const positionInfo = await this.account(positionAddress(row.program_id, row.pool_address, input.wallet));
@@ -421,7 +486,7 @@ export class TreasuryService {
     if (principal + amount > p.terms.commitment_max) refuse("over_limit", `That would take this wallet's principal in the pool over its maximum of ${p.terms.commitment_max} base units`, { principal: units(principal), commitment_max: units(p.terms.commitment_max) });
     if (principal + amount < p.terms.commitment_min) refuse("under_minimum", `A wallet's principal in this pool must be at least ${p.terms.commitment_min} base units`, { commitment_min: units(p.terms.commitment_min) });
     const firmMax = BigInt(pool.max_commitment_cents) * BASE_UNITS_PER_CENT;
-    const firmNow = (await this.firmPrincipal(firm, row.pool_address, input.wallet)) + principal;
+    const firmNow = (await this.firmPrincipal(await this.walletsOf(firm, s), row.pool_address, input.wallet)) + principal;
     if (firmNow + amount > firmMax) refuse("over_limit", `That would take your firm's position over this pool's limit of ${pool.max_commitment_cents} cents per firm`, { exposure: units(firmNow), limit: units(firmMax) });
     if (p.terms.lock_in_seconds > BigInt(input.max_lock_in_seconds)) refuse("terms_changed", `The pool's lock-in is ${p.terms.lock_in_seconds} seconds, longer than the ${input.max_lock_in_seconds} you agreed to`, { lock_in_seconds: Number(p.terms.lock_in_seconds) });
     const ata = await this.account(associatedTokenAddress(input.wallet, p.usdc_mint));
@@ -430,7 +495,7 @@ export class TreasuryService {
 
     const nowS = Math.floor(this.now().getTime() / 1000);
     const expiry = BigInt(nowS + MAX_APPROVAL_SECONDS);
-    const cluster = Buffer.from(p.cluster);
+    const cluster = DEVNET_GENESIS;
     const { message, signature } = attester.signDepositApproval({ programId: row.program_id, cluster, pool: row.pool_address, depositor: input.wallet, nonce: position?.nonce ?? 0n, expiry }, nowS);
     const ixs = [
       ed25519Instruction(attester.publicKey, signature, message),
@@ -469,6 +534,7 @@ export class TreasuryService {
   }
 
   async prepareWithdrawal(s: Standing, input: { pool_id: string; wallet: string; deposit: string; amount_usdc_base_units: number; max_notice_seconds: number }) {
+    this.limit(s.user.id, "prepare", this.config.prepareLimitPerMinute ?? 20);
     const { pool, row, firm } = await this.eligible(s, input.pool_id);
     this.linked(s, input.wallet);
     const amount = BigInt(input.amount_usdc_base_units);
@@ -538,7 +604,9 @@ export class TreasuryService {
 
   async index() {
     let events = 0;
-    for (const row of await this.all()) {
+    // Pools asked for first (a transaction they touched was confirmed), then the rest.
+    const rows = (await this.db.query(`SELECT * FROM ${T}.treasury_pools ORDER BY index_requested_at DESC NULLS LAST, created_at`)).rows as unknown as TreasuryRow[];
+    for (const row of rows) {
       if (row.cluster !== "devnet") continue;
       try {
         events += await this.indexPool(row);
@@ -549,37 +617,111 @@ export class TreasuryService {
     return { events };
   }
 
-  // Every signature since the cursor (newest first, a page at a time, at most ten pages a poll); the oldest
-  // indexPerPoll of them are read, and the cursor moves only past what was read.
+  // The pools asked for, indexed in the background, one run at a time.
+  private kick() {
+    if (this.kicking) return;
+    this.kicking = (async () => {
+      try {
+        const rows = (await this.db.query(`SELECT * FROM ${T}.treasury_pools WHERE index_requested_at IS NOT NULL ORDER BY index_requested_at`)).rows as unknown as TreasuryRow[];
+        for (const row of rows) await this.indexPool(row).catch((e) => console.error(`treasury indexer: ${row.pool_address}: ${(e as Error).message.slice(0, 200)}`));
+      } finally {
+        this.kicking = null;
+      }
+    })();
+  }
+  // For tests: until the background indexing the status checks asked for has finished.
+  async idle() {
+    while (this.kicking) await this.kicking;
+  }
+
+  // Two steps, with bounded work per poll and nothing ever skipped. A scan pages backward from the newest signature
+  // to the stored cursor (indexPagesPerPoll pages a poll, resuming where it stopped), keeping what it finds; once it
+  // reaches the cursor, the cursor moves to the newest signature it started from. Then what it found is read oldest
+  // first, indexPerPoll a poll; a new scan starts only once all of it has been read.
   async indexPool(row: TreasuryRow): Promise<number> {
+    await this.db.query(`UPDATE ${T}.treasury_pools SET index_requested_at = NULL WHERE pool_id = $1`, [row.pool_id]);
+    const fresh = (await this.db.query(`SELECT * FROM ${T}.treasury_pools WHERE pool_id = $1`, [row.pool_id])).rows[0] as unknown as TreasuryRow | undefined;
+    if (!fresh) return 0;
+    let applied = 0;
+    if (!fresh.scan_newest && (await this.pending(fresh.pool_id)) > 0) applied += await this.readPending(fresh);
+    else if (await this.scan(fresh)) applied += await this.readPending(fresh);
+    if (applied) this.cache.delete(fresh.pool_address);
+    return applied;
+  }
+
+  private async pending(poolId: string) {
+    return Number((await this.db.query(`SELECT count(*)::int AS n FROM ${T}.treasury_pending WHERE pool_id = $1`, [poolId])).rows[0]?.n ?? 0);
+  }
+
+  // Pages of the scan; true once it has reached the cursor.
+  private async scan(row: TreasuryRow): Promise<boolean> {
     const rpc = this.rpc();
-    const fresh: { signature: string; slot: number; err: unknown }[] = [];
-    let before: string | undefined;
-    for (let page = 0; page < 10; page++) {
+    let before = row.scan_before ?? undefined;
+    let newest = row.scan_newest;
+    let pages = Number(row.scan_pages ?? 0);
+    for (let i = 0; i < (this.config.indexPagesPerPoll ?? 5); i++) {
       const sigs = await rpc.call<{ signature: string; slot: number; err: unknown }[]>("getSignaturesForAddress", [
         row.pool_address,
         { limit: 1000, commitment: "confirmed", ...(row.index_cursor ? { until: row.index_cursor } : {}), ...(before ? { before } : {}) },
       ]);
-      fresh.push(...sigs);
-      if (sigs.length < 1000) break;
+      if (!newest && sigs.length) newest = sigs[0].signature;
+      for (const [k, x] of sigs.entries())
+        await this.db.query(`INSERT INTO ${T}.treasury_pending (pool_id, signature, slot, pos, failed) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`, [row.pool_id, x.signature, x.slot ?? 0, pages * 1000 + k, !!x.err]);
+      pages++;
+      if (sigs.length < 1000) {
+        await this.db.query(`UPDATE ${T}.treasury_pools SET index_cursor = COALESCE($2, index_cursor), scan_before = NULL, scan_newest = NULL, scan_pages = 0, indexed_at = now() WHERE pool_id = $1`, [row.pool_id, newest]);
+        row.index_cursor = newest ?? row.index_cursor;
+        row.scan_before = row.scan_newest = null;
+        return true;
+      }
       before = sigs[sigs.length - 1].signature;
+      await this.db.query(`UPDATE ${T}.treasury_pools SET scan_before = $2, scan_newest = $3, scan_pages = $4 WHERE pool_id = $1`, [row.pool_id, before, newest, pages]);
     }
+    return false;
+  }
+
+  // What the scan found, oldest first, indexPerPoll at a time.
+  private async readPending(row: TreasuryRow): Promise<number> {
+    const rpc = this.rpc();
+    const { rows } = await this.db.query(`SELECT signature, slot, failed FROM ${T}.treasury_pending WHERE pool_id = $1 ORDER BY slot ASC, pos DESC LIMIT $2`, [row.pool_id, this.config.indexPerPoll]);
     let applied = 0;
-    for (const s of fresh.reverse().slice(0, this.config.indexPerPoll)) {
-      const tx = await rpc.call<{ slot: number; meta: { err: unknown; logMessages?: string[] } | null } | null>("getTransaction", [s.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
-      if (tx && !tx.meta?.err && !s.err) {
-        const events = programEvents(row.program_id, tx.meta?.logMessages ?? []).map(decodeEvent);
-        for (const [i, e] of events.entries()) {
-          if (!e) continue;
-          if (e.name !== "other" && e.pool !== row.pool_address) continue;
-          if (await this.record(row.pool_address, s.signature, i, tx.slot ?? s.slot, e)) applied++;
+    for (const s of rows as { signature: string; slot: unknown; failed: boolean }[]) {
+      if (!s.failed) {
+        const tx = await rpc.call<{ slot: number; meta: { err: unknown; logMessages?: string[] } | null } | null>("getTransaction", [s.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
+        if (tx && !tx.meta?.err) {
+          const events = programEvents(row.program_id, tx.meta?.logMessages ?? []).map(decodeEvent);
+          for (const [i, e] of events.entries()) {
+            if (!e) continue;
+            if (e.name !== "other" && e.pool !== row.pool_address) continue;
+            if (await this.record(row.pool_address, s.signature, i, tx.slot ?? Number(s.slot), e)) {
+              applied++;
+              await this.watchAttesters(row, e);
+            }
+          }
         }
       }
-      await this.db.query(`UPDATE ${T}.treasury_pools SET index_cursor = $2, indexed_at = now() WHERE pool_id = $1`, [row.pool_id, s.signature]);
-      row.index_cursor = s.signature;
+      await this.db.query(`DELETE FROM ${T}.treasury_pending WHERE pool_id = $1 AND signature = $2`, [row.pool_id, s.signature]);
     }
-    if (applied) this.cache.delete(row.pool_address);
     return applied;
+  }
+
+  // A terms change or a removal that leaves the attesters other than [Mynt's, none] stops Mynt's approvals for the pool.
+  private async watchAttesters(row: TreasuryRow, e: TreasuryEvent) {
+    if (e.name === "AttesterRemoved") return this.flag(row, `attester ${e.attester} was removed on chain`);
+    if (e.name !== "TermsApplied") return;
+    let mynt: string;
+    try {
+      mynt = await this.attesterAddress();
+    } catch {
+      return this.flag(row, "a terms change was applied and Mynt's attester couldn't be read to check it");
+    }
+    if (!exactAttesters(e.attesters, mynt)) await this.flag(row, `a terms change set the attesters to [${e.attesters.join(", ")}]`);
+  }
+
+  private async flag(row: TreasuryRow, why: string) {
+    const { rows } = await this.db.query(`UPDATE ${T}.treasury_pools SET attesters_flag = $2, attesters_flagged_at = now() WHERE pool_id = $1 AND attesters_flag IS NULL RETURNING pool_id`, [row.pool_id, why]);
+    row.attesters_flag = why;
+    if (rows.length) await this.store.audit(null, "treasury_attesters_flagged", row.pool_id, { pool_address: row.pool_address, reason: why });
   }
 
   // One event, once: recorded, then applied to the deposits and requests it changes, together.
@@ -599,10 +741,28 @@ export class TreasuryService {
 
   // ---- positions ----
 
-  // The wallets whose positions a firm sees: those its people prepared from, and the caller's own linked ones.
-  async walletsOf(firm: string, linked: string[]) {
-    const { rows } = await this.db.query(`SELECT DISTINCT wallet FROM ${T}.treasury_wallets WHERE lp_entity_id = $1`, [firm]);
-    return [...new Set([...rows.map((r) => r.wallet as string), ...linked])];
+  // The firm's wallets: the caller's own linked ones (when they're at this firm), and those its people prepared from,
+  // each only while that person is still at the firm and the wallet is still linked to them. A record whose person left
+  // the firm or unlinked the wallet is dropped; one whose links can't be read now is left out until they can.
+  async walletsOf(firm: string, s: Standing): Promise<string[]> {
+    const out = new Set<string>(s.user.entity_id === firm && Array.isArray(s.wallets) ? s.wallets : []);
+    const { rows } = await this.db.query(`SELECT wallet, user_id FROM ${T}.treasury_wallets WHERE lp_entity_id = $1`, [firm]);
+    const byUser = new Map<string, string[]>();
+    for (const r of rows as { wallet: string; user_id: string }[]) byUser.set(r.user_id, [...(byUser.get(r.user_id) ?? []), r.wallet]);
+    for (const [userId, wallets] of byUser) {
+      const person = await this.store.getUser(userId);
+      if (!person || person.entity_id !== firm) {
+        await this.db.query(`DELETE FROM ${T}.treasury_wallets WHERE lp_entity_id = $1 AND user_id = $2`, [firm, userId]);
+        continue;
+      }
+      const linked = userId === s.user.id && Array.isArray(s.wallets) ? s.wallets : await s.linkedOf(userId).catch(() => null);
+      if (!linked) continue;
+      for (const w of wallets) {
+        if (linked.includes(w)) out.add(w);
+        else await this.db.query(`DELETE FROM ${T}.treasury_wallets WHERE wallet = $1 AND lp_entity_id = $2 AND user_id = $3`, [w, firm, userId]);
+      }
+    }
+    return [...out];
   }
 
   async positions(wallets: string[], poolId?: string) {
@@ -677,7 +837,8 @@ export class TreasuryService {
 
   // ---- a sent transaction ----
 
-  async txStatus(signature: string) {
+  async txStatus(user: User, signature: string) {
+    this.limit(user.id, "get_treasury_tx_status", this.config.statusLimitPerMinute ?? 30);
     let ok = false;
     try {
       ok = base58Decode(signature).length === 64;
@@ -688,18 +849,19 @@ export class TreasuryService {
     const r = await this.call<{ value: ({ slot: number; err: unknown; confirmationStatus?: string } | null)[] }>("getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
     const st = r.value?.[0] ?? null;
     const status = !st ? "not_found" : st.err ? "failed" : (st.confirmationStatus ?? "processed");
-    const indexed: string[] = [];
-    // Confirmed: index the registered pools it touched now, so positions show it straight away.
+    const queued: string[] = [];
+    // Confirmed: the registered pools it touched are indexed next, in the background, so positions show it soon.
     if (status === "confirmed" || status === "finalized") {
       const tx = await this.call<{ transaction?: { message?: { accountKeys?: string[] } } } | null>("getTransaction", [signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
       const keys = new Set(tx?.transaction?.message?.accountKeys ?? []);
       for (const row of await this.all()) {
         if (!keys.has(row.pool_address)) continue;
-        await this.indexPool(row).catch((e) => console.error(`treasury indexer: ${row.pool_address}: ${(e as Error).message.slice(0, 200)}`));
-        indexed.push(row.pool_id);
+        await this.db.query(`UPDATE ${T}.treasury_pools SET index_requested_at = now() WHERE pool_id = $1`, [row.pool_id]);
+        queued.push(row.pool_id);
       }
+      if (queued.length) this.kick();
     }
-    return { signature, cluster: "devnet" as const, status, err: st?.err ?? null, slot: st?.slot ?? null, indexed_pools: indexed };
+    return { signature, cluster: "devnet" as const, status, err: st?.err ?? null, slot: st?.slot ?? null, queued_pools: queued };
   }
 }
 

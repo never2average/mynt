@@ -647,11 +647,11 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
       if (!firm) return fail(noFirm);
       const positions = (await positionsOf(firm, pool_id)).map((p) => ({ source: "off-chain" as const, ...p }));
       const off = include_entries ? await Promise.all(positions.map(async (p) => ({ ...p, entries: await entriesOf(firm, p.pool_id, p.sandbox) }))) : positions;
-      // On-chain positions (devnet treasuries), from the indexer: every wallet the firm's people prepared from, and yours.
+      // On-chain positions (devnet treasuries), from the indexer: the firm's wallets as linked now (treasury.walletsOf).
       let on: unknown[] = [];
       if (treasury) {
         const linked = await treasuryStanding(store, user, onChain.identity ?? null);
-        on = await treasury.positions(await treasury.walletsOf(firm, Array.isArray(linked.wallets) ? linked.wallets : []), pool_id);
+        on = await treasury.positions(await treasury.walletsOf(firm, linked), pool_id);
       }
       await audit("list_my_positions", pool_id ?? "all", { returned: positions.length + on.length });
       return json([...off, ...on]);
