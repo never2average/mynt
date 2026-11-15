@@ -491,7 +491,7 @@ test("the indexer turns the treasury's events into on-chain positions, once, and
     { cluster: "devnet", pool_id: poolId, wallet, principal: 4_500_000, deposited: 6_000_000, paid: 1_500_000, queued: 500_000, available: 3_000_000 },
   );
   assert.deepEqual(
-    p.deposits.map((d) => [d.address, d.remaining, d.queued, d.unlocked]),
+    p.deposits.map((d) => [d.deposit, d.remaining, d.queued, d.unlocked]),
     [
       [deposit, 3_500_000, 500_000, true],
       [locked, 1_000_000, 0, false],

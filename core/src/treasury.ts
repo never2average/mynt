@@ -643,6 +643,7 @@ export class TreasuryService {
           queued: units(queued),
           available_to_request: units(unlocked),
           deposits: ds.map((d) => ({
+            deposit: d.address as string, // the deposit record's address: prepare_treasury_withdrawal's `deposit`
             address: d.address as string,
             seq: units(big(d.seq)),
             amount: units(big(d.amount)),
@@ -651,6 +652,7 @@ export class TreasuryService {
             settled_at: iso(Number(d.settled_at)),
             review_until: iso(Number(d.review_until)),
             unlock_at: iso(Number(d.unlock_at)),
+            unlocks_at: iso(Number(d.unlock_at)),
             lock_in_seconds: Number(d.unlock_at) - Number(d.settled_at),
             unlocked: Number(d.unlock_at) <= nowS,
             rejected: d.rejected as boolean,
