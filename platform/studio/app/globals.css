@@ -55,81 +55,83 @@
 }
 
 :root {
-  /* Mynt's brand (lib/brand.ts): deep forest green, mint accent, light green-white. Text pairs
-     are checked for WCAG AA in test/branding.test.ts. */
+  /* shadcn's neutral (zinc) palette, with the app icon's mint (#3DDC97, lib/brand.ts) only as the
+     accent: primary buttons, focus rings, the active nav item and the first chart colour. Text
+     pairs are checked for WCAG AA in test/branding.test.tsx. */
   --radius: 0.625rem;
-  --background: #f2f6f3;
-  --foreground: #10241d;
+  --background: #ffffff;
+  --foreground: #09090b;
   --card: #ffffff;
-  --card-foreground: #10241d;
+  --card-foreground: #09090b;
   --popover: #ffffff;
-  --popover-foreground: #10241d;
+  --popover-foreground: #09090b;
   --primary: #3ddc97;
-  --primary-foreground: #0f2a23;
-  --secondary: #e3ece6;
-  --secondary-foreground: #10241d;
-  --muted: #edf3ef;
-  --muted-foreground: #5e7169;
-  --accent: #e3f6ec;
-  --accent-foreground: #0f2a23;
+  --primary-foreground: #09090b;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #6b6b73;
+  --accent: #f4f4f5;
+  --accent-foreground: #18181b;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: #d5e0d9;
-  --input: #d5e0d9;
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  /* Mint itself is too light to see as a ring on white; its deeper shade is. */
   --ring: #13805a;
-  /* Brand greens first, then amber, slate and a blue-grey for further series. */
   --chart-1: #13805a;
-  --chart-2: #3ddc97;
-  --chart-3: #0f2a23;
-  --chart-4: #c98a12;
-  --chart-5: #5e7169;
+  --chart-2: #2563eb;
+  --chart-3: #d97706;
+  --chart-4: #71717a;
+  --chart-5: #db2777;
   /* Coverage map: unlocked is the most prominent (strong blue), available a muted blue of the
      same hue, unavailable neutral grey. Checked with the dataviz validator on each surface. */
   --coverage-unlocked: #1f6fd6;
   --coverage-available: #7f9fc6;
   --coverage-unavailable: #d4d3cf;
-  --sidebar: #edf3ef;
-  --sidebar-foreground: #10241d;
-  --sidebar-primary: #0f2a23;
-  --sidebar-primary-foreground: #3ddc97;
-  --sidebar-accent: #e3ece6;
-  --sidebar-accent-foreground: #0f2a23;
-  --sidebar-border: #d5e0d9;
+  --sidebar: #fafafa;
+  --sidebar-foreground: #09090b;
+  --sidebar-primary: #3ddc97;
+  --sidebar-primary-foreground: #09090b;
+  --sidebar-accent: #f4f4f5;
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: #e4e4e7;
   --sidebar-ring: #13805a;
 }
 
 .dark {
-  --background: #0f2a23;
-  --foreground: #f2f6f3;
-  --card: #153c31;
-  --card-foreground: #f2f6f3;
-  --popover: #153c31;
-  --popover-foreground: #f2f6f3;
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #18181b;
+  --card-foreground: #fafafa;
+  --popover: #18181b;
+  --popover-foreground: #fafafa;
   --primary: #3ddc97;
-  --primary-foreground: #0f2a23;
-  --secondary: #1b4a3c;
-  --secondary-foreground: #f2f6f3;
-  --muted: #153c31;
-  --muted-foreground: #9fb8ad;
-  --accent: #1b4a3c;
-  --accent-foreground: #f2f6f3;
+  --primary-foreground: #09090b;
+  --secondary: #27272a;
+  --secondary-foreground: #fafafa;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --accent: #27272a;
+  --accent-foreground: #fafafa;
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: #3ddc97;
+  /* Mint first, then a blue, an amber, a neutral grey and a pink: not a wall of greens. */
   --chart-1: #3ddc97;
-  --chart-2: #2e8c66;
-  --chart-3: #a7f0cf;
-  --chart-4: #f2c14e;
-  --chart-5: #9fb8ad;
+  --chart-2: #60a5fa;
+  --chart-3: #f2c14e;
+  --chart-4: #a1a1aa;
+  --chart-5: #f472b6;
   --coverage-unlocked: #5aa5f5;
   --coverage-available: #33598a;
   --coverage-unavailable: #383835;
-  --sidebar: #0c241e;
-  --sidebar-foreground: #f2f6f3;
+  --sidebar: #18181b;
+  --sidebar-foreground: #fafafa;
   --sidebar-primary: #3ddc97;
-  --sidebar-primary-foreground: #0f2a23;
-  --sidebar-accent: #153c31;
-  --sidebar-accent-foreground: #f2f6f3;
+  --sidebar-primary-foreground: #09090b;
+  --sidebar-accent: #27272a;
+  --sidebar-accent-foreground: #fafafa;
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: #3ddc97;
 }
@@ -149,6 +151,12 @@
 
   body {
     @apply bg-background text-foreground;
+  }
+
+  /* The active sidebar item is marked with the accent: a thin mint bar on its leading edge. */
+  [data-sidebar="menu-button"][data-active="true"],
+  [data-sidebar="menu-sub-button"][data-active="true"] {
+    box-shadow: inset 2px 0 0 var(--sidebar-primary);
   }
 
   /* Headings in Space Grotesk, body in DM Sans (app/layout.tsx). */

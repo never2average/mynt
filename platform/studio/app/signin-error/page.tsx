@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 
-import { MyntLogo } from "@/components/brand/mynt-logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -20,8 +19,7 @@ const REASONS: Record<string, string> = {
 export default async function SignInErrorPage({ searchParams }: { searchParams: Promise<{ auth_error?: string }> }) {
   const { auth_error } = await searchParams;
   return (
-    <main className="flex h-full flex-col items-center justify-center gap-6 p-4">
-      <MyntLogo size={32} />
+    <main className="flex h-full items-center justify-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Mynt Studio</CardTitle>

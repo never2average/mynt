@@ -37,6 +37,8 @@ export const selectClass =
   "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20"
 
 export const NEXT_UPDATE = "Coming with Mynt's next update"
+// Import's explanation, only on the disabled button (its tooltip and accessible description).
+export const IMPORT_NOTE = `Import a CSV of licences for Mynt's admins to verify. ${NEXT_UPDATE}.`
 
 const dateOf = (iso: string | null) => (iso ? iso.slice(0, 10) : "—")
 
@@ -199,7 +201,7 @@ export function LicencesView({
           options={[{ value: "expired", label: "Expired" }, ...statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]}
         />
         <Select label="Expiring within" value={f.within} onChange={set("within")} all="Any expiry" options={EXPIRY_WINDOWS.map((d) => ({ value: String(d), label: `Expiring within ${d} days` }))} />
-        <Button variant="outline" disabled title={NEXT_UPDATE} data-import>
+        <Button variant="outline" disabled title={IMPORT_NOTE} aria-description={IMPORT_NOTE} data-import>
           <Upload />
           Import
         </Button>
@@ -210,12 +212,6 @@ export function LicencesView({
         <InvitePartner />
         <ViewToggle view={view} onView={onView} />
       </div>
-      <p className="text-xs text-muted-foreground">
-        <span className="tabular-nums">
-          {shown.length} of {licences.length}
-        </span>{" "}
-        licences · Import (a CSV of licences for Mynt&apos;s admins to verify): {NEXT_UPDATE.toLowerCase()}
-      </p>
       {view === "map" ? (
         coverage.kind === "ready" ? (
           <CoverageMap coverage={coverage.data} region={region} onRegion={onRegion} highlight={highlight} />

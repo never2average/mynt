@@ -90,7 +90,7 @@ describe("coverage", () => {
     expect(renderToStaticMarkup(<StatePanel state={allStates(coverage).find((s) => s.code === "WY")!} />)).toContain("No partner licensed here yet");
   });
 
-  it("World: the legend says the US's status and that every other country is Not available (the map itself: test/coverage-map.test.tsx)", () => {
+  it("World: the legend says the US's status, and grey is a plain Not available swatch (the map itself: test/coverage-map.test.tsx)", () => {
     const topo = countries110m as unknown as { objects: { countries: { geometries: { id?: string }[] } } };
     expect(topo.objects.countries.geometries.some((g) => g.id === US_COUNTRY_ID)).toBe(true);
     expect(usStatus(allStates(coverage))).toBe("unlocked");
@@ -98,7 +98,9 @@ describe("coverage", () => {
     expect(usStatus(allStates(fromCoverage({ states: [] })))).toBe("unavailable");
     const html = renderToStaticMarkup(<CoverageMap coverage={coverage} region="world" onRegion={() => undefined} />);
     expect(html).toContain("United States: Unlocked");
-    expect(html).toContain("Every other country: Not available (Mynt serves the US only)");
+    expect(html).toMatch(/data-legend="not-available"[\s\S]*?<span>Not available<\/span>/);
+    expect(html).not.toContain("Every other country");
+    expect(html).not.toContain("serves the US only");
     expect(html).toMatch(/aria-pressed="true"[^>]*data-region="world"/);
   });
 });
@@ -138,7 +140,13 @@ describe("licences", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     expect(html).toMatch(/<tr[^>]*data-expiry="expired"[\s\S]*?Expired/);
     expect(html).toMatch(/<tr[^>]*data-expiry="expiring"[\s\S]*?Expires soon/);
-    for (const t of ["Search licences", "All partners", "All statuses", "All regulators", "All states", "Any expiry", "Expiring within 90 days", "4 of 4"]) expect(html).toContain(t);
+    for (const t of ["Search licences", "All partners", "All statuses", "All regulators", "All states", "Any expiry", "Expiring within 90 days"]) expect(html).toContain(t);
+    // No count line and no inline Import note, in either view.
+    const map = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} view="map" coverage={{ kind: "ready", data: coverage }} />);
+    for (const view of [html, map]) {
+      expect(view).not.toMatch(/\d+ of \d+/);
+      expect(view).not.toMatch(/>[^<]*admins to verify/);
+    }
   });
 
   it("has one toolbar row beside the search: filters, Import, Export, Invite partner and the view toggle", () => {
@@ -148,8 +156,9 @@ describe("licences", () => {
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
-    // Import isn't in Mynt yet: disabled, saying so. Export and Invite partner are labelled.
-    expect(bar).toMatch(/<button[^>]*disabled=""[^>]*title="Coming with Mynt&#x27;s next update"[^>]*data-import/);
+    // Import isn't in Mynt yet: disabled, saying so only in its tooltip and accessible description.
+    const note = "Import a CSV of licences for Mynt&#x27;s admins to verify. Coming with Mynt&#x27;s next update.";
+    expect(bar).toMatch(new RegExp(`<button[^>]*disabled=""[^>]*title="${note}"[^>]*aria-description="${note}"[^>]*data-import`));
     expect(bar).toMatch(/data-export[^>]*>[\s\S]*?Export</);
     expect(bar).toMatch(/data-invite-partner[^>]*>[\s\S]*?Invite partner</);
     // The toggle: an icon button named for the view it opens.

@@ -1,10 +1,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-// Mynt's branding: the logo, the page metadata and titles, the manifest and icons, the theme's
+// The studio's branding: the page metadata and titles, the manifest and icons (the app icon's
+// mint circle is the only brand mark), the neutral theme with mint as its accent and its
 // contrast, and no Adorable branding left in what users see.
 
 vi.mock("next/font/google", () => {
@@ -13,39 +13,8 @@ vi.mock("next/font/google", () => {
 });
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const { MyntLogo, MyntMark } = await import("@/components/brand/mynt-logo");
 const { BRAND, SITE_DESCRIPTION, SITE_NAME } = await import("@/lib/brand");
 const { contrastRatio } = await import("@/lib/contrast");
-
-describe("the logo", () => {
-  it("draws the mint mark and the wordmark, coloured for the surface", () => {
-    const dark = renderToStaticMarkup(<MyntLogo variant="dark" />);
-    expect(dark).toContain(`fill="${BRAND.mint}"`);
-    expect(dark).toContain(">mynt</text>");
-    expect(dark).toContain(`fill="${BRAND.white}"`);
-    expect(dark).toContain('aria-label="Mynt"');
-
-    const light = renderToStaticMarkup(<MyntLogo variant="light" />);
-    expect(light).toContain(`fill="${BRAND.forest}"`);
-    expect(light).toContain(">mynt</text>");
-
-    expect(renderToStaticMarkup(<MyntLogo />)).toContain('fill="currentColor"');
-  });
-
-  it("shows the mark alone for the mark variant, at the size asked", () => {
-    const mark = renderToStaticMarkup(<MyntLogo variant="mark" size={16} />);
-    expect(mark).toContain(`fill="${BRAND.mint}"`);
-    expect(mark).not.toContain("mynt</text>");
-    expect(mark).toContain('width="16"');
-    expect(mark).toContain('aria-label="Mynt"');
-    expect(renderToStaticMarkup(<MyntMark />)).toContain('aria-hidden="true"');
-  });
-
-  it("lets the wordmark be hidden on the collapsed sidebar rail", () => {
-    const html = renderToStaticMarkup(<MyntLogo wordmarkClassName="group-data-[collapsible=icon]:hidden" />);
-    expect(html).toMatch(/<svg[^>]*class="[^"]*group-data-\[collapsible=icon\]:hidden[^"]*"[^>]*data-mynt-wordmark/);
-  });
-});
 
 describe("metadata", () => {
   it("titles every page '<page> · Mynt Studio', with Mynt's description and theme colours", async () => {
@@ -56,8 +25,8 @@ describe("metadata", () => {
     expect(meta.applicationName).toBe(SITE_NAME);
     expect(meta.metadataBase).toBeInstanceOf(URL);
     expect(viewport.themeColor).toEqual([
-      { media: "(prefers-color-scheme: light)", color: "#F2F6F3" },
-      { media: "(prefers-color-scheme: dark)", color: "#0F2A23" },
+      { media: "(prefers-color-scheme: light)", color: "#FFFFFF" },
+      { media: "(prefers-color-scheme: dark)", color: "#09090B" },
     ]);
   });
 
@@ -94,8 +63,8 @@ describe("manifest and icons", () => {
     expect(m.name).toBe("Mynt Studio");
     expect(m.short_name).toBe("Mynt");
     expect(m.description).toBe(SITE_DESCRIPTION);
-    expect(m.theme_color).toBe("#0F2A23");
-    expect(m.background_color).toBe("#0F2A23");
+    expect(m.theme_color).toBe("#09090B");
+    expect(m.background_color).toBe("#09090B");
     expect(m.icons?.map((i) => i.src)).toEqual(["/icon", "/apple-icon"]);
   });
 
@@ -152,18 +121,50 @@ describe("the theme", () => {
     });
   }
 
-  it("maps the brand: mint primary with dark green text, deep green dark sidebar, brand greens first in charts", () => {
-    for (const vars of Object.values(themes)) {
-      expect(vars.primary.toLowerCase()).toBe(BRAND.mint.toLowerCase());
-      expect(vars["primary-foreground"].toLowerCase()).toBe(BRAND.forest.toLowerCase());
+  // Whether a #rrggbb colour is a neutral grey (its channels within a few steps of each other).
+  const rgb = (hex: string) => {
+    const n = Number.parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const neutral = (hex: string) => Math.max(...rgb(hex)) - Math.min(...rgb(hex)) <= 10;
+  const hexes = (vars: Record<string, string>) => Object.entries(vars).filter(([, v]) => /^#[0-9a-f]{6}$/i.test(v));
+
+  it("is shadcn's neutral palette: neutral surfaces, text, borders and sidebar", () => {
+    for (const [name, vars] of Object.entries(themes)) {
+      for (const k of ["background", "foreground", "card", "popover", "secondary", "muted", "muted-foreground", "accent", "sidebar", "sidebar-accent"]) {
+        expect(neutral(vars[k]), `${name} ${k} ${vars[k]}`).toBe(true);
+      }
     }
-    expect(themes.dark.background.toLowerCase()).toBe(BRAND.forest.toLowerCase());
-    expect(themes.dark.card.toLowerCase()).toBe(BRAND.panel.toLowerCase());
-    expect(themes.light.background.toLowerCase()).toBe(BRAND.light.toLowerCase());
-    expect(themes.light.foreground.toLowerCase()).toBe(BRAND.ink.toLowerCase());
-    expect(themes.dark.sidebar.toLowerCase()).toMatch(/^#0[a-f0-9]2[a-f0-9]{3}$/); // a deep green
-    expect(themes.dark["chart-1"].toLowerCase()).toBe(BRAND.mint.toLowerCase());
-    expect(themes.light["chart-1"].toLowerCase()).toBe(BRAND.deepGreen.toLowerCase());
+    expect(neutral(themes.light.border)).toBe(true);
+    expect(themes.dark.background).toBe("#09090b");
+    expect(themes.light.background).toBe("#ffffff");
+  });
+
+  it("uses the app icon's mint only as the accent: primary, ring, active nav and the first chart colour", () => {
+    const mint = BRAND.mint.toLowerCase();
+    for (const vars of Object.values(themes)) {
+      expect(vars.primary).toBe(mint);
+      expect(vars["sidebar-primary"]).toBe(mint);
+      expect(neutral(vars["primary-foreground"])).toBe(true); // near-black text on mint
+    }
+    expect(themes.dark.ring).toBe(mint);
+    expect(themes.dark["sidebar-ring"]).toBe(mint);
+    expect(themes.light.ring).toBe(BRAND.deepMint.toLowerCase()); // mint is too light to see on white
+    expect(themes.dark["chart-1"]).toBe(mint);
+    // Mint appears nowhere else.
+    const accents = new Set(["primary", "sidebar-primary", "ring", "sidebar-ring", "chart-1"]);
+    for (const vars of Object.values(themes)) {
+      for (const [k, v] of hexes(vars)) if (!accents.has(k)) expect(v, k).not.toBe(mint);
+    }
+    // The other chart colours aren't greens.
+    for (const vars of Object.values(themes)) {
+      for (const k of ["chart-2", "chart-3", "chart-4", "chart-5"]) {
+        const [r, g, b] = rgb(vars[k]);
+        expect(g > r + 10 && g > b + 10, `${k} ${vars[k]} is green`).toBe(false);
+      }
+    }
+    // The active sidebar item is marked with the accent.
+    expect(css).toMatch(/\[data-sidebar="menu-button"\]\[data-active="true"\][\s\S]*?box-shadow: inset 2px 0 0 var\(--sidebar-primary\)/);
     // Semantic colours stay: destructive red, the coverage map's blues.
     expect(themes.light.destructive).toMatch(/^oklch\(0\.577 0\.245 27/);
     expect(themes.dark["coverage-unlocked"]).toBe("#5aa5f5");
@@ -173,6 +174,16 @@ describe("the theme", () => {
     expect(contrastRatio("#000000", "#FFFFFF")).toBeCloseTo(21, 5);
     expect(contrastRatio("#3DDC97", "#3DDC97")).toBe(1);
     expect(() => contrastRatio("mint", "#fff")).toThrow();
+  });
+});
+
+describe("no logo in the UI", () => {
+  it("has no wordmark or logo component: the app icon is the only brand mark", () => {
+    expect(existsSync(join(root, "components/brand"))).toBe(false);
+    for (const f of ["components/app-sidebar.tsx", "components/chat-welcome.tsx", "components/ask-ai.tsx", "app/signed-out/page.tsx", "app/signin-error/page.tsx", "app/opengraph-image.tsx"]) {
+      const code = readFileSync(join(root, f), "utf8");
+      expect(code, f).not.toMatch(/MyntLogo|MyntMark|>mynt</);
+    }
   });
 });
 

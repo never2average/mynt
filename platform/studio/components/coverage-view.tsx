@@ -133,7 +133,7 @@ function WorldLegend({ us }: { us: CoverageStatus }) {
       </li>
       <li className="flex items-center gap-2" data-legend="not-available">
         <Swatch status="unavailable" />
-        <span>Every other country: {NOT_AVAILABLE} (Mynt serves the US only)</span>
+        <span>{NOT_AVAILABLE}</span>
       </li>
     </ul>
   )
