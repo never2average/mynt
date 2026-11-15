@@ -34,21 +34,18 @@ export async function treasuryStanding(store: Store, user: User, identity: Linke
 }
 
 export function registerTreasuryTools(server: McpServer, store: Store, user: User, roles: LiquidityRoles, treasury: TreasuryService, identity: LinkedAccountsService | null) {
-  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
-  // A refusal with its code; anything else is a plain failure (the message never carries an RPC address).
-  const guarded = async (action: string, target: string, details: Record<string, unknown>, f: () => Promise<unknown>) => {
+  // A refusal with its code; anything else is a plain failure (the message never carries an RPC address). Each tool
+  // audits its own outcome, by name.
+  type Outcome = { value: unknown } | { refusal: TreasuryRefusal } | { error: string };
+  const attempt = async (f: () => Promise<unknown>): Promise<Outcome> => {
     try {
-      const out = await f();
-      await audit(action, target, details);
-      return json(out);
+      return { value: await f() };
     } catch (e) {
-      if (e instanceof TreasuryRefusal) {
-        await audit(`${action}_refused`, target, { ...details, code: e.code });
-        return fail(e.message, { code: e.code, ...e.extra });
-      }
-      return fail((e as Error).message.slice(0, 300));
+      return e instanceof TreasuryRefusal ? { refusal: e } : { error: (e as Error).message.slice(0, 300) };
     }
   };
+  const reply = (o: Outcome) => ("value" in o ? json(o.value) : "refusal" in o ? fail(o.refusal.message, { code: o.refusal.code, ...o.refusal.extra }) : fail(o.error));
+  const codeOf = (o: Outcome) => ("refusal" in o ? o.refusal.code : null);
 
   if (roles.builder || roles.admin) {
     server.registerTool(
@@ -86,7 +83,11 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
           const owned = me.entity_id ? (await productsAnsweredBy(store, me)).some((p) => p.entity_id === me.entity_id && p.product.id === pool.product_id) : false;
           if (!owned) return fail("Only the builder of the pool's product can register its treasury", { code: "not_builder" });
         }
-        return guarded("register_treasury_pool", input.pool_id, { program_id: input.program_id, pool_address: input.pool_address }, () => treasury.register(user, input));
+        const details = { program_id: input.program_id, pool_address: input.pool_address };
+        const o = await attempt(() => treasury.register(user, input));
+        if ("value" in o) await store.audit(user.id, "register_treasury_pool", input.pool_id, details);
+        else if ("refusal" in o) await store.audit(user.id, "register_treasury_pool_refused", input.pool_id, { ...details, code: codeOf(o) });
+        return reply(o);
       },
     );
   }
@@ -100,8 +101,13 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
           "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, rpc_unavailable.",
         inputSchema: { pool_id: z.string().uuid(), wallet: Address, amount_usdc_base_units: BaseUnits, max_lock_in_seconds: Seconds },
       },
-      async (input) =>
-        guarded("prepare_treasury_deposit", input.pool_id, { wallet: input.wallet, amount_usdc_base_units: input.amount_usdc_base_units }, async () => treasury.prepareDeposit(await treasuryStanding(store, user, identity), input)),
+      async (input) => {
+        const details = { wallet: input.wallet, amount_usdc_base_units: input.amount_usdc_base_units };
+        const o = await attempt(async () => treasury.prepareDeposit(await treasuryStanding(store, user, identity), input));
+        if ("value" in o) await store.audit(user.id, "prepare_treasury_deposit", input.pool_id, details);
+        else if ("refusal" in o) await store.audit(user.id, "prepare_treasury_deposit_refused", input.pool_id, { ...details, code: codeOf(o) });
+        return reply(o);
+      },
     );
 
     server.registerTool(
@@ -112,10 +118,13 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
           "Liquidity provider, devnet only: an unsigned request_withdrawal transaction against one of your deposits (deposit: its record's address, from list_my_positions), for your wallet to sign and send. It joins the pool's first-in-first-out queue and is paid to the wallet's own USDC account after the notice period, never below the reserve floor. max_notice_seconds is the longest notice you accept. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, deposit_not_found, deposit_rejected, in_review, deposit_locked, over_limit, below_min_request, terms_changed, not_on_chain, mainnet_disabled, rpc_unavailable.",
         inputSchema: { pool_id: z.string().uuid(), wallet: Address, deposit: Address, amount_usdc_base_units: BaseUnits, max_notice_seconds: Seconds },
       },
-      async (input) =>
-        guarded("prepare_treasury_withdrawal", input.pool_id, { wallet: input.wallet, deposit: input.deposit, amount_usdc_base_units: input.amount_usdc_base_units }, async () =>
-          treasury.prepareWithdrawal(await treasuryStanding(store, user, identity), input),
-        ),
+      async (input) => {
+        const details = { wallet: input.wallet, deposit: input.deposit, amount_usdc_base_units: input.amount_usdc_base_units };
+        const o = await attempt(async () => treasury.prepareWithdrawal(await treasuryStanding(store, user, identity), input));
+        if ("value" in o) await store.audit(user.id, "prepare_treasury_withdrawal", input.pool_id, details);
+        else if ("refusal" in o) await store.audit(user.id, "prepare_treasury_withdrawal_refused", input.pool_id, { ...details, code: codeOf(o) });
+        return reply(o);
+      },
     );
 
     server.registerTool(
