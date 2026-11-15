@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
+// These import whole pages (Next, the fonts, the studio's layout), which takes several seconds on a
+// busy or slow runner: a longer timeout for this file only. The assertions are unchanged.
+vi.setConfig({ testTimeout: 20_000 });
+
 // The studio's branding: the page metadata and titles, the manifest and icons (the app icon's
 // mint circle is the only brand mark), the neutral theme with mint as its accent and its
 // contrast, and no Adorable branding left in what users see.

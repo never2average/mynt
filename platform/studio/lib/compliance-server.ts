@@ -1,4 +1,5 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Session } from "./session-store";
 import { callStudioTool, listMyntTools } from "./studio-server";
 import { asDeveloper, json } from "./studio-route";
 import { NOT_SCOPED, scopeFor, workspaceSupport } from "./workspace-server";
@@ -20,6 +21,8 @@ export function complianceRead(
   what: string,
   answer: (reply: unknown, found: Tool) => Record<string, unknown>,
   args: Record<string, unknown> | ((found: Tool) => Record<string, unknown> | null) = {},
+  // Who the studio lets ask (developers by default); Mynt checks what each caller may read.
+  allowed?: (session: Session) => boolean,
 ) {
   return asDeveloper(what, async (mynt: Client) => {
     const tools = await listMyntTools(mynt);
@@ -35,5 +38,5 @@ export function complianceRead(
     // The caller's filters first, so the workspace always wins.
     const reply = await callStudioTool(mynt, tool, { ...given, ...(workspace ? { workspace_id: workspace } : {}) });
     return json({ supported: true, ...answer(reply, found) });
-  });
+  }, allowed);
 }
