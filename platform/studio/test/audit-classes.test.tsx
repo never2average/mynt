@@ -66,7 +66,15 @@ describe("audit classes", () => {
   it("App security: its own columns, severity and status in words, search, filters and Export", () => {
     const html = view("security");
     expect(CLASS_COLUMNS.security.map((c) => c.label)).toEqual(["When", "App", "Kind", "Summary", "Severity", "Status", "Who"]);
-    for (const t of ["Secret written to logs", "Cards", "All kinds", "All members", "All apps", "All severities", "All statuses", "From", "To", "Export CSV", "Search the audit trail", "Page 1"]) expect(html).toContain(t);
+    for (const t of ["Secret written to logs", "Cards", "Export CSV", "Search the audit trail", "Page 1"]) expect(html).toContain(t);
+    // One toolbar row: the search, every filter, then Export CSV; no separate filters row.
+    const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("<table"));
+    const order = ['aria-label="Search the audit trail"', 'data-filter="App"', 'data-filter="Kind"', 'data-filter="Severity"', 'data-filter="Status"', 'data-filter="Member"', 'data-filter="Dates"', "data-export"];
+    const at = order.map((t) => bar.indexOf(t));
+    expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
+    expect([...at].sort((x, y) => x - y)).toEqual(at);
+    expect(html).not.toContain("data-filters");
+    expect(html).not.toContain("<select");
     expect(html).toMatch(/data-tone="red"[^>]*>[\s\S]*?High/);
     expect(html).toMatch(/data-tone="amber"[^>]*>[\s\S]*?Medium/);
   });
@@ -75,12 +83,12 @@ describe("audit classes", () => {
     expect(CLASS_COLUMNS.financial.map((c) => c.label)).toEqual(["When", "App", "Kind", "Summary", "Status", "Who", "Target"]);
     expect(CLASS_COLUMNS.workspace.map((c) => c.label)).toEqual(["When", "Who", "Action", "Target", "Summary"]);
     const fin = view("financial");
-    expect(fin).not.toContain("All severities");
-    expect(fin).toContain("All statuses");
+    expect(fin).not.toContain('data-filter="Severity"');
+    expect(fin).toContain('data-filter="Status"');
     // Before Mynt classifies: the trail as it is, under Workspace activity.
     const trail = fromAudit({ events: [{ at: "2026-11-12T10:00:00Z", actor: { name: "Ines" }, action: "member.invited", target: { type: "user", id: "u9" } }] }).events;
     const ws = view("workspace", rowsFromEvents(trail));
-    for (const t of ["All actions", "member.invited", "user: u9", "Ines"]) expect(ws).toContain(t);
+    for (const t of ['data-filter="Action"', "member.invited", "user: u9", "Ines"]) expect(ws).toContain(t);
   });
 
   it("Licence obligations: per licence and product, met / at risk / overdue in words, with evidence", () => {
@@ -96,9 +104,13 @@ describe("audit classes", () => {
     expect(html).toMatch(/data-status="met"[\s\S]*?data-tone="green"[\s\S]*?Met/);
     expect(html).toMatch(/data-status="at_risk"[\s\S]*?data-tone="amber"[\s\S]*?At risk/);
     expect(html).toMatch(/data-status="overdue"[\s\S]*?data-tone="red"[\s\S]*?Overdue/);
-    for (const t of ["Filed 2026-10-10", "No evidence recorded", "Cards, Savings", "Money transmitter", "All partners", "All regulators", "All statuses", "All products", "Export CSV", "4 of 4", "<th", "Reason"]) expect(html).toContain(t);
+    for (const t of ["Filed 2026-10-10", "No evidence recorded", "Cards, Savings", "Money transmitter", "Export CSV", "<th", "Reason"]) expect(html).toContain(t);
+    const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("<table"));
+    const order = ['aria-label="Search obligations"', 'data-filter="Partner"', 'data-filter="Regulator"', 'data-filter="Status"', 'data-filter="Product"', "data-export"];
+    const at = order.map((t) => bar.indexOf(t));
+    expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
+    expect([...at].sort((x, y) => x - y)).toEqual(at);
     // The partner filter is by entity id, shown by name; due dates Mynt doesn't set read "—".
-    expect(html).toMatch(/<option value="e1">Harbor Bank<\/option>/);
     expect(html).toMatch(/data-status="met"[\s\S]*?tabular-nums">—</);
     // An Unknown one says why, in its own column and as the status's tooltip.
     expect(html).toMatch(/title="No evidence source connected for this obligation"[^>]*>Unknown</);

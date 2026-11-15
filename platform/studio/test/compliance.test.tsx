@@ -140,7 +140,7 @@ describe("licences", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     expect(html).toMatch(/<tr[^>]*data-expiry="expired"[\s\S]*?Expired/);
     expect(html).toMatch(/<tr[^>]*data-expiry="expiring"[\s\S]*?Expires soon/);
-    for (const t of ["Search licences", "All partners", "All statuses", "All regulators", "All states", "Any expiry", "Expiring within 90 days"]) expect(html).toContain(t);
+    for (const t of ["Search licences", 'data-filter="Partner"', 'data-filter="Status"', 'data-filter="Regulator"', 'data-filter="State"', 'data-filter="Expiring"']) expect(html).toContain(t);
     // No count line and no inline Import note, in either view.
     const map = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} view="map" coverage={{ kind: "ready", data: coverage }} />);
     for (const view of [html, map]) {
@@ -152,7 +152,7 @@ describe("licences", () => {
   it("has one toolbar row beside the search: filters, Import, Export, Invite partner and the view toggle", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("data-table-view"));
-    const order = ['aria-label="Search licences"', 'aria-label="Partner"', 'aria-label="Regulator"', 'aria-label="State"', 'aria-label="Status"', 'aria-label="Expiring within"', "data-import", "data-export", "data-invite-partner", "data-view-toggle"];
+    const order = ['aria-label="Search licences"', 'aria-label="Partner"', 'aria-label="Regulator"', 'aria-label="State"', 'aria-label="Status"', 'aria-label="Expiring"', "data-import", "data-export", "data-invite-partner", "data-view-toggle"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
@@ -206,7 +206,7 @@ describe("audits", () => {
     const html = renderToStaticMarkup(
       <AuditsView rows={rowsFromEvents(page.events)} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["app.created"]} page={1} hasNext onPrev={() => undefined} onNext={() => undefined} />,
     );
-    for (const t of ["All actions", "All members", "All apps", "From", "To", "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
+    for (const t of ['data-filter="Action"', 'data-filter="Member"', 'data-filter="App"', 'data-filter="Dates"', "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
     expect(html).toMatch(/<button[^>]*disabled[^>]*>[\s\S]*?Previous/);
   });
 });

@@ -8,7 +8,9 @@
 // Given `linked` and `repos` it renders from them (the tests); otherwise it reads them itself.
 import Link from "next/link"
 import { useState } from "react"
-import { ArrowRight, ChevronDown, ExternalLink, GitBranchPlus, Github, Link2 } from "lucide-react"
+import { ArrowRight, ChevronDown, ExternalLink, GitBranchPlus } from "lucide-react"
+
+import { GithubMark } from "@/components/brand-icons"
 
 import { ConnectRepository, RepoStatus, useRepositories, type ReposState } from "@/components/repositories"
 import { Button } from "@/components/ui/button"
@@ -67,14 +69,14 @@ export function GithubControl({ linked, repos, onReposChanged }: { linked?: Link
     if (!accounts.manageUrl)
       return (
         <Button size="sm" variant="outline" disabled title={NOT_YET} data-github-control="none">
-          <Github />
+          <GithubMark />
           Link GitHub
         </Button>
       )
     return (
       <Button size="sm" variant="outline" asChild data-github-control="none">
         <a href={accounts.manageUrl} rel="noreferrer">
-          <Link2 />
+          <GithubMark />
           Link GitHub
         </a>
       </Button>
@@ -90,7 +92,7 @@ export function GithubControl({ linked, repos, onReposChanged }: { linked?: Link
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button size="sm" variant="outline" aria-label={`GitHub ${accounts.github}`} data-github-control="linked">
-            <Github />
+            <GithubMark />
             <span className="max-w-32 truncate">{accounts.github}</span>
             <ChevronDown className="text-muted-foreground" />
           </Button>

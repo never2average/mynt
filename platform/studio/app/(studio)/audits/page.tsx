@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AuditsView, AuditTabs, NO_AUDIT_FILTERS, ObligationsView, type AuditFilters, type Option } from "@/components/audits-view";
 import { NotReady } from "@/components/not-available";
 import { useWorkspace } from "@/components/workspace-context";
-import { AUDIT_CLASS_HELP, auditClassOf, type AuditClass, type AuditRow, type AuditRowPage, type Obligation } from "@/lib/audit-classes";
+import { auditClassOf, type AuditClass, type AuditRow, type AuditRowPage, type Obligation } from "@/lib/audit-classes";
 import { useComplianceData } from "@/lib/use-compliance";
 
 type ClassPage = AuditRowPage & { classes: boolean };
@@ -115,10 +115,7 @@ export default function AuditsPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 w-full flex-1 flex-col gap-3 p-4 lg:p-6">
-        <div className="flex flex-wrap items-center gap-3">
-          <AuditTabs tab={tab} onTab={onTab} />
-          <p className="text-xs text-muted-foreground">{AUDIT_CLASS_HELP[tab]}</p>
-        </div>
+        <AuditTabs tab={tab} onTab={onTab} />
         <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel={tab}>
           {tab === "obligations" ? (
             <ObligationsTab />

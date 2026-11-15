@@ -54,7 +54,7 @@ export function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
       <Tooltip>
         <TooltipTrigger asChild>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className={compact ? "size-8" : undefined} aria-label="Theme" data-theme-switcher>
+            <Button variant="outline" size="icon" className="relative size-8" aria-label="Theme" data-theme-switcher data-compact={compact || undefined}>
               <Sun className="scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
               <Moon className="absolute scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
             </Button>

@@ -13,38 +13,29 @@
 import { useState, type ReactNode } from "react";
 import { MessageSquareIcon, PanelRightIcon } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils"
+import { Tab, TabList } from "@/components/ui/tabs";
 
 export type PanelTab = { id: string; label: string; badge?: number; content: ReactNode };
 export type MobileView = "chat" | "panel";
 
 export function PanelTabStrip({ tabs, tab, onTab, header }: { tabs: PanelTab[]; tab: string; onTab: (id: string) => void; header?: ReactNode }) {
   return (
-    <div className="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2" data-panel-tabs>
-      <div role="tablist" aria-label="Panel" className="flex min-w-0 items-center gap-1 overflow-x-auto">
+    <div className="flex h-10 shrink-0 items-stretch gap-1 border-b px-3" data-panel-tabs>
+      {/* The line tabs' underline sits on this strip's bottom border. */}
+      <TabList aria-label="Panel" className="border-b-0">
         {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={t.id === tab}
-            data-panel-tab={t.id}
-            onClick={() => onTab(t.id)}
-            className={cn(
-              "flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
-              t.id === tab ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-            )}
-          >
+          <Tab key={t.id} selected={t.id === tab} data-panel-tab={t.id} onClick={() => onTab(t.id)}>
             {t.label}
             {t.badge ? (
-              <span className="rounded-full bg-primary px-1.5 text-xs leading-5 text-primary-foreground tabular-nums" data-badge={t.badge}>
+              <span className="rounded-full bg-muted px-1.5 text-xs leading-5 text-foreground tabular-nums" data-badge={t.badge}>
                 {t.badge}
               </span>
             ) : null}
-          </button>
+          </Tab>
         ))}
-      </div>
-      {header && <div className="ml-auto flex min-w-0 shrink items-center gap-2 text-xs text-muted-foreground">{header}</div>}
+      </TabList>
+      {header && <div className="ml-auto flex min-w-0 shrink items-center self-center gap-2 text-xs text-muted-foreground">{header}</div>}
     </div>
   );
 }

@@ -10,7 +10,8 @@
 import { useMemo, useState } from "react"
 import { ChevronLeft, ChevronRight, Download, Search } from "lucide-react"
 
-import { downloadCsv, selectClass } from "@/components/licences-view"
+import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
+import { downloadCsv } from "@/components/licences-view"
 import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -32,25 +33,17 @@ import {
 } from "@/lib/audit-classes"
 import { distinct, toCsv } from "@/lib/compliance"
 import { cn } from "@/lib/utils"
+import { Tab, TabList } from "@/components/ui/tabs"
 
 export function AuditTabs({ tab, onTab }: { tab: AuditClass; onTab: (t: AuditClass) => void }) {
   return (
-    <div role="tablist" aria-label="Audits" className="inline-flex w-fit max-w-full flex-wrap items-center gap-1 rounded-lg bg-muted p-1">
+    <TabList aria-label="Audits">
       {AUDIT_CLASSES.map((t) => (
-        <button
-          key={t}
-          type="button"
-          role="tab"
-          aria-selected={tab === t}
-          data-tab={t}
-          title={AUDIT_CLASS_HELP[t]}
-          onClick={() => onTab(t)}
-          className={cn("rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors", tab === t ? "bg-background text-foreground shadow-sm" : "hover:text-foreground")}
-        >
+        <Tab key={t} selected={tab === t} data-tab={t} title={AUDIT_CLASS_HELP[t]} onClick={() => onTab(t)}>
           {AUDIT_CLASS_LABELS[t]}
-        </button>
+        </Tab>
       ))}
-    </div>
+    </TabList>
   )
 }
 
@@ -141,7 +134,6 @@ export function AuditsView({
   )
   const columns = CLASS_COLUMNS[auditClass]
   const appName = (id: string | null) => (id ? (apps.find((a) => a.id === id)?.name ?? id) : "—")
-  const set = (k: keyof AuditFilters) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => onFilters({ ...filters, [k]: e.target.value })
   const exportCsv = () =>
     downloadCsv(
       `audit-${auditClass}.csv`,
@@ -153,59 +145,28 @@ export function AuditsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-audit-class={auditClass}>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2" data-toolbar>
         <div className="relative min-w-64 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search this page: kind, person, target, summary or details" className="pl-8" aria-label="Search the audit trail" />
         </div>
-        <Button variant="outline" onClick={exportCsv} disabled={!shown.length}>
+        <FilterSelect label="App" value={filters.app_id} onChange={(v) => onFilters({ ...filters, app_id: v })} options={apps.map((x) => ({ value: x.id, label: x.name }))} />
+        <FilterSelect label={auditClass === "workspace" ? "Action" : "Kind"} value={filters.action} onChange={(v) => onFilters({ ...filters, action: v })} options={actions.map((x) => ({ value: x, label: x }))} />
+        {CLASS_FIELDS[auditClass].map((k) => (
+          <FilterSelect
+            key={k}
+            label={k === "severity" ? "Severity" : "Status"}
+            value={local[k]}
+            onChange={(v) => setLocal({ ...local, [k]: v })}
+            options={distinct(rows.map((r) => r[k])).map((v) => ({ value: v, label: v.replace(/_/g, " ") }))}
+          />
+        ))}
+        <FilterSelect label="Member" value={filters.user_id} onChange={(v) => onFilters({ ...filters, user_id: v })} options={members.map((m) => ({ value: m.id, label: m.name }))} />
+        <DateRangeFilter from={filters.from} to={filters.to} onChange={(from, to) => onFilters({ ...filters, from, to })} />
+        <Button variant="outline" onClick={exportCsv} disabled={!shown.length} data-export>
           <Download />
           Export CSV
         </Button>
-      </div>
-      <div className="flex flex-wrap items-center gap-2 text-sm" data-filters>
-        <select className={selectClass} value={filters.action} onChange={set("action")} aria-label={auditClass === "workspace" ? "Action" : "Kind"}>
-          <option value="">{auditClass === "workspace" ? "All actions" : "All kinds"}</option>
-          {actions.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
-        <select className={selectClass} value={filters.user_id} onChange={set("user_id")} aria-label="Member">
-          <option value="">All members</option>
-          {members.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-        <select className={selectClass} value={filters.app_id} onChange={set("app_id")} aria-label="App">
-          <option value="">All apps</option>
-          {apps.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-            </option>
-          ))}
-        </select>
-        {CLASS_FIELDS[auditClass].map((k) => (
-          <select key={k} className={selectClass} value={local[k]} onChange={(e) => setLocal({ ...local, [k]: e.target.value })} aria-label={k === "severity" ? "Severity" : "Status"}>
-            <option value="">{k === "severity" ? "All severities" : "All statuses"}</option>
-            {distinct(rows.map((r) => r[k])).map((v) => (
-              <option key={v} value={v}>
-                {v.replace(/_/g, " ")}
-              </option>
-            ))}
-          </select>
-        ))}
-        <label className="flex items-center gap-1.5 text-muted-foreground">
-          From
-          <Input type="date" value={filters.from} onChange={set("from")} className="h-9 w-40" />
-        </label>
-        <label className="flex items-center gap-1.5 text-muted-foreground">
-          To
-          <Input type="date" value={filters.to} onChange={set("to")} className="h-9 w-40" />
-        </label>
       </div>
       <div className="min-h-0 flex-1 overflow-auto rounded-lg border">
         <Table>
@@ -270,6 +231,7 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
   const [f, setF] = useState<ObligationFilters>(initial)
   const shown = useMemo(() => filterObligations(obligations, f), [obligations, f])
   const set = (k: keyof ObligationFilters) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value })
+  const pick = (k: keyof ObligationFilters) => (v: string) => setF({ ...f, [k]: v })
   const counts = Object.fromEntries(OBLIGATION_STATUSES.map((s) => [s, obligations.filter((o) => o.status === s).length])) as Record<ObligationStatus, number>
   const exportCsv = () =>
     downloadCsv(
@@ -281,48 +243,19 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
     )
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-audit-class="obligations">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2" data-toolbar>
         <div className="relative min-w-64 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={f.query} onChange={set("query")} placeholder="Search obligation, partner, regulator, product or evidence" className="pl-8" aria-label="Search obligations" />
         </div>
-        <Button variant="outline" onClick={exportCsv} disabled={!shown.length}>
+        <FilterSelect label="Partner" value={f.partner} onChange={pick("partner")} options={partnersOf(obligations).map(([id, name]) => ({ value: id, label: name }))} />
+        <FilterSelect label="Regulator" value={f.regulator} onChange={pick("regulator")} options={distinct(obligations.map((o) => o.regulator)).map((v) => ({ value: v, label: v }))} />
+        <FilterSelect label="Status" value={f.status} onChange={pick("status")} options={OBLIGATION_STATUSES.map((st) => ({ value: st, label: `${OBLIGATION_LABELS[st]} (${counts[st]})` }))} />
+        <FilterSelect label="Product" value={f.product} onChange={pick("product")} options={distinct(obligations.flatMap((o) => o.products)).map((v) => ({ value: v, label: v }))} />
+        <Button variant="outline" onClick={exportCsv} disabled={!shown.length} data-export>
           <Download />
           Export CSV
         </Button>
-      </div>
-      <div className="flex flex-wrap items-center gap-2 text-sm" data-filters>
-        <select className={selectClass} value={f.partner} onChange={set("partner")} aria-label="Partner">
-          <option value="">All partners</option>
-          {partnersOf(obligations).map(([id, name]) => (
-            <option key={id} value={id}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <select className={selectClass} value={f.regulator} onChange={set("regulator")} aria-label="Regulator">
-          <option value="">All regulators</option>
-          {distinct(obligations.map((o) => o.regulator)).map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-        <select className={selectClass} value={f.status} onChange={set("status")} aria-label="Status">
-          <option value="">All statuses</option>
-          {OBLIGATION_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {OBLIGATION_LABELS[s]} ({counts[s]})
-            </option>
-          ))}
-        </select>
-        <select className={selectClass} value={f.product} onChange={set("product")} aria-label="Product">
-          <option value="">All products</option>
-          {distinct(obligations.flatMap((o) => o.products)).map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-        <span className="ml-auto text-muted-foreground tabular-nums">
-          {shown.length} of {obligations.length}
-        </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto rounded-lg border">
         <Table>

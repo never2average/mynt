@@ -71,14 +71,23 @@ describe("the Licences toolbar's view toggle", () => {
       return <LicencesView licences={licences} coverage={{ kind: "ready", data: coverage }} view={view} onView={setView} />;
     };
     const c = await draw(<Harness />);
-    fireEvent.change(c.querySelector('select[aria-label="Partner"]')!, { target: { value: "Harbor Bank" } });
+    // The Partner filter: a compact control in the toolbar row, opening its choices.
+    await act(async () => {
+      fireEvent.keyDown(c.querySelector('[data-filter="Partner"]')!, { key: "Enter" });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-filter-menu="Partner"] [data-filter-option="Harbor Bank"]')!);
+    });
     expect(c.querySelectorAll("[data-table-view] tbody tr")).toHaveLength(1);
+    // Shown on the control, with Clear in its menu; not as an extra line of text.
+    expect(c.querySelector('[data-filter="Partner"]')!.getAttribute("aria-label")).toBe("Partner: Harbor Bank");
+    expect(c.querySelector('[data-filter="Partner"]')!.textContent).toContain("· Harbor Bank");
     await act(async () => {
       fireEvent.click(c.querySelector('[data-view-toggle="map"]')!);
     });
     expect(c.querySelector("[data-table-view]")).toBeNull();
     expect(c.querySelector("[data-map-view]")).not.toBeNull();
-    expect((c.querySelector('select[aria-label="Partner"]') as HTMLSelectElement).value).toBe("Harbor Bank");
+    expect(c.querySelector('[data-filter="Partner"]')!.getAttribute("data-active")).toBe("true"); // the filters stay
     // The filtered licence covers California only: the rest are dimmed.
     expect(c.querySelector('[data-state="CA"]')!.hasAttribute("data-dimmed")).toBe(false);
     expect(c.querySelector('[data-state="TX"]')!.getAttribute("data-dimmed")).toBe("true");
@@ -86,6 +95,15 @@ describe("the Licences toolbar's view toggle", () => {
       fireEvent.click(c.querySelector('[data-view-toggle="table"]')!);
     });
     expect(c.querySelectorAll("[data-table-view] tbody tr")).toHaveLength(1);
+    // Clear puts every licence back.
+    await act(async () => {
+      fireEvent.keyDown(c.querySelector('[data-filter="Partner"]')!, { key: "Enter" });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-filter-menu="Partner"] [data-filter-clear]')!);
+    });
+    expect(c.querySelectorAll("[data-table-view] tbody tr")).toHaveLength(2);
+    expect(c.querySelector('[data-filter="Partner"]')!.hasAttribute("data-active")).toBe(false);
   });
 
   it("Invite partner opens a form whose sending waits on Mynt; it never emails the partner", async () => {

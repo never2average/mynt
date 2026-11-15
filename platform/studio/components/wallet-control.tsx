@@ -8,7 +8,7 @@
 // otherwise it reads them itself.
 import Link from "next/link"
 import { useState } from "react"
-import { ArrowRight, Check, ChevronDown, Copy, ExternalLink, Link2, Wallet } from "lucide-react"
+import { ArrowRight, Check, ChevronDown, Copy, ExternalLink, Wallet } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -24,6 +24,7 @@ import { shortAddress, type LinkedAccounts } from "@/lib/linked-accounts"
 import { walletLinksFor, type LiquidityAccess } from "@/lib/liquidity"
 import { useLinkedAccounts } from "@/lib/use-linked-accounts"
 import { useLiquidityAccess } from "@/lib/use-liquidity-access"
+import { SolanaMark } from "@/components/brand-icons"
 
 export const NOT_YET = "Linking accounts comes with Mynt's next update"
 
@@ -57,7 +58,7 @@ export function WalletControl({
     return (
       <Button size="sm" variant="outline" className={size} asChild data-wallet-control="none">
         <a href={accounts.manageUrl} rel="noreferrer">
-          <Link2 />
+          <Wallet />
           Link wallet
         </a>
       </Button>
@@ -80,6 +81,8 @@ export function WalletControl({
       <DropdownMenuTrigger asChild>
         <Button size="sm" variant="outline" className={size} aria-label={`Wallet ${shortAddress(address)} on ${network}`} data-wallet-control="linked">
           <Wallet />
+          {/* The network's mark, monochrome: Solana's for a Solana wallet, else none (the wallet icon says it). */}
+          {network === "Solana" && <SolanaMark className="text-muted-foreground" data-network-mark="solana" />}
           <span className="font-mono">{shortAddress(address)}</span>
           {!compact && (
             <Badge variant="secondary" className="font-normal" data-network>
