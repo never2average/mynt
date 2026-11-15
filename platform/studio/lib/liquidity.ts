@@ -8,6 +8,8 @@
 // capital and ask for it back. Money only ever moves on a rail the pool's sponsoring licence
 // provider approved; Mynt never holds anyone's funds or keys.
 
+import { treasuryFrom, type Treasury } from "./wallets";
+
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -96,6 +98,7 @@ export type Pool = {
   approvedAt: string | null;
   offeringCleared: boolean;
   createdAt: string | null;
+  treasury: Treasury | null; // an on-chain USDC treasury (lib/wallets.ts), when the pool has one
 };
 
 export function fromPools(reply: unknown): Pool[] {
@@ -124,6 +127,7 @@ export function fromPools(reply: unknown): Pool[] {
       approvedAt: str(p.approved_at),
       offeringCleared: p.offering_cleared === true,
       createdAt: str(p.created_at),
+      treasury: treasuryFrom(p.treasury),
     }))
     .filter((p) => p.id && p.productId);
 }
@@ -270,6 +274,9 @@ export type Position = {
   paidCents: number; // settled withdrawals
   availableCents: number; // what may be asked for now
   exited: boolean;
+  onChain: boolean; // list_my_positions' source: "on-chain"
+  cluster: string | null;
+  deposit: string | null; // the on-chain deposit a withdrawal draws from, when Mynt names it
 };
 export function fromPositions(reply: unknown): Position[] {
   return list(reply, "positions")
@@ -288,6 +295,9 @@ export function fromPositions(reply: unknown): Position[] {
       paidCents: cents(p.withdrawn_cents),
       availableCents: cents(p.available_to_withdraw_cents),
       exited: p.exited === true,
+      onChain: p.source === "on-chain",
+      cluster: str(p.cluster),
+      deposit: str(p.deposit) ?? str(p.deposit_address),
     }))
     .filter((p) => p.poolId);
 }

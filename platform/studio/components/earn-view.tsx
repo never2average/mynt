@@ -49,11 +49,6 @@ import {
   type Withdrawal,
 } from "@/lib/liquidity"
 
-// What Earn says about money, everywhere it shows pools: where money moves today, what's coming,
-// and that it explains terms rather than recommending anything. No yields or returns are shown.
-export const EARN_DISCLOSURE =
-  "Money moves only on rails a pool's sponsoring licence provider approved, and Mynt never holds your funds or keys. An on-chain USDC treasury per app is coming (on devnet first). Real commitments wait until a Mynt admin clears a pool's offering; sandbox pools move test money only. Earn explains pool terms and matches them to what you ask: it isn't investment advice and shows no promised returns, only figures Mynt measures."
-
 export type ActionResult = { ok: true; reply: unknown } | { error: string; refused?: boolean }
 export type LiquidityActions = {
   propose(input: ProposeInput): Promise<ActionResult>

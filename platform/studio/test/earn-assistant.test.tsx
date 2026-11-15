@@ -96,9 +96,9 @@ describe("Earn in the chat workspace", () => {
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("false");
     expect(screen.getByRole("heading", { name: "What do you want to earn?" })).toBeTruthy();
     for (const ex of PROMPT_EXAMPLES) expect(document.querySelector(`[data-chip="${ex}"]`)).toBeTruthy();
+    // One line under the composer; the full text is in its tooltip (test/earn-wallet.test.tsx).
     const note = document.querySelector("[data-composer-note] [data-earn-disclosure]")!.textContent!;
-    expect(note).toContain("on-chain USDC treasury per app is coming");
-    expect(note).toContain("isn't investment advice");
+    expect(note).toBe("Not investment advice · Mynt never holds your funds");
     // No page-level tab bar or metadata card any more.
     expect(document.querySelector("[data-metadata]")).toBeNull();
     expect(document.querySelector('[role="tablist"][aria-label="Earn"]')).toBeNull();
