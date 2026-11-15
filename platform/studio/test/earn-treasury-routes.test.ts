@@ -13,6 +13,8 @@ const OTHER_SOL = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
 const EVM = "0x52908400098527886E0F7030069857D2E4169EE7";
 const TX = Buffer.alloc(300, 1).toString("base64");
 const SIG = "5".repeat(87);
+const DEP = "Dep1111111111111111111111111111111111111111";
+const LOCKED = "Dep2222222222222222222222222222222222222222";
 const ALL = ["get_linked_accounts", "get_wallet_balances", "list_pools", "list_my_positions", "prepare_treasury_deposit", "prepare_treasury_withdrawal", "get_treasury_tx_status"];
 const pool = (id: string, over: Record<string, unknown> = {}) => ({ id, product_id: "p", name: `Pool ${id.slice(-1)}`, sandbox: true, status: "open", notice_period_days: 7, lock_in_days: 30, min_commitment_cents: 100, max_commitment_cents: 1_000_000, approved_at: "2026-11-01T00:00:00Z", ...over });
 const TREASURY = { cluster: "devnet", program_id: "Prog", pool_address: OTHER_SOL, verified_build: true, on_chain_terms: { lock_in_seconds: 2_592_000, notice_seconds: 604_800 } };
@@ -24,6 +26,8 @@ const fake = {
   claims: new Set<string>(),
   pools: [pool(POOL, { treasury: TREASURY }), pool(RAIL_POOL)] as unknown[],
   prepareReply: null as unknown,
+  refusal: null as Record<string, unknown> | null,
+  txStatus: "confirmed",
 };
 
 vi.mock("@/lib/session", () => ({
@@ -59,12 +63,33 @@ vi.mock("@/lib/tokens", () => ({
         case "list_pools":
           return ok(fake.pools);
         case "list_my_positions":
-          return ok([{ pool_id: POOL, name: "Pool 1", product_id: "p", sandbox: true, balance_cents: 10_000, available_to_withdraw_cents: 5_000, source: "on-chain", cluster: "devnet", deposit: "dep-1" }]);
+          return ok([
+            { source: "off-chain", pool_id: RAIL_POOL, name: "Pool 2", product_id: "p", balance_cents: 100 },
+            {
+              source: "on-chain",
+              cluster: "devnet",
+              pool_id: POOL,
+              name: "Pool 1",
+              product_id: "p",
+              wallet: SOL,
+              sandbox: true,
+              principal: "150000000",
+              queued: 0,
+              available_to_request: 50_000_000,
+              deposits: [
+                { deposit: DEP, address: DEP, seq: 1, amount: 50_000_000, remaining: 50_000_000, queued: 0, review_until: "2026-01-01T00:00:00Z", unlocks_at: "2026-02-01T00:00:00Z", unlocked: true, rejected: false },
+                { deposit: LOCKED, address: LOCKED, seq: 2, amount: "100000000", remaining: "100000000", queued: 0, review_until: "2026-01-01T00:00:00Z", unlocks_at: "2099-02-01T00:00:00Z", unlocked: false, rejected: false },
+              ],
+              requests: [],
+            },
+          ]);
         case "prepare_treasury_deposit":
         case "prepare_treasury_withdrawal":
+          if (fake.refusal) return { isError: true, content: [{ type: "text", text: JSON.stringify(fake.refusal) }] };
           return ok(fake.prepareReply ?? { cluster: "devnet", transaction_base64: TX, expires_at: "2099-01-01T00:00:00Z", summary: { pool: "Pool 1", amount: args.amount_usdc_base_units, lock_in_seconds: 2_592_000, notice_seconds: 604_800, wallet: args.wallet } });
         case "get_treasury_tx_status":
-          return ok({ status: "confirmed" });
+          if (fake.refusal) return { isError: true, content: [{ type: "text", text: JSON.stringify(fake.refusal) }] };
+          return ok({ status: fake.txStatus, queued_pools: [POOL] });
         default:
           return ok({});
       }
@@ -90,6 +115,8 @@ beforeEach(() => {
   fake.claims = new Set();
   fake.pools = [pool(POOL, { treasury: TREASURY }), pool(RAIL_POOL)];
   fake.prepareReply = null;
+  fake.refusal = null;
+  fake.txStatus = "confirmed";
   as("liquidity_provider");
 });
 
@@ -101,7 +128,8 @@ describe("the allow-list", () => {
     expect(parseStudioCall("prepare_treasury_deposit", { pool_id: POOL, wallet: SOL, amount_usdc_base_units: 1, max_lock_in_seconds: 0 })).toHaveProperty("tool");
     expect(parseStudioCall("prepare_treasury_deposit", { pool_id: POOL, wallet: SOL, amount_usdc_base_units: 1.5, max_lock_in_seconds: 0 })).toHaveProperty("error");
     expect(parseStudioCall("prepare_treasury_deposit", { pool_id: POOL, wallet: SOL, amount_usdc_base_units: 1, max_lock_in_seconds: 0, cluster: "mainnet-beta" })).toHaveProperty("error");
-    expect(parseStudioCall("prepare_treasury_withdrawal", { pool_id: POOL, wallet: SOL, deposit: "dep-1", amount_usdc_base_units: 1, max_notice_seconds: 0 })).toHaveProperty("tool");
+    expect(parseStudioCall("prepare_treasury_withdrawal", { pool_id: POOL, wallet: SOL, deposit: DEP, amount_usdc_base_units: 1, max_notice_seconds: 0 })).toHaveProperty("tool");
+    expect(parseStudioCall("prepare_treasury_withdrawal", { pool_id: POOL, wallet: SOL, deposit: "dep-1", amount_usdc_base_units: 1, max_notice_seconds: 0 })).toHaveProperty("error");
     expect(parseStudioCall("get_treasury_tx_status", { signature: SIG })).toHaveProperty("tool");
     expect(parseStudioCall("get_treasury_tx_status", { signature: "short" })).toHaveProperty("error");
   });
@@ -146,11 +174,29 @@ describe("POST /api/earn/treasury/prepare", () => {
     expect(called("prepare_treasury_deposit")).toEqual([{ name: "prepare_treasury_deposit", args: { pool_id: POOL, wallet: SOL, amount_usdc_base_units: 25_000_000, max_lock_in_seconds: 2_592_000 } }]);
   });
 
-  it("prepares a withdrawal from the user's on-chain deposit, within what's available", async () => {
-    const res = await prepare.POST(deposit({ kind: "withdrawal", amount_cents: 5_000 }));
+  it("prepares a withdrawal from the deposit chosen, within what it has available", async () => {
+    const res = await prepare.POST(deposit({ kind: "withdrawal", amount_cents: undefined, amount_usdc_base_units: 50_000_000, deposit: DEP }));
     expect(res.status).toBe(200);
-    expect(called("prepare_treasury_withdrawal")[0].args).toEqual({ pool_id: POOL, wallet: SOL, deposit: "dep-1", amount_usdc_base_units: 50_000_000, max_notice_seconds: 604_800 });
-    expect((await prepare.POST(deposit({ kind: "withdrawal", amount_cents: 5_001 }))).status).toBe(400);
+    expect(called("prepare_treasury_withdrawal")[0].args).toEqual({ pool_id: POOL, wallet: SOL, deposit: DEP, amount_usdc_base_units: 50_000_000, max_notice_seconds: 604_800 });
+    expect((await prepare.POST(deposit({ kind: "withdrawal", amount_cents: 5_001, deposit: DEP }))).status).toBe(400);
+    const locked = await prepare.POST(deposit({ kind: "withdrawal", deposit: LOCKED }));
+    expect(locked.status).toBe(400);
+    expect((await locked.json()).message).toContain("Locked until 2099-02-01");
+    expect((await prepare.POST(deposit({ kind: "withdrawal", deposit: OTHER_SOL }))).status).toBe(404);
+    expect((await prepare.POST(deposit({ kind: "withdrawal" }))).status).toBe(400); // no deposit named
+    expect(called("prepare_treasury_withdrawal")).toHaveLength(1);
+  });
+
+  it("answers Mynt's coded refusals in plain words, and frees the key for another try", async () => {
+    fake.refusal = { error: "Insufficient USDC in wallet ...", code: "insufficient_usdc" };
+    const res = await prepare.POST(deposit({ idempotency_key: "retry-key-1" }));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "insufficient_usdc", message: "Your wallet doesn't hold enough devnet USDC for that amount." });
+    fake.refusal = { error: "x", code: "in_review", review_until: "2026-11-16T00:00:00Z" };
+    const review = await (await prepare.POST(deposit({ kind: "withdrawal", deposit: DEP }))).json();
+    expect(review.message).toBe("That deposit is still in its review window until 2026-11-16.");
+    fake.refusal = null;
+    expect((await prepare.POST(deposit({ idempotency_key: "retry-key-1" }))).status).toBe(200);
   });
 
   it("refuses another origin, a wallet that isn't the user's verified one, and a non-liquidity provider", async () => {
@@ -183,6 +229,14 @@ describe("POST /api/earn/treasury/prepare", () => {
     expect(called("prepare_treasury_deposit")).toHaveLength(1);
   });
 
+  it("refuses a deposit to a pool whose approvers changed, without asking Mynt to prepare it", async () => {
+    fake.pools = [pool(POOL, { treasury: { ...TREASURY, attesters_flag: "attesters changed" } })];
+    const res = await prepare.POST(deposit());
+    expect(res.status).toBe(409);
+    expect((await res.json()).message).toBe("This pool's approvers changed; deposits are paused until its builder re-registers it.");
+    expect(called("prepare_treasury_deposit")).toHaveLength(0);
+  });
+
   it("says on-chain deposits are coming soon until Mynt has the tool", async () => {
     fake.tools = ALL.filter((t) => t !== "prepare_treasury_deposit");
     const res = await prepare.POST(deposit());
@@ -194,7 +248,17 @@ describe("POST /api/earn/treasury/prepare", () => {
 describe("POST /api/earn/treasury/status", () => {
   it("reads a signature's status from the studio's own origin only", async () => {
     const res = await status.POST(post("/api/earn/treasury/status", { signature: SIG }));
-    expect(await res.json()).toEqual({ status: "confirmed", error: null });
+    expect(await res.json()).toEqual({ status: "confirmed", stage: "confirmed", error: null });
+    for (const [raw, want] of [["not_found", "pending"], ["processed", "pending"], ["finalized", "confirmed"], ["failed", "failed"]]) {
+      fake.txStatus = raw;
+      expect((await (await status.POST(post("/api/earn/treasury/status", { signature: SIG }))).json()).status, raw).toBe(want);
+    }
+    fake.txStatus = "confirmed";
+    fake.refusal = { error: "rpc down at some address", code: "rpc_unavailable" };
+    const down = await status.POST(post("/api/earn/treasury/status", { signature: SIG }));
+    expect(down.status).toBe(422);
+    expect((await down.json()).message).toBe("Mynt couldn't reach devnet just now. Please try again in a minute.");
+    fake.refusal = null;
     expect((await status.POST(post("/api/earn/treasury/status", { signature: SIG }, "https://evil.example"))).status).toBe(403);
     expect((await status.POST(post("/api/earn/treasury/status", { signature: "x" }))).status).toBe(400);
     fake.tools = [];

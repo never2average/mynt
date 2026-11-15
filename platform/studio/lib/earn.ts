@@ -8,7 +8,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { commitRefusal, US_STATE_CODES, usd, withdrawalRefusal, type Pool, type Position } from "./liquidity";
-import { balancesText, centsToUsdcBaseUnits, CLUSTER, onDevnet, usdcText, type Balances } from "./wallets";
+import { balancesText, centsToUsdcBaseUnits, CLUSTER, DEPOSITS_PAUSED, depositStanding, onDevnet, SOLANA_ADDRESS, standingText, usdcText, type Balances, type OnChainDeposit } from "./wallets";
 import type { StudioTool } from "./studio-tools";
 
 type ToolDef = Anthropic.Beta.Messages.BetaTool;
@@ -41,8 +41,8 @@ export const PANEL_TOOL_DEFS: ToolDef[] = [
   },
   {
     name: "draft_withdrawal",
-    description: "Put a draft withdrawal request in the panel for the user to review: a pool they hold a position in and an amount in integer cents. It does NOT request anything: only the user's own click does. A draft over what's available is refused with the reason.",
-    input_schema: { type: "object", properties: { pool_id: { type: "string" }, amount_cents: { type: "integer" } }, required: ["pool_id", "amount_cents"] },
+    description: "Put a draft withdrawal request in the panel for the user to review: a pool they hold a position in and an amount in integer cents. For an on-chain position it draws from one deposit of the chosen wallet (its `deposit` address from list_my_positions, or the oldest with enough available) and is signed in the user's own wallet. It does NOT request anything: only the user's own click does. A draft over what's available, or from a deposit still in review or locked in, is refused with the reason.",
+    input_schema: { type: "object", properties: { pool_id: { type: "string" }, amount_cents: { type: "integer" }, deposit: { type: "string" } }, required: ["pool_id", "amount_cents"] },
   },
 ];
 
@@ -76,7 +76,7 @@ export function earnContext(access: { builder: boolean; liquidityProvider: boole
 // user signs in their own wallet, not a rail.
 export type Draft =
   | { kind: "commit"; id: string; poolId: string; poolName: string; amountCents: number; state: string | null; sandbox: boolean; onChain?: boolean; wallet?: string | null }
-  | { kind: "withdraw"; id: string; poolId: string; poolName: string; amountCents: number; sandbox: boolean; onChain?: boolean; wallet?: string | null };
+  | { kind: "withdraw"; id: string; poolId: string; poolName: string; amountCents: number; sandbox: boolean; onChain?: boolean; wallet?: string | null; deposit?: string | null };
 
 // The wallet the user chose in the chat bar, as the server checked it: one of their verified
 // linked wallets, with its devnet balances when Mynt could read them.
@@ -87,7 +87,7 @@ const CommitDraft = z.object({
   amount_cents: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   state: z.string().trim().toLowerCase().refine((s) => US_STATE_CODES.includes(s), "a US state like us-ny").optional(),
 });
-const WithdrawDraft = z.object({ pool_id: z.string().uuid(), amount_cents: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) });
+const WithdrawDraft = z.object({ pool_id: z.string().uuid(), amount_cents: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), deposit: z.string().regex(SOLANA_ADDRESS).optional() });
 
 // A draft as the model asked for it, checked against the pools and positions Mynt answers now, and,
 // for a pool with an on-chain treasury, against the chosen wallet and its devnet USDC balance.
@@ -97,13 +97,16 @@ export function validateDraft(kind: "commit" | "withdraw", input: unknown, pools
     if (!parsed.success) return { error: "A draft commitment needs a pool id, a positive whole number of cents and, for a pool on rails, a US state like us-ny." };
     const pool = pools.find((p) => p.id === parsed.data.pool_id);
     if (!pool) return { error: "That pool isn't one open to this user." };
-    const position = positions.find((p) => p.poolId === pool.id);
+    const position = positions.find((p) => p.poolId === pool.id && !p.onChain);
     if (pool.treasury) {
       if (!onDevnet(pool.treasury)) return { error: "This pool's treasury isn't on devnet, and only devnet deposits are offered." };
+      if (pool.treasury.attestersFlag) return { error: DEPOSITS_PAUSED };
       if (!wallet?.solana) return { error: "A deposit to this pool comes from a Solana wallet: ask the user to choose one of their linked Solana wallets in the chat bar first." };
       if (wallet.balances && BigInt(wallet.balances.usdcBaseUnits) < BigInt(centsToUsdcBaseUnits(parsed.data.amount_cents)))
         return { error: `The chosen wallet holds ${usdcText(wallet.balances.usdcBaseUnits)} on devnet, less than that amount.` };
-      const refused = poolLimitRefusal(pool, position, parsed.data.amount_cents);
+      // The firm's limit counts every wallet's on-chain principal in the pool.
+      const held = positions.filter((p) => p.poolId === pool.id && p.onChain).reduce((n, p) => n + p.settledCents, 0);
+      const refused = poolLimitRefusal(pool, held, parsed.data.amount_cents);
       if (refused) return { error: refused };
       return { draft: { kind, id, poolId: pool.id, poolName: pool.name, amountCents: parsed.data.amount_cents, state: null, sandbox: pool.sandbox, onChain: true, wallet: wallet.address } };
     }
@@ -115,23 +118,41 @@ export function validateDraft(kind: "commit" | "withdraw", input: unknown, pools
   }
   const parsed = WithdrawDraft.safeParse(input);
   if (!parsed.success) return { error: "A draft withdrawal needs a pool id and a positive whole number of cents." };
-  const position = positions.find((p) => p.poolId === parsed.data.pool_id);
-  if (!position) return { error: "The user holds no position in that pool." };
+  const inPool = positions.filter((p) => p.poolId === parsed.data.pool_id);
+  if (!inPool.length) return { error: "The user holds no position in that pool." };
+  if (inPool.some((p) => p.onChain)) {
+    if (inPool.some((p) => p.onChain && p.cluster && p.cluster !== CLUSTER)) return { error: "This position isn't on devnet, and only devnet withdrawals are offered." };
+    if (!wallet?.solana) return { error: "An on-chain withdrawal is signed by the wallet that deposited: ask the user to choose one of their linked Solana wallets in the chat bar first." };
+    const row = inPool.find((p) => p.onChain && p.wallet === wallet.address);
+    if (!row?.chain) return { error: "The chosen wallet has no deposit in this pool. Ask the user to choose the wallet they deposited from." };
+    const pick = depositFor(row.chain.deposits, BigInt(centsToUsdcBaseUnits(parsed.data.amount_cents)), parsed.data.deposit);
+    if ("error" in pick) return pick;
+    return { draft: { kind, id, poolId: row.poolId, poolName: row.name, amountCents: parsed.data.amount_cents, sandbox: row.sandbox, onChain: true, wallet: wallet.address, deposit: pick.deposit } };
+  }
+  const position = inPool[0];
   const refused = withdrawalRefusal(position, parsed.data.amount_cents);
   if (refused) return { error: refused };
-  if (position.onChain) {
-    if (position.cluster && position.cluster !== CLUSTER) return { error: "This position isn't on devnet, and only devnet withdrawals are offered." };
-    if (!wallet?.solana) return { error: "An on-chain withdrawal goes back to a Solana wallet: ask the user to choose one of their linked Solana wallets in the chat bar first." };
-    return { draft: { kind, id, poolId: position.poolId, poolName: position.name, amountCents: parsed.data.amount_cents, sandbox: position.sandbox, onChain: true, wallet: wallet.address } };
-  }
   return { draft: { kind, id, poolId: position.poolId, poolName: position.name, amountCents: parsed.data.amount_cents, sandbox: position.sandbox } };
 }
 
+// The deposit an on-chain withdrawal draws from: the one named, or the first (oldest) one with
+// enough available, else why none can.
+export function depositFor(deposits: OnChainDeposit[], amount: bigint, named?: string): { deposit: string } | { error: string } {
+  const candidates = named ? deposits.filter((d) => d.deposit === named) : deposits;
+  if (!candidates.length) return { error: "That deposit isn't one of the chosen wallet's in this pool." };
+  const ok = candidates.find((d) => { const s = depositStanding(d); return s.kind === "available" && s.free >= amount; });
+  if (ok) return { deposit: ok.deposit };
+  const why = candidates.map((d) => depositStanding(d)).find((s) => s.kind !== "available");
+  const most = candidates.reduce((n, d) => { const s = depositStanding(d); return s.kind === "available" && s.free > n ? s.free : n; }, 0n);
+  if (most > 0n) return { error: `No single deposit has that much available: the most one has is ${usdcText(most)}.` };
+  return { error: `Nothing is available to withdraw from this wallet's deposits yet${why ? ` (${standingText(why).toLowerCase()})` : ""}.` };
+}
+
 // A pool's commitment limits only (an on-chain pool has no rails to check).
-function poolLimitRefusal(pool: Pool, position: Position | undefined, amount: number): string | null {
+function poolLimitRefusal(pool: Pool, heldCents: number, amount: number): string | null {
   if (!pool.approvedAt) return "This pool isn't approved yet.";
   if (pool.status !== "open") return statusRefusal(pool);
-  const current = position ? position.settledCents + position.pendingInCents : 0;
+  const current = heldCents;
   if (current + amount > pool.maxCommitmentCents) return `That would take the position over this pool's limit of ${usd(pool.maxCommitmentCents)} per firm.`;
   if (current + amount < pool.minCommitmentCents) return `A firm's position in this pool must be at least ${usd(pool.minCommitmentCents)}.`;
   return null;
@@ -161,7 +182,7 @@ export function panelFrom(messages: Message[]): { poolIds: string[] | null; draf
       if (p.type === "data-earn-pools" && Array.isArray((p.data as { pool_ids?: unknown })?.pool_ids)) poolIds = ((p.data as { pool_ids: unknown[] }).pool_ids).filter((v): v is string => typeof v === "string");
       if (p.type === "data-earn-draft" && p.data && typeof p.data === "object") {
         const d = p.data as Draft;
-        if ((d.kind === "commit" || d.kind === "withdraw") && typeof d.poolId === "string" && Number.isSafeInteger(d.amountCents) && d.amountCents > 0) drafts.push({ ...d, wallet: typeof d.wallet === "string" ? d.wallet : null, onChain: d.onChain === true });
+        if ((d.kind === "commit" || d.kind === "withdraw") && typeof d.poolId === "string" && Number.isSafeInteger(d.amountCents) && d.amountCents > 0) drafts.push({ ...d, wallet: typeof d.wallet === "string" ? d.wallet : null, onChain: d.onChain === true, ...(d.kind === "withdraw" ? { deposit: typeof d.deposit === "string" ? d.deposit : null } : {}) } as Draft);
       }
     }
   }

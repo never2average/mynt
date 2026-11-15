@@ -75,11 +75,32 @@ function decimal(baseUnits: string, decimals: number, maxFraction: number): stri
   const frac = (n % scale).toString().padStart(decimals, "0").slice(0, maxFraction).replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : whole;
 }
-export const usdcText = (baseUnits: string) => `${decimal(baseUnits, 6, 6)} USDC`;
+export const usdcText = (baseUnits: string | bigint) => `${decimal(String(baseUnits), 6, 6)} USDC`;
 export const solText = (lamports: string) => `${decimal(lamports, 9, 4)} SOL`;
 export const balancesText = (b: Balances | null) => (b ? `${usdcText(b.usdcBaseUnits)} · ${solText(b.solLamports)}` : "Balances unavailable");
 // Pools count in integer cents; USDC has 6 decimals, so a cent is 10,000 base units.
 export const centsToUsdcBaseUnits = (cents: number) => String(BigInt(cents) * 10_000n);
+// Base units to whole cents, rounded down (what may be asked for is never overstated).
+export const usdcBaseUnitsToCents = (units: bigint) => Number(units / 10_000n);
+
+// USDC base units as Mynt sends them: a number while it's exact, a decimal string above 2^53.
+// Parsed with BigInt, never through a float; null for anything else.
+export function baseUnitsOf(v: unknown): bigint | null {
+  if (typeof v === "number") return Number.isSafeInteger(v) && v >= 0 ? BigInt(v) : null;
+  if (typeof v === "bigint") return v >= 0n ? v : null;
+  if (typeof v === "string" && /^\d{1,40}$/.test(v.trim())) return BigInt(v.trim());
+  return null;
+}
+
+// "12.5" or "1,000.000001" USDC, as typed, to base units; null if it isn't a positive amount with
+// at most 6 decimals.
+export function parseUsdc(input: string): bigint | null {
+  const t = input.trim().replace(/\s*USDC$/i, "").replace(/,/g, "");
+  if (!/^\d+(\.\d{1,6})?$/.test(t)) return null;
+  const [whole, frac = ""] = t.split(".");
+  const n = BigInt(whole) * 1_000_000n + BigInt(frac.padEnd(6, "0"));
+  return n > 0n ? n : null;
+}
 
 // ---- the chosen wallet, remembered per user in this browser ----
 
@@ -118,7 +139,8 @@ export function rememberWallet(owner: string | null, address: string, s: Storage
 
 // ---- on-chain treasuries ----
 
-export type Treasury = { cluster: string; programId: string | null; poolAddress: string | null; verifiedBuild: boolean | null; lockInSeconds: number | null; noticeSeconds: number | null };
+// attestersFlag: why Mynt stopped approving deposits (the pool's approvers changed on chain), else null.
+export type Treasury = { cluster: string; programId: string | null; poolAddress: string | null; verifiedBuild: boolean | null; lockInSeconds: number | null; noticeSeconds: number | null; minRequest: bigint | null; attestersFlag: string | null };
 
 // list_pools' treasury, when the pool has one.
 export function treasuryFrom(v: unknown): Treasury | null {
@@ -134,9 +156,123 @@ export function treasuryFrom(v: unknown): Treasury | null {
     verifiedBuild: typeof v.verified_build === "boolean" ? v.verified_build : null,
     lockInSeconds: secs(terms.lock_in_seconds),
     noticeSeconds: secs(terms.notice_seconds),
+    minRequest: baseUnitsOf(terms.min_request),
+    attestersFlag: str(v.attesters_flag),
   };
 }
 export const onDevnet = (t: Treasury | null | undefined): t is Treasury => t?.cluster === CLUSTER;
+export const DEPOSITS_PAUSED = "This pool's approvers changed; deposits are paused until its builder re-registers it.";
+
+// ---- on-chain positions (list_my_positions rows with source "on-chain", one per pool and wallet) ----
+
+export type OnChainDeposit = {
+  deposit: string; // the deposit record's address: what prepare_treasury_withdrawal takes
+  seq: string | null;
+  amount: bigint;
+  remaining: bigint;
+  queued: bigint;
+  settledAt: string | null;
+  reviewUntil: string | null;
+  unlocksAt: string | null;
+  lockInSeconds: number | null;
+  unlocked: boolean;
+  rejected: boolean;
+  signature: string | null;
+};
+export type OnChainRequest = { address: string; deposit: string | null; seq: string | null; amount: bigint; remaining: bigint; paid: bigint; payableAt: string | null; status: string; signature: string | null };
+export type OnChainPosition = { wallet: string; principal: bigint; deposited: bigint; paid: bigint; queued: bigint; availableToRequest: bigint; deposits: OnChainDeposit[]; requests: OnChainRequest[] };
+
+const big0 = (v: unknown) => baseUnitsOf(v) ?? 0n;
+export function onChainPositionFrom(row: Record<string, unknown>): OnChainPosition | null {
+  const wallet = str(row.wallet);
+  if (!wallet) return null;
+  const deposits = (Array.isArray(row.deposits) ? row.deposits : []).filter(isObj).flatMap((d): OnChainDeposit[] => {
+    const deposit = str(d.deposit) ?? str(d.address);
+    if (!deposit) return [];
+    const lock = typeof d.lock_in_seconds === "number" && Number.isFinite(d.lock_in_seconds) ? d.lock_in_seconds : null;
+    return [{ deposit, seq: baseUnitsOf(d.seq)?.toString() ?? null, amount: big0(d.amount), remaining: big0(d.remaining), queued: big0(d.queued), settledAt: str(d.settled_at), reviewUntil: str(d.review_until), unlocksAt: str(d.unlocks_at) ?? str(d.unlock_at), lockInSeconds: lock, unlocked: d.unlocked === true, rejected: d.rejected === true, signature: str(d.signature) }];
+  });
+  const requests = (Array.isArray(row.requests) ? row.requests : []).filter(isObj).flatMap((r): OnChainRequest[] => {
+    const address = str(r.address);
+    return address ? [{ address, deposit: str(r.deposit), seq: baseUnitsOf(r.seq)?.toString() ?? null, amount: big0(r.amount), remaining: big0(r.remaining), paid: big0(r.paid), payableAt: str(r.payable_at), status: str(r.status) ?? "unknown", signature: str(r.signature) }] : [];
+  });
+  return { wallet, principal: big0(row.principal), deposited: big0(row.deposited), paid: big0(row.paid), queued: big0(row.queued), availableToRequest: big0(row.available_to_request), deposits, requests };
+}
+
+// Where one deposit stands: refused (and refunded), in its review window, locked in, fully
+// queued, or available to ask for (what's left, less what's already queued).
+export type DepositStanding = { kind: "rejected" | "in_review" | "locked" | "queued" | "available" | "empty"; free: bigint; until: string | null };
+const past = (iso: string | null, now: number) => !iso || !Number.isFinite(Date.parse(iso)) || Date.parse(iso) <= now;
+export function depositStanding(d: OnChainDeposit, now = Date.now()): DepositStanding {
+  const free = d.remaining > d.queued ? d.remaining - d.queued : 0n;
+  if (d.rejected) return { kind: "rejected", free: 0n, until: null };
+  if (!past(d.reviewUntil, now)) return { kind: "in_review", free, until: d.reviewUntil };
+  if (!d.unlocked && !past(d.unlocksAt, now)) return { kind: "locked", free, until: d.unlocksAt };
+  if (d.remaining === 0n) return { kind: "empty", free: 0n, until: null };
+  if (free === 0n) return { kind: "queued", free, until: null };
+  return { kind: "available", free, until: null };
+}
+const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "—");
+export function standingText(s: DepositStanding): string {
+  switch (s.kind) {
+    case "rejected":
+      return "Refused and refunded";
+    case "in_review":
+      return `In review until ${day(s.until)}`;
+    case "locked":
+      return `Locked until ${day(s.until)}`;
+    case "queued":
+      return "All of it queued for withdrawal";
+    case "empty":
+      return "Withdrawn";
+    default:
+      return "Available";
+  }
+}
+
+// ---- Mynt's treasury refusals, in plain words ----
+
+export const TREASURY_REFUSALS: Record<string, string> = {
+  wallet_not_linked: "That wallet isn't one of the verified Solana wallets linked to your sign-in. Link it on your account page first.",
+  not_liquidity_provider: "Only a liquidity provider can deposit to or withdraw from a pool.",
+  offering_not_cleared: "This pool isn't cleared for commitments yet: a Mynt admin must clear its offering first.",
+  over_limit: "That's over this pool's limit. Try a smaller amount.",
+  under_minimum: "That's under this pool's minimum. Try a larger amount.",
+  pool_paused: "This pool isn't taking deposits right now.",
+  not_on_chain: "This pool moves money on its approved rails, not on-chain.",
+  mainnet_disabled: "Only devnet is offered.",
+  terms_changed: "The pool's terms changed since you looked: its lock-in or notice period is now longer than the one shown. Check the pool again before depositing.",
+  insufficient_usdc: "Your wallet doesn't hold enough devnet USDC for that amount.",
+  attester_removed: "This pool no longer lets Mynt approve deposits, so a deposit can't be prepared. Its builder needs to fix the treasury.",
+  rpc_unavailable: "Mynt couldn't reach devnet just now. Please try again in a minute.",
+  deposit_not_found: "Mynt can't find that deposit on devnet. Your positions may still be catching up; try again shortly.",
+  deposit_rejected: "That deposit was refused and refunded, so there's nothing to withdraw from it.",
+  in_review: "That deposit is still in its review window.",
+  deposit_locked: "That deposit is still locked in.",
+  below_min_request: "That's under this pool's smallest withdrawal request. Try a larger amount.",
+  attesters_changed: "This pool's approvers changed; deposits are paused until its builder re-registers it.",
+  unexpected_attesters: "This pool's treasury names approvers other than Mynt's, so Mynt can't register it. Its builder must set its approvers to Mynt's alone.",
+  not_pool_owner: "Only the builder of this pool's product can register its treasury.",
+  wrong_cluster: "That treasury isn't on devnet. Only devnet is offered.",
+  rate_limited: "Too many requests — try again in a minute.",
+};
+// The refusal Mynt sent ({"error": "...", "code": "...", ...}) as plain words, with the date
+// it names where it names one; null when it isn't a coded refusal.
+export function treasuryRefusal(raw: string): { code: string; message: string } | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isObj(data) || typeof data.code !== "string") return null;
+  const code = data.code;
+  let message = TREASURY_REFUSALS[code];
+  if (!message) return null;
+  const when = code === "in_review" ? str(data.review_until) : code === "deposit_locked" ? str(data.unlock_at) : null;
+  if (when) message = message.replace(/\.$/, ` until ${day(when)}.`);
+  return { code, message };
+}
 
 // What prepare_treasury_deposit and prepare_treasury_withdrawal answer: the unsigned transaction
 // and Mynt's own summary of it, which is what the user confirms (never the assistant's words).
@@ -144,8 +280,16 @@ export type Prepared = {
   cluster: typeof CLUSTER;
   transactionBase64: string;
   expiresAt: string | null;
-  summary: { pool: string; amount: string; lockInSeconds: number | null; noticeSeconds: number | null; wallet: string };
+  lastValidBlockHeight: number | null; // the blockhash's last block: about a minute after preparing
+  summary: { pool: string; amount: string; lockInSeconds: number | null; noticeSeconds: number | null; reviewWindowSeconds: number | null; wallet: string; verifiedBuild: boolean | null };
 };
+// How long a prepared transaction's blockhash is trusted before signing: it lasts about a minute,
+// so after this the page prepares it again first.
+export const BLOCKHASH_FRESH_MS = 45_000;
+// Two preparations of the same request say the same thing (pool, amount, wallet and terms), so a
+// refreshed one can be signed without asking again.
+export const sameSummary = (a: Prepared["summary"], b: Prepared["summary"]) =>
+  a.pool === b.pool && a.amount === b.amount && a.wallet === b.wallet && a.lockInSeconds === b.lockInSeconds && a.noticeSeconds === b.noticeSeconds && a.reviewWindowSeconds === b.reviewWindowSeconds;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const base64Bytes = (s: string) => (s.length % 4 === 0 ? (s.length / 4) * 3 - (s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0) : -1);
 
@@ -161,12 +305,21 @@ export function preparedFrom(reply: unknown, wallet: string): Prepared | { error
   const summaryWallet = s ? str(s.wallet) : null;
   if (!s || summaryWallet !== wallet) return { error: "Mynt's summary didn't name your chosen wallet, so the transaction wasn't shown." };
   const secs = (x: unknown) => (typeof x === "number" && Number.isSafeInteger(x) && x >= 0 ? x : null);
-  const amount = units(s.amount);
+  const amount = baseUnitsOf(s.amount);
   return {
     cluster: CLUSTER,
     transactionBase64: tx,
     expiresAt: str(reply.expires_at),
-    summary: { pool: str(s.pool) ?? "", amount: amount !== null ? usdcText(amount) : (str(s.amount) ?? "—"), lockInSeconds: secs(s.lock_in_seconds), noticeSeconds: secs(s.notice_seconds), wallet: summaryWallet },
+    lastValidBlockHeight: secs(reply.last_valid_block_height),
+    summary: {
+      pool: str(s.pool) ?? "",
+      amount: amount !== null ? usdcText(amount) : "—",
+      lockInSeconds: secs(s.lock_in_seconds),
+      noticeSeconds: secs(s.notice_seconds),
+      reviewWindowSeconds: secs(s.review_window_seconds),
+      wallet: summaryWallet,
+      verifiedBuild: typeof s.verified_build === "boolean" ? s.verified_build : null,
+    },
   };
 }
 
@@ -179,11 +332,17 @@ export const durationText = (seconds: number | null) => {
   return hours >= 1 ? `${hours} hour${hours === 1 ? "" : "s"}` : `${seconds} seconds`;
 };
 
-export type TxStatus = { status: "pending" | "confirmed" | "failed"; error: string | null };
+// get_treasury_tx_status: not_found (not seen yet, normal just after sending), processed,
+// confirmed, finalized or failed. The page waits on the first two and stops on the rest.
+export type TxStatus = { status: "pending" | "confirmed" | "failed"; stage: "not_found" | "processed" | "confirmed" | "finalized" | "failed"; error: string | null };
 export function txStatusFrom(reply: unknown): TxStatus | null {
   if (!isObj(reply)) return null;
   const s = reply.status;
-  return s === "pending" || s === "confirmed" || s === "failed" ? { status: s, error: str(reply.error) } : null;
+  const error = typeof reply.error === "string" ? str(reply.error) : reply.error ? "The transaction failed on devnet." : null;
+  if (s === "not_found" || s === "processed") return { status: "pending", stage: s, error: null };
+  if (s === "confirmed" || s === "finalized") return { status: "confirmed", stage: s, error: null };
+  if (s === "failed") return { status: "failed", stage: s, error };
+  return null;
 }
 
 // A link to the transaction in a block explorer, only when the studio is told one: the address is

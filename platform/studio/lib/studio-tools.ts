@@ -182,7 +182,7 @@ export const STUDIO_TOOLS = {
   // in their own browser wallet (Mynt and the studio never sign), then its status.
   get_wallet_balances: z.object({ address: solanaAddress, cluster: devnet }).strict(),
   prepare_treasury_deposit: z.object({ pool_id: uuid, wallet: solanaAddress, amount_usdc_base_units: baseUnits, max_lock_in_seconds: seconds }).strict(),
-  prepare_treasury_withdrawal: z.object({ pool_id: uuid, wallet: solanaAddress, deposit: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), amount_usdc_base_units: baseUnits, max_notice_seconds: seconds }).strict(),
+  prepare_treasury_withdrawal: z.object({ pool_id: uuid, wallet: solanaAddress, deposit: solanaAddress, amount_usdc_base_units: baseUnits, max_notice_seconds: seconds }).strict(),
   get_treasury_tx_status: z.object({ signature: z.string().regex(SIGNATURE) }).strict(),
 } as const;
 
