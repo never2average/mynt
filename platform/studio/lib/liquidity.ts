@@ -277,7 +277,59 @@ export type Position = {
   onChain: boolean; // list_my_positions' source: "on-chain"
   cluster: string | null;
   deposit: string | null; // the on-chain deposit a withdrawal draws from, when Mynt names it
+  // On-chain rows only (list_my_positions' deposits[] and requests[]); [] for rails rows.
+  deposits: OnChainDeposit[];
+  requests: OnChainRequest[];
 };
+
+// USDC has 6 decimals: a cent is 10,000 base units. Amounts on chain are base units as strings.
+const baseToCents = (v: unknown): number | null => {
+  const s = typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? String(v) : typeof v === "string" && /^\d{1,30}$/.test(v) ? v : null;
+  if (s === null) return null;
+  const c = BigInt(s) / 10_000n;
+  return c <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(c) : null;
+};
+
+export type OnChainDeposit = {
+  deposit: string; // the deposit record's address
+  amountCents: number | null;
+  remainingCents: number | null;
+  queuedCents: number | null;
+  settledAt: string | null;
+  reviewUntil: string | null;
+  unlockAt: string | null;
+  unlocked: boolean;
+  rejected: boolean;
+};
+export type OnChainRequest = { address: string; deposit: string | null; amountCents: number | null; remainingCents: number | null; paidCents: number | null; payableAt: string | null; status: string };
+
+function onChainDeposits(v: unknown): OnChainDeposit[] {
+  return (Array.isArray(v) ? v : []).filter(isObj).flatMap((d) => {
+    const deposit = str(d.deposit) ?? str(d.address);
+    if (!deposit) return [];
+    return [
+      {
+        deposit,
+        amountCents: baseToCents(d.amount),
+        remainingCents: baseToCents(d.remaining),
+        queuedCents: baseToCents(d.queued),
+        settledAt: str(d.settled_at),
+        reviewUntil: str(d.review_until),
+        unlockAt: str(d.unlock_at) ?? str(d.unlocks_at),
+        unlocked: d.unlocked === true,
+        rejected: d.rejected === true,
+      },
+    ];
+  });
+}
+function onChainRequests(v: unknown): OnChainRequest[] {
+  return (Array.isArray(v) ? v : []).filter(isObj).flatMap((r) => {
+    const address = str(r.address);
+    if (!address) return [];
+    return [{ address, deposit: str(r.deposit), amountCents: baseToCents(r.amount), remainingCents: baseToCents(r.remaining), paidCents: baseToCents(r.paid), payableAt: str(r.payable_at), status: str(r.status) ?? "unknown" }];
+  });
+}
+
 export function fromPositions(reply: unknown): Position[] {
   return list(reply, "positions")
     .filter(isObj)
@@ -298,6 +350,8 @@ export function fromPositions(reply: unknown): Position[] {
       onChain: p.source === "on-chain",
       cluster: str(p.cluster),
       deposit: str(p.deposit) ?? str(p.deposit_address),
+      deposits: p.source === "on-chain" ? onChainDeposits(p.deposits) : [],
+      requests: p.source === "on-chain" ? onChainRequests(p.requests) : [],
     }))
     .filter((p) => p.poolId);
 }

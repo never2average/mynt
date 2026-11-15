@@ -102,19 +102,41 @@ function Segmented<T extends string | number>({ label, options, value, onChange,
   )
 }
 
+export type ChartLabels = { revenue: string; costs: string; netIncome: string }
+
+/**
+ * The P&L chart: two bars and a line per period. The dashboard's investor view uses it too, with
+ * its own title and labels (capital in, paid out, net), `note` under it and `empty` when nothing
+ * was measured. `series` alone is read from `state`.
+ */
 export function PnlChart({
   state,
   granularity,
   periods,
   onGranularity,
   onPeriods,
+  title = "Profit and loss",
+  labels,
+  note,
+  empty = "Not measured yet: Mynt hasn't recorded revenue or costs for these periods.",
 }: {
-  state: Loaded<Pnl>
+  state: Loaded<Pick<Pnl, "series">>
   granularity: Granularity
   periods: Range
   onGranularity?: (g: Granularity) => void
   onPeriods?: (p: Range) => void
+  title?: string
+  labels?: ChartLabels
+  note?: string
+  empty?: string
 }) {
+  const config = labels
+    ? ({
+        revenue: { label: labels.revenue, color: chartConfig.revenue.color },
+        costs: { label: labels.costs, color: chartConfig.costs.color },
+        netIncome: { label: labels.netIncome, color: chartConfig.netIncome.color },
+      } satisfies ChartConfig)
+    : chartConfig
   const unit = granularity === "month" ? "mo" : "wk"
   const series = state.kind === "ready" ? state.data.series : []
   const rows = chartRows(series, granularity)
@@ -123,7 +145,7 @@ export function PnlChart({
     <section className="flex min-w-0 flex-col gap-2" data-section="pnl-chart" aria-labelledby="section-pnl-chart">
       <div className="flex flex-wrap items-center gap-2 border-b pb-2">
         <h2 id="section-pnl-chart" className="text-sm font-semibold">
-          Profit and loss
+          {title}
         </h2>
         <div className="ml-auto flex items-center gap-2">
           <Segmented label="Period" options={["month", "week"] as const} value={granularity} onChange={onGranularity} text={(g) => (g === "month" ? "Month" : "Week")} />
@@ -134,11 +156,11 @@ export function PnlChart({
         <PnlNotReady state={state} height="h-[220px]" />
       ) : !anyMeasured(series) ? (
         <div className="flex h-[220px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground" data-pnl-empty="unmeasured">
-          Not measured yet: Mynt hasn&apos;t recorded revenue or costs for these periods.
+          {empty}
         </div>
       ) : (
         <>
-          <ChartContainer config={chartConfig} className="aspect-auto h-[220px] w-full" data-pnl-chart>
+          <ChartContainer config={config} className="aspect-auto h-[220px] w-full" data-pnl-chart>
             <ComposedChart data={rows} margin={{ left: 4, right: 4, top: 8 }} barGap={2}>
               <CartesianGrid vertical={false} />
               <XAxis dataKey="period" tickLine={false} axisLine={false} tickMargin={8} minTickGap={16} />
@@ -150,7 +172,7 @@ export function PnlChart({
                     indicator="dot"
                     formatter={(value, name) => (
                       <div className="flex w-full justify-between gap-4">
-                        <span className="text-muted-foreground">{chartConfig[name as keyof typeof chartConfig]?.label ?? String(name)}</span>
+                        <span className="text-muted-foreground">{config[name as keyof typeof config]?.label ?? String(name)}</span>
                         <span className="font-mono tabular-nums">{money(typeof value === "number" ? value : null)}</span>
                       </div>
                     )}
@@ -167,6 +189,11 @@ export function PnlChart({
           {hasGaps(series) && (
             <p className="text-xs text-muted-foreground" data-pnl-gaps>
               Gaps are periods Mynt didn&apos;t measure: {gaps.map((g) => g.period).join(", ")}.
+            </p>
+          )}
+          {note && (
+            <p className="text-xs text-muted-foreground" data-chart-note>
+              {note}
             </p>
           )}
         </>
