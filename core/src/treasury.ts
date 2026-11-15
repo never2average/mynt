@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "./db.js";
-import { getPool, OFFERING_NOT_CLEARED, type Pool } from "./liquidity.js";
+import { getPool, OFFERING_NOT_CLEARED, pausedOnlyForMissingHealth, treasuryHealthExempt, type Pool } from "./liquidity.js";
 import type { Store, User } from "./store.js";
 import { base58Decode, base58Encode, executableHash, findProgramAddress, isAddress, pubkeyBytes } from "./solana/codec.js";
 import { GENESIS_HASH, type Cluster, type SolanaRpc } from "./solana/rpc.js";
@@ -463,7 +463,10 @@ export class TreasuryService {
     this.linked(s, input.wallet);
     const amount = BigInt(input.amount_usdc_base_units);
     if (amount <= 0n) refuse("over_limit", "The amount must be more than zero");
-    if (pool.status !== "open") refuse("pool_paused", `This pool isn't taking deposits right now (${pool.status}${pool.pause_reason ? `: ${pool.pause_reason}` : ""})`);
+    // As the liquidity worker: a sandbox treasury pool paused only because no health snapshot exists isn't held to it
+    // (the treasury enforces its own reserve on chain); the worker opens it on its next tick.
+    const exempt = pausedOnlyForMissingHealth(pool) && (await treasuryHealthExempt(this.store, pool));
+    if (pool.status !== "open" && !exempt) refuse("pool_paused", `This pool isn't taking deposits right now (${pool.status}${pool.pause_reason ? `: ${pool.pause_reason}` : ""})`);
     const p = await this.poolAccount(row, true);
     const attester = await this.chain.treasuryAttester();
     if (row.attesters_flag) refuse("attesters_changed", `Mynt has stopped approving deposits to this pool: ${row.attesters_flag}. Its builder registers it again once its attesters are [Mynt's, none]`);

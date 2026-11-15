@@ -727,3 +727,65 @@ test("positions and the firm's limit follow each wallet's current link: unlinked
   await onChain(s.fundA.client);
   assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_wallets WHERE user_id = $1", [second.user.id])).rows[0].n, 0);
 });
+
+// ---- sandbox treasury pools and the health rule ----
+
+const liq = await import("../dist/liquidity.js");
+
+test("a sandbox pool backed by an on-chain treasury isn't paused for a missing health snapshot; real-money, rail and flagged pools are", async () => {
+  const s = await world();
+  // The product's component is sponsored, so governance passes and only health is in question.
+  const req = await s.store.requestSponsorship(s.builder.user.id, { product_id: s.productId, component_key: "account", builder_entity_id: s.builder.entity.id, provider_entity_id: s.sponsor.entity.id, requested_jurisdictions: ["us-ny"], note: null });
+  await s.store.decideSponsorship(req.id, { status: "approved", decided_by: s.sponsor.user.id, note: null, jurisdictions: ["us-ny"] });
+  const sandboxPool = async () => {
+    const r = await registered(s);
+    await s.db.query("UPDATE financial_products.liquidity_pools SET sandbox = true WHERE id = $1", [r.poolId]);
+    return r;
+  };
+  const exempt = await sandboxPool();
+  const realMoney = await registered(s); // not sandbox
+  const rail = await s.makePool(); // no treasury
+  await s.db.query("UPDATE financial_products.liquidity_pools SET sandbox = true WHERE id = $1", [rail]);
+  const flagged = await sandboxPool();
+  await s.db.query("UPDATE financial_products.treasury_pools SET attesters_flag = 'test: attesters changed' WHERE pool_id = $1", [flagged.poolId]);
+  const manual = await sandboxPool();
+  await s.db.query("UPDATE financial_products.liquidity_pools SET status = 'paused', pause_kind = 'manual', pause_reason = 'Sponsor paused it' WHERE id = $1", [manual.poolId]);
+  // The exempt pool was auto-paused earlier, before this rule, for the missing snapshot.
+  await s.db.query("UPDATE financial_products.liquidity_pools SET status = 'paused', pause_kind = 'health', pause_reason = $2, paused_at = now() WHERE id = $1", [exempt.poolId, liq.NO_SNAPSHOT_REASON]);
+
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  const args = (poolId) => ({ pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 0 });
+  // prepare_treasury_deposit already agrees, before the worker's next tick.
+  await ok(s.fundA.client, "prepare_treasury_deposit", args(exempt.poolId));
+
+  // Production: product health with no program configured, so no snapshot ever exists.
+  const noSnapshots = { latestFinished: async () => null };
+  const worker = new liq.LiquidityWorker(s.store, noSnapshots, { maxHealthAgeMs: 3_600_000, pollMs: 60_000 });
+  await worker.tick();
+  const pool = async (id) => (await s.db.query("SELECT status, pause_kind, pause_reason, hold_reason FROM financial_products.liquidity_pools WHERE id = $1", [id])).rows[0];
+  assert.deepEqual(await pool(exempt.poolId), { status: "open", pause_kind: null, pause_reason: null, hold_reason: liq.TREASURY_HEALTH_EXEMPT });
+  const { rows: resumed } = await s.db.query("SELECT details FROM financial_products.audit_log WHERE action = 'pool_auto_resumed' AND target = $1", [exempt.poolId]);
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0].details.reason, liq.TREASURY_HEALTH_EXEMPT);
+  for (const id of [realMoney.poolId, rail, flagged.poolId]) assert.deepEqual(await pool(id), { status: "paused", pause_kind: "health", pause_reason: liq.NO_SNAPSHOT_REASON, hold_reason: null }, id);
+  assert.equal((await pool(manual.poolId)).pause_kind, "manual", "an explicit pause stays");
+  // Ticking again changes nothing and audits nothing new.
+  await worker.tick();
+  assert.equal((await pool(exempt.poolId)).status, "open");
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'pool_auto_resumed' AND target = $1", [exempt.poolId])).rows[0].n, 1);
+
+  await ok(s.fundA.client, "prepare_treasury_deposit", args(exempt.poolId));
+  await refused(s.fundA.client, "prepare_treasury_deposit", args(realMoney.poolId), "pool_paused");
+  await refused(s.fundA.client, "prepare_treasury_deposit", args(flagged.poolId), "pool_paused");
+  await refused(s.fundA.client, "prepare_treasury_deposit", args(manual.poolId), "pool_paused");
+
+  // A snapshot that exists and fails still pauses it: the exemption is only for no reading at all.
+  const failing = { latestFinished: async () => ({ status: "missed", sequence: 3 }) };
+  await new liq.LiquidityWorker(s.store, failing, { maxHealthAgeMs: 3_600_000, pollMs: 60_000 }).tick();
+  const after = await pool(exempt.poolId);
+  assert.equal(after.status, "paused");
+  assert.match(after.pause_reason, /missed period/);
+  await refused(s.fundA.client, "prepare_treasury_deposit", args(exempt.poolId), "pool_paused");
+});
