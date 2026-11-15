@@ -118,6 +118,7 @@ describe("the theme", () => {
     it(`${name}: text pairs meet WCAG AA (4.5:1) and the focus ring 3:1`, () => {
       for (const [fg, bg] of TEXT) expect(contrastRatio(vars[fg], vars[bg]), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(vars.ring, vars.background), "ring on background").toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(vars.link, vars.background), "link on background").toBeGreaterThanOrEqual(4.5);
     });
   }
 
@@ -140,7 +141,7 @@ describe("the theme", () => {
     expect(themes.light.background).toBe("#ffffff");
   });
 
-  it("uses the app icon's mint only as the accent: primary, ring, active nav and the first chart colour", () => {
+  it("uses the app icon's mint only as the accent: primary, ring, links and the first chart colour", () => {
     const mint = BRAND.mint.toLowerCase();
     for (const vars of Object.values(themes)) {
       expect(vars.primary).toBe(mint);
@@ -150,9 +151,11 @@ describe("the theme", () => {
     expect(themes.dark.ring).toBe(mint);
     expect(themes.dark["sidebar-ring"]).toBe(mint);
     expect(themes.light.ring).toBe(BRAND.deepMint.toLowerCase()); // mint is too light to see on white
+    expect(themes.light.link).toBe(BRAND.deepMint.toLowerCase());
+    expect(themes.dark.link).toBe(mint);
     expect(themes.dark["chart-1"]).toBe(mint);
     // Mint appears nowhere else.
-    const accents = new Set(["primary", "sidebar-primary", "ring", "sidebar-ring", "chart-1"]);
+    const accents = new Set(["primary", "sidebar-primary", "ring", "sidebar-ring", "link", "chart-1"]);
     for (const vars of Object.values(themes)) {
       for (const [k, v] of hexes(vars)) if (!accents.has(k)) expect(v, k).not.toBe(mint);
     }
@@ -163,8 +166,17 @@ describe("the theme", () => {
         expect(g > r + 10 && g > b + 10, `${k} ${vars[k]} is green`).toBe(false);
       }
     }
-    // The active sidebar item is marked with the accent.
-    expect(css).toMatch(/\[data-sidebar="menu-button"\]\[data-active="true"\][\s\S]*?box-shadow: inset 2px 0 0 var\(--sidebar-primary\)/);
+    // The active sidebar row has no accent: no rule styles it in the theme, and its shadcn classes
+    // are the neutral sidebar-accent (a zinc grey in both themes), never primary or mint.
+    expect(css).not.toMatch(/data-active/);
+    for (const vars of Object.values(themes)) expect(neutral(vars["sidebar-accent"])).toBe(true);
+    const sidebar = readFileSync(join(root, "components/ui/sidebar.tsx"), "utf8");
+    const active = [...sidebar.matchAll(/data-\[active=true\]:([\w-]+)/g)].map((m) => m[1]);
+    expect(new Set(active)).toEqual(new Set(["bg-sidebar-accent", "text-sidebar-accent-foreground", "font-medium"]));
+    expect(sidebar).not.toMatch(/data-\[active=true\]:[\w-]*(primary|ring|mint)/);
+    // Text in the accent colour uses the link token, never mint on white.
+    for (const f of ["components/ask-ai-markdown.tsx", "components/ui/button.tsx", "components/studio-search.tsx", "components/ask-ai.tsx"])
+      expect(readFileSync(join(root, f), "utf8"), f).not.toMatch(/\btext-primary\b(?!-)/);
     // Semantic colours stay: destructive red, the coverage map's blues.
     expect(themes.light.destructive).toMatch(/^oklch\(0\.577 0\.245 27/);
     expect(themes.dark["coverage-unlocked"]).toBe("#5aa5f5");

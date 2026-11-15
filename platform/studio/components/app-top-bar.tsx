@@ -4,7 +4,7 @@
 // lays it out (back to the app's builds or all apps, then the preview's browser controls) with
 // what Lovable-style builders add: the app's name and stage, the preview's width (desktop,
 // tablet, phone) and opening the preview in a new tab. Search and New app stay at the right as
-// icon buttons, with the wallet control (its short address) beside New app. Sticky. Beside the stage is the stage control: Promote to Staging or Production
+// icon buttons, with the GitHub and wallet controls (hidden on phones) beside New app, and the theme switcher last. Sticky. Beside the stage is the stage control: Promote to Staging or Production
 // (and Move back, for owners and admins), which opens the promotion checks
 // (components/promotion-view.tsx). The studio has no code view yet.
 import { useEffect, useState } from "react";
@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 
 import { StageControl } from "@/components/promotion-view";
+import { GithubControl } from "@/components/github-control";
+import { ThemeSwitcher } from "@/components/theme-switcher";
 import { WalletControl } from "@/components/wallet-control";
 import { NewAppButton } from "@/components/site-header";
 import { SearchTrigger } from "@/components/studio-search";
@@ -109,8 +111,10 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
 
       <div className="flex shrink-0 items-center gap-1 pl-1">
         <SearchTrigger compact />
+        {!isMobile && <GithubControl />}
         {!isMobile && <WalletControl compact />}
         <NewAppButton compact />
+        <ThemeSwitcher compact />
       </div>
     </header>
   );

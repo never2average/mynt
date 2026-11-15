@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 export function AnswerLink({ href, children, className }: { href?: string; children?: ReactNode; className?: string }) {
   if (isStudioPath(href))
     return (
-      <a href={href} className={cn("aui-md-a font-medium text-primary underline underline-offset-4", className)} data-studio-link>
+      <a href={href} className={cn("aui-md-a font-medium text-link underline underline-offset-4", className)} data-studio-link>
         {children}
       </a>
     );

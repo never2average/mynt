@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { DM_Sans, Geist_Mono, Space_Grotesk } from "next/font/google";
+import { headers } from "next/headers";
+import { ThemeProvider } from "@/components/theme-switcher";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BRAND, SITE_DESCRIPTION, SITE_NAME, TITLE_TEMPLATE } from "@/lib/brand";
 import { appUrl } from "@/lib/config";
@@ -46,19 +48,26 @@ export const viewport: Viewport = {
   ],
 };
 
-export default function RootLayout({
+// The theme is light, dark or the system's (components/theme-switcher.tsx): next-themes sets the
+// class on <html> before the page paints, so <html> carries no theme class of its own and React
+// is told the class may differ from the server's (suppressHydrationWarning). Its inline script
+// carries this request's CSP nonce (proxy.ts sets x-nonce).
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
-    <html lang="en" className="dark h-full overflow-hidden">
+    <html lang="en" className="h-full overflow-hidden" suppressHydrationWarning>
       <body
         className={`${dmSans.variable} ${spaceGrotesk.variable} ${geistMono.variable} h-full overflow-hidden overscroll-none font-sans antialiased`}
       >
         {/* Every page but /signin-error and /signed-out needs a signed-in user; proxy.ts sends
             anyone else straight to sign-in. */}
-        <TooltipProvider delayDuration={0}>{children}</TooltipProvider>
+        <ThemeProvider nonce={nonce}>
+          <TooltipProvider delayDuration={0}>{children}</TooltipProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

@@ -173,7 +173,7 @@ describe("the header's wallet control", () => {
 
 describe("the dashboard", () => {
   it("no longer has the wallet tile", () => {
-    const html = renderToStaticMarkup(<DashboardView dashboard={fromDashboardTool({})} linked={withWallet} />);
+    const html = renderToStaticMarkup(<DashboardView dashboard={fromDashboardTool({})} />);
     expect(html).not.toContain('data-tile="wallet"');
     expect(html).not.toContain("7EcDhS…FLtV");
     expect(html).not.toContain("Link wallet");
