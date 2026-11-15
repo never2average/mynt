@@ -29,6 +29,7 @@ const pool = (id: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 const POOLS = [pool(POOL), pool(UNCLEARED, { offering_cleared: false })];
+const WALLET = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
 const POSITIONS = [{ pool_id: POOL, name: "Pool 1", product_id: "their-product", sandbox: false, state: "us-ny", contributed_cents: 500_000, balance_cents: 500_000, available_to_withdraw_cents: 200_000 }];
 
 type Step = { text?: string; tool?: { name: string; input: Record<string, unknown> } };
@@ -66,6 +67,8 @@ vi.mock("@/lib/tokens", () => ({
       const ok = (d: unknown) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
       if (name === "list_pools") return ok(POOLS);
       if (name === "list_my_positions") return ok(POSITIONS);
+      if (name === "get_linked_accounts") return ok({ git: null, wallets: [{ chain: "solana", address: WALLET, verified: true }], manage_url: null });
+      if (name === "get_wallet_balances") return ok({ sol_lamports: 1_000_000_000, usdc_base_units: 75_000_000 });
       return ok([]);
     },
     close: async () => undefined,
@@ -98,8 +101,8 @@ const { POST, GET } = await import("@/app/api/earn/route");
 const as = (...roles: string[]) => {
   fake.session = { id: "s", userId: "u1", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() } as Session;
 };
-const ask = (text: string, origin = "http://localhost:3000") =>
-  POST(new Request("http://localhost:3000/api/earn", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text }] }] }) }));
+const ask = (text: string, origin = "http://localhost:3000", wallet?: string) =>
+  POST(new Request("http://localhost:3000/api/earn", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text }] }], ...(wallet ? { wallet: { address: wallet } } : {}) }) }));
 async function chunks(res: Response): Promise<Record<string, unknown>[]> {
   return (await res.text())
     .split("\n")
@@ -126,6 +129,16 @@ describe("/api/earn", () => {
     expect(WRITES).toEqual(expect.arrayContaining(["commit_to_pool", "request_withdrawal", "create_pool"]));
     expect(fake.requests[0].system[0].text).toContain("You don't give investment advice");
     expect(fake.requests[0].system[1].text).toContain("liquidity provider");
+  });
+
+  it("tells the model the chosen wallet and its devnet balances only when it's one of the user's verified linked wallets", async () => {
+    await chunks(await ask("can I afford $50?", "http://localhost:3000", WALLET));
+    expect(fake.requests[0].system[1].text).toContain(`${WALLET} (Solana, devnet). Its devnet balances: 75 USDC · 1 SOL`);
+    expect(fake.calls.find((c) => c.name === "get_wallet_balances")?.args).toEqual({ address: WALLET, cluster: "devnet" });
+    fake.requests = [];
+    await chunks(await ask("can I afford $50?", "http://localhost:3000", "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"));
+    expect(fake.requests[0].system[1].text).toContain("haven't chosen a wallet");
+    expect(fake.requests[0].system[1].text).not.toContain("9xQeWvG8");
   });
 
   it("refuses a write the model asks for anyway, without calling Mynt", async () => {

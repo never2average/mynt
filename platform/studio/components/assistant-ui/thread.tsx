@@ -51,8 +51,10 @@ import { createContext, useContext, type FC, type ReactNode } from "react";
 // How an answer's text is drawn: MarkdownText (no clickable links) unless the thread names its own.
 const TextRenderer = createContext<FC>(MarkdownText);
 
-export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; note?: ReactNode; placeholder?: string; Text?: FC }> = ({
+// `toolbar` sits in the composer, left of Send (Earn's wallet picker, like a model picker).
+export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; note?: ReactNode; placeholder?: string; Text?: FC; toolbar?: ReactNode }> = ({
   welcome,
+  toolbar,
   disabledNote,
   note,
   placeholder,
@@ -83,7 +85,7 @@ export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; note?: Rea
 
         <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4 md:pb-6">
           <ThreadScrollToBottom />
-          <Composer placeholder={placeholder} />
+          <Composer placeholder={placeholder} toolbar={toolbar} />
           {disabledNote && (
             <p className="aui-composer-disabled-note -mt-2 text-center text-xs text-muted-foreground">
               {disabledNote}
@@ -110,7 +112,7 @@ const ThreadScrollToBottom: FC = () => {
     </ThreadPrimitive.ScrollToBottom>
   );
 };
-const Composer: FC<{ placeholder?: string }> = ({ placeholder = "Tell the coding agent what to build or change..." }) => {
+const Composer: FC<{ placeholder?: string; toolbar?: ReactNode }> = ({ placeholder = "Tell the coding agent what to build or change...", toolbar }) => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col has-[textarea:disabled]:opacity-60">
       <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-2xl border border-input bg-background px-1 pt-2 transition-shadow outline-none has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-ring/20 data-[dragging=true]:border-dashed data-[dragging=true]:border-ring data-[dragging=true]:bg-accent/50">
@@ -120,17 +122,17 @@ const Composer: FC<{ placeholder?: string }> = ({ placeholder = "Tell the coding
           rows={1}
           aria-label="Message input"
         />
-        <ComposerAction />
+        <ComposerAction toolbar={toolbar} />
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
   );
 };
 
-const ComposerAction: FC = () => {
+const ComposerAction: FC<{ toolbar?: ReactNode }> = ({ toolbar }) => {
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
       {/* Mynt's coding agent takes text; attachments aren't sent. */}
-      <span />
+      {toolbar ? <div className="flex min-w-0 items-center" data-composer-toolbar>{toolbar}</div> : <span />}
 
       <AssistantIf condition={({ thread }) => !thread.isRunning}>
         <ComposerPrimitive.Send asChild>

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isCalendarDate } from "./compliance";
+import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
 // checks everything again (who owns what, roles, limits); these keep junk off the wire and keep
@@ -28,6 +29,12 @@ const cents = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const usState = z.string().regex(/^us-[a-z]{2}$/);
 const idempotencyKey = z.string().regex(/^[A-Za-z0-9_-]{8,200}$/);
 const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
+// Wallets and treasuries: a Solana address, devnet only, USDC in whole base units (6 decimals, sent
+// as a number while it's a safe integer) and a duration in seconds.
+const solanaAddress = z.string().regex(SOLANA_ADDRESS);
+const devnet = z.literal(CLUSTER);
+const baseUnits = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const seconds = z.number().int().min(0).max(10 * 365 * 86_400);
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -170,6 +177,13 @@ export const STUDIO_TOOLS = {
     .strict(),
   commit_to_pool: z.object({ pool_id: uuid, amount_cents: cents, state: usState, idempotency_key: idempotencyKey }).strict(),
   request_withdrawal: z.object({ pool_id: uuid, amount_cents: cents, idempotency_key: idempotencyKey }).strict(),
+  // Earn's wallets and on-chain treasuries, devnet only (never mainnet): a linked wallet's live
+  // balances, and Mynt preparing an unsigned deposit or withdrawal transaction that the user signs
+  // in their own browser wallet (Mynt and the studio never sign), then its status.
+  get_wallet_balances: z.object({ address: solanaAddress, cluster: devnet }).strict(),
+  prepare_treasury_deposit: z.object({ pool_id: uuid, wallet: solanaAddress, amount_usdc_base_units: baseUnits, max_lock_in_seconds: seconds }).strict(),
+  prepare_treasury_withdrawal: z.object({ pool_id: uuid, wallet: solanaAddress, deposit: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), amount_usdc_base_units: baseUnits, max_notice_seconds: seconds }).strict(),
+  get_treasury_tx_status: z.object({ signature: z.string().regex(SIGNATURE) }).strict(),
 } as const;
 
 export type StudioTool = keyof typeof STUDIO_TOOLS;

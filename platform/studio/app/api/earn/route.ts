@@ -4,7 +4,10 @@ import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ChatBody, readCapped, TOO_LARGE } from "@/lib/ai-route";
 import { historyFrom, runAsk, type LocalTool } from "@/lib/ask";
-import { EARN_SYSTEM_PROMPT, earnContext, earnToolDefs, isEarnTool, PANEL_TOOL_DEFS, shownPools, validateDraft } from "@/lib/earn";
+import { z } from "zod";
+import { EARN_SYSTEM_PROMPT, earnContext, earnToolDefs, isEarnTool, PANEL_TOOL_DEFS, shownPools, validateDraft, type ChosenWallet } from "@/lib/earn";
+import { EVM_ADDRESS, SOLANA_ADDRESS } from "@/lib/wallets";
+import { linkedWallet } from "@/lib/wallets-server";
 import { loadLiquidity, sessionAccess, sessionCanUseLiquidity } from "@/lib/liquidity-server";
 import type { LiquidityData } from "@/lib/liquidity";
 import { askConfigured, askModel, createLlm } from "@/lib/llm";
@@ -25,6 +28,7 @@ export const EARN_PER_HOUR = 20;
 export const EARN_WINDOW_SECONDS = 60 * 60;
 
 const noStore = { "Cache-Control": "no-store" };
+const ChosenBody = z.object({ wallet: z.object({ address: z.string().refine((a) => SOLANA_ADDRESS.test(a) || EVM_ADDRESS.test(a)) }).nullish() });
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: noStore });
 
 // Whether the assistant can answer here (the page says "AI is not configured" otherwise).
@@ -55,6 +59,10 @@ export async function POST(req: Request) {
   const parsed = ChatBody.safeParse(body);
   const history = parsed.success ? historyFrom(parsed.data.messages) : null;
   if (!history) return json({ error: "bad_request" }, 400);
+  // The wallet picked in the chat bar, sent with every message. It's only an address: whether it's
+  // one of the user's verified linked wallets, and its balances, are read from Mynt below.
+  const asked = ChosenBody.safeParse(body);
+  const walletAsked = asked.success ? (asked.data.wallet?.address ?? null) : null;
 
   let mynt: Client;
   try {
@@ -101,6 +109,7 @@ export async function POST(req: Request) {
       // tool call, and shared by the rest of it (each read is several Mynt calls). The next answer
       // reads them again, so a draft is checked against terms no older than the question.
       let loaded: ReturnType<typeof load> | null = null;
+      let chosen: ChosenWallet | null = null;
       const visible = () => (loaded ??= load());
       const load = async () => {
         const data: LiquidityData = await loadLiquidity(mynt, access);
@@ -113,7 +122,7 @@ export async function POST(req: Request) {
           if (!access.liquidityProvider) return { content: "Only a liquidity provider can commit or withdraw capital; this user can't, so there's nothing to draft.", isError: true };
           const v = await visible();
           if (kind === "commit" ? !v.canCommit : !v.canWithdraw) return { content: "This Mynt doesn't offer that yet.", isError: true };
-          const out = validateDraft(kind, input, v.lpPools, v.positions, randomUUID());
+          const out = validateDraft(kind, input, v.lpPools, v.positions, randomUUID(), chosen);
           if ("error" in out) return { content: `Draft refused: ${out.error}`, isError: true };
           data("earn-draft", out.draft);
           return { content: "The draft is shown in the panel as a card. Nothing has been sent: only the user's own click on it does that." };
@@ -128,6 +137,13 @@ export async function POST(req: Request) {
         draft_withdrawal: draft("withdraw"),
       };
       try {
+        if (walletAsked) {
+          const w = await linkedWallet(mynt, session, walletAsked).catch((err) => {
+            if (isAuthError(err)) throw err;
+            return null;
+          });
+          chosen = w ? { address: w.address, network: w.network, solana: w.chain === "solana", balances: w.balances } : null;
+        }
         const tools = await listMyntTools(mynt);
         let textId = 0;
         await runAsk(history, {
@@ -136,7 +152,7 @@ export async function POST(req: Request) {
           tools: [...earnToolDefs(tools), ...PANEL_TOOL_DEFS],
           workspaceId: null,
           system: EARN_SYSTEM_PROMPT,
-          context: earnContext(access),
+          context: earnContext(access, chosen),
           allowTool: isEarnTool,
           local,
           signal: req.signal,

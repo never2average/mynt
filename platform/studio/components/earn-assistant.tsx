@@ -6,7 +6,9 @@
 // message the right panel opens beside it with Pools (what the conversation matched, the default),
 // Opportunities, My positions, My pools (builders) and Drafts (liquidity providers: the
 // commitments and withdrawals the assistant proposed, each confirmed only by the user's own click,
-// which calls the same routes as the tables; the assistant can't send anything itself).
+// which calls the same routes as the tables; the assistant can't send anything itself). The chat
+// bar has the wallet picker, and a draft for a pool with an on-chain treasury is a devnet deposit
+// or withdrawal the user signs in their own wallet (components/earn-wallet.tsx).
 import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
@@ -18,11 +20,14 @@ import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
-import { commitOutcome, EARN_DISCLOSURE, EarnStats, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
+import { DevnetBadge, EarnDisclosure, EarnWalletProvider, OnChainAction, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
+import { commitOutcome, EarnStats, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
+import { shortAddress } from "@/lib/linked-accounts"
+import { onDevnet } from "@/lib/wallets"
 import {
   commitRefusal,
   earnTabFromQuery,
@@ -67,7 +72,8 @@ function EarnThread({ chat }: { chat: Chat }) {
         Text={AskAiMarkdownText}
         placeholder={chat.messages.length ? "Ask a follow-up…" : "Describe an amount, a lock-in, a state or a product line…"}
         welcome={<ChatWelcome title={WELCOME_TITLE} subtitle="The assistant explains pool terms and matches them to what you ask. It can't move money." chips={PROMPT_EXAMPLES} />}
-        note={<span data-earn-disclosure>{EARN_DISCLOSURE}</span>}
+        note={<EarnDisclosure />}
+        toolbar={<WalletPicker />}
       />
     </AssistantRuntimeProvider>
   )
@@ -86,8 +92,8 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
       </div>
       <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-4 md:pb-6">
         <textarea disabled rows={2} aria-label="Message input" placeholder={status === "loading" ? "…" : "AI is not configured"} className="w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm opacity-60" />
-        <p className="-mt-2 text-center text-xs text-muted-foreground" data-earn-disclosure>
-          {EARN_DISCLOSURE}
+        <p className="-mt-2 text-center text-xs text-muted-foreground">
+          <EarnDisclosure />
         </p>
       </div>
     </div>
@@ -110,6 +116,12 @@ export function PoolCard({ pool }: { pool: PoolRow }) {
         <div className="flex flex-wrap gap-1.5">
           <StageBadge stage={stageOf(pool)} />
           <Money sandbox={pool.sandbox} />
+          {pool.treasury && (
+            <Badge variant="outline" data-treasury={pool.treasury.cluster}>
+              {onDevnet(pool.treasury) ? "On-chain treasury" : "On-chain treasury, not on devnet"}
+            </Badge>
+          )}
+          {onDevnet(pool.treasury) && <DevnetBadge />}
         </div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
           <dt className="text-muted-foreground">Lock-in</dt>
@@ -141,6 +153,16 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
   const [key, setKey] = useState(newKey)
   const [state, setState] = useState<{ kind: "idle" } | { kind: "busy" } | { kind: "done"; message: string } | { kind: "error"; message: string }>({ kind: "idle" })
   const commit = draft.kind === "commit"
+  // On-chain: the pool's treasury (a deposit) or the position's source (a withdrawal), as the page
+  // reads them now, not as the draft says.
+  const onChain = commit ? Boolean(pool?.treasury) : Boolean(position?.onChain)
+  const onChainBlock = commit
+    ? !pool
+      ? "This pool isn't open to you any more."
+      : !onDevnet(pool.treasury)
+        ? "On-chain deposits run on devnet only, and this pool's treasury isn't on devnet."
+        : null
+    : withdrawalRefusal(position, draft.amountCents)
   const refusal = commit
     ? !canCommit
       ? "Committing capital comes with Mynt's next update."
@@ -156,7 +178,7 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
     if (refusal || state.kind === "busy" || state.kind === "done") return
     setState({ kind: "busy" })
     const r = commit
-      ? await actions.commit({ pool_id: draft.poolId, amount_cents: draft.amountCents, state: draft.state, idempotency_key: key })
+      ? await actions.commit({ pool_id: draft.poolId, amount_cents: draft.amountCents, state: draft.state ?? "", idempotency_key: key })
       : await actions.withdraw({ pool_id: draft.poolId, amount_cents: draft.amountCents, idempotency_key: key })
     if ("error" in r) {
       if (r.refused) setKey(newKey())
@@ -190,13 +212,21 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
             <span data-notice>{noticeText(pool.noticePeriodDays)}</span>
           </div>
         )}
-        {draft.kind === "commit" && (
+        {draft.kind === "commit" && !onChain && draft.state && (
           <div>
             <span className="text-muted-foreground">From:</span> {draft.state.slice(3).toUpperCase()}
           </div>
         )}
-        {pool && <div className="text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</div>}
-        {refusal && state.kind !== "done" && (
+        {onChain && (
+          <div className="flex items-center gap-2" data-draft-wallet>
+            <span className="text-muted-foreground">{commit ? "From:" : "To:"}</span>
+            <span className="font-mono text-xs">{draft.wallet ? shortAddress(draft.wallet) : "your chosen wallet"}</span>
+            <DevnetBadge />
+          </div>
+        )}
+        {pool && !onChain && <div className="text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</div>}
+        {onChain && <div className="text-muted-foreground">{commit ? "A USDC deposit on devnet, signed in your own wallet after you check Mynt's summary. Test money only." : "A USDC withdrawal on devnet back to your wallet, signed in your own wallet after you check Mynt's summary."}</div>}
+        {!onChain && refusal && state.kind !== "done" && (
           <p className="text-amber-600 dark:text-amber-300" data-refusal>
             {refusal}
           </p>
@@ -213,10 +243,14 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
         )}
       </CardContent>
       <CardFooter className="px-4">
+        {onChain ? (
+          <OnChainAction kind={commit ? "deposit" : "withdrawal"} poolId={draft.poolId} amountCents={draft.amountCents} wallet={draft.wallet ?? null} blocked={onChainBlock} newKey={newKey} />
+        ) : (
         <Button onClick={() => void confirm()} disabled={Boolean(refusal) || state.kind === "busy" || state.kind === "done"} data-confirm={draft.kind}>
           {state.kind === "busy" && <Loader2 className="animate-spin" />}
           {label}
         </Button>
+        )}
       </CardFooter>
     </Card>
   )
@@ -243,7 +277,7 @@ export function PoolsTab({ data, poolIds }: { data: LiquidityData; poolIds: stri
             positions.map((p) => (
               <div key={p.poolId} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
                 <span>
-                  {p.name} {p.sandbox && <Money sandbox />}
+                  {p.name} {p.sandbox && <Money sandbox />} {p.onChain && <DevnetBadge />}
                 </span>
                 <span className="tabular-nums text-muted-foreground">
                   {usd(p.settledCents)} settled · {usd(p.availableCents)} available
@@ -293,7 +327,9 @@ export function EarnWorkspace({
   actions,
   initialTab,
   isMobile,
+  wallet,
 }: {
+  wallet?: EarnWalletState
   chat: Chat
   status: EarnStatus
   data: LiquidityData
@@ -330,7 +366,7 @@ export function EarnWorkspace({
   const content = (t: EarnTab) =>
     t === "pools" ? <PoolsTab data={data} poolIds={poolIds} /> : t === "drafts" ? <DraftsTab data={data} drafts={drafts} actions={actions} /> : <EarnTable tab={t} data={data} actions={actions} />
 
-  return (
+  const shell = (
     <ChatWorkspaceShell
       chat={<EarnChat chat={chat} status={status} />}
       showPanel={opened || chat.messages.length > 0}
@@ -344,4 +380,5 @@ export function EarnWorkspace({
       isMobile={isMobile}
     />
   )
+  return wallet ? <EarnWalletProvider value={wallet}>{shell}</EarnWalletProvider> : shell
 }
