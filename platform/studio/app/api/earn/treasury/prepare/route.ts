@@ -61,6 +61,7 @@ export async function POST(req: Request) {
 
       let args: Record<string, unknown>;
       if (b.kind === "deposit") {
+        if (pool.treasury.attestersFlag) return json({ error: "attesters_changed", message: TREASURY_REFUSALS.attesters_changed }, 409);
         // The longest lock-in the user agreed to: the pool's terms as the page showed them.
         const lockIn = pool.treasury.lockInSeconds ?? (pool.lockInDays === null ? null : pool.lockInDays * 86_400);
         if (lockIn === null) return json({ error: "no_lock_in", message: "This pool's lock-in isn't set, so a deposit can't be prepared." }, 400);

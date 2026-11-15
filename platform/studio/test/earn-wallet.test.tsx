@@ -91,6 +91,7 @@ function state(over: Partial<EarnWalletState> = {}): TestState {
     browserWallets: () => [] as Wallet[],
     onSettled: () => void s.settled++,
     pollMs: 1,
+    settleDelaysMs: [1, 2, 3],
     ...over,
   };
   return s;
@@ -317,7 +318,9 @@ describe("the on-chain deposit", () => {
     expect(btoa(String.fromCharCode(...input.transaction))).toBe(TX); // untouched
     expect(document.querySelector("[data-tx=confirmed]")!.textContent).toContain("Confirmed on devnet");
     expect(document.querySelector(`[data-signature="${SIG}"]`)).toBeTruthy();
-    expect(s.settled).toBe(1);
+    // Positions read again at each wait (this Mynt never shows it here), then "catching up".
+    expect(s.settled).toBe(3);
+    expect(document.querySelector("[data-positions-late]")).toBeTruthy();
     expect(railCalls).toHaveLength(0);
   });
 
@@ -550,5 +553,67 @@ describe("My positions on-chain", () => {
     await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV · devnet" }));
     expect(s.prepares).toEqual([{ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 150_250_000, deposit: DEP1, idempotency_key: expect.any(String) }]);
     expect(railCalls).toHaveLength(0);
+  });
+});
+
+describe("after a confirmed transaction", () => {
+  it("says Updating positions… and reads them again until Mynt shows the deposit", async () => {
+    const { wallet } = fakeWallet(SOL);
+    const SIG_TEXT = SIG;
+    let reads = 0;
+    const shown: LiquidityData = { ...data, provider: { ...data.provider!, positions: fromPositions([{ ...onChainRow, deposits: [...onChainRow.deposits, { ...onChainRow.deposits[0], deposit: "Dep4444444444444444444444444444444444444444", signature: SIG_TEXT }] }]) } };
+    let release: () => void = () => undefined;
+    const s = state({
+      browserWallets: () => [wallet],
+      settleDelaysMs: [1, 2, 3],
+      onSettled: async () => {
+        reads++;
+        if (reads === 1) {
+          await new Promise<void>((r) => (release = r));
+          return data;
+        }
+        return shown;
+      },
+    });
+    renderDrafts(s);
+    await click(screen.getByRole("button", { name: /Deposit from/ }));
+    await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
+    await settle();
+    expect(document.querySelector("[data-updating-positions]")!.textContent).toContain("Updating positions…");
+    await act(async () => release());
+    await settle();
+    expect(reads).toBe(2);
+    expect(document.querySelector("[data-positions-updated]")).toBeTruthy();
+    expect(document.querySelector("[data-updating-positions]")).toBeNull();
+  });
+});
+
+describe("a pool whose approvers changed", () => {
+  const flagged = fromPools([{ ...base, id: POOL, name: "On-chain float", treasury: { ...TREASURY, attesters_flag: "attesters changed on chain at slot 123" } }]).map((p) => ({ ...p, productLine: null, queueLength: null, health: null }));
+  const flaggedData: LiquidityData = { ...data, provider: { ...data.provider!, pools: flagged } };
+
+  it("shows Deposits paused and can't be deposited to, from a draft or the assistant", async () => {
+    render(<PoolsTab data={flaggedData} poolIds={null} />);
+    expect(document.querySelector("[data-attesters-flag]")!.textContent).toBe("Deposits paused: approvers changed");
+    cleanup();
+    const s = state();
+    render(
+      <EarnWalletProvider value={s}>
+        <DraftsTab data={flaggedData} drafts={[depositDraft]} actions={rails} />
+      </EarnWalletProvider>,
+    );
+    const button = screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(document.body.textContent).toContain("deposits are paused until its builder re-registers it");
+    await click(button);
+    expect(s.prepares).toHaveLength(0);
+    const sol = { address: SOL, network: "Solana", solana: true, balances: null };
+    expect(validateDraft("commit", { pool_id: POOL, amount_cents: 50_000 }, flagged, [], "d", sol)).toEqual({ error: "This pool's approvers changed; deposits are paused until its builder re-registers it." });
+  });
+
+  it("maps the new refusal codes", () => {
+    expect(treasuryRefusal(JSON.stringify({ error: "x", code: "attesters_changed" }))!.message).toBe("This pool's approvers changed; deposits are paused until its builder re-registers it.");
+    expect(treasuryRefusal(JSON.stringify({ error: "x", code: "rate_limited" }))!.message).toBe("Too many requests — try again in a minute.");
+    for (const code of ["unexpected_attesters", "not_pool_owner", "wrong_cluster"]) expect(treasuryRefusal(JSON.stringify({ error: "x", code })), code).not.toBeNull();
   });
 });

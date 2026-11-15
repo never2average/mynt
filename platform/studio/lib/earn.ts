@@ -8,7 +8,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { commitRefusal, US_STATE_CODES, usd, withdrawalRefusal, type Pool, type Position } from "./liquidity";
-import { balancesText, centsToUsdcBaseUnits, CLUSTER, depositStanding, onDevnet, SOLANA_ADDRESS, standingText, usdcText, type Balances, type OnChainDeposit } from "./wallets";
+import { balancesText, centsToUsdcBaseUnits, CLUSTER, DEPOSITS_PAUSED, depositStanding, onDevnet, SOLANA_ADDRESS, standingText, usdcText, type Balances, type OnChainDeposit } from "./wallets";
 import type { StudioTool } from "./studio-tools";
 
 type ToolDef = Anthropic.Beta.Messages.BetaTool;
@@ -100,6 +100,7 @@ export function validateDraft(kind: "commit" | "withdraw", input: unknown, pools
     const position = positions.find((p) => p.poolId === pool.id && !p.onChain);
     if (pool.treasury) {
       if (!onDevnet(pool.treasury)) return { error: "This pool's treasury isn't on devnet, and only devnet deposits are offered." };
+      if (pool.treasury.attestersFlag) return { error: DEPOSITS_PAUSED };
       if (!wallet?.solana) return { error: "A deposit to this pool comes from a Solana wallet: ask the user to choose one of their linked Solana wallets in the chat bar first." };
       if (wallet.balances && BigInt(wallet.balances.usdcBaseUnits) < BigInt(centsToUsdcBaseUnits(parsed.data.amount_cents)))
         return { error: `The chosen wallet holds ${usdcText(wallet.balances.usdcBaseUnits)} on devnet, less than that amount.` };

@@ -20,14 +20,14 @@ import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
-import { DevnetBadge, EarnDisclosure, EarnWalletProvider, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
+import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
 import { commitOutcome, EarnStats, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
 import { shortAddress } from "@/lib/linked-accounts"
-import { centsToUsdcBaseUnits, onDevnet } from "@/lib/wallets"
+import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import {
   commitRefusal,
   earnTabFromQuery,
@@ -124,6 +124,7 @@ export function PoolCard({ pool }: { pool: PoolRow }) {
           )}
           {onDevnet(pool.treasury) && <DevnetBadge />}
           {pool.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
+          {pool.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
         </div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
           <dt className="text-muted-foreground">Lock-in</dt>
@@ -166,7 +167,9 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
       ? "This pool isn't open to you any more."
       : !onDevnet(pool.treasury)
         ? "On-chain deposits run on devnet only, and this pool's treasury isn't on devnet."
-        : null
+        : pool.treasury.attestersFlag
+          ? DEPOSITS_PAUSED
+          : null
     : picked && "error" in picked
       ? picked.error
       : null

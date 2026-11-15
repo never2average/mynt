@@ -139,7 +139,8 @@ export function rememberWallet(owner: string | null, address: string, s: Storage
 
 // ---- on-chain treasuries ----
 
-export type Treasury = { cluster: string; programId: string | null; poolAddress: string | null; verifiedBuild: boolean | null; lockInSeconds: number | null; noticeSeconds: number | null; minRequest: bigint | null };
+// attestersFlag: why Mynt stopped approving deposits (the pool's approvers changed on chain), else null.
+export type Treasury = { cluster: string; programId: string | null; poolAddress: string | null; verifiedBuild: boolean | null; lockInSeconds: number | null; noticeSeconds: number | null; minRequest: bigint | null; attestersFlag: string | null };
 
 // list_pools' treasury, when the pool has one.
 export function treasuryFrom(v: unknown): Treasury | null {
@@ -156,9 +157,11 @@ export function treasuryFrom(v: unknown): Treasury | null {
     lockInSeconds: secs(terms.lock_in_seconds),
     noticeSeconds: secs(terms.notice_seconds),
     minRequest: baseUnitsOf(terms.min_request),
+    attestersFlag: str(v.attesters_flag),
   };
 }
 export const onDevnet = (t: Treasury | null | undefined): t is Treasury => t?.cluster === CLUSTER;
+export const DEPOSITS_PAUSED = "This pool's approvers changed; deposits are paused until its builder re-registers it.";
 
 // ---- on-chain positions (list_my_positions rows with source "on-chain", one per pool and wallet) ----
 
@@ -176,7 +179,7 @@ export type OnChainDeposit = {
   rejected: boolean;
   signature: string | null;
 };
-export type OnChainRequest = { address: string; deposit: string | null; seq: string | null; amount: bigint; remaining: bigint; paid: bigint; payableAt: string | null; status: string };
+export type OnChainRequest = { address: string; deposit: string | null; seq: string | null; amount: bigint; remaining: bigint; paid: bigint; payableAt: string | null; status: string; signature: string | null };
 export type OnChainPosition = { wallet: string; principal: bigint; deposited: bigint; paid: bigint; queued: bigint; availableToRequest: bigint; deposits: OnChainDeposit[]; requests: OnChainRequest[] };
 
 const big0 = (v: unknown) => baseUnitsOf(v) ?? 0n;
@@ -191,7 +194,7 @@ export function onChainPositionFrom(row: Record<string, unknown>): OnChainPositi
   });
   const requests = (Array.isArray(row.requests) ? row.requests : []).filter(isObj).flatMap((r): OnChainRequest[] => {
     const address = str(r.address);
-    return address ? [{ address, deposit: str(r.deposit), seq: baseUnitsOf(r.seq)?.toString() ?? null, amount: big0(r.amount), remaining: big0(r.remaining), paid: big0(r.paid), payableAt: str(r.payable_at), status: str(r.status) ?? "unknown" }] : [];
+    return address ? [{ address, deposit: str(r.deposit), seq: baseUnitsOf(r.seq)?.toString() ?? null, amount: big0(r.amount), remaining: big0(r.remaining), paid: big0(r.paid), payableAt: str(r.payable_at), status: str(r.status) ?? "unknown", signature: str(r.signature) }] : [];
   });
   return { wallet, principal: big0(row.principal), deposited: big0(row.deposited), paid: big0(row.paid), queued: big0(row.queued), availableToRequest: big0(row.available_to_request), deposits, requests };
 }
@@ -247,6 +250,11 @@ export const TREASURY_REFUSALS: Record<string, string> = {
   in_review: "That deposit is still in its review window.",
   deposit_locked: "That deposit is still locked in.",
   below_min_request: "That's under this pool's smallest withdrawal request. Try a larger amount.",
+  attesters_changed: "This pool's approvers changed; deposits are paused until its builder re-registers it.",
+  unexpected_attesters: "This pool's treasury names approvers other than Mynt's, so Mynt can't register it. Its builder must set its approvers to Mynt's alone.",
+  not_pool_owner: "Only the builder of this pool's product can register its treasury.",
+  wrong_cluster: "That treasury isn't on devnet. Only devnet is offered.",
+  rate_limited: "Too many requests — try again in a minute.",
 };
 // The refusal Mynt sent ({"error": "...", "code": "...", ...}) as plain words, with the date
 // it names where it names one; null when it isn't a coded refusal.
