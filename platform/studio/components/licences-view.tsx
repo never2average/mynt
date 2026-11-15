@@ -10,6 +10,7 @@
 import { useMemo, useState } from "react"
 import { AlertTriangle, Download, Map as MapIcon, Search, Table2, Upload, UserPlus, XCircle } from "lucide-react"
 
+import { FilterSelect } from "@/components/filter-controls"
 import { CoverageMap, type MapRegion } from "@/components/coverage-view"
 import { NotReady } from "@/components/not-available"
 import { Badge } from "@/components/ui/badge"
@@ -143,17 +144,9 @@ function ViewToggle({ view, onView }: { view: View; onView: (v: View) => void })
   )
 }
 
-function Select({ label, value, onChange, all, options }: { label: string; value: string; onChange: (v: string) => void; all: string; options: { value: string; label: string }[] }) {
-  return (
-    <select className={selectClass} value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}>
-      <option value="">{all}</option>
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
-  )
+// Each filter is a compact control in the toolbar row (components/filter-controls.tsx).
+function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; all?: string; options: { value: string; label: string }[] }) {
+  return <FilterSelect label={label} value={value} onChange={onChange} options={options} />
 }
 
 const opts = (values: string[]) => values.map((v) => ({ value: v, label: v }))
@@ -200,7 +193,7 @@ export function LicencesView({
           all="All statuses"
           options={[{ value: "expired", label: "Expired" }, ...statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]}
         />
-        <Select label="Expiring within" value={f.within} onChange={set("within")} all="Any expiry" options={EXPIRY_WINDOWS.map((d) => ({ value: String(d), label: `Expiring within ${d} days` }))} />
+        <Select label="Expiring" value={f.within} onChange={set("within")} options={EXPIRY_WINDOWS.map((d) => ({ value: String(d), label: `Within ${d} days` }))} />
         <Button variant="outline" disabled title={IMPORT_NOTE} aria-description={IMPORT_NOTE} data-import>
           <Upload />
           Import

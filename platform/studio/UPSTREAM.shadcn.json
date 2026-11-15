@@ -21,6 +21,8 @@
     "components/dashboard-view.tsx": "dashboard-01's page, relaid as a P&L statement: sections with headings, dividers and tables instead of cards",
     "components/team-switcher.tsx": "sidebar-07's team switcher as the workspace switcher: the user's workspaces, Invitations, and Create workspace (a dialog)",
     "components/nav-folders.tsx": "sidebar-07's nav-main (collapsible groups) as the Production, Staging and Ideas folders of the workspace's apps under an Apps label, each with its own icon, exactly one open at a time",
-    "components/pnl.tsx": "dashboard-01's chart (shadcn chart and recharts) as the P&L chart: revenue and costs as bars, net as a line, month or week over 3, 6 or 12 periods, gaps for unmeasured periods"
+    "components/pnl.tsx": "dashboard-01's chart (shadcn chart and recharts) as the P&L chart: revenue and costs as bars, net as a line, month or week over 3, 6 or 12 periods, gaps for unmeasured periods",
+    "components/ui/popover.tsx": "the registry popover (new-york-v4, radix-ui), with its cn import pointed at lib/utils",
+    "components/ui/tabs.tsx": "after the registry tabs and its line variant: the same list/trigger classes (line and default variants via cva), as a controlled TabList of Tab buttons with arrow-key movement instead of Radix Tabs with content panels, since each page keeps its tab in the address"
   }
 }

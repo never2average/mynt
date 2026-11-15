@@ -16,7 +16,7 @@ const { PromotionView, StageControl, MoveBackForm } = await import("@/components
 const { AppTopBar } = await import("@/components/app-top-bar");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
-const { WorkspaceView, WorkspaceCard, SettingsTab, NO_SETTINGS_TOOLS } = await import("@/components/workspace-view");
+const { WorkspaceView, SettingsTab, NO_SETTINGS_TOOLS } = await import("@/components/workspace-view");
 const { NeedsAttention, AppsByStage, RecentActivity } = await import("@/components/dashboard-panels");
 const { DashboardView } = await import("@/components/dashboard-view");
 const { TeamSwitcher } = await import("@/components/team-switcher");
@@ -234,14 +234,20 @@ const actions = { invite: async () => null, changeRole: async () => null, remove
 const settings = { rename: async () => null, archive: async () => null, unarchive: async () => null, relink: async () => null };
 
 describe("the Settings page (once Workspace)", () => {
-  it("has a details card on top: name, your role, created, members, apps by stage and Manage organization", () => {
-    const html = renderToStaticMarkup(<WorkspaceCard info={info} members={membersData} apps={appsRows} />);
-    for (const s of ["Workspace name", "Your role", "Created", "Sep 1, 2026", "Members", "Apps by stage", "Production 1", "Staging 0", "Ideas 1"]) expect(html).toContain(s);
-    expect(html).toMatch(/href="https:\/\/accounts\.example\.test\/organization"[^>]*>Manage organization/);
-    // No manage_url from Mynt: no link.
-    expect(renderToStaticMarkup(<WorkspaceCard info={info} members={{ ...membersData, manageUrl: null }} apps={appsRows} />)).not.toContain("Manage organization");
-    // Not recorded by Mynt: said so, never made up.
-    expect(renderToStaticMarkup(<WorkspaceCard info={{ ...info, workspace: { id: "w1", name: "Acme", role: "owner" } }} members={null} apps={null} />)).toContain("Not recorded");
+  it("has no details card: the page starts with the line tab bar; Manage organization is a labelled button in General", () => {
+    const view = (tab: "apps" | "general", m: Parameters<typeof WorkspaceView>[0]["members"] = membersData) =>
+      renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={m} apps={appsRows} memberActions={actions} settingsActions={settings} />);
+    const html = view("apps");
+    expect(html).not.toContain("data-workspace-card");
+    expect(html).not.toContain('data-slot="card"');
+    for (const gone of ["Workspace name", "Your role", "Apps by stage", "Manage organization"]) expect(html, gone).not.toContain(gone);
+    // The tab bar comes first, in the shared line variant.
+    expect(html.indexOf('role="tablist"')).toBeLessThan(html.indexOf('data-tab-panel="apps"'));
+    expect(html).toMatch(/role="tablist" aria-label="Settings" data-slot="tabs-list" data-variant="line"/);
+    const general = view("general");
+    expect(general).toMatch(/data-manage-org[\s\S]*?href="https:\/\/accounts\.example\.test\/organization"[^>]*>[\s\S]*?Manage organization/);
+    // No manage_url from Mynt: no button.
+    expect(view("general", { ...membersData, manageUrl: null })).not.toContain("Manage organization");
   });
 
   it("has Members, Invitations, Apps, Repositories and General tabs, from ?tab= (the old Settings tab is General)", () => {

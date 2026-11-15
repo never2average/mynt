@@ -1,0 +1,10 @@
+{
+  "repo": "simple-icons/simple-icons",
+  "url": "https://github.com/simple-icons/simple-icons",
+  "version": "simple-icons 15.0.0 (npm)",
+  "license": "CC0-1.0",
+  "modified": true,
+  "files": {
+    "components/brand-icons.tsx": "the single path of icons/github.svg and icons/solana.svg, as React SVG components drawn in currentColor (monochrome), without the files' title and namespace attributes, and with a space between numbers SVG already reads apart (so no run of digits looks like a dotted address); the shapes are unchanged"
+  }
+}

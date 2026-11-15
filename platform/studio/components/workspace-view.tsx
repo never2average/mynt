@@ -1,10 +1,11 @@
 "use client"
 
-// The Settings page (/settings), laid out as the studio's detail pages are: a card with the
-// workspace's details on top, then a tab selector, each tab a table. Members and Invitations
+// The Settings page (/settings): the tab bar (shadcn's line tabs, components/ui/tabs.tsx) first,
+// with no details card above it, each tab a table with its one toolbar row. Members and Invitations
 // (components/members-view.tsx), Apps (every app with its stage, owner and last build),
 // Repositories (the developer's own connected GitHub repositories) and
-// Settings (rename; for owners, archive, unarchive and relink, only where Mynt offers them).
+// General (Manage organization, the identity provider's page for the workspace; rename; for
+// owners, archive, unarchive and relink, only where Mynt offers them).
 // Server-renderable for the tests.
 import Link from "next/link"
 import { useMemo, useState } from "react"
@@ -22,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toCsv } from "@/lib/compliance"
 import { cn } from "@/lib/utils"
+import { Tab, TabList } from "@/components/ui/tabs"
 import { TAB_LABELS, WORKSPACE_TABS, type WorkspaceTab } from "@/lib/workspace-tabs"
 import { STAGE_LABELS, STAGES, type Stage, type Workspace } from "@/lib/workspaces"
 
@@ -53,81 +55,15 @@ export type SettingsActions = {
   relink(): Promise<string | null>
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-sm font-medium">{children}</dd>
-    </div>
-  )
-}
-
-export function WorkspaceCard({ info, members, apps }: { info: WorkspaceInfo; members: MembersData | null; apps: WorkspaceApp[] | null }) {
-  const w = info.workspace
-  const memberCount = w.memberCount ?? (members?.supported ? members.members.length : null)
-  const byStage = apps ? STAGES.map((s) => [s, apps.filter((a) => a.stage === s).length] as const) : null
-  return (
-    <Card data-workspace-card>
-      <CardHeader>
-        <CardTitle className="flex flex-wrap items-center gap-2 text-xl">
-          {w.name}
-          {w.archivedAt && <Badge variant="destructive">Archived</Badge>}
-          {w.orgMissingSince && <Badge variant="outline">Frozen</Badge>}
-        </CardTitle>
-        <CardDescription>{w.implicit ? "Your apps, before Mynt has workspaces." : w.personal ? "Your own workspace." : "A shared workspace."}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <dl className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-          <Field label="Workspace name">{w.name}</Field>
-          <Field label="Your role">
-            <span className="capitalize">{w.role}</span>
-          </Field>
-          <Field label="Created">{dateOf(w.createdAt) ?? <span className="text-muted-foreground">Not recorded</span>}</Field>
-          <Field label="Members">{memberCount ?? <span className="text-muted-foreground">{members ? "Not available yet" : "Loading…"}</span>}</Field>
-          <Field label="Apps by stage">
-            {byStage ? (
-              <span className="flex flex-wrap gap-x-3 gap-y-1" data-apps-by-stage>
-                {byStage.map(([s, n]) => (
-                  <Link key={s} href="/settings?tab=apps" className="hover:underline" data-stage-count={s}>
-                    {STAGE_LABELS[s]} {n}
-                  </Link>
-                ))}
-              </span>
-            ) : (
-              <span className="text-muted-foreground">Loading…</span>
-            )}
-          </Field>
-          {members?.manageUrl && (
-            <Field label="Identity provider">
-              <a href={members.manageUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline" data-manage-url>
-                Manage organization
-                <ExternalLink className="size-3.5" />
-              </a>
-            </Field>
-          )}
-        </dl>
-      </CardContent>
-    </Card>
-  )
-}
-
 export function TabSelector({ tab, onTab }: { tab: WorkspaceTab; onTab: (t: WorkspaceTab) => void }) {
   return (
-    <div role="tablist" aria-label="Settings" className="inline-flex w-fit items-center gap-1 rounded-lg bg-muted p-1">
+    <TabList aria-label="Settings">
       {WORKSPACE_TABS.map((t) => (
-        <button
-          key={t}
-          type="button"
-          role="tab"
-          aria-selected={tab === t}
-          data-tab={t}
-          onClick={() => onTab(t)}
-          className={cn("rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors", tab === t ? "bg-background text-foreground shadow-sm" : "hover:text-foreground")}
-        >
+        <Tab key={t} selected={tab === t} data-tab={t} onClick={() => onTab(t)}>
           {TAB_LABELS[t]}
-        </button>
+        </Tab>
       ))}
-    </div>
+    </TabList>
   )
 }
 
@@ -215,7 +151,7 @@ export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: Works
   )
 }
 
-export function SettingsTab({ info, actions }: { info: WorkspaceInfo; actions: SettingsActions }) {
+export function SettingsTab({ info, actions, manageUrl = null }: { info: WorkspaceInfo; actions: SettingsActions; manageUrl?: string | null }) {
   const w = info.workspace
   const [name, setName] = useState(w.name)
   const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null)
@@ -241,6 +177,20 @@ export function SettingsTab({ info, actions }: { info: WorkspaceInfo; actions: S
 
   return (
     <div className="flex flex-col gap-4" data-tab-panel="general">
+      {manageUrl && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border p-4" data-manage-org>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-sm font-medium">Organization</span>
+            <span className="text-sm text-muted-foreground">Members, roles and sign-in for this workspace&apos;s organization, on the identity provider&apos;s page.</span>
+          </div>
+          <Button variant="outline" asChild>
+            <a href={manageUrl} target="_blank" rel="noopener noreferrer" data-manage-url>
+              <ExternalLink />
+              Manage organization
+            </a>
+          </Button>
+        </div>
+      )}
       {message && (
         <p role={message.error ? "alert" : "status"} className={cn("text-sm", message.error ? "text-destructive" : "font-medium")}>
           {message.text}
@@ -356,13 +306,12 @@ export function WorkspaceView({
   const loading = <Skeleton className="h-64 w-full rounded-xl" />
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4" data-workspace-view>
-      <WorkspaceCard info={info} members={members} apps={apps} />
       <TabSelector tab={tab} onTab={onTab} />
       {tab === "members" && (members ? <MembersTab workspace={info.workspace} data={members} actions={memberActions} /> : loading)}
       {tab === "invitations" && (members ? <InvitationsTab workspace={info.workspace} data={members} actions={memberActions} /> : loading)}
       {tab === "apps" && (apps ? <AppsTab workspace={info.workspace} apps={apps} /> : loading)}
       {tab === "repositories" && <RepositoriesTab state={repos} onConnected={onReposChanged} />}
-      {tab === "general" && <SettingsTab info={info} actions={settingsActions} />}
+      {tab === "general" && <SettingsTab info={info} actions={settingsActions} manageUrl={members?.manageUrl ?? null} />}
     </div>
   )
 }
