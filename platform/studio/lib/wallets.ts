@@ -183,6 +183,25 @@ export type OnChainRequest = { address: string; deposit: string | null; seq: str
 export type OnChainPosition = { wallet: string; principal: bigint; deposited: bigint; paid: bigint; queued: bigint; availableToRequest: bigint; deposits: OnChainDeposit[]; requests: OnChainRequest[] };
 
 const big0 = (v: unknown) => baseUnitsOf(v) ?? 0n;
+
+// JSON can't carry a bigint, so the studio's routes send these amounts as decimal strings
+// (lib/studio-route.ts json). The browser turns an on-chain position back into exact bigints.
+type Raw = Record<string, unknown>;
+export function reviveOnChainPosition(c: unknown): OnChainPosition | null {
+  if (!c || typeof c !== "object") return null;
+  const r = c as Raw;
+  const list = (v: unknown) => (Array.isArray(v) ? (v.filter((x) => x && typeof x === "object") as Raw[]) : []);
+  return {
+    ...(r as unknown as OnChainPosition),
+    principal: big0(r.principal),
+    deposited: big0(r.deposited),
+    paid: big0(r.paid),
+    queued: big0(r.queued),
+    availableToRequest: big0(r.availableToRequest),
+    deposits: list(r.deposits).map((d) => ({ ...(d as unknown as OnChainDeposit), amount: big0(d.amount), remaining: big0(d.remaining), queued: big0(d.queued) })),
+    requests: list(r.requests).map((q) => ({ ...(q as unknown as OnChainRequest), amount: big0(q.amount), remaining: big0(q.remaining), paid: big0(q.paid) })),
+  };
+}
 export function onChainPositionFrom(row: Record<string, unknown>): OnChainPosition | null {
   const wallet = str(row.wallet);
   if (!wallet) return null;

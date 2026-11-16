@@ -22,7 +22,7 @@ import { ModeSwitch } from "@/components/mode-switch";
 import { HeaderTabs } from "@/components/header-tabs";
 import type { AuditRow } from "@/lib/audit-classes";
 import { modesFor, rememberedMode, rememberMode, type DashboardMode } from "@/lib/investor";
-import { NO_ACCESS, type LiquidityAccess, type LiquidityData } from "@/lib/liquidity";
+import { NO_ACCESS, reviveLiquidity, type LiquidityAccess, type LiquidityData } from "@/lib/liquidity";
 import type { Loaded } from "@/lib/use-compliance";
 import type { EarnWallets } from "@/lib/wallets";
 import { withWorkspace } from "@/lib/workspaces";
@@ -133,7 +133,7 @@ function useRead<T>(path: string, pick: (b: Record<string, unknown>) => T | unde
   }, [path, pick]);
   return state;
 }
-const pickLiquidity = (b: Record<string, unknown>) => b as unknown as LiquidityData;
+const pickLiquidity = (b: Record<string, unknown>) => reviveLiquidity(b as unknown as LiquidityData);
 const pickWallets = (b: Record<string, unknown>) => b as unknown as EarnWallets;
 
 function InvestorDashboard() {

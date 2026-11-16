@@ -8,7 +8,7 @@
 // capital and ask for it back. Money only ever moves on a rail the pool's sponsoring licence
 // provider approved; Mynt never holds anyone's funds or keys.
 
-import { onChainPositionFrom, treasuryFrom, usdcBaseUnitsToCents, type OnChainPosition, type Treasury } from "./wallets";
+import { onChainPositionFrom, reviveOnChainPosition, treasuryFrom, usdcBaseUnitsToCents, type OnChainPosition, type Treasury } from "./wallets";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -484,6 +484,13 @@ export type LiquidityData = {
   provider?: { pools: PoolRow[]; positions: Position[]; withdrawals: Withdrawal[]; canCommit: boolean; canWithdraw: boolean };
   unavailable?: ("builder" | "provider")[]; // sections that failed to load; the rest still shows
 };
+
+// Liquidity data as it arrives from /api/liquidity: on-chain amounts come as strings (see
+// reviveOnChainPosition) and are turned back into bigints here.
+export function reviveLiquidity<T extends LiquidityData | null>(d: T): T {
+  if (!d || !d.provider) return d;
+  return { ...d, provider: { ...d.provider, positions: d.provider.positions.map((p) => ({ ...p, chain: p.chain ? reviveOnChainPosition(p.chain) : null })) } };
+}
 
 export type PoolFilters = { query: string; productLine: string; stage: "" | PoolStage; money: "" | "sandbox" | "real" };
 export const NO_POOL_FILTERS: PoolFilters = { query: "", productLine: "", stage: "", money: "" };

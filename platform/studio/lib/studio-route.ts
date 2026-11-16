@@ -9,7 +9,10 @@ import { connectStudio } from "./tokens";
 
 const noStore = { "Cache-Control": "no-store" };
 
-export const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: noStore });
+// bigints (exact on-chain USDC amounts) go out as decimal strings: JSON has no bigint.
+const bigintSafe = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
+export const json = (body: unknown, status = 200) =>
+  new NextResponse(JSON.stringify(body, bigintSafe), { status, headers: { ...noStore, "content-type": "application/json" } });
 
 export const NOT_DEVELOPER = { error: "not_developer", message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." } as const;
 
