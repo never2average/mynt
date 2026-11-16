@@ -24,6 +24,7 @@ import { modesFor, rememberedMode, rememberMode, type DashboardMode } from "@/li
 import { NO_ACCESS, type LiquidityAccess, type LiquidityData } from "@/lib/liquidity";
 import type { Loaded } from "@/lib/use-compliance";
 import type { EarnWallets } from "@/lib/wallets";
+import { withWorkspace } from "@/lib/workspaces";
 
 type State = { dashboard: Dashboard } | { unavailable: string } | { error: string } | null;
 
@@ -59,7 +60,7 @@ function BuilderDashboard() {
     let live = true;
     setState(null);
     (async () => {
-      const res = await fetch(`/api/dashboard?workspace=${encodeURIComponent(selected.id)}`, { cache: "no-store" }).catch(() => null);
+      const res = await fetch(withWorkspace("/api/dashboard", selected), { cache: "no-store" }).catch(() => null);
       if (res?.status === 401) {
         window.location.assign("/api/auth/login"); // the session ended meanwhile
         return;

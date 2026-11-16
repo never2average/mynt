@@ -12,6 +12,7 @@ import { NotReady } from "@/components/not-available";
 import { useWorkspace } from "@/components/workspace-context";
 import { auditClassOf, type AuditClass, type AuditRow, type AuditRowPage, type Obligation } from "@/lib/audit-classes";
 import { useComplianceData } from "@/lib/use-compliance";
+import { withWorkspace } from "@/lib/workspaces";
 
 type ClassPage = AuditRowPage & { classes: boolean };
 const pickPage = (body: Record<string, unknown>) => (body.page ? ({ ...(body.page as AuditRowPage), classes: body.classes === true } as ClassPage) : undefined);
@@ -93,7 +94,7 @@ export default function AuditsPage() {
   useEffect(() => {
     if (loading) return;
     const ws = encodeURIComponent(selected.id);
-    void fetch(`/api/projects?workspace=${ws}`, { cache: "no-store" })
+    void fetch(withWorkspace("/api/projects", selected), { cache: "no-store" })
       .then((r) => r.json())
       .then((b: { projects?: { id: string; name: string }[] }) => setApps((b.projects ?? []).map((p) => ({ id: p.id, name: p.name }))))
       .catch(() => setApps([]));

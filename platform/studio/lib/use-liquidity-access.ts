@@ -1,25 +1,40 @@
 "use client";
 
-// The signed-in user's liquidity roles (builder, liquidity provider), read once per page load
-// and shared by the sidebar and the header's wallet control. Null until known; no roles if it can't be read.
+// The signed-in user's roles as the studio uses them, read once per page load from
+// /api/liquidity/access and shared: whether they're a developer (the studio's pages, New app,
+// Licences, Audits, Settings), a builder or a liquidity provider (Earn, the dashboard's investor
+// view), and an opaque hash of the user for remembering choices in this browser. Null until
+// known; no roles if they can't be read, so nothing developer-only is fetched on a guess.
 import { useEffect, useState } from "react";
 import { NO_ACCESS, type LiquidityAccess } from "./liquidity";
 
-let pending: Promise<LiquidityAccess> | null = null;
+export type StudioAccess = { developer: boolean; liquidity: LiquidityAccess; owner: string | null };
+export const NO_STUDIO_ACCESS: StudioAccess = { developer: false, liquidity: NO_ACCESS, owner: null };
 
-function load(): Promise<LiquidityAccess> {
+let pending: Promise<StudioAccess> | null = null;
+
+function load(): Promise<StudioAccess> {
   pending ??= fetch("/api/liquidity/access", { cache: "no-store" })
     .then((r) => (r.ok ? r.json() : null))
-    .then((b: { access?: Partial<LiquidityAccess> } | null) => ({ builder: b?.access?.builder === true, liquidityProvider: b?.access?.liquidityProvider === true }))
+    .then((b: { access?: Partial<LiquidityAccess>; developer?: boolean; owner?: string } | null) => ({
+      developer: b?.developer === true,
+      liquidity: { builder: b?.access?.builder === true, liquidityProvider: b?.access?.liquidityProvider === true },
+      owner: typeof b?.owner === "string" ? b.owner : null,
+    }))
     .catch(() => {
       pending = null;
-      return NO_ACCESS;
+      return NO_STUDIO_ACCESS;
     });
   return pending;
 }
 
-export function useLiquidityAccess(enabled = true): LiquidityAccess | null {
-  const [access, setAccess] = useState<LiquidityAccess | null>(null);
+/** For the tests: forget what was read. */
+export const resetStudioAccess = () => {
+  pending = null;
+};
+
+export function useStudioAccess(enabled = true): StudioAccess | null {
+  const [access, setAccess] = useState<StudioAccess | null>(null);
   useEffect(() => {
     if (!enabled) return;
     let live = true;
@@ -29,4 +44,8 @@ export function useLiquidityAccess(enabled = true): LiquidityAccess | null {
     };
   }, [enabled]);
   return access;
+}
+
+export function useLiquidityAccess(enabled = true): LiquidityAccess | null {
+  return useStudioAccess(enabled)?.liquidity ?? null;
 }

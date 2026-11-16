@@ -35,6 +35,13 @@ export type Workspace = {
 
 export const PERSONAL_ID = "personal";
 export const PERSONAL: Workspace = { id: PERSONAL_ID, name: "Personal", role: "owner", implicit: true };
+/** A studio route's path for a workspace: ?workspace=<id> for a real one; nothing for the implicit Personal one (never "personal"). */
+export function withWorkspace(path: string, w: Pick<Workspace, "id" | "implicit">): string {
+  if (w.implicit || w.id === PERSONAL_ID) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(w.id)}`;
+}
+// A workspace id Mynt could know: well formed, and never the studio's synthetic "personal".
+export const isRealWorkspaceId = (id: string) => id !== PERSONAL_ID && WORKSPACE_ID.test(id);
 
 // The cookie that remembers the selected workspace (not a credential: Mynt checks membership on
 // every call). __Host-: set only by this origin, over https, for the whole site.

@@ -1,7 +1,7 @@
 import { fromPnl, GRANULARITIES, type Granularity } from "@/lib/pnl";
 import { callStudioTool, listMyntTools } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
-import { NOT_SCOPED, ownWorkspace, scopeFor, workspaceSupport } from "@/lib/workspace-server";
+import { NO_WORKSPACE, ownWorkspace, scopeFor, workspaceSupport } from "@/lib/workspace-server";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +21,7 @@ export async function GET(req: Request) {
     const scope = await scopeFor(mynt, req, support);
     if (scope.unavailable !== undefined) return json({ supported: true, unavailable: scope.unavailable });
     const workspace = scope.workspace ?? (await ownWorkspace(mynt, support));
-    if (!workspace) return json({ supported: true, unavailable: support.workspaces ? NOT_SCOPED : "It comes with Mynt's workspaces." });
+    if (!workspace) return json({ supported: true, unavailable: support.workspaces ? NO_WORKSPACE : "It comes with Mynt's workspaces." });
     return json({ supported: true, pnl: fromPnl(await callStudioTool(mynt, "get_workspace_pnl", { workspace_id: workspace, granularity, periods })) });
   });
 }

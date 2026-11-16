@@ -21,6 +21,7 @@ const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { isAppPath, isStudioPath, pageTitle, searchIndex, searchStudio } = await import("@/lib/studio-search");
 const { AnswerLink } = await import("@/components/ask-ai-markdown");
 const { groupByStage } = await import("@/lib/workspaces");
+const { resetStudioAccess } = await import("@/lib/use-liquidity-access");
 
 beforeAll(() => {
   // What jsdom lacks and Radix / cmdk use.
@@ -36,9 +37,10 @@ beforeAll(() => {
 beforeEach(() => {
   nav.pathname = "/";
   nav.pushed = [];
-  // The studio's API, as an empty account: no workspaces, apps or members yet; Ask AI off.
+  // The studio's API, as a developer's empty account: no workspaces, apps or members yet; Ask AI off.
+  resetStudioAccess();
   vi.stubGlobal("fetch", async (url: string) => {
-    const body = url.startsWith("/api/ask") ? { enabled: false } : url.startsWith("/api/workspaces") ? { workspaces: [], supported: false } : {};
+    const body = url.startsWith("/api/ask") ? { enabled: false } : url.startsWith("/api/workspaces") ? { workspaces: [], supported: false } : url.startsWith("/api/liquidity/access") ? { developer: true, access: { builder: true, liquidityProvider: false }, owner: "o" } : {};
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   });
 });
@@ -215,8 +217,9 @@ describe("an app's top bar", () => {
     onDevice: () => undefined,
   };
 
-  it("names the app and its stage, with the preview's controls, and compact search and New app", () => {
+  it("names the app and its stage, with the preview's controls, and compact search and New app (once the roles say developer)", async () => {
     const { container } = render(withProviders(<AppTopBar {...props} />));
+    await act(async () => undefined);
     const bar = container.querySelector("[data-app-top-bar]")!;
     expect(bar.className).toContain("sticky");
     expect(bar.querySelector("[data-app-name]")?.textContent).toBe("Round-up savings");

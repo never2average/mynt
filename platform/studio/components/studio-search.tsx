@@ -20,6 +20,9 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { SEARCH_GROUPS, searchIndex, searchStudio, type SearchItem, type SearchSources } from "@/lib/studio-search";
 import { cn } from "@/lib/utils";
+import { withWorkspace } from "@/lib/workspaces";
+import { useStudioAccess } from "@/lib/use-liquidity-access";
+import { askFetch } from "@/lib/ask-client";
 
 export type SearchMode = "search" | "ai";
 
@@ -125,24 +128,26 @@ const pick = async <T,>(url: string, read: (body: Record<string, unknown>) => T 
 // What search covers, for the selected workspace: loaded each time the modal opens.
 function useSearchSources(open: boolean): SearchSources {
   const { selected, loading } = useWorkspace();
+  // Apps, members, licences and audit actions are developers' (their routes are developer-only).
+  const developer = useStudioAccess()?.developer === true;
   const [sources, setSources] = useState<SearchSources>({});
   useEffect(() => {
-    if (!open || loading) return;
+    if (!open || loading || !developer) return;
     let live = true;
     const ws = encodeURIComponent(selected.id);
     const set = (patch: SearchSources) => live && setSources((s) => ({ ...s, ...patch }));
-    void pick(`/api/projects?workspace=${ws}`, (b) => b.projects as SearchSources["apps"]).then((apps) => set({ apps: apps ?? [] }));
+    void pick(withWorkspace("/api/projects", selected), (b) => b.projects as SearchSources["apps"]).then((apps) => set({ apps: apps ?? [] }));
     if (!selected.implicit)
       void pick(`/api/workspaces/${ws}/members`, (b) => b.members as SearchSources["members"]).then((members) => set({ members: members ?? [] }));
     else set({ members: [] });
-    void pick(`/api/licences?workspace=${ws}`, (b) => b.licences as SearchSources["licences"]).then((licences) => set({ licences: licences ?? [] }));
-    void pick(`/api/audit?workspace=${ws}`, (b) => (b.page as { events?: { action: string }[] } | undefined)?.events).then((events) =>
+    void pick(withWorkspace("/api/licences", selected), (b) => b.licences as SearchSources["licences"]).then((licences) => set({ licences: licences ?? [] }));
+    void pick(withWorkspace("/api/audit", selected), (b) => (b.page as { events?: { action: string }[] } | undefined)?.events).then((events) =>
       set({ auditActions: (events ?? []).map((e) => e.action) }),
     );
     return () => {
       live = false;
     };
-  }, [open, loading, selected.id, selected.implicit]);
+  }, [open, loading, selected, developer]);
   return sources;
 }
 
@@ -199,7 +204,8 @@ function StudioSearchDialog() {
   const askStatus = useAskStatus(open);
 
   // The conversation lives here, so it outlasts the modal closing.
-  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/ask" }), []);
+  // Failures come back as a sentence, never raw JSON (lib/ask-client.ts).
+  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/ask", fetch: askFetch }), []);
   const chat = useChat<UIMessage>({ id: "studio-ask-ai", transport });
   const pendingQuestion = useRef<string | null>(null);
 

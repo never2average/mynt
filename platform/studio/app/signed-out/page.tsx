@@ -5,7 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 
 export const metadata: Metadata = { title: "Signed out" };
 
-// Where signing out lands. It doesn't need a sign-in, so signing out doesn't sign straight back in.
+// Where signing out lands: a page of its own (no sign-in needed, never a redirect), so signing out
+// doesn't sign straight back in. Sign in again starts a new sign-in.
 export default function SignedOutPage() {
   return (
     <main className="flex h-full items-center justify-center p-4">
@@ -16,7 +17,7 @@ export default function SignedOutPage() {
         </CardHeader>
         <CardContent>
           <Button asChild>
-            <a href="/api/auth/login">Sign in</a>
+            <a href="/api/auth/login" data-sign-in-again>Sign in again</a>
           </Button>
         </CardContent>
       </Card>

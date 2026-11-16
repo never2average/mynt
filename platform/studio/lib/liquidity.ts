@@ -482,6 +482,7 @@ export type LiquidityData = {
   access: LiquidityAccess;
   builder?: { pools: PoolRow[]; proposable: Sponsored[] | null; withdrawalsShown: boolean };
   provider?: { pools: PoolRow[]; positions: Position[]; withdrawals: Withdrawal[]; canCommit: boolean; canWithdraw: boolean };
+  unavailable?: ("builder" | "provider")[]; // sections that failed to load; the rest still shows
 };
 
 export type PoolFilters = { query: string; productLine: string; stage: "" | PoolStage; money: "" | "sandbox" | "real" };
