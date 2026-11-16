@@ -10,7 +10,7 @@
     "commit": "1ebbe58158d089a2a40b5e35ebead5a10db9090d"
   },
   "rust": {
-    "version": "1.99.1",
+    "version": "1.100.0",
     "rustup": "1.29.3",
     "rustupSha256": "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55"
   },
