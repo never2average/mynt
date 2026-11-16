@@ -46,12 +46,67 @@ async function retry<T>(send: () => Promise<T>, attempts = 3): Promise<T> {
   }
 }
 
-// Every transaction is read, simulated and confirmed at "confirmed", with a blockhash fetched for it (AnchorProvider
-// takes a fresh one on each send), and sent again on a transient failure.
-class TestProvider extends anchor.AnchorProvider {
-  async sendAndConfirm(tx: any, signers?: any, opts?: any): Promise<string> {
-    return retry(() => super.sendAndConfirm(tx, signers, { ...opts, commitment: "confirmed", preflightCommitment: "confirmed" }));
+// A transaction that landed and failed: the error carries the program's logs (and is the program's AnchorError when
+// the logs hold one), so assertions read what the program said. Anchor's own path for this builds a
+// SendTransactionError the installed web3.js rejects ("Unknown action 'undefined'"), losing the logs.
+async function landedFailure(connection: anchor.web3.Connection, signature: string, err: unknown): Promise<Error> {
+  let logs: string[] = [];
+  for (let i = 0; i < 20 && !logs.length; i++) {
+    const tx = await connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }).catch(() => null);
+    logs = tx?.meta?.logMessages ?? [];
+    if (!logs.length) await sleep(250);
   }
+  const anchorError = anchor.AnchorError.parse(logs);
+  if (anchorError) return anchorError;
+  return Object.assign(new Error(`Transaction ${signature} failed: ${JSON.stringify(err)}\n${logs.join("\n")}`), { logs, signature });
+}
+
+// Every transaction is simulated, sent and confirmed at "confirmed". Each attempt is a new transaction built from the
+// same instructions with a blockhash fetched for it, never the object an earlier attempt consumed. Before sending
+// again after a transient failure, the earlier attempt's signature is looked up: if it landed after all, its outcome
+// is the answer (sending it again would run it twice).
+class TestProvider extends anchor.AnchorProvider {
+  async sendAndConfirm(tx: any, signers: anchor.web3.Signer[] = [], _opts?: any): Promise<string> {
+    const connection = this.connection;
+    let previous: string | null = null;
+    for (let attempt = 1; ; attempt++) {
+      if (previous) {
+        const outcome = await landed(connection, previous);
+        if (outcome === "ok") return previous;
+        if (outcome) throw await landedFailure(connection, previous, outcome);
+      }
+      const fresh = new Transaction();
+      fresh.add(...tx.instructions);
+      fresh.feePayer = tx.feePayer ?? this.wallet.publicKey;
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      fresh.recentBlockhash = blockhash;
+      if (signers.length) fresh.partialSign(...signers);
+      const signed = await this.wallet.signTransaction(fresh);
+      try {
+        const signature = await connection.sendRawTransaction(signed.serialize(), { preflightCommitment: "confirmed" });
+        previous = signature;
+        const result = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+        if (result.value.err) throw await landedFailure(connection, signature, result.value.err);
+        return signature;
+      } catch (e) {
+        if (attempt >= 3 || !transient(e)) throw e;
+        await sleep(500 * attempt);
+      }
+    }
+  }
+}
+
+// Whether a sent transaction landed: "ok", its error, or null if the cluster never saw it.
+async function landed(connection: anchor.web3.Connection, signature: string): Promise<"ok" | object | null> {
+  for (let i = 0; i < 60; i++) {
+    const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    const status = value[0];
+    if (!status) return null;
+    if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") return status.err ? status.err : "ok";
+    await sleep(400);
+  }
+  // Seen but never confirmed: sending it again could run it twice, so this is a real failure, not a transient one.
+  throw new Error(`Transaction ${signature} was processed but never confirmed`);
 }
 
 // Runs on the local validator `anchor test` starts. Mynt runs these again, in its own clean sandbox, against the
