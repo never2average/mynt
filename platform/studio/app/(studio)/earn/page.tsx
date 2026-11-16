@@ -16,7 +16,7 @@ import type { EarnWalletState, TreasuryActions } from "@/components/earn-wallet"
 import { devnetWallets } from "@/lib/browser-wallet";
 import { chosenWallet, rememberWallet, type EarnWallet, type EarnWallets, type Prepared, type TxStatus } from "@/lib/wallets";
 import { NotReady } from "@/components/not-available";
-import type { LiquidityData } from "@/lib/liquidity";
+import { reviveLiquidity, type LiquidityData } from "@/lib/liquidity";
 import type { Loaded } from "@/lib/use-compliance";
 
 async function post(path: string, body: unknown): Promise<ActionResult> {
@@ -105,7 +105,7 @@ export default function EarnPage() {
       if (!live) return;
       setTab(new URLSearchParams(window.location.search).get("tab"));
       if (!res?.ok || !body) return setState({ kind: "error", message: body?.message ?? "Couldn't reach Mynt. Please try again." });
-      setState(body.supported === false ? { kind: "unsupported" } : { kind: "ready", data: body });
+      setState(body.supported === false ? { kind: "unsupported" } : { kind: "ready", data: reviveLiquidity(body) });
     })();
     return () => {
       live = false;
@@ -118,8 +118,9 @@ export default function EarnPage() {
     const res = await fetch("/api/liquidity", { cache: "no-store" }).catch(() => null);
     const body = (await res?.json().catch(() => null)) as LiquidityData | null;
     if (!res?.ok || !body || body.supported === false) return null;
-    setState({ kind: "ready", data: body });
-    return body;
+    const data = reviveLiquidity(body);
+    setState({ kind: "ready", data });
+    return data;
   }, []);
 
   // After a change, read everything again (positions and queues move only on Mynt's side).
