@@ -7,8 +7,11 @@
 import Link from "next/link"
 import { Plus } from "lucide-react"
 
-import { AppsByStage, NeedsAttention, RecentActivity, type StagesData } from "@/components/dashboard-panels"
-import { PnlChart, PnlStatement, PnlStats } from "@/components/pnl"
+import { AppsByStage, NeedsAttention, RecentActivity, Section, type StagesData } from "@/components/dashboard-panels"
+import { PnlChart, PnlStatement, PNL_NOT_AVAILABLE } from "@/components/pnl"
+import { Donut, HBars, KpiRow } from "@/components/charts"
+import { Skeleton } from "@/components/ui/skeleton"
+import { builderKpis, costSlices, moneyByApp } from "@/lib/dashboard-visual"
 import { ConnectRepository, type ReposState } from "@/components/repositories"
 import { Button } from "@/components/ui/button"
 import { count, facts, type Dashboard } from "@/lib/dashboard"
@@ -109,31 +112,68 @@ export function DashboardView({
   onGranularity?: (g: Granularity) => void
   onPeriods?: (p: Range) => void
 }) {
+  const ready = pnl.kind === "ready" ? pnl.data : null
+  const appsLive = stages.kind === "ready" ? stages.data.apps.filter((a) => a.stage === "production").length : null
+  const costs = costSlices(ready)
   return (
-    <div className="@container/main flex flex-1 flex-col gap-6 p-4 lg:p-6" data-dashboard>
+    <div className="@container/main flex flex-1 flex-col gap-8 p-4 lg:p-6" data-dashboard>
       <NeedsAttention state={attention} />
       {dashboard.apps.length === 0 && <EmptyState />}
 
-      <div className="grid grid-cols-1 gap-6 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]" data-row="top">
+      <section className="flex flex-col gap-3" data-section="kpis" aria-label="Key figures this period">
+        <KpiRow kpis={builderKpis(ready, appsLive)} />
+      </section>
+
+      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" data-row="top">
+        <PnlChart state={pnl} granularity={granularity} periods={periods} onGranularity={onGranularity} onPeriods={onPeriods} variant="area" title="Money moved and costs" />
+        <Section id="cost-breakdown" title="Where the money goes" description="This period's costs">
+          {pnl.kind === "ready" ? (
+            <Donut title="Costs this period" slices={costs.slices} unmeasured={costs.unmeasured} empty="No costs measured this period" />
+          ) : (
+            <PnlNotReadyLine state={pnl} />
+          )}
+        </Section>
+      </div>
+
+      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-2" data-row="apps">
+        <Section id="money-by-app" title="Money moved by app" description="This period">
+          {pnl.kind === "ready" ? <HBars title="Money moved by app" rows={moneyByApp(ready)} empty="No money moved through your apps yet" /> : <PnlNotReadyLine state={pnl} />}
+        </Section>
+        <AppsByStage state={stages} apps={dashboard.apps} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-2" data-row="activity-and-facts">
+        <RecentActivity state={activity} />
         <section className="flex min-w-0 flex-col gap-3" data-section="summary" aria-labelledby="section-summary">
           <div className="border-b pb-2">
             <h2 id="section-summary" className="text-sm font-semibold">
-              How the workspace is doing
+              Workspace
             </h2>
           </div>
-          <PnlStats state={pnl} />
           <OperatingFacts dashboard={dashboard} />
           <WorkspaceFacts dashboard={dashboard} repos={repos} onReposChanged={onReposChanged} />
         </section>
-        <PnlChart state={pnl} granularity={granularity} periods={periods} onGranularity={onGranularity} onPeriods={onPeriods} />
       </div>
 
-      <PnlStatement state={pnl} />
-
-      <div className="grid grid-cols-1 gap-6 @5xl/main:grid-cols-2" data-row="apps-and-activity">
-        <AppsByStage state={stages} apps={dashboard.apps} />
-        <RecentActivity state={activity} />
-      </div>
+      {/* The full statement, on request. */}
+      <details className="group border-t pt-4" data-statement-disclosure>
+        <summary className="cursor-pointer list-none text-sm font-medium hover:underline [&::-webkit-details-marker]:hidden">
+          <span className="group-open:hidden">Show statement</span>
+          <span className="hidden group-open:inline">Hide statement</span>
+        </summary>
+        <div className="mt-4">
+          <PnlStatement state={pnl} />
+        </div>
+      </details>
     </div>
+  )
+}
+
+function PnlNotReadyLine({ state }: { state: Exclude<Loaded<Pnl>, { kind: "ready" }> }) {
+  if (state.kind === "loading") return <Skeleton className="h-40 w-full" />
+  return (
+    <p className="py-3 text-sm text-muted-foreground" data-pnl-empty={state.kind}>
+      {state.kind === "error" ? state.message : state.kind === "unavailable" ? state.message : PNL_NOT_AVAILABLE}
+    </p>
   )
 }

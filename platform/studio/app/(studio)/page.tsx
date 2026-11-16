@@ -19,6 +19,7 @@ import { useComplianceData } from "@/lib/use-compliance";
 import { useRepositories } from "@/components/repositories";
 import { InvestorView } from "@/components/investor-view";
 import { ModeSwitch } from "@/components/mode-switch";
+import { HeaderTabs } from "@/components/header-tabs";
 import type { AuditRow } from "@/lib/audit-classes";
 import { modesFor, rememberedMode, rememberMode, type DashboardMode } from "@/lib/investor";
 import { NO_ACCESS, type LiquidityAccess, type LiquidityData } from "@/lib/liquidity";
@@ -197,10 +198,11 @@ export default function DashboardPage() {
   return (
     <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
       <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
+      {/* Builder / Investor: line tabs in the page header, beside the title. */}
       {modes.length > 1 && shown && (
-        <div className="px-4 pt-4 lg:px-6">
+        <HeaderTabs>
           <ModeSwitch modes={modes} mode={shown} onMode={pick} />
-        </div>
+        </HeaderTabs>
       )}
       {shown === null ? (
         <div className="flex flex-col gap-4 p-4 lg:p-6">

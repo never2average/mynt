@@ -108,7 +108,7 @@ export function fromPromotionChecks(reply: unknown, toStage: PromotionTarget): P
 }
 
 // One line for an app's readiness, for the dashboard's Apps by stage.
-export type Readiness = { toStage: PromotionTarget; canPromote: boolean; failing: number; open: number; needsSignoff: boolean; signoff: Signoff["status"] | null };
+export type Readiness = { toStage: PromotionTarget; canPromote: boolean; failing: number; open: number; needsSignoff: boolean; signoff: Signoff["status"] | null; passing?: number; total?: number };
 
 export function readinessOf(c: PromotionChecks): Readiness {
   return {
@@ -118,6 +118,8 @@ export function readinessOf(c: PromotionChecks): Readiness {
     open: c.checks.filter((x) => x.status === "warn" || x.status === "pending").length,
     needsSignoff: c.needsAdminSignoff,
     signoff: c.signoff?.status ?? null,
+    passing: c.checks.filter((x) => x.status === "pass").length,
+    total: c.checks.length,
   };
 }
 
