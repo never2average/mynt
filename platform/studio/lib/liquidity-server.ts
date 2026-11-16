@@ -16,7 +16,7 @@ import {
   type Pool,
 } from "./liquidity";
 import type { Session } from "./session-store";
-import { callStudioTool, isAuthError, listMyntTools } from "./studio-server";
+import { callStudioTool, isAuthError, listMyntTools, logLine } from "./studio-server";
 
 // The /liquidity page's data, read from Mynt as the signed-in user. Each part waits for Mynt to
 // offer its tool: without list_pools there's nothing to show ("not available yet"); without a
@@ -43,9 +43,19 @@ export async function loadLiquidity(mynt: Client, access: LiquidityAccess): Prom
   };
 
   const [poolsReply, sponsorships, withdrawalsReply] = await Promise.all([read("list_pools"), access.builder ? read("list_my_sponsorships") : null, read("list_withdrawals")]);
-  const pools = fromPools(poolsReply);
-  const withdrawals = withdrawalsReply === null ? null : fromWithdrawals(withdrawalsReply);
-  const sponsored = sponsorships === null ? null : fromSponsorships(sponsorships);
+  // A reply the studio can't read is treated like a tool this Mynt lacks: that part is left out
+  // (and logged), never a 502 for the whole page.
+  const readable = <T,>(what: string, parse: () => T, fallback: T): T => {
+    try {
+      return parse();
+    } catch (err) {
+      console.error(logLine(`reading ${what} for Earn`, err));
+      return fallback;
+    }
+  };
+  const pools = readable("list_pools", () => fromPools(poolsReply), []);
+  const withdrawals = withdrawalsReply === null ? null : readable("list_withdrawals", () => fromWithdrawals(withdrawalsReply), null);
+  const sponsored = sponsorships === null ? null : readable("list_my_sponsorships", () => fromSponsorships(sponsorships), null);
   // The builder's own pools: on a product of its firm (every pool needs an approved sponsorship of
   // one of the firm's products). list_pools also answers pools the user may see as a liquidity
   // provider, or every pool for an admin, so those are told apart by product.
@@ -54,48 +64,64 @@ export async function loadLiquidity(mynt: Client, access: LiquidityAccess): Prom
   const data: LiquidityData = { supported: true, access };
 
   if (access.builder) {
-    const healthReply = await read("list_product_health");
-    const health = healthReply === null ? null : fromProductHealth(healthReply);
-    const mine = pools.filter(own);
-    const productNames = new Map((sponsored?.approved ?? []).map((s) => [s.productId, s.productName]));
-    data.builder = {
-      pools: mine.map((p) => ({ ...p, productName: productNames.get(p.productId) ?? null, queueLength: withdrawals ? queueLength(withdrawals, p.id) : null, health: health ? healthFor(health, p) : null })),
-      proposable: names.has("create_pool") && sponsored ? sponsored.approved : null,
-      withdrawalsShown: withdrawals !== null,
-    };
+    try {
+      const healthReply = await read("list_product_health");
+      const health = healthReply === null ? null : fromProductHealth(healthReply);
+      const mine = pools.filter(own);
+      const productNames = new Map((sponsored?.approved ?? []).map((s) => [s.productId, s.productName]));
+      data.builder = {
+        pools: mine.map((p) => ({ ...p, productName: productNames.get(p.productId) ?? null, queueLength: withdrawals ? queueLength(withdrawals, p.id) : null, health: health ? healthFor(health, p) : null })),
+        proposable: names.has("create_pool") && sponsored ? sponsored.approved : null,
+        withdrawalsShown: withdrawals !== null,
+      };
+    } catch (err) {
+      // One section failing (a reply this studio can't read) leaves that section out, not
+      // the whole page: the rest of Earn still shows. A lost sign-in still ends the request.
+      if (isAuthError(err)) throw err;
+      console.error(logLine("loading Earn's builder section", err));
+      data.unavailable = [...(data.unavailable ?? []), "builder"];
+    }
   }
 
   if (access.liquidityProvider) {
-    const [positionsReply, healthReply] = await Promise.all([read("list_my_positions"), read("list_pools_with_health")]);
-    const positions = positionsReply === null ? [] : fromPositions(positionsReply);
-    const held = new Set(positions.map((p) => p.poolId));
-    const health = healthReply === null ? null : fromPoolsWithHealth(healthReply);
-    // Pools open to commitments (approved, sandbox or cleared, not closed), and any the firm is
-    // already in, whatever their state now. Never the user's own firm's pools.
-    const open = pools.filter((p) => !(access.builder && own(p)) && (held.has(p.id) || (stageOf(p) !== "awaiting_approval" && stageOf(p) !== "uncleared" && p.status !== "closed")));
-    const products = [...new Set(open.map((p) => p.productId))].slice(0, MAX_PRODUCTS);
-    const described = new Map(
-      await Promise.all(
-        products.map(async (id) => {
-          const r = (await read("get_product", { id })) as { name?: unknown; product_line?: unknown } | null;
-          return [id, { name: typeof r?.name === "string" ? r.name : null, line: typeof r?.product_line === "string" ? r.product_line : null }] as const;
-        }),
-      ),
-    );
-    data.provider = {
-      pools: open.map((p) => ({
-        ...p,
-        productName: described.get(p.productId)?.name ?? null,
-        productLine: described.get(p.productId)?.line ?? null,
-        queueLength: null,
-        health: health?.get(p.id) ?? null,
-      })),
-      positions,
-      // The firm's own requests: those in pools it holds a position in.
-      withdrawals: (withdrawals ?? []).filter((w) => held.has(w.poolId)),
-      canCommit: names.has("commit_to_pool"),
-      canWithdraw: names.has("request_withdrawal"),
-    };
+    try {
+      const [positionsReply, healthReply] = await Promise.all([read("list_my_positions"), read("list_pools_with_health")]);
+      const positions = positionsReply === null ? [] : fromPositions(positionsReply);
+      const held = new Set(positions.map((p) => p.poolId));
+      const health = healthReply === null ? null : fromPoolsWithHealth(healthReply);
+      // Pools open to commitments (approved, sandbox or cleared, not closed), and any the firm is
+      // already in, whatever their state now. Never the user's own firm's pools.
+      const open = pools.filter((p) => !(access.builder && own(p)) && (held.has(p.id) || (stageOf(p) !== "awaiting_approval" && stageOf(p) !== "uncleared" && p.status !== "closed")));
+      const products = [...new Set(open.map((p) => p.productId))].slice(0, MAX_PRODUCTS);
+      const described = new Map(
+        await Promise.all(
+          products.map(async (id) => {
+            const r = (await read("get_product", { id })) as { name?: unknown; product_line?: unknown } | null;
+            return [id, { name: typeof r?.name === "string" ? r.name : null, line: typeof r?.product_line === "string" ? r.product_line : null }] as const;
+          }),
+        ),
+      );
+      data.provider = {
+        pools: open.map((p) => ({
+          ...p,
+          productName: described.get(p.productId)?.name ?? null,
+          productLine: described.get(p.productId)?.line ?? null,
+          queueLength: null,
+          health: health?.get(p.id) ?? null,
+        })),
+        positions,
+        // The firm's own requests: those in pools it holds a position in.
+        withdrawals: (withdrawals ?? []).filter((w) => held.has(w.poolId)),
+        canCommit: names.has("commit_to_pool"),
+        canWithdraw: names.has("request_withdrawal"),
+      };
+    } catch (err) {
+      // One section failing (a reply this studio can't read) leaves that section out, not
+      // the whole page: the rest of Earn still shows. A lost sign-in still ends the request.
+      if (isAuthError(err)) throw err;
+      console.error(logLine("loading Earn's provider section", err));
+      data.unavailable = [...(data.unavailable ?? []), "provider"];
+    }
   }
   return data;
 }

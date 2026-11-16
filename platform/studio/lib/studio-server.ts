@@ -50,12 +50,26 @@ export function certainlyNotDone(err: unknown): boolean {
 export const GENERIC_REFUSAL = "Mynt couldn't do that just now. Please try again.";
 const MAX_SHOWN = 500;
 
-// Mynt's error message, if the reply is Mynt's {"error": "..."} shape; otherwise the generic one.
+// What a person may be shown of Mynt's refusal: Mynt's own message, cleaned (no control
+// characters) and capped, from any of the shapes Mynt answers with ({"error": "..."},
+// {"error": {"message": "..."}}, {"message": "..."}, or plain text such as an argument
+// validation error). Only an empty message, or text that looks like a stack trace or names
+// server files, falls back to the generic line.
+const INTERNALS = /Traceback|\n\s+at |\bat [\w.<>]+ \(|[\\/](srv|opt|home|usr|app|var)[\\/]|\.(py|ts|js|mjs|cjs):\d+/;
+function messageIn(data: unknown): string | null {
+  if (typeof data === "string") return data;
+  if (!data || typeof data !== "object") return null;
+  const o = data as { error?: unknown; message?: unknown };
+  if (typeof o.error === "string") return o.error;
+  if (o.error && typeof o.error === "object" && typeof (o.error as { message?: unknown }).message === "string") return (o.error as { message: string }).message;
+  if (typeof o.message === "string") return o.message;
+  return null;
+}
 export function refusalMessage(text: string): string {
-  const data = parseToolText(text);
-  const error = data && typeof data === "object" ? (data as { error?: unknown }).error : undefined;
-  if (typeof error !== "string" || !error.trim()) return GENERIC_REFUSAL;
-  const clean = error.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  const raw = messageIn(parseToolText(text));
+  if (raw === null || !raw.trim() || INTERNALS.test(raw)) return GENERIC_REFUSAL;
+  const clean = raw.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return GENERIC_REFUSAL;
   return clean.length > MAX_SHOWN ? `${clean.slice(0, MAX_SHOWN)}…` : clean;
 }
 
@@ -84,6 +98,9 @@ export async function refreshRoles(session: Session, client: Client): Promise<st
 // every few minutes, not once per session. Mynt still checks each call itself.
 export const ROLES_MAX_AGE_MS = 5 * 60 * 1000;
 
+// Whether the session's roles were read from Mynt recently enough to act on without asking again.
+export const rolesFresh = (session: Session, now = Date.now()) => Boolean(session.roles && session.rolesAt && now - session.rolesAt < ROLES_MAX_AGE_MS);
+
 export async function ensureRoles(session: Session, client: Client, now = Date.now()): Promise<string[]> {
   if (session.roles && session.rolesAt && now - session.rolesAt < ROLES_MAX_AGE_MS) return session.roles;
   return refreshRoles(session, client);
@@ -111,5 +128,15 @@ export async function listMyntTools(client: Client): Promise<{ name: string; des
 // A line for the server log about a failed call: never the reply or arguments (preview URLs
 // in a reply are capabilities).
 export function logLine(what: string, err: unknown): string {
-  return `${what} failed (${err instanceof Error ? err.name : "error"})`;
+  const name = err instanceof Error ? err.name : "error";
+  // A bug in the studio's own code (a TypeError reading a reply it didn't expect) names what and
+  // where, so it can be found from the log: the message (no arguments or replies are in these)
+  // and the first frame's function and file. Other errors (Mynt's, the network's) stay a name only.
+  if (err instanceof TypeError || err instanceof RangeError || err instanceof SyntaxError) {
+    const message = err.message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200);
+    const frame = /\n\s+at (?:(\S+) )?\(?([^()\s]*?)([^/\\()\s]+):(\d+):\d+\)?/.exec(err.stack ?? "");
+    const where = frame ? ` at ${frame[1] ?? "?"} (${frame[3]}:${frame[4]})` : "";
+    return `${what} failed (${name}: ${message}${where})`;
+  }
+  return `${what} failed (${name})`;
 }

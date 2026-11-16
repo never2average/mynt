@@ -4,12 +4,14 @@ import { NotAllowedError } from "./mynt-client";
 import { currentSession } from "./session";
 import { finishSession } from "./session-response";
 import type { Session } from "./session-store";
-import { ensureRoles, isAuthError, logLine, sessionIsDeveloper, ToolRefusedError } from "./studio-server";
+import { ensureRoles, isAuthError, logLine, rolesFresh, sessionIsDeveloper, ToolRefusedError } from "./studio-server";
 import { connectStudio } from "./tokens";
 
 const noStore = { "Cache-Control": "no-store" };
 
 export const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: noStore });
+
+export const NOT_DEVELOPER = { error: "not_developer", message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." } as const;
 
 // An API route that talks to Mynt as the signed-in developer: sign-in, the developer check, the
 // connection and the usual answers (401, 403, 422 with Mynt's own message, 502), and the session
@@ -22,6 +24,10 @@ export async function asDeveloper(
 ): Promise<NextResponse> {
   const session = await currentSession();
   if (!session?.tokens) return json({ error: "auth_required" }, 401);
+  // Roles read in the last few minutes that don't allow this route: refused at once, without
+  // connecting to Mynt (a non-developer's page fires several of these; each used to open a
+  // connection and wait on Mynt before being refused).
+  if (rolesFresh(session) && !allowed(session)) return finishSession(json(NOT_DEVELOPER, 403), session);
   let mynt: Client | undefined;
   let res: NextResponse;
   try {
@@ -29,7 +35,7 @@ export async function asDeveloper(
     await ensureRoles(session, mynt);
     res = allowed(session)
       ? await handle(mynt, session)
-      : json({ error: "not_developer", message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." }, 403);
+      : json(NOT_DEVELOPER, 403);
   } catch (err) {
     if (isAuthError(err)) {
       session.tokens = undefined;

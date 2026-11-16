@@ -17,6 +17,7 @@ const { SiteHeader } = await import("@/components/site-header");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { NOT_LINKED } = await import("@/lib/linked-accounts");
+const { resetStudioAccess } = await import("@/lib/use-liquidity-access");
 
 const MANAGE = "https://accounts.example.test/user";
 const linked = { supported: true, github: "ines", wallet: null, manageUrl: MANAGE };
@@ -31,6 +32,7 @@ beforeAll(() => {
   } as unknown as typeof ResizeObserver;
 });
 beforeEach(() => {
+  resetStudioAccess();
   localStorage.clear();
   document.documentElement.className = "";
 });
@@ -137,7 +139,7 @@ describe("the header's GitHub control", () => {
 describe("the header's order", () => {
   it("Search, GitHub (hidden on phones), Wallet, New app, then the theme switcher at the far right", async () => {
     vi.stubGlobal("fetch", async (url: string) =>
-      new Response(JSON.stringify(url.startsWith("/api/linked-accounts") ? { linked: { ...linked, wallet: { address: "0x52908400098527886E0F7030069857D2E4169EE7", chain: null, network: "EVM" } } } : url.startsWith("/api/repositories") ? { repositories: [], connect: true } : {}), { status: 200 }),
+      new Response(JSON.stringify(url.startsWith("/api/linked-accounts") ? { linked: { ...linked, wallet: { address: "0x52908400098527886E0F7030069857D2E4169EE7", chain: null, network: "EVM" } } } : url.startsWith("/api/repositories") ? { repositories: [], connect: true } : url.startsWith("/api/liquidity/access") ? { developer: true, access: { builder: true, liquidityProvider: false }, owner: "o" } : {}), { status: 200 }),
     );
     const { container } = render(
       <ThemeProvider>

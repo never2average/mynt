@@ -8,10 +8,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MembersActions, MembersData } from "@/components/members-view";
 import { useWorkspace } from "@/components/workspace-context";
 import { useRepositories } from "@/components/repositories";
-import { NO_SETTINGS_TOOLS, WorkspaceView, type SettingsActions, type WorkspaceApp, type WorkspaceInfo } from "@/components/workspace-view";
+import { NO_SETTINGS_TOOLS, TabSelector, WorkspaceView, type SettingsActions, type WorkspaceApp, type WorkspaceInfo } from "@/components/workspace-view";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { CreateWorkspace } from "@/components/studio-gates";
+import type { Workspace } from "@/lib/workspaces";
 import type { ProjectItem } from "@/lib/project-types";
 import type { WorkspaceTab } from "@/lib/workspace-tabs";
+import { withWorkspace } from "@/lib/workspaces";
 
 const read = async <T,>(url: string): Promise<{ ok: boolean; body: (T & { message?: string }) | null }> => {
   const res = await fetch(url, { cache: "no-store" }).catch(() => null);
@@ -20,7 +24,7 @@ const read = async <T,>(url: string): Promise<{ ok: boolean; body: (T & { messag
 };
 
 export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
-  const { selected, loading, reload } = useWorkspace();
+  const { selected, loading, reload, workspaces, select } = useWorkspace();
   const [tab, setTab] = useState<WorkspaceTab>(initialTab);
   const [info, setInfo] = useState<WorkspaceInfo | null>(null);
   const [members, setMembers] = useState<MembersData | null>(null);
@@ -30,20 +34,23 @@ export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
   const { state: repos, reload: reloadRepos } = useRepositories();
 
   const loadInfo = useCallback(async () => {
+    // The implicit Personal workspace isn't one Mynt knows: never asked for by its "personal" id.
+    if (selected.implicit) return setError("There's no workspace to show yet.");
     const { ok, body } = await read<WorkspaceInfo>(`/api/workspaces/${id}`);
     if (ok && body) {
       setInfo({ ...body, tools: { ...NO_SETTINGS_TOOLS, ...body.tools }, canManage: body.canManage ?? false, isOwner: body.isOwner ?? false });
       setError(null);
     } else setError(body?.message ?? "Couldn't load the workspace.");
-  }, [id]);
+  }, [id, selected.implicit]);
 
   const loadMembers = useCallback(async () => {
+    if (selected.implicit) return setMembers({ supported: false, canManage: false, members: [], invites: [], message: "There's no workspace to show yet." });
     const { ok, body } = await read<MembersData>(`/api/workspaces/${id}/members`);
     setMembers(ok && body ? body : { supported: false, canManage: false, members: [], invites: [], message: body?.message ?? "Couldn't load the members." });
-  }, [id]);
+  }, [id, selected.implicit]);
 
   const loadApps = useCallback(async () => {
-    const { ok, body } = await read<{ projects?: ProjectItem[] }>(`/api/projects?workspace=${id}`);
+    const { ok, body } = await read<{ projects?: ProjectItem[] }>(withWorkspace("/api/projects", selected));
     setProjects(ok ? (body?.projects ?? []) : []);
   }, [id]);
 
@@ -116,15 +123,51 @@ export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <div className="flex min-h-0 w-full flex-1 flex-col p-4 lg:p-6">
         {error ? (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
+          <div className="flex flex-col gap-4">
+            <TabSelector tab={tab} onTab={onTab} />
+            <WorkspaceUnavailable message={error} others={workspaces.filter((w) => !w.implicit && w.id !== selected.id)} onSelect={select} />
+          </div>
         ) : info ? (
           <WorkspaceView tab={tab} onTab={onTab} info={info} members={members} apps={apps} memberActions={memberActions} settingsActions={settingsActions} repos={repos} onReposChanged={reloadRepos} />
         ) : (
           <Skeleton className="h-40 w-full rounded-xl" />
         )}
       </div>
+    </div>
+  );
+}
+
+// The workspace couldn't be loaded (it's gone, or there's none yet): the tab bar stays, with what
+// happened and a way on: another of the user's workspaces, or a new one.
+export function WorkspaceUnavailable({ message, others, onSelect }: { message: string; others: Workspace[]; onSelect: (id: string) => void }) {
+  const { reload, select } = useWorkspace();
+  const create = useCallback(
+    async (name: string) => {
+      const res = await fetch("/api/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }).catch(() => null);
+      const data = (await res?.json().catch(() => null)) as { workspace?: Workspace | null; message?: string } | null;
+      if (!res?.ok) return data?.message ?? "Couldn't create the workspace. Please try again.";
+      await reload();
+      if (data?.workspace) select(data.workspace.id);
+      return null;
+    },
+    [reload, select],
+  );
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border border-dashed p-6" data-workspace-unavailable>
+      <p role="alert" className="text-sm font-medium">
+        {message}
+      </p>
+      {others.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-muted-foreground">Open another workspace:</span>
+          {others.map((w) => (
+            <Button key={w.id} size="sm" variant="outline" onClick={() => onSelect(w.id)} data-switch-workspace={w.id}>
+              {w.name}
+            </Button>
+          ))}
+        </div>
+      )}
+      <CreateWorkspace onCreate={create} />
     </div>
   );
 }

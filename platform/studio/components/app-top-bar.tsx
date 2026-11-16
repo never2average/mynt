@@ -21,6 +21,7 @@ import {
 
 import { StageControl } from "@/components/promotion-view";
 import { GithubControl } from "@/components/github-control";
+import { DeveloperOnly } from "@/components/studio-gates";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { WalletControl } from "@/components/wallet-control";
 import { NewAppButton } from "@/components/site-header";
@@ -111,9 +112,11 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
 
       <div className="flex shrink-0 items-center gap-1 pl-1">
         <SearchTrigger compact />
-        {!isMobile && <GithubControl />}
-        {!isMobile && <WalletControl compact />}
-        <NewAppButton compact />
+        <DeveloperOnly>
+          {!isMobile && <GithubControl />}
+          {!isMobile && <WalletControl compact />}
+          <NewAppButton compact />
+        </DeveloperOnly>
         <ThemeSwitcher compact />
       </div>
     </header>

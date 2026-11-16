@@ -3,6 +3,7 @@
 // Loads a compliance page's data for the selected workspace, again whenever another is picked.
 import { useCallback, useEffect, useState } from "react";
 import { useWorkspace } from "@/components/workspace-context";
+import { withWorkspace } from "@/lib/workspaces";
 
 export type Loaded<T> =
   | { kind: "loading" }
@@ -22,8 +23,7 @@ export function useComplianceData<T>(path: string, pick: (body: Record<string, u
     let live = true;
     setState({ kind: "loading" });
     (async () => {
-      const sep = path.includes("?") ? "&" : "?";
-      const res = await fetch(`${path}${sep}workspace=${encodeURIComponent(selected.id)}`, { cache: "no-store" }).catch(() => null);
+      const res = await fetch(withWorkspace(path, selected), { cache: "no-store" }).catch(() => null);
       if (res?.status === 401) {
         window.location.assign("/api/auth/login");
         return;
@@ -39,7 +39,7 @@ export function useComplianceData<T>(path: string, pick: (body: Record<string, u
     return () => {
       live = false;
     };
-  }, [path, pick, selected.id, loading, tick]);
+  }, [path, pick, selected, loading, tick]);
 
   return { state, reload };
 }

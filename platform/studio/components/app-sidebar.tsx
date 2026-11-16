@@ -28,8 +28,8 @@ import {
 } from "@/components/ui/sidebar"
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
-import { useLiquidityAccess } from "@/lib/use-liquidity-access"
-import { groupByStage, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
+import { useStudioAccess } from "@/lib/use-liquidity-access"
+import { groupByStage, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
 
@@ -56,15 +56,16 @@ export type SidebarViewProps = {
   invitations?: Invitation[]
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
   liquidity?: boolean
+  developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        <TeamSwitcher
+        {developer && <TeamSwitcher
           workspaces={workspaces}
           selected={selected}
           supported={supported}
@@ -72,12 +73,12 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
           onCreate={onCreateWorkspace}
           invitations={invitations}
           onAnswerInvitation={onAnswerInvitation}
-        />
+        />}
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            {[...PAGES, ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
+            {[...(developer ? PAGES : PAGES.slice(0, 1)), ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
                   <Link href={href}>
@@ -89,7 +90,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
-        <NavFolders groups={groups} activeAppId={appId} />
+        {developer && <NavFolders groups={groups} activeAppId={appId} />}
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={account} />
@@ -104,12 +105,14 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const { workspaces, selected, supported, select, reload, invitations, answerInvitation } = useWorkspace()
   const [groups, setGroups] = useState<Record<Stage, StagedApp[]> | null>(null)
   const [account, setAccount] = useState<Account>({ name: null, email: null })
-  const liquidity = hasLiquidity(useLiquidityAccess())
+  const access = useStudioAccess()
+  const liquidity = hasLiquidity(access?.liquidity)
+  const developer = access?.developer === true
 
   // The selected workspace's apps (the API routes scope to it through the switcher's cookie).
   const loadApps = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/projects?workspace=${encodeURIComponent(selected.id)}`, { cache: "no-store" })
+    if (developer) try {
+      const res = await fetch(withWorkspace("/api/projects", selected), { cache: "no-store" })
       const data = (await res.json().catch(() => null)) as { projects?: StagedApp[] } | null
       setGroups(groupByStage(res.ok ? (data?.projects ?? []).map((p) => ({ id: p.id, name: p.name, stage: p.stage })) : []))
     } catch {
@@ -118,7 +121,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     // The account is known once the apps have loaded (roles, name and email come together).
     const s = (await fetch("/api/session", { cache: "no-store" }).then((r) => r.json()).catch(() => null)) as Account | null
     if (s) setAccount({ name: s.name ?? null, email: s.email ?? null })
-  }, [selected.id])
+  }, [selected, developer])
 
   useEffect(() => {
     setGroups(null)
@@ -158,6 +161,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       invitations={invitations}
       onAnswerInvitation={answerInvitation}
       liquidity={liquidity}
+      developer={access ? developer : true}
     />
   )
 }

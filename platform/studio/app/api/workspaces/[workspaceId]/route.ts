@@ -3,7 +3,7 @@ import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool, listMyntTools } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
 import { loadWorkspaces, workspaceSupport } from "@/lib/workspace-server";
-import { canManageMembers, PERSONAL, WORKSPACE_ID } from "@/lib/workspaces";
+import { canManageMembers, isRealWorkspaceId, PERSONAL } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +21,7 @@ type SettingsTool = keyof typeof SETTINGS_TOOLS;
 // Mynt offers.
 export async function GET(_req: Request, { params }: Params) {
   const { workspaceId } = await params;
-  if (!WORKSPACE_ID.test(workspaceId)) return json({ error: "bad_request" }, 400);
+  if (!isRealWorkspaceId(workspaceId)) return json({ error: "not_found", message: NOT_YOURS }, 404);
   return asDeveloper("loading a workspace", async (mynt) => {
     const tools = await listMyntTools(mynt);
     const support = workspaceSupport(tools);
@@ -40,7 +40,7 @@ const Action = z.object({ action: z.enum(["archive", "unarchive", "relink"]) }).
 
 async function change(req: Request, params: Params["params"], what: string, tool: SettingsTool, ownersOnly: boolean, args: Record<string, unknown>) {
   const { workspaceId } = await params;
-  if (!WORKSPACE_ID.test(workspaceId)) return json({ error: "bad_request" }, 400);
+  if (!isRealWorkspaceId(workspaceId)) return json({ error: "not_found", message: NOT_YOURS }, 404);
   return asDeveloper(what, async (mynt) => {
     const tools = await listMyntTools(mynt);
     const support = workspaceSupport(tools);

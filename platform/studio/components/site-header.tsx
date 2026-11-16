@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { GithubControl } from "@/components/github-control"
+import { DeveloperOnly } from "@/components/studio-gates"
 import { ThemeSwitcher } from "@/components/theme-switcher"
 import { WalletControl } from "@/components/wallet-control"
 
@@ -39,11 +40,13 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {children}
           <SearchTrigger />
-          <span className="hidden md:flex">
-            <GithubControl />
-          </span>
-          <WalletControl />
-          <NewAppButton />
+          <DeveloperOnly>
+            <span className="hidden md:flex">
+              <GithubControl />
+            </span>
+            <WalletControl />
+            <NewAppButton />
+          </DeveloperOnly>
           <ThemeSwitcher />
         </div>
       </div>
