@@ -4,6 +4,10 @@
 // sections with headings and tables, no cards. Each says when Mynt doesn't offer its data yet,
 // never showing an empty table as if it were data. Server-renderable for the tests.
 import Link from "next/link"
+import { Activity as ActivityIcon, Coins, Hammer, KeyRound, Users } from "lucide-react"
+
+import { PipelineFunnel } from "@/components/charts"
+import { pipeline, relativeTime } from "@/lib/dashboard-visual"
 
 import { StatusDot } from "@/components/promotion-view"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -129,8 +133,8 @@ function ReadinessLine({ app, checks }: { app: StageApp; checks: boolean }) {
 const STAGE_ORDER: Record<Stage, number> = Object.fromEntries(STAGES.map((s, i) => [s, i])) as Record<Stage, number>
 
 /** Apps by stage: a compact table, Production first; each app's last build comes from the dashboard. */
-export function AppsByStage({ state, apps = [] }: { state: Loaded<StagesData>; apps?: DashboardApp[] }) {
-  const counts = state.kind === "ready" ? STAGES.map((s) => [s, state.data.apps.filter((a) => a.stage === s).length] as const) : []
+/** Apps by stage: Ideas → Staging → Production as a funnel, each app a chip with its checks passing. */
+export function AppsByStage({ state }: { state: Loaded<StagesData>; apps?: DashboardApp[] }) {
   return (
     <Section
       id="apps-by-stage"
@@ -142,64 +146,8 @@ export function AppsByStage({ state, apps = [] }: { state: Loaded<StagesData>; a
         <NotReadyText state={state} what="Apps by stage" />
       ) : (
         <>
-          <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            {counts.map(([s, n]) => (
-              <span key={s}>
-                {STAGE_LABELS[s]}{" "}
-                <span className="font-semibold text-foreground tabular-nums" data-stage-count={s}>
-                  {n}
-                </span>
-              </span>
-            ))}
-          </p>
-          {state.data.apps.length === 0 ? (
-            <Quiet kind="nothing">No apps in this workspace yet</Quiet>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>App</TableHead>
-                  <TableHead>Stage</TableHead>
-                  <TableHead>Readiness</TableHead>
-                  <TableHead>Last build</TableHead>
-                  <TableHead className="text-right">
-                    <span className="sr-only">Open</span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...state.data.apps]
-                  .sort((a, b) => STAGE_ORDER[a.stage] - STAGE_ORDER[b.stage] || a.name.localeCompare(b.name))
-                  .map((a) => {
-                    const build = apps.find((d) => d.id === a.id)?.lastBuild ?? null
-                    return (
-                      <TableRow key={a.id} data-stage-row={a.stage}>
-                        <TableCell className="max-w-48 truncate font-medium">{a.name}</TableCell>
-                        <TableCell className="text-muted-foreground">{STAGE_LABELS[a.stage]}</TableCell>
-                        <TableCell>
-                          <ReadinessLine app={a} checks={state.data.checks} />
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {build ? (
-                            <Link className="hover:underline" href={`/${encodeURIComponent(a.id)}/${encodeURIComponent(build.id)}`}>
-                              {build.status}
-                              {when(build.at) ? ` · ${when(build.at)}` : ""}
-                            </Link>
-                          ) : (
-                            "None yet"
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Link href={`/${encodeURIComponent(a.id)}`} className="text-sm font-medium hover:underline">
-                            Open app
-                          </Link>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-              </TableBody>
-            </Table>
-          )}
+          <PipelineFunnel steps={pipeline(state.data.apps)} />
+          {!state.data.checks && <p className="text-xs text-muted-foreground">Promotion checks aren&apos;t available yet</p>}
         </>
       )}
     </Section>
@@ -208,7 +156,16 @@ export function AppsByStage({ state, apps = [] }: { state: Loaded<StagesData>; a
 
 export const RECENT_ROWS = 10
 
-export function RecentActivity({ state }: { state: Loaded<AuditEvent[]> }) {
+const ACTIVITY_ICONS: [RegExp, React.ComponentType<{ className?: string }>][] = [
+  [/^(app|build|deploy|release|promotion)\b/, Hammer],
+  [/^(member|invite|workspace|role)\b/, Users],
+  [/^(key|webhook|setting|repo)/, KeyRound],
+  [/^(pool|liquidity|withdraw|commit|deposit|money|payment|rail)/, Coins],
+]
+const iconFor = (action: string) => ACTIVITY_ICONS.find(([re]) => re.test(action))?.[1] ?? ActivityIcon
+
+/** Recent activity: a compact timeline, an icon per kind of record, newest first. */
+export function RecentActivity({ state, now = Date.now() }: { state: Loaded<AuditEvent[]>; now?: number }) {
   const rows = state.kind === "ready" ? state.data.slice(0, RECENT_ROWS) : []
   return (
     <Section id="recent-activity" title="Recent activity" description="The newest entries in the audit trail" action={<SectionLink href="/audits">Audits</SectionLink>}>
@@ -217,26 +174,25 @@ export function RecentActivity({ state }: { state: Loaded<AuditEvent[]> }) {
       ) : rows.length === 0 ? (
         <Quiet kind="nothing">Nothing has happened in this workspace yet</Quiet>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>When</TableHead>
-              <TableHead>Who</TableHead>
-              <TableHead>Action</TableHead>
-              <TableHead>Target</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((e, i) => (
-              <TableRow key={`${e.at}-${i}`} data-activity-row>
-                <TableCell className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">{e.at.slice(0, 16).replace("T", " ")} UTC</TableCell>
-                <TableCell className="max-w-32 truncate font-medium">{e.actor.name ?? e.actor.id ?? "Mynt"}</TableCell>
-                <TableCell className="font-mono text-xs">{e.action}</TableCell>
-                <TableCell className="max-w-48 truncate">{[e.target.type, e.target.name ?? e.target.id].filter(Boolean).join(": ") || "Not recorded"}</TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <ol className="relative flex flex-col border-l pl-4" data-timeline>
+          {rows.map((e, i) => {
+            const Icon = iconFor(e.action)
+            return (
+              <li key={`${e.at}-${i}`} className="relative flex min-w-0 items-start gap-2 py-1.5" data-activity-row>
+                <span className="absolute top-2 -left-[25px] flex size-4 items-center justify-center rounded-full border bg-background" aria-hidden>
+                  <Icon className="size-2.5 text-muted-foreground" />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm">
+                  <span className="font-medium">{e.actor.name ?? e.actor.id ?? "Mynt"}</span> <span className="font-mono text-xs">{e.action}</span>{" "}
+                  <span className="text-muted-foreground">{[e.target.type, e.target.name ?? e.target.id].filter(Boolean).join(": ") || "Not recorded"}</span>
+                </span>
+                <time className="shrink-0 text-xs text-muted-foreground tabular-nums" dateTime={e.at} title={`${e.at.slice(0, 16).replace("T", " ")} UTC`}>
+                  {relativeTime(e.at, now)}
+                </time>
+              </li>
+            )
+          })}
+        </ol>
       )}
     </Section>
   )

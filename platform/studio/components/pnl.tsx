@@ -6,7 +6,7 @@
 // the totals, for this period, last period and year to date). A figure Mynt doesn't measure
 // reads "Not measured" and is a gap in the chart, never $0. Until Mynt has the tool, each part
 // says the P&L isn't available yet and the rest of the dashboard carries on.
-import { Bar, CartesianGrid, ComposedChart, Line, ReferenceLine, XAxis, YAxis } from "recharts"
+import { Area, Bar, CartesianGrid, ComposedChart, Line, ReferenceLine, XAxis, YAxis } from "recharts"
 
 import { Skeleton } from "@/components/ui/skeleton"
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
@@ -22,8 +22,8 @@ export const REVENUE_LABEL = "Money moved through your apps"
 export const PNL_NOT_AVAILABLE = "P&L isn't available yet. It comes with Mynt's next update."
 
 const chartConfig = {
-  revenue: { label: "Money moved", color: "var(--chart-2)" },
-  costs: { label: "Costs", color: "var(--chart-1)" },
+  revenue: { label: "Money moved", color: "var(--chart-1)" },
+  costs: { label: "Costs", color: "var(--chart-2)" },
   netIncome: { label: "Net", color: "var(--foreground)" },
 } satisfies ChartConfig
 
@@ -119,6 +119,7 @@ export function PnlChart({
   labels,
   note,
   empty = "Not measured yet: Mynt hasn't recorded revenue or costs for these periods.",
+  variant = "bars",
 }: {
   state: Loaded<Pick<Pnl, "series">>
   granularity: Granularity
@@ -129,7 +130,10 @@ export function PnlChart({
   labels?: ChartLabels
   note?: string
   empty?: string
+  /** "area": the dashboard's large chart (filled areas, net as a line); "bars": the compact one. */
+  variant?: "bars" | "area"
 }) {
+  const height = variant === "area" ? "h-[300px]" : "h-[220px]"
   const config = labels
     ? ({
         revenue: { label: labels.revenue, color: chartConfig.revenue.color },
@@ -153,14 +157,14 @@ export function PnlChart({
         </div>
       </div>
       {state.kind !== "ready" ? (
-        <PnlNotReady state={state} height="h-[220px]" />
+        <PnlNotReady state={state} height={height} />
       ) : !anyMeasured(series) ? (
-        <div className="flex h-[220px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground" data-pnl-empty="unmeasured">
+        <div className={cn("flex items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground", height)} data-pnl-empty="unmeasured">
           {empty}
         </div>
       ) : (
         <>
-          <ChartContainer config={config} className="aspect-auto h-[220px] w-full" data-pnl-chart>
+          <ChartContainer config={config} className={cn("aspect-auto w-full", height)} data-pnl-chart data-variant={variant}>
             <ComposedChart data={rows} margin={{ left: 4, right: 4, top: 8 }} barGap={2}>
               <CartesianGrid vertical={false} />
               <XAxis dataKey="period" tickLine={false} axisLine={false} tickMargin={8} minTickGap={16} />
@@ -180,8 +184,17 @@ export function PnlChart({
                 }
               />
               <ChartLegend content={<ChartLegendContent />} />
-              <Bar dataKey="revenue" fill="var(--color-revenue)" radius={[4, 4, 0, 0]} maxBarSize={28} />
-              <Bar dataKey="costs" fill="var(--color-costs)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+              {variant === "area" ? (
+                <>
+                  <Area dataKey="revenue" type="monotone" fill="var(--color-revenue)" fillOpacity={0.25} stroke="var(--color-revenue)" strokeWidth={2} connectNulls={false} />
+                  <Area dataKey="costs" type="monotone" fill="var(--color-costs)" fillOpacity={0.2} stroke="var(--color-costs)" strokeWidth={2} connectNulls={false} />
+                </>
+              ) : (
+                <>
+                  <Bar dataKey="revenue" fill="var(--color-revenue)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+                  <Bar dataKey="costs" fill="var(--color-costs)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+                </>
+              )}
               {/* A period Mynt didn't measure stays a gap: nulls are never joined or drawn as 0. */}
               <Line dataKey="netIncome" type="linear" stroke="var(--color-netIncome)" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
             </ComposedChart>

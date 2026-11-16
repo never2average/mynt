@@ -11,12 +11,19 @@ import Link from "next/link"
 
 import { NeedsAttention, Section, SectionLink } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
+import { Donut, KpiRow } from "@/components/charts"
+import type { Kpi } from "@/lib/dashboard-visual"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditRow } from "@/lib/audit-classes"
 import {
+  allocation,
+  HEALTH_LABELS,
+  healthState,
+  unlockBars,
+  type HealthState,
   comingUp,
   COMING_UP_DAYS,
   COMING_UP_LABELS,
@@ -65,29 +72,103 @@ const STATS: [keyof Totals, string][] = [
   ["paid", "Paid out"],
 ]
 
-function PortfolioStrip({ positions }: { positions: NonNullable<LiquidityData["provider"]>["positions"] }) {
+function PortfolioKpis({ positions, flows }: { positions: NonNullable<LiquidityData["provider"]>["positions"]; flows: { revenue: number | null; costs: number | null }[] | null }) {
   const p = portfolioOf(positions)
   const sources = (Object.keys(p.bySource) as Source[]).sort()
-  const split = sources.length > 1
+  // Running totals per period from the dated history (devnet): what went in, what was paid out.
+  const running = (pick: (f: { revenue: number | null; costs: number | null }) => number | null) => {
+    if (!flows || !flows.some((f) => pick(f) !== null)) return null
+    let n = 0
+    return flows.map((f) => (pick(f) === null ? null : (n += pick(f)!)))
+  }
+  const kpis: Kpi[] = [
+    { key: "committed", label: "Committed", value: p.all.committed, unit: "money", delta: null, spark: running((f) => f.revenue) },
+    { key: "settled", label: "Settled", value: p.all.settled, unit: "money", delta: null, spark: null },
+    { key: "queued", label: "Queued for withdrawal", value: p.all.queued, unit: "money", delta: null, spark: null },
+    { key: "paid", label: "Paid out", value: p.all.paid, unit: "money", delta: null, spark: running((f) => f.costs) },
+    { key: "returns", label: "Returns", value: null, unit: "money", delta: null, spark: null, note: "Mynt doesn't measure yield" },
+  ]
   return (
-    <dl className="grid grid-cols-2 divide-x divide-y rounded-md border sm:grid-cols-5 sm:divide-y-0" data-portfolio>
-      {STATS.map(([k, label]) => (
-        <div key={k} className="flex min-w-0 flex-col gap-0.5 px-3 py-2" data-stat={k}>
-          <dt className="truncate text-xs text-muted-foreground">{label}</dt>
-          <dd className={cn("truncate font-semibold tabular-nums", p.all[k] === null ? "text-sm text-muted-foreground" : "text-xl")}>{money(p.all[k])}</dd>
-          {split && (
-            <dd className="truncate text-xs text-muted-foreground" data-split>
-              {sources.map((s) => `${SOURCE_LABELS[s]} ${money(p.bySource[s]![k])}`).join(" · ")}
-            </dd>
-          )}
-        </div>
-      ))}
-      <div className="flex min-w-0 flex-col gap-0.5 px-3 py-2" data-stat="returns">
-        <dt className="truncate text-xs text-muted-foreground">Returns</dt>
-        <dd className="truncate text-sm font-semibold text-muted-foreground">{NOT_MEASURED}</dd>
-        <dd className="truncate text-xs text-muted-foreground">Mynt doesn&apos;t measure yield</dd>
-      </div>
-    </dl>
+    <>
+      <KpiRow kpis={kpis} />
+      {sources.length > 1 && (
+        <p className="flex flex-wrap gap-x-4 text-xs text-muted-foreground" data-split>
+          {sources.map((s) => (
+            <span key={s}>
+              {SOURCE_LABELS[s]}: committed {money(p.bySource[s]!.committed)} · settled {money(p.bySource[s]!.settled)} · paid out {money(p.bySource[s]!.paid)}
+            </span>
+          ))}
+        </p>
+      )}
+    </>
+  )
+}
+
+// ---- the unlock timeline: a mini Gantt per deposit ----
+
+const day = (t: number) => new Date(t).toISOString().slice(0, 10)
+
+function UnlockTimeline({ positions, now }: { positions: NonNullable<LiquidityData["provider"]>["positions"]; now: number }) {
+  const bars = unlockBars(positions, now)
+  if (!bars.length)
+    return (
+      <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
+        No devnet deposits with a lock-in
+      </p>
+    )
+  return (
+    <ol className="flex flex-col gap-2" data-unlocks>
+      {bars.map((b) => {
+        const span = b.end - b.start
+        const at = (t: number) => `${Math.min(100, Math.max(0, ((t - b.start) / span) * 100))}%`
+        const label = `${b.poolName}: in review until ${day(b.reviewEnd)}, locked until ${day(b.unlock)}, then available. ${statusText({ status: b.status, until: null })} today.`
+        return (
+          <li key={b.key} className="grid grid-cols-[minmax(0,8rem)_1fr] items-center gap-3" data-unlock={b.key} data-status={b.status}>
+            <span className="truncate text-xs">{b.poolName}</span>
+            <span className="relative block h-3 w-full overflow-hidden rounded-sm bg-muted" role="img" aria-label={label}>
+              <span className="absolute inset-y-0 bg-chart-3/70" style={{ left: "0%", width: at(b.reviewEnd) }} data-segment="review" />
+              <span className="absolute inset-y-0 bg-chart-2/70" style={{ left: at(b.reviewEnd), width: `calc(${at(b.unlock)} - ${at(b.reviewEnd)})` }} data-segment="locked" />
+              <span className="absolute inset-y-0 right-0 bg-chart-1/70" style={{ left: at(b.unlock) }} data-segment="available" />
+              <span className="absolute inset-y-[-2px] w-0.5 bg-foreground" style={{ left: at(b.now) }} data-now title="Now" />
+            </span>
+          </li>
+        )
+      })}
+      <li className="flex flex-wrap gap-x-4 gap-y-1 pt-1 text-xs text-muted-foreground" aria-hidden>
+        <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-chart-3/70" />In review</span>
+        <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-chart-2/70" />Locked</span>
+        <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-chart-1/70" />Available</span>
+        <span className="flex items-center gap-1.5"><span className="h-2.5 w-0.5 bg-foreground" />Now</span>
+      </li>
+    </ol>
+  )
+}
+
+// ---- pool health ----
+
+const HEALTH_TONE: Record<HealthState, string> = { healthy: "bg-emerald-500", at_risk: "bg-amber-500", paused: "bg-destructive", unknown: "bg-muted-foreground/40" }
+
+function PoolHealthList({ pools, held }: { pools: NonNullable<LiquidityData["provider"]>["pools"]; held: Set<string> }) {
+  const mine = pools.filter((p) => held.has(p.id))
+  if (!mine.length)
+    return (
+      <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
+        No pools held yet
+      </p>
+    )
+  return (
+    <ul className="flex flex-col divide-y" data-pool-health>
+      {mine.map((p) => {
+        const state = healthState(p)
+        return (
+          <li key={p.id} className="flex items-center gap-2 py-1.5 text-sm" data-pool={p.id} data-health={state}>
+            <span aria-hidden className={cn("size-2 shrink-0 rounded-full", HEALTH_TONE[state])} />
+            <span className="min-w-0 flex-1 truncate">{p.name}</span>
+            <span className="text-xs text-muted-foreground">{HEALTH_LABELS[state]}</span>
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 
@@ -158,29 +239,42 @@ export function InvestorView({
   const investing: Loaded<AttentionItem[]> = attention.kind === "ready" ? { kind: "ready", data: attention.data.filter(investingItem) } : attention
 
   return (
-    <div className="flex flex-col gap-6" data-investor-view>
+    <div className="flex flex-col gap-8" data-investor-view>
       <NeedsAttention state={investing} />
 
-      <div className="grid grid-cols-1 gap-6 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]" data-row="top">
-        <section className="flex min-w-0 flex-col gap-3" data-section="portfolio" aria-labelledby="section-portfolio">
-          <div className="border-b pb-2">
-            <h2 id="section-portfolio" className="text-sm font-semibold">
-              Your portfolio
-            </h2>
-          </div>
-          {positionsState.kind === "ready" ? <PortfolioStrip positions={positionsState.data.positions} /> : <NotReady state={positionsState} what="Your positions" />}
-        </section>
+      <section className="flex min-w-0 flex-col gap-2" data-section="portfolio" aria-label="Your portfolio">
+        {positionsState.kind === "ready" ? <PortfolioKpis positions={positionsState.data.positions} flows={flows?.series ?? null} /> : <NotReady state={positionsState} what="Your positions" />}
+      </section>
+
+      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" data-row="top">
         <PnlChart
           state={flows ? { kind: "ready", data: { series: flows.series } } : (positionsState as Exclude<typeof positionsState, { kind: "ready" }>)}
           granularity={granularity}
           periods={periods}
           onGranularity={onGranularity}
           onPeriods={onPeriods}
+          variant="area"
           title="Capital in and paid out"
           labels={{ revenue: "Capital in", costs: "Paid out", netIncome: "Net" }}
           empty="Not measured yet: Mynt has no dated deposits or payouts for these periods."
           note={flows?.railsUnmeasured && provider?.positions.some((p) => p.onChain) ? "Devnet deposits and payouts only: rails positions carry no dated history yet. Paid out counts in the period it became payable." : flows && provider?.positions.some((p) => p.onChain) ? "Paid out counts in the period it became payable." : undefined}
         />
+        <Section id="allocation" title="Allocation" description="What's settled, by pool">
+          {positionsState.kind === "ready" ? (
+            <Donut title="Settled by pool" slices={allocation(positionsState.data.positions)} empty="Nothing settled in a pool yet" />
+          ) : (
+            <NotReady state={positionsState} what="Allocation" />
+          )}
+        </Section>
+      </div>
+
+      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" data-row="unlocks-and-health">
+        <Section id="unlocks" title="Unlock timeline" description="Each devnet deposit: review, then lock-in, then available">
+          {positionsState.kind === "ready" ? <UnlockTimeline positions={positionsState.data.positions} now={now} /> : <NotReady state={positionsState} what="Unlocks" />}
+        </Section>
+        <Section id="pool-health" title="Pool health" description="Pools you hold">
+          {positionsState.kind === "ready" ? <PoolHealthList pools={positionsState.data.pools} held={new Set(positionsState.data.positions.map((p) => p.poolId))} /> : <NotReady state={positionsState} what="Pool health" />}
+        </Section>
       </div>
 
       <Section id="positions" title="Positions" description="Each deposit, with its pool's health" action={<SectionLink href={EARN_POSITIONS}>Earn</SectionLink>}>

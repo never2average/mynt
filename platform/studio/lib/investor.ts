@@ -209,3 +209,49 @@ export function flowSeries(positions: Position[], granularity: Granularity, peri
 // Needs attention items about investing: pools, positions, withdrawals or the treasury.
 export const investingItem = (i: { kind?: string | null; href?: string | null }) =>
   /pool|position|withdraw|liquidity|treasury|deposit/i.test(i.kind ?? "") || (i.href ?? "").startsWith("/earn");
+
+// ---- the visual view ----
+
+/** Each pool's share of what's settled: the allocation donut (only pools with something in them). */
+export function allocation(positions: Position[]): { key: string; label: string; value: number }[] {
+  const by = new Map<string, { label: string; value: number }>();
+  for (const p of positions) {
+    const t = p.onChain ? onChainTotals(p) : railsTotals(p);
+    if (t.settled === null || t.settled <= 0) continue;
+    const cur = by.get(p.poolId) ?? { label: p.name, value: 0 };
+    cur.value += t.settled;
+    by.set(p.poolId, cur);
+  }
+  return [...by].map(([key, v]) => ({ key, ...v })).sort((a, b) => b.value - a.value);
+}
+
+/** A deposit's road from settled to free: review, then lock-in, then available, with now on it. */
+export type UnlockBar = { key: string; poolName: string; start: number; reviewEnd: number; unlock: number; end: number; now: number; status: DepositStatus };
+export function unlockBars(positions: Position[], now: number): UnlockBar[] {
+  return positions
+    .filter((p) => p.onChain)
+    .flatMap((p) =>
+      p.deposits
+        .filter((d) => !d.rejected && d.settledAt && d.unlockAt)
+        .map((d) => {
+          const start = Date.parse(d.settledAt!);
+          const unlock = Date.parse(d.unlockAt!);
+          const reviewEnd = d.reviewUntil ? Math.min(Date.parse(d.reviewUntil), unlock) : start;
+          // The bar runs a little past the later of now and the unlock, so "available" shows.
+          const end = Math.max(now, unlock) + Math.max(1, (unlock - start) * 0.15);
+          return { key: d.deposit, poolName: p.name, start, reviewEnd, unlock, end, now, status: depositStatus(d, now).status };
+        })
+        .filter((b) => [b.start, b.unlock, b.reviewEnd].every(Number.isFinite)),
+    );
+}
+
+export type HealthState = "healthy" | "at_risk" | "paused" | "unknown";
+export const HEALTH_LABELS: Record<HealthState, string> = { healthy: "Healthy", at_risk: "At risk", paused: "Paused", unknown: "No verified snapshot" };
+/** A held pool's health at a glance, from its latest snapshot and status (never guessed). */
+export function healthState(pool: Pick<PoolRow, "status" | "pauseKind" | "health">): HealthState {
+  if (pool.status === "paused" || pool.pauseKind) return "paused";
+  const h = pool.health;
+  if (!h || h.sequence === null) return "unknown";
+  if (h.verified === false || (h.coverageBps !== null && h.coverageBps < 10_000) || (h.headroomCents !== null && h.headroomCents < 0)) return "at_risk";
+  return h.verified ? "healthy" : "unknown";
+}
