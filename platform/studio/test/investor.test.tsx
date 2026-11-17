@@ -50,10 +50,12 @@ describe("the Builder / Investor switch", () => {
     expect(renderToStaticMarkup(<ModeSwitch modes={["builder"]} mode="builder" onMode={() => undefined} />)).toBe("");
     const picked: string[] = [];
     render(<ModeSwitch modes={["builder", "investor"]} mode="builder" onMode={(m) => picked.push(m)} />);
-    expect(screen.getByRole("button", { name: "Builder" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Investor" }));
+    // The studio's line tabs, not a segmented control.
+    expect(document.querySelector("[data-mode-switch]")!.getAttribute("data-variant")).toBe("line");
+    expect(screen.getByRole("tab", { name: "Builder" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "Investor" }));
     expect(picked).toEqual(["investor"]);
-    expect(document.querySelector("[data-mode-switch]")!.innerHTML).not.toMatch(/primary|mint/);
+    expect(document.querySelector("[data-mode-switch]")!.outerHTML).not.toMatch(/primary|mint|aria-pressed/);
   });
 
   it("remembers the choice per user in this browser, only while the roles still allow it, and survives blocked storage", () => {
@@ -131,10 +133,13 @@ describe("the investor view", () => {
       <InvestorView liquidity={{ kind: "ready", data: liquidity }} wallets={{ kind: "ready", data: wallets }} activity={{ kind: "ready", data: activity }} attention={{ kind: "ready", data: [] }} now={NOW} />,
     );
     expect(html).not.toContain('data-slot="card"');
-    for (const s of ["portfolio", "pnl-chart", "positions", "coming-up", "wallets", "financial-activity"]) expect(html).toContain(`data-section="${s}"`);
-    expect(html).toMatch(/data-stat="committed"[\s\S]*?\$6,250\.00/);
-    expect(html).toMatch(/data-stat="committed"[\s\S]*?data-split[^>]*>Devnet \$1,250\.00 · Rails \$5,000\.00</);
-    expect(html).toMatch(/data-stat="returns"[\s\S]*?>Not measured</);
+    for (const s of ["portfolio", "pnl-chart", "allocation", "unlocks", "pool-health", "positions", "coming-up", "wallets", "financial-activity"]) expect(html).toContain(`data-section="${s}"`);
+    expect(html).toMatch(/data-kpi="committed"[\s\S]*?\$6,250\.00/);
+    expect(html).toMatch(/data-split[\s\S]*?Devnet: committed \$1,250\.00[\s\S]*?Rails: committed \$5,000\.00/);
+    expect(html).toMatch(/data-kpi="returns"[\s\S]*?>Not measured<[\s\S]*?Mynt doesn.{1,6}t measure yield/);
+    // Committed and Paid out have their running history as sparklines; Settled has none (no history).
+    expect(html).toMatch(/data-kpi="committed"[\s\S]*?data-sparkline="6"/);
+    expect(html).toMatch(/data-kpi="settled"[\s\S]*?data-sparkline="none"/);
     expect(html).toContain("Capital in and paid out");
     expect(html).toMatch(/data-deposit="Dep1"[\s\S]*?data-source="devnet"[\s\S]*?Locked until 2026-11-25/);
     expect(html).toMatch(/data-deposit="rails-p-rails"[\s\S]*?data-source="rails"[\s\S]*?Verified · #7/);

@@ -71,7 +71,8 @@ export async function resolveWorkspace(mynt: Client, requested: string | null, s
   return mine.some((w) => w.id === requested && !w.implicit) ? requested : null;
 }
 
-// The user's own workspace on Mynt (list_workspaces marks it personal), if Mynt has one.
+// The user's own workspace on Mynt (list_workspaces marks it personal), if Mynt has one. Never
+// one they were invited to.
 export async function ownWorkspace(mynt: Client, support: WorkspaceSupport): Promise<string | null> {
   if (!support.workspaces) return null;
   return (await loadWorkspaces(mynt, support)).find((w) => w.personal && !w.implicit)?.id ?? null;
@@ -79,12 +80,18 @@ export async function ownWorkspace(mynt: Client, support: WorkspaceSupport): Pro
 
 // What a shared workspace's page says when this Mynt can't scope that data to it yet. The studio
 // never shows the user's unscoped data under a workspace's name.
-export const NOT_SCOPED = "This workspace's data comes with Mynt's next update. Your Personal workspace still shows everything.";
+export const NOT_SCOPED = "Mynt can't show this workspace's data here yet. It comes with Mynt's next update.";
+// A signed-in user with no workspace on Mynt yet (they skipped choosing or creating one): pages
+// say so, and the studio asks them to create one first. "personal" is never sent to Mynt.
+export const NO_WORKSPACE = "You don't have a workspace yet. Create one to see this.";
 export const WORKSPACE_GONE = "You're no longer a member of this workspace. Pick another one in the switcher.";
 
 // The scope for a page's read. A workspace the page names (?workspace=<id>) that isn't the
-// user's any more (left or removed) gets `unavailable`, never Personal's data under its name. Only
-// a remembered cookie with no explicit workspace falls back quietly to Personal.
+// user's any more (left or removed) gets `unavailable`, never another workspace's data under its
+// name. With no workspace named (or only a remembered one that's gone), the read isn't scoped,
+// as before; but where Mynt has workspaces and the user has none at all, it's `unavailable`
+// (NO_WORKSPACE) and nothing is sent: never without a workspace Mynt needs, or with the studio's
+// synthetic "personal".
 export async function scopeFor(
   mynt: Client,
   req: Request,
@@ -95,5 +102,9 @@ export async function scopeFor(
     const workspace = await resolveWorkspace(mynt, explicit, support);
     return workspace ? { workspace } : { unavailable: WORKSPACE_GONE };
   }
-  return { workspace: await resolveWorkspace(mynt, workspaceOf(req), support) };
+  const remembered = await resolveWorkspace(mynt, workspaceOf(req), support);
+  if (remembered || !support.workspaces) return { workspace: remembered };
+  // No workspace on Mynt at all: nothing is asked of Mynt (it would be refused for want of one).
+  const mine = (await loadWorkspaces(mynt, support)).filter((w) => !w.implicit);
+  return mine.length ? { workspace: null } : { unavailable: NO_WORKSPACE };
 }

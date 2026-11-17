@@ -378,7 +378,7 @@ describe("the dashboard's sections", () => {
     expect(renderToStaticMarkup(<NeedsAttention state={{ kind: "unavailable", message: "This workspace's data comes with Mynt's next update." }} />)).toContain("next update");
   });
 
-  it("Apps by stage is a compact table: counts per stage, each app's stage, readiness, last build and Open app", () => {
+  it("Apps by stage is a funnel: Ideas → Staging → Production with counts, each app a chip with its checks passing", () => {
     const ready = readinessOf(passing);
     const blocked = readinessOf(checks);
     expect(readinessText(ready)).toBe("Ready for Production");
@@ -397,16 +397,16 @@ describe("the dashboard's sections", () => {
     expect(html).toMatch(/data-stage-count="staging">2</);
     expect(html).toMatch(/data-stage-count="idea">1</);
     expect(html).toContain('href="/a2"');
-    expect(html).toContain("Ready for Production");
-    expect(html).toContain("2 checks failing for Production");
-    expect(html).toContain("Not checked yet");
-    expect(html).toContain("Live");
-    expect(html.match(/data-stage-row=/g)).toHaveLength(4);
-    expect(html.match(/>Open app</g)).toHaveLength(4); // labelled, never icon-only
-    expect(html.indexOf('data-stage-row="production"')).toBeLessThan(html.indexOf('data-stage-row="idea"'));
-    expect(html).toContain("<table");
-    const withBuild = renderToStaticMarkup(<AppsByStage state={{ kind: "ready", data }} apps={fromDashboardTool({ apps: [{ app_id: "a2", name: "Budgeting", last_build: { id: "b7", status: "succeeded", at: "2026-11-10T00:00:00Z" } }] }).apps} />);
-    expect(withBuild).toMatch(/href="\/a2\/b7"[^>]*>succeeded · Nov 10</);
+    // Ideas first, then Staging, then Production.
+    expect(html.indexOf('data-step="idea"')).toBeLessThan(html.indexOf('data-step="staging"'));
+    expect(html.indexOf('data-step="staging"')).toBeLessThan(html.indexOf('data-step="production"'));
+    expect(html.match(/data-chip=/g)).toHaveLength(4);
+    expect(html).toMatch(/data-chip="a2"[\s\S]*?data-checks[^>]*>1\/1</);
+    expect(html).toMatch(new RegExp(`data-chip="a3"[\\s\\S]*?data-checks[^>]*>${blocked.passing}/${blocked.total}<`));
+    expect(blocked.total).toBeGreaterThan(blocked.passing ?? 0);
+    expect(html).toMatch(/data-chip="a4"[\s\S]*?Not checked/);
+    expect(html).toMatch(/data-chip="a1"[\s\S]*?Live/);
+    expect(html).not.toContain("<table");
     // Before Mynt has promotion checks: the counts, and readiness says it isn't available.
     const before = renderToStaticMarkup(<AppsByStage state={{ kind: "ready", data: { checks: false, apps: data.apps.map((a) => ({ ...a, readiness: null })) } }} />);
     expect(before).toContain("Promotion checks aren&#x27;t available yet");

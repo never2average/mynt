@@ -19,11 +19,13 @@ import { useComplianceData } from "@/lib/use-compliance";
 import { useRepositories } from "@/components/repositories";
 import { InvestorView } from "@/components/investor-view";
 import { ModeSwitch } from "@/components/mode-switch";
+import { HeaderTabs } from "@/components/header-tabs";
 import type { AuditRow } from "@/lib/audit-classes";
 import { modesFor, rememberedMode, rememberMode, type DashboardMode } from "@/lib/investor";
-import { NO_ACCESS, type LiquidityAccess, type LiquidityData } from "@/lib/liquidity";
+import { NO_ACCESS, reviveLiquidity, type LiquidityAccess, type LiquidityData } from "@/lib/liquidity";
 import type { Loaded } from "@/lib/use-compliance";
 import type { EarnWallets } from "@/lib/wallets";
+import { withWorkspace } from "@/lib/workspaces";
 
 type State = { dashboard: Dashboard } | { unavailable: string } | { error: string } | null;
 
@@ -59,7 +61,7 @@ function BuilderDashboard() {
     let live = true;
     setState(null);
     (async () => {
-      const res = await fetch(`/api/dashboard?workspace=${encodeURIComponent(selected.id)}`, { cache: "no-store" }).catch(() => null);
+      const res = await fetch(withWorkspace("/api/dashboard", selected), { cache: "no-store" }).catch(() => null);
       if (res?.status === 401) {
         window.location.assign("/api/auth/login"); // the session ended meanwhile
         return;
@@ -131,7 +133,7 @@ function useRead<T>(path: string, pick: (b: Record<string, unknown>) => T | unde
   }, [path, pick]);
   return state;
 }
-const pickLiquidity = (b: Record<string, unknown>) => b as unknown as LiquidityData;
+const pickLiquidity = (b: Record<string, unknown>) => reviveLiquidity(b as unknown as LiquidityData);
 const pickWallets = (b: Record<string, unknown>) => b as unknown as EarnWallets;
 
 function InvestorDashboard() {
@@ -196,10 +198,11 @@ export default function DashboardPage() {
   return (
     <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
       <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
+      {/* Builder / Investor: line tabs in the page header, beside the title. */}
       {modes.length > 1 && shown && (
-        <div className="px-4 pt-4 lg:px-6">
+        <HeaderTabs>
           <ModeSwitch modes={modes} mode={shown} onMode={pick} />
-        </div>
+        </HeaderTabs>
       )}
       {shown === null ? (
         <div className="flex flex-col gap-4 p-4 lg:p-6">

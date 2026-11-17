@@ -157,17 +157,19 @@ const dashboardWithApps = fromDashboardTool(measured);
 const stages = { kind: "ready" as const, data: { checks: false, apps: [{ id: "a1", name: "Round-up savings", stage: "production" as const, readiness: null }] } };
 
 describe("dashboard page", () => {
-  it("is a statement, not a grid of cards: no shadcn Card, no wallet tile", () => {
+  it("is visual-first and borderless: KPIs, charts, funnel, timeline; no shadcn Card, no wallet tile", () => {
     const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} pnl={{ kind: "ready", data: fromPnl(pnlReply) }} />);
     expect(html).not.toContain('data-slot="card"');
     expect(html).not.toContain('data-tile="wallet"');
     expect(html).not.toContain("Crypto wallet");
     expect(html).not.toContain("Link wallet");
-    for (const s of ["summary", "pnl-chart", "pnl-statement", "apps-by-stage", "recent-activity"]) expect(html).toContain(`data-section="${s}"`);
-    // The top row: the stat strip on the left, the chart on the right.
-    const top = html.slice(html.indexOf('data-row="top"'));
-    expect(top.indexOf('data-section="summary"')).toBeLessThan(top.indexOf('data-section="pnl-chart"'));
-    expect(html).toMatch(/data-stat="net"[\s\S]*?\$1,100\.00/);
+    for (const s of ["kpis", "pnl-chart", "cost-breakdown", "money-by-app", "apps-by-stage", "recent-activity", "summary", "pnl-statement"]) expect(html).toContain(`data-section="${s}"`);
+    // The KPIs come first, then the large area chart beside the cost breakdown.
+    expect(html.indexOf('data-section="kpis"')).toBeLessThan(html.indexOf('data-section="pnl-chart"'));
+    expect(html).toMatch(/data-variant="area"/);
+    expect(html).toMatch(/data-kpi="money-moved"[\s\S]*?\$1,500\.00/);
+    // The full statement is behind a disclosure.
+    expect(html).toMatch(/<details[^>]*data-statement-disclosure[\s\S]*?Show statement[\s\S]*?data-section="pnl-statement"[\s\S]*?<\/details>/);
   });
 
   it("keeps the operating and workspace facts: money moved, customers, repositories, products, licences (GitHub is in the header)", () => {
@@ -181,12 +183,12 @@ describe("dashboard page", () => {
     expect(html).toMatch(/data-fact="repositories"[\s\S]*?href="\/settings\?tab=repositories"[^>]*>0 connected</);
     expect(html).toMatch(/data-fact="licences"[\s\S]*?href="\/licences"/);
     expect(html).toMatch(/>\s*Connect repository\s*</);
-    expect(html).toContain('href="/a1/b9"'); // the last build, in Apps by stage
+    expect(html).toContain('href="/a1"'); // the app's chip, in the funnel
   });
 
   it("degrades without get_workspace_pnl: the P&L says it isn't available, the rest works", () => {
     const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} attention={{ kind: "ready", data: [] }} activity={{ kind: "ready", data: [] }} pnl={{ kind: "unsupported" }} />);
-    expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(3); // stats, chart, statement
+    expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(4); // chart, cost breakdown, money by app, statement
     expect(html).toContain(PNL_NOT_AVAILABLE.replace("&", "&amp;").replaceAll("'", "&#x27;"));
     expect(html).toContain("Round-up savings");
     expect(html).toContain("Nothing needs you right now");

@@ -190,9 +190,9 @@ describe("GET /api/liquidity", () => {
   it("isn't for anyone else", async () => {
     as("consumer");
     expect((await liquidity.GET()).status).toBe(403);
-    expect(await (await access.GET()).json()).toEqual({ access: { builder: false, liquidityProvider: false }, owner: expect.any(String) });
+    expect(await (await access.GET()).json()).toEqual({ access: { builder: false, liquidityProvider: false }, developer: false, owner: expect.any(String) });
     as("liquidity_provider");
-    expect(await (await access.GET()).json()).toEqual({ access: { builder: false, liquidityProvider: true }, owner: expect.any(String) });
+    expect(await (await access.GET()).json()).toEqual({ access: { builder: false, liquidityProvider: true }, developer: false, owner: expect.any(String) });
   });
 });
 

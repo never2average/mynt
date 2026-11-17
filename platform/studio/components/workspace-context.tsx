@@ -18,6 +18,9 @@ type WorkspaceState = {
   reload(): Promise<void>;
   invitations: Invitation[];
   answerInvitation: InvitationAnswer;
+  // Mynt has workspaces and the user has none yet (they skipped choosing or creating one): the
+  // studio asks them to create one before anything else.
+  needsWorkspace: boolean;
 };
 
 const Ctx = createContext<WorkspaceState>({
@@ -29,6 +32,7 @@ const Ctx = createContext<WorkspaceState>({
   reload: async () => undefined,
   invitations: [],
   answerInvitation: async () => null,
+  needsWorkspace: false,
 });
 
 function rememberedId(): string | null {
@@ -41,7 +45,9 @@ function remember(id: string) {
   document.cookie = `${WORKSPACE_COOKIE}=${encodeURIComponent(id)}; Path=/; Max-Age=31536000; SameSite=Lax; Secure`;
 }
 
-export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
+// `enabled`: only for developers. Everyone else has no workspaces in the studio, and nothing is
+// fetched for them (the routes are developer-only).
+export function WorkspaceProvider({ children, enabled = true }: { children: React.ReactNode; enabled?: boolean }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([PERSONAL]);
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -63,10 +69,15 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     setSelectedId(rememberedId());
     void reload();
     void loadInvitations();
-  }, [reload, loadInvitations]);
+  }, [enabled, reload, loadInvitations]);
 
   const select = useCallback((id: string) => {
     remember(id);
@@ -93,8 +104,18 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ workspaces, selected: selectWorkspace(workspaces, selectedId), supported, loading, select, reload, invitations, answerInvitation }),
-    [workspaces, selectedId, supported, loading, select, reload, invitations, answerInvitation],
+    () => ({
+      workspaces,
+      selected: selectWorkspace(workspaces, selectedId),
+      supported,
+      loading,
+      select,
+      reload,
+      invitations,
+      answerInvitation,
+      needsWorkspace: enabled && !loading && supported && workspaces.every((w) => w.implicit),
+    }),
+    [workspaces, selectedId, supported, loading, select, reload, invitations, answerInvitation, enabled],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

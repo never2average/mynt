@@ -15,6 +15,7 @@ const { DashboardView } = await import("@/components/dashboard-view");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { fromDashboardTool } = await import("@/lib/dashboard");
+const { resetStudioAccess } = await import("@/lib/use-liquidity-access");
 const { fromLinkedAccounts, networkOf, NOT_LINKED, shortAddress, UNKNOWN_NETWORK } = await import("@/lib/linked-accounts");
 
 const ADDRESS = "0x52908400098527886E0F7030069857D2E4169EE7";
@@ -78,7 +79,9 @@ describe("linked accounts", () => {
 });
 
 describe("the header's wallet control", () => {
-  it("sits right beside New app in the page header", () => {
+  it("sits right beside New app in the page header", async () => {
+    resetStudioAccess();
+    vi.stubGlobal("fetch", async (url: string) => new Response(JSON.stringify(url.startsWith("/api/liquidity/access") ? { developer: true, access: { builder: true, liquidityProvider: false }, owner: "o" } : {}), { status: 200 }));
     const { container } = render(
       <TooltipProvider>
         <SidebarProvider>
@@ -86,6 +89,7 @@ describe("the header's wallet control", () => {
         </SidebarProvider>
       </TooltipProvider>,
     );
+    await act(async () => undefined);
     // Not known yet (no linked accounts read): nothing rather than a guess; New app still there.
     expect(container.querySelector("[data-new-app]")).not.toBeNull();
     const html = renderToStaticMarkup(
@@ -154,8 +158,9 @@ describe("the header's wallet control", () => {
   });
 
   it("in an app's top bar: compact, the short address without the network badge", async () => {
+    resetStudioAccess();
     vi.stubGlobal("fetch", async (url: string) =>
-      new Response(JSON.stringify(url.startsWith("/api/linked-accounts") ? { linked: withWallet } : url.startsWith("/api/liquidity/access") ? { access: both } : {}), { status: 200 }),
+      new Response(JSON.stringify(url.startsWith("/api/linked-accounts") ? { linked: withWallet } : url.startsWith("/api/liquidity/access") ? { access: both, developer: true } : {}), { status: 200 }),
     );
     const { container } = render(
       <TooltipProvider>

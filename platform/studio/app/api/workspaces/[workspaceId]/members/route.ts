@@ -5,7 +5,7 @@ import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
 import { loadWorkspaces, supportOf } from "@/lib/workspace-server";
-import { canManageMembers, fromListMembers, WORKSPACE_ID, type Workspace } from "@/lib/workspaces";
+import { canManageMembers, fromListMembers, isRealWorkspaceId, type Workspace } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
@@ -24,13 +24,13 @@ const Remove = z.union([z.object({ user_id: id }).strict(), z.object({ invite_id
 async function theirWorkspace(mynt: Client, workspaceId: string): Promise<{ workspace?: Workspace; supported: boolean }> {
   const support = await supportOf(mynt);
   if (!support.workspaces) return { supported: false };
-  return { supported: true, workspace: (await loadWorkspaces(mynt, support)).find((w) => w.id === workspaceId) };
+  return { supported: true, workspace: (await loadWorkspaces(mynt, support)).find((w) => w.id === workspaceId && !w.implicit) };
 }
 
 // GET: the members and pending invites, and whether the user may manage them.
 export async function GET(_req: Request, { params }: Params) {
   const { workspaceId } = await params;
-  if (!WORKSPACE_ID.test(workspaceId)) return json({ error: "bad_request" }, 400);
+  if (!isRealWorkspaceId(workspaceId)) return json({ error: "not_found", message: "That workspace isn't one of yours." }, 404);
   return asDeveloper("loading workspace members", async (mynt) => {
     const { workspace, supported } = await theirWorkspace(mynt, workspaceId);
     if (!supported) return json({ supported: false, message: UNSUPPORTED, members: [], invites: [], canManage: false });
@@ -50,7 +50,7 @@ async function manage(
 ) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
   const { workspaceId } = await params;
-  if (!WORKSPACE_ID.test(workspaceId)) return json({ error: "bad_request" }, 400);
+  if (!isRealWorkspaceId(workspaceId)) return json({ error: "not_found", message: "That workspace isn't one of yours." }, 404);
   const body = await req.json().catch(() => null);
   return asDeveloper(what, async (mynt) => {
     const { workspace, supported } = await theirWorkspace(mynt, workspaceId);
