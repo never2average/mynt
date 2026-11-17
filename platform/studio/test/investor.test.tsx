@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InvestorView, BALANCES_UNAVAILABLE } from "@/components/investor-view";
@@ -43,19 +43,35 @@ const pools = [
 const liquidity: LiquidityData = { supported: true, access: { builder: true, liquidityProvider: true }, provider: { pools, positions, withdrawals, canCommit: true, canWithdraw: true } };
 
 describe("the Builder / Investor switch", () => {
-  it("offers only the views the user's roles allow; one view means no switch", () => {
+  it("offers only the views the user's roles allow; one view means no switch", async () => {
     expect(modesFor({ builder: true, liquidityProvider: true })).toEqual(["builder", "investor"]);
     expect(modesFor({ builder: true, liquidityProvider: false })).toEqual(["builder"]);
     expect(modesFor({ builder: false, liquidityProvider: true })).toEqual(["investor"]);
     expect(renderToStaticMarkup(<ModeSwitch modes={["builder"]} mode="builder" onMode={() => undefined} />)).toBe("");
     const picked: string[] = [];
     render(<ModeSwitch modes={["builder", "investor"]} mode="builder" onMode={(m) => picked.push(m)} />);
-    // The studio's line tabs, not a segmented control.
-    expect(document.querySelector("[data-mode-switch]")!.getAttribute("data-variant")).toBe("line");
-    expect(screen.getByRole("tab", { name: "Builder" }).getAttribute("aria-selected")).toBe("true");
-    fireEvent.click(screen.getByRole("tab", { name: "Investor" }));
+    await act(async () => undefined);
+    // A breadcrumb: "/" then a plain dropdown showing the current view; no tabs.
+    const sw = document.querySelector("[data-mode-switch]")!;
+    expect(sw.querySelector("[data-breadcrumb-separator]")?.textContent?.trim()).toBe("/");
+    expect(sw.querySelector('[role="tab"], [role="tablist"]')).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Dashboard view: Builder" });
+    expect(trigger.textContent).toContain("Builder");
+    expect(trigger.getAttribute("data-variant")).toBe("ghost");
+    expect(sw.outerHTML).not.toMatch(/primary|mint/);
+    // The menu (opened from the keyboard) lists both, with a check on the current one.
+    await act(async () => {
+      fireEvent.keyDown(trigger, { key: "Enter" });
+    });
+    const menu = document.querySelector("[data-mode-menu]")!;
+    expect([...menu.querySelectorAll("[data-mode]")].map((i) => i.textContent)).toEqual(["Builder", "Investor"]);
+    expect(menu.querySelector('[data-mode="builder"]')!.getAttribute("aria-current")).toBe("true");
+    expect(menu.querySelector('[data-mode="builder"] [aria-label="Current view"]')).not.toBeNull();
+    expect(menu.querySelector('[data-mode="investor"] [aria-label="Current view"]')).toBeNull();
+    await act(async () => {
+      fireEvent.click(menu.querySelector('[data-mode="investor"]')!);
+    });
     expect(picked).toEqual(["investor"]);
-    expect(document.querySelector("[data-mode-switch]")!.outerHTML).not.toMatch(/primary|mint|aria-pressed/);
   });
 
   it("remembers the choice per user in this browser, only while the roles still allow it, and survives blocked storage", () => {

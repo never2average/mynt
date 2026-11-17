@@ -165,7 +165,7 @@ describe("the investor's charts", () => {
 });
 
 describe("the header", () => {
-  it("puts the dashboard's Builder / Investor line tabs beside the title", async () => {
+  it("puts the dashboard's view beside the title as a breadcrumb: Dashboard / Builder ▾", async () => {
     const { container } = render(
       <TooltipProvider>
         <SidebarProvider>
@@ -180,8 +180,9 @@ describe("the header", () => {
     const header = container.querySelector("[data-site-header]")!;
     const slot = header.querySelector("[data-header-slot]")!;
     expect(slot.previousElementSibling?.tagName).toBe("H1");
-    expect(slot.querySelector('[role="tablist"][data-variant="line"]')).not.toBeNull();
-    expect(slot.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    expect(slot.querySelector('[role="tablist"], [role="tab"]')).toBeNull();
+    expect(slot.textContent).toMatch(/^\s*\/\s*Builder/);
+    expect(slot.querySelector("[data-mode-trigger]")).not.toBeNull();
   });
 
   it("the theme button is square, centred, with the same padding on the header's right as its left", () => {
