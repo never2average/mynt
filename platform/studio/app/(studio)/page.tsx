@@ -198,7 +198,7 @@ export default function DashboardPage() {
   return (
     <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
       <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
-      {/* Builder / Investor: line tabs in the page header, beside the title. */}
+      {/* Builder / Investor: "Dashboard / Builder ▾" in the page header (a breadcrumb with a dropdown). */}
       {modes.length > 1 && shown && (
         <HeaderTabs>
           <ModeSwitch modes={modes} mode={shown} onMode={pick} />

@@ -37,8 +37,8 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
         <SidebarTrigger />
         <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" data-toggle-separator />
         <h1 className="truncate text-base font-medium">{title}</h1>
-        {/* A page's own tabs beside its title (the dashboard's Builder / Investor): HeaderTabs. */}
-        <div id={HEADER_TABS_ID} className="ml-3 flex min-w-0 self-stretch" data-header-slot />
+        {/* What a page puts beside its title (the dashboard's "/ Builder ▾"): HeaderTabs. */}
+        <div id={HEADER_TABS_ID} className="ml-1 flex min-w-0 items-center" data-header-slot />
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {children}
           <SearchTrigger />
