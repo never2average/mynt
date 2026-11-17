@@ -777,28 +777,6 @@ function MyPositions({ positions: all, withdrawals, pools, canWithdraw, actions,
 
 // ---- the page ----
 
-// The panel header's summary on Earn: the user's roles and their counts, in a line.
-export function EarnStats({ data }: { data: LiquidityData }) {
-  const b = data.builder
-  const lp = data.provider
-  const roles = [data.access.builder && "Builder", data.access.liquidityProvider && "Liquidity provider"].filter(Boolean) as string[]
-  const sum = (k: "committedCents" | "settledCents" | "queuedCents") => (lp ? lp.positions.reduce((n, p) => n + p[k], 0) : 0)
-  const stats = [
-    ...(lp ? [`${lp.pools.length} open`, `${usd(sum("settledCents"))} settled`, `${usd(sum("queuedCents"))} queued`] : []),
-    ...(b ? [`${b.pools.length} of yours`, `${b.pools.filter((p) => stageOf(p) === "awaiting_approval").length} awaiting approval`] : []),
-  ]
-  return (
-    <span className="flex min-w-0 items-center gap-2" data-earn-stats>
-      {roles.map((r) => (
-        <Badge key={r} variant="secondary" data-role={r}>
-          {r}
-        </Badge>
-      ))}
-      <span className="truncate tabular-nums">{stats.join(" · ")}</span>
-    </span>
-  )
-}
-
 // One of Earn's table tabs in the right-hand panel: Opportunities, My positions or My pools.
 export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "opportunities" | "my-positions" | "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
   const [form, setForm] = useState<OpenForm>(initialForm)
