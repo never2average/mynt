@@ -25,6 +25,7 @@ export const SOURCE_BUILTINS = [
   "no_reload_after_cpi",
   "swap_without_bounds",
   "unbounded_account_vec",
+  "anchor_lazy_account",
 ] as const;
 export const IDL_BUILTINS = ["token_program_account", "pinned_signer"] as const;
 

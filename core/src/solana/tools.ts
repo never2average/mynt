@@ -87,14 +87,15 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
     {
       title: "Deploy a Solana program",
       description:
-        "Developer: deploy a reserved program from a build Mynt verified. Mynt deploys the program it built itself in its clean verify sandbox (Anchor's verifiable build, tested on a local validator), never the coding agent's file, and records its hash. Devnet signs with Mynt's devnet key; mainnet is refused until an admin configures and enables the mainnet signer, and needs an approved mainnet review of exactly this build's program (request_mainnet_review). Runs in the background: follow it with get_program.",
+        "Developer: deploy a reserved program from a build Mynt verified. Mynt deploys the program it built itself in its clean verify sandbox (Anchor's verifiable build, tested on a local validator), never the coding agent's file, and records its hash. Devnet signs with Mynt's devnet key; mainnet is refused until an admin configures and enables the mainnet signer, and needs an approved mainnet review of exactly this build's program (request_mainnet_review). On devnet, `warnings` lists what mainnet's program gate would refuse in the build's source (for example anchor-lang's lazy-account feature, advisory GHSA-6px8-6mw3-4hx4). Runs in the background: follow it with get_program.",
       inputSchema: { program_id: ADDRESS, build_id: z.string().describe("A succeeded build whose verification built this program") },
     },
     async ({ program_id, build_id }) =>
       withProgram(program_id, async (p) => {
         const started = await solana.deploy(user, p, build_id, "deploy");
         await store.audit(user.id, "deploy_program", p.program_id, { cluster: p.cluster, build_id });
-        return { ...solana.view(started), track_with: "get_program" };
+        const warnings = await solana.devnetWarnings(user, p, build_id);
+        return { ...solana.view(started), ...(warnings.length ? { warnings } : {}), track_with: "get_program" };
       }),
   );
 
@@ -110,7 +111,8 @@ export function registerSolanaTools(server: McpServer, store: Store, user: User,
       withProgram(program_id, async (p) => {
         const started = await solana.deploy(user, p, build_id, "upgrade");
         await store.audit(user.id, "upgrade_program", p.program_id, { cluster: p.cluster, build_id });
-        return { ...solana.view(started), track_with: "get_program" };
+        const warnings = await solana.devnetWarnings(user, p, build_id);
+        return { ...solana.view(started), ...(warnings.length ? { warnings } : {}), track_with: "get_program" };
       }),
   );
 

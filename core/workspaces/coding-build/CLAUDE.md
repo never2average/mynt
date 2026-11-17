@@ -48,6 +48,9 @@ reserved for this app (`name`, `cluster`, `program_id`); `solana.toolchain` the 
 - **What a program may do:** record and check state, and emit events (`emit!`), which Mynt forwards to the
   firm's webhooks. No program moves customers' money, holds tokens for them, or shows them anything: customers
   only ever see dollars, never crypto, in any screen or message.
+- **Never** turn on anchor-lang's `lazy-account` feature or use `LazyAccount`: its `unload()` skips the owner and
+  discriminator checks after a CPI (advisory GHSA-6px8-6mw3-4hx4, no fixed release). Use `Account<'info, T>` and
+  `reload()` after a CPI. Mynt warns on a devnet deploy and refuses such a program on mainnet.
 - **Never** deploy anything yourself, run `solana program deploy` or `anchor deploy`, or use a network other
   than the local validator. The developer deploys from Mynt (`deploy_program`) after the build ships.
 

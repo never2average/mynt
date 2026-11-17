@@ -5,7 +5,8 @@
 // CLI and its verifiable-build image, Rust and rustup, the @coral-xyz/anchor client), computes each new download's
 // sha256 and the image's digest itself, checks the RustSec and GitHub advisory databases for the pinned and the
 // proposed versions, and rewrites every place a pin appears: the pins file, the starter program in
-// workspaces/coding-build/templates/solana-program, the version-matched docs in workspaces/coding-build/docs/solana
+// workspaces/coding-build/templates/solana-program, the treasury template's toolchain strings (never its build hashes),
+// the version-matched docs in workspaces/coding-build/docs/solana
 // (re-vendored at the new tags), and the vendored solana-dev skill (brought to its latest upstream commit). The
 // workflow then opens a pull request, whose CI builds and tests the template program with the new toolchain. It
 // never merges anything.
@@ -33,6 +34,8 @@ export const ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const PATHS = {
   pins: "schemas/solana-toolchain.json",
   template: "workspaces/coding-build/templates/solana-program",
+  treasury: "workspaces/coding-build/templates/solana-treasury",
+  treasuryManifest: "schemas/solana-treasury-template.json",
   docs: "workspaces/coding-build/docs/solana",
   skill: "workspaces/coding-build/.claude/skills/solana-dev",
 };
@@ -399,7 +402,21 @@ export function applyPins(root, current, next) {
   writeFileSync(cargoPath, readFileSync(cargoPath, "utf8").replace(/^anchor-lang = "=[^"]+"/m, `anchor-lang = "=${next.anchor.version}"`));
   const rtPath = join(t, "rust-toolchain.toml");
   writeFileSync(rtPath, readFileSync(rtPath, "utf8").replace(/^channel = "[^"]+"/m, `channel = "${next.rust.version}"`));
+  applyTreasuryToolchain(root, next);
   return { clientChanged };
+}
+
+// The treasury template's toolchain strings follow the pins: its rust-toolchain.toml channel and the toolchain its
+// manifest names. Its build hashes (program_sha256, cargo_lock_sha256) are never touched here: the verifiable build
+// runs in the pinned Anchor image, so when the image, Agave or Anchor moves, CI's manifest step fails on the hash and
+// a person re-reviews the treasury and records the new one. A Rust-only bump needs nothing more.
+export function applyTreasuryToolchain(root, next) {
+  const rtPath = join(root, PATHS.treasury, "rust-toolchain.toml");
+  writeFileSync(rtPath, readFileSync(rtPath, "utf8").replace(/^channel = "[^"]+"/m, `channel = "${next.rust.version}"`));
+  const manifestPath = join(root, PATHS.treasuryManifest);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.toolchain = { ...manifest.toolchain, agave: next.agave.version, anchor: next.anchor.version, rust: next.rust.version, anchorImage: next.anchorImage };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 // The template's package-lock.json, resolved again for a new client version (no scripts run).
@@ -576,9 +593,19 @@ Start with \`anchor/basics/program-structure.mdx\`, \`anchor/references/account-
 export function renderPr({ changes, notes, advisoriesBefore = [], advisoriesAfter = [], docs = [], skill = null, diffstat = "" }) {
   const breaking = changes.filter((c) => c.breaking);
   const fixed = advisoriesBefore.filter((a) => !advisoriesAfter.some((b) => b.id === a.id && b.tool === a.tool));
+  const unfixed = advisoriesBefore.filter((a) => !fixed.includes(a));
   const urgent = advisoriesBefore.length > 0;
   const summary = changes.filter((c) => c.tool !== "anchorImage").map((c) => `${c.tool === "anchorTs" ? "@coral-xyz/anchor" : c.tool} ${c.to}`);
-  const title = `${urgent ? "URGENT (security advisory): " : ""}${breaking.length ? "BREAKING: " : ""}Solana toolchain: ${summary.join(", ") || "docs and skill refresh"}`;
+  // The title says plainly whether this bump fixes each advisory on the pinned toolchain; only a fix is urgent.
+  const ids = (list) => {
+    const u = [...new Set(list.map((a) => a.id))];
+    return u.length > 3 ? `${u.slice(0, 3).join(", ")} and ${u.length - 3} more` : u.join(", ");
+  };
+  const advisoryTitle = [
+    fixed.length ? `URGENT (security advisory): fixes ${ids(fixed)}` : "",
+    unfixed.length ? `advisory ${ids(unfixed)} still unfixed upstream; this bump doesn't address it` : "",
+  ].filter(Boolean);
+  const title = `${advisoryTitle.length ? `${advisoryTitle.join("; ")}: ` : ""}${breaking.length ? "BREAKING: " : ""}Solana toolchain: ${summary.join(", ") || "docs and skill refresh"}`;
   const lines = [
     "Weekly Solana toolchain update, opened by `scripts/solana-toolchain-watch.mjs`. It is never merged automatically: CI's `solana-program` job builds and tests the template program with these pins.",
     "",
@@ -587,6 +614,12 @@ export function renderPr({ changes, notes, advisoriesBefore = [], advisoriesAfte
   ];
   if (urgent) {
     lines.push("## Security advisories affecting the pinned toolchain", "");
+    if (fixed.length) lines.push(`**This update fixes ${ids(fixed)}.**`, "");
+    if (unfixed.length)
+      lines.push(
+        `**This update does not fix ${ids(unfixed)}:** the proposed versions are still affected (no patched release on the line the watcher follows yet), so merging it doesn't address ${unfixed.length === 1 ? "that advisory" : "those advisories"}.`,
+        "",
+      );
     for (const a of advisoriesBefore) lines.push(`- **${a.id}** (${a.package} ${a.version}${a.severity ? `, ${a.severity}` : ""}): ${a.summary ?? ""} ${a.url}${fixed.includes(a) ? " (fixed by this update)" : " (**still affects the proposed versions**)"}`);
     lines.push("");
   }

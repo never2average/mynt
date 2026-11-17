@@ -90,6 +90,50 @@ export function packagesOf(files: Record<string, string>): Package[] {
   return out.sort((a, b) => a.manifest.localeCompare(b.manifest));
 }
 
+// Where a workspace's manifests turn on one of anchor-lang's cargo features: in a dependency's `features` list
+// (under [dependencies], [workspace.dependencies] or a [target.*.dependencies] table, renamed with `package =` or
+// not), or in a [features] entry ("anchor-lang/<feature>", "anchor-lang?/<feature>", or "<rename>/<feature>"). A
+// [features] entry counts even if nothing enables it: the gate reads what the program can be built with. A manifest
+// that isn't valid TOML is matched as text.
+export function anchorLangFeature(files: Record<string, string>, feature: string): { file: string; line: number; where: string }[] {
+  const out: { file: string; line: number; where: string }[] = [];
+  const lineOfText = (body: string, needle: string) => {
+    const i = body.indexOf(needle);
+    return i < 0 ? 1 : lineOf(body, i);
+  };
+  const quoted = `"${feature}"`;
+  for (const [path, body] of Object.entries(files)) {
+    if (!/(^|\/)Cargo\.toml$/.test(path)) continue;
+    let m: Toml;
+    try {
+      m = parseToml(body) as Toml;
+    } catch {
+      if (body.includes(feature)) out.push({ file: path, line: lineOfText(body, feature), where: `mentions ${feature} (the manifest isn't valid TOML)` });
+      continue;
+    }
+    const tables: [string, Toml | null][] = [
+      ["dependencies", obj(m.dependencies)],
+      ["workspace.dependencies", obj(obj(m.workspace)?.dependencies)],
+      ...Object.entries(obj(m.target) ?? {}).map(([t, v]) => [`target.${t}.dependencies`, obj(obj(v)?.dependencies)] as [string, Toml | null]),
+    ];
+    const names = new Set(["anchor-lang"]);
+    for (const [table, deps] of tables)
+      for (const [name, spec] of Object.entries(deps ?? {})) {
+        const s = obj(spec);
+        if ((text(s?.package) ?? name) !== "anchor-lang") continue;
+        names.add(name);
+        const features = Array.isArray(s?.features) ? (s!.features as unknown[]) : [];
+        if (features.includes(feature)) out.push({ file: path, line: lineOfText(body, quoted), where: `[${table}] ${name} turns on anchor-lang's ${feature} feature` });
+      }
+    for (const [own, list] of Object.entries(obj(m.features) ?? {}))
+      for (const f of Array.isArray(list) ? (list as unknown[]) : []) {
+        const e = /^([\w-]+)\??\/(.+)$/.exec(String(f));
+        if (e && names.has(e[1]) && e[2] === feature) out.push({ file: path, line: lineOfText(body, String(f)), where: `[features] ${own} turns on anchor-lang's ${feature} feature (${f})` });
+      }
+  }
+  return out;
+}
+
 // Every file reachable from the crate roots. With no package in the workspace (a bare fixture), every src/lib.rs
 // is a root; with none of those either, every .rs file.
 export function resolveCrateTree(files: Record<string, string>): CrateTree {
