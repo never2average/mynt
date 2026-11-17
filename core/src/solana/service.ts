@@ -21,6 +21,7 @@ import {
 } from "./signer.js";
 import { turnkeyFromEnv } from "./custody/turnkey.js";
 import type { DepInfoCapture } from "./crate-tree.js";
+import { devnetWarnings as programDevnetWarnings } from "./program-rules.js";
 import {
   BUFFER_HEADER,
   compileMessage,
@@ -773,6 +774,17 @@ export class SolanaService {
       deps: (deps?.data as DepsCapture | undefined) ?? null,
       depinfo: (depinfo?.data as DepInfoCapture | undefined) ?? null,
     };
+  }
+
+  // What a devnet deploy or upgrade warns about in the build's captured source (rules mainnet's gate would refuse,
+  // such as GHSA-6px8-6mw3-4hx4's LazyAccount): said to the developer, never a refusal. Never throws.
+  async devnetWarnings(user: User, p: ProgramRecord, buildId: string) {
+    if (p.cluster !== "devnet") return [];
+    try {
+      return programDevnetWarnings((await this.reviewMaterial(user, p, buildId)).sources);
+    } catch {
+      return [];
+    }
   }
 
   // Mynt's mainnet signer as it stands, or null while mainnet isn't ready. Never throws.

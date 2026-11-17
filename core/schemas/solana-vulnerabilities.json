@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated": "2026-11-09",
+  "version": 2,
+  "updated": "2026-11-17",
   "description": "Mynt's Solana vulnerability database: one entry per vulnerability class. Entries with gate 'block' refuse a program on mainnet when a deterministic detection finds them; 'flag' entries are leads the audit agent must confirm or dismiss. Every detection that Mynt runs itself (source_pattern, idl_shape, bytecode_program_ref, dependency_advisory) is tested against the entry's bad and good fixtures. The audit and red-team agents get the whole database as their checklist. Changes land only by a reviewed pull request; propose_vulnerability_rule stores proposals for that review.",
   "entries": [
     {
@@ -1280,6 +1280,34 @@
       "fixtures": {
         "bad": "test/fixtures/solana-vulns/DEP-RUSTSEC/bad",
         "good": "test/fixtures/solana-vulns/DEP-RUSTSEC/good"
+      }
+    },
+    {
+      "id": "DEP-GHSA-6PX8-6MW3-4HX4",
+      "title": "anchor-lang LazyAccount::unload() skips owner and discriminator checks after a CPI (GHSA-6px8-6mw3-4hx4)",
+      "severity": "high",
+      "category": "dependencies",
+      "gate": "block",
+      "description": "anchor-lang 0.31.0 and later, with no patched release yet: with the lazy-account feature on, LazyAccount::unload() re-reads an account after a CPI without checking its owner or discriminator again, so a CPI that reassigns or rewrites the account hands the program data it didn't write. Mynt refuses a mainnet program whose manifests turn the feature on, or whose code calls unload() after a CPI, and warns about it on a devnet deploy. Use Account<'info, T> and reload() after a CPI instead.",
+      "detection": [
+        {
+          "type": "source_pattern",
+          "builtin": "anchor_lazy_account"
+        }
+      ],
+      "references": [
+        {
+          "title": "GitHub advisory GHSA-6px8-6mw3-4hx4: LazyAccount::unload() skips post-CPI revalidation",
+          "url": "https://github.com/advisories/GHSA-6px8-6mw3-4hx4"
+        },
+        {
+          "title": "anchor-lang API docs: LazyAccount",
+          "url": "https://docs.rs/anchor-lang/latest/anchor_lang/?search=LazyAccount"
+        }
+      ],
+      "fixtures": {
+        "bad": "test/fixtures/solana-vulns/DEP-GHSA-6PX8-6MW3-4HX4/bad",
+        "good": "test/fixtures/solana-vulns/DEP-GHSA-6PX8-6MW3-4HX4/good"
       }
     }
   ]

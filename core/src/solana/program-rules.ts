@@ -1,7 +1,7 @@
 import { base58Decode, base58Encode, isAddress } from "./codec.js";
 import { SYSTEM_PROGRAM, UPGRADEABLE_LOADER } from "./tx.js";
 import { IDL_BUILTINS, loadVulnDb, SOURCE_BUILTINS, type VulnDb, type VulnEntry } from "./vuln-db.js";
-import { resolveCrateTree, type CrateTree } from "./crate-tree.js";
+import { anchorLangFeature, resolveCrateTree, type CrateTree } from "./crate-tree.js";
 
 // The mainnet program gate's hard rules: deterministic, run by Mynt itself, no model, driven by the vulnerability
 // database (schemas/solana-vulnerabilities.json, vuln-db.ts). An entry whose gate is "block" refuses the program;
@@ -534,7 +534,63 @@ const SOURCE_DETECTORS: Record<(typeof SOURCE_BUILTINS)[number], (ix: SourceInde
         if (/^(Vec\s*<|String\b)/.test(f.type) && !/\bmax_len\b/.test(f.attrs)) hits.push({ file: st.file, line: st.line, detail: `${name}.${f.name} is a ${f.type} with no declared maximum (#[max_len])` });
     return hits;
   },
+
+  anchor_lazy_account(ix) {
+    return lazyAccountHits(ix.all, ix.code);
+  },
 };
+
+// GHSA-6px8-6mw3-4hx4: anchor-lang's LazyAccount::unload() (the lazy-account feature, anchor-lang >= 0.31.0, no
+// patched release) re-reads an account after a CPI without checking its owner or discriminator again, so a CPI that
+// reassigns the account lets the program act on data it didn't write. Two signals: a manifest turning the feature on
+// (nothing compiles LazyAccount without it), and, in the code, unload() called after a CPI in the same function.
+export const LAZY_ACCOUNT_ADVISORY = "GHSA-6px8-6mw3-4hx4";
+export const LAZY_ACCOUNT_RULE = "DEP-GHSA-6PX8-6MW3-4HX4";
+const ADVISORY_URL = `https://github.com/advisories/${LAZY_ACCOUNT_ADVISORY}`;
+const CPI = /\binvoke(?:_signed)?\s*\(|\bCpiContext\s*::\s*new|::\s*cpi\s*::/;
+
+function lazyAccountHits(all: Record<string, string>, code: Map<string, string>): Hit[] {
+  const hits: Hit[] = anchorLangFeature(all, "lazy-account").map((f) => ({
+    file: f.file,
+    line: f.line,
+    detail: `${f.where}: anchor-lang's LazyAccount::unload() skips the owner and discriminator checks after a CPI (${LAZY_ACCOUNT_ADVISORY}, no patched release; ${ADVISORY_URL}). Use Account<'info, T> and reload() instead`,
+  }));
+  for (const [file, text] of code) {
+    if (!/\bLazyAccount\b/.test(text)) continue;
+    const re = /\bfn\s+(\w+)\s*(?:<[^>(]*>)?\s*\(/g;
+    for (let m; (m = re.exec(text)); ) {
+      const p = balanced(text, m.index + m[0].length - 1);
+      const brace = p ? text.indexOf("{", p.end) : -1;
+      const b = brace >= 0 ? balanced(text, brace) : null;
+      if (!b) continue;
+      const cpi = CPI.exec(b.body);
+      if (!cpi) continue;
+      const unload = /\.\s*unload\s*\(/g;
+      unload.lastIndex = cpi.index;
+      const u = unload.exec(b.body);
+      if (u)
+        hits.push({
+          file,
+          line: lineOf(text, brace + 1 + u.index),
+          detail: `${m[1]} calls LazyAccount's unload() after a CPI: anchor-lang doesn't check the account's owner or discriminator again there, so a CPI that reassigned it hands the program data it didn't write (${LAZY_ACCOUNT_ADVISORY}, no patched release; ${ADVISORY_URL})`,
+        });
+    }
+  }
+  return hits;
+}
+
+// What a devnet deploy warns about (and mainnet's gate refuses): entries a developer should know of before they
+// build on them, run over the build's captured source. Never blocks a devnet deploy.
+export const DEVNET_WARNING_RULES = [LAZY_ACCOUNT_RULE];
+export function devnetWarnings(sources: Record<string, string> | null, db: VulnDb = loadVulnDb()): { rule: string; title: string; detail: string; file?: string; line?: number }[] {
+  if (!sources || !Object.keys(sources).length) return [];
+  return runDetections({ name: "p", program_id: "", program: null, idl: null, sources }, db, (e) => DEVNET_WARNING_RULES.includes(e.id)).map((f) => ({
+    rule: f.rule,
+    title: f.title,
+    detail: `${f.detail}. Mainnet's program gate refuses this program`,
+    ...(f.file ? { file: f.file, line: f.line } : {}),
+  }));
+}
 
 interface IdlAccount {
   name?: string;

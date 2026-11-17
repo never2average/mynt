@@ -219,8 +219,22 @@ test("an advisory on a pinned tool marks the pull request urgent, and says wheth
   const after = await advisories(net, p.next);
   assert.deepEqual(after, []);
   const pr = renderPr({ ...p, advisoriesBefore: before, advisoriesAfter: after });
-  assert.match(pr.title, /^URGENT \(security advisory\): Solana toolchain/);
+  assert.match(pr.title, /^URGENT \(security advisory\): fixes GHSA-test-std: Solana toolchain/);
+  assert.doesNotMatch(pr.title, /unfixed/);
+  assert.match(pr.body, /\*\*This update fixes GHSA-test-std\.\*\*/);
   assert.match(pr.body, /GHSA-test-std.*fixed by this update/);
+  // The same advisory still affecting the proposed versions: the title says the bump doesn't fix it, and isn't urgent.
+  const still = renderPr({ ...p, advisoriesBefore: before, advisoriesAfter: before.map((a) => ({ ...a, version: p.next.rust.version })) });
+  assert.match(still.title, /^advisory GHSA-test-std still unfixed upstream; this bump doesn't address it: Solana toolchain/);
+  assert.doesNotMatch(still.title, /URGENT|fixes/);
+  assert.match(still.body, /\*\*This update does not fix GHSA-test-std:\*\* the proposed versions are still affected/);
+  assert.match(still.body, /GHSA-test-std.*still affects the proposed versions/);
+  // One fixed and one not: both said, the fix first.
+  const other = { id: "GHSA-test-anchor", tool: "anchor", package: "anchor-lang", version: WATCH_PINS.anchor.version, summary: "anchor flaw", url: "https://github.com/advisories/GHSA-test-anchor" };
+  const mixed = renderPr({ ...p, advisoriesBefore: [...before, other], advisoriesAfter: [other] });
+  assert.match(mixed.title, /^URGENT \(security advisory\): fixes GHSA-test-std; advisory GHSA-test-anchor still unfixed upstream; this bump doesn't address it: Solana toolchain/);
+  // No update at all (docs only) with an advisory on the pins: never called a fix.
+  assert.match(renderPr({ changes: [], notes: [], advisoriesBefore: before, advisoriesAfter: before }).title, /^advisory GHSA-test-std still unfixed upstream; this bump doesn't address it: Solana toolchain: docs and skill refresh$/);
   // RustSec findings come through OSV for the crates the template builds with.
   const osvNet = fakeNet({ ...WORLD, osv: { results: [{ vulns: [{ id: "RUSTSEC-2099-0001" }] }] } });
   const viaOsv = await advisories(osvNet, WATCH_PINS);
@@ -232,6 +246,8 @@ test("applying a plan rewrites every pin: the pins file, the starter program's A
   mkdirSync(join(root, "schemas"));
   writeFileSync(join(root, PATHS.pins), WATCH_PINS_TEXT);
   cpSync(join(ROOT, PATHS.template), join(root, PATHS.template), { recursive: true });
+  cpSync(join(ROOT, PATHS.treasury, "rust-toolchain.toml"), join(root, PATHS.treasury, "rust-toolchain.toml"));
+  cpSync(join(ROOT, PATHS.treasuryManifest), join(root, PATHS.treasuryManifest));
   const next = { ...WATCH_PINS, anchor: { version: "0.32.9", sha256: H("b"), commit: "f".repeat(40) }, rust: { ...WATCH_PINS.rust, version: "1.99.1" }, anchorTs: { ...WATCH_PINS.anchorTs, version: "0.32.9" } };
   const { clientChanged } = applyPins(root, WATCH_PINS, next);
   assert.equal(clientChanged, true);
@@ -242,6 +258,34 @@ test("applying a plan rewrites every pin: the pins file, the starter program's A
   assert.equal(JSON.parse(readFileSync(join(root, PATHS.template, "package.json"), "utf8")).dependencies["@coral-xyz/anchor"], "0.32.9");
   assert.match(readFileSync(join(root, PATHS.template, "programs/mynt_program/Cargo.toml"), "utf8"), /^anchor-lang = "=0\.32\.9"$/m);
   assert.match(readFileSync(join(root, PATHS.template, "rust-toolchain.toml"), "utf8"), /^channel = "1\.99\.1"$/m);
+  // The treasury template's toolchain strings follow the pins; its build hashes never do (a person re-records them).
+  assert.match(readFileSync(join(root, PATHS.treasury, "rust-toolchain.toml"), "utf8"), /^channel = "1\.99\.1"$/m);
+  const before = JSON.parse(readFileSync(join(ROOT, PATHS.treasuryManifest), "utf8"));
+  const after = JSON.parse(readFileSync(join(root, PATHS.treasuryManifest), "utf8"));
+  assert.deepEqual(after.toolchain, { agave: next.agave.version, anchor: "0.32.9", rust: "1.99.1", anchorImage: next.anchorImage });
+  assert.equal(after.program_sha256, before.program_sha256);
+  assert.equal(after.cargo_lock_sha256, before.cargo_lock_sha256);
+  assert.deepEqual({ ...after, toolchain: before.toolchain }, before, "nothing but the toolchain changes");
+});
+
+test("a Rust-only bump leaves the treasury template matching the pins, so its pinned-toolchain test passes with no manual fix", () => {
+  const root = mkdtempSync(join(tmpdir(), "mynt-watch-rust-"));
+  mkdirSync(join(root, "schemas"));
+  writeFileSync(join(root, PATHS.pins), readFileSync(join(ROOT, PATHS.pins), "utf8"));
+  cpSync(join(ROOT, PATHS.template), join(root, PATHS.template), { recursive: true });
+  cpSync(join(ROOT, PATHS.treasury, "rust-toolchain.toml"), join(root, PATHS.treasury, "rust-toolchain.toml"));
+  cpSync(join(ROOT, PATHS.treasuryManifest), join(root, PATHS.treasuryManifest));
+  const next = { ...PINS, rust: { ...PINS.rust, version: "9.99.0" } };
+  applyPins(root, PINS, next);
+  // The same checks test/solana-treasury.test.js makes against the pins, here against the bumped ones.
+  const manifest = JSON.parse(readFileSync(join(root, PATHS.treasuryManifest), "utf8"));
+  const pins = JSON.parse(readFileSync(join(root, PATHS.pins), "utf8"));
+  assert.equal(manifest.toolchain.rust, pins.rust.version);
+  assert.equal(manifest.toolchain.anchor, pins.anchor.version);
+  assert.equal(manifest.toolchain.agave, pins.agave.version);
+  assert.equal(manifest.toolchain.anchorImage, pins.anchorImage);
+  assert.match(readFileSync(join(root, PATHS.treasury, "rust-toolchain.toml"), "utf8"), /^channel = "9\.99\.0"$/m);
+  assert.match(readFileSync(join(root, PATHS.treasury, "rust-toolchain.toml"), "utf8"), /^profile = "minimal"$/m, "the rest of the file stays");
 });
 
 test("docs are re-vendored at the pinned tag (only the listed subset, with the licence), and the skill follows its upstream", async () => {

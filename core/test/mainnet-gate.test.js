@@ -653,6 +653,61 @@ test("vulnerability database: every entry catches its bad fixture and passes its
   assert.deepEqual(runDetections({ name: "p", program_id: ID, program: elf(), idl: null, sources: TEMPLATE }, db), []);
 });
 
+test("GHSA-6px8-6mw3-4hx4: anchor-lang's lazy-account feature, or LazyAccount's unload() after a CPI, blocks on mainnet and warns on devnet", async () => {
+  const { devnetWarnings, LAZY_ACCOUNT_RULE } = await import("../dist/solana/program-rules.js");
+  const { anchorLangFeature } = CRATE_TREE;
+  const bad = loadFixture("test/fixtures/solana-vulns/DEP-GHSA-6PX8-6MW3-4HX4/bad").program_under_review.sources;
+  const good = loadFixture("test/fixtures/solana-vulns/DEP-GHSA-6PX8-6MW3-4HX4/good").program_under_review.sources;
+  const lazy = (r) => r.findings.filter((f) => f.rule === LAZY_ACCOUNT_RULE);
+
+  // Mainnet: the gate refuses, naming the advisory, the manifest line and the unload() after the CPI.
+  const refused = rules(bad);
+  assert.equal(refused.passed, false);
+  const found = lazy(refused);
+  assert.ok(found.length >= 2 && found.every((f) => f.blocks && /GHSA-6px8-6mw3-4hx4/.test(f.detail)), JSON.stringify(found));
+  assert.ok(found.some((f) => f.file === "programs/p/Cargo.toml" && f.line === 15 && /\[dependencies\] anchor-lang turns on anchor-lang's lazy-account feature/.test(f.detail)), JSON.stringify(found));
+  assert.ok(found.some((f) => f.file === "programs/p/src/lib.rs" && f.line === 11 && /bump calls LazyAccount's unload\(\) after a CPI/.test(f.detail)), JSON.stringify(found));
+  assert.deepEqual(lazy(rules(good)), []);
+
+  // Each signal on its own is enough.
+  const noFeature = { ...bad, "programs/p/Cargo.toml": good["programs/p/Cargo.toml"] };
+  assert.deepEqual(lazy(rules(noFeature)).map((f) => [f.file, f.blocks]), [["programs/p/src/lib.rs", true]]);
+  const featureOnly = { ...good, "programs/p/Cargo.toml": bad["programs/p/Cargo.toml"] };
+  assert.deepEqual(lazy(rules(featureOnly)).map((f) => [f.file, f.blocks]), [["programs/p/Cargo.toml", true]]);
+  // unload() before the CPI, or a LazyAccount with no CPI, isn't the advisory's shape (the feature still is).
+  const before = bad["programs/p/src/lib.rs"].replace(/(\s+other::cpi::record\([^\n]+\n)(\s+\/\/[^\n]+\n)(\s+let ledger = [^\n]+\n)/, "$3$1");
+  assert.notEqual(before, bad["programs/p/src/lib.rs"]);
+  assert.deepEqual(lazy(rules({ ...noFeature, "programs/p/src/lib.rs": before })), []);
+
+  // Every way a manifest can turn the feature on.
+  const manifest = (body) => anchorLangFeature({ "programs/p/Cargo.toml": body }, "lazy-account").map((x) => x.where);
+  assert.deepEqual(manifest('[dependencies]\nanchor = { package = "anchor-lang", version = "0.32.1", features = ["lazy-account"] }\n'), ["[dependencies] anchor turns on anchor-lang's lazy-account feature"]);
+  assert.deepEqual(manifest('[dependencies]\nanchor-lang = "0.32.1"\n[features]\nfast = ["anchor-lang/lazy-account"]\n'), ["[features] fast turns on anchor-lang's lazy-account feature (anchor-lang/lazy-account)"]);
+  assert.deepEqual(manifest('[dependencies.anchor-lang]\nversion = "0.32.1"\nfeatures = ["lazy-account"]\n'), ["[dependencies] anchor-lang turns on anchor-lang's lazy-account feature"]);
+  assert.deepEqual(manifest('[workspace.dependencies]\nanchor-lang = { version = "0.32.1", features = ["lazy-account"] }\n'), ["[workspace.dependencies] anchor-lang turns on anchor-lang's lazy-account feature"]);
+  assert.deepEqual(manifest('[target.\'cfg(target_os = "solana")\'.dependencies]\nanchor-lang = { version = "0.32.1", features = ["lazy-account"] }\n'), ["[target.cfg(target_os = \"solana\").dependencies] anchor-lang turns on anchor-lang's lazy-account feature"]);
+  assert.deepEqual(manifest('[dependencies]\nanchor-lang = { version = "0.32.1", features = ["init-if-needed"] }\nother = { version = "1", features = ["lazy-account"] }\n'), [], "another crate's feature of the same name isn't anchor-lang's");
+  assert.deepEqual(manifest('# anchor-lang = { features = ["lazy-account"] }\n[dependencies]\nanchor-lang = "0.32.1"\n'), [], "a comment isn't a feature");
+  assert.equal(manifest('[dependencies\nanchor-lang = { features = ["lazy-account"] }').length, 1, "an unreadable manifest is matched as text");
+
+  // Devnet: the same findings come back as warnings, saying mainnet would refuse; nothing blocks.
+  const warned = devnetWarnings(bad);
+  assert.ok(warned.length >= 2 && warned.every((w) => w.rule === LAZY_ACCOUNT_RULE && /GHSA-6px8-6mw3-4hx4/.test(w.detail) && /Mainnet's program gate refuses this program/.test(w.detail)), JSON.stringify(warned));
+  assert.deepEqual(devnetWarnings(good), []);
+  assert.deepEqual(devnetWarnings(TEMPLATE), []);
+  assert.deepEqual(devnetWarnings(null), []);
+  // The service asks only for devnet programs, from the build's captured source, and never throws.
+  const svc = { reviewMaterial: async () => ({ sources: bad }) };
+  assert.equal((await SolanaService.prototype.devnetWarnings.call(svc, null, { cluster: "devnet" }, "b")).length, warned.length);
+  assert.deepEqual(await SolanaService.prototype.devnetWarnings.call(svc, null, { cluster: "mainnet" }, "b"), []);
+  assert.deepEqual(await SolanaService.prototype.devnetWarnings.call({ reviewMaterial: async () => { throw new Error("gone"); } }, null, { cluster: "devnet" }, "b"), []);
+
+  // Mynt's own templates use neither.
+  const TREASURY = sourcesOf(new URL("../workspaces/coding-build/templates/solana-treasury", import.meta.url).pathname);
+  assert.deepEqual(lazy(rules(TEMPLATE)), []);
+  assert.deepEqual(lazy(rules(TREASURY)), []);
+});
+
 const readFileSafe = (p) => {
   try {
     return readFileSync(p, "utf8");
@@ -942,7 +997,7 @@ test("an approval is used once, claimed atomically, expires, and must still pass
   // A new database version's blocking rule refuses it at deploy time.
   const db = loadVulnDb();
   w.gate.vulnDb = { ...db, version: db.version + 1, entries: [...db.entries, { id: "TEST-NEW", title: "A new rule", severity: "high", category: "resource", gate: "block", description: "Stands for a new class of bug, for this test.", detection: [{ type: "source_pattern", pattern: "checked_add", message: "uses checked_add" }], references: [{ title: "t", url: "https://example.com" }], fixtures: { bad: "x", good: "y" } }] };
-  await assert.rejects(w.gate.check(p, b.sha256, "deploy"), /current rules \(v2\) refuse this program: TEST-NEW/);
+  await assert.rejects(w.gate.check(p, b.sha256, "deploy"), new RegExp(`current rules \\(v${db.version + 1}\\) refuse this program: TEST-NEW`));
   w.gate.vulnDb = db;
   // Used: once deployed, A -> B -> A needs a fresh review.
   const c2 = await w.gate.claim(p, b.sha256, "deploy");
