@@ -14,7 +14,7 @@
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "next": "16.4.3"
+    "next": "16.4.6"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
