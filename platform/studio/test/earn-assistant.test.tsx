@@ -112,7 +112,9 @@ describe("Earn in the chat workspace", () => {
     expect(sent).toEqual(["$50k, 90-day lock-in, US credit"]);
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
     expect(selected()).toBe("pools");
-    expect(document.querySelector("[data-earn-stats]")!.textContent).toContain("Liquidity provider");
+    // The panel header no longer shows role badges or counts (removed at the user's request).
+    expect(document.querySelector("[data-earn-stats]")).toBeNull();
+    expect(document.querySelector('[data-role="Liquidity provider"]')).toBeNull();
   });
 
   it("has the right-hand tabs for the user's roles", () => {

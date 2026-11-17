@@ -21,7 +21,7 @@ import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
-import { commitOutcome, EarnStats, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
+import { commitOutcome, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -91,7 +91,7 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
           {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. The Opportunities and My positions tabs still work."}
         </p>
       </div>
-      <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-4 md:pb-6">
+      <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-2 md:pb-3">
         <textarea disabled rows={2} aria-label="Message input" placeholder={status === "loading" ? "…" : "AI is not configured"} className="w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm opacity-60" />
         <p className="-mt-2 text-center text-xs text-muted-foreground">
           <EarnDisclosure />
@@ -386,7 +386,6 @@ export function EarnWorkspace({
         choose(id)
         setOpened(true)
       }}
-      panelHeader={<EarnStats data={data} />}
       isMobile={isMobile}
     />
   )
