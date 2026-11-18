@@ -85,7 +85,7 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
   if (status === "enabled") return <EarnThread chat={chat} />
   return (
     <div className="flex h-full flex-col bg-background px-4 pt-4" style={{ ["--thread-max-width" as string]: "44rem" }} data-earn-chat-off>
-      <div className="mr-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-start justify-center gap-2 px-2 text-left">
+      <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-center justify-center gap-2 text-center">
         <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">{WELCOME_TITLE}</h1>
         <p className="text-sm text-muted-foreground" role="status">
           {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. The Opportunities and My positions tabs still work."}

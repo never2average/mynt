@@ -11,6 +11,7 @@ import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
 import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
+import { ConnectAgentMenuItem } from "@/components/connect-agent"
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
@@ -93,6 +94,9 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
         {developer && <NavFolders groups={groups} activeAppId={appId} />}
       </SidebarContent>
       <SidebarFooter>
+        <SidebarMenu>
+          <ConnectAgentMenuItem />
+        </SidebarMenu>
         <NavUser user={account} />
       </SidebarFooter>
       <SidebarRail />

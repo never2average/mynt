@@ -184,7 +184,7 @@ const AssistantMessage: FC = () => {
       className="aui-assistant-message-root relative mr-auto w-full max-w-(--thread-max-width) animate-in py-3 duration-150 fade-in slide-in-from-bottom-1"
       data-role="assistant"
     >
-      <div className="aui-assistant-message-content px-2 leading-relaxed wrap-break-word text-foreground">
+      <div className="aui-assistant-message-content px-2 text-sm leading-relaxed wrap-break-word text-foreground">
         <MessagePrimitive.Unstable_PartsGrouped
           groupingFunction={groupConsecutiveToolCalls}
           components={{
@@ -275,7 +275,7 @@ const UserMessage: FC = () => {
       <UserMessageAttachments />
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
-        <div className="aui-user-message-content rounded-2xl bg-muted px-4 py-2.5 wrap-break-word text-foreground">
+        <div className="aui-user-message-content rounded-2xl bg-muted px-3.5 py-2 text-sm wrap-break-word text-foreground">
           <MessagePrimitive.Parts />
         </div>
       </div>
