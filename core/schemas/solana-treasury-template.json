@@ -11,5 +11,13 @@
   },
   "cargo_lock_sha256": "c51a670669ed92a2e055eaa370921df6e5a22bdde2b48369b3776892ba109347",
   "program_sha256": "29b7ae0496c6f8b4d334a64a477aa1d4a5005fb460b18c2205f0c950eaa90988",
-  "mainnet": false
+  "mainnet": false,
+  "deposit_approval": "MYNTDEP3",
+  "earlier_builds": [
+    {
+      "program_sha256": "29b7ae0496c6f8b4d334a64a477aa1d4a5005fb460b18c2205f0c950eaa90988",
+      "deposit_approval": "MYNTDEP2",
+      "note": "The build before MYNTDEP3: its approvals name no amount and can be reused until they expire. Pools registered on it keep MYNTDEP2 on devnet; mainnet never takes it."
+    }
+  ]
 }

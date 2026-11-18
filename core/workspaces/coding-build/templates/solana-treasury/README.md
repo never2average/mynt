@@ -50,10 +50,12 @@ The pool's address is `["pool", creator, pool_id]`; the vault's is `["vault", po
 v1 uses **Ed25519 attestations** (OnRe's pattern): the instruction just before `deposit` must be the Ed25519
 precompile verifying one signature, by one of the pool's attesters, over exactly
 
-    "MYNTDEP2" ‖ program id ‖ cluster ‖ pool ‖ depositor ‖ nonce (u64 LE) ‖ expiry (i64 LE)
+    "MYNTDEP3" ‖ program id ‖ cluster ‖ pool ‖ depositor ‖ nonce (u64 LE) ‖ amount (u64 LE) ‖ expiry (i64 LE)
 
-where `nonce` is the depositor's position nonce. `deposit(amount, approval_expiry, max_lock_in_seconds)` fails if the
-terms' lock-in has risen above what the depositor agreed to. Each deposit is its own record (`["deposit", pool,
+where `nonce` is the depositor's position nonce and `amount` the exact deposit. An approval admits one deposit of that
+amount: every deposit moves the position's nonce on, so it can't be used again, and a different amount doesn't match.
+(`MYNTDEP2`, in earlier builds, named neither the amount nor a single use.) `deposit(amount, approval_expiry,
+max_lock_in_seconds)` fails if the terms' lock-in has risen above what the depositor agreed to. Each deposit is its own record (`["deposit", pool,
 seq]`) with its lock-in and notice copied from the terms in force when it was made, and `review_until = settled_at +
 review_window_seconds`.
 

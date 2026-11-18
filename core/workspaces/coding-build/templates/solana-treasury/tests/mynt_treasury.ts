@@ -240,10 +240,10 @@ describe("mynt_treasury", () => {
     return { pool, vault, signature };
   };
 
-  const approval = (pool: PublicKeyT, who: PublicKeyT, nonce: number, expiry: number, signer: KeypairT = attester) =>
+  const approval = (pool: PublicKeyT, who: PublicKeyT, nonce: number, amount: number, expiry: number, signer: KeypairT = attester) =>
     Ed25519Program.createInstructionWithPrivateKey({
       privateKey: signer.secretKey,
-      message: Buffer.concat([Buffer.from("MYNTDEP2"), program.programId.toBuffer(), Buffer.from(cluster), pool.toBuffer(), who.toBuffer(), u64(nonce), i64(expiry)]),
+      message: Buffer.concat([Buffer.from("MYNTDEP3"), program.programId.toBuffer(), Buffer.from(cluster), pool.toBuffer(), who.toBuffer(), u64(nonce), u64(amount), i64(expiry)]),
     });
   const obligationsAttestation = (pool: PublicKeyT, obligations: number, asOf: number, signer: KeypairT) =>
     Ed25519Program.createInstructionWithPrivateKey({
@@ -256,6 +256,7 @@ describe("mynt_treasury", () => {
     signer?: KeypairT;
     approveFor?: PublicKeyT;
     nonce?: number;
+    approvedAmount?: number;
     noAttestation?: boolean;
     maxLockIn?: number;
     extension?: PublicKeyT | null;
@@ -284,7 +285,7 @@ describe("mynt_treasury", () => {
         systemProgram: SystemProgram.programId,
       })
       .remainingAccounts(o.remaining ?? [])
-      .preInstructions(o.noAttestation ? [] : [approval(p.pool, o.approveFor ?? who.publicKey, nonce, expiry, o.signer)])
+      .preInstructions(o.noAttestation ? [] : [approval(p.pool, o.approveFor ?? who.publicKey, nonce, o.approvedAmount ?? amount, expiry, o.signer)])
       .signers([who])
       .rpc(confirmed);
     return { record, position, seq, signature };
@@ -411,6 +412,13 @@ describe("mynt_treasury", () => {
     assert.equal(made.name, "depositmade");
     assert.equal(made.data.amount.toNumber(), 10);
 
+    // An approval names the amount and is good for one deposit: each deposit moves the position's nonce on.
+    assert.equal(position.nonce.toNumber(), 2);
+    await fails(deposit(p, d, 11, { approvedAmount: 10 }), /AttestationMismatch/); // more than approved
+    await fails(deposit(p, d, 9, { approvedAmount: 10 }), /AttestationMismatch/); // or less
+    await fails(deposit(p, d, 15, { nonce: 1 }), /AttestationMismatch/); // the second deposit's approval, again
+    assert.equal((await program.account.position.fetch(first.position, "confirmed")).principal.toNumber(), 25);
+
     // An attester removed by the authority admits no one, at once.
     await fails(authorityCall("removeAttester", p, [attester.publicKey], stranger), /ConstraintHasOne|has.one/i);
     const removed = await authorityCall("removeAttester", p, [attester.publicKey]);
@@ -479,11 +487,12 @@ describe("mynt_treasury", () => {
     const r = await reject(p, refused.record);
     const [ev] = await events(r);
     assert.equal(ev.name, "depositrejected");
-    assert.equal(ev.data.nonce.toNumber(), 1);
+    assert.equal(ev.data.nonce.toNumber(), 2); // the deposit moved it to 1, the refusal to 2
     assert.equal(await balance(ata(d.publicKey)), held + 100, "the refused deposit went back to the depositor");
     await fails(reject(p, refused.record), /DepositRejected/);
     await fails(deposit(p, d, 100, { nonce: 0 }), /AttestationMismatch/); // the old attestation is spent
-    const accepted = await deposit(p, d, 100); // a fresh one, at nonce 1
+    await fails(deposit(p, d, 100, { nonce: 1 }), /AttestationMismatch/); // and so is one at the deposit's own nonce
+    const accepted = await deposit(p, d, 100); // a fresh one, at nonce 2
 
     const effective = (await chainNow()) + 4;
     await authorityCall("proposeTerms", p, [terms({ lockInSeconds: new BN(3600) }), new BN(effective)]);
