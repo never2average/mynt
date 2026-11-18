@@ -183,7 +183,7 @@ const TABLES = `
   );
   -- Mainnet treasuries, once an admin has turned treasury mainnet on and a pool passes every mainnet check.
   DO $$ BEGIN
-    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'treasury_pools_cluster_check' AND pg_get_constraintdef(oid) NOT LIKE '%mainnet%') THEN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'treasury_pools_cluster_check' AND conrelid = '${T}.treasury_pools'::regclass AND pg_get_constraintdef(oid) NOT LIKE '%mainnet%') THEN
       ALTER TABLE ${T}.treasury_pools DROP CONSTRAINT treasury_pools_cluster_check;
       ALTER TABLE ${T}.treasury_pools ADD CONSTRAINT treasury_pools_cluster_check CHECK (cluster IN ('devnet', 'mainnet'));
     END IF;
@@ -216,6 +216,14 @@ export const MAINNET_DISABLED = "Treasury pools are devnet only for now: mainnet
 export const MAINNET_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 // Where a treasury rebuild runs in its sandbox.
 const BUILD_DIR = "/home/user/mynt-treasury-build";
+
+// Whether depositors can leave within the upgrade time lock: always for an immutable program; for a multisig, its time
+// lock covers the pool's lock-in plus notice.
+export function timeLockCovers(lock: UpgradeLock | { status: string }, terms: { lock_in_seconds: bigint; notice_seconds: bigint }): boolean {
+  if (lock.status === "immutable") return true;
+  if (lock.status !== "timelocked_multisig") return false;
+  return BigInt((lock as { time_lock_seconds: number }).time_lock_seconds) >= terms.lock_in_seconds + terms.notice_seconds;
+}
 
 // What would still stop a registered (devnet) treasury from holding mainnet money, besides mainnet being off.
 export function mainnetBlockers(row: Pick<TreasuryRow, "verified_build" | "deposit_approval" | "upgrade_lock" | "upgrade_lock_detail">, terms?: { lock_in_seconds: bigint; notice_seconds: bigint } | null): string[] {
@@ -308,6 +316,8 @@ export const units = (v: bigint) => (v <= BigInt(Number.MAX_SAFE_INTEGER) ? Numb
 const big = (v: unknown) => BigInt(String(v ?? 0));
 const iso = (seconds: bigint | number) => new Date(Number(seconds) * 1000).toISOString();
 const DEVNET_GENESIS = Buffer.from(base58Decode(GENESIS_HASH.devnet));
+// One program id and pool address can exist on both clusters: everything cached per pool is keyed by cluster too.
+const cacheKey = (cluster: Cluster, address: string) => `${cluster}:${address}`;
 // The only attester set Mynt approves deposits under: its own attester in the first slot, the second empty.
 export const exactAttesters = (attesters: readonly string[], mynt: string) => attesters.length === 2 && attesters[0] === mynt && attesters[1] === ZERO_KEY;
 
@@ -480,6 +490,11 @@ export class TreasuryService {
     if (!pool) refuse("no_pool", `No pool '${input.pool_id}'`);
     if (!isAddress(input.program_id) || !isAddress(input.pool_address)) refuse("not_an_address", "program_id and pool_address must be Solana addresses");
     if (input.cluster === "mainnet") return this.registerMainnet(user, input, who);
+    // A pool on mainnet is never registered back onto devnet in place, and devnet never shares a mainnet program id.
+    const existing = await this.get(input.pool_id);
+    if (existing?.cluster === "mainnet") refuse("cluster_mismatch", "This pool's treasury is on mainnet: register it with cluster mainnet");
+    const { rows: onMainnet } = await this.db.query(`SELECT 1 FROM ${T}.treasury_pools WHERE program_id = $1 AND cluster = 'mainnet' LIMIT 1`, [input.program_id]);
+    if (onMainnet[0]) refuse("cluster_mismatch", "A mainnet treasury uses this program id: a devnet treasury needs a program id of its own");
     const { programHash, upgradeAuthority, programSlot, authorityKnown, p } = await this.readTreasury("devnet", input.program_id, input.pool_address);
     if (p.usdc_mint !== this.config.usdcMint) refuse("wrong_mint", `The pool holds ${p.usdc_mint}, not devnet USDC (${this.config.usdcMint})`);
     const attester = await this.attesterAddress();
@@ -531,19 +546,19 @@ export class TreasuryService {
          ON CONFLICT DO NOTHING`,
         [input.pool_address],
       );
-    this.cache.set(input.pool_address, { at: Date.now(), pool: p });
+    this.cache.set(cacheKey("devnet", input.pool_address), { at: Date.now(), pool: p });
     return this.view((await this.get(input.pool_id))!, p, null, attester);
   }
 
   // ---- reading the chain ----
 
   private async poolAccount(row: TreasuryRow, fresh = false): Promise<PoolAccount> {
-    const hit = this.cache.get(row.pool_address);
+    const hit = this.cache.get(cacheKey(row.cluster, row.pool_address));
     if (!fresh && hit && Date.now() - hit.at < CACHE_MS) return hit.pool;
-    const info = await this.account(row.pool_address);
+    const info = await this.account(row.pool_address, row.cluster);
     const p = info && info.owner === row.program_id ? decodePool(this.bytes(info)) : null;
-    if (!p) return refuse("not_on_chain", "The pool's treasury account isn't on devnet any more");
-    this.cache.set(row.pool_address, { at: Date.now(), pool: p });
+    if (!p) return refuse("not_on_chain", `The pool's treasury account isn't on ${row.cluster} any more`);
+    this.cache.set(cacheKey(row.cluster, row.pool_address), { at: Date.now(), pool: p });
     return p;
   }
 
@@ -609,15 +624,13 @@ export class TreasuryService {
     const out = new Map<string, ReturnType<TreasuryService["view"]>>();
     if (!poolIds.length) return out;
     const { rows } = await this.db.query(`SELECT * FROM ${T}.treasury_pools WHERE pool_id = ANY($1::uuid[])`, [poolIds]);
-    let attester: string | null = null;
-    try {
-      attester = await this.attesterAddress();
-    } catch {
-      attester = null;
-    }
+    // Each pool from its own cluster, judged against that cluster's attester.
+    const attesters = new Map<Cluster, string | null>();
     for (const r of rows as unknown as TreasuryRow[]) {
+      if (!attesters.has(r.cluster)) attesters.set(r.cluster, await this.attesterAddress(r.cluster).catch(() => null));
+      const attester = attesters.get(r.cluster) ?? null;
       try {
-        out.set(r.pool_id, this.view(r, await this.poolAccount(r), null, attester));
+        out.set(r.pool_id, this.view(r, await this.onCluster.run(r.cluster, () => this.poolAccount(r)), null, attester));
       } catch (e) {
         out.set(r.pool_id, this.view(r, null, (e as Error).message, attester));
       }
@@ -655,6 +668,16 @@ export class TreasuryService {
     if (pool.sandbox) refuse("mainnet_disabled", "A sandbox pool can't hold mainnet money");
     if (!row.verified_build || row.deposit_approval !== "MYNTDEP3") refuse("mainnet_disabled", "This mainnet treasury isn't a verified MYNTDEP3 build any more: its builder registers it again");
     if (row.upgrade_lock !== "immutable" && row.upgrade_lock !== "timelocked_multisig") refuse("upgrade_lock_changed", "This mainnet treasury's upgrade authority isn't locked: its builder registers it again");
+  }
+
+  // Mainnet reads need a mainnet RPC; without one, mainnet is simply off here.
+  private mainnetReachable(cluster: Cluster) {
+    if (cluster !== "mainnet") return;
+    try {
+      this.rpc("mainnet");
+    } catch {
+      refuse("mainnet_disabled", `${MAINNET_DISABLED}: this Mynt has no mainnet RPC`);
+    }
   }
 
   // USDC on each cluster: devnet's from the config, Circle's on mainnet.
@@ -709,6 +732,8 @@ export class TreasuryService {
     const genesis = Buffer.from(base58Decode(GENESIS_HASH[row.cluster]));
     if (!Buffer.from(p.cluster).equals(genesis)) refuse("wrong_cluster", `The pool's attestations are for another cluster than ${row.cluster}`);
     if (row.cluster === "mainnet" && row.deposit_approval !== "MYNTDEP3") refuse("mainnet_disabled", "Mainnet takes only MYNTDEP3 approvals");
+    if (row.cluster === "mainnet" && !timeLockCovers((row.upgrade_lock_detail ?? { status: row.upgrade_lock }) as UpgradeLock, p.terms))
+      refuse("upgrade_lock_changed", "The pool's lock-in and notice are now longer than the multisig's time lock: depositors couldn't leave before an approved upgrade runs");
     if (p.wind_down_at !== 0n) refuse("pool_paused", "The pool is winding down: it takes no new deposits");
     if (p.sponsor_paused) refuse("pool_paused", "The pool's authority has paused new deposits");
     const positionInfo = await this.account(positionAddress(row.program_id, row.pool_address, input.wallet));
@@ -933,7 +958,7 @@ export class TreasuryService {
     try {
       read = await this.readTreasury("mainnet", input.program_id, input.pool_address);
     } catch (e) {
-      if (e instanceof TreasuryRefusal) return refuse("mainnet_disabled", `${MAINNET_DISABLED}. On mainnet: ${e.message}`, { mainnet_checks: { [e.code]: e.message } });
+      if (e instanceof TreasuryRefusal) return refuse((await this.mainnetEnabled()) ? e.code : "mainnet_disabled", `On mainnet: ${e.message}`, { mainnet_checks: { [e.code]: e.message } });
       throw e;
     }
     const { programHash, upgradeAuthority, authorityKnown, programSlot, p } = read;
@@ -954,11 +979,13 @@ export class TreasuryService {
       attesters: mainnetAttester && exactAttesters(p.terms.attesters, mainnetAttester) ? "pass" : `fail: the pool's attesters must be exactly [Mynt's mainnet attester${mainnetAttester ? ` ${mainnetAttester}` : ""}, none] (get_treasury_attester with cluster mainnet)`,
       owner: mine ? "pass" : "fail: the pool's creator or authority isn't a verified Solana wallet linked to you",
       real_money_pool: pool!.sandbox ? "fail: a sandbox pool can't hold mainnet money" : "pass",
+      time_lock: timeLockCovers(lock, p.terms) ? "pass" : `fail: the multisig's time lock is shorter than the pool's lock-in and notice (${p.terms.lock_in_seconds + p.terms.notice_seconds}s): depositors couldn't leave before an approved upgrade runs`,
+      history: await this.historyCheck(input.pool_id, input.pool_address),
     };
     const enabled = await this.mainnetEnabled();
     const failing = Object.values(checks).some((c) => c.startsWith("fail"));
-    if (!enabled || failing)
-      return refuse("mainnet_disabled", `${enabled ? "This treasury doesn't pass every mainnet check" : `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on`}. Its checks there are listed in mainnet_checks`, { mainnet_checks: checks });
+    if (!enabled) return refuse("mainnet_disabled", `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on. Its checks there are listed in mainnet_checks`, { mainnet_checks: checks });
+    if (failing) return refuse("mainnet_checks_failed", "This treasury doesn't pass every mainnet check: they're listed in mainnet_checks", { mainnet_checks: checks });
     const { rows: taken } = await this.db.query(`SELECT pool_id FROM ${T}.treasury_pools WHERE pool_address = $1 AND pool_id <> $2`, [input.pool_address, input.pool_id]);
     if (taken[0]) refuse("already_registered", "That pool account is already another pool's treasury");
     await this.db.query(
@@ -972,8 +999,24 @@ export class TreasuryService {
       [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, user.id, programSlot === null ? null : programSlot.toString(), lock.status, JSON.stringify(lock), input.upgrade_multisig ?? null],
     );
     await this.store.audit(user.id, "treasury_mainnet_registered", input.pool_id, { program_id: input.program_id, pool_address: input.pool_address });
-    this.cache.set(input.pool_address, { at: Date.now(), pool: p });
+    this.cache.set(cacheKey("mainnet", input.pool_address), { at: Date.now(), pool: p });
     return this.view((await this.get(input.pool_id))!, p, null, mainnetAttester);
+  }
+
+  // A pool moving onto mainnet, or to another mainnet address, mustn't strand money or inherit another's records:
+  // its current treasury holds nothing still in it (indexed deposits with money left), and the new address has no
+  // records from devnet (deposits, requests and events are keyed by address, the same on both clusters).
+  private async historyCheck(poolId: string, address: string): Promise<string> {
+    const before = await this.get(poolId);
+    if (before && (before.pool_address !== address || before.cluster !== "mainnet")) {
+      const { rows } = await this.db.query(`SELECT count(*)::int AS n FROM ${T}.treasury_deposits WHERE pool_address = $1 AND NOT rejected AND remaining > 0`, [before.pool_address]);
+      if (Number((rows[0] as { n: number }).n) > 0) return `fail: its current treasury (${before.cluster} ${before.pool_address}) still holds deposits; it can't move until they're withdrawn`;
+    }
+    if (!(before?.cluster === "mainnet" && before.pool_address === address)) {
+      const { rows } = await this.db.query(`SELECT 1 FROM ${T}.treasury_events WHERE pool_address = $1 LIMIT 1`, [address]);
+      if (rows[0]) return "fail: this address has records from devnet: use a pool account that never held a devnet treasury";
+    }
+    return "pass";
   }
 
   // ---- verified builds: Mynt's own rebuild of the template at a program id ----
@@ -1084,11 +1127,17 @@ export class TreasuryService {
   // Judges every pool on this program id against Mynt's rebuild there. A pool whose program was redeployed since it
   // was registered (its recorded hash is stale) isn't judged on that hash: it's told to register again.
   private async rejudge(programId: string, sha256: string) {
-    const slot = await this.programSlotNow(programId).catch(() => undefined);
+    const { rows } = await this.db.query(`SELECT DISTINCT cluster FROM ${T}.treasury_pools WHERE program_id = $1`, [programId]);
+    for (const { cluster } of rows as { cluster: Cluster }[]) await this.rejudgeOn(cluster, programId, sha256);
+  }
+
+  // Each cluster's pools on the program id against that cluster's program, never another's.
+  private async rejudgeOn(cluster: Cluster, programId: string, sha256: string) {
+    const slot = await this.onCluster.run(cluster, () => this.programSlotNow(programId)).catch(() => undefined);
     await this.db.query(
       `UPDATE ${T}.treasury_pools SET build_note = 'redeployed since it was registered: register it again to check it', verified_build = false, updated_at = now()
-       WHERE program_id = $1 AND $2::text IS DISTINCT FROM program_slot::text`,
-      [programId, slot === undefined ? "unknown" : slot],
+       WHERE program_id = $1 AND cluster = $3 AND $2::text IS DISTINCT FROM program_slot::text`,
+      [programId, slot === undefined ? "unknown" : slot, cluster],
     );
     await this.db.query(
       `UPDATE ${T}.treasury_pools SET verified_build = (program_hash = $2 AND deposit_approval = $3),
@@ -1096,8 +1145,8 @@ export class TreasuryService {
                            WHEN program_hash = $2 THEN 'verified bytes, but registered with another deposit approval layout: register it again'
                            ELSE 'unverified build: the deployed program isn''t the treasury template rebuilt at this program id (' || $2 || ')' END,
          updated_at = now()
-       WHERE program_id = $1 AND $4::text IS NOT DISTINCT FROM program_slot::text`,
-      [programId, sha256, MANIFEST.deposit_approval ?? "MYNTDEP3", slot === undefined ? "unknown" : slot],
+       WHERE program_id = $1 AND cluster = $5 AND $4::text IS NOT DISTINCT FROM program_slot::text`,
+      [programId, sha256, MANIFEST.deposit_approval ?? "MYNTDEP3", slot === undefined ? "unknown" : slot, cluster],
     );
   }
 
@@ -1196,6 +1245,8 @@ export class TreasuryService {
     await this.remember(input.wallet, firm, s.user.id);
     return {
       cluster: row.cluster,
+      // Exits are never blocked, but the wallet should hear that the program changed since it was registered.
+      ...(row.program_flag ? { warning: `This pool's program changed since it was registered (${row.program_flag}): check the transaction in your wallet before signing` } : {}),
       transaction_base64: tx.base64,
       // No attestation: only the blockhash ages (about a minute), after which it's prepared again.
       expires_at: new Date(this.now().getTime() + 60_000).toISOString(),
@@ -1229,8 +1280,9 @@ export class TreasuryService {
 
   async balances(address: string, cluster: string) {
     if (cluster !== "devnet" && cluster !== "mainnet") refuse("mainnet_disabled", MAINNET_DISABLED);
-    if (cluster === "mainnet" && !(await this.mainnetEnabled())) refuse("mainnet_disabled", `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on`);
+    // A read: allowed with the switch off too (when Mynt has a mainnet RPC), so people can still see their money.
     const c = cluster as Cluster;
+    this.mainnetReachable(c);
     const sol = await this.call<{ value: number }>("getBalance", [address, { commitment: "confirmed" }], c);
     const mint = this.mintFor(c);
     const ata = associatedTokenAddress(address, mint);
@@ -1282,7 +1334,13 @@ export class TreasuryService {
   }
 
   private async flagProgram(row: TreasuryRow, why: string): Promise<boolean> {
-    const { rows } = await this.db.query(`UPDATE ${T}.treasury_pools SET program_flag = $2, program_flagged_at = now() WHERE pool_id = $1 AND program_flag IS NULL RETURNING pool_id`, [row.pool_id, why]);
+    // Only if the pool is still registered as it was when read (a registration meanwhile is judged afresh).
+    const { rows } = await this.db.query(
+      `UPDATE ${T}.treasury_pools SET program_flag = $2, program_flagged_at = now()
+       WHERE pool_id = $1 AND program_flag IS NULL AND program_slot::text IS NOT DISTINCT FROM $3::text AND upgrade_authority IS NOT DISTINCT FROM $4 AND upgrade_multisig IS NOT DISTINCT FROM $5
+       RETURNING pool_id`,
+      [row.pool_id, why, row.program_slot, row.upgrade_authority, row.upgrade_multisig],
+    );
     if (rows.length) await this.store.audit(null, "treasury_program_flagged", row.pool_id, { cluster: row.cluster, pool_address: row.pool_address, reason: why });
     return rows.length > 0;
   }
@@ -1335,7 +1393,7 @@ export class TreasuryService {
     let applied = 0;
     if (!fresh.scan_newest && (await this.pending(fresh.pool_id)) > 0) applied += await this.readPending(fresh);
     else if (await this.scan(fresh)) applied += await this.readPending(fresh);
-    if (applied) this.cache.delete(fresh.pool_address);
+    if (applied) this.cache.delete(cacheKey(fresh.cluster, fresh.pool_address));
     return applied;
   }
 
@@ -1401,7 +1459,7 @@ export class TreasuryService {
     if (e.name !== "TermsApplied") return;
     let mynt: string;
     try {
-      mynt = await this.attesterAddress();
+      mynt = await this.attesterAddress(row.cluster);
     } catch {
       return this.flag(row, "a terms change was applied and Mynt's attester couldn't be read to check it");
     }
@@ -1486,7 +1544,7 @@ export class TreasuryService {
           program_id: p.program_id as string,
           pool_address: p.pool_address as string,
           wallet,
-          sandbox: true, // devnet USDC: test money, none of it real
+          sandbox: p.cluster !== "mainnet", // devnet USDC is test money; mainnet's is real
           principal: units(principal),
           deposited: units(sum(live, "amount")),
           paid: units(sum(rs, "paid")),
@@ -1528,7 +1586,8 @@ export class TreasuryService {
   // ---- a sent transaction ----
 
   async txStatus(user: User, signature: string, cluster: Cluster = "devnet") {
-    if (cluster === "mainnet" && !(await this.mainnetEnabled())) refuse("mainnet_disabled", `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on`);
+    // A read: allowed with the switch off too, so a withdrawal request can be followed.
+    this.mainnetReachable(cluster);
     return this.onCluster.run(cluster, () => this.txStatusOn(user, signature, cluster));
   }
 

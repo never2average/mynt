@@ -1455,11 +1455,11 @@ test("a mainnet treasury registers only with the switch on and every check passi
 test("mainnet refuses a sandbox pool, and a treasury attested by the devnet key", async () => {
   const a = await mainnetWorld({ sandbox: true });
   await ok(a.s.admin.client, "configure_treasury_mainnet", { enabled: true });
-  const r = await refused(a.s.builder.client, "register_treasury_pool", a.args, "mainnet_disabled");
+  const r = await refused(a.s.builder.client, "register_treasury_pool", a.args, "mainnet_checks_failed");
   assert.match(r.mainnet_checks.real_money_pool, /sandbox/);
   const b = await mainnetWorld({ terms: { attesters: [(await world()).attester, chain.ZERO_KEY] } });
   await ok(b.s.admin.client, "configure_treasury_mainnet", { enabled: true });
-  const r2 = await refused(b.s.builder.client, "register_treasury_pool", b.args, "mainnet_disabled");
+  const r2 = await refused(b.s.builder.client, "register_treasury_pool", b.args, "mainnet_checks_failed");
   assert.match(r2.mainnet_checks.attesters, /^fail/);
 });
 
@@ -1497,4 +1497,82 @@ test("the watch flags a pool whose program, upgrade authority or multisig change
   s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ slot: 5, authority: addr(42) }));
   await s.treasury.watch();
   assert.match(await flag(), /upgrade authority changed/);
+});
+
+test("a mainnet treasury stays on mainnet: never re-registered onto devnet, read from mainnet, judged by the mainnet attester", async () => {
+  const { s, m, address, poolId, args, mainnetAttester } = await mainnetWorld();
+  await refused(s.builder.client, "register_treasury_pool", args, "mainnet_disabled"); // queues the rebuild
+  await s.treasury.buildTick();
+  await s.treasury.buildTick();
+  await ok(s.admin.client, "configure_treasury_mainnet", { enabled: true });
+  await ok(s.builder.client, "register_treasury_pool", args);
+  // Re-registering it on devnet, or a devnet pool on its program id: refused.
+  const t = s.treasuryPool();
+  await refused(s.builder.client, "register_treasury_pool", { ...args, cluster: "devnet" }, "cluster_mismatch");
+  await refused(s.builder.client, "register_treasury_pool", { pool_id: await s.makePool(), cluster: "devnet", program_id: s.programId, pool_address: t.address }, "cluster_mismatch");
+  assert.equal((await s.treasury.get(poolId)).cluster, "mainnet");
+  // The pool's view comes from mainnet, judged against the mainnet attester, even past the cache.
+  s.treasury.cache.clear();
+  const devnetCalls = s.devnet.calls.length;
+  const v = (await s.treasury.views([poolId])).get(poolId);
+  assert.equal(v.on_chain_error ?? null, null, JSON.stringify(v));
+  assert.equal(s.devnet.calls.length, devnetCalls, "a mainnet pool's view reads nothing from devnet");
+  // A terms change on mainnet keeping the mainnet attester flags nothing.
+  m.transactions.set(sigN(1), txOf(s.programId, termsApplied(address, [mainnetAttester, chain.ZERO_KEY])));
+  m.signatures.set(address, [{ signature: sigN(1), slot: 1 }]);
+  await s.treasury.index();
+  assert.equal((await s.treasury.get(poolId)).attesters_flag, null);
+  // Its positions are real money.
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  m.transactions.set(sigN(2), txOf(s.programId, depositMade(address, wallet, 0, 3_000_000, Math.floor(Date.now() / 1000))));
+  m.signatures.set(address, [{ signature: sigN(2), slot: 2 }, { signature: sigN(1), slot: 1 }]);
+  await s.treasury.index();
+  const pos = (await ok(s.fundA.client, "list_my_positions", {})).find((x) => x.source === "on-chain" && x.pool_id === poolId);
+  assert.equal(pos.cluster, "mainnet");
+  assert.equal(pos.sandbox, false);
+  // With money in it, it can't move to another mainnet address.
+  const elsewhere = chain.poolAddress(s.programId, s.creator, 2);
+  const vault2 = findProgramAddress([Buffer.from("vault"), base58Decode(elsewhere)], s.programId)[0];
+  m.set(elsewhere, s.programId, encodePool({ creator: s.creator, poolId: 2, mint: MAINNET_USDC, vault: vault2, cluster: MAINNET, terms: terms({ attesters: [mainnetAttester, chain.ZERO_KEY] }) }));
+  const moved = await refused(s.builder.client, "register_treasury_pool", { ...args, pool_address: elsewhere }, "mainnet_checks_failed");
+  assert.match(moved.mainnet_checks.history, /still holds deposits/);
+});
+
+test("mainnet refuses a multisig whose time lock is shorter than the pool's lock-in and notice, at registration and at each deposit", async () => {
+  const { s, m, args, address, mainnetAttester, vault } = await mainnetWorld({ terms: { lock_in: 30 * 86_400, notice: 3600 } });
+  const ms = addr(80);
+  m.set(ms, lock.SQUADS_V4_PROGRAM, squads({ timeLock: 72 * 3600 }));
+  m.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: lock.squadsVault(ms, 0) }));
+  await refused(s.builder.client, "register_treasury_pool", { ...args, upgrade_multisig: ms }, "mainnet_disabled"); // queues the rebuild
+  await s.treasury.buildTick();
+  await s.treasury.buildTick();
+  await ok(s.admin.client, "configure_treasury_mainnet", { enabled: true });
+  const r = await refused(s.builder.client, "register_treasury_pool", { ...args, upgrade_multisig: ms }, "mainnet_checks_failed");
+  assert.match(r.mainnet_checks.time_lock, /^fail/);
+  // With a short lock-in it registers; raised later on chain, deposits stop.
+  m.set(address, s.programId, encodePool({ creator: s.creator, poolId: 1, mint: MAINNET_USDC, vault, cluster: MAINNET, terms: terms({ attesters: [mainnetAttester, chain.ZERO_KEY], lock_in: 3600, notice: 3600 }) }));
+  const v = await ok(s.builder.client, "register_treasury_pool", { ...args, upgrade_multisig: ms });
+  assert.equal(v.upgrade_lock.status, "timelocked_multisig");
+  m.set(address, s.programId, encodePool({ creator: s.creator, poolId: 1, mint: MAINNET_USDC, vault, cluster: MAINNET, terms: terms({ attesters: [mainnetAttester, chain.ZERO_KEY], lock_in: 30 * 86_400, notice: 3600 }) }));
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  m.set(chain.associatedTokenAddress(wallet, MAINNET_USDC), chain.TOKEN_PROGRAM, encodeToken(MAINNET_USDC, wallet, 50_000_000));
+  await refused(s.fundA.client, "prepare_treasury_deposit", { pool_id: args.pool_id, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 40 * 86_400 }, "upgrade_lock_changed");
+});
+
+test("an address with devnet records can't become a mainnet treasury", async () => {
+  const { s, m, args, address, mainnetAttester } = await mainnetWorld();
+  // Events recorded for this address while it was a devnet treasury.
+  await s.db.query("INSERT INTO financial_products.treasury_events (id, pool_address, signature, idx, slot, event, data) VALUES ($1, $2, 'sig', 0, 1, 'DepositMade', '{}')", [randomUUID(), address]);
+  await s.treasury.buildTick();
+  await s.treasury.buildTick();
+  await refused(s.builder.client, "register_treasury_pool", args, "mainnet_disabled");
+  await s.treasury.buildTick();
+  await s.treasury.buildTick();
+  await ok(s.admin.client, "configure_treasury_mainnet", { enabled: true });
+  const r = await refused(s.builder.client, "register_treasury_pool", args, "mainnet_checks_failed");
+  assert.match(r.mainnet_checks.history, /records from devnet/);
+  void m;
+  void mainnetAttester;
 });
