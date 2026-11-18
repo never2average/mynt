@@ -18,3 +18,7 @@ docker compose --profile mobile up     # also the Expo web export
 The device flow: web or mobile asks `POST /api/session` → the api mints a client session for the signed-in
 customer with only the actions the app needs → the device runs offers, documents, consents and journeys on it,
 and the provider's hosted flows do the regulated steps.
+
+## Pinned dependencies
+
+- `rollup` is pinned to 4.68.5 (`overrides` in `package.json`): 4.68.6 fails to parse `react-dom/client` on Alpine (musl), which the web image builds on ("Code is nested too deeply"). Remove the override once a later Rollup builds the web image again.
