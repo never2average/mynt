@@ -85,15 +85,15 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
   if (status === "enabled") return <EarnThread chat={chat} />
   return (
     <div className="flex h-full flex-col bg-background px-4 pt-4" style={{ ["--thread-max-width" as string]: "44rem" }} data-earn-chat-off>
-      <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-center justify-center gap-2 text-center">
+      <div className="mr-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-start justify-center gap-2 px-2 text-left">
         <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">{WELCOME_TITLE}</h1>
         <p className="text-sm text-muted-foreground" role="status">
           {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. The Opportunities and My positions tabs still work."}
         </p>
       </div>
-      <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-2 md:pb-3">
+      <div className="mr-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-2 md:pb-3">
         <textarea disabled rows={2} aria-label="Message input" placeholder={status === "loading" ? "…" : "AI is not configured"} className="w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm opacity-60" />
-        <p className="-mt-2 text-center text-xs text-muted-foreground">
+        <p className="-mt-2 px-2 text-left text-xs text-muted-foreground">
           <EarnDisclosure />
         </p>
       </div>
