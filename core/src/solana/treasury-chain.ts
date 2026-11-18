@@ -18,7 +18,12 @@ export const ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJ
 export const DEVNET_USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 export const ZERO_KEY = "11111111111111111111111111111111";
 
-export const DEPOSIT_APPROVAL_DOMAIN = Buffer.from("MYNTDEP2", "ascii");
+// The deposit approval's layouts. MYNTDEP3 (the template now) signs the exact amount, and every deposit moves the
+// position's nonce on, so an approval admits one deposit of that amount. MYNTDEP2 (earlier builds, still on devnet)
+// names neither: it admits any number of deposits at the position's nonce until it expires.
+export const DEPOSIT_APPROVAL_FORMATS = ["MYNTDEP3", "MYNTDEP2"] as const;
+export type DepositApprovalFormat = (typeof DEPOSIT_APPROVAL_FORMATS)[number];
+export const DEPOSIT_APPROVAL_DOMAIN = Buffer.from("MYNTDEP3", "ascii");
 // The longest a deposit approval may live.
 export const MAX_APPROVAL_SECONDS = 600;
 
@@ -41,11 +46,19 @@ const u16le = (n: number) => {
   return b;
 };
 
-// "MYNTDEP2" ‖ program id ‖ cluster (genesis hash) ‖ pool ‖ depositor ‖ nonce (u64 LE) ‖ expiry (i64 LE): 152 bytes,
-// exactly what deposit_approval_message in the program builds.
-export function depositApprovalMessage(o: { programId: string; cluster: Uint8Array; pool: string; depositor: string; nonce: bigint | number; expiry: bigint | number }): Uint8Array {
+// Exactly what deposit_approval_message in the program builds:
+// MYNTDEP3: "MYNTDEP3" ‖ program id ‖ cluster (genesis hash) ‖ pool ‖ depositor ‖ nonce (u64 LE) ‖ amount (u64 LE) ‖ expiry (i64 LE), 160 bytes;
+// MYNTDEP2: "MYNTDEP2" ‖ program id ‖ cluster ‖ pool ‖ depositor ‖ nonce ‖ expiry, 152 bytes (earlier builds).
+export type DepositApproval = { programId: string; cluster: Uint8Array; pool: string; depositor: string; nonce: bigint | number; expiry: bigint | number } & (
+  | { format?: "MYNTDEP3"; amount: bigint | number }
+  | { format: "MYNTDEP2"; amount?: bigint | number }
+);
+export function depositApprovalMessage(o: DepositApproval): Uint8Array {
   if (o.cluster.length !== 32) throw new Error("The cluster is its 32-byte genesis hash");
-  return Uint8Array.from(Buffer.concat([DEPOSIT_APPROVAL_DOMAIN, pubkeyBytes(o.programId), Buffer.from(o.cluster), pubkeyBytes(o.pool), pubkeyBytes(o.depositor), u64le(o.nonce), i64le(o.expiry)]));
+  const head = [pubkeyBytes(o.programId), Buffer.from(o.cluster), pubkeyBytes(o.pool), pubkeyBytes(o.depositor), u64le(o.nonce)];
+  if (o.format === "MYNTDEP2") return Uint8Array.from(Buffer.concat([Buffer.from("MYNTDEP2", "ascii"), ...head, i64le(o.expiry)]));
+  if (o.amount === undefined || BigInt(o.amount) <= 0n) throw new Error("A MYNTDEP3 approval names the amount, more than zero");
+  return Uint8Array.from(Buffer.concat([DEPOSIT_APPROVAL_DOMAIN, ...head, u64le(o.amount), i64le(o.expiry)]));
 }
 
 // The Ed25519 precompile's instruction for one signature, laid out as web3.js's Ed25519Program writes it: a 16-byte
@@ -569,7 +582,7 @@ export class TreasuryAttester {
   get publicKey() {
     return this.#key.publicKey;
   }
-  signDepositApproval(o: { programId: string; cluster: Uint8Array; pool: string; depositor: string; nonce: bigint; expiry: bigint }, nowSeconds: number): { message: Uint8Array; signature: Uint8Array } {
+  signDepositApproval(o: DepositApproval, nowSeconds: number): { message: Uint8Array; signature: Uint8Array } {
     const expiry = Number(o.expiry);
     if (!(expiry > nowSeconds) || expiry - nowSeconds > MAX_APPROVAL_SECONDS) throw new AttesterRefused(`A deposit approval expires within ${MAX_APPROVAL_SECONDS / 60} minutes`);
     if (!Buffer.from(o.cluster).equals(Buffer.from(base58Decode(GENESIS_HASH.devnet)))) throw new AttesterRefused("The treasury attester signs devnet approvals only");

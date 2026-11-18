@@ -6,6 +6,7 @@ import type { LiquidityRoles } from "./liquidity-tools.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
 import type { Store, User } from "./store.js";
 import { MAINNET_DISABLED, TREASURY_CLUSTERS, TreasuryRefusal, type Standing, type TreasuryService } from "./treasury.js";
+import { DEPOSIT_APPROVAL_FORMATS } from "./solana/treasury-chain.js";
 
 // The tools of on-chain treasury pools (treasury.ts). Devnet only. Mynt prepares unsigned transactions; the person's
 // own wallet signs and sends them.
@@ -77,8 +78,14 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Register a pool's on-chain treasury",
         description:
-          "Builder of the pool's product: name the devnet treasury (a program built from Mynt's treasury template, and its pool account) that holds this pool's capital. Mynt reads both from devnet and refuses a pool account that isn't a mynt_treasury pool at its own address, for devnet, holding devnet USDC, whose attesters are exactly [Mynt's attester (get_treasury_attester), none] (attester_missing, unexpected_attesters), and whose creator or authority is a verified Solana wallet linked to you (not_pool_owner; an admin may register any). The program's executable hash is recorded; a build Mynt hasn't rebuilt from the template at this address is shown as an unverified build (devnet takes it). Devnet only: mainnet is refused (mainnet_disabled). Registering again replaces it.",
-        inputSchema: { pool_id: z.string().uuid(), cluster: z.enum(TREASURY_CLUSTERS), program_id: Address, pool_address: Address },
+          "Builder of the pool's product: name the devnet treasury (a program built from Mynt's treasury template, and its pool account) that holds this pool's capital. Mynt reads both from devnet and refuses a pool account that isn't a mynt_treasury pool at its own address, for devnet, holding devnet USDC, whose attesters are exactly [Mynt's attester (get_treasury_attester), none] (attester_missing, unexpected_attesters), and whose creator or authority is a verified Solana wallet linked to you (not_pool_owner; an admin may register any). The program's executable hash is recorded; a build Mynt hasn't rebuilt from the template at this address is shown as an unverified build (devnet takes it). deposit_approval is the approval layout the program checks: MYNTDEP3 (the template now: each approval is for one deposit of its exact amount) or MYNTDEP2 (earlier builds: reusable until it expires, so Mynt's limits are only advisory). Mynt knows it for the template's own builds and refuses a different one (wrong_deposit_approval); otherwise it defaults to what the pool was registered with, or MYNTDEP3. Devnet only: mainnet is refused (mainnet_disabled). Registering again replaces it.",
+        inputSchema: {
+          pool_id: z.string().uuid(),
+          cluster: z.enum(TREASURY_CLUSTERS),
+          program_id: Address,
+          pool_address: Address,
+          deposit_approval: z.enum(DEPOSIT_APPROVAL_FORMATS).optional().describe("The deposit approval layout the program checks; leave it out for a build of the current template"),
+        },
       },
       async (input) => {
         if (input.cluster !== "devnet") return fail(MAINNET_DISABLED, { code: "mainnet_disabled" });
@@ -104,7 +111,7 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Prepare a deposit into a pool's on-chain treasury",
         description:
-          "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, attesters_changed, wrong_cluster, rate_limited (20 prepares a minute), rpc_unavailable.",
+          "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). For a pool on MYNTDEP3 (deposit_approval) the approval names the exact amount and is spent by the deposit, and approvals not yet landed count toward your firm's limit until they expire. Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, attesters_changed, program_upgraded (the program was redeployed since it was registered), wrong_cluster, rate_limited (20 prepares a minute), rpc_unavailable.",
         inputSchema: { pool_id: z.string().uuid(), wallet: Address, amount_usdc_base_units: BaseUnits, max_lock_in_seconds: Seconds },
       },
       async (input) => {

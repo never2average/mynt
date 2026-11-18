@@ -83,8 +83,8 @@ pub mod mynt_treasury {
     }
 
     /// A deposit from an allow-listed depositor: the instruction just before must be an Ed25519 verification of the
-    /// pool's deposit approval for this depositor (at their position's current nonce) by one of the pool's attesters,
-    /// not yet expired. Each deposit is its own record, with the lock-in and notice copied from the terms in force
+    /// pool's deposit approval for this depositor, this exact amount and their position's current nonce, by one of the
+    /// pool's attesters, not yet expired. The deposit moves the nonce on, so an approval is good for one deposit only. Each deposit is its own record, with the lock-in and notice copied from the terms in force
     /// now; `max_lock_in_seconds` is what the depositor agreed to, so a terms change landing first can't surprise them.
     pub fn deposit<'info>(ctx: Context<'_, '_, 'info, 'info, MakeDeposit<'info>>, amount: u64, approval_expiry: i64, max_lock_in_seconds: i64) -> Result<()> {
         require!(amount > 0, TreasuryError::ZeroAmount);
@@ -110,7 +110,7 @@ pub mod mynt_treasury {
             }
             require!(pool.terms.lock_in_seconds <= max_lock_in_seconds, TreasuryError::TermsChanged);
             require!(approval_expiry >= now, TreasuryError::AttestationExpired);
-            let expected = deposit_approval_message(&pool.cluster, &pool_key, &depositor, ctx.accounts.position.nonce, approval_expiry);
+            let expected = deposit_approval_message(&pool.cluster, &pool_key, &depositor, ctx.accounts.position.nonce, amount, approval_expiry);
             attestation::verify_attestations(&ctx.accounts.instructions.to_account_info(), &pool.terms.attesters, &expected, 1)?;
         }
 
@@ -136,6 +136,8 @@ pub mod mynt_treasury {
         position.principal = principal;
         position.deposited = position.deposited.checked_add(amount).ok_or(TreasuryError::Overflow)?;
         position.deposits = position.deposits.checked_add(1).ok_or(TreasuryError::Overflow)?;
+        // The approval this deposit used is spent: the next deposit needs a new one.
+        position.nonce = position.nonce.checked_add(1).ok_or(TreasuryError::Overflow)?;
         let pool = &mut ctx.accounts.pool;
         let seq = pool.next_deposit_seq;
         let record = &mut ctx.accounts.deposit;
@@ -621,7 +623,7 @@ pub mod mynt_treasury {
 pub const MAX_BPS: u16 = 10_000;
 /// The longest review window a product floor may set: 30 days.
 pub const MAX_REVIEW_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
-pub const DEPOSIT_APPROVAL_DOMAIN: [u8; 8] = *b"MYNTDEP2";
+pub const DEPOSIT_APPROVAL_DOMAIN: [u8; 8] = *b"MYNTDEP3";
 pub const OBLIGATIONS_DOMAIN: [u8; 8] = *b"MYNTOBL2";
 /// sha256("global:on_treasury_event")[..8]: an Anchor extension handles the hook as `on_treasury_event`.
 pub const EXTENSION_HOOK_DISCRIMINATOR: [u8; 8] = [225, 98, 18, 23, 251, 52, 176, 175];
@@ -633,15 +635,17 @@ pub const REQUEST_CANCELLED: u8 = 2;
 pub const REQUEST_VOIDED: u8 = 3;
 pub const REQUEST_PARKED: u8 = 4;
 
-/// What an attester signs to allow a depositor into a pool, at their position's nonce, until `expiry`.
-pub fn deposit_approval_message(cluster: &[u8; 32], pool: &Pubkey, depositor: &Pubkey, nonce: u64, expiry: i64) -> Vec<u8> {
-    let mut m = Vec::with_capacity(152);
+/// What an attester signs to allow one deposit of exactly `amount` by a depositor into a pool, at their position's
+/// nonce, until `expiry`.
+pub fn deposit_approval_message(cluster: &[u8; 32], pool: &Pubkey, depositor: &Pubkey, nonce: u64, amount: u64, expiry: i64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(160);
     m.extend_from_slice(&DEPOSIT_APPROVAL_DOMAIN);
     m.extend_from_slice(crate::ID.as_ref());
     m.extend_from_slice(cluster);
     m.extend_from_slice(pool.as_ref());
     m.extend_from_slice(depositor.as_ref());
     m.extend_from_slice(&nonce.to_le_bytes());
+    m.extend_from_slice(&amount.to_le_bytes());
     m.extend_from_slice(&expiry.to_le_bytes());
     m
 }
@@ -1133,7 +1137,7 @@ pub struct Position {
     /// Everything deposited and not refused.
     pub deposited: u64,
     pub deposits: u64,
-    /// Signed into the deposit approval; a refused deposit moves it on.
+    /// Signed into the deposit approval; every deposit, and every refused deposit, moves it on.
     pub nonce: u64,
     /// The principal when a wind-down was proposed, kept before it first changes (valid for `snapshot_epoch`).
     pub principal_at_wind_down: u64,
