@@ -207,6 +207,10 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const flaggedTreasuries = (await exists("treasury_pools"))
     ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.treasury_pools WHERE attesters_flag IS NOT NULL`)).rows[0]?.n ?? 0)
     : 0;
+  // Treasuries whose program, upgrade authority or multisig changed since registration (the watch, treasury.ts).
+  const changedTreasuries = (await exists("treasury_pools"))
+    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.treasury_pools WHERE program_flag IS NOT NULL`)).rows[0]?.n ?? 0)
+    : 0;
   const offboards = (await exists("workspace_offboards"))
     ? ((await db.query(
         `SELECT workspace_id::text AS workspace_id, user_id::text AS user_id, kind, attempts, error FROM financial_products.workspace_offboards WHERE status = 'failed' ORDER BY started_at`,
@@ -250,6 +254,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...backups.attention,
     ...(poolFlags ? [`liquidity pools: ${poolFlags} settlement report(s) in the last ${hours}h refused for reporting more than was asked; see audit_log (pool_movement_over_settlement)`] : []),
     ...openPoolFlags.map((f) => `liquidity pools: ${f.n} open ${f.kind} flag(s) on real money: list_pool_flags, then resolve_pool_flag`),
+    ...(changedTreasuries ? [`treasury pools: ${changedTreasuries} treasury(ies) whose program, upgrade authority or multisig changed since registration; Mynt stopped approving deposits to them until their builders register them again (list_pools shows program_flag)`] : []),
     ...(flaggedTreasuries ? [`treasury pools: ${flaggedTreasuries} devnet treasury(ies) whose attesters changed on chain; Mynt stopped approving deposits to them until their builders register them again (list_pools shows attesters_flag)`] : []),
     ...(solana.flagged_programs.length ? [`solana: ${solana.flagged_programs.length} mainnet program(s) flagged by the vulnerability database; review with list_program_flags`] : []),
     ...(solana.reviews_awaiting_approval ? [`solana: ${solana.reviews_awaiting_approval} mainnet review(s) awaiting approval (list_mainnet_reviews)`] : []),
