@@ -272,7 +272,10 @@ async function world(config = {}) {
     write();
     return { address, vault, write, p };
   };
-  return { db, store, devnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, treasuryPool, connect, firm, productId: seed.id, creator };
+  // The cluster's clock (the Clock sysvar): slot, epoch start, epoch, leader schedule epoch, unix timestamp.
+  const setClock = (t) => devnet.set("SysvarC1ock11111111111111111111111111111111", "Sysvar1111111111111111111111111111111111111", Buffer.concat([u64(1), i64(t), u64(0), u64(0), i64(t)]));
+  setClock(Math.floor(Date.now() / 1000));
+  return { db, store, devnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, programData, treasuryPool, connect, firm, productId: seed.id, creator, setClock };
 }
 
 const callTool = async (client, name, args = {}) => {
@@ -730,11 +733,15 @@ test("positions and the firm's limit follow each wallet's current link: unlinked
   await s.db.query("UPDATE financial_products.liquidity_pools SET max_commitment_cents = 500 WHERE id = $1", [poolId]);
   const ownArgs = { pool_id: poolId, wallet: own, amount_usdc_base_units: 2_000_000, max_lock_in_seconds: 0 };
   await refused(colleague, "prepare_treasury_deposit", ownArgs, "over_limit");
-  // The first person unlinks it: it no longer counts, and its record is dropped.
+  // The first person unlinks it: it no longer shows among the firm's positions, and its record is dropped ...
   s.linked.set(s.fundA.user.id, []);
   assert.equal((await onChain(colleague)).length, 0);
   assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_wallets WHERE wallet = $1", [wallet])).rows[0].n, 0);
-  await ok(colleague, "prepare_treasury_deposit", ownArgs);
+  // ... but in a MYNTDEP3 pool its principal still counts toward the firm's limit: Mynt approved it for this firm, and
+  // unlinking a wallet mustn't make room for more.
+  await refused(colleague, "prepare_treasury_deposit", ownArgs, "over_limit");
+  await s.db.query("UPDATE financial_products.liquidity_pools SET max_commitment_cents = 1000 WHERE id = $1", [poolId]);
+  await ok(colleague, "prepare_treasury_deposit", ownArgs); // 4 + 2 USDC is within 10
   // Someone who leaves the firm takes their wallets with them.
   const other = await s.store.createEntity(null, { name: "Elsewhere", registration_numbers: {}, regions: ["US"] });
   await s.store.setUserEntity(second.user.id, other.id);
@@ -820,6 +827,8 @@ test("a pool's deposit approval layout: MYNTDEP3 for new registrations, kept on 
   const view = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address, deposit_approval: "MYNTDEP3" });
   assert.equal(await row(), "MYNTDEP3");
   assert.equal(view.deposit_approval, "MYNTDEP3", "the registration's answer says which");
+  // An unverified build is whatever its builder deployed: Mynt doesn't call its limit exact.
+  assert.equal(view.firm_limit, "advisory");
   // Only the two layouts exist.
   const bad = await callTool(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address, deposit_approval: "MYNTDEP1" });
   assert.equal(bad.isError, true);
@@ -900,4 +909,77 @@ test("MYNTDEP3: two prepares at once can't both pass the firm's limit", async ()
   assert.equal(results.filter((r) => r.data.code === "over_limit").length, 1);
   const { rows } = await s.db.query("SELECT coalesce(sum(amount), 0)::text AS n FROM financial_products.treasury_approvals");
   assert.equal(rows[0].n, "800000");
+});
+
+test("MYNTDEP3: an unlinked wallet's principal still counts for the firm Mynt approved it for", async () => {
+  const s = await world();
+  const { poolId, address } = await registered(s, { pool: { maxCents: 100 } }); // 1 USDC
+  const [w1, w2] = [Keypair.generate().address, Keypair.generate().address];
+  for (const w of [w1, w2]) s.devnet.set(chain.associatedTokenAddress(w, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, w, 50_000_000));
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: w1, verified: true }]);
+  await ok(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w1, amount_usdc_base_units: 600_000, max_lock_in_seconds: 7200 });
+  s.devnet.set(chain.positionAddress(s.programId, address, w1), s.programId, encodePosition(address, w1, 600_000, 1)); // it landed
+  // The person swaps w1 for w2: w1's 600k still counts, so 500k more is over the firm's 1M.
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: w2, verified: true }]);
+  const r = await refused(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w2, amount_usdc_base_units: 500_000, max_lock_in_seconds: 7200 }, "over_limit");
+  assert.equal(r.exposure, 600_000);
+  await ok(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w2, amount_usdc_base_units: 400_000, max_lock_in_seconds: 7200 });
+});
+
+test("MYNTDEP3: an approval follows its wallet to another firm until it's spent", async () => {
+  const s = await world();
+  const { poolId } = await registered(s, { pool: { maxCents: 100 } });
+  const [w, w3] = [Keypair.generate().address, Keypair.generate().address];
+  for (const x of [w, w3]) s.devnet.set(chain.associatedTokenAddress(x, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, x, 50_000_000));
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: w, verified: true }]);
+  await ok(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w, amount_usdc_base_units: 600_000, max_lock_in_seconds: 7200 });
+  // w moves to Fund B, still holding Fund A's unspent 600k approval, which can land.
+  s.linked.set(s.fundA.user.id, []);
+  s.linked.set(s.fundB.user.id, [
+    { chain: "solana", address: w, verified: true },
+    { chain: "solana", address: w3, verified: true },
+  ]);
+  await ok(s.fundB.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w, amount_usdc_base_units: 500_000, max_lock_in_seconds: 7200 });
+  // At w's nonce the larger, Fund A's 600k, counts for Fund B too: 600k + 500k from w3 is over 1M.
+  await refused(s.fundB.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w3, amount_usdc_base_units: 500_000, max_lock_in_seconds: 7200 }, "over_limit");
+  await ok(s.fundB.client, "prepare_treasury_deposit", { pool_id: poolId, wallet: w3, amount_usdc_base_units: 400_000, max_lock_in_seconds: 7200 });
+});
+
+test("MYNTDEP3: an approval counts until the cluster's own clock passes its expiry", async () => {
+  const s = await world();
+  const { poolId } = await registered(s, { pool: { maxCents: 100 } });
+  const [w1, w2] = [Keypair.generate().address, Keypair.generate().address];
+  for (const w of [w1, w2]) s.devnet.set(chain.associatedTokenAddress(w, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, w, 50_000_000));
+  s.linked.set(s.fundA.user.id, [
+    { chain: "solana", address: w1, verified: true },
+    { chain: "solana", address: w2, verified: true },
+  ]);
+  const prep = (wallet, amount) => callTool(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet, amount_usdc_base_units: amount, max_lock_in_seconds: 7200 });
+  assert.equal((await prep(w1, 600_000)).isError, false);
+  // By Mynt's clock it expired more than two minutes ago ...
+  await s.db.query("UPDATE financial_products.treasury_approvals SET expires_at = expires_at - 721");
+  // ... but the cluster's clock trails by 50 minutes, so on chain it's still good: it counts.
+  s.setClock(Math.floor(Date.now() / 1000) - 3000);
+  assert.equal((await prep(w2, 500_000)).data.code, "over_limit");
+  // With the cluster's clock caught up, it no longer does.
+  s.setClock(Math.floor(Date.now() / 1000));
+  assert.equal((await prep(w2, 500_000)).isError, false);
+  // And with no readable clock at all, every recent approval counts.
+  s.devnet.accounts.delete("SysvarC1ock11111111111111111111111111111111");
+  assert.equal((await prep(w1, 600_000)).data.code, "over_limit");
+});
+
+test("MYNTDEP3: a program upgraded since registration gets no approvals until it's registered again", async () => {
+  const s = await world();
+  const { poolId, address } = await registered(s);
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  const args = { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 7200 };
+  await ok(s.fundA.client, "prepare_treasury_deposit", args);
+  // Redeployed at slot 2 (it was 1 when registered).
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(3), u64(2), bool(true), key(addr(41)), Buffer.from("other bytes"), Buffer.alloc(16)]));
+  await refused(s.fundA.client, "prepare_treasury_deposit", args, "program_upgraded");
+  await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address });
+  await ok(s.fundA.client, "prepare_treasury_deposit", args);
 });

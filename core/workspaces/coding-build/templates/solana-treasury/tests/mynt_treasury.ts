@@ -426,6 +426,43 @@ describe("mynt_treasury", () => {
     await fails(deposit(p, d, 10), /UnknownAttester/);
   });
 
+  it("spends an approval with the deposit it admits: the same bytes again, or a second deposit after it, are refused", async () => {
+    const p = await createPool({ commitmentMax: new BN(500) }, {}, 5);
+    const d = await depositor();
+    const position = pda(["position", p.pool, d.publicKey]);
+    const expiry = (await chainNow()) + 600;
+    // The same approval, byte for byte (Ed25519 signing is deterministic): admitted once, then refused.
+    await deposit(p, d, 100, { expiry, nonce: 0 });
+    await fails(deposit(p, d, 100, { expiry, nonce: 0 }), /AttestationMismatch/);
+    // A deposit that fails after the approval was checked changes nothing: the nonce stays, so a fresh approval works.
+    await fails(deposit(p, d, 401), /AboveCommitmentMax/);
+    assert.equal((await program.account.position.fetch(position, "confirmed")).nonce.toNumber(), 1);
+    // One approval, two deposits in one transaction: the second has no approval just before it.
+    const seq = (await program.account.pool.fetch(p.pool, "confirmed")).nextDepositSeq.toNumber();
+    const ix = (n: number) =>
+      program.methods
+        .deposit(new BN(10), new BN(expiry), new BN(1_000_000))
+        .accountsPartial({
+          depositor: d.publicKey,
+          pool: p.pool,
+          position,
+          deposit: pda(["deposit", p.pool, u64(n)]),
+          vault: p.vault,
+          depositorToken: ata(d.publicKey),
+          usdcMint: mint,
+          instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
+          hook: pda(["hook", p.pool]),
+          extensionProgram: null,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .instruction();
+    const twice = new Transaction().add(approval(p.pool, d.publicKey, 1, 10, expiry), await ix(seq), await ix(seq + 1));
+    await fails(provider.sendAndConfirm(twice, [d]), /MissingAttestation/);
+    const after = await program.account.position.fetch(position, "confirmed");
+    assert.deepEqual([after.nonce.toNumber(), after.principal.toNumber()], [1, 100], "nothing from that transaction landed");
+  });
+
   it("keeps each depositor's principal within the commitments, and requests above the minimum size", async () => {
     const p = await createPool({ commitmentMin: new BN(100), commitmentMax: new BN(500), minRequest: new BN(50), noticeSeconds: new BN(5) }, {}, 5);
     const d = await depositor();

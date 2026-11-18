@@ -31,7 +31,7 @@ import {
   type TreasuryAttester,
   type TreasuryEvent,
 } from "./solana/treasury-chain.js";
-import { UPGRADEABLE_LOADER } from "./solana/tx.js";
+import { SYSVAR_CLOCK, UPGRADEABLE_LOADER } from "./solana/tx.js";
 
 // Liquidity pools whose capital is held on chain, in an app's own treasury program built from Mynt's template
 // (workspaces/coding-build/templates/solana-treasury). Devnet only: mainnet stays behind the mainnet program gate.
@@ -122,7 +122,6 @@ const TABLES = `
   ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS scan_before text;
   ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS scan_newest text;
   ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS scan_pages integer NOT NULL DEFAULT 0;
-  -- Signatures a completed scan found and the indexer hasn't read yet, oldest first by (slot, pos DESC).
   -- The deposit approval layout the pool's program checks (solana/treasury-chain.ts). Pools registered before
   -- MYNTDEP3 keep MYNTDEP2, which binds no amount: Mynt's limits are advisory for them, so mainnet never takes one.
   ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS deposit_approval text NOT NULL DEFAULT 'MYNTDEP2' CHECK (deposit_approval IN ('MYNTDEP2', 'MYNTDEP3'));
@@ -141,6 +140,19 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS treasury_approvals_firm_idx ON ${T}.treasury_approvals (pool_address, lp_entity_id, expires_at);
+  CREATE INDEX IF NOT EXISTS treasury_approvals_wallet_idx ON ${T}.treasury_approvals (pool_address, wallet, expires_at);
+  -- Every wallet Mynt approved a MYNTDEP3 deposit for, per firm and pool, kept for good: its principal counts toward
+  -- that firm's limit whether or not it's still linked.
+  CREATE TABLE IF NOT EXISTS ${T}.treasury_firm_wallets (
+    pool_address text NOT NULL,
+    lp_entity_id uuid NOT NULL,
+    wallet text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (pool_address, lp_entity_id, wallet)
+  );
+  -- The program's last-deployed slot when the pool was registered: a MYNTDEP3 prepare refuses a program upgraded since.
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS program_slot numeric(20, 0);
+  -- Signatures a completed scan found and the indexer hasn't read yet, oldest first by (slot, pos DESC).
   CREATE TABLE IF NOT EXISTS ${T}.treasury_pending (
     pool_id uuid NOT NULL,
     signature text NOT NULL,
@@ -162,9 +174,13 @@ const MANIFEST = JSON.parse(readFileSync(fileURLToPath(new URL("../schemas/solan
   program_sha256: string;
   // Earlier template builds still deployed on devnet, and the approval layout each checks.
   earlier_builds?: { program_sha256: string; deposit_approval: DepositApprovalFormat }[];
+  deposit_approval?: DepositApprovalFormat;
 };
-// How long past its expiry an approval still counts toward a firm's limit: the cluster's clock can trail Mynt's.
+// How long past its expiry (by Mynt's clock) an approval still counts toward a firm's limit, at least: the cluster's
+// clock can trail Mynt's. It counts for longer if the cluster's own clock says it's still valid.
 const APPROVAL_CLOCK_GRACE_SECONDS = 120;
+// How far back approvals are read for the limit; if the cluster's clock can't be read, all of these count.
+const APPROVAL_LOOKBACK_SECONDS = 86_400;
 // Issued approvals are kept this long, then pruned.
 const APPROVAL_KEEP_SECONDS = 30 * 86_400;
 
@@ -223,6 +239,7 @@ export interface TreasuryRow {
   verified_build: boolean;
   build_note: string | null;
   deposit_approval: DepositApprovalFormat;
+  program_slot: string | null;
   index_cursor: string | null;
   attesters_flag: string | null;
   scan_before: string | null;
@@ -328,9 +345,11 @@ export class TreasuryService {
     const pd = await this.account(programData);
     let programHash: string | null = null;
     let upgradeAuthority: string | null = null;
+    let programSlot: bigint | null = null;
     if (pd) {
       const b = Buffer.from(this.bytes(pd));
       if (b.length > 45 && b.readUInt32LE(0) === 3) {
+        programSlot = b.readBigUInt64LE(4);
         upgradeAuthority = b[12] === 1 ? base58Encode(b.subarray(13, 45)) : null;
         programHash = executableHash(b.subarray(45));
       }
@@ -354,26 +373,27 @@ export class TreasuryService {
     }
     const { rows: taken } = await this.db.query(`SELECT pool_id FROM ${T}.treasury_pools WHERE pool_address = $1 AND pool_id <> $2`, [input.pool_address, input.pool_id]);
     if (taken[0]) refuse("already_registered", "That pool account is already another pool's treasury");
-    const verified = input.program_id === MANIFEST.declared_id && programHash === MANIFEST.program_sha256;
+    // An earlier template build is never the current one, even if the manifest were left listing it as both.
+    const earlier = programHash ? MANIFEST.earlier_builds?.find((b) => b.program_sha256 === programHash) : undefined;
+    const verified = !earlier && input.program_id === MANIFEST.declared_id && programHash === MANIFEST.program_sha256;
     const note = verified ? null : programHash ? "unverified build: Mynt hasn't rebuilt the treasury template at this program id, so the deployed bytes aren't checked against it" : "unverified build: the program's bytes couldn't be read";
     // The approval layout the program checks: the template's own build and its earlier builds are known; otherwise
     // what the builder says, else what this pool was registered with, else the template's current one (MYNTDEP3).
-    const earlier = programHash ? MANIFEST.earlier_builds?.find((b) => b.program_sha256 === programHash) : undefined;
-    const known: DepositApprovalFormat | null = verified ? "MYNTDEP3" : (earlier?.deposit_approval ?? null);
+    const known: DepositApprovalFormat | null = earlier ? earlier.deposit_approval : verified ? (MANIFEST.deposit_approval ?? "MYNTDEP3") : null;
     if (known && input.deposit_approval && input.deposit_approval !== known)
       refuse("wrong_deposit_approval", `This program is a build of Mynt's treasury template that checks ${known} deposit approvals, not ${input.deposit_approval}`, { deposit_approval: known });
     const before = await this.get(input.pool_id);
     const format: DepositApprovalFormat = known ?? input.deposit_approval ?? (before && before.pool_address === input.pool_address ? before.deposit_approval : "MYNTDEP3");
     await this.db.query(
-      `INSERT INTO ${T}.treasury_pools (pool_id, cluster, program_id, pool_address, vault, usdc_mint, creator, program_hash, upgrade_authority, verified_build, build_note, registered_by, deposit_approval)
-       VALUES ($1, 'devnet', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO ${T}.treasury_pools (pool_id, cluster, program_id, pool_address, vault, usdc_mint, creator, program_hash, upgrade_authority, verified_build, build_note, registered_by, deposit_approval, program_slot)
+       VALUES ($1, 'devnet', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (pool_id) DO UPDATE SET program_id = EXCLUDED.program_id, pool_address = EXCLUDED.pool_address, vault = EXCLUDED.vault, usdc_mint = EXCLUDED.usdc_mint, creator = EXCLUDED.creator,
-         program_hash = EXCLUDED.program_hash, upgrade_authority = EXCLUDED.upgrade_authority, verified_build = EXCLUDED.verified_build, build_note = EXCLUDED.build_note, registered_by = EXCLUDED.registered_by, deposit_approval = EXCLUDED.deposit_approval,
+         program_hash = EXCLUDED.program_hash, upgrade_authority = EXCLUDED.upgrade_authority, verified_build = EXCLUDED.verified_build, build_note = EXCLUDED.build_note, registered_by = EXCLUDED.registered_by, deposit_approval = EXCLUDED.deposit_approval, program_slot = EXCLUDED.program_slot,
          index_cursor = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.index_cursor ELSE NULL END,
          scan_before = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.scan_before ELSE NULL END,
          scan_newest = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.scan_newest ELSE NULL END,
          attesters_flag = NULL, attesters_flagged_at = NULL, updated_at = now()`,
-      [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, verified, note, user.id, format],
+      [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, verified, note, user.id, format, programSlot === null ? null : programSlot.toString()],
     );
     this.cache.set(input.pool_address, { at: Date.now(), pool: p });
     return this.view((await this.get(input.pool_id))!, p, null, attester);
@@ -404,6 +424,9 @@ export class TreasuryService {
       // MYNTDEP3: each approval is for one deposit of its exact amount, so the firm's limit holds on chain.
       // MYNTDEP2 (earlier builds): an approval can be reused until it expires, so Mynt's limits are advisory.
       deposit_approval: row.deposit_approval,
+      // Exact only when Mynt rebuilt the program (a verified build) and it checks MYNTDEP3: an unverified build is
+      // whatever its builder deployed, so Mynt can't vouch that it spends approvals.
+      firm_limit: row.verified_build && row.deposit_approval === "MYNTDEP3" ? "exact" : "advisory",
       build_note: row.build_note,
       program_hash: row.program_hash,
       upgrade_authority: row.upgrade_authority,
@@ -545,8 +568,7 @@ export class TreasuryService {
     const nowS = Math.floor(this.now().getTime() / 1000);
     const expiry = BigInt(nowS + MAX_APPROVAL_SECONDS);
     const cluster = DEVNET_GENESIS;
-    const nonce = position?.nonce ?? 0n;
-    const build = async () => {
+    const build = async (nonce: bigint) => {
       const base = { programId: row.program_id, cluster, pool: row.pool_address, depositor: input.wallet, nonce, expiry };
       const { message, signature } = attester.signDepositApproval(once ? { ...base, format: "MYNTDEP3", amount } : { ...base, format: "MYNTDEP2" }, nowS);
       const ixs = [
@@ -566,7 +588,10 @@ export class TreasuryService {
       ];
       return this.unsigned(input.wallet, ixs);
     };
-    const tx = once ? await this.approveOnce({ s, firm, firmWallets, row, pool, wallet: input.wallet, nonce, amount, expiry, nowS, firmMax }, build) : await build();
+    if (once) await this.unchangedProgram(row);
+    const tx = once
+      ? await this.approveOnce({ s, firm, firmWallets, row, pool, wallet: input.wallet, nonce: position?.nonce ?? 0n, amount, expiry, nowS, firmMax }, build)
+      : await build(position?.nonce ?? 0n);
     await this.remember(input.wallet, firm, s.user.id);
     return {
       cluster: "devnet" as const,
@@ -588,64 +613,77 @@ export class TreasuryService {
     };
   }
 
-  // MYNTDEP3: issues one approval, checking the firm's limit exactly under a lock per firm and pool, so two prepares
-  // at once can't both pass. The firm's exposure is every one of its wallets' principal in the pool as it is on chain
-  // now, plus every approval Mynt issued that can still be used: unexpired (with the cluster clock's grace) and at a
-  // nonce the wallet's position hasn't passed (a deposit or a refusal moves it on). Of several approvals at one
-  // wallet's nonce only one can land, so the largest counts. The approval is recorded in the same transaction it's
-  // signed in: if building the transaction fails, nothing is recorded.
+  // MYNTDEP3: issues one approval, checking the firm's limit exactly, under one lock per pool (in this process, then
+  // across Mynt's processes) so no two prepares in a pool can both pass. The firm's exposure is:
+  // - the on-chain principal of every wallet that counts for the firm: those linked to its people now, and every wallet
+  //   Mynt ever approved for this firm in this pool (treasury_firm_wallets), linked or not, so unlinking a wallet (or a
+  //   colleague's links being unreadable) can't hide principal. In a MYNTDEP3 pool money only comes in through Mynt's
+  //   approvals, so that history is complete;
+  // - plus every approval that can still land, whichever firm it was issued to, for those wallets and the firm's own:
+  //   unexpired by the cluster's clock or by Mynt's (less the grace), and at a nonce the wallet's position hasn't passed
+  //   (a deposit or a refusal moves it on). Of several at one wallet's nonce only one can land, so the largest counts.
+  // The cluster's clock and the positions come from one read. The approval is signed at the nonce read under the lock
+  // and recorded, with the wallet's link to the firm, in the transaction it's signed in: if building fails, nothing is.
   private async approveOnce<R>(
     o: { s: Standing; firm: string; firmWallets: string[]; row: TreasuryRow; pool: Pool; wallet: string; nonce: bigint; amount: bigint; expiry: bigint; nowS: number; firmMax: bigint },
-    build: () => Promise<R>,
+    build: (nonce: bigint) => Promise<R>,
   ): Promise<R> {
-    const lock = `mynt.treasury_approval:${o.firm}:${o.row.pool_address}`;
-    // In this process first (a single-connection database can't block itself), then across Mynt's processes.
-    return this.serially(lock, () => inTransaction(this.db, async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lock]);
-      const { rows } = (await tx.query(`SELECT wallet, nonce, amount FROM ${T}.treasury_approvals WHERE pool_address = $1 AND lp_entity_id = $2 AND expires_at >= $3`, [
-        o.row.pool_address,
-        o.firm,
-        o.nowS - APPROVAL_CLOCK_GRACE_SECONDS,
-      ])) as { rows: { wallet: string; nonce: string; amount: string }[] };
-      // Principal counts for the firm's wallets as linked now (as everywhere else); an approval counts whoever holds
-      // it until it's spent, since it can still land.
-      const counted = [...new Set([...o.firmWallets, o.wallet])];
-      const live = await this.positionsOf(o.row, [...new Set([...counted, ...rows.map((r) => r.wallet)])]);
-      let principal = 0n;
-      for (const w of counted) principal += live.get(w)?.principal ?? 0n;
-      const open = new Map<string, bigint>();
-      for (const r of rows) {
-        const n = BigInt(r.nonce);
-        if (n < (live.get(r.wallet)?.nonce ?? 0n)) continue; // spent, or can't land any more
-        const k = `${r.wallet}:${n}`;
-        const a = BigInt(r.amount);
-        if (a > (open.get(k) ?? 0n)) open.set(k, a);
-      }
-      const mine = `${o.wallet}:${(live.get(o.wallet)?.nonce ?? 0n) > o.nonce ? live.get(o.wallet)!.nonce : o.nonce}`;
-      let outstanding = 0n;
-      for (const [k, a] of open) if (k !== mine) outstanding += a;
-      const exposure = principal + outstanding + ((open.get(mine) ?? 0n) > o.amount ? open.get(mine)! : o.amount);
-      if (exposure > o.firmMax)
-        refuse("over_limit", `That would take your firm's position over this pool's limit of ${o.pool.max_commitment_cents} cents per firm (counting deposits approved in the last ${MAX_APPROVAL_SECONDS / 60} minutes that haven't landed yet)`, {
-          exposure: units(principal),
-          approved_not_landed: units(outstanding + (open.get(mine) ?? 0n)),
-          limit: units(o.firmMax),
-        });
-      const out = await build();
-      await tx.query(`INSERT INTO ${T}.treasury_approvals (id, pool_id, pool_address, lp_entity_id, user_id, wallet, nonce, amount, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
-        randomUUID(),
-        o.row.pool_id,
-        o.row.pool_address,
-        o.firm,
-        o.s.user.id,
-        o.wallet,
-        o.nonce.toString(),
-        o.amount.toString(),
-        o.expiry.toString(),
-      ]);
-      await tx.query(`DELETE FROM ${T}.treasury_approvals WHERE pool_address = $1 AND expires_at < $2`, [o.row.pool_address, o.nowS - APPROVAL_KEEP_SECONDS]);
-      return out;
-    }));
+    const lock = `mynt.treasury_approval:${o.row.pool_address}`;
+    return this.serially(lock, () =>
+      inTransaction(this.db, async (tx) => {
+        await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lock]);
+        const { rows: history } = (await tx.query(`SELECT wallet FROM ${T}.treasury_firm_wallets WHERE pool_address = $1 AND lp_entity_id = $2`, [o.row.pool_address, o.firm])) as { rows: { wallet: string }[] };
+        const counted = [...new Set([...o.firmWallets, o.wallet, ...history.map((r) => r.wallet)])];
+        const { rows } = (await tx.query(
+          `SELECT wallet, nonce, amount, expires_at FROM ${T}.treasury_approvals WHERE pool_address = $1 AND (lp_entity_id = $2 OR wallet = ANY($3::text[])) AND expires_at >= $4`,
+          [o.row.pool_address, o.firm, counted, o.nowS - APPROVAL_LOOKBACK_SECONDS],
+        )) as { rows: { wallet: string; nonce: string; amount: string; expires_at: string }[] };
+        const { positions: live, clusterNow } = await this.positionsOf(o.row, [...new Set([...counted, ...rows.map((r) => r.wallet)])]);
+        // Still usable on chain until the cluster's clock passes its expiry; Mynt's clock (less the grace) as a floor.
+        // An unreadable clock counts everything in the lookback.
+        const after = clusterNow === null ? o.nowS - APPROVAL_LOOKBACK_SECONDS : Math.min(clusterNow, o.nowS - APPROVAL_CLOCK_GRACE_SECONDS);
+        let principal = 0n;
+        for (const w of counted) principal += live.get(w)?.principal ?? 0n;
+        const open = new Map<string, bigint>();
+        for (const r of rows) {
+          if (Number(r.expires_at) < after) continue;
+          const n = BigInt(r.nonce);
+          if (n < (live.get(r.wallet)?.nonce ?? 0n)) continue; // spent, or can't land any more
+          const k = `${r.wallet}:${n}`;
+          const a = BigInt(r.amount);
+          if (a > (open.get(k) ?? 0n)) open.set(k, a);
+        }
+        const liveNonce = live.get(o.wallet)?.nonce ?? 0n;
+        const nonce = liveNonce > o.nonce ? liveNonce : o.nonce;
+        const mine = `${o.wallet}:${nonce}`;
+        let outstanding = 0n;
+        for (const [k, a] of open) if (k !== mine) outstanding += a;
+        const atMine = open.get(mine) ?? 0n;
+        const exposure = principal + outstanding + (atMine > o.amount ? atMine : o.amount);
+        if (exposure > o.firmMax)
+          refuse("over_limit", `That would take your firm's position over this pool's limit of ${o.pool.max_commitment_cents} cents per firm (counting deposits approved in the last ${MAX_APPROVAL_SECONDS / 60} minutes that haven't landed yet)`, {
+            exposure: units(principal),
+            approved_not_landed: units(outstanding + atMine),
+            limit: units(o.firmMax),
+          });
+        const out = await build(nonce);
+        await tx.query(`INSERT INTO ${T}.treasury_approvals (id, pool_id, pool_address, lp_entity_id, user_id, wallet, nonce, amount, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+          randomUUID(),
+          o.row.pool_id,
+          o.row.pool_address,
+          o.firm,
+          o.s.user.id,
+          o.wallet,
+          nonce.toString(),
+          o.amount.toString(),
+          o.expiry.toString(),
+        ]);
+        await tx.query(`INSERT INTO ${T}.treasury_firm_wallets (pool_address, lp_entity_id, wallet) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [o.row.pool_address, o.firm, o.wallet]);
+        await tx.query(`INSERT INTO ${T}.treasury_wallets (wallet, lp_entity_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [o.wallet, o.firm, o.s.user.id]);
+        await tx.query(`DELETE FROM ${T}.treasury_approvals WHERE pool_address = $1 AND expires_at < $2`, [o.row.pool_address, o.nowS - APPROVAL_KEEP_SECONDS]);
+        return out;
+      }),
+    );
   }
 
   // Runs `f` after any earlier call with the same key has finished, in this process.
@@ -661,19 +699,39 @@ export class TreasuryService {
     return run;
   }
 
-  // The positions of these wallets in the pool, as on chain now (one read per hundred wallets, all at one slot each).
+  // MYNTDEP3 is checked against the program as registered: one upgraded since might no longer spend approvals, so it's
+  // refused until its builder registers it again (which re-reads its bytes and layout).
+  private async unchangedProgram(row: TreasuryRow) {
+    if (row.program_slot === null) return;
+    const [programData] = findProgramAddress([pubkeyBytes(row.program_id)], UPGRADEABLE_LOADER);
+    const r = await this.call<{ value: AccountInfo | null }>("getAccountInfo", [programData, { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 12 } }]);
+    const b = r?.value ? Buffer.from(this.bytes(r.value)) : null;
+    const slot = b && b.length >= 12 && b.readUInt32LE(0) === 3 ? b.readBigUInt64LE(4).toString() : null;
+    if (slot !== row.program_slot) refuse("program_upgraded", "The pool's program was upgraded (or closed) since it was registered: Mynt approves no deposits to it until its builder registers it again");
+  }
+
+  // The positions of these wallets in the pool, and the cluster's clock, as on chain now: the clock rides in the first
+  // read, so it's from the same slot as the first hundred positions. clusterNow is null when the clock can't be read.
   private async positionsOf(row: TreasuryRow, wallets: string[]) {
-    const out = new Map<string, NonNullable<ReturnType<typeof decodePosition>>>();
-    for (let i = 0; i < wallets.length; i += 100) {
-      const chunk = wallets.slice(i, i + 100);
-      const r = await this.call<{ value: (AccountInfo | null)[] }>("getMultipleAccounts", [chunk.map((w) => positionAddress(row.program_id, row.pool_address, w)), { encoding: "base64", commitment: "confirmed" }]);
-      chunk.forEach((w, j) => {
+    const positions = new Map<string, NonNullable<ReturnType<typeof decodePosition>>>();
+    let clusterNow: number | null = null;
+    const addresses = [SYSVAR_CLOCK, ...wallets.map((w) => positionAddress(row.program_id, row.pool_address, w))];
+    for (let i = 0; i < addresses.length; i += 100) {
+      const chunk = addresses.slice(i, i + 100);
+      const r = await this.call<{ value: (AccountInfo | null)[] }>("getMultipleAccounts", [chunk, { encoding: "base64", commitment: "confirmed" }]);
+      chunk.forEach((_, j) => {
         const a = r?.value?.[j];
+        if (i + j === 0) {
+          // Clock: slot, epoch_start_timestamp, epoch, leader_schedule_epoch (8 bytes each), then unix_timestamp.
+          const b = a ? Buffer.from(this.bytes(a)) : null;
+          if (b && b.length >= 40) clusterNow = Number(b.readBigInt64LE(32));
+          return;
+        }
         const p = a && a.owner === row.program_id ? decodePosition(this.bytes(a)) : null;
-        if (p) out.set(w, p);
+        if (p) positions.set(wallets[i + j - 1], p);
       });
     }
-    return out;
+    return { positions, clusterNow: clusterNow as number | null };
   }
 
   async prepareWithdrawal(s: Standing, input: { pool_id: string; wallet: string; deposit: string; amount_usdc_base_units: number; max_notice_seconds: number }) {
