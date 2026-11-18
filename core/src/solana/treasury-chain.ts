@@ -567,14 +567,16 @@ export function decodeV0Transaction(tx: Uint8Array): DecodedTransaction {
 
 export class AttesterRefused extends Error {}
 
-// Devnet's treasury attester, sealed in the vault under its own role. It holds no funds and no other authority, and
+// A cluster's treasury attester (devnet's, or mainnet's), sealed in the vault under its own role. It holds no funds and no other authority, and
 // it signs one thing only: a deposit approval it builds itself, in the program's layout, expiring within ten minutes.
 // It never signs a transaction message, so no code holding this object can make it pay, transfer or call a program,
-// and it signs only for devnet: an approval naming any other cluster's genesis hash is refused.
+// and it signs only for its own cluster: an approval naming any other cluster's genesis hash is refused.
 export class TreasuryAttester {
   readonly #key: Keypair;
-  constructor(key: Keypair) {
+  readonly cluster: "devnet" | "mainnet";
+  constructor(key: Keypair, cluster: "devnet" | "mainnet" = "devnet") {
     this.#key = key;
+    this.cluster = cluster;
   }
   get address() {
     return this.#key.address;
@@ -585,7 +587,7 @@ export class TreasuryAttester {
   signDepositApproval(o: DepositApproval, nowSeconds: number): { message: Uint8Array; signature: Uint8Array } {
     const expiry = Number(o.expiry);
     if (!(expiry > nowSeconds) || expiry - nowSeconds > MAX_APPROVAL_SECONDS) throw new AttesterRefused(`A deposit approval expires within ${MAX_APPROVAL_SECONDS / 60} minutes`);
-    if (!Buffer.from(o.cluster).equals(Buffer.from(base58Decode(GENESIS_HASH.devnet)))) throw new AttesterRefused("The treasury attester signs devnet approvals only");
+    if (!Buffer.from(o.cluster).equals(Buffer.from(base58Decode(GENESIS_HASH[this.cluster])))) throw new AttesterRefused(`The treasury attester signs ${this.cluster} approvals only`);
     const message = depositApprovalMessage(o);
     return { message, signature: this.#key.sign(message) };
   }

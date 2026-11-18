@@ -196,8 +196,8 @@ export async function treasuryHealthExempt(store: Store, pool: Pick<Pool, "id" |
   if (!pool.sandbox) return false;
   const { rows: t } = await store.db.query(`SELECT to_regclass('${T}.treasury_pools') AS t`);
   if (!t[0]?.t) return false;
-  const { rows } = await store.db.query(`SELECT attesters_flag FROM ${T}.treasury_pools WHERE pool_id = $1`, [pool.id]);
-  return !!rows[0] && rows[0].attesters_flag == null;
+  const { rows } = await store.db.query(`SELECT attesters_flag, program_flag FROM ${T}.treasury_pools WHERE pool_id = $1`, [pool.id]);
+  return !!rows[0] && rows[0].attesters_flag == null && rows[0].program_flag == null;
 }
 // Whether a pause is one only the missing health reading caused (so the exemption may lift it).
 export const pausedOnlyForMissingHealth = (pool: Pick<Pool, "status" | "pause_kind" | "pause_reason">) =>

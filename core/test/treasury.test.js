@@ -247,6 +247,7 @@ async function world(config = {}) {
   const builder = await firm("Builder Co", ["innovator"]);
   const fundA = await firm("Fund A", ["liquidity_provider"]);
   const fundB = await firm("Fund B", ["liquidity_provider"]);
+  const admin = await firm("Mynt operations", ["admin"]);
   const [seed] = await store.publishedProducts();
   await db.query("UPDATE financial_products.products SET owner_id = $1, entity_id = $2 WHERE id = $3", [builder.user.id, builder.entity.id, seed.id]);
   const makePool = async (o = {}) => {
@@ -279,7 +280,7 @@ async function world(config = {}) {
   // The cluster's clock (the Clock sysvar): slot, epoch start, epoch, leader schedule epoch, unix timestamp.
   const setClock = (t) => devnet.set("SysvarC1ock11111111111111111111111111111111", "Sysvar1111111111111111111111111111111111111", Buffer.concat([u64(1), i64(t), u64(0), u64(0), i64(t)]));
   setClock(Math.floor(Date.now() / 1000));
-  return { db, store, devnet, mainnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, programData, treasuryPool, connect, firm, productId: seed.id, creator, setClock };
+  return { db, store, devnet, mainnet, solana, treasury, linked, sponsor, builder, fundA, fundB, admin, makePool, attester, programId, programData, treasuryPool, connect, firm, productId: seed.id, creator, setClock };
 }
 
 const callTool = async (client, name, args = {}) => {
@@ -482,8 +483,10 @@ test("balances are read only for the caller's own linked wallets, and mainnet is
   await refused(s.fundB.client, "get_wallet_balances", { address: wallet, cluster: "devnet" }, "wallet_not_linked");
   await refused(s.fundA.client, "get_wallet_balances", { address: wallet, cluster: "mainnet" }, "mainnet_disabled");
   await refused(s.builder.client, "register_treasury_pool", { pool_id: await s.makePool(), cluster: "mainnet", program_id: s.programId, pool_address: addr(60) }, "mainnet_disabled");
-  // A treasury row can only ever be devnet.
-  await assert.rejects(s.db.query("INSERT INTO financial_products.treasury_pools (pool_id, cluster, program_id, pool_address, vault, usdc_mint, creator, registered_by) VALUES ($1, 'mainnet', 'a', 'b', 'c', 'd', 'e', $2)", [await s.makePool(), s.fundA.user.id]));
+  // A treasury row is devnet or mainnet, nothing else (mainnet rows come only from a mainnet registration that passed
+  // every check while treasury mainnet was on; see the mainnet tests).
+  await assert.rejects(s.db.query("INSERT INTO financial_products.treasury_pools (pool_id, cluster, program_id, pool_address, vault, usdc_mint, creator, registered_by) VALUES ($1, 'testnet', 'a', 'b', 'c', 'd', 'e', $2)", [await s.makePool(), s.fundA.user.id]));
+  assert.equal(await s.treasury.mainnetEnabled(), false, "treasury mainnet starts off");
 });
 
 const logs = (programId, ...events) => [
@@ -1354,4 +1357,144 @@ test("asked about mainnet, Mynt queues no rebuild for a pool that isn't the call
   const r = await refused(s.builder.client, "register_treasury_pool", { pool_id: await s.makePool(), cluster: "mainnet", program_id: s.programId, pool_address: address }, "mainnet_disabled");
   assert.match(r.mainnet_checks.verified_build, /isn't a verified wallet linked to you/);
   assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_builds")).rows[0].n, 0);
+});
+
+// ---- treasury mainnet: the switch, the mainnet path, and the watch ----
+
+const MAINNET_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const MAINNET = Buffer.from(base58Decode(GENESIS_HASH.mainnet));
+const setClockOn = (fake, t) => fake.set("SysvarC1ock11111111111111111111111111111111", "Sysvar1111111111111111111111111111111111111", Buffer.concat([u64(1), i64(t), u64(0), u64(0), i64(t)]));
+
+test("each cluster's attester signs only that cluster's approvals", () => {
+  const now = 1_700_000_000;
+  const o = { programId: addr(1), pool: addr(2), depositor: addr(3), nonce: 0n, amount: 1n, expiry: BigInt(now + 60) };
+  const mainnet = new chain.TreasuryAttester(Keypair.generate(), "mainnet");
+  assert.throws(() => mainnet.signDepositApproval({ ...o, cluster: DEVNET }, now), /mainnet approvals only/);
+  assert.equal(mainnet.signDepositApproval({ ...o, cluster: MAINNET }, now).signature.length, 64);
+  assert.throws(() => new chain.TreasuryAttester(Keypair.generate()).signDepositApproval({ ...o, cluster: MAINNET }, now), /devnet approvals only/);
+});
+
+test("treasury mainnet: off by default, turned on by an admin only when the server is ready, and audited", async () => {
+  const off = await world();
+  const r = await ok(off.admin.client, "configure_treasury_mainnet", {});
+  assert.deepEqual([r.enabled, r.ready], [false, false]);
+  assert.ok(r.reasons.some((x) => /mainnet RPC/i.test(x)), JSON.stringify(r.reasons));
+  await refused(off.admin.client, "configure_treasury_mainnet", { enabled: true }, "mainnet_not_ready");
+  assert.ok(!(await off.builder.client.listTools()).tools.some((t) => t.name === "configure_treasury_mainnet"), "admins only");
+
+  const s = await world({ mainnet: true });
+  const ready = await ok(s.admin.client, "configure_treasury_mainnet", {});
+  assert.deepEqual([ready.enabled, ready.ready, ready.reasons], [false, true, []]);
+  assert.notEqual(ready.attester, s.attester, "mainnet has its own attester");
+  assert.equal((await ok(s.builder.client, "get_treasury_attester", { cluster: "mainnet" })).attester, ready.attester);
+  assert.equal((await ok(s.admin.client, "configure_treasury_mainnet", { enabled: true })).enabled, true);
+  assert.equal((await ok(s.admin.client, "configure_treasury_mainnet", { enabled: false })).enabled, false);
+  const { rows } = await s.db.query("SELECT action FROM financial_products.audit_log WHERE action LIKE 'treasury_mainnet_%' ORDER BY created_at");
+  assert.deepEqual(rows.map((x) => x.action), ["treasury_mainnet_enabled", "treasury_mainnet_disabled"]);
+});
+
+// A treasury on the stand-in mainnet: the program (immutable, the bytes Mynt's rebuild answers with), a pool bound to
+// mainnet holding USDC, attested by Mynt's mainnet attester.
+async function mainnetWorld(o = {}) {
+  const deployed = executableHash(Buffer.concat([Buffer.from("not the template's bytes"), Buffer.alloc(16)]));
+  const s = await world({ mainnet: true, sandboxes: new FakeBuildBox(() => ({ sha256: deployed })) });
+  const m = s.mainnet;
+  setClockOn(m, Math.floor(Date.now() / 1000));
+  m.set(s.programId, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(2), key(s.programData)]), true);
+  m.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: null }));
+  const mainnetAttester = (await ok(s.builder.client, "get_treasury_attester", { cluster: "mainnet" })).attester;
+  const address = chain.poolAddress(s.programId, s.creator, 1);
+  const vault = findProgramAddress([Buffer.from("vault"), base58Decode(address)], s.programId)[0];
+  m.set(address, s.programId, encodePool({ creator: s.creator, poolId: 1, mint: MAINNET_USDC, vault, cluster: MAINNET, terms: terms({ attesters: [mainnetAttester, chain.ZERO_KEY], ...(o.terms ?? {}) }) }));
+  const poolId = await s.makePool({ maxCents: 100_000 });
+  if (o.sandbox) await s.db.query("UPDATE financial_products.liquidity_pools SET sandbox = true WHERE id = $1", [poolId]);
+  const args = { pool_id: poolId, cluster: "mainnet", program_id: s.programId, pool_address: address };
+  return { s, m, address, vault, poolId, args, mainnetAttester };
+}
+
+test("a mainnet treasury registers only with the switch on and every check passing, then takes real deposits signed for mainnet", async () => {
+  const { s, m, address, poolId, args, mainnetAttester } = await mainnetWorld();
+  // Switch off: nothing registered, but the checks are listed (and the rebuild is queued for the builder).
+  const off = await refused(s.builder.client, "register_treasury_pool", args, "mainnet_disabled");
+  assert.match(off.error ?? JSON.stringify(off), /hasn't turned treasury mainnet on/);
+  assert.match(off.mainnet_checks.verified_build, /^fail/);
+  assert.equal(off.mainnet_checks.attesters, "pass");
+  await s.treasury.buildTick();
+  await s.treasury.buildTick();
+  await ok(s.admin.client, "configure_treasury_mainnet", { enabled: true });
+  const view = await ok(s.builder.client, "register_treasury_pool", args);
+  assert.deepEqual([view.cluster, view.verified_build, view.deposit_approval, view.upgrade_lock.status, view.firm_limit], ["mainnet", true, "MYNTDEP3", "immutable", "exact"]);
+  assert.deepEqual(view.mainnet_blockers, []);
+
+  // A liquidity provider deposits real USDC: the approval is signed by the mainnet attester, over mainnet's genesis hash.
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  m.set(chain.associatedTokenAddress(wallet, MAINNET_USDC), chain.TOKEN_PROGRAM, encodeToken(MAINNET_USDC, wallet, 50_000_000));
+  const devnetCalls = s.devnet.calls.length;
+  const out = await ok(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet, amount_usdc_base_units: 2_000_000, max_lock_in_seconds: 7200 });
+  assert.equal(out.cluster, "mainnet");
+  const tx = chain.decodeV0Transaction(Buffer.from(out.transaction_base64, "base64"));
+  const parsed = chain.parseEd25519Instruction(tx.instructions[0].data);
+  assert.equal(base58Encode(parsed.publicKey), mainnetAttester);
+  const expiry = BigInt(new Date(out.expires_at).getTime() / 1000);
+  assert.deepEqual(Buffer.from(parsed.message), Buffer.from(chain.depositApprovalMessage({ programId: s.programId, cluster: MAINNET, pool: address, depositor: wallet, nonce: 0n, amount: 2_000_000n, expiry })));
+  assert.equal(s.devnet.calls.length, devnetCalls, "nothing of a mainnet deposit is read from devnet");
+  const bal = await ok(s.fundA.client, "get_wallet_balances", { address: wallet, cluster: "mainnet" });
+  assert.deepEqual([bal.usdc_base_units, bal.usdc_mint], [50_000_000, MAINNET_USDC]);
+
+  // Turned off: no more deposits or approvals; a withdrawal request still goes through.
+  await ok(s.admin.client, "configure_treasury_mainnet", { enabled: false });
+  await refused(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 7200 }, "mainnet_disabled");
+  const now = Math.floor(Date.now() / 1000);
+  const dep = chain.depositAddress(s.programId, address, 0);
+  m.set(dep, s.programId, encodeDeposit({ pool: address, depositor: wallet, seq: 0, amount: 2_000_000, remaining: 2_000_000, queued: 0, settled_at: now - 100, review_until: now - 50, lock_in: 0, unlock_at: now - 100, notice: 0 }));
+  const w = await ok(s.fundA.client, "prepare_treasury_withdrawal", { pool_id: poolId, wallet, deposit: dep, amount_usdc_base_units: 1_000_000, max_notice_seconds: 3600 });
+  assert.equal(w.cluster, "mainnet");
+});
+
+test("mainnet refuses a sandbox pool, and a treasury attested by the devnet key", async () => {
+  const a = await mainnetWorld({ sandbox: true });
+  await ok(a.s.admin.client, "configure_treasury_mainnet", { enabled: true });
+  const r = await refused(a.s.builder.client, "register_treasury_pool", a.args, "mainnet_disabled");
+  assert.match(r.mainnet_checks.real_money_pool, /sandbox/);
+  const b = await mainnetWorld({ terms: { attesters: [(await world()).attester, chain.ZERO_KEY] } });
+  await ok(b.s.admin.client, "configure_treasury_mainnet", { enabled: true });
+  const r2 = await refused(b.s.builder.client, "register_treasury_pool", b.args, "mainnet_disabled");
+  assert.match(r2.mainnet_checks.attesters, /^fail/);
+});
+
+test("the watch flags a pool whose program, upgrade authority or multisig changed, and approvals stop until it's registered again", async () => {
+  const s = await world();
+  const ms = addr(80);
+  s.devnet.set(ms, lock.SQUADS_V4_PROGRAM, squads({ timeLock: 72 * 3600 }));
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: lock.squadsVault(ms, 0) }));
+  const poolId = await s.makePool();
+  const t = s.treasuryPool();
+  const register = () => ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address, upgrade_multisig: ms });
+  await register();
+  const flag = async () => (await s.db.query("SELECT program_flag FROM financial_products.treasury_pools WHERE pool_id = $1", [poolId])).rows[0].program_flag;
+  assert.deepEqual(await s.treasury.watch(), { checked: 1, flagged: 0 });
+  assert.equal(await flag(), null);
+  // Its multisig is weakened: flagged, audited, and deposits stop.
+  s.devnet.set(ms, lock.SQUADS_V4_PROGRAM, squads({ timeLock: 49 * 3600 }));
+  assert.deepEqual(await s.treasury.watch(), { checked: 1, flagged: 1 });
+  assert.match(await flag(), /weakened \(time lock 259200s to 176400s/);
+  const { rows } = await s.db.query("SELECT details FROM financial_products.audit_log WHERE action = 'treasury_program_flagged'");
+  assert.equal(rows.length, 1);
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  await refused(s.fundA.client, "prepare_treasury_deposit", { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 7200 }, "program_changed");
+  // Registered again: the flag clears.
+  await register();
+  assert.equal(await flag(), null);
+  // A redeploy, and an upgrade authority handed on: each flagged.
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ slot: 5, authority: lock.squadsVault(ms, 0) }));
+  await s.treasury.watch();
+  assert.match(await flag(), /redeployed/);
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ slot: 5, authority: addr(41) }));
+  await register();
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ slot: 5, authority: addr(42) }));
+  await s.treasury.watch();
+  assert.match(await flag(), /upgrade authority changed/);
 });

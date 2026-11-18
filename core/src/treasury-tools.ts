@@ -60,13 +60,14 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Mynt's treasury attester",
         description:
-          "Builder: the devnet key Mynt approves treasury deposits with. Put it in your pool's attesters (terms.attesters) when you initialise the treasury, or Mynt can't approve deposits to it. It holds no funds and signs only deposit approvals.",
-        inputSchema: {},
+          "Builder: the key Mynt approves treasury deposits with on a cluster (devnet by default; mainnet has its own). Put it in your pool's attesters (terms.attesters) when you initialise the treasury, or Mynt can't approve deposits to it. It holds no funds and signs only deposit approvals for its own cluster.",
+        inputSchema: { cluster: z.enum(TREASURY_CLUSTERS).optional() },
         annotations: { readOnlyHint: true },
       },
-      async () => {
+      async ({ cluster }) => {
         try {
-          return json({ cluster: "devnet", attester: await treasury.attesterAddress() });
+          const c = cluster ?? "devnet";
+          return json({ cluster: c, attester: await treasury.attesterAddress(c) });
         } catch (e) {
           return fail((e as Error).message);
         }
@@ -111,7 +112,7 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       {
         title: "Prepare a deposit into a pool's on-chain treasury",
         description:
-          "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). For a pool on MYNTDEP3 (deposit_approval) the approval names the exact amount and is spent by the deposit, and approvals not yet landed count toward your firm's limit until they expire. Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, attesters_changed, program_upgraded (the program was redeployed, or its upgrade authority changed, since it was registered), upgrade_lock_changed (the multisig that can upgrade it was weakened), wrong_cluster, rate_limited (20 prepares a minute), rpc_unavailable.",
+          "Liquidity provider, devnet only: an unsigned transaction depositing devnet USDC from one of your linked wallets into the pool's treasury. Mynt checks the wallet is a verified wallet linked to your sign-in, your firm's standing, the pool's commitment limits and pauses, then its attester approves this one deposit (valid ten minutes). For a pool on MYNTDEP3 (deposit_approval) the approval names the exact amount and is spent by the deposit, and approvals not yet landed count toward your firm's limit until they expire. Your wallet pays the fee, signs and sends it: Mynt never signs for your funds or holds your keys. max_lock_in_seconds is the longest lock-in you accept: the deposit fails on chain if the pool's lock-in rises above it. Refusals carry a code: wallet_not_linked, not_liquidity_provider, offering_not_cleared, over_limit, under_minimum, pool_paused, not_on_chain, mainnet_disabled, terms_changed, insufficient_usdc, attester_removed, attesters_changed, program_changed (the watch saw its program, upgrade authority or multisig change), program_upgraded (the program was redeployed, or its upgrade authority changed, since it was registered), upgrade_lock_changed (the multisig that can upgrade it was weakened), wrong_cluster, rate_limited (20 prepares a minute), rpc_unavailable.",
         inputSchema: { pool_id: z.string().uuid(), wallet: Address, amount_usdc_base_units: BaseUnits, max_lock_in_seconds: Seconds },
       },
       async (input) => {
@@ -144,12 +145,11 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
       "get_wallet_balances",
       {
         title: "A linked wallet's balances",
-        description: "Liquidity provider: the SOL (lamports) and devnet USDC (base units) one of your verified linked Solana wallets holds, read from devnet. Only your own linked wallets (wallet_not_linked otherwise); devnet only (mainnet_disabled).",
+        description: "Liquidity provider: the SOL (lamports) and USDC (base units) one of your verified linked Solana wallets holds on a cluster: devnet USDC on devnet; on mainnet, Circle's USDC, once an admin has turned treasury mainnet on (mainnet_disabled before). Only your own linked wallets (wallet_not_linked otherwise).",
         inputSchema: { address: Address, cluster: z.enum(TREASURY_CLUSTERS) },
         annotations: { readOnlyHint: true },
       },
       async ({ address, cluster }) => {
-        if (cluster !== "devnet") return fail(MAINNET_DISABLED, { code: "mainnet_disabled" });
         const s = await treasuryStanding(store, user, identity);
         if (!Array.isArray(s.wallets)) return fail(`Your linked wallets couldn't be checked: ${s.wallets.unavailable}`, { code: "wallet_not_linked" });
         if (!s.wallets.includes(address)) return fail("That isn't a verified Solana wallet linked to your sign-in", { code: "wallet_not_linked" });
@@ -162,19 +162,37 @@ export function registerTreasuryTools(server: McpServer, store: Store, user: Use
     );
   }
 
+  if (roles.admin)
+    server.registerTool(
+      "configure_treasury_mainnet",
+      {
+        title: "Treasury mainnet: readiness, and the switch",
+        description:
+          "Admin: with no arguments, whether treasury mainnet is on and whether this server is ready for it (a mainnet RPC, SOLANA_RPC_URL_MAINNET, checked against mainnet's genesis hash; and the vault for Mynt's mainnet attester), with what's missing. enabled: true turns it on, only when ready (mainnet_not_ready otherwise); enabled: false turns it off at once. While it's on, pools passing every mainnet check can be registered on mainnet and take real USDC deposits; turning it off stops every mainnet deposit and approval, and withdrawal requests still go through. Recorded in the audit log.",
+        inputSchema: { enabled: z.boolean().optional() },
+      },
+      async ({ enabled }) => {
+        try {
+          return json(enabled === undefined ? await treasury.mainnetReadiness() : await treasury.setMainnet(user, enabled));
+        } catch (e) {
+          return e instanceof TreasuryRefusal ? fail(e.message, { code: e.code, ...e.extra }) : fail((e as Error).message.slice(0, 300));
+        }
+      },
+    );
+
   if (roles.liquidityProvider || roles.builder || roles.licenceProvider || roles.admin)
     server.registerTool(
       "get_treasury_tx_status",
       {
         title: "Has a treasury transaction landed?",
         description:
-          "Whether a transaction you sent on devnet landed: not_found, processed, confirmed, finalized or failed (with the cluster's error). Once confirmed, the registered treasury pools it touched are queued for indexing (queued_pools), so list_my_positions shows it within moments. At most 30 calls a minute (rate_limited).",
-        inputSchema: { signature: z.string().min(64).max(100) },
+          "Whether a transaction you sent landed (devnet by default; mainnet once an admin has turned treasury mainnet on): not_found, processed, confirmed, finalized or failed (with the cluster's error). Once confirmed, the registered treasury pools on that cluster it touched are queued for indexing (queued_pools), so list_my_positions shows it within moments. At most 30 calls a minute (rate_limited).",
+        inputSchema: { signature: z.string().min(64).max(100), cluster: z.enum(TREASURY_CLUSTERS).optional() },
         annotations: { readOnlyHint: true },
       },
-      async ({ signature }) => {
+      async ({ signature, cluster }) => {
         try {
-          return json(await treasury.txStatus(user, signature));
+          return json(await treasury.txStatus(user, signature, cluster ?? "devnet"));
         } catch (e) {
           return e instanceof TreasuryRefusal ? fail(e.message, { code: e.code }) : fail((e as Error).message.slice(0, 300));
         }

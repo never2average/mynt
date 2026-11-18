@@ -539,12 +539,13 @@ export class SolanaService {
     return new HealthPublisher(key, programId);
   }
 
-  // Devnet's treasury attester: its own role in the vault, separate from every other key, generated once. It holds no
-  // funds and signs only deposit approvals (TreasuryAttester); nothing hands it out to sign a transaction.
-  async treasuryAttester(): Promise<TreasuryAttester> {
+  // A cluster's treasury attester: its own role in the vault, one per cluster, separate from every other key,
+  // generated once. It holds no funds and signs only deposit approvals for its own cluster (TreasuryAttester); nothing
+  // hands it out to sign a transaction.
+  async treasuryAttester(cluster: Cluster = "devnet"): Promise<TreasuryAttester> {
     if (!vaultAvailable(false)) throw new SignerNotConfigured("The treasury attester needs MYNT_VAULT_KEY set on the server");
-    const key = (await this.vaultKey("devnet", TREASURY_ATTESTER_ROLE, "")) ?? (await this.createKey("devnet", TREASURY_ATTESTER_ROLE, ""));
-    return new TreasuryAttester(key);
+    const key = (await this.vaultKey(cluster, TREASURY_ATTESTER_ROLE, "")) ?? (await this.createKey(cluster, TREASURY_ATTESTER_ROLE, ""));
+    return new TreasuryAttester(key, cluster);
   }
 
   // Sends a publisher-signed transaction on devnet, through the RPC client's retries and backoff.

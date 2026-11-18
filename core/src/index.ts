@@ -295,9 +295,12 @@ if (values.help) {
   treasuryEvents.unref();
   // Mynt's rebuilds of the treasury template at pools' program ids, one at a time.
   const treasuryBuilds = serialLoop(() => treasury.buildTick(), 60_000, "treasury builds:");
+  // Every pool's program, upgrade authority and multisig, against what was registered.
+  const treasuryWatch = serialLoop(() => treasury.watch(), Number(process.env.TREASURY_WATCH_POLL_MS ?? 300_000), "treasury watch:");
   process.on("SIGTERM", () => {
     clearInterval(treasuryEvents);
     clearInterval(treasuryBuilds);
+    clearInterval(treasuryWatch);
     clearInterval(drift);
     clearInterval(firmChecks);
     clearInterval(vendorRuns);

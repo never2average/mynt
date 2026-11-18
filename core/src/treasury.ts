@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -180,6 +181,24 @@ const TABLES = `
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (program_id, template_sha256)
   );
+  -- Mainnet treasuries, once an admin has turned treasury mainnet on and a pool passes every mainnet check.
+  DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'treasury_pools_cluster_check' AND pg_get_constraintdef(oid) NOT LIKE '%mainnet%') THEN
+      ALTER TABLE ${T}.treasury_pools DROP CONSTRAINT treasury_pools_cluster_check;
+      ALTER TABLE ${T}.treasury_pools ADD CONSTRAINT treasury_pools_cluster_check CHECK (cluster IN ('devnet', 'mainnet'));
+    END IF;
+  END $$;
+  -- Set by the watch (watch()) when a pool's program, upgrade authority or multisig changed on chain since it was
+  -- registered: Mynt approves no deposits to it until its builder registers it again.
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS program_flag text;
+  ALTER TABLE ${T}.treasury_pools ADD COLUMN IF NOT EXISTS program_flagged_at timestamptz;
+  -- Treasury settings an admin changes (configure_treasury_mainnet): 'mainnet' = { enabled }.
+  CREATE TABLE IF NOT EXISTS ${T}.treasury_settings (
+    key text PRIMARY KEY,
+    value jsonb NOT NULL,
+    updated_by uuid,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
   -- Signatures a completed scan found and the indexer hasn't read yet, oldest first by (slot, pos DESC).
   CREATE TABLE IF NOT EXISTS ${T}.treasury_pending (
     pool_id uuid NOT NULL,
@@ -210,7 +229,7 @@ export function mainnetBlockers(row: Pick<TreasuryRow, "verified_build" | "depos
   const timeLock = (row.upgrade_lock_detail as { time_lock_seconds?: number } | null)?.time_lock_seconds;
   if (row.upgrade_lock === "timelocked_multisig" && terms && timeLock !== undefined && BigInt(timeLock) < terms.lock_in_seconds + terms.notice_seconds)
     out.push(`its multisig's time lock (${timeLock}s) is shorter than the pool's lock-in and notice (${terms.lock_in_seconds + terms.notice_seconds}s): depositors couldn't leave before an approved upgrade runs`);
-  out.push("on mainnet it must be registered again there: its pool bound to mainnet's genesis hash, holding USDC, under a program id of its own");
+  out.push("on mainnet it must be registered again there, once an admin turns treasury mainnet on: its pool bound to mainnet's genesis hash, holding USDC, attested by Mynt's mainnet attester, under a program id of its own");
   return out;
 }
 // A cent in USDC base units (USDC has 6 decimals).
@@ -268,7 +287,7 @@ export function treasuryConfigFromEnv(env = process.env): TreasuryConfig {
 // attester sealed in the vault.
 export interface TreasuryChain {
   rpc(cluster: Cluster): SolanaRpc;
-  treasuryAttester(): Promise<TreasuryAttester>;
+  treasuryAttester(cluster?: Cluster): Promise<TreasuryAttester>;
 }
 
 export class TreasuryRefusal extends Error {
@@ -310,6 +329,7 @@ export interface TreasuryRow {
   upgrade_lock: UpgradeLock["status"] | null;
   upgrade_lock_detail: Record<string, unknown> | null;
   upgrade_multisig: string | null;
+  program_flag: string | null;
   index_cursor: string | null;
   attesters_flag: string | null;
   scan_before: string | null;
@@ -338,6 +358,10 @@ export interface Standing {
 export class TreasuryService {
   private cache = new Map<string, { at: number; pool: PoolAccount }>();
   private calls = new Map<string, number[]>(); // per person and kind: the times of their calls in the last minute
+  // The cluster every chain read in the current operation goes to: the pool's own, set where an operation on one pool
+  // starts (prepare, index, watch); devnet otherwise. An explicit cluster argument always wins.
+  private readonly onCluster = new AsyncLocalStorage<Cluster>();
+  private here = (c?: Cluster): Cluster => c ?? this.onCluster.getStore() ?? "devnet";
   private kicking: Promise<void> | null = null;
 
   private constructor(
@@ -355,8 +379,8 @@ export class TreasuryService {
   }
 
   // The cluster's RPC, checked once against its genesis hash (SolanaService.rpc), so what's read is that chain.
-  private rpc(cluster: Cluster = "devnet") {
-    return this.chain.rpc(cluster);
+  private rpc(cluster?: Cluster) {
+    return this.chain.rpc(this.here(cluster));
   }
 
   // At most `max` calls a minute per person and kind (in this process), or rate_limited.
@@ -370,23 +394,65 @@ export class TreasuryService {
     if (this.calls.size > 10_000) this.calls.delete(this.calls.keys().next().value!);
   }
 
-  private async call<R>(method: string, params: unknown[], cluster: Cluster = "devnet"): Promise<R> {
+  private async call<R>(method: string, params: unknown[], cluster?: Cluster): Promise<R> {
+    const c = this.here(cluster);
     try {
-      return await this.rpc(cluster).call<R>(method, params);
+      return await this.rpc(c).call<R>(method, params);
     } catch (e) {
       // RPC errors never carry the endpoint (rpc.ts); the message says what kind of failure it was.
-      return refuse("rpc_unavailable", `${cluster === "devnet" ? "Devnet" : "Mainnet"} couldn't be read just now: ${(e as Error).message.slice(0, 200)}`);
+      return refuse("rpc_unavailable", `${c === "devnet" ? "Devnet" : "Mainnet"} couldn't be read just now: ${(e as Error).message.slice(0, 200)}`);
     }
   }
 
-  private async account(address: string, cluster: Cluster = "devnet"): Promise<AccountInfo | null> {
+  private async account(address: string, cluster?: Cluster): Promise<AccountInfo | null> {
     const r = await this.call<{ value: AccountInfo | null }>("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }], cluster);
     return r?.value ?? null;
   }
   private bytes = (a: AccountInfo) => Uint8Array.from(Buffer.from(a.data[0], "base64"));
 
-  async attesterAddress() {
-    return (await this.chain.treasuryAttester()).address;
+  async attesterAddress(cluster: Cluster = "devnet") {
+    return (await this.chain.treasuryAttester(cluster)).address;
+  }
+
+  // ---- the treasury mainnet switch ----
+
+  async mainnetEnabled(): Promise<boolean> {
+    const { rows } = await this.db.query(`SELECT value FROM ${T}.treasury_settings WHERE key = 'mainnet'`);
+    return (rows[0] as { value?: { enabled?: boolean } } | undefined)?.value?.enabled === true;
+  }
+
+  // What treasury mainnet needs from this server before an admin can turn it on: a mainnet RPC (checked against
+  // mainnet's genesis hash) and the vault for the mainnet attester. Pools still pass every mainnet check one by one.
+  async mainnetReadiness(): Promise<{ enabled: boolean; ready: boolean; reasons: string[]; attester: string | null }> {
+    const reasons: string[] = [];
+    let attester: string | null = null;
+    try {
+      this.rpc("mainnet");
+      await this.call("getGenesisHash", [], "mainnet");
+    } catch (e) {
+      reasons.push(e instanceof TreasuryRefusal ? e.message : `no mainnet RPC (SOLANA_RPC_URL_MAINNET): ${(e as Error).message.slice(0, 200)}`);
+    }
+    try {
+      attester = await this.attesterAddress("mainnet");
+    } catch (e) {
+      reasons.push(`no mainnet attester: ${(e as Error).message.slice(0, 200)}`);
+    }
+    return { enabled: await this.mainnetEnabled(), ready: reasons.length === 0, reasons, attester };
+  }
+
+  // An admin turns treasury mainnet on (only when the server is ready) or off (always). Off stops every mainnet
+  // prepare at once; deposits already made stay withdrawable through the program itself.
+  async setMainnet(user: User, enabled: boolean) {
+    if (enabled) {
+      const r = await this.mainnetReadiness();
+      if (!r.ready) refuse("mainnet_not_ready", `Treasury mainnet can't be turned on yet: ${r.reasons.join("; ")}`, { reasons: r.reasons });
+    }
+    await this.db.query(
+      `INSERT INTO ${T}.treasury_settings (key, value, updated_by) VALUES ('mainnet', $1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+      [JSON.stringify({ enabled }), user.id],
+    );
+    await this.store.audit(user.id, enabled ? "treasury_mainnet_enabled" : "treasury_mainnet_disabled", "treasury_mainnet", {});
+    return this.mainnetReadiness();
   }
 
   // ---- registry ----
@@ -413,7 +479,7 @@ export class TreasuryService {
     const pool = await getPool(this.store, input.pool_id);
     if (!pool) refuse("no_pool", `No pool '${input.pool_id}'`);
     if (!isAddress(input.program_id) || !isAddress(input.pool_address)) refuse("not_an_address", "program_id and pool_address must be Solana addresses");
-    if (input.cluster === "mainnet") return this.mainnetPreflight(user, input, who);
+    if (input.cluster === "mainnet") return this.registerMainnet(user, input, who);
     const { programHash, upgradeAuthority, programSlot, authorityKnown, p } = await this.readTreasury("devnet", input.program_id, input.pool_address);
     if (p.usdc_mint !== this.config.usdcMint) refuse("wrong_mint", `The pool holds ${p.usdc_mint}, not devnet USDC (${this.config.usdcMint})`);
     const attester = await this.attesterAddress();
@@ -446,7 +512,7 @@ export class TreasuryService {
          index_cursor = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.index_cursor ELSE NULL END,
          scan_before = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.scan_before ELSE NULL END,
          scan_newest = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address THEN ${T}.treasury_pools.scan_newest ELSE NULL END,
-         attesters_flag = NULL, attesters_flagged_at = NULL, updated_at = now()`,
+         attesters_flag = NULL, attesters_flagged_at = NULL, program_flag = NULL, program_flagged_at = NULL, updated_at = now()`,
       [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, verified, note, user.id, format, programSlot === null ? null : programSlot.toString(), lock.status, JSON.stringify(lock), input.upgrade_multisig ?? null],
     );
     // A pool on MYNTDEP3 counts every firm's history of wallets toward its limit. Deposits made before (under
@@ -502,7 +568,9 @@ export class TreasuryService {
       // Who can change the program: immutable, a timelocked Squads multisig, or unlocked (with why).
       upgrade_lock: row.upgrade_lock_detail ?? (row.upgrade_lock ? { status: row.upgrade_lock } : null),
       // What stands between this treasury and mainnet, besides mainnet being off at Mynt.
-      mainnet_blockers: mainnetBlockers(row, p?.terms ?? null),
+      // Set by the watch when the program, its upgrade authority or its multisig changed since registration.
+      program_flag: row.program_flag ?? null,
+      mainnet_blockers: row.cluster === "mainnet" ? [] : mainnetBlockers(row, p?.terms ?? null),
       build_note: row.build_note,
       program_hash: row.program_hash,
       upgrade_authority: row.upgrade_authority,
@@ -565,18 +633,33 @@ export class TreasuryService {
     if (!(s.wallets as string[]).includes(wallet)) refuse("wallet_not_linked", "That wallet isn't a verified Solana wallet linked to your sign-in; link it on your account page first");
   }
 
-  private async eligible(s: Standing, poolId: string): Promise<{ pool: Pool; row: TreasuryRow; firm: string }> {
+  // `exit`: a withdrawal request. Getting money out is never held to the conditions for putting it in: a mainnet
+  // pool whose switch was turned off, or whose program changed, still gets withdrawal requests prepared.
+  private async eligible(s: Standing, poolId: string, o: { exit?: boolean } = {}): Promise<{ pool: Pool; row: TreasuryRow; firm: string }> {
     if (!s.firm) refuse("not_liquidity_provider", s.firmProblem ?? "You don't belong to an active firm");
     const pool = await getPool(this.store, poolId);
     if (!pool || !pool.approved_at) refuse("not_on_chain", `No approved pool '${poolId}'`);
     const row = await this.get(poolId);
     if (!row) refuse("not_on_chain", "This pool has no on-chain treasury registered");
-    if (row!.cluster !== "devnet") refuse("mainnet_disabled", MAINNET_DISABLED);
+    if (row!.cluster === "mainnet" && !o.exit) await this.mainnetStillHolds(row!, pool!);
     const product = await this.store.getProduct(pool!.product_id);
     if (s.firm === pool!.sponsor_entity_id || s.firm === product?.entity_id) refuse("not_liquidity_provider", "A pool's sponsor or its product's firm can't be a liquidity provider in it");
     // As commit_to_pool: a pool that isn't sandbox takes capital only once an admin recorded its offering as cleared.
-    if (!pool!.sandbox && !pool!.offering_cleared) refuse("offering_not_cleared", OFFERING_NOT_CLEARED);
+    if (!o.exit && !pool!.sandbox && !pool!.offering_cleared) refuse("offering_not_cleared", OFFERING_NOT_CLEARED);
     return { pool: pool!, row: row!, firm: s.firm! };
+  }
+
+  // A mainnet pool takes real money only while treasury mainnet is on and it still holds every mainnet condition.
+  private async mainnetStillHolds(row: TreasuryRow, pool: Pool) {
+    if (!(await this.mainnetEnabled())) refuse("mainnet_disabled", "Treasury mainnet is off: an admin turned it off, so Mynt prepares nothing on mainnet");
+    if (pool.sandbox) refuse("mainnet_disabled", "A sandbox pool can't hold mainnet money");
+    if (!row.verified_build || row.deposit_approval !== "MYNTDEP3") refuse("mainnet_disabled", "This mainnet treasury isn't a verified MYNTDEP3 build any more: its builder registers it again");
+    if (row.upgrade_lock !== "immutable" && row.upgrade_lock !== "timelocked_multisig") refuse("upgrade_lock_changed", "This mainnet treasury's upgrade authority isn't locked: its builder registers it again");
+  }
+
+  // USDC on each cluster: devnet's from the config, Circle's on mainnet.
+  private mintFor(cluster: Cluster) {
+    return cluster === "mainnet" ? MAINNET_USDC_MINT : this.config.usdcMint;
   }
 
   private async blockhash() {
@@ -599,15 +682,20 @@ export class TreasuryService {
   async prepareDeposit(s: Standing, input: { pool_id: string; wallet: string; amount_usdc_base_units: number; max_lock_in_seconds: number }) {
     this.limit(s.user.id, "prepare", this.config.prepareLimitPerMinute ?? 20);
     const { pool, row, firm } = await this.eligible(s, input.pool_id);
+    return this.onCluster.run(row.cluster, () => this.depositOn(s, input, pool, row, firm));
+  }
+
+  private async depositOn(s: Standing, input: { pool_id: string; wallet: string; amount_usdc_base_units: number; max_lock_in_seconds: number }, pool: Pool, row: TreasuryRow, firm: string) {
     this.linked(s, input.wallet);
     const amount = BigInt(input.amount_usdc_base_units);
     if (amount <= 0n) refuse("over_limit", "The amount must be more than zero");
     // As the liquidity worker: a sandbox treasury pool paused only because no health snapshot exists isn't held to it
     // (the treasury enforces its own reserve on chain); the worker opens it on its next tick.
     const exempt = pausedOnlyForMissingHealth(pool) && (await treasuryHealthExempt(this.store, pool));
+    if (row.program_flag) refuse("program_changed", `Mynt has stopped approving deposits to this pool: ${row.program_flag}. Its builder registers it again`);
     if (pool.status !== "open" && !exempt) refuse("pool_paused", `This pool isn't taking deposits right now (${pool.status}${pool.pause_reason ? `: ${pool.pause_reason}` : ""})`);
     const p = await this.poolAccount(row, true);
-    const attester = await this.chain.treasuryAttester();
+    const attester = await this.chain.treasuryAttester(row.cluster);
     if (row.attesters_flag) refuse("attesters_changed", `Mynt has stopped approving deposits to this pool: ${row.attesters_flag}. Its builder registers it again once its attesters are [Mynt's, none]`);
     if (!p.terms.attesters.includes(attester.address)) {
       await this.flag(row, "Mynt's attester is no longer one of the pool's attesters");
@@ -617,8 +705,10 @@ export class TreasuryService {
       await this.flag(row, "the pool's attesters are no longer exactly [Mynt's attester, none]");
       refuse("attesters_changed", "The pool's attesters changed on chain: Mynt has stopped approving deposits to it");
     }
-    // Every approval Mynt signs is for devnet, whatever the account says: a pool for another cluster is refused.
-    if (!Buffer.from(p.cluster).equals(DEVNET_GENESIS)) refuse("wrong_cluster", "The pool's attestations are for another cluster than devnet");
+    // Every approval Mynt signs is for the pool's own cluster, whatever the account says: a pool bound elsewhere is refused.
+    const genesis = Buffer.from(base58Decode(GENESIS_HASH[row.cluster]));
+    if (!Buffer.from(p.cluster).equals(genesis)) refuse("wrong_cluster", `The pool's attestations are for another cluster than ${row.cluster}`);
+    if (row.cluster === "mainnet" && row.deposit_approval !== "MYNTDEP3") refuse("mainnet_disabled", "Mainnet takes only MYNTDEP3 approvals");
     if (p.wind_down_at !== 0n) refuse("pool_paused", "The pool is winding down: it takes no new deposits");
     if (p.sponsor_paused) refuse("pool_paused", "The pool's authority has paused new deposits");
     const positionInfo = await this.account(positionAddress(row.program_id, row.pool_address, input.wallet));
@@ -639,11 +729,11 @@ export class TreasuryService {
     if (p.terms.lock_in_seconds > BigInt(input.max_lock_in_seconds)) refuse("terms_changed", `The pool's lock-in is ${p.terms.lock_in_seconds} seconds, longer than the ${input.max_lock_in_seconds} you agreed to`, { lock_in_seconds: Number(p.terms.lock_in_seconds) });
     const ata = await this.account(associatedTokenAddress(input.wallet, p.usdc_mint));
     const held = ata ? (decodeTokenAccount(this.bytes(ata))?.amount ?? 0n) : 0n;
-    if (held < amount) refuse("insufficient_usdc", `The wallet holds ${held} base units of devnet USDC, less than ${amount}`, { usdc_base_units: units(held) });
+    if (held < amount) refuse("insufficient_usdc", `The wallet holds ${held} base units of ${row.cluster === "devnet" ? "devnet " : ""}USDC, less than ${amount}`, { usdc_base_units: units(held) });
 
     const nowS = Math.floor(this.now().getTime() / 1000);
     const expiry = BigInt(nowS + MAX_APPROVAL_SECONDS);
-    const cluster = DEVNET_GENESIS;
+    const cluster = genesis;
     const build = async (nonce: bigint) => {
       const base = { programId: row.program_id, cluster, pool: row.pool_address, depositor: input.wallet, nonce, expiry };
       const { message, signature } = attester.signDepositApproval(once ? { ...base, format: "MYNTDEP3", amount } : { ...base, format: "MYNTDEP2" }, nowS);
@@ -670,7 +760,7 @@ export class TreasuryService {
       : await build(position?.nonce ?? 0n);
     await this.remember(input.wallet, firm, s.user.id);
     return {
-      cluster: "devnet" as const,
+      cluster: row.cluster,
       transaction_base64: tx.base64,
       expires_at: iso(expiry),
       last_valid_block_height: tx.lastValidBlockHeight,
@@ -833,7 +923,7 @@ export class TreasuryService {
   // would still stop it there: the pool bound to mainnet's genesis hash, a verified build of the template at its
   // own address (a rebuild is queued if there's none), a locked upgrade authority, MYNTDEP3, mainnet USDC, and a
   // program id of its own (not one a devnet treasury uses). Nothing is recorded but the rebuild request.
-  private async mainnetPreflight(user: User, input: { pool_id: string; program_id: string; pool_address: string; upgrade_multisig?: string }, who: { admin: boolean; wallets: string[] | { unavailable: string } }): Promise<never> {
+  private async registerMainnet(user: User, input: { pool_id: string; program_id: string; pool_address: string; upgrade_multisig?: string }, who: { admin: boolean; wallets: string[] | { unavailable: string } }) {
     let read: Awaited<ReturnType<TreasuryService["readTreasury"]>>;
     try {
       this.rpc("mainnet");
@@ -846,21 +936,44 @@ export class TreasuryService {
       if (e instanceof TreasuryRefusal) return refuse("mainnet_disabled", `${MAINNET_DISABLED}. On mainnet: ${e.message}`, { mainnet_checks: { [e.code]: e.message } });
       throw e;
     }
-    const { programHash, upgradeAuthority, authorityKnown, p } = read;
+    const { programHash, upgradeAuthority, authorityKnown, programSlot, p } = read;
     // Only the pool's own builder (its creator or authority, a wallet linked to them; or an admin) gets a rebuild queued.
     const mine = who.admin || (Array.isArray(who.wallets) && (who.wallets.includes(p.creator) || who.wallets.includes(p.authority)));
     const { verified, note } = mine ? await this.verification(input.program_id, programHash, user.id) : { verified: false, note: "not checked: the pool's creator or authority isn't a verified wallet linked to you" };
     const lock = await this.upgradeLock("mainnet", upgradeAuthority, input.upgrade_multisig ?? null, authorityKnown);
     const { rows: reused } = await this.db.query(`SELECT 1 FROM ${T}.treasury_pools WHERE program_id = $1 AND cluster = 'devnet' LIMIT 1`, [input.program_id]);
+    const pool = await getPool(this.store, input.pool_id);
+    const mainnetAttester = await this.attesterAddress("mainnet").catch(() => null);
     const checks = {
       cluster: "pass: the pool's deposit approvals are bound to mainnet",
       verified_build: verified ? "pass" : `fail: ${note}`,
       upgrade_lock: lock.status === "unlocked" ? `fail: ${lock.reason}` : `pass: ${lock.status}`,
       deposit_approval: verified && MANIFEST.deposit_approval === "MYNTDEP3" ? "pass: MYNTDEP3" : "fail: only a verified MYNTDEP3 build",
-      usdc_mint: p.usdc_mint === MAINNET_USDC_MINT ? "pass" : `fail: the pool holds ${p.usdc_mint}, not USDC (${MAINNET_USDC_MINT})`,
+      usdc_mint: p.usdc_mint === this.mintFor("mainnet") ? "pass" : `fail: the pool holds ${p.usdc_mint}, not USDC (${this.mintFor("mainnet")})`,
       own_program_id: reused[0] ? "fail: a devnet treasury uses this program id; give the mainnet treasury its own" : "pass",
+      attesters: mainnetAttester && exactAttesters(p.terms.attesters, mainnetAttester) ? "pass" : `fail: the pool's attesters must be exactly [Mynt's mainnet attester${mainnetAttester ? ` ${mainnetAttester}` : ""}, none] (get_treasury_attester with cluster mainnet)`,
+      owner: mine ? "pass" : "fail: the pool's creator or authority isn't a verified Solana wallet linked to you",
+      real_money_pool: pool!.sandbox ? "fail: a sandbox pool can't hold mainnet money" : "pass",
     };
-    return refuse("mainnet_disabled", `${MAINNET_DISABLED}. Its checks there are listed in mainnet_checks`, { mainnet_checks: checks });
+    const enabled = await this.mainnetEnabled();
+    const failing = Object.values(checks).some((c) => c.startsWith("fail"));
+    if (!enabled || failing)
+      return refuse("mainnet_disabled", `${enabled ? "This treasury doesn't pass every mainnet check" : `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on`}. Its checks there are listed in mainnet_checks`, { mainnet_checks: checks });
+    const { rows: taken } = await this.db.query(`SELECT pool_id FROM ${T}.treasury_pools WHERE pool_address = $1 AND pool_id <> $2`, [input.pool_address, input.pool_id]);
+    if (taken[0]) refuse("already_registered", "That pool account is already another pool's treasury");
+    await this.db.query(
+      `INSERT INTO ${T}.treasury_pools (pool_id, cluster, program_id, pool_address, vault, usdc_mint, creator, program_hash, upgrade_authority, verified_build, build_note, registered_by, deposit_approval, program_slot, upgrade_lock, upgrade_lock_detail, upgrade_multisig)
+       VALUES ($1, 'mainnet', $2, $3, $4, $5, $6, $7, $8, true, NULL, $9, 'MYNTDEP3', $10, $11, $12, $13)
+       ON CONFLICT (pool_id) DO UPDATE SET cluster = 'mainnet', program_id = EXCLUDED.program_id, pool_address = EXCLUDED.pool_address, vault = EXCLUDED.vault, usdc_mint = EXCLUDED.usdc_mint, creator = EXCLUDED.creator,
+         program_hash = EXCLUDED.program_hash, upgrade_authority = EXCLUDED.upgrade_authority, verified_build = true, build_note = NULL, registered_by = EXCLUDED.registered_by, deposit_approval = 'MYNTDEP3',
+         program_slot = EXCLUDED.program_slot, upgrade_lock = EXCLUDED.upgrade_lock, upgrade_lock_detail = EXCLUDED.upgrade_lock_detail, upgrade_multisig = EXCLUDED.upgrade_multisig,
+         index_cursor = CASE WHEN ${T}.treasury_pools.pool_address = EXCLUDED.pool_address AND ${T}.treasury_pools.cluster = 'mainnet' THEN ${T}.treasury_pools.index_cursor ELSE NULL END,
+         scan_before = NULL, scan_newest = NULL, attesters_flag = NULL, attesters_flagged_at = NULL, program_flag = NULL, program_flagged_at = NULL, updated_at = now()`,
+      [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, user.id, programSlot === null ? null : programSlot.toString(), lock.status, JSON.stringify(lock), input.upgrade_multisig ?? null],
+    );
+    await this.store.audit(user.id, "treasury_mainnet_registered", input.pool_id, { program_id: input.program_id, pool_address: input.pool_address });
+    this.cache.set(input.pool_address, { at: Date.now(), pool: p });
+    return this.view((await this.get(input.pool_id))!, p, null, mainnetAttester);
   }
 
   // ---- verified builds: Mynt's own rebuild of the template at a program id ----
@@ -1054,7 +1167,11 @@ export class TreasuryService {
 
   async prepareWithdrawal(s: Standing, input: { pool_id: string; wallet: string; deposit: string; amount_usdc_base_units: number; max_notice_seconds: number }) {
     this.limit(s.user.id, "prepare", this.config.prepareLimitPerMinute ?? 20);
-    const { pool, row, firm } = await this.eligible(s, input.pool_id);
+    const { pool, row, firm } = await this.eligible(s, input.pool_id, { exit: true });
+    return this.onCluster.run(row.cluster, () => this.withdrawalOn(s, input, pool, row, firm));
+  }
+
+  private async withdrawalOn(s: Standing, input: { pool_id: string; wallet: string; deposit: string; amount_usdc_base_units: number; max_notice_seconds: number }, pool: Pool, row: TreasuryRow, firm: string) {
     this.linked(s, input.wallet);
     const amount = BigInt(input.amount_usdc_base_units);
     if (!isAddress(input.deposit)) refuse("deposit_not_found", "deposit is the deposit record's address");
@@ -1078,7 +1195,7 @@ export class TreasuryService {
     ]);
     await this.remember(input.wallet, firm, s.user.id);
     return {
-      cluster: "devnet" as const,
+      cluster: row.cluster,
       transaction_base64: tx.base64,
       // No attestation: only the blockhash ages (about a minute), after which it's prepared again.
       expires_at: new Date(this.now().getTime() + 60_000).toISOString(),
@@ -1111,12 +1228,63 @@ export class TreasuryService {
   // ---- balances ----
 
   async balances(address: string, cluster: string) {
-    if (cluster !== "devnet") refuse("mainnet_disabled", MAINNET_DISABLED);
-    const sol = await this.call<{ value: number }>("getBalance", [address, { commitment: "confirmed" }]);
-    const ata = associatedTokenAddress(address, this.config.usdcMint);
-    const info = await this.account(ata);
+    if (cluster !== "devnet" && cluster !== "mainnet") refuse("mainnet_disabled", MAINNET_DISABLED);
+    if (cluster === "mainnet" && !(await this.mainnetEnabled())) refuse("mainnet_disabled", `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on`);
+    const c = cluster as Cluster;
+    const sol = await this.call<{ value: number }>("getBalance", [address, { commitment: "confirmed" }], c);
+    const mint = this.mintFor(c);
+    const ata = associatedTokenAddress(address, mint);
+    const info = await this.account(ata, c);
     const token = info && info.owner === TOKEN_PROGRAM ? decodeTokenAccount(this.bytes(info)) : null;
-    return { address, cluster: "devnet" as const, sol_lamports: sol.value, usdc_base_units: units(token?.amount ?? 0n), usdc_mint: this.config.usdcMint, usdc_account: ata };
+    return { address, cluster: c, sol_lamports: sol.value, usdc_base_units: units(token?.amount ?? 0n), usdc_mint: mint, usdc_account: ata };
+  }
+
+  // ---- the watch ----
+
+  // Every few minutes, for every registered pool: is its program still the one registered (same last-deployed slot),
+  // its upgrade authority the same, and its multisig (if one holds it) no weaker? A change flags the pool
+  // (program_flag, audited as treasury_program_flagged, counted in ops_status): Mynt approves no deposits to it until
+  // its builder registers it again. Withdrawal requests aren't affected. An unreadable chain flags nothing.
+  async watch(): Promise<{ checked: number; flagged: number }> {
+    let checked = 0;
+    let flagged = 0;
+    for (const row of await this.all()) {
+      if (row.program_flag) continue;
+      try {
+        const why = await this.onCluster.run(row.cluster, () => this.programChange(row));
+        checked++;
+        if (why && (await this.flagProgram(row, why))) flagged++;
+      } catch (e) {
+        if (!(e instanceof TreasuryRefusal && e.code === "rpc_unavailable")) console.error(`treasury watch: ${row.pool_address}: ${(e as Error).message.slice(0, 200)}`);
+      }
+    }
+    return { checked, flagged };
+  }
+
+  // What changed about the pool's program since registration, or null.
+  private async programChange(row: TreasuryRow): Promise<string | null> {
+    if (row.program_slot === null) return null; // never read at registration: already refused for approvals
+    const [programData] = findProgramAddress([pubkeyBytes(row.program_id)], UPGRADEABLE_LOADER);
+    const r = await this.call<{ value: AccountInfo | null }>("getAccountInfo", [programData, { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 45 } }]);
+    const b = r?.value ? Buffer.from(this.bytes(r.value)) : null;
+    if (!b || b.length < 45 || b.readUInt32LE(0) !== 3) return "its program was closed";
+    if (b.readBigUInt64LE(4).toString() !== row.program_slot) return "its program was redeployed since it was registered";
+    const authority = b[12] === 1 ? base58Encode(b.subarray(13, 45)) : null;
+    if (authority !== row.upgrade_authority) return `its upgrade authority changed since it was registered (now ${authority ?? "none"})`;
+    if (row.upgrade_lock === "timelocked_multisig" && row.upgrade_multisig) {
+      const before = row.upgrade_lock_detail as { time_lock_seconds: number; threshold: number } | null;
+      const now = await this.upgradeLock(row.cluster, row.upgrade_authority, row.upgrade_multisig);
+      if (now.status !== "timelocked_multisig") return `the multisig that can upgrade it is no longer locked: ${now.status === "unlocked" ? now.reason : now.status}`;
+      if (before && (now.time_lock_seconds < before.time_lock_seconds || now.threshold < before.threshold))
+        return `the multisig that can upgrade it was weakened (time lock ${before.time_lock_seconds}s to ${now.time_lock_seconds}s, threshold ${before.threshold} to ${now.threshold})`;
+    }
+    return null;
+  }
+
+  private async flagProgram(row: TreasuryRow, why: string): Promise<boolean> {
+    const { rows } = await this.db.query(`UPDATE ${T}.treasury_pools SET program_flag = $2, program_flagged_at = now() WHERE pool_id = $1 AND program_flag IS NULL RETURNING pool_id`, [row.pool_id, why]);
+    if (rows.length) await this.store.audit(null, "treasury_program_flagged", row.pool_id, { cluster: row.cluster, pool_address: row.pool_address, reason: why });
+    return rows.length > 0;
   }
 
   // ---- the indexer ----
@@ -1126,7 +1294,6 @@ export class TreasuryService {
     // Pools asked for first (a transaction they touched was confirmed), then the rest.
     const rows = (await this.db.query(`SELECT * FROM ${T}.treasury_pools ORDER BY index_requested_at DESC NULLS LAST, created_at`)).rows as unknown as TreasuryRow[];
     for (const row of rows) {
-      if (row.cluster !== "devnet") continue;
       try {
         events += await this.indexPool(row);
       } catch (e) {
@@ -1158,6 +1325,10 @@ export class TreasuryService {
   // reaches the cursor, the cursor moves to the newest signature it started from. Then what it found is read oldest
   // first, indexPerPoll a poll; a new scan starts only once all of it has been read.
   async indexPool(row: TreasuryRow): Promise<number> {
+    return this.onCluster.run(row.cluster, () => this.indexPoolOn(row));
+  }
+
+  private async indexPoolOn(row: TreasuryRow): Promise<number> {
     await this.db.query(`UPDATE ${T}.treasury_pools SET index_requested_at = NULL WHERE pool_id = $1`, [row.pool_id]);
     const fresh = (await this.db.query(`SELECT * FROM ${T}.treasury_pools WHERE pool_id = $1`, [row.pool_id])).rows[0] as unknown as TreasuryRow | undefined;
     if (!fresh) return 0;
@@ -1356,7 +1527,12 @@ export class TreasuryService {
 
   // ---- a sent transaction ----
 
-  async txStatus(user: User, signature: string) {
+  async txStatus(user: User, signature: string, cluster: Cluster = "devnet") {
+    if (cluster === "mainnet" && !(await this.mainnetEnabled())) refuse("mainnet_disabled", `${MAINNET_DISABLED}: an admin hasn't turned treasury mainnet on`);
+    return this.onCluster.run(cluster, () => this.txStatusOn(user, signature, cluster));
+  }
+
+  private async txStatusOn(user: User, signature: string, cluster: Cluster) {
     this.limit(user.id, "get_treasury_tx_status", this.config.statusLimitPerMinute ?? 30);
     let ok = false;
     try {
@@ -1374,13 +1550,13 @@ export class TreasuryService {
       const tx = await this.call<{ transaction?: { message?: { accountKeys?: string[] } } } | null>("getTransaction", [signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
       const keys = new Set(tx?.transaction?.message?.accountKeys ?? []);
       for (const row of await this.all()) {
-        if (!keys.has(row.pool_address)) continue;
+        if (row.cluster !== cluster || !keys.has(row.pool_address)) continue;
         await this.db.query(`UPDATE ${T}.treasury_pools SET index_requested_at = now() WHERE pool_id = $1`, [row.pool_id]);
         queued.push(row.pool_id);
       }
       if (queued.length) this.kick();
     }
-    return { signature, cluster: "devnet" as const, status, err: st?.err ?? null, slot: st?.slot ?? null, queued_pools: queued };
+    return { signature, cluster, status, err: st?.err ?? null, slot: st?.slot ?? null, queued_pools: queued };
   }
 }
 
