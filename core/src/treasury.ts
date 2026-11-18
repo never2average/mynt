@@ -395,6 +395,17 @@ export class TreasuryService {
          attesters_flag = NULL, attesters_flagged_at = NULL, updated_at = now()`,
       [input.pool_id, input.program_id, input.pool_address, p.vault, p.usdc_mint, p.creator, programHash, upgradeAuthority, verified, note, user.id, format, programSlot === null ? null : programSlot.toString()],
     );
+    // A pool on MYNTDEP3 counts every firm's history of wallets toward its limit. Deposits made before (under
+    // MYNTDEP2, e.g. a pool upgraded in place) came through Mynt's prepares too, which recorded each wallet's firm:
+    // those wallets with money still in the pool join their firm's history, so nothing earlier escapes the count.
+    if (format === "MYNTDEP3")
+      await this.db.query(
+        `INSERT INTO ${T}.treasury_firm_wallets (pool_address, lp_entity_id, wallet)
+         SELECT DISTINCT d.pool_address, w.lp_entity_id, d.depositor FROM ${T}.treasury_deposits d JOIN ${T}.treasury_wallets w ON w.wallet = d.depositor
+         WHERE d.pool_address = $1 AND NOT d.rejected AND d.remaining > 0
+         ON CONFLICT DO NOTHING`,
+        [input.pool_address],
+      );
     this.cache.set(input.pool_address, { at: Date.now(), pool: p });
     return this.view((await this.get(input.pool_id))!, p, null, attester);
   }
@@ -425,7 +436,9 @@ export class TreasuryService {
       // MYNTDEP2 (earlier builds): an approval can be reused until it expires, so Mynt's limits are advisory.
       deposit_approval: row.deposit_approval,
       // Exact only when Mynt rebuilt the program (a verified build) and it checks MYNTDEP3: an unverified build is
-      // whatever its builder deployed, so Mynt can't vouch that it spends approvals.
+      // whatever its builder deployed, so Mynt can't vouch that it spends approvals. Even exact holds only while the
+      // program is the one registered: its upgrade authority could deploy one that takes deposits without approvals
+      // (Mynt stops approving once it sees an upgrade, program_upgraded).
       firm_limit: row.verified_build && row.deposit_approval === "MYNTDEP3" ? "exact" : "advisory",
       build_note: row.build_note,
       program_hash: row.program_hash,
@@ -588,7 +601,6 @@ export class TreasuryService {
       ];
       return this.unsigned(input.wallet, ixs);
     };
-    if (once) await this.unchangedProgram(row);
     const tx = once
       ? await this.approveOnce({ s, firm, firmWallets, row, pool, wallet: input.wallet, nonce: position?.nonce ?? 0n, amount, expiry, nowS, firmMax }, build)
       : await build(position?.nonce ?? 0n);
@@ -632,6 +644,7 @@ export class TreasuryService {
     return this.serially(lock, () =>
       inTransaction(this.db, async (tx) => {
         await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lock]);
+        await this.unchangedProgram(o.row);
         const { rows: history } = (await tx.query(`SELECT wallet FROM ${T}.treasury_firm_wallets WHERE pool_address = $1 AND lp_entity_id = $2`, [o.row.pool_address, o.firm])) as { rows: { wallet: string }[] };
         const counted = [...new Set([...o.firmWallets, o.wallet, ...history.map((r) => r.wallet)])];
         const { rows } = (await tx.query(
@@ -653,6 +666,12 @@ export class TreasuryService {
           const a = BigInt(r.amount);
           if (a > (open.get(k) ?? 0n)) open.set(k, a);
         }
+        // A wallet in the firm's history that's no longer linked to it, holds nothing in the pool and has no approval
+        // that can still land drops out (it could otherwise only ever take room from the firm).
+        const linkedNow = new Set([...o.firmWallets, o.wallet]);
+        const openWallets = new Set([...open.keys()].map((k) => k.slice(0, k.lastIndexOf(":"))));
+        const idle = history.map((r) => r.wallet).filter((w) => !linkedNow.has(w) && (live.get(w)?.principal ?? 0n) === 0n && !openWallets.has(w));
+        if (idle.length) await tx.query(`DELETE FROM ${T}.treasury_firm_wallets WHERE pool_address = $1 AND lp_entity_id = $2 AND wallet = ANY($3::text[])`, [o.row.pool_address, o.firm, idle]);
         const liveNonce = live.get(o.wallet)?.nonce ?? 0n;
         const nonce = liveNonce > o.nonce ? liveNonce : o.nonce;
         const mine = `${o.wallet}:${nonce}`;
@@ -702,7 +721,7 @@ export class TreasuryService {
   // MYNTDEP3 is checked against the program as registered: one upgraded since might no longer spend approvals, so it's
   // refused until its builder registers it again (which re-reads its bytes and layout).
   private async unchangedProgram(row: TreasuryRow) {
-    if (row.program_slot === null) return;
+    if (row.program_slot === null) refuse("program_upgraded", "The pool's program couldn't be read when it was registered: Mynt approves no deposits to it until its builder registers it again");
     const [programData] = findProgramAddress([pubkeyBytes(row.program_id)], UPGRADEABLE_LOADER);
     const r = await this.call<{ value: AccountInfo | null }>("getAccountInfo", [programData, { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 12 } }]);
     const b = r?.value ? Buffer.from(this.bytes(r.value)) : null;
