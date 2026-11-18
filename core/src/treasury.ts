@@ -199,12 +199,17 @@ export const MAINNET_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const BUILD_DIR = "/home/user/mynt-treasury-build";
 
 // What would still stop a registered (devnet) treasury from holding mainnet money, besides mainnet being off.
-export function mainnetBlockers(row: Pick<TreasuryRow, "verified_build" | "deposit_approval" | "upgrade_lock" | "upgrade_lock_detail">): string[] {
+export function mainnetBlockers(row: Pick<TreasuryRow, "verified_build" | "deposit_approval" | "upgrade_lock" | "upgrade_lock_detail">, terms?: { lock_in_seconds: bigint; notice_seconds: bigint } | null): string[] {
   const out: string[] = [];
   if (!row.verified_build) out.push("not a verified build: its bytes must be the treasury template as Mynt rebuilds it at its program id");
   if (row.deposit_approval !== "MYNTDEP3") out.push("its deposit approvals aren't MYNTDEP3 (amount-bound, single use)");
   if (row.upgrade_lock !== "immutable" && row.upgrade_lock !== "timelocked_multisig")
     out.push(`its upgrade authority isn't locked: ${(row.upgrade_lock_detail as { reason?: string } | null)?.reason ?? "make it immutable, or a Squads multisig vault (no config authority, two or more signers, a time lock) and name the multisig"}`);
+  // A time lock only protects depositors who can leave within it: an upgrade approved now could run before a deposit
+  // made now is out of its lock-in and notice.
+  const timeLock = (row.upgrade_lock_detail as { time_lock_seconds?: number } | null)?.time_lock_seconds;
+  if (row.upgrade_lock === "timelocked_multisig" && terms && timeLock !== undefined && BigInt(timeLock) < terms.lock_in_seconds + terms.notice_seconds)
+    out.push(`its multisig's time lock (${timeLock}s) is shorter than the pool's lock-in and notice (${terms.lock_in_seconds + terms.notice_seconds}s): depositors couldn't leave before an approved upgrade runs`);
   out.push("on mainnet it must be registered again there: its pool bound to mainnet's genesis hash, holding USDC, under a program id of its own");
   return out;
 }
@@ -408,8 +413,8 @@ export class TreasuryService {
     const pool = await getPool(this.store, input.pool_id);
     if (!pool) refuse("no_pool", `No pool '${input.pool_id}'`);
     if (!isAddress(input.program_id) || !isAddress(input.pool_address)) refuse("not_an_address", "program_id and pool_address must be Solana addresses");
-    if (input.cluster === "mainnet") return this.mainnetPreflight(user, input);
-    const { programHash, upgradeAuthority, programSlot, p } = await this.readTreasury("devnet", input.program_id, input.pool_address);
+    if (input.cluster === "mainnet") return this.mainnetPreflight(user, input, who);
+    const { programHash, upgradeAuthority, programSlot, authorityKnown, p } = await this.readTreasury("devnet", input.program_id, input.pool_address);
     if (p.usdc_mint !== this.config.usdcMint) refuse("wrong_mint", `The pool holds ${p.usdc_mint}, not devnet USDC (${this.config.usdcMint})`);
     const attester = await this.attesterAddress();
     if (!p.terms.attesters.includes(attester)) refuse("attester_missing", `Mynt's attester ${attester} isn't one of the pool's attesters, so Mynt can't approve deposits to it`, { mynt_attester: attester });
@@ -425,7 +430,7 @@ export class TreasuryService {
     // An earlier template build is never the current one, even if the manifest were left listing it as both.
     const earlier = programHash ? MANIFEST.earlier_builds?.find((b) => b.program_sha256 === programHash) : undefined;
     const { verified, note } = earlier ? { verified: false, note: "an earlier build of the treasury template" } : await this.verification(input.program_id, programHash, user.id);
-    const lock = await this.upgradeLock("devnet", upgradeAuthority, input.upgrade_multisig ?? null);
+    const lock = await this.upgradeLock("devnet", upgradeAuthority, input.upgrade_multisig ?? null, authorityKnown);
     // The approval layout the program checks: the template's own build and its earlier builds are known; otherwise
     // what the builder says, else what this pool was registered with, else the template's current one (MYNTDEP3).
     const known: DepositApprovalFormat | null = earlier ? earlier.deposit_approval : verified ? (MANIFEST.deposit_approval ?? "MYNTDEP3") : null;
@@ -447,6 +452,11 @@ export class TreasuryService {
     // A pool on MYNTDEP3 counts every firm's history of wallets toward its limit. Deposits made before (under
     // MYNTDEP2, e.g. a pool upgraded in place) came through Mynt's prepares too, which recorded each wallet's firm:
     // those wallets with money still in the pool join their firm's history, so nothing earlier escapes the count.
+    // A rebuild that finished while this registration was being checked is applied now.
+    if (!verified && !earlier && input.program_id !== MANIFEST.declared_id) {
+      const done = await this.templateBuild(input.program_id);
+      if (done?.status === "succeeded" && done.sha256) await this.rejudge(input.program_id, done.sha256);
+    }
     if (format === "MYNTDEP3")
       await this.db.query(
         `INSERT INTO ${T}.treasury_firm_wallets (pool_address, lp_entity_id, wallet)
@@ -492,7 +502,7 @@ export class TreasuryService {
       // Who can change the program: immutable, a timelocked Squads multisig, or unlocked (with why).
       upgrade_lock: row.upgrade_lock_detail ?? (row.upgrade_lock ? { status: row.upgrade_lock } : null),
       // What stands between this treasury and mainnet, besides mainnet being off at Mynt.
-      mainnet_blockers: mainnetBlockers(row),
+      mainnet_blockers: mainnetBlockers(row, p?.terms ?? null),
       build_note: row.build_note,
       program_hash: row.program_hash,
       upgrade_authority: row.upgrade_authority,
@@ -654,6 +664,7 @@ export class TreasuryService {
       ];
       return this.unsigned(input.wallet, ixs);
     };
+    if (once) await this.multisigStillLocked(row);
     const tx = once
       ? await this.approveOnce({ s, firm, firmWallets, row, pool, wallet: input.wallet, nonce: position?.nonce ?? 0n, amount, expiry, nowS, firmMax }, build)
       : await build(position?.nonce ?? 0n);
@@ -787,12 +798,14 @@ export class TreasuryService {
     let programHash: string | null = null;
     let upgradeAuthority: string | null = null;
     let programSlot: bigint | null = null;
+    let authorityKnown = false;
     if (pd) {
       const b = Buffer.from(this.bytes(pd));
       if (b.length > 45 && b.readUInt32LE(0) === 3) {
         programSlot = b.readBigUInt64LE(4);
         upgradeAuthority = b[12] === 1 ? base58Encode(b.subarray(13, 45)) : null;
         programHash = executableHash(b.subarray(45));
+        authorityKnown = true;
       }
     }
     const info = await this.account(address, cluster);
@@ -803,12 +816,14 @@ export class TreasuryService {
     if (poolAddress(programId, p.creator, p.pool_id) !== address) refuse("not_a_treasury_pool", `${address} isn't at the pool's own address`);
     if (!Buffer.from(p.cluster).equals(Buffer.from(base58Decode(GENESIS_HASH[cluster]))))
       refuse("wrong_cluster", `The pool's deposit approvals are bound to another chain than ${cluster}: its cluster isn't ${cluster}'s genesis hash`, { cluster: base58Encode(p.cluster), expected: GENESIS_HASH[cluster] });
-    return { programHash, upgradeAuthority, programSlot, p };
+    return { programHash, upgradeAuthority, programSlot, authorityKnown, p };
   }
 
   // Who can change the program, from the chain: the multisig the builder names (if any) is read and judged.
-  private async upgradeLock(cluster: Cluster, authority: string | null, multisig: string | null): Promise<UpgradeLock> {
+  private async upgradeLock(cluster: Cluster, authority: string | null, multisig: string | null, authorityKnown = true): Promise<UpgradeLock> {
     const min = this.config.minUpgradeTimelockSeconds ?? 48 * 3600;
+    // A program whose data couldn't be read isn't judged immutable: who can change it is unknown.
+    if (!authorityKnown) return { status: "unlocked", reason: "the program's data couldn't be read, so who can change it is unknown" };
     if (authority === null || !multisig) return judgeUpgradeLock(authority, null, min);
     const a = isAddress(multisig) ? await this.account(multisig, cluster) : null;
     return judgeUpgradeLock(authority, { address: multisig, account: a ? { owner: a.owner, data: this.bytes(a) } : null }, min);
@@ -818,7 +833,7 @@ export class TreasuryService {
   // would still stop it there: the pool bound to mainnet's genesis hash, a verified build of the template at its
   // own address (a rebuild is queued if there's none), a locked upgrade authority, MYNTDEP3, mainnet USDC, and a
   // program id of its own (not one a devnet treasury uses). Nothing is recorded but the rebuild request.
-  private async mainnetPreflight(user: User, input: { pool_id: string; program_id: string; pool_address: string; upgrade_multisig?: string }): Promise<never> {
+  private async mainnetPreflight(user: User, input: { pool_id: string; program_id: string; pool_address: string; upgrade_multisig?: string }, who: { admin: boolean; wallets: string[] | { unavailable: string } }): Promise<never> {
     let read: Awaited<ReturnType<TreasuryService["readTreasury"]>>;
     try {
       this.rpc("mainnet");
@@ -831,9 +846,11 @@ export class TreasuryService {
       if (e instanceof TreasuryRefusal) return refuse("mainnet_disabled", `${MAINNET_DISABLED}. On mainnet: ${e.message}`, { mainnet_checks: { [e.code]: e.message } });
       throw e;
     }
-    const { programHash, upgradeAuthority, p } = read;
-    const { verified, note } = await this.verification(input.program_id, programHash, user.id);
-    const lock = await this.upgradeLock("mainnet", upgradeAuthority, input.upgrade_multisig ?? null);
+    const { programHash, upgradeAuthority, authorityKnown, p } = read;
+    // Only the pool's own builder (its creator or authority, a wallet linked to them; or an admin) gets a rebuild queued.
+    const mine = who.admin || (Array.isArray(who.wallets) && (who.wallets.includes(p.creator) || who.wallets.includes(p.authority)));
+    const { verified, note } = mine ? await this.verification(input.program_id, programHash, user.id) : { verified: false, note: "not checked: the pool's creator or authority isn't a verified wallet linked to you" };
+    const lock = await this.upgradeLock("mainnet", upgradeAuthority, input.upgrade_multisig ?? null, authorityKnown);
     const { rows: reused } = await this.db.query(`SELECT 1 FROM ${T}.treasury_pools WHERE program_id = $1 AND cluster = 'devnet' LIMIT 1`, [input.program_id]);
     const checks = {
       cluster: "pass: the pool's deposit approvals are bound to mainnet",
@@ -858,18 +875,25 @@ export class TreasuryService {
     if (b?.status === "succeeded") return b.sha256 === programHash ? { verified: true, note: null } : { verified: false, note: `unverified build: the deployed program isn't the treasury template rebuilt at this program id (${b.sha256})` };
     if (!this.sandboxes) return { verified: false, note: "unverified build: this Mynt has no sandboxes to rebuild the treasury template at this program id" };
     if (b?.status === "queued" || b?.status === "running") return { verified: false, note: "unverified build, for now: Mynt is rebuilding the treasury template at this program id, and checks it when done" };
-    if (b?.status === "failed" && b.attempts >= 3) return { verified: false, note: `unverified build: Mynt couldn't rebuild the treasury template at this program id (${b.error ?? "failed"})` };
+    // Three failures in a row wait a day before another try (a provider outage shouldn't end it for good).
+    if (b?.status === "failed" && b.attempts >= 3 && b.finished_at && Date.now() - new Date(b.finished_at).getTime() < 86_400_000)
+      return { verified: false, note: `unverified build: Mynt couldn't rebuild the treasury template at this program id (${b.error ?? "failed"}); it tries again a day after the last attempt` };
+    // At most three rebuilds waiting or running per person: one builder can't hold up everyone else's.
+    const { rows: mine } = await this.db.query(`SELECT count(*)::int AS n FROM ${T}.treasury_builds WHERE requested_by = $1 AND status IN ('queued', 'running') AND program_id <> $2`, [userId, programId]);
+    if (Number((mine[0] as { n: number }).n) >= 3) return { verified: false, note: "unverified build: you have three rebuilds waiting already; register again once they're done" };
     await this.db.query(
       `INSERT INTO ${T}.treasury_builds (program_id, template_sha256, status, requested_by) VALUES ($1, $2, 'queued', $3)
-       ON CONFLICT (program_id, template_sha256) DO UPDATE SET status = 'queued', error = NULL, sandbox_id = NULL, process_id = NULL, updated_at = now() WHERE ${T}.treasury_builds.status = 'failed'`,
+       ON CONFLICT (program_id, template_sha256) DO UPDATE SET status = 'queued', error = NULL, sandbox_id = NULL, process_id = NULL, requested_by = EXCLUDED.requested_by,
+         attempts = CASE WHEN ${T}.treasury_builds.attempts >= 3 THEN 0 ELSE ${T}.treasury_builds.attempts END, updated_at = now()
+       WHERE ${T}.treasury_builds.status = 'failed'`,
       [programId, MANIFEST.program_sha256, userId],
     );
     return { verified: false, note: "unverified build, for now: Mynt is rebuilding the treasury template at this program id, and checks it when done" };
   }
 
   private async templateBuild(programId: string) {
-    const { rows } = await this.db.query(`SELECT status, sha256, error, attempts FROM ${T}.treasury_builds WHERE program_id = $1 AND template_sha256 = $2`, [programId, MANIFEST.program_sha256]);
-    return (rows[0] as { status: string; sha256: string | null; error: string | null; attempts: number } | undefined) ?? null;
+    const { rows } = await this.db.query(`SELECT status, sha256, error, attempts, finished_at FROM ${T}.treasury_builds WHERE program_id = $1 AND template_sha256 = $2`, [programId, MANIFEST.program_sha256]);
+    return (rows[0] as { status: string; sha256: string | null; error: string | null; attempts: number; finished_at: string | null } | undefined) ?? null;
   }
 
   // One step of the rebuild worker (every minute or so): finishes the running rebuild when its command is done (or
@@ -883,14 +907,26 @@ export class TreasuryService {
       const id = r.sandbox_id as string;
       const pid = r.process_id as number | null;
       const timedOut = Date.now() - new Date(r.started_at as string).getTime() > (this.config.verifyBuildMinutes ?? 90) * 60_000;
-      const st = pid === null ? { running: false, exitCode: null } : await sb.commandStatus(id, pid).catch(() => ({ running: true, exitCode: null }));
+      let st = pid === null ? { running: false, exitCode: null } : await sb.commandStatus(id, pid).catch(() => null);
+      if (st === null) {
+        // Not answering: a sandbox that's gone or broken fails the rebuild now rather than holding the queue.
+        const box = await sb.getSandbox(id).catch(() => null);
+        st = !box || ["error", "cancelled", "archived", "archiving"].includes(box.state) ? { running: false, exitCode: null } : { running: true, exitCode: null };
+      }
       if (st.running && !timedOut) return;
       const out = timedOut && st.running ? { error: `timed out after ${this.config.verifyBuildMinutes ?? 90} minutes` } : readTemplateBuild(await sb.readFile(id, `${BUILD_DIR}/out/programs.json`).catch(() => null), await sb.readFile(id, `${BUILD_DIR}/out/checks.jsonl`).catch(() => null), r.program_id as string, MANIFEST);
       await sb.stop(id).catch(() => undefined);
       await this.finishBuild(r.program_id as string, r.template_sha256 as string, out);
       return;
     }
-    const { rows: queued } = (await this.db.query(`SELECT * FROM ${T}.treasury_builds WHERE status = 'queued' AND template_sha256 = $1 ORDER BY updated_at LIMIT 1`, [MANIFEST.program_sha256])) as { rows: Row[] };
+    // Claimed before anything is created, so a second worker (or tick) can't start the same one.
+    const { rows: queued } = (await this.db.query(
+      `UPDATE ${T}.treasury_builds SET status = 'running', started_at = now(), attempts = attempts + 1, updated_at = now()
+       WHERE (program_id, template_sha256) = (SELECT program_id, template_sha256 FROM ${T}.treasury_builds WHERE status = 'queued' AND template_sha256 = $1 ORDER BY updated_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+         AND status = 'queued'
+       RETURNING *`,
+      [MANIFEST.program_sha256],
+    )) as { rows: Row[] };
     const q = queued[0];
     if (!q) return;
     const programId = q.program_id as string;
@@ -904,7 +940,7 @@ export class TreasuryService {
       if (sb.writeFiles) await sb.writeFiles(s.id, all);
       else for (const [path, text] of Object.entries(all)) await sb.writeFile(s.id, path, text);
       const run = await sb.exec(s.id, `cd ${BUILD_DIR} && bash solana-verify.sh build ${BUILD_DIR}/src ${BUILD_DIR}/out ${BUILD_DIR}/allowlist.json > ${BUILD_DIR}/build.log 2>&1`, { detached: true });
-      await this.db.query(`UPDATE ${T}.treasury_builds SET status = 'running', sandbox_id = $3, process_id = $4, started_at = now(), attempts = attempts + 1, updated_at = now() WHERE program_id = $1 AND template_sha256 = $2`, [
+      await this.db.query(`UPDATE ${T}.treasury_builds SET sandbox_id = $3, process_id = $4, updated_at = now() WHERE program_id = $1 AND template_sha256 = $2`, [
         programId,
         q.template_sha256,
         s.id,
@@ -912,7 +948,7 @@ export class TreasuryService {
       ]);
     } catch (e) {
       if (sandboxId) await sb.stop(sandboxId).catch(() => undefined);
-      await this.db.query(`UPDATE ${T}.treasury_builds SET status = 'failed', error = $3, attempts = attempts + 1, finished_at = now(), updated_at = now() WHERE program_id = $1 AND template_sha256 = $2`, [
+      await this.db.query(`UPDATE ${T}.treasury_builds SET status = 'failed', error = $3, finished_at = now(), updated_at = now() WHERE program_id = $1 AND template_sha256 = $2`, [
         programId,
         q.template_sha256,
         `couldn't start: ${(e as Error).message.slice(0, 300)}`,
@@ -929,15 +965,52 @@ export class TreasuryService {
     }
     await this.db.query(`UPDATE ${T}.treasury_builds SET status = 'succeeded', sha256 = $3, error = NULL, finished_at = now(), updated_at = now() WHERE program_id = $1 AND template_sha256 = $2`, [programId, template, out.sha256]);
     if (template !== MANIFEST.program_sha256) return;
+    await this.rejudge(programId, out.sha256);
+  }
+
+  // Judges every pool on this program id against Mynt's rebuild there. A pool whose program was redeployed since it
+  // was registered (its recorded hash is stale) isn't judged on that hash: it's told to register again.
+  private async rejudge(programId: string, sha256: string) {
+    const slot = await this.programSlotNow(programId).catch(() => undefined);
+    await this.db.query(
+      `UPDATE ${T}.treasury_pools SET build_note = 'redeployed since it was registered: register it again to check it', verified_build = false, updated_at = now()
+       WHERE program_id = $1 AND $2::text IS DISTINCT FROM program_slot::text`,
+      [programId, slot === undefined ? "unknown" : slot],
+    );
     await this.db.query(
       `UPDATE ${T}.treasury_pools SET verified_build = (program_hash = $2 AND deposit_approval = $3),
          build_note = CASE WHEN program_hash = $2 AND deposit_approval = $3 THEN NULL
                            WHEN program_hash = $2 THEN 'verified bytes, but registered with another deposit approval layout: register it again'
                            ELSE 'unverified build: the deployed program isn''t the treasury template rebuilt at this program id (' || $2 || ')' END,
          updated_at = now()
-       WHERE program_id = $1`,
-      [programId, out.sha256, MANIFEST.deposit_approval ?? "MYNTDEP3"],
+       WHERE program_id = $1 AND $4::text IS NOT DISTINCT FROM program_slot::text`,
+      [programId, sha256, MANIFEST.deposit_approval ?? "MYNTDEP3", slot === undefined ? "unknown" : slot],
     );
+  }
+
+  private async programSlotNow(programId: string): Promise<string | null> {
+    const [programData] = findProgramAddress([pubkeyBytes(programId)], UPGRADEABLE_LOADER);
+    const r = await this.call<{ value: AccountInfo | null }>("getAccountInfo", [programData, { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 12 } }]);
+    const b = r?.value ? Buffer.from(this.bytes(r.value)) : null;
+    return b && b.length >= 12 && b.readUInt32LE(0) === 3 ? b.readBigUInt64LE(4).toString() : null;
+  }
+
+  // A timelocked multisig weakened since registration (its time lock, threshold or members, which its own proposals
+  // can change) is caught before any approval: recorded as unlocked, and Mynt stops until the builder registers it
+  // again. Checked before the approval's transaction (so the record stays); weakening a multisig itself waits out its
+  // time lock, so nothing slips in between.
+  private async multisigStillLocked(row: TreasuryRow) {
+    if (row.upgrade_lock === "timelocked_multisig" && row.upgrade_multisig) {
+      const before = row.upgrade_lock_detail as { time_lock_seconds: number; threshold: number } | null;
+      const now = await this.upgradeLock(row.cluster, row.upgrade_authority, row.upgrade_multisig);
+      if (now.status !== "timelocked_multisig" || (before && (now.time_lock_seconds < before.time_lock_seconds || now.threshold < before.threshold))) {
+        await this.db.query(`UPDATE ${T}.treasury_pools SET upgrade_lock = 'unlocked', upgrade_lock_detail = $2, updated_at = now() WHERE pool_id = $1`, [
+          row.pool_id,
+          JSON.stringify({ status: "unlocked", reason: `its multisig changed since registration: ${now.status === "unlocked" ? now.reason : "a shorter time lock or a lower threshold"}` }),
+        ]);
+        refuse("upgrade_lock_changed", "The multisig that can upgrade the pool's program was weakened since it was registered: Mynt approves no deposits to it until its builder registers it again");
+      }
+    }
   }
 
   // MYNTDEP3 is checked against the program as registered: one upgraded since might no longer spend approvals, so it's

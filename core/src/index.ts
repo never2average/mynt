@@ -10,6 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ClerkAdmin, ClerkAuth, ClerkIdentityProvider, clerkConfigFromEnv, registerFirstPartyApp } from "./auth.js";
 import { LinkedAccountsService } from "./linked-accounts.js";
 import { sandboxesFromEnv } from "./sandbox-providers/index.js";
+import { serialLoop } from "./worker.js";
 import { BdService, bdConfigFromEnv } from "./bd.js";
 import { HostingService, hostingConfigFromEnv, hostingProviderFromEnv } from "./hosting.js";
 import { egressFor } from "./hosting-tools.js";
@@ -293,8 +294,7 @@ if (values.help) {
   const treasuryEvents = setInterval(() => treasury.index().catch((e) => console.error("treasury indexer:", (e as Error).message)), Number(process.env.TREASURY_INDEX_POLL_MS ?? 30_000));
   treasuryEvents.unref();
   // Mynt's rebuilds of the treasury template at pools' program ids, one at a time.
-  const treasuryBuilds = setInterval(() => treasury.buildTick().catch((e) => console.error("treasury builds:", (e as Error).message)), 60_000);
-  treasuryBuilds.unref();
+  const treasuryBuilds = serialLoop(() => treasury.buildTick(), 60_000, "treasury builds:");
   process.on("SIGTERM", () => {
     clearInterval(treasuryEvents);
     clearInterval(treasuryBuilds);

@@ -1248,3 +1248,110 @@ test("mainnet stays off; asked for it, Mynt reads the treasury there and lists w
   // The devnet RPC is never asked for mainnet's accounts, nor the other way round.
   assert.ok(m.calls.includes("getGenesisHash"));
 });
+
+test("the template at its own program id is the template, file for file", () => {
+  const manifest = tpl.readTreasuryManifest();
+  const files = tpl.treasuryTemplateAt(manifest.declared_id);
+  const dir = new URL("workspaces/coding-build/templates/solana-treasury/", new URL("../", import.meta.url));
+  for (const [path, text] of Object.entries(files)) assert.equal(text, readFileSync(new URL(path, dir), "utf8"), path);
+});
+
+test("a multisig weakened after registration stops approvals; a time lock shorter than lock-in and notice is a blocker", async () => {
+  const s = await world();
+  const ms = addr(80);
+  s.devnet.set(ms, lock.SQUADS_V4_PROGRAM, squads({ timeLock: 72 * 3600 }));
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: lock.squadsVault(ms, 0) }));
+  const poolId = await s.makePool();
+  const t = s.treasuryPool({ terms: { lock_in: 30 * 86_400, notice: 3600 } });
+  const v = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address, upgrade_multisig: ms });
+  assert.equal(v.upgrade_lock.status, "timelocked_multisig");
+  assert.ok(v.mainnet_blockers.some((b) => /shorter than the pool's lock-in and notice/.test(b)), JSON.stringify(v.mainnet_blockers));
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  const args = { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 40 * 86_400 };
+  await ok(s.fundA.client, "prepare_treasury_deposit", args);
+  // Its members lower the time lock (still over the 48h minimum): weaker than registered, so approvals stop.
+  s.devnet.set(ms, lock.SQUADS_V4_PROGRAM, squads({ timeLock: 50 * 3600 }));
+  await refused(s.fundA.client, "prepare_treasury_deposit", args, "upgrade_lock_changed");
+  const row = (await s.db.query("SELECT upgrade_lock, upgrade_lock_detail FROM financial_products.treasury_pools WHERE pool_id = $1", [poolId])).rows[0];
+  assert.equal(row.upgrade_lock, "unlocked");
+  // Registered again with it as it is now, approvals resume.
+  await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address, upgrade_multisig: ms });
+  await ok(s.fundA.client, "prepare_treasury_deposit", args);
+  // One signature needed now: refused again.
+  s.devnet.set(ms, lock.SQUADS_V4_PROGRAM, squads({ timeLock: 50 * 3600, threshold: 1 }));
+  await refused(s.fundA.client, "prepare_treasury_deposit", args, "upgrade_lock_changed");
+});
+
+test("a program whose data can't be read isn't judged immutable", async () => {
+  const s = await world();
+  s.devnet.accounts.delete(s.programData);
+  const poolId = await s.makePool();
+  const t = s.treasuryPool();
+  const v = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address });
+  assert.equal(v.upgrade_lock.status, "unlocked");
+  assert.match(v.upgrade_lock.reason, /couldn't be read/);
+});
+
+test("the rebuild worker: overlapping ticks start one sandbox, a dead sandbox fails the rebuild, and each person queues at most three", async () => {
+  const deployed = executableHash(Buffer.concat([Buffer.from("not the template's bytes"), Buffer.alloc(16)]));
+  const box = new FakeBuildBox(() => ({ sha256: deployed }));
+  let slow;
+  const gate = new Promise((r) => (slow = r));
+  const create = box.createSandbox.bind(box);
+  box.createSandbox = async (o) => {
+    await gate;
+    return create(o);
+  };
+  const s = await world({ sandboxes: box });
+  await registered(s);
+  const a = s.treasury.buildTick();
+  const b = s.treasury.buildTick();
+  slow();
+  await Promise.all([a, b]);
+  assert.equal(box.boxes.size, 1, "one sandbox for one rebuild");
+  assert.equal((await s.db.query("SELECT attempts FROM financial_products.treasury_builds")).rows[0].attempts, 1);
+  // The sandbox stops answering and is gone: the rebuild fails at once rather than holding the queue.
+  box.commandStatus = async () => {
+    throw new Error("gone");
+  };
+  box.getSandbox = async () => ({ id: "box-1", state: "error" });
+  box.answer = () => ({ fail: true });
+  await s.treasury.buildTick();
+  assert.equal((await s.db.query("SELECT status FROM financial_products.treasury_builds")).rows[0].status, "failed");
+
+  // Three rebuilds waiting per person; a fourth program id isn't queued.
+  const s2 = await world({ sandboxes: new FakeBuildBox(() => ({ sha256: deployed })) });
+  const programAt = (id) => {
+    const pd = findProgramAddress([base58Decode(id)], "BPFLoaderUpgradeab1e11111111111111111111111")[0];
+    s2.devnet.set(id, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(2), key(pd)]), true);
+    s2.devnet.set(pd, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes());
+    const address = chain.poolAddress(id, s2.creator, 1);
+    const vault = findProgramAddress([Buffer.from("vault"), base58Decode(address)], id)[0];
+    s2.devnet.set(address, id, encodePool({ creator: s2.creator, poolId: 1, mint: chain.DEVNET_USDC_MINT, vault, terms: terms({ attesters: [s2.attester, chain.ZERO_KEY] }) }));
+    return address;
+  };
+  const notes = [];
+  for (let i = 0; i < 4; i++) {
+    const id = Keypair.generate().address;
+    const v = await ok(s2.builder.client, "register_treasury_pool", { pool_id: await s2.makePool(), cluster: "devnet", program_id: id, pool_address: programAt(id) });
+    notes.push(v.build_note);
+  }
+  assert.match(notes[3], /three rebuilds waiting/);
+  assert.equal((await s2.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_builds")).rows[0].n, 3);
+});
+
+test("asked about mainnet, Mynt queues no rebuild for a pool that isn't the caller's", async () => {
+  const s = await world({ mainnet: true, sandboxes: new FakeBuildBox(() => ({ sha256: "a".repeat(64) })) });
+  const m = s.mainnet;
+  m.set(s.programId, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(2), key(s.programData)]), true);
+  m.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: null }));
+  const stranger = addr(70);
+  const address = chain.poolAddress(s.programId, stranger, 9);
+  const vault = findProgramAddress([Buffer.from("vault"), base58Decode(address)], s.programId)[0];
+  m.set(address, s.programId, encodePool({ creator: stranger, poolId: 9, mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", vault, cluster: Buffer.from(base58Decode(GENESIS_HASH.mainnet)), terms: terms({ attesters: [s.attester, chain.ZERO_KEY] }) }));
+  const r = await refused(s.builder.client, "register_treasury_pool", { pool_id: await s.makePool(), cluster: "mainnet", program_id: s.programId, pool_address: address }, "mainnet_disabled");
+  assert.match(r.mainnet_checks.verified_build, /isn't a verified wallet linked to you/);
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_builds")).rows[0].n, 0);
+});
