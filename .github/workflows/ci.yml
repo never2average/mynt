@@ -441,9 +441,26 @@ jobs:
           python3 -c 'import json,sys; r = json.load(open(sys.argv[1])); print(json.dumps({"passed": r["passed"], "refusals": r.get("rules", {}).get("refusals", r.get("refusals"))}, indent=2)[:4000])' "$RUNNER_TEMP/treasury-rules.json" || cat "$RUNNER_TEMP/treasury-rules.json"
           [ "$code" = 1 ] || { echo "program-rules exited $code, not 1 (refused)"; exit 1; }
           grep -q "anchor_spl::token" "$RUNNER_TEMP/treasury-rules.json"
+      # How Mynt verifies a pool's program (src/treasury-template.ts, TreasuryService.buildTick): the template at
+      # another program id, written by the same code, built by the same script, read back the same way. At a fresh
+      # id it must build, declare that id, use the recorded Cargo.lock, and differ from the template's own build.
+      - name: The template rebuilt at another program id, as Mynt verifies a pool's program
+        run: |
+          id=$(node -e 'import("./dist/solana/codec.js").then((m) => console.log(m.Keypair.generate().address))')
+          echo "program id: $id"
+          node scripts/treasury-at.mjs "$id" "$RUNNER_TEMP/treasury-at"
+          bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/treasury-at" "$RUNNER_TEMP/treasury-at-out" "$PWD/schemas/solana-crate-allowlist.json"
+          node scripts/treasury-at.mjs check "$id" "$RUNNER_TEMP/treasury-at-out" | tee "$RUNNER_TEMP/treasury-at.json"
+          python3 - "$RUNNER_TEMP/treasury-at.json" schemas/solana-treasury-template.json <<'PY'
+          import json, sys
+          r, manifest = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+          assert "sha256" in r, r
+          assert r["sha256"] != manifest["program_sha256"], "a build at another id must differ from the template's own"
+          print(f"::notice title=Treasury template at another id::{r['sha256']}")
+          PY
       - name: Logs
         if: failure()
-        run: for f in "$RUNNER_TEMP"/treasury-out/*.log; do echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"; done
+        run: for f in "$RUNNER_TEMP"/treasury-out/*.log "$RUNNER_TEMP"/treasury-at-out/*.log; do [ -f "$f" ] || continue; echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"; done
   # The apps under platform/ (chat: mynt-chat's chat and developer console; studio: Mynt Studio), the repository's npm
   # workspaces, each installed on its own from the root lockfile with the sign-in code both import (@mynt/auth,
   # platform/packages/auth): each app's tests, type check and production build. For the studio, also: it and the

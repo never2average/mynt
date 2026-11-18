@@ -186,7 +186,7 @@ class FakeDevnet {
     this.calls.push(method);
     switch (method) {
       case "getGenesisHash":
-        return GENESIS_HASH.devnet;
+        return this.genesis ?? GENESIS_HASH.devnet;
       case "getAccountInfo":
         return { value: this.accounts.get(params[0]) ?? null };
       case "getMultipleAccounts":
@@ -220,8 +220,12 @@ async function world(config = {}) {
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const devnet = new FakeDevnet();
-  const solana = await SolanaService.open(db, store, solanaConfigFromEnv({}), { rpc: () => devnet, custody: null });
-  const treasury = await TreasuryService.open(db, store, solana, { usdcMint: chain.DEVNET_USDC_MINT, indexPerPoll: 200, ...config });
+  // A second chain standing in for mainnet when asked for (opts.mainnet), answering with mainnet's genesis hash.
+  const mainnet = new FakeDevnet();
+  mainnet.genesis = GENESIS_HASH.mainnet;
+  const solana = await SolanaService.open(db, store, solanaConfigFromEnv(config.mainnet ? { SOLANA_RPC_URL_MAINNET: "http://mainnet.invalid" } : {}), { rpc: (c) => (c === "mainnet" ? mainnet : devnet), custody: null });
+  const { sandboxes, mainnet: _m, ...rest } = config;
+  const treasury = await TreasuryService.open(db, store, solana, { usdcMint: chain.DEVNET_USDC_MINT, indexPerPoll: 200, ...rest }, { sandboxes });
   const linked = new Map(); // user id -> wallets
   const identity = new LinkedAccountsService({ subjectOf: async (id) => id, linkedAccounts: async (id) => ({ git: null, wallets: linked.get(id) ?? [] }), manageUrl: () => null }, 0, Date.now, 0);
   const connect = async (user) => {
@@ -275,7 +279,7 @@ async function world(config = {}) {
   // The cluster's clock (the Clock sysvar): slot, epoch start, epoch, leader schedule epoch, unix timestamp.
   const setClock = (t) => devnet.set("SysvarC1ock11111111111111111111111111111111", "Sysvar1111111111111111111111111111111111111", Buffer.concat([u64(1), i64(t), u64(0), u64(0), i64(t)]));
   setClock(Math.floor(Date.now() / 1000));
-  return { db, store, devnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, programData, treasuryPool, connect, firm, productId: seed.id, creator, setClock };
+  return { db, store, devnet, mainnet, solana, treasury, linked, sponsor, builder, fundA, fundB, makePool, attester, programId, programData, treasuryPool, connect, firm, productId: seed.id, creator, setClock };
 }
 
 const callTool = async (client, name, args = {}) => {
@@ -1015,4 +1019,232 @@ test("MYNTDEP3: a program upgraded since registration gets no approvals until it
   await refused(s.fundA.client, "prepare_treasury_deposit", args, "program_upgraded");
   await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address });
   await ok(s.fundA.client, "prepare_treasury_deposit", args);
+});
+
+// ---- verified builds, locked upgrade authorities, and the cluster a pool is bound to ----
+
+const lock = await import("../dist/solana/upgrade-lock.js");
+const tpl = await import("../dist/treasury-template.js");
+const { executableHash } = await import("../dist/solana/codec.js");
+
+// A Squads v4 Multisig account as the program lays it out.
+const squads = (o = {}) =>
+  Buffer.concat([
+    Buffer.from(anchorDiscriminator("account", "Multisig")),
+    key(addr(90)), // create_key
+    key(o.configAuthority ?? "11111111111111111111111111111111"),
+    (() => { const b = Buffer.alloc(2); b.writeUInt16LE(o.threshold ?? 2); return b; })(),
+    u32(o.timeLock ?? 48 * 3600),
+    u64(3),
+    u64(0),
+    o.rentCollector ? Buffer.concat([Buffer.from([1]), key(o.rentCollector)]) : Buffer.from([0]),
+    Buffer.from([254]),
+    u32((o.members ?? [[addr(91), 7], [addr(92), 7], [addr(93), 1]]).length),
+    ...(o.members ?? [[addr(91), 7], [addr(92), 7], [addr(93), 1]]).map(([k, perm]) => Buffer.concat([key(k), Buffer.from([perm])])),
+  ]);
+
+test("an upgrade authority is locked only when immutable or a timelocked Squads vault its members govern", () => {
+  const ms = addr(80);
+  const vault = lock.squadsVault(ms, 0);
+  const acct = (o) => ({ address: ms, account: { owner: lock.SQUADS_V4_PROGRAM, data: squads(o) } });
+  const H48 = 48 * 3600;
+  assert.deepEqual(lock.judgeUpgradeLock(null, null, H48), { status: "immutable" });
+  assert.equal(lock.judgeUpgradeLock(addr(41), null, H48).status, "unlocked");
+  const ok = lock.judgeUpgradeLock(vault, acct(), H48);
+  assert.deepEqual(ok, { status: "timelocked_multisig", multisig: ms, vault_index: 0, threshold: 2, voters: 2, time_lock_seconds: H48 });
+  // Another vault index of the same multisig counts; a key that's no vault of it doesn't.
+  assert.equal(lock.judgeUpgradeLock(lock.squadsVault(ms, 3), acct(), H48).vault_index, 3);
+  assert.match(lock.judgeUpgradeLock(addr(41), acct(), H48).reason, /isn't one of/);
+  // The rent collector option changes the layout; it still decodes.
+  assert.equal(lock.judgeUpgradeLock(vault, acct({ rentCollector: addr(94) }), H48).status, "timelocked_multisig");
+  // Refused: a controlled multisig, one signature, too few voters, a short time lock, not Squads.
+  assert.match(lock.judgeUpgradeLock(vault, acct({ configAuthority: addr(95) }), H48).reason, /config authority/);
+  assert.match(lock.judgeUpgradeLock(vault, acct({ threshold: 1 }), H48).reason, /at least two/);
+  assert.match(lock.judgeUpgradeLock(vault, acct({ threshold: 3 }), H48).reason, /needs 3 of 2/);
+  assert.match(lock.judgeUpgradeLock(vault, acct({ timeLock: 3600 }), H48).reason, /time lock is 3600s/);
+  assert.match(lock.judgeUpgradeLock(vault, { address: ms, account: { owner: addr(1), data: squads() } }, H48).reason, /isn't a Squads v4 multisig/);
+  assert.match(lock.judgeUpgradeLock(vault, { address: ms, account: { owner: lock.SQUADS_V4_PROGRAM, data: Buffer.alloc(20) } }, H48).reason, /multisig account/);
+});
+
+test("the treasury template at another program id: the id swapped everywhere it's written, and the build read back as Mynt does", () => {
+  const manifest = tpl.readTreasuryManifest();
+  const id = Keypair.generate().address;
+  const files = tpl.treasuryTemplateAt(id);
+  assert.match(files["programs/mynt_treasury/src/lib.rs"], new RegExp(`declare_id!\\("${id}"\\)`));
+  assert.equal(files["Anchor.toml"].split(id).length - 1, 2);
+  assert.match(files["programs/extension_probe/src/lib.rs"], new RegExp(`TREASURY_ID: Pubkey = pubkey!\\("${id}"\\)`));
+  assert.ok(!Object.values(files).some((t) => t.includes(manifest.declared_id)), "the template's own id is gone");
+  assert.ok("Cargo.lock" in files && !Object.keys(files).some((f) => f.startsWith("target/") || f.includes("node_modules")));
+  assert.throws(() => tpl.treasuryTemplateAt("not an address"), /Solana address/);
+  const pass = '{"name": "solana_build", "status": "pass", "detail": ""}';
+  const programs = (o = {}) => JSON.stringify([{ name: "extension_probe", sha256: "1".repeat(64), declared_id: addr(3) }, { name: "mynt_treasury", sha256: "a".repeat(64), declared_id: id, cargo_lock_sha256: manifest.cargo_lock_sha256, ...o }]);
+  assert.deepEqual(tpl.readTemplateBuild(programs(), pass, id, manifest), { sha256: "a".repeat(64), cargo_lock_sha256: manifest.cargo_lock_sha256 });
+  assert.match(tpl.readTemplateBuild(programs(), '{"name": "solana_build", "status": "fail", "detail": "boom"}', id, manifest).error, /failed: boom/);
+  assert.match(tpl.readTemplateBuild(programs(), null, id, manifest).error, /didn't finish/);
+  assert.match(tpl.readTemplateBuild(programs({ declared_id: addr(4) }), pass, id, manifest).error, /declares/);
+  assert.match(tpl.readTemplateBuild(programs({ cargo_lock_sha256: "b".repeat(64) }), pass, id, manifest).error, /Cargo\.lock/);
+  assert.match(tpl.readTemplateBuild("[]", pass, id, manifest).error, /no mynt_treasury/);
+});
+
+// A sandbox host whose one command is the template rebuild, answering with `sha256` (or a failed build).
+class FakeBuildBox {
+  boxes = new Map();
+  stopped = [];
+  constructor(answer) {
+    this.answer = answer;
+  }
+  async createSandbox() {
+    const id = `box-${this.boxes.size + 1}`;
+    this.boxes.set(id, { files: {}, commands: [] });
+    return { id, state: "ready" };
+  }
+  async writeFiles(id, files) {
+    Object.assign(this.boxes.get(id).files, files);
+  }
+  async writeFile(id, path, text) {
+    this.boxes.get(id).files[path] = text;
+  }
+  async exec(id, command) {
+    this.boxes.get(id).commands.push(command);
+    return { processId: 7, exitCode: null, stdout: "", stderr: "" };
+  }
+  async commandStatus() {
+    return { running: false, exitCode: 0 };
+  }
+  async readFile(id, path) {
+    const box = this.boxes.get(id);
+    const lib = box.files["/home/user/mynt-treasury-build/src/solana/programs/mynt_treasury/src/lib.rs"] ?? "";
+    const declared = /declare_id!\("([^"]+)"\)/.exec(lib)?.[1];
+    const a = this.answer(declared);
+    if (path.endsWith("checks.jsonl")) return a.fail ? '{"name": "solana_build", "status": "fail", "detail": "it broke"}' : '{"name": "solana_build", "status": "pass", "detail": ""}';
+    if (path.endsWith("programs.json")) return JSON.stringify([{ name: "mynt_treasury", sha256: a.sha256, declared_id: declared, cargo_lock_sha256: tpl.readTreasuryManifest().cargo_lock_sha256 }]);
+    return null;
+  }
+  async stop(id) {
+    this.stopped.push(id);
+  }
+}
+
+const programDataBytes = (o = {}) => Buffer.concat([u32(3), u64(o.slot ?? 1), o.authority === null ? Buffer.from([0]) : bool(true), o.authority === null ? Buffer.alloc(32) : key(o.authority ?? addr(41)), Buffer.from(o.bytes ?? "not the template's bytes"), Buffer.alloc(16)]);
+
+test("a pool's program is a verified build once Mynt's own rebuild of the template at its program id matches it", async () => {
+  const deployed = executableHash(Buffer.concat([Buffer.from("not the template's bytes"), Buffer.alloc(16)]));
+  let answer = { sha256: deployed };
+  const box = new FakeBuildBox(() => answer);
+  const s = await world({ sandboxes: box });
+  const { poolId, address } = await registered(s);
+  const row = async () => (await s.db.query("SELECT verified_build, build_note FROM financial_products.treasury_pools WHERE pool_id = $1", [poolId])).rows[0];
+  assert.deepEqual(await row(), { verified_build: false, build_note: "unverified build, for now: Mynt is rebuilding the treasury template at this program id, and checks it when done" });
+  const builds = async () => (await s.db.query("SELECT program_id, status, sha256, attempts FROM financial_products.treasury_builds")).rows;
+  assert.deepEqual(await builds(), [{ program_id: s.programId, status: "queued", sha256: null, attempts: 0 }]);
+  // Registering again doesn't queue a second rebuild.
+  await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address });
+  assert.equal((await builds()).length, 1);
+
+  await s.treasury.buildTick(); // starts it
+  const [b] = [...box.boxes.values()];
+  assert.match(b.files["/home/user/mynt-treasury-build/src/solana/programs/mynt_treasury/src/lib.rs"], new RegExp(`declare_id!\\("${s.programId}"\\)`), "built at the pool's own program id");
+  assert.ok(b.files["/home/user/mynt-treasury-build/solana-verify.sh"].startsWith("#!/usr/bin/env bash"));
+  assert.match(b.commands[0], /bash solana-verify\.sh build \/home\/user\/mynt-treasury-build\/src \/home\/user\/mynt-treasury-build\/out/);
+  assert.equal((await builds())[0].status, "running");
+  await s.treasury.buildTick(); // finishes it
+  assert.deepEqual(await builds(), [{ program_id: s.programId, status: "succeeded", sha256: deployed, attempts: 1 }]);
+  assert.deepEqual(box.stopped, ["box-1"]);
+  assert.deepEqual(await row(), { verified_build: true, build_note: null });
+  // Registered again, it stays verified, with no new rebuild; its limit is now exact.
+  const view = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address });
+  assert.equal(view.verified_build, true);
+  assert.equal(view.firm_limit, "exact");
+  assert.ok(!view.mainnet_blockers.some((b) => /verified build/.test(b)));
+  assert.equal((await builds()).length, 1);
+  // Redeployed with other bytes and registered again: not verified, and says against what.
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ slot: 2, bytes: "something else" }));
+  const other = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address });
+  assert.equal(other.verified_build, false);
+  assert.match(other.build_note, new RegExp(`isn't the treasury template rebuilt at this program id \\(${deployed}\\)`));
+  answer = null;
+});
+
+test("a failed rebuild says so, and is retried when the pool is registered again", async () => {
+  const box = new FakeBuildBox(() => ({ fail: true }));
+  const s = await world({ sandboxes: box });
+  const { poolId, address } = await registered(s);
+  await s.treasury.buildTick();
+  await s.treasury.buildTick();
+  const b = (await s.db.query("SELECT status, error, attempts FROM financial_products.treasury_builds")).rows[0];
+  assert.deepEqual([b.status, b.attempts], ["failed", 1]);
+  assert.match(b.error, /failed: it broke/);
+  assert.match((await s.db.query("SELECT build_note FROM financial_products.treasury_pools WHERE pool_id = $1", [poolId])).rows[0].build_note, /couldn't rebuild/);
+  await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: address });
+  assert.equal((await s.db.query("SELECT status FROM financial_products.treasury_builds")).rows[0].status, "queued");
+  // Without sandboxes, Mynt says it can't rebuild here.
+  const plain = await world();
+  const { poolId: p2 } = await registered(plain);
+  assert.match((await plain.db.query("SELECT build_note FROM financial_products.treasury_pools WHERE pool_id = $1", [p2])).rows[0].build_note, /no sandboxes/);
+});
+
+test("a treasury's upgrade authority is judged at registration, and handing it on stops approvals", async () => {
+  const s = await world();
+  const ms = addr(80);
+  const vault = lock.squadsVault(ms, 0);
+  s.devnet.set(ms, lock.SQUADS_V4_PROGRAM, squads());
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: vault }));
+  const poolId = await s.makePool();
+  const t = s.treasuryPool();
+  const unlocked = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address });
+  assert.equal(unlocked.upgrade_lock.status, "unlocked", "the multisig wasn't named");
+  assert.ok(unlocked.mainnet_blockers.some((b) => /upgrade authority isn't locked/.test(b)));
+  const locked = await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address, upgrade_multisig: ms });
+  assert.deepEqual(locked.upgrade_lock, { status: "timelocked_multisig", multisig: ms, vault_index: 0, threshold: 2, voters: 2, time_lock_seconds: 48 * 3600 });
+  assert.ok(!locked.mainnet_blockers.some((b) => /upgrade authority/.test(b)));
+  // Immutable counts as locked too.
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: null }));
+  assert.equal((await ok(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "devnet", program_id: s.programId, pool_address: t.address })).upgrade_lock.status, "immutable");
+  // The authority handed to a single key (no redeploy): no more approvals until it's registered again.
+  const wallet = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  s.devnet.set(chain.associatedTokenAddress(wallet, chain.DEVNET_USDC_MINT), chain.TOKEN_PROGRAM, encodeToken(chain.DEVNET_USDC_MINT, wallet, 50_000_000));
+  const args = { pool_id: poolId, wallet, amount_usdc_base_units: 1_000_000, max_lock_in_seconds: 7200 };
+  await ok(s.fundA.client, "prepare_treasury_deposit", args);
+  s.devnet.set(s.programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: addr(41) }));
+  await refused(s.fundA.client, "prepare_treasury_deposit", args, "program_upgraded");
+});
+
+test("mainnet stays off; asked for it, Mynt reads the treasury there and lists what would still stop it", async () => {
+  // No mainnet RPC: refused, saying it can't check either.
+  const off = await world();
+  const r0 = await refused(off.builder.client, "register_treasury_pool", { pool_id: await off.makePool(), cluster: "mainnet", program_id: off.programId, pool_address: addr(60) }, "mainnet_disabled");
+  assert.match(r0.error ?? r0.message ?? JSON.stringify(r0), /no mainnet RPC/);
+
+  const s = await world({ mainnet: true });
+  const m = s.mainnet;
+  const programData = s.programData;
+  m.set(s.programId, "BPFLoaderUpgradeab1e11111111111111111111111", Buffer.concat([u32(2), key(programData)]), true);
+  m.set(programData, "BPFLoaderUpgradeab1e11111111111111111111111", programDataBytes({ authority: null }));
+  const creator = s.creator;
+  const at = (poolNumber, o = {}) => {
+    const address = chain.poolAddress(s.programId, creator, poolNumber);
+    const vault = findProgramAddress([Buffer.from("vault"), base58Decode(address)], s.programId)[0];
+    m.set(address, s.programId, encodePool({ creator, poolId: poolNumber, mint: o.mint ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", vault, cluster: o.cluster, terms: terms({ attesters: [s.attester, chain.ZERO_KEY] }) }));
+    return address;
+  };
+  const poolId = await s.makePool();
+  // A pool bound to devnet's genesis hash, on mainnet: its devnet approvals would work there. Refused, and said why.
+  const bound = await refused(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "mainnet", program_id: s.programId, pool_address: at(50) }, "mainnet_disabled");
+  assert.match(JSON.stringify(bound.mainnet_checks), /bound to another chain than mainnet/);
+  // Bound to mainnet: every check is listed, and nothing is registered.
+  const r = await refused(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "mainnet", program_id: s.programId, pool_address: at(51, { cluster: Buffer.from(base58Decode(GENESIS_HASH.mainnet)) }) }, "mainnet_disabled");
+  assert.equal(r.mainnet_checks.cluster, "pass: the pool's deposit approvals are bound to mainnet");
+  assert.equal(r.mainnet_checks.upgrade_lock, "pass: immutable");
+  assert.equal(r.mainnet_checks.usdc_mint, "pass");
+  assert.match(r.mainnet_checks.verified_build, /^fail: /);
+  assert.equal(r.mainnet_checks.own_program_id, "pass");
+  assert.equal((await s.db.query("SELECT count(*)::int AS n FROM financial_products.treasury_pools")).rows[0].n, 0);
+  // Holding devnet USDC, or under a program id a devnet treasury uses: both listed.
+  await registered(s); // a devnet treasury on the same program id
+  const r2 = await refused(s.builder.client, "register_treasury_pool", { pool_id: poolId, cluster: "mainnet", program_id: s.programId, pool_address: at(52, { cluster: Buffer.from(base58Decode(GENESIS_HASH.mainnet)), mint: chain.DEVNET_USDC_MINT }) }, "mainnet_disabled");
+  assert.match(r2.mainnet_checks.usdc_mint, /^fail/);
+  assert.match(r2.mainnet_checks.own_program_id, /^fail/);
+  // The devnet RPC is never asked for mainnet's accounts, nor the other way round.
+  assert.ok(m.calls.includes("getGenesisHash"));
 });
