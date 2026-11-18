@@ -91,9 +91,9 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
           {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. The Opportunities and My positions tabs still work."}
         </p>
       </div>
-      <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-2 md:pb-3">
+      <div className="mr-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-2 md:pb-3">
         <textarea disabled rows={2} aria-label="Message input" placeholder={status === "loading" ? "…" : "AI is not configured"} className="w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm opacity-60" />
-        <p className="-mt-2 text-center text-xs text-muted-foreground">
+        <p className="-mt-2 px-2 text-left text-xs text-muted-foreground">
           <EarnDisclosure />
         </p>
       </div>
