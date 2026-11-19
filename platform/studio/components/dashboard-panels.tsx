@@ -5,8 +5,9 @@
 // never showing an empty table as if it were data. Server-renderable for the tests.
 import Link from "next/link"
 
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { Activity as ActivityIcon, Coins, Hammer, KeyRound, Users } from "lucide-react"
+import { Activity as ActivityIcon, ChevronRight, Coins, Hammer, KeyRound, Users } from "lucide-react"
 
 import { PipelineFunnel } from "@/components/charts"
 import { pipeline, relativeTime } from "@/lib/dashboard-visual"
@@ -184,7 +185,7 @@ const iconFor = (action: string) => ACTIVITY_ICONS.find(([re]) => re.test(action
 export function RecentActivity({ state, now = Date.now() }: { state: Loaded<AuditEvent[]>; now?: number }) {
   const rows = state.kind === "ready" ? state.data.slice(0, RECENT_ROWS) : []
   return (
-    <Section id="recent-activity" title="Recent activity" description="The newest entries in the audit trail" action={<SectionLink href="/audits">Audits</SectionLink>}>
+    <Section id="recent-activity" title="Recent activity">
       {state.kind !== "ready" ? (
         <NotReadyText state={state} what="Recent activity" />
       ) : rows.length === 0 ? (
@@ -210,6 +211,15 @@ export function RecentActivity({ state, now = Date.now() }: { state: Loaded<Audi
           })}
         </ol>
       )}
+      {/* The whole audit trail, on a row of its own at the bottom right. */}
+      <div className="flex justify-end border-t pt-3" data-view-all>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/audits">
+            View all
+            <ChevronRight />
+          </Link>
+        </Button>
+      </div>
     </Section>
   )
 }
