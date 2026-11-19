@@ -1,14 +1,13 @@
-// The dashboard (home page), laid out like a P&L statement rather than a grid of cards: Needs
-// attention as a strip, then the top row (left: revenue, costs and net this period, the
-// operating facts and the workspace facts; right: the P&L chart), the statement table, and Apps
-// by stage beside Recent activity (stacked on narrow screens). Sections with headings,
-// dividers and tables; no cards. The P&L comes from get_workspace_pnl (components/pnl.tsx) and
-// degrades on its own; everything else works without it. Server-renderable for the tests.
+// The dashboard (home page): Needs attention as a strip, then rows of outlined panels (Panel):
+// the key figures; the P&L chart beside where the money goes; money by app beside apps by stage;
+// recent activity beside the workspace facts. Sections side by side are split by a divider; flat,
+// no shadows. The P&L comes from get_workspace_pnl (components/pnl.tsx) and degrades on its own;
+// everything else works without it. Server-renderable for the tests.
 import Link from "next/link"
 import { Plus } from "lucide-react"
 
-import { AppsByStage, NeedsAttention, RecentActivity, Section, type StagesData } from "@/components/dashboard-panels"
-import { PnlChart, PnlStatement, PNL_NOT_AVAILABLE } from "@/components/pnl"
+import { AppsByStage, NeedsAttention, Panel, RecentActivity, Section, type StagesData } from "@/components/dashboard-panels"
+import { PnlChart, PNL_NOT_AVAILABLE } from "@/components/pnl"
 import { Donut, HBars, KpiRow } from "@/components/charts"
 import { Skeleton } from "@/components/ui/skeleton"
 import { builderKpis, costSlices, moneyByApp } from "@/lib/dashboard-visual"
@@ -49,7 +48,7 @@ const repoCount = (r: ReposState) => (r.kind === "ready" ? r.repos.length : null
 function WorkspaceFacts({ dashboard, repos, onReposChanged }: { dashboard: Dashboard; repos: ReposState; onReposChanged?: () => void }) {
   const n = repoCount(repos)
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-2 text-xs" data-facts="workspace">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-3 text-xs" data-facts="workspace">
       <Fact id="repositories" label="Repositories" measured={n !== null}>
         <Link href="/settings?tab=repositories" className="hover:underline">
           {n === null ? (repos.kind === "unsupported" ? "Not available yet" : "…") : `${n} connected`}
@@ -116,15 +115,17 @@ export function DashboardView({
   const appsLive = stages.kind === "ready" ? stages.data.apps.filter((a) => a.stage === "production").length : null
   const costs = costSlices(ready)
   return (
-    <div className="@container/main flex flex-1 flex-col gap-8 p-4 lg:p-6" data-dashboard>
+    <div className="@container/main flex flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6" data-dashboard>
       <NeedsAttention state={attention} />
       {dashboard.apps.length === 0 && <EmptyState />}
 
-      <section className="flex flex-col gap-3" data-section="kpis" aria-label="Key figures this period">
-        <KpiRow kpis={builderKpis(ready, appsLive)} />
-      </section>
+      <Panel id="kpis">
+        <section className="flex flex-col gap-3" data-section="kpis" aria-label="Key figures this period">
+          <KpiRow kpis={builderKpis(ready, appsLive)} />
+        </section>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" data-row="top">
+      <Panel id="top" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <PnlChart state={pnl} granularity={granularity} periods={periods} onGranularity={onGranularity} onPeriods={onPeriods} variant="area" title="Money moved and costs" />
         <Section id="cost-breakdown" title="Where the money goes" description="This period's costs">
           {pnl.kind === "ready" ? (
@@ -133,38 +134,25 @@ export function DashboardView({
             <PnlNotReadyLine state={pnl} />
           )}
         </Section>
-      </div>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-2" data-row="apps">
+      <Panel id="apps" cols="@4xl/main:grid-cols-2">
         <Section id="money-by-app" title="Money moved by app" description="This period">
           {pnl.kind === "ready" ? <HBars title="Money moved by app" rows={moneyByApp(ready)} empty="No money moved through your apps yet" /> : <PnlNotReadyLine state={pnl} />}
         </Section>
         <AppsByStage state={stages} apps={dashboard.apps} />
-      </div>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-2" data-row="activity-and-facts">
+      <Panel id="activity-and-facts" cols="@4xl/main:grid-cols-2">
         <RecentActivity state={activity} />
         <section className="flex min-w-0 flex-col gap-3" data-section="summary" aria-labelledby="section-summary">
-          <div className="border-b pb-2">
-            <h2 id="section-summary" className="text-sm font-semibold">
-              Workspace
-            </h2>
-          </div>
+          <h2 id="section-summary" className="text-sm font-semibold">
+            Workspace
+          </h2>
           <OperatingFacts dashboard={dashboard} />
           <WorkspaceFacts dashboard={dashboard} repos={repos} onReposChanged={onReposChanged} />
         </section>
-      </div>
-
-      {/* The full statement, on request. */}
-      <details className="group border-t pt-4" data-statement-disclosure>
-        <summary className="cursor-pointer list-none text-sm font-medium hover:underline [&::-webkit-details-marker]:hidden">
-          <span className="group-open:hidden">Show statement</span>
-          <span className="hidden group-open:inline">Hide statement</span>
-        </summary>
-        <div className="mt-4">
-          <PnlStatement state={pnl} />
-        </div>
-      </details>
+      </Panel>
     </div>
   )
 }

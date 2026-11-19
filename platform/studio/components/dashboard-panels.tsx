@@ -4,6 +4,8 @@
 // sections with headings and tables, no cards. Each says when Mynt doesn't offer its data yet,
 // never showing an empty table as if it were data. Server-renderable for the tests.
 import Link from "next/link"
+
+import { cn } from "@/lib/utils"
 import { Activity as ActivityIcon, Coins, Hammer, KeyRound, Users } from "lucide-react"
 
 import { PipelineFunnel } from "@/components/charts"
@@ -25,10 +27,29 @@ export type StagesData = { checks: boolean; apps: StageApp[] }
 const SEVERITY_TONE: Record<Severity, "red" | "amber" | "green"> = { high: "red", medium: "amber", low: "green" }
 
 /** A dashboard section: a heading with an optional labelled link, then its body. */
+// The dashboards' layout: each row is one outlined panel; sections side by side in a row are split by a
+// divider (stacked, with one between them, on narrow screens). Flat: a border, no shadow or fill.
+export function Panel({ children, cols, id, className }: { children: React.ReactNode; cols?: string; id: string; className?: string }) {
+  return (
+    <div
+      className={cn(
+        "grid min-w-0 grid-cols-1 divide-y overflow-hidden rounded-lg border [&>*]:min-w-0 [&>*]:p-4",
+        cols && "@4xl/main:divide-x @4xl/main:divide-y-0",
+        cols,
+        className,
+      )}
+      data-row={id}
+      data-panel
+    >
+      {children}
+    </div>
+  )
+}
+
 export function Section({ title, description, action, children, id }: { title: string; description?: string; action?: React.ReactNode; children: React.ReactNode; id: string }) {
   return (
-    <section className="flex min-w-0 flex-col gap-2" data-section={id} aria-labelledby={`section-${id}`}>
-      <div className="flex items-baseline gap-3 border-b pb-2">
+    <section className="flex min-w-0 flex-col gap-3" data-section={id} aria-labelledby={`section-${id}`}>
+      <div className="flex items-baseline gap-3">
         <h2 id={`section-${id}`} className="text-sm font-semibold">
           {title}
         </h2>
