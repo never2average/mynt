@@ -141,9 +141,6 @@ export function ConnectAgentPanel() {
         ))}
       </div>
       {url && <AgentInstructions agent={agent} url={url} />}
-      <Link href="/docs" className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" data-docs-link>
-        Read the full guide: signing in, what your agent can do, troubleshooting
-      </Link>
     </div>
   )
 }

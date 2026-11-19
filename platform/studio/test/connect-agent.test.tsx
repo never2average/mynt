@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -56,21 +56,56 @@ describe("connect your agent", () => {
   });
 });
 
-describe("docs page", () => {
+describe("the connect page is the guide too (/docs comes here)", () => {
   afterEach(cleanup);
 
-  it("lists every section and every agent's steps, with this site's /mcp address", async () => {
-    const { default: DocsPage } = await import("@/app/(studio)/docs/page");
-    render(<DocsPage />);
+  it("has the picker first, then every section of the guide, with this site's /mcp address", async () => {
+    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
+    render(<ConnectPage />);
     await act(async () => {});
-    for (const s of ["address", "connect", "sign-in", "access", "try", "trouble"]) expect(document.querySelector(`[data-docs-section="${s}"]`)).not.toBeNull();
-    for (const a of ["claude-code", "claude", "cursor", "vscode", "chatgpt"]) expect(document.querySelector(`[data-docs-agent="${a}"]`)).not.toBeNull();
-    expect(document.querySelector("[data-copy-value]")!.textContent).toBe(`${window.location.origin}/mcp`);
+    const order = [...document.querySelectorAll("[data-docs-section]")].map((e) => e.getAttribute("data-docs-section"));
+    expect(order).toEqual(["connect", "address", "sign-in", "access", "try", "trouble"]);
+    expect(document.querySelector('[data-docs-section="connect"] [data-connect-agent]')).not.toBeNull();
+    expect(document.querySelector('[data-docs-section="address"] [data-copy-value]')!.textContent).toBe(`${window.location.origin}/mcp`);
+    expect(document.querySelector("[data-docs-link]")).toBeNull();
+    // On this page sits on the right, after the guide, behind a vertical rule.
+    const nav = document.querySelector('[data-on-this-page="side"]')!;
+    expect(nav.className).toContain("border-l");
+    expect(document.querySelector("article")!.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("the connect page links to it", async () => {
-    render(<ConnectAgentPanel />);
+  it("goes to a section on a click and highlights it, wherever the page scrolls", async () => {
+    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    render(<ConnectPage />);
     await act(async () => {});
-    expect(document.querySelector("[data-docs-link]")!.getAttribute("href")).toBe("/docs");
+    const link = document.querySelector('[data-on-this-page="side"] [data-section-link="access"]')!;
+    await act(async () => void fireEvent.click(link));
+    expect(scrolled).toContain("access");
+    expect(window.location.hash).toBe("#access");
+    // Opened at a #section, it goes there.
+    cleanup();
+    scrolled.length = 0;
+    window.history.replaceState(null, "", "#trouble");
+    render(<ConnectPage />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(scrolled).toContain("trouble");
+    expect(document.querySelector('[data-on-this-page="side"] [aria-current="location"]')!.getAttribute("data-section-link")).toBe("trouble");
+    window.history.replaceState(null, "", "#");
+  });
+
+  it("/docs sends people to /connect", async () => {
+    vi.resetModules();
+    const redirect = vi.fn();
+    vi.doMock("next/navigation", () => ({ redirect }));
+    const { default: DocsPage } = await import("@/app/(studio)/docs/page");
+    (DocsPage as () => void)();
+    expect(redirect).toHaveBeenCalledWith("/connect");
+    vi.doUnmock("next/navigation");
   });
 });
