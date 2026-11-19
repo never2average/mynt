@@ -2,6 +2,7 @@
 // (get_workspace_pnl), the dashboard (get_developer_dashboard or apps and builds), the apps by
 // stage and their promotion checks. Pure, for the components and the tests. Amounts are integer
 // cents; anything Mynt doesn't measure stays null (a gap, "Not measured"), never 0.
+import { DATE_RANGES, type DateRangeKey } from "@/lib/pnl";
 import type { StageApp } from "@/components/dashboard-panels";
 import type { Pnl, PnlLine, Values } from "./pnl";
 import type { Stage } from "./workspaces";
@@ -97,4 +98,23 @@ export function relativeTime(iso: string, now = Date.now()): string {
 export function seriesSummary(label: string, points: { label: string; value: number | null }[], format: (v: number | null) => string): string {
   if (!points.length) return `${label}: no data.`;
   return `${label}: ${points.map((p) => `${p.label} ${format(p.value)}`).join(", ")}.`;
+}
+
+// ---- the builder dashboard's chart filters: app, app stage, date range ----
+
+export type ChartFilter = { appId: string; stage: Stage | "all"; range: DateRangeKey };
+export const DEFAULT_CHART_FILTER: ChartFilter = { appId: "all", stage: "all", range: "6m" };
+
+export const dateRange = (key: DateRangeKey) => DATE_RANGES.find((r) => r.key === key) ?? DATE_RANGES[1];
+
+// The apps the app picker offers: those in the chosen stage (all apps for every stage).
+export const appsForStage = (apps: readonly { id: string; name: string; stage: Stage }[], stage: ChartFilter["stage"]) => (stage === "all" ? [...apps] : apps.filter((a) => a.stage === stage));
+
+// The P&L route for a filter: one app (?app=), a stage's apps added up (?apps=), or the whole workspace.
+export function chartPnlUrl(f: ChartFilter, apps: readonly { id: string; stage: Stage }[]): string {
+  const r = dateRange(f.range);
+  const base = `/api/pnl?granularity=${r.granularity}&periods=${r.periods}`;
+  if (f.appId !== "all") return `${base}&app=${encodeURIComponent(f.appId)}`;
+  if (f.stage !== "all") return `${base}&apps=${apps.filter((a) => a.stage === f.stage).map((a) => encodeURIComponent(a.id)).join(",")}`;
+  return base;
 }

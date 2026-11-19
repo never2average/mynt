@@ -368,10 +368,9 @@ describe("the dashboard's sections", () => {
     expect(attention.find((i) => i.id === "x5")).toMatchObject({ href: null, linkText: "https://partner.example.test/review" });
   });
 
-  it("Needs attention is one line when nothing needs you, or says it isn't available yet, never an empty list", () => {
+  it("Needs attention shows nothing when nothing needs you, or says it isn't available yet, never an empty list", () => {
     const nothing = renderToStaticMarkup(<NeedsAttention state={{ kind: "ready", data: [] }} />);
-    expect(nothing).toContain("Nothing needs you right now");
-    expect(nothing).not.toContain("<ul");
+    expect(nothing).toBe("");
     const unsupported = renderToStaticMarkup(<NeedsAttention state={{ kind: "unsupported" }} />);
     expect(unsupported).toContain('data-empty="not-available"');
     expect(unsupported).toContain("isn&#x27;t available yet");
@@ -431,9 +430,10 @@ describe("the dashboard's sections", () => {
         activity={{ kind: "unsupported" }}
       />,
     );
-    for (const marker of ['data-strip="attention"', 'data-section="apps-by-stage"', 'data-section="recent-activity"', 'data-fact="active-products"']) expect(html).toContain(marker);
+    expect(html).toContain('data-section="recent-activity"');
     expect(html).toContain("Money moved");
-    expect(html).toContain("Nothing needs you right now");
+    // Nothing needs you: no strip at all; apps by stage and the workspace facts aren't on the dashboard.
+    for (const gone of ['data-strip="attention"', "Nothing needs you right now", 'data-section="apps-by-stage"', 'data-fact="active-products"']) expect(html).not.toContain(gone);
     expect(html).not.toContain('data-slot="card"');
   });
 });

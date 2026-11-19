@@ -95,15 +95,10 @@ const when = (iso: string | null) => {
   return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
 }
 
-/** Needs attention: a compact strip of items (severity dot, title, link); one line when nothing needs you. */
+/** Needs attention: a compact strip of items (severity dot, title, link); nothing at all when nothing needs you. */
 export function NeedsAttention({ state }: { state: Loaded<AttentionItem[]> }) {
   if (state.kind === "loading") return <Skeleton className="h-8 w-full" data-strip="attention" />
-  if (state.kind === "ready" && state.data.length === 0)
-    return (
-      <p className="text-sm text-muted-foreground" data-strip="attention" data-empty="nothing">
-        Nothing needs you right now
-      </p>
-    )
+  if (state.kind === "ready" && state.data.length === 0) return null
   return (
     <div className="flex flex-col gap-1 rounded-md border px-3 py-2" data-strip="attention">
       <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">

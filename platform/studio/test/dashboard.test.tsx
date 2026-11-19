@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DashboardView } from "@/components/dashboard-view";
 import { PnlChart, PnlStatement, PNL_NOT_AVAILABLE } from "@/components/pnl";
 import { facts, fromAppsAndBuilds, fromDashboardTool, NOT_MEASURED, usd } from "@/lib/dashboard";
-import { chartRows, fromPnl, MINUS, money, changeText } from "@/lib/pnl";
+import { chartRows, fromPnl, MINUS, money, changeText, sumSeries } from "@/lib/pnl";
+import { chartPnlUrl } from "@/lib/dashboard-visual";
 
 // The dashboard never shows 0 for something Mynt doesn't measure.
 const render = (d: ReturnType<typeof fromDashboardTool>) => renderToStaticMarkup(<DashboardView dashboard={d} />);
@@ -157,45 +158,61 @@ const dashboardWithApps = fromDashboardTool(measured);
 const stages = { kind: "ready" as const, data: { checks: false, apps: [{ id: "a1", name: "Round-up savings", stage: "production" as const, readiness: null }] } };
 
 describe("dashboard page", () => {
-  it("is visual-first and borderless: KPIs, charts, funnel, timeline; no shadcn Card, no wallet tile", () => {
+  it("is the key figures, Money moved and Costs under one set of filters, and recent activity; no cards", () => {
     const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} pnl={{ kind: "ready", data: fromPnl(pnlReply) }} />);
     expect(html).not.toContain('data-slot="card"');
     expect(html).not.toContain('data-tile="wallet"');
-    expect(html).not.toContain("Crypto wallet");
-    expect(html).not.toContain("Link wallet");
-    for (const s of ["kpis", "pnl-chart", "cost-breakdown", "money-by-app", "apps-by-stage", "recent-activity", "summary"]) expect(html).toContain(`data-section="${s}"`);
-    // The KPIs come first, then the large area chart beside the cost breakdown.
-    expect(html.indexOf('data-section="kpis"')).toBeLessThan(html.indexOf('data-section="pnl-chart"'));
-    expect(html).toMatch(/data-variant="area"/);
+    for (const s of ["kpis", "money-moved", "costs", "recent-activity"]) expect(html).toContain(`data-section="${s}"`);
+    // Gone: where the money goes, money moved by app, apps by stage, the workspace facts, the statement.
+    for (const s of ["pnl-chart", "cost-breakdown", "money-by-app", "apps-by-stage", "summary", "pnl-statement"]) expect(html).not.toContain(`data-section="${s}"`);
+    expect(html).not.toContain('data-facts="workspace"');
+    // In order: key figures, the filters, Money moved, then Costs below it.
+    const at = (m: string) => html.indexOf(m);
+    expect(at('data-section="kpis"')).toBeLessThan(at("data-chart-filters"));
+    expect(at("data-chart-filters")).toBeLessThan(at('data-section="money-moved"'));
+    expect(at('data-section="money-moved"')).toBeLessThan(at('data-section="costs"'));
     expect(html).toMatch(/data-kpi="money-moved"[\s\S]*?\$1,500\.00/);
-    // The statement table isn't on the dashboard any more.
-    expect(html).not.toContain("data-statement-disclosure");
-    expect(html).not.toContain('data-section="pnl-statement"');
-    // Each row is its own outlined panel; side-by-side sections are split by a divider.
-    for (const row of ["kpis", "top", "apps", "activity-and-facts"]) expect(html).toMatch(new RegExp(`data-row="${row}" data-panel="true"|data-panel="true"[^>]*data-row="${row}"|data-row="${row}"[^>]*data-panel`));
-    expect(html).toMatch(/class="[^"]*rounded-lg border[^"]*@4xl\/main:divide-x[^"]*"[^>]*data-row="top"/);
+    // One set of filters: app, app stage, date range; neither chart has its own controls.
+    expect(html.match(/data-chart-filters/g)).toHaveLength(1);
+    for (const f of ["app", "stage", "range"]) expect(html).toContain(`data-filter="${f}"`);
+    expect(html).not.toContain('aria-label="Period"');
+    // Each row is its own outlined panel.
+    for (const row of ["kpis", "money", "activity"]) expect(html).toMatch(new RegExp(`data-row="${row}"[^>]*data-panel`));
   });
 
-  it("keeps the operating and workspace facts: money moved, customers, repositories, products, licences (GitHub is in the header)", () => {
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} repos={{ kind: "ready", repos: [], connect: true }} />);
-    expect(html).toContain(usd(125430.5));
-    expect(html).toContain("812");
-    expect(html).toContain("25%");
-    expect(html).not.toContain('data-fact="github"');
-    expect(html).not.toContain("Link GitHub");
-    expect(html).toMatch(/data-fact="active-products"/);
-    expect(html).toMatch(/data-fact="repositories"[\s\S]*?href="\/settings\?tab=repositories"[^>]*>0 connected</);
-    expect(html).toMatch(/data-fact="licences"[\s\S]*?href="\/licences"/);
-    expect(html).toMatch(/>\s*Connect repository\s*</);
-    expect(html).toContain('href="/a1"'); // the app's chip, in the funnel
+  it("filters the charts by app (within the stage picked), app stage and date range", () => {
+    const apps = [
+      { id: "a1", name: "Cards", stage: "production" as const, readiness: null },
+      { id: "a2", name: "Savings", stage: "staging" as const, readiness: null },
+    ];
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={{ appId: "all", stage: "staging", range: "12w" }} />);
+    const appSelect = html.slice(html.indexOf('data-filter="app"'), html.indexOf('data-filter="stage"'));
+    expect(appSelect).toContain(">Savings<");
+    expect(appSelect).not.toContain(">Cards<");
+    for (const label of ["All stages", "Production", "Staging", "Ideas", "Last 3 months", "Last 6 months", "Last 12 months", "Last 12 weeks"]) expect(html).toContain(`>${label}<`);
+    // What each filter asks the P&L route for.
+    expect(chartPnlUrl({ appId: "all", stage: "all", range: "6m" }, apps)).toBe("/api/pnl?granularity=month&periods=6");
+    expect(chartPnlUrl({ appId: "a1", stage: "all", range: "3m" }, apps)).toBe("/api/pnl?granularity=month&periods=3&app=a1");
+    expect(chartPnlUrl({ appId: "all", stage: "staging", range: "12w" }, apps)).toBe("/api/pnl?granularity=week&periods=12&apps=a2");
+    expect(chartPnlUrl({ appId: "all", stage: "idea", range: "12m" }, apps)).toBe("/api/pnl?granularity=month&periods=12&apps=");
+  });
+
+  it("adds up a stage's apps period by period, never filling an unmeasured one", () => {
+    const p = (start: string, revenue: number | null, costs: number | null) => ({ start, end: start, revenue, costs, netIncome: revenue === null || costs === null ? null : revenue - costs });
+    const sum = sumSeries([
+      [p("2026-10", 100, 40), p("2026-11", 50, 10)],
+      [p("2026-10", 20, 5), p("2026-11", null, 10)],
+    ]);
+    expect(sum).toEqual([p("2026-10", 120, 45), { start: "2026-11", end: "2026-11", revenue: null, costs: 20, netIncome: null }]);
+    expect(sumSeries([])).toEqual([]);
   });
 
   it("degrades without get_workspace_pnl: the P&L says it isn't available, the rest works", () => {
     const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} attention={{ kind: "ready", data: [] }} activity={{ kind: "ready", data: [] }} pnl={{ kind: "unsupported" }} />);
-    expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(3); // chart, cost breakdown, money by app (the statement is gone)
+    expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(2); // Money moved and Costs
     expect(html).toContain(PNL_NOT_AVAILABLE.replace("&", "&amp;").replaceAll("'", "&#x27;"));
     expect(html).toContain("Round-up savings");
-    expect(html).toContain("Nothing needs you right now");
+    expect(html).not.toContain("Nothing needs you right now"); // nothing at all when nothing needs you
     expect(html).toContain("Nothing has happened in this workspace yet");
     expect(html).not.toContain("$0");
   });
