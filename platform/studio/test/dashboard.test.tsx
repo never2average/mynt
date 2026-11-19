@@ -185,16 +185,16 @@ describe("dashboard page", () => {
       { id: "a1", name: "Cards", stage: "production" as const, readiness: null },
       { id: "a2", name: "Savings", stage: "staging" as const, readiness: null },
     ];
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={{ app: "all", stage: "staging", range: "12w" }} />);
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={{ appId: "all", stage: "staging", range: "12w" }} />);
     const appSelect = html.slice(html.indexOf('data-filter="app"'), html.indexOf('data-filter="stage"'));
     expect(appSelect).toContain(">Savings<");
     expect(appSelect).not.toContain(">Cards<");
     for (const label of ["All stages", "Production", "Staging", "Ideas", "Last 3 months", "Last 6 months", "Last 12 months", "Last 12 weeks"]) expect(html).toContain(`>${label}<`);
     // What each filter asks the P&L route for.
-    expect(chartPnlUrl({ app: "all", stage: "all", range: "6m" }, apps)).toBe("/api/pnl?granularity=month&periods=6");
-    expect(chartPnlUrl({ app: "a1", stage: "all", range: "3m" }, apps)).toBe("/api/pnl?granularity=month&periods=3&app=a1");
-    expect(chartPnlUrl({ app: "all", stage: "staging", range: "12w" }, apps)).toBe("/api/pnl?granularity=week&periods=12&apps=a2");
-    expect(chartPnlUrl({ app: "all", stage: "idea", range: "12m" }, apps)).toBe("/api/pnl?granularity=month&periods=12&apps=");
+    expect(chartPnlUrl({ appId: "all", stage: "all", range: "6m" }, apps)).toBe("/api/pnl?granularity=month&periods=6");
+    expect(chartPnlUrl({ appId: "a1", stage: "all", range: "3m" }, apps)).toBe("/api/pnl?granularity=month&periods=3&app=a1");
+    expect(chartPnlUrl({ appId: "all", stage: "staging", range: "12w" }, apps)).toBe("/api/pnl?granularity=week&periods=12&apps=a2");
+    expect(chartPnlUrl({ appId: "all", stage: "idea", range: "12m" }, apps)).toBe("/api/pnl?granularity=month&periods=12&apps=");
   });
 
   it("adds up a stage's apps period by period, never filling an unmeasured one", () => {

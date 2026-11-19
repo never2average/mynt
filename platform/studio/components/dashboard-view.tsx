@@ -93,7 +93,7 @@ function ChartFilters({ filter, onFilter, apps }: { filter: ChartFilter; onFilte
   const choices = appsForStage(apps, filter.stage)
   return (
     <div className="flex flex-wrap items-end gap-3" data-chart-filters>
-      <FilterSelect label="App" value={filter.app} onChange={(app) => set({ app })} id="app">
+      <FilterSelect label="App" value={filter.appId} onChange={(appId) => set({ appId })} id="app">
         <option value="all">All apps</option>
         {choices.map((a) => (
           <option key={a.id} value={a.id}>
@@ -101,7 +101,7 @@ function ChartFilters({ filter, onFilter, apps }: { filter: ChartFilter; onFilte
           </option>
         ))}
       </FilterSelect>
-      <FilterSelect label="App stage" value={filter.stage} onChange={(stage) => set({ stage: stage as ChartFilter["stage"], app: "all" })} id="stage">
+      <FilterSelect label="App stage" value={filter.stage} onChange={(stage) => set({ stage: stage as ChartFilter["stage"], appId: "all" })} id="stage">
         <option value="all">All stages</option>
         {STAGES.map((st) => (
           <option key={st} value={st}>

@@ -102,8 +102,8 @@ export function seriesSummary(label: string, points: { label: string; value: num
 
 // ---- the builder dashboard's chart filters: app, app stage, date range ----
 
-export type ChartFilter = { app: string; stage: Stage | "all"; range: DateRangeKey };
-export const DEFAULT_CHART_FILTER: ChartFilter = { app: "all", stage: "all", range: "6m" };
+export type ChartFilter = { appId: string; stage: Stage | "all"; range: DateRangeKey };
+export const DEFAULT_CHART_FILTER: ChartFilter = { appId: "all", stage: "all", range: "6m" };
 
 export const dateRange = (key: DateRangeKey) => DATE_RANGES.find((r) => r.key === key) ?? DATE_RANGES[1];
 
@@ -114,7 +114,7 @@ export const appsForStage = (apps: readonly { id: string; name: string; stage: S
 export function chartPnlUrl(f: ChartFilter, apps: readonly { id: string; stage: Stage }[]): string {
   const r = dateRange(f.range);
   const base = `/api/pnl?granularity=${r.granularity}&periods=${r.periods}`;
-  if (f.app !== "all") return `${base}&app=${encodeURIComponent(f.app)}`;
+  if (f.appId !== "all") return `${base}&app=${encodeURIComponent(f.appId)}`;
   if (f.stage !== "all") return `${base}&apps=${apps.filter((a) => a.stage === f.stage).map((a) => encodeURIComponent(a.id)).join(",")}`;
   return base;
 }
