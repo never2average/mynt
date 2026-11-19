@@ -2,7 +2,9 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AgentInstructions, ConnectAgentDialog, claudeCodeCommand, cursorInstallLink, mcpUrl, vscodeInstallLink } from "@/components/connect-agent";
+import { TooltipProvider } from "@/components/ui/tooltip";
+
+import { AgentInstructions, ConnectAgentButton, ConnectAgentPanel, claudeCodeCommand, cursorInstallLink, mcpUrl, vscodeInstallLink } from "@/components/connect-agent";
 
 const URL_ = "https://studio.example/mcp";
 
@@ -31,8 +33,21 @@ describe("connect your agent", () => {
     }
   });
 
-  it("switches agents in the dialog", async () => {
-    render(<ConnectAgentDialog open onOpenChange={() => {}} />);
+  it("is a page of its own, opened from the header's plug button", async () => {
+    render(<TooltipProvider><ConnectAgentButton /></TooltipProvider>);
+    const button = document.querySelector("[data-connect-agent-open]")!;
+    expect(button.getAttribute("href")).toBe("/connect");
+    expect(button.getAttribute("aria-label")).toBe("Connect your agent");
+    cleanup();
+    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
+    render(<ConnectPage />);
+    await act(async () => {});
+    expect(document.querySelector("h1")!.textContent).toBe("Connect your agent");
+    expect(document.querySelector("[data-connect-page] [data-connect-agent]")).not.toBeNull();
+  });
+
+  it("switches agents on the page", async () => {
+    render(<ConnectAgentPanel />);
     await act(async () => {});
     expect(document.querySelector('[data-agent="claude-code"]')).not.toBeNull();
     await act(async () => void fireEvent.click(document.querySelector('[data-agent-tab="cursor"]')!));
@@ -53,8 +68,8 @@ describe("docs page", () => {
     expect(document.querySelector("[data-copy-value]")!.textContent).toBe(`${window.location.origin}/mcp`);
   });
 
-  it("the dialog links to it", async () => {
-    render(<ConnectAgentDialog open onOpenChange={() => {}} />);
+  it("the connect page links to it", async () => {
+    render(<ConnectAgentPanel />);
     await act(async () => {});
     expect(document.querySelector("[data-docs-link]")!.getAttribute("href")).toBe("/docs");
   });
