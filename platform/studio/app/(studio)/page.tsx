@@ -12,11 +12,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/components/workspace-context";
 import type { Dashboard } from "@/lib/dashboard";
 import type { Granularity, Pnl, Range } from "@/lib/pnl";
+import { chartPnlUrl, DEFAULT_CHART_FILTER, type ChartFilter } from "@/lib/dashboard-visual";
 import type { StagesData } from "@/components/dashboard-panels";
 import type { AttentionItem } from "@/lib/attention";
 import type { AuditEvent } from "@/lib/compliance";
 import { useComplianceData } from "@/lib/use-compliance";
-import { useRepositories } from "@/components/repositories";
 import { InvestorView } from "@/components/investor-view";
 import { ModeSwitch } from "@/components/mode-switch";
 import { HeaderTabs } from "@/components/header-tabs";
@@ -41,7 +41,6 @@ function BuilderDashboard() {
   const { state: attention } = useComplianceData("/api/attention", pickAttention);
   const { state: stages, reload: reloadStages } = useComplianceData("/api/stages", pickStages);
   const { state: activity } = useComplianceData("/api/audit", pickActivity);
-  const { state: repos, reload: reloadRepos } = useRepositories();
 
   // A promotion elsewhere moves apps between stages.
   useEffect(() => {
@@ -50,10 +49,13 @@ function BuilderDashboard() {
   }, [reloadStages]);
   const { selected, loading } = useWorkspace();
 
-  // The P&L: per month or week, over the last 3, 6 or 12 (read again when either changes).
-  const [granularity, setGranularity] = useState<Granularity>("month");
-  const [periods, setPeriods] = useState<Range>(6);
-  const { state: pnl } = useComplianceData(`/api/pnl?granularity=${granularity}&periods=${periods}`, pickPnl);
+  // The P&L: the whole workspace's for the key figures; the charts' for their filters (app, app
+  // stage, date range), read again when they change.
+  const [filter, setFilter] = useState<ChartFilter>(DEFAULT_CHART_FILTER);
+  const workspaceUrl = "/api/pnl?granularity=month&periods=6";
+  const chartUrl = chartPnlUrl(filter, stages.kind === "ready" ? stages.data.apps : []);
+  const { state: pnl } = useComplianceData(workspaceUrl, pickPnl);
+  const { state: filtered } = useComplianceData(chartUrl === workspaceUrl ? `${workspaceUrl}&charts=1` : chartUrl, pickPnl);
 
   // The selected workspace's dashboard; again whenever another workspace is picked.
   useEffect(() => {
@@ -96,12 +98,11 @@ function BuilderDashboard() {
           {state.error}
         </p>
       ) : (
-        <DashboardView dashboard={state.dashboard} attention={attention} stages={stages} activity={activity} repos={repos} onReposChanged={reloadRepos}
+        <DashboardView dashboard={state.dashboard} attention={attention} stages={stages} activity={activity}
           pnl={pnl}
-          granularity={granularity}
-          periods={periods}
-          onGranularity={setGranularity}
-          onPeriods={setPeriods}
+          chartPnl={chartUrl === workspaceUrl ? pnl : filtered}
+          filter={filter}
+          onFilter={setFilter}
         />
       )}
     </>

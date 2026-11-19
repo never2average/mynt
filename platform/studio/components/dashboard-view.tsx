@@ -1,73 +1,23 @@
 // The dashboard (home page): Needs attention as a strip, then rows of outlined panels (Panel):
-// the key figures; the P&L chart beside where the money goes; money by app beside apps by stage;
-// recent activity beside the workspace facts. Sections side by side are split by a divider; flat,
+// the key figures; Money moved and Costs, one chart above the other, under one set of filters
+// (app, app stage, date range: those charts only); recent activity. Sections side by side are split by a divider; flat,
 // no shadows. The P&L comes from get_workspace_pnl (components/pnl.tsx) and degrades on its own;
 // everything else works without it. Server-renderable for the tests.
 import Link from "next/link"
 import { Plus } from "lucide-react"
 
-import { AppsByStage, NeedsAttention, Panel, RecentActivity, Section, type StagesData } from "@/components/dashboard-panels"
+import { NeedsAttention, Panel, RecentActivity, type StageApp, type StagesData } from "@/components/dashboard-panels"
 import { PnlChart, PNL_NOT_AVAILABLE } from "@/components/pnl"
-import { Donut, HBars, KpiRow } from "@/components/charts"
+import { KpiRow } from "@/components/charts"
 import { Skeleton } from "@/components/ui/skeleton"
-import { builderKpis, costSlices, moneyByApp } from "@/lib/dashboard-visual"
-import { ConnectRepository, type ReposState } from "@/components/repositories"
+import { appsForStage, builderKpis, dateRange, DEFAULT_CHART_FILTER, type ChartFilter } from "@/lib/dashboard-visual"
 import { Button } from "@/components/ui/button"
-import { count, facts, type Dashboard } from "@/lib/dashboard"
+import type { Dashboard } from "@/lib/dashboard"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditEvent } from "@/lib/compliance"
-import type { Granularity, Pnl, Range } from "@/lib/pnl"
+import { DATE_RANGES, type Pnl } from "@/lib/pnl"
+import { STAGE_LABELS, STAGES } from "@/lib/workspaces"
 import type { Loaded } from "@/lib/use-compliance"
-import { cn } from "@/lib/utils"
-
-function Fact({ label, children, measured = true, title, id }: { label: string; children: React.ReactNode; measured?: boolean; title?: string; id: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-baseline gap-1.5" title={title} data-fact={id}>
-      <span className="text-muted-foreground">{label}</span>
-      <span className={cn("font-medium tabular-nums", !measured && "font-normal text-muted-foreground")}>{children}</span>
-    </span>
-  )
-}
-
-/** The operating facts: money moved, customers, hand-offs and build spend, on one wrapping line. */
-function OperatingFacts({ dashboard }: { dashboard: Dashboard }) {
-  return (
-    <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs" data-facts="operating">
-      {facts(dashboard).map((f) => (
-        <Fact key={f.label} id={f.label} label={f.label} measured={f.measured} title={f.note}>
-          {f.value}
-        </Fact>
-      ))}
-    </p>
-  )
-}
-
-const repoCount = (r: ReposState) => (r.kind === "ready" ? r.repos.length : null)
-
-/** The workspace facts: repositories (listed in Settings), active products and licences. GitHub is in the header. */
-function WorkspaceFacts({ dashboard, repos, onReposChanged }: { dashboard: Dashboard; repos: ReposState; onReposChanged?: () => void }) {
-  const n = repoCount(repos)
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-3 text-xs" data-facts="workspace">
-      <Fact id="repositories" label="Repositories" measured={n !== null}>
-        <Link href="/settings?tab=repositories" className="hover:underline">
-          {n === null ? (repos.kind === "unsupported" ? "Not available yet" : "…") : `${n} connected`}
-        </Link>
-      </Fact>
-      <Fact id="active-products" label="Active products" measured={dashboard.activeProducts !== null}>
-        {count(dashboard.activeProducts)}
-      </Fact>
-      <Fact id="licences" label="Licences" measured={dashboard.licences !== null}>
-        <Link href="/licences" className="hover:underline">
-          {count(dashboard.licences)}
-        </Link>
-      </Fact>
-      <span className="ml-auto flex flex-wrap gap-2">
-        <ConnectRepository enabled={repos.kind === "ready" && repos.connect} onConnected={onReposChanged} />
-      </span>
-    </div>
-  )
-}
 
 function EmptyState() {
   return (
@@ -91,29 +41,26 @@ export function DashboardView({
   attention = LOADING,
   stages = LOADING,
   activity = LOADING,
-  repos = LOADING,
-  onReposChanged,
   pnl = LOADING,
-  granularity = "month",
-  periods = 6,
-  onGranularity,
-  onPeriods,
+  chartPnl,
+  filter = DEFAULT_CHART_FILTER,
+  onFilter,
 }: {
   dashboard: Dashboard
   attention?: Loaded<AttentionItem[]>
   stages?: Loaded<StagesData>
   activity?: Loaded<AuditEvent[]>
-  repos?: ReposState
-  onReposChanged?: () => void
+  /** The whole workspace's P&L: the key figures. */
   pnl?: Loaded<Pnl>
-  granularity?: Granularity
-  periods?: Range
-  onGranularity?: (g: Granularity) => void
-  onPeriods?: (p: Range) => void
+  /** The P&L for the filter (app, stage, date range): the Money moved and Costs charts. The workspace's when absent. */
+  chartPnl?: Loaded<Pnl>
+  filter?: ChartFilter
+  onFilter?: (f: ChartFilter) => void
 }) {
   const ready = pnl.kind === "ready" ? pnl.data : null
   const appsLive = stages.kind === "ready" ? stages.data.apps.filter((a) => a.stage === "production").length : null
-  const costs = costSlices(ready)
+  const charts = chartPnl ?? pnl
+  const range = dateRange(filter.range)
   return (
     <div className="@container/main flex flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6" data-dashboard>
       <NeedsAttention state={attention} />
@@ -125,35 +72,66 @@ export function DashboardView({
         </section>
       </Panel>
 
-      <Panel id="top" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <PnlChart state={pnl} granularity={granularity} periods={periods} onGranularity={onGranularity} onPeriods={onPeriods} variant="area" title="Money moved and costs" />
-        <Section id="cost-breakdown" title="Where the money goes" description="This period's costs">
-          {pnl.kind === "ready" ? (
-            <Donut title="Costs this period" slices={costs.slices} unmeasured={costs.unmeasured} empty="No costs measured this period" />
-          ) : (
-            <PnlNotReadyLine state={pnl} />
-          )}
-        </Section>
+      <Panel id="money">
+        <div className="flex flex-col gap-4">
+          <ChartFilters filter={filter} onFilter={onFilter} apps={stages.kind === "ready" ? stages.data.apps : []} />
+          <PnlChart state={charts} granularity={range.granularity} periods={range.periods} controls={false} only="revenue" variant="area" title="Money moved" id="money-moved" empty="Not measured yet: Mynt hasn't recorded money moved for these periods." />
+        </div>
+        <PnlChart state={charts} granularity={range.granularity} periods={range.periods} controls={false} only="costs" variant="area" title="Costs" id="costs" empty="Not measured yet: Mynt hasn't recorded costs for these periods." />
       </Panel>
 
-      <Panel id="apps" cols="@4xl/main:grid-cols-2">
-        <Section id="money-by-app" title="Money moved by app" description="This period">
-          {pnl.kind === "ready" ? <HBars title="Money moved by app" rows={moneyByApp(ready)} empty="No money moved through your apps yet" /> : <PnlNotReadyLine state={pnl} />}
-        </Section>
-        <AppsByStage state={stages} apps={dashboard.apps} />
-      </Panel>
-
-      <Panel id="activity-and-facts" cols="@4xl/main:grid-cols-2">
+      <Panel id="activity">
         <RecentActivity state={activity} />
-        <section className="flex min-w-0 flex-col gap-3" data-section="summary" aria-labelledby="section-summary">
-          <h2 id="section-summary" className="text-sm font-semibold">
-            Workspace
-          </h2>
-          <OperatingFacts dashboard={dashboard} />
-          <WorkspaceFacts dashboard={dashboard} repos={repos} onReposChanged={onReposChanged} />
-        </section>
       </Panel>
     </div>
+  )
+}
+
+/** One set of filters for both charts: the app (within the stage picked), the app stage, the date range. */
+function ChartFilters({ filter, onFilter, apps }: { filter: ChartFilter; onFilter?: (f: ChartFilter) => void; apps: StageApp[] }) {
+  const set = (patch: Partial<ChartFilter>) => onFilter?.({ ...filter, ...patch })
+  const choices = appsForStage(apps, filter.stage)
+  return (
+    <div className="flex flex-wrap items-end gap-3" data-chart-filters>
+      <FilterSelect label="App" value={filter.app} onChange={(app) => set({ app })} id="app">
+        <option value="all">All apps</option>
+        {choices.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name}
+          </option>
+        ))}
+      </FilterSelect>
+      <FilterSelect label="App stage" value={filter.stage} onChange={(stage) => set({ stage: stage as ChartFilter["stage"], app: "all" })} id="stage">
+        <option value="all">All stages</option>
+        {STAGES.map((st) => (
+          <option key={st} value={st}>
+            {STAGE_LABELS[st]}
+          </option>
+        ))}
+      </FilterSelect>
+      <FilterSelect label="Date range" value={filter.range} onChange={(range) => set({ range: range as ChartFilter["range"] })} id="range">
+        {DATE_RANGES.map((r) => (
+          <option key={r.key} value={r.key}>
+            {r.label}
+          </option>
+        ))}
+      </FilterSelect>
+    </div>
+  )
+}
+
+function FilterSelect({ label, value, onChange, id, children }: { label: string; value: string; onChange: (v: string) => void; id: string; children: React.ReactNode }) {
+  return (
+    <label className="flex min-w-36 flex-col gap-1 text-xs text-muted-foreground" data-filter={id}>
+      {label}
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-8 rounded-md border bg-background px-2 text-sm text-foreground shadow-xs outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        {children}
+      </select>
+    </label>
   )
 }
 

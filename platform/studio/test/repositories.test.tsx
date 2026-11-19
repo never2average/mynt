@@ -35,7 +35,7 @@ vi.mock("@/lib/tokens", () => ({
 }));
 
 const { DashboardView } = await import("@/components/dashboard-view");
-const { RepositoriesTab, ConnectResultView } = await import("@/components/repositories");
+const { RepositoriesTab, ConnectResultView, ConnectRepository } = await import("@/components/repositories");
 const { fromConnectRepository, fromListRepositories } = await import("@/lib/repositories");
 const { fromDashboardTool } = await import("@/lib/dashboard");
 const route = await import("@/app/api/repositories/route");
@@ -53,20 +53,15 @@ const repos = [
 ];
 const dashboard = fromDashboardTool({});
 
-describe("the dashboard's workspace facts", () => {
-  it("show how many repositories are connected (listed in Settings) and Connect repository; GitHub itself is in the header", () => {
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboard} repos={{ kind: "ready", repos, connect: true }} />);
-    const line = html.slice(html.indexOf('data-facts="workspace"'));
-    expect(line).not.toContain('data-fact="github"');
-    expect(line).toMatch(/href="\/settings\?tab=repositories"[^>]*>3 connected</);
-    expect(line).toMatch(/>\s*Connect repository\s*</);
-    // The list itself is on Settings > Repositories, not the dashboard.
-    expect(html).not.toContain("data-repo=");
+describe("Connect repository (in Settings and the header's GitHub control; the dashboard has no workspace facts)", () => {
+  it("isn't on the dashboard any more, nor the repository count", () => {
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboard} />);
+    expect(html).not.toContain('data-facts="workspace"');
+    expect(html).not.toContain("data-connect-repository");
   });
 
-  it("say when Mynt doesn't list repositories yet, and disable Connect then", () => {
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboard} repos={{ kind: "unsupported" }} />);
-    expect(html).toMatch(/data-fact="repositories"[\s\S]*?Not available yet/);
+  it("is disabled when Mynt doesn't list repositories yet", () => {
+    const html = renderToStaticMarkup(<ConnectRepository enabled={false} />);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-connect-repository/);
   });
 
@@ -77,7 +72,7 @@ describe("the dashboard's workspace facts", () => {
       return new Response(JSON.stringify({ result: { kind: "pending", repository: "ines/cards", why: "read-only access", manageUrl: "https://accounts.example.test/user" } }), { status: 200 });
     });
     const connected: string[] = [];
-    render(<DashboardView dashboard={dashboard} repos={{ kind: "ready", repos: [], connect: true }} onReposChanged={() => connected.push("x")} />);
+    render(<ConnectRepository enabled onConnected={() => connected.push("x")} />);
     fireEvent.click(screen.getByRole("button", { name: "Connect repository" }));
     const input = screen.getByLabelText("Repository (owner/name)");
     fireEvent.change(input, { target: { value: "not a repo" } });

@@ -120,6 +120,9 @@ export function PnlChart({
   note,
   empty = "Not measured yet: Mynt hasn't recorded revenue or costs for these periods.",
   variant = "bars",
+  only,
+  controls = true,
+  id = "pnl-chart",
 }: {
   state: Loaded<Pick<Pnl, "series">>
   granularity: Granularity
@@ -132,6 +135,12 @@ export function PnlChart({
   empty?: string
   /** "area": the dashboard's large chart (filled areas, net as a line); "bars": the compact one. */
   variant?: "bars" | "area"
+  /** One series alone (no net line): the builder dashboard's Money moved and Costs charts. */
+  only?: "revenue" | "costs"
+  /** The chart's own period and range controls (off where a filter bar above sets them). */
+  controls?: boolean
+  /** The section's id, so two charts can share a page. */
+  id?: string
 }) {
   const height = variant === "area" ? "h-[300px]" : "h-[220px]"
   const config = labels
@@ -144,21 +153,24 @@ export function PnlChart({
   const unit = granularity === "month" ? "mo" : "wk"
   const series = state.kind === "ready" ? state.data.series : []
   const rows = chartRows(series, granularity)
-  const gaps = rows.filter((r) => r.revenue === null || r.costs === null || r.netIncome === null)
+  const gaps = rows.filter((r) => (only ? r[only] === null : r.revenue === null || r.costs === null || r.netIncome === null))
+  const measured = only ? series.some((p) => p[only] !== null) : anyMeasured(series)
   return (
-    <section className="flex min-w-0 flex-col gap-2" data-section="pnl-chart" aria-labelledby="section-pnl-chart">
-      <div className="flex flex-wrap items-center gap-2 border-b pb-2">
-        <h2 id="section-pnl-chart" className="text-sm font-semibold">
+    <section className="flex min-w-0 flex-col gap-2" data-section={id} aria-labelledby={`section-${id}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id={`section-${id}`} className="text-sm font-semibold">
           {title}
         </h2>
-        <div className="ml-auto flex items-center gap-2">
-          <Segmented label="Period" options={["month", "week"] as const} value={granularity} onChange={onGranularity} text={(g) => (g === "month" ? "Month" : "Week")} />
-          <Segmented label="Range" options={RANGES} value={periods} onChange={onPeriods} text={(n) => `${n} ${unit}`} />
-        </div>
+        {controls && (
+          <div className="ml-auto flex items-center gap-2">
+            <Segmented label="Period" options={["month", "week"] as const} value={granularity} onChange={onGranularity} text={(g) => (g === "month" ? "Month" : "Week")} />
+            <Segmented label="Range" options={RANGES} value={periods} onChange={onPeriods} text={(n) => `${n} ${unit}`} />
+          </div>
+        )}
       </div>
       {state.kind !== "ready" ? (
         <PnlNotReady state={state} height={height} />
-      ) : !anyMeasured(series) ? (
+      ) : !measured ? (
         <div className={cn("flex items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground", height)} data-pnl-empty="unmeasured">
           {empty}
         </div>
@@ -183,8 +195,10 @@ export function PnlChart({
                   />
                 }
               />
-              <ChartLegend content={<ChartLegendContent />} />
-              {variant === "area" ? (
+              {!only && <ChartLegend content={<ChartLegendContent />} />}
+              {only ? (
+                <Area dataKey={only} type="monotone" fill={`var(--color-${only})`} fillOpacity={0.25} stroke={`var(--color-${only})`} strokeWidth={2} connectNulls={false} />
+              ) : variant === "area" ? (
                 <>
                   <Area dataKey="revenue" type="monotone" fill="var(--color-revenue)" fillOpacity={0.25} stroke="var(--color-revenue)" strokeWidth={2} connectNulls={false} />
                   <Area dataKey="costs" type="monotone" fill="var(--color-costs)" fillOpacity={0.2} stroke="var(--color-costs)" strokeWidth={2} connectNulls={false} />
@@ -196,7 +210,7 @@ export function PnlChart({
                 </>
               )}
               {/* A period Mynt didn't measure stays a gap: nulls are never joined or drawn as 0. */}
-              <Line dataKey="netIncome" type="linear" stroke="var(--color-netIncome)" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+              {!only && <Line dataKey="netIncome" type="linear" stroke="var(--color-netIncome)" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />}
             </ComposedChart>
           </ChartContainer>
           {hasGaps(series) && (

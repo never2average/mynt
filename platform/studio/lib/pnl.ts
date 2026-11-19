@@ -15,6 +15,27 @@ export type Granularity = (typeof GRANULARITIES)[number];
 export const RANGES = [3, 6, 12] as const;
 export type Range = (typeof RANGES)[number];
 
+// The dashboard's date ranges: each a granularity and a number of periods.
+export const DATE_RANGES = [
+  { key: "3m", label: "Last 3 months", granularity: "month", periods: 3 },
+  { key: "6m", label: "Last 6 months", granularity: "month", periods: 6 },
+  { key: "12m", label: "Last 12 months", granularity: "month", periods: 12 },
+  { key: "12w", label: "Last 12 weeks", granularity: "week", periods: 12 },
+] as const satisfies readonly { key: string; label: string; granularity: Granularity; periods: Range }[];
+export type DateRangeKey = (typeof DATE_RANGES)[number]["key"];
+
+// Several apps' series (the same periods, asked with the same granularity and count) added up. A period
+// is measured only if it is for every app: one unmeasured app leaves the total unmeasured, never a smaller sum.
+export function sumSeries(all: PnlPeriod[][]): PnlPeriod[] {
+  if (!all.length) return [];
+  const add = (xs: (number | null)[]) => (xs.some((x) => x === null) ? null : (xs as number[]).reduce((a, b) => a + b, 0));
+  return all[0].map((p, i) => {
+    const at = all.map((s) => s[i]);
+    if (at.some((x) => !x || x.start !== p.start)) return { ...p, revenue: null, costs: null, netIncome: null };
+    return { start: p.start, end: p.end, revenue: add(at.map((x) => x.revenue)), costs: add(at.map((x) => x.costs)), netIncome: add(at.map((x) => x.netIncome)) };
+  });
+}
+
 export const COLUMN_KEYS = ["this_period", "last_period", "year_to_date"] as const;
 export type ColumnKey = (typeof COLUMN_KEYS)[number];
 export type Values = Record<ColumnKey, number | null>;
