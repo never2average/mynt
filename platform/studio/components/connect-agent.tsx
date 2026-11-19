@@ -1,15 +1,15 @@
 "use client"
 
-// "Connect your agent" in the sidebar: for people who'd rather work from their own AI agent, how to add
+// "Connect your agent" (/connect, from the header's plug button): for people who'd rather work from their own AI agent, how to add
 // Mynt's MCP server to it. The server's address is this site's own origin + /mcp (Mynt's paths share
 // the studio's domain), read in the browser, so no host is written into the code. Signing in from the
 // agent goes through Mynt's normal sign-in (OAuth), so nothing secret is shown here.
+import Link from "next/link"
 import { useEffect, useState } from "react"
 import { Check, Copy, ExternalLink, Plug } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export type AgentId = "claude-code" | "claude" | "cursor" | "vscode" | "chatgpt" | "other"
 export const AGENTS: { id: AgentId; label: string }[] = [
@@ -126,43 +126,40 @@ export function AgentInstructions({ agent, url }: { agent: AgentId; url: string 
   }
 }
 
-export function ConnectAgentDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+// The agent picker and its steps, as the /connect page shows them.
+export function ConnectAgentPanel() {
   const [agent, setAgent] = useState<AgentId>("claude-code")
   const [url, setUrl] = useState("")
   useEffect(() => setUrl(mcpUrl(window.location.origin)), [])
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg" data-connect-agent>
-        <DialogHeader>
-          <DialogTitle>Connect your agent</DialogTitle>
-          <DialogDescription>Use Mynt from the AI agent you already work in. It signs in as you and sees what you can see here.</DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Agent">
-          {AGENTS.map((a) => (
-            <Button key={a.id} type="button" size="sm" variant={a.id === agent ? "secondary" : "ghost"} role="tab" aria-selected={a.id === agent} onClick={() => setAgent(a.id)} data-agent-tab={a.id}>
-              {a.label}
-            </Button>
-          ))}
-        </div>
-        {url && <AgentInstructions agent={agent} url={url} />}
-        <a href="/docs" className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" data-docs-link>
-          Read the full guide: signing in, what your agent can do, troubleshooting
-        </a>
-      </DialogContent>
-    </Dialog>
+    <div className="flex flex-col gap-4" data-connect-agent>
+      <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Agent">
+        {AGENTS.map((a) => (
+          <Button key={a.id} type="button" size="sm" variant={a.id === agent ? "secondary" : "ghost"} role="tab" aria-selected={a.id === agent} onClick={() => setAgent(a.id)} data-agent-tab={a.id}>
+            {a.label}
+          </Button>
+        ))}
+      </div>
+      {url && <AgentInstructions agent={agent} url={url} />}
+      <Link href="/docs" className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" data-docs-link>
+        Read the full guide: signing in, what your agent can do, troubleshooting
+      </Link>
+    </div>
   )
 }
 
-// The sidebar entry (sits above the account row).
-export function ConnectAgentMenuItem() {
-  const [open, setOpen] = useState(false)
+// The header's icon button beside the theme switcher, opening /connect. Outlined and sized like the theme button.
+export function ConnectAgentButton() {
   return (
-    <SidebarMenuItem>
-      <SidebarMenuButton tooltip="Connect your agent" onClick={() => setOpen(true)} data-connect-agent-open>
-        <Plug />
-        <span>Connect your agent</span>
-      </SidebarMenuButton>
-      <ConnectAgentDialog open={open} onOpenChange={setOpen} />
-    </SidebarMenuItem>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button asChild variant="outline" size="icon" className="size-8 shrink-0 p-0">
+          <Link href="/connect" aria-label="Connect your agent" data-connect-agent-open>
+            <Plug />
+          </Link>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Connect your agent</TooltipContent>
+    </Tooltip>
   )
 }
