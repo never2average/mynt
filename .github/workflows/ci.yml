@@ -598,9 +598,9 @@ jobs:
           java-version: "17"
       - name: Kotlin compiles
         run: |
-          curl -fsSL -o kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip
           unzip -q kotlin.zip
-          curl -fsSL -o json.jar https://repo1.maven.org/maven2/org/json/json/20240303/json-20240303.jar
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o json.jar https://repo1.maven.org/maven2/org/json/json/20240303/json-20240303.jar
           ./kotlinc/bin/kotlinc sdk-out/kotlin/src/main/kotlin -cp json.jar -d kotlin-sdk.jar
       - uses: dart-lang/setup-dart@v1
         with:
