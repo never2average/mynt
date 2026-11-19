@@ -53,7 +53,13 @@ function BuilderDashboard() {
   // stage, date range), read again when they change.
   const [filter, setFilter] = useState<ChartFilter>(DEFAULT_CHART_FILTER);
   const workspaceUrl = "/api/pnl?granularity=month&periods=6";
-  const chartUrl = chartPnlUrl(filter, stages.kind === "ready" ? stages.data.apps : []);
+  // The search narrows the charts once typing pauses, not on every key.
+  const [query, setQuery] = useState(filter.query);
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(filter.query), 300);
+    return () => clearTimeout(t);
+  }, [filter.query]);
+  const chartUrl = chartPnlUrl({ ...filter, query }, stages.kind === "ready" ? stages.data.apps : []);
   const { state: pnl } = useComplianceData(workspaceUrl, pickPnl);
   const { state: filtered } = useComplianceData(chartUrl === workspaceUrl ? `${workspaceUrl}&charts=1` : chartUrl, pickPnl);
 

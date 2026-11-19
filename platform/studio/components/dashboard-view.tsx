@@ -1,10 +1,13 @@
 // The dashboard (home page): Needs attention as a strip, then rows of outlined panels (Panel):
-// the key figures; Money moved and Costs, one chart above the other, under one set of filters
-// (app, app stage, date range: those charts only); recent activity. Sections side by side are split by a divider; flat,
+// the key figures; one toolbar row (search, App, App stage, Date range) over Money moved and Costs,
+// one chart above the other (the toolbar narrows those charts only); recent activity. Sections side by side are split by a divider; flat,
 // no shadows. The P&L comes from get_workspace_pnl (components/pnl.tsx) and degrades on its own;
 // everything else works without it. Server-renderable for the tests.
 import Link from "next/link"
-import { Plus } from "lucide-react"
+import { Plus, Search } from "lucide-react"
+
+import { FilterSelect } from "@/components/filter-controls"
+import { Input } from "@/components/ui/input"
 
 import { NeedsAttention, Panel, RecentActivity, type StageApp, type StagesData } from "@/components/dashboard-panels"
 import { PnlChart, PNL_NOT_AVAILABLE } from "@/components/pnl"
@@ -72,9 +75,9 @@ export function DashboardView({
         </section>
       </Panel>
 
+      <ChartToolbar filter={filter} onFilter={onFilter} apps={stages.kind === "ready" ? stages.data.apps : []} />
       <Panel id="money">
         <div className="flex flex-col gap-4">
-          <ChartFilters filter={filter} onFilter={onFilter} apps={stages.kind === "ready" ? stages.data.apps : []} />
           <PnlChart state={charts} granularity={range.granularity} periods={range.periods} controls={false} only="revenue" variant="area" title="Money moved" id="money-moved" empty="Not measured yet: Mynt hasn't recorded money moved for these periods." />
         </div>
         <PnlChart state={charts} granularity={range.granularity} periods={range.periods} controls={false} only="costs" variant="area" title="Costs" id="costs" empty="Not measured yet: Mynt hasn't recorded costs for these periods." />
@@ -87,51 +90,29 @@ export function DashboardView({
   )
 }
 
-/** One set of filters for both charts: the app (within the stage picked), the app stage, the date range. */
-function ChartFilters({ filter, onFilter, apps }: { filter: ChartFilter; onFilter?: (f: ChartFilter) => void; apps: StageApp[] }) {
+/** The charts' one toolbar row, as on Audits and Licences: search (app names), then App, App stage and Date range. */
+function ChartToolbar({ filter, onFilter, apps }: { filter: ChartFilter; onFilter?: (f: ChartFilter) => void; apps: StageApp[] }) {
   const set = (patch: Partial<ChartFilter>) => onFilter?.({ ...filter, ...patch })
-  const choices = appsForStage(apps, filter.stage)
   return (
-    <div className="flex flex-wrap items-end gap-3" data-chart-filters>
-      <FilterSelect label="App" value={filter.appId} onChange={(appId) => set({ appId })} id="app">
-        <option value="all">All apps</option>
-        {choices.map((a) => (
-          <option key={a.id} value={a.id}>
-            {a.name}
-          </option>
-        ))}
-      </FilterSelect>
-      <FilterSelect label="App stage" value={filter.stage} onChange={(stage) => set({ stage: stage as ChartFilter["stage"], appId: "all" })} id="stage">
-        <option value="all">All stages</option>
-        {STAGES.map((st) => (
-          <option key={st} value={st}>
-            {STAGE_LABELS[st]}
-          </option>
-        ))}
-      </FilterSelect>
-      <FilterSelect label="Date range" value={filter.range} onChange={(range) => set({ range: range as ChartFilter["range"] })} id="range">
-        {DATE_RANGES.map((r) => (
-          <option key={r.key} value={r.key}>
-            {r.label}
-          </option>
-        ))}
-      </FilterSelect>
+    <div className="flex flex-wrap items-center gap-2" data-toolbar data-chart-filters>
+      <div className="relative min-w-64 flex-1">
+        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input value={filter.query} onChange={(e) => set({ query: e.target.value, appId: "all" })} placeholder="Search apps by name" className="pl-8" aria-label="Search apps" />
+      </div>
+      <FilterSelect
+        label="App"
+        value={filter.appId === "all" ? "" : filter.appId}
+        onChange={(v) => set({ appId: v || "all" })}
+        options={appsForStage(apps, filter.stage).map((a) => ({ value: a.id, label: a.name }))}
+      />
+      <FilterSelect
+        label="App stage"
+        value={filter.stage === "all" ? "" : filter.stage}
+        onChange={(v) => set({ stage: (v || "all") as ChartFilter["stage"], appId: "all" })}
+        options={STAGES.map((st) => ({ value: st, label: STAGE_LABELS[st] }))}
+      />
+      <FilterSelect label="Date range" value={filter.range} onChange={(v) => set({ range: (v || DEFAULT_CHART_FILTER.range) as ChartFilter["range"] })} options={DATE_RANGES.map((r) => ({ value: r.key, label: r.label }))} />
     </div>
-  )
-}
-
-function FilterSelect({ label, value, onChange, id, children }: { label: string; value: string; onChange: (v: string) => void; id: string; children: React.ReactNode }) {
-  return (
-    <label className="flex min-w-36 flex-col gap-1 text-xs text-muted-foreground" data-filter={id}>
-      {label}
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-8 rounded-md border bg-background px-2 text-sm text-foreground shadow-xs outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-      >
-        {children}
-      </select>
-    </label>
   )
 }
 

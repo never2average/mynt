@@ -102,19 +102,27 @@ export function seriesSummary(label: string, points: { label: string; value: num
 
 // ---- the builder dashboard's chart filters: app, app stage, date range ----
 
-export type ChartFilter = { appId: string; stage: Stage | "all"; range: DateRangeKey };
-export const DEFAULT_CHART_FILTER: ChartFilter = { appId: "all", stage: "all", range: "6m" };
+export type ChartFilter = { appId: string; stage: Stage | "all"; range: DateRangeKey; query: string };
+export const DEFAULT_CHART_FILTER: ChartFilter = { appId: "all", stage: "all", range: "6m", query: "" };
 
 export const dateRange = (key: DateRangeKey) => DATE_RANGES.find((r) => r.key === key) ?? DATE_RANGES[1];
 
 // The apps the app picker offers: those in the chosen stage (all apps for every stage).
 export const appsForStage = (apps: readonly { id: string; name: string; stage: Stage }[], stage: ChartFilter["stage"]) => (stage === "all" ? [...apps] : apps.filter((a) => a.stage === stage));
 
-// The P&L route for a filter: one app (?app=), a stage's apps added up (?apps=), or the whole workspace.
-export function chartPnlUrl(f: ChartFilter, apps: readonly { id: string; stage: Stage }[]): string {
+// The apps the charts add up: the one picked, else those in the stage whose name matches the search.
+export function chartApps<A extends { id: string; name: string; stage: Stage }>(f: ChartFilter, apps: readonly A[]): A[] {
+  if (f.appId !== "all") return apps.filter((a) => a.id === f.appId);
+  const q = f.query.trim().toLowerCase();
+  return appsForStage(apps, f.stage).filter((a) => !q || a.name.toLowerCase().includes(q)) as A[];
+}
+
+// The P&L route for a filter: one app (?app=), the apps a stage or search narrows to added up (?apps=), or the
+// whole workspace when nothing narrows it.
+export function chartPnlUrl(f: ChartFilter, apps: readonly { id: string; name: string; stage: Stage }[]): string {
   const r = dateRange(f.range);
   const base = `/api/pnl?granularity=${r.granularity}&periods=${r.periods}`;
   if (f.appId !== "all") return `${base}&app=${encodeURIComponent(f.appId)}`;
-  if (f.stage !== "all") return `${base}&apps=${apps.filter((a) => a.stage === f.stage).map((a) => encodeURIComponent(a.id)).join(",")}`;
+  if (f.stage !== "all" || f.query.trim()) return `${base}&apps=${chartApps(f, apps).map((a) => encodeURIComponent(a.id)).join(",")}`;
   return base;
 }

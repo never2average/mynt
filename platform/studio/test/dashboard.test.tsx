@@ -4,7 +4,7 @@ import { DashboardView } from "@/components/dashboard-view";
 import { PnlChart, PnlStatement, PNL_NOT_AVAILABLE } from "@/components/pnl";
 import { facts, fromAppsAndBuilds, fromDashboardTool, NOT_MEASURED, usd } from "@/lib/dashboard";
 import { chartRows, fromPnl, MINUS, money, changeText, sumSeries } from "@/lib/pnl";
-import { chartPnlUrl } from "@/lib/dashboard-visual";
+import { appsForStage, chartApps, chartPnlUrl, DEFAULT_CHART_FILTER } from "@/lib/dashboard-visual";
 
 // The dashboard never shows 0 for something Mynt doesn't measure.
 const render = (d: ReturnType<typeof fromDashboardTool>) => renderToStaticMarkup(<DashboardView dashboard={d} />);
@@ -172,29 +172,38 @@ describe("dashboard page", () => {
     expect(at("data-chart-filters")).toBeLessThan(at('data-section="money-moved"'));
     expect(at('data-section="money-moved"')).toBeLessThan(at('data-section="costs"'));
     expect(html).toMatch(/data-kpi="money-moved"[\s\S]*?\$1,500\.00/);
-    // One set of filters: app, app stage, date range; neither chart has its own controls.
+    // One toolbar row above Money moved: search, then App, App stage and Date range; no chart has its own controls.
     expect(html.match(/data-chart-filters/g)).toHaveLength(1);
-    for (const f of ["app", "stage", "range"]) expect(html).toContain(`data-filter="${f}"`);
+    const toolbar = html.slice(at("data-chart-filters"), at('data-section="money-moved"'));
+    expect(toolbar).toContain('aria-label="Search apps"');
+    for (const f of ["App", "App stage", "Date range"]) expect(toolbar).toContain(`data-filter="${f}"`);
+    expect(toolbar).toMatch(/Date range[\s\S]*?· Last 6 months/);
     expect(html).not.toContain('aria-label="Period"');
+    expect(html).not.toContain("The newest entries in the audit trail");
     // Each row is its own outlined panel.
     for (const row of ["kpis", "money", "activity"]) expect(html).toMatch(new RegExp(`data-row="${row}"[^>]*data-panel`));
   });
 
-  it("filters the charts by app (within the stage picked), app stage and date range", () => {
+  it("narrows the charts by app, app stage, search and date range", () => {
     const apps = [
       { id: "a1", name: "Cards", stage: "production" as const, readiness: null },
       { id: "a2", name: "Savings", stage: "staging" as const, readiness: null },
+      { id: "a3", name: "Card rewards", stage: "staging" as const, readiness: null },
     ];
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={{ appId: "all", stage: "staging", range: "12w" }} />);
-    const appSelect = html.slice(html.indexOf('data-filter="app"'), html.indexOf('data-filter="stage"'));
-    expect(appSelect).toContain(">Savings<");
-    expect(appSelect).not.toContain(">Cards<");
-    for (const label of ["All stages", "Production", "Staging", "Ideas", "Last 3 months", "Last 6 months", "Last 12 months", "Last 12 weeks"]) expect(html).toContain(`>${label}<`);
-    // What each filter asks the P&L route for.
-    expect(chartPnlUrl({ appId: "all", stage: "all", range: "6m" }, apps)).toBe("/api/pnl?granularity=month&periods=6");
-    expect(chartPnlUrl({ appId: "a1", stage: "all", range: "3m" }, apps)).toBe("/api/pnl?granularity=month&periods=3&app=a1");
-    expect(chartPnlUrl({ appId: "all", stage: "staging", range: "12w" }, apps)).toBe("/api/pnl?granularity=week&periods=12&apps=a2");
-    expect(chartPnlUrl({ appId: "all", stage: "idea", range: "12m" }, apps)).toBe("/api/pnl?granularity=month&periods=12&apps=");
+    const f = (o: Partial<typeof DEFAULT_CHART_FILTER>) => ({ ...DEFAULT_CHART_FILTER, ...o });
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={f({ stage: "staging", range: "12w" })} />);
+    expect(html).toMatch(/App stage[\s\S]*?· Staging/);
+    expect(html).toMatch(/Date range[\s\S]*?· Last 12 weeks/);
+    // The app picker offers the stage's apps; search narrows by name within the stage.
+    expect(appsForStage(apps, "staging").map((a) => a.name)).toEqual(["Savings", "Card rewards"]);
+    expect(chartApps(f({ stage: "staging", query: "card" }), apps).map((a) => a.id)).toEqual(["a3"]);
+    expect(chartApps(f({ query: "CARD" }), apps).map((a) => a.id)).toEqual(["a1", "a3"]);
+    // What each asks the P&L route for.
+    expect(chartPnlUrl(f({}), apps)).toBe("/api/pnl?granularity=month&periods=6");
+    expect(chartPnlUrl(f({ appId: "a1", range: "3m" }), apps)).toBe("/api/pnl?granularity=month&periods=3&app=a1");
+    expect(chartPnlUrl(f({ stage: "staging", range: "12w" }), apps)).toBe("/api/pnl?granularity=week&periods=12&apps=a2,a3");
+    expect(chartPnlUrl(f({ query: "card" }), apps)).toBe("/api/pnl?granularity=month&periods=6&apps=a1,a3");
+    expect(chartPnlUrl(f({ stage: "idea", range: "12m" }), apps)).toBe("/api/pnl?granularity=month&periods=12&apps=");
   });
 
   it("adds up a stage's apps period by period, never filling an unmeasured one", () => {
@@ -211,8 +220,10 @@ describe("dashboard page", () => {
     const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} attention={{ kind: "ready", data: [] }} activity={{ kind: "ready", data: [] }} pnl={{ kind: "unsupported" }} />);
     expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(2); // Money moved and Costs
     expect(html).toContain(PNL_NOT_AVAILABLE.replace("&", "&amp;").replaceAll("'", "&#x27;"));
-    expect(html).toContain("Round-up savings");
+    expect(html).toContain("data-chart-filters"); // the toolbar still works without the P&L
     expect(html).not.toContain("Nothing needs you right now"); // nothing at all when nothing needs you
+    // Recent activity: no subtitle, and View all on a row of its own linking to the audit trail.
+    expect(html).toMatch(/data-view-all[\s\S]*?href="\/audits"[\s\S]*?View all/);
     expect(html).toContain("Nothing has happened in this workspace yet");
     expect(html).not.toContain("$0");
   });
