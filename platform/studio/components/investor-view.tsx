@@ -9,7 +9,7 @@
 // whose tool this Mynt lacks says so. Model: lib/investor.ts. Server-renderable for the tests.
 import Link from "next/link"
 
-import { NeedsAttention, Section, SectionLink } from "@/components/dashboard-panels"
+import { NeedsAttention, Panel, Section, SectionLink } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
 import { Donut, KpiRow } from "@/components/charts"
 import type { Kpi } from "@/lib/dashboard-visual"
@@ -239,14 +239,16 @@ export function InvestorView({
   const investing: Loaded<AttentionItem[]> = attention.kind === "ready" ? { kind: "ready", data: attention.data.filter(investingItem) } : attention
 
   return (
-    <div className="flex flex-col gap-8" data-investor-view>
+    <div className="flex flex-col gap-4 lg:gap-5" data-investor-view>
       <NeedsAttention state={investing} />
 
-      <section className="flex min-w-0 flex-col gap-2" data-section="portfolio" aria-label="Your portfolio">
-        {positionsState.kind === "ready" ? <PortfolioKpis positions={positionsState.data.positions} flows={flows?.series ?? null} /> : <NotReady state={positionsState} what="Your positions" />}
-      </section>
+      <Panel id="portfolio">
+        <section className="flex min-w-0 flex-col gap-2" data-section="portfolio" aria-label="Your portfolio">
+          {positionsState.kind === "ready" ? <PortfolioKpis positions={positionsState.data.positions} flows={flows?.series ?? null} /> : <NotReady state={positionsState} what="Your positions" />}
+        </section>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" data-row="top">
+      <Panel id="top" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <PnlChart
           state={flows ? { kind: "ready", data: { series: flows.series } } : (positionsState as Exclude<typeof positionsState, { kind: "ready" }>)}
           granularity={granularity}
@@ -266,17 +268,18 @@ export function InvestorView({
             <NotReady state={positionsState} what="Allocation" />
           )}
         </Section>
-      </div>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-8 @4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" data-row="unlocks-and-health">
+      <Panel id="unlocks-and-health" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Section id="unlocks" title="Unlock timeline" description="Each devnet deposit: review, then lock-in, then available">
           {positionsState.kind === "ready" ? <UnlockTimeline positions={positionsState.data.positions} now={now} /> : <NotReady state={positionsState} what="Unlocks" />}
         </Section>
         <Section id="pool-health" title="Pool health" description="Pools you hold">
           {positionsState.kind === "ready" ? <PoolHealthList pools={positionsState.data.pools} held={new Set(positionsState.data.positions.map((p) => p.poolId))} /> : <NotReady state={positionsState} what="Pool health" />}
         </Section>
-      </div>
+      </Panel>
 
+      <Panel id="positions">
       <Section id="positions" title="Positions" description="Each deposit, with its pool's health" action={<SectionLink href={EARN_POSITIONS}>Earn</SectionLink>}>
         {positionsState.kind !== "ready" ? (
           <NotReady state={positionsState} what="Your positions" />
@@ -321,8 +324,9 @@ export function InvestorView({
           </Table>
         )}
       </Section>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-6 @5xl/main:grid-cols-2" data-row="coming-and-wallets">
+      <Panel id="coming-and-wallets" cols="@4xl/main:grid-cols-2">
         <Section id="coming-up" title="Coming up" description={`Unlocks and payable withdrawals in the next ${COMING_UP_DAYS} days`}>
           {positionsState.kind !== "ready" ? (
             <NotReady state={positionsState} what="Coming up" />
@@ -395,9 +399,11 @@ export function InvestorView({
             </Table>
           )}
         </Section>
-      </div>
+      </Panel>
 
-      <FinancialActivity state={activity} />
+      <Panel id="financial-activity">
+        <FinancialActivity state={activity} />
+      </Panel>
     </div>
   )
 }

@@ -163,13 +163,17 @@ describe("dashboard page", () => {
     expect(html).not.toContain('data-tile="wallet"');
     expect(html).not.toContain("Crypto wallet");
     expect(html).not.toContain("Link wallet");
-    for (const s of ["kpis", "pnl-chart", "cost-breakdown", "money-by-app", "apps-by-stage", "recent-activity", "summary", "pnl-statement"]) expect(html).toContain(`data-section="${s}"`);
+    for (const s of ["kpis", "pnl-chart", "cost-breakdown", "money-by-app", "apps-by-stage", "recent-activity", "summary"]) expect(html).toContain(`data-section="${s}"`);
     // The KPIs come first, then the large area chart beside the cost breakdown.
     expect(html.indexOf('data-section="kpis"')).toBeLessThan(html.indexOf('data-section="pnl-chart"'));
     expect(html).toMatch(/data-variant="area"/);
     expect(html).toMatch(/data-kpi="money-moved"[\s\S]*?\$1,500\.00/);
-    // The full statement is behind a disclosure.
-    expect(html).toMatch(/<details[^>]*data-statement-disclosure[\s\S]*?Show statement[\s\S]*?data-section="pnl-statement"[\s\S]*?<\/details>/);
+    // The statement table isn't on the dashboard any more.
+    expect(html).not.toContain("data-statement-disclosure");
+    expect(html).not.toContain('data-section="pnl-statement"');
+    // Each row is its own outlined panel; side-by-side sections are split by a divider.
+    for (const row of ["kpis", "top", "apps", "activity-and-facts"]) expect(html).toMatch(new RegExp(`data-row="${row}" data-panel="true"|data-panel="true"[^>]*data-row="${row}"|data-row="${row}"[^>]*data-panel`));
+    expect(html).toMatch(/class="[^"]*rounded-lg border[^"]*@4xl\/main:divide-x[^"]*"[^>]*data-row="top"/);
   });
 
   it("keeps the operating and workspace facts: money moved, customers, repositories, products, licences (GitHub is in the header)", () => {
@@ -188,7 +192,7 @@ describe("dashboard page", () => {
 
   it("degrades without get_workspace_pnl: the P&L says it isn't available, the rest works", () => {
     const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={stages} attention={{ kind: "ready", data: [] }} activity={{ kind: "ready", data: [] }} pnl={{ kind: "unsupported" }} />);
-    expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(4); // chart, cost breakdown, money by app, statement
+    expect(html.match(/data-pnl-empty="unsupported"/g)).toHaveLength(3); // chart, cost breakdown, money by app (the statement is gone)
     expect(html).toContain(PNL_NOT_AVAILABLE.replace("&", "&amp;").replaceAll("'", "&#x27;"));
     expect(html).toContain("Round-up savings");
     expect(html).toContain("Nothing needs you right now");

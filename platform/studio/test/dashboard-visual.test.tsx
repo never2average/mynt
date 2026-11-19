@@ -183,6 +183,8 @@ describe("the header", () => {
     expect(slot.querySelector('[role="tablist"], [role="tab"]')).toBeNull();
     expect(slot.textContent).toMatch(/^\s*\/\s*Builder/);
     expect(slot.querySelector("[data-mode-trigger]")).not.toBeNull();
+    // The trigger shows the current view's icon.
+    expect(slot.querySelector("[data-mode-trigger] [data-mode-icon]")).not.toBeNull();
   });
 
   it("the theme button is square, centred, with the same padding on the header's right as its left", () => {
