@@ -33,7 +33,7 @@ afterEach(cleanup);
 
 const NOW = Date.parse("2026-11-15T12:00:00Z");
 const vals = (t: number | null, l: number | null, y: number | null = null) => ({ this_period: t, last_period: l, year_to_date: y });
-const pnl = fromPnl({
+const pnlReply = {
   series: [
     { start: "2026-09-01", end: "2026-09-30", revenue_cents: null, costs_cents: 1000, net_cents: null },
     { start: "2026-10-01", end: "2026-10-31", revenue_cents: 50000, costs_cents: 9000, net_cents: 41000 },
@@ -50,9 +50,18 @@ const pnl = fromPnl({
     ],
     totals: { revenue: vals(150000, 50000), costs: vals(null, null), net: vals(null, null) },
   },
-});
+};
+const pnl = fromPnl(pnlReply);
 
 describe("the builder's KPIs", () => {
+  it("reads build spend from the line Mynt sends (build_agents)", () => {
+    const real = fromPnl({
+      ...pnlReply,
+      statement: { ...pnlReply.statement, costs: pnlReply.statement.costs.map((c) => (c.key === "coding_agents" ? { ...c, key: "build_agents" } : c)) },
+    });
+    expect(builderKpis(real, 2).find((k) => k.key === "build-spend")!.value).toBe(8000);
+  });
+
   it("money moved, build spend, hosting and apps live, with their change; more cost is bad", () => {
     const kpis = builderKpis(pnl, 2);
     expect(kpis.map((k) => [k.key, k.value])).toEqual([["money-moved", 150000], ["build-spend", 8000], ["hosting", 2000], ["apps-live", 2]]);
