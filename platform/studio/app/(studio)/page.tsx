@@ -11,7 +11,7 @@ import { InvitationsBanner } from "@/components/invitations";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/components/workspace-context";
 import type { Dashboard } from "@/lib/dashboard";
-import type { Granularity, Pnl, Range } from "@/lib/pnl";
+import type { Pnl } from "@/lib/pnl";
 import { chartPnlUrl, DEFAULT_CHART_FILTER, type ChartFilter } from "@/lib/dashboard-visual";
 import type { StagesData } from "@/components/dashboard-panels";
 import type { AttentionItem } from "@/lib/attention";
@@ -144,8 +144,6 @@ const pickLiquidity = (b: Record<string, unknown>) => reviveLiquidity(b as unkno
 const pickWallets = (b: Record<string, unknown>) => b as unknown as EarnWallets;
 
 function InvestorDashboard() {
-  const [granularity, setGranularity] = useState<Granularity>("month");
-  const [periods, setPeriods] = useState<Range>(6);
   const liquidity = useRead("/api/liquidity", pickLiquidity);
   // Earn's wallets route answers "supported: false" itself before Mynt has linked accounts.
   const walletsRaw = useRead("/api/earn/wallets", pickWallets);
@@ -158,10 +156,6 @@ function InvestorDashboard() {
       wallets={walletsRaw}
       activity={activity}
       attention={attention}
-      granularity={granularity}
-      periods={periods}
-      onGranularity={setGranularity}
-      onPeriods={setPeriods}
     />
   );
 }
