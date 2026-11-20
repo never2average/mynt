@@ -9,9 +9,8 @@
 // then the page follows its status until it's confirmed and reads the positions again. Mynt never
 // signs and never holds funds or keys. Devnet only: mainnet is never offered.
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react"
-import { Check, ChevronDown, Info, Link2, Loader2, Wallet } from "lucide-react"
+import { Check, ChevronDown, ChevronLeft, Info, Link2, Loader2, Wallet } from "lucide-react"
 
-import { Panel, Section } from "@/components/dashboard-panels"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -512,131 +511,138 @@ function WalletFigures({ held, queued, available }: { held: bigint; queued: bigi
 
 type OpenDeposit = { poolId: string; poolName: string; wallet: string; deposit: string; seq: string | null; free: bigint; noticeSeconds: number | null; minRequest: bigint | null }
 
-// Each wallet's position in an on-chain pool: its totals, then deposit by deposit (amount, what's
-// left, when it unlocks, whether it's in review, locked or available, and what's queued), with
-// Withdraw on each deposit opening a sheet for that deposit, then its withdrawal requests.
-export function OnChainPositions({ positions, pools }: { positions: Position[]; pools: PoolRow[] }) {
+// One wallet's position in an on-chain pool, in a sheet opened from its row in My positions: its
+// totals, then deposit by deposit (amount, what's left, when it unlocks, whether it's in review,
+// locked or available, and what's queued), then its withdrawal requests. Withdraw on a deposit
+// turns the sheet into that deposit's withdrawal, with Back to return to the deposits.
+export function OnChainPositionSheet({ position: p, pools, onClose }: { position: Position | null; pools: PoolRow[]; onClose: () => void }) {
   const [open, setOpen] = useState<OpenDeposit | null>(null)
-  if (!positions.length) return null
+  const c = p?.chain ?? null
+  const pool = p ? (pools.find((x) => x.id === p.poolId) ?? null) : null
+  const close = () => {
+    setOpen(null)
+    onClose()
+  }
   return (
-    <div data-on-chain-positions>
-      <Panel id="on-chain-positions">
-        <Section id="on-chain-positions" title="On-chain positions" action={<DevnetBadge />}>
-          {positions.map((p) => {
-            const c = p.chain!
-            const pool = pools.find((x) => x.id === p.poolId) ?? null
-            return (
-              <div key={positionKey(p)} className="flex flex-col gap-3 border-t pt-3 first:border-t-0 first:pt-0" data-on-chain-position={positionKey(p)}>
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="font-medium">{p.name}</span>
-                  <span className="font-mono text-xs text-muted-foreground" title={c.wallet}>
-                    {shortAddress(c.wallet)}
-                  </span>
-                  {pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
-                  {pool?.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
-                </div>
-                <WalletFigures held={c.principal} queued={c.queued} available={c.availableToRequest} />
-                <div className="overflow-auto rounded-lg border">
+    <Sheet open={Boolean(p && c)} onOpenChange={(o) => !o && close()}>
+      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl" aria-describedby={undefined} data-sheet={open ? "on-chain-withdraw" : "on-chain-deposits"}>
+        <SheetHeader>
+          <SheetTitle>{open ? `Withdraw from ${open.poolName}` : p ? p.name : "Deposits"}</SheetTitle>
+        </SheetHeader>
+        <div className="flex flex-col gap-4 px-4 pb-4">
+          {p && c && open ? (
+            <>
+              <div>
+                <Button variant="outline" size="sm" onClick={() => setOpen(null)} data-back-to-deposits>
+                  <ChevronLeft />
+                  Back to deposits
+                </Button>
+              </div>
+              <WithdrawDeposit key={`${open.wallet}|${open.deposit}`} {...open} />
+            </>
+          ) : p && c ? (
+            <div className="flex flex-col gap-3" data-on-chain-positions data-on-chain-position={positionKey(p)}>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="font-mono text-xs text-muted-foreground" title={c.wallet}>
+                  {shortAddress(c.wallet)}
+                </span>
+                <DevnetBadge />
+                {pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
+                {pool?.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
+              </div>
+              <WalletFigures held={c.principal} queued={c.queued} available={c.availableToRequest} />
+              <div className="overflow-auto rounded-lg border">
+                <Table>
+                  <TableHeader className="bg-card">
+                    <TableRow>
+                      <TableHead>Deposit</TableHead>
+                      <TableHead className="text-right">Amount</TableHead>
+                      <TableHead className="text-right">Remaining</TableHead>
+                      <TableHead className="text-right">Queued</TableHead>
+                      <TableHead>Unlocks</TableHead>
+                      <TableHead>Standing</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {c.deposits.length ? (
+                      c.deposits.map((d) => {
+                        const s = depositStanding(d)
+                        return (
+                          <TableRow key={d.deposit} data-deposit={d.deposit} data-standing={s.kind}>
+                            <TableCell className="font-mono text-xs" title={d.deposit}>
+                              {d.seq !== null ? `#${d.seq} · ` : ""}
+                              {shortAddress(d.deposit)}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">{usdcText(d.amount)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{usdcText(d.remaining)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{usdcText(d.queued)}</TableCell>
+                            <TableCell>{d.unlocksAt ? d.unlocksAt.slice(0, 10) : "—"}</TableCell>
+                            <TableCell>{standingText(s)}</TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={s.kind !== "available"}
+                                title={s.kind !== "available" ? standingText(s) : undefined}
+                                onClick={() => setOpen({ poolId: p.poolId, poolName: p.name, wallet: c.wallet, deposit: d.deposit, seq: d.seq, free: s.free, noticeSeconds: pool?.treasury?.noticeSeconds ?? null, minRequest: pool?.treasury?.minRequest ?? null })}
+                                data-withdraw-deposit={d.deposit}
+                              >
+                                Withdraw
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })
+                    ) : (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-4 text-center text-muted-foreground">
+                          No deposits from this wallet yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+              {c.requests.length > 0 && (
+                <div className="overflow-auto rounded-lg border" data-on-chain-requests>
                   <Table>
                     <TableHeader className="bg-card">
                       <TableRow>
-                        <TableHead>Deposit</TableHead>
-                        <TableHead className="text-right">Amount</TableHead>
-                        <TableHead className="text-right">Remaining</TableHead>
-                        <TableHead className="text-right">Queued</TableHead>
-                        <TableHead>Unlocks</TableHead>
-                        <TableHead>Standing</TableHead>
-                        <TableHead className="text-right">Action</TableHead>
+                        <TableHead>Withdrawal request</TableHead>
+                        <TableHead className="text-right">Asked</TableHead>
+                        <TableHead className="text-right">Paid</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Payable from</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {c.deposits.length ? (
-                        c.deposits.map((d) => {
-                          const s = depositStanding(d)
-                          return (
-                            <TableRow key={d.deposit} data-deposit={d.deposit} data-standing={s.kind}>
-                              <TableCell className="font-mono text-xs" title={d.deposit}>
-                                {d.seq !== null ? `#${d.seq} · ` : ""}
-                                {shortAddress(d.deposit)}
-                              </TableCell>
-                              <TableCell className="text-right tabular-nums">{usdcText(d.amount)}</TableCell>
-                              <TableCell className="text-right tabular-nums">{usdcText(d.remaining)}</TableCell>
-                              <TableCell className="text-right tabular-nums">{usdcText(d.queued)}</TableCell>
-                              <TableCell>{d.unlocksAt ? d.unlocksAt.slice(0, 10) : "—"}</TableCell>
-                              <TableCell>{standingText(s)}</TableCell>
-                              <TableCell className="text-right">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={s.kind !== "available"}
-                                  title={s.kind !== "available" ? standingText(s) : undefined}
-                                  onClick={() => setOpen({ poolId: p.poolId, poolName: p.name, wallet: c.wallet, deposit: d.deposit, seq: d.seq, free: s.free, noticeSeconds: pool?.treasury?.noticeSeconds ?? null, minRequest: pool?.treasury?.minRequest ?? null })}
-                                  data-withdraw-deposit={d.deposit}
-                                >
-                                  Withdraw
-                                </Button>
-                              </TableCell>
-                            </TableRow>
-                          )
-                        })
-                      ) : (
-                        <TableRow>
-                          <TableCell colSpan={7} className="py-4 text-center text-muted-foreground">
-                            No deposits from this wallet yet.
+                      {c.requests.map((r) => (
+                        <TableRow key={r.address} data-on-chain-request={r.address}>
+                          <TableCell className="font-mono text-xs" title={r.address}>
+                            {r.seq !== null ? `#${r.seq}` : shortAddress(r.address)}
                           </TableCell>
+                          <TableCell className="text-right tabular-nums" data-asked>
+                            {usdcText(r.amount)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums" data-paid>
+                            {usdcText(r.paid)}
+                          </TableCell>
+                          <TableCell className="capitalize" data-status>
+                            {r.status}
+                          </TableCell>
+                          <TableCell>{r.payableAt ? r.payableAt.slice(0, 10) : "—"}</TableCell>
                         </TableRow>
-                      )}
+                      ))}
                     </TableBody>
                   </Table>
                 </div>
-                {c.requests.length > 0 && (
-                  <div className="overflow-auto rounded-lg border" data-on-chain-requests>
-                    <Table>
-                      <TableHeader className="bg-card">
-                        <TableRow>
-                          <TableHead>Withdrawal request</TableHead>
-                          <TableHead className="text-right">Asked</TableHead>
-                          <TableHead className="text-right">Paid</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead>Payable from</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {c.requests.map((r) => (
-                          <TableRow key={r.address} data-on-chain-request={r.address}>
-                            <TableCell className="font-mono text-xs" title={r.address}>
-                              {r.seq !== null ? `#${r.seq}` : shortAddress(r.address)}
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums" data-asked>
-                              {usdcText(r.amount)}
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums" data-paid>
-                              {usdcText(r.paid)}
-                            </TableCell>
-                            <TableCell className="capitalize" data-status>
-                              {r.status}
-                            </TableCell>
-                            <TableCell>{r.payableAt ? r.payableAt.slice(0, 10) : "—"}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </Section>
-      </Panel>
-      <Sheet open={open !== null} onOpenChange={(o) => !o && setOpen(null)}>
-        <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg" aria-describedby={undefined} data-sheet="on-chain-withdraw">
-          <SheetHeader>
-            <SheetTitle>{open ? `Withdraw from ${open.poolName}` : "Withdraw"}</SheetTitle>
-          </SheetHeader>
-          <div className="px-4 pb-4">{open && <WithdrawDeposit key={`${open.wallet}|${open.deposit}`} {...open} />}</div>
-        </SheetContent>
-      </Sheet>
-    </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
   )
 }
 
