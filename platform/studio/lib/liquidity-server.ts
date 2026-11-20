@@ -85,7 +85,7 @@ export async function loadLiquidity(mynt: Client, access: LiquidityAccess): Prom
 
   if (access.liquidityProvider) {
     try {
-      const [positionsReply, healthReply] = await Promise.all([read("list_my_positions"), read("list_pools_with_health")]);
+      const [positionsReply, healthReply] = await Promise.all([read("list_my_positions", { include_entries: true }), read("list_pools_with_health")]);
       const positions = positionsReply === null ? [] : fromPositions(positionsReply);
       const held = new Set(positions.map((p) => p.poolId));
       const health = healthReply === null ? null : fromPoolsWithHealth(healthReply);

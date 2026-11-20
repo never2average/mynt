@@ -571,6 +571,12 @@ test("a position counts only settled movements; a reversal takes it back out", a
   p = await s.position(s.fundA);
   assert.deepEqual([p.contributed_cents, p.balance_cents, p.reversed_in_cents], [29_000, 29_000, 50_000]);
   assert.equal(p.entries.find((e) => e.movement_id === c.movement_id).ledger_state, "reversed");
+  // Every entry says when it was asked for, and a settled one when it settled (the investor charts date by them).
+  for (const e of p.entries) {
+    assert.match(e.claimed_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.ok(e.settled_at === null || /^\d{4}-\d{2}-\d{2}T/.test(e.settled_at));
+  }
+  assert.ok(p.entries.some((e) => e.settled_at !== null), "a settled movement carries its settlement date");
 });
 
 test("a request can't ask for more than is settled, and a retry is the same request", async () => {
