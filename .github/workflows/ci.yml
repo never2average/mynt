@@ -605,7 +605,11 @@ jobs:
           echo "$(tr -d '[:space:]' < kotlin-compiler-2.0.21.zip.sha256)  kotlin-compiler-2.0.21.zip" | sha256sum -c
           mv kotlin-compiler-2.0.21.zip kotlin.zip
           unzip -q kotlin.zip
-          curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o json.jar https://repo1.maven.org/maven2/org/json/json/20240303/json-20240303.jar
+          # Maven Central refuses some runners: try its mirrors in turn; the jar must match Central's published sha1.
+          for base in https://repo1.maven.org/maven2 https://repo.maven.apache.org/maven2 https://maven-central.storage-download.googleapis.com/maven2; do
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o json.jar "$base/org/json/json/20240303/json-20240303.jar" && break
+          done
+          echo "0ebb88e8fb5122b7506d5cf1d69f1ccdb790d22a  json.jar" | sha1sum -c
           ./kotlinc/bin/kotlinc sdk-out/kotlin/src/main/kotlin -cp json.jar -d kotlin-sdk.jar
       - uses: dart-lang/setup-dart@v1
         with:
