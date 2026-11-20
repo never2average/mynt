@@ -3,6 +3,7 @@ import type { Session } from "@/lib/session-store";
 import { EARN_TOOLS, PANEL_TOOLS, validateDraft } from "@/lib/earn";
 import { fromPools, fromPositions } from "@/lib/liquidity";
 import { STUDIO_TOOLS } from "@/lib/studio-tools";
+import { readTimed, sleep } from "./stream-timing";
 
 // Earn's assistant route: the Ask AI stack with Earn's reads and panel tools. A fake Mynt, a fake
 // model and a fake sign-in.
@@ -32,12 +33,13 @@ const POOLS = [pool(POOL), pool(UNCLEARED, { offering_cleared: false })];
 const WALLET = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
 const POSITIONS = [{ pool_id: POOL, name: "Pool 1", product_id: "their-product", sandbox: false, state: "us-ny", contributed_cents: 500_000, balance_cents: 500_000, available_to_withdraw_cents: 200_000 }];
 
-type Step = { text?: string; tool?: { name: string; input: Record<string, unknown> } };
+type Step = { text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> } };
 const fake = {
   session: undefined as Session | undefined,
   steps: [] as Step[],
   requests: [] as { tools: { name: string }[]; system: { text: string }[]; messages: unknown[] }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
+  producedAt: [] as number[],
 };
 
 vi.mock("@/lib/session", () => ({
@@ -85,7 +87,14 @@ vi.mock("@/lib/llm", () => ({
       return {
         on: (_e: string, cb: (d: string) => void) => listeners.push(cb),
         finalMessage: async () => {
-          if (step.text) for (const l of listeners) l(step.text);
+          // A step given in pieces is written a piece at a time, `gapMs` apart, as the model streams.
+          if (step.pieces)
+            for (const p of step.pieces) {
+              await sleep(step.gapMs ?? 0);
+              fake.producedAt.push(performance.now());
+              for (const l of listeners) l(p);
+            }
+          else if (step.text) for (const l of listeners) l(step.text);
           const content: unknown[] = [];
           if (step.text) content.push({ type: "text", text: step.text });
           if (step.tool) content.push({ type: "tool_use", id: `call-${fake.requests.length}`, name: step.tool.name, input: step.tool.input });
@@ -116,10 +125,27 @@ beforeEach(() => {
   fake.steps = [];
   fake.requests = [];
   fake.calls = [];
+  fake.producedAt = [];
   counts.clear();
 });
 
 describe("/api/earn", () => {
+  it("streams the answer as the model writes it: the first words reach the browser before the last are written, through headers that keep proxies from holding it back", async () => {
+    const pieces = ["Pool 1 ", "has a ", "90-day ", "notice period."];
+    fake.steps = [{ pieces, gapMs: 150 }];
+    const res = await ask("Which pools have a short notice period?");
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(res.headers.get("x-accel-buffering")).toBe("no");
+    const got = await readTimed(res);
+    const deltas = got.filter((c) => c.chunk.type === "text-delta");
+    expect(deltas.map((c) => c.chunk.delta)).toEqual(pieces);
+    const lastWritten = fake.producedAt[pieces.length - 1];
+    console.info(`earn: first delta at +${(deltas[0].at - fake.producedAt[0]).toFixed(1)} ms after the model wrote it; ${(lastWritten - deltas[0].at).toFixed(1)} ms before the last piece was written`);
+    expect(deltas[0].at).toBeLessThan(lastWritten);
+    for (let i = 0; i < pieces.length - 1; i++) expect(deltas[i].at).toBeLessThan(fake.producedAt[i + 1]);
+  });
+
   it("offers the model Earn's reads and its panel tools only: no write tool, and none of Mynt's other tools", async () => {
     const res = await ask("$50k, 90-day lock-in, US credit");
     await chunks(res);

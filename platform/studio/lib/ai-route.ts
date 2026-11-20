@@ -5,6 +5,11 @@ import { z } from "zod";
 
 export const TOO_LARGE = Symbol("too large");
 
+// Headers for a streamed reply (with createUIMessageStreamResponse's own text/event-stream): never
+// stored, and never transformed on the way (compression or a buffering proxy would hold the
+// stream back until it ends), so each piece reaches the browser as it's written.
+export const STREAM_HEADERS = { "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" } as const;
+
 // The body as text, read no further than `max` bytes: a declared length over it, or a stream that
 // goes past it, is refused before anything is parsed.
 export async function readCapped(req: Request, max: number): Promise<string | typeof TOO_LARGE> {

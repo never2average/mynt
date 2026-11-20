@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { ChatBody, readCapped, TOO_LARGE } from "@/lib/ai-route";
+import { ChatBody, readCapped, STREAM_HEADERS, TOO_LARGE } from "@/lib/ai-route";
 import { askToolDefs, historyFrom, runAsk, type AskTool } from "@/lib/ask";
 import { askConfigured, askModel, createLlm } from "@/lib/llm";
 import { NotAllowedError } from "@/lib/mynt-client";
@@ -149,5 +149,5 @@ export async function POST(req: Request) {
       return GENERIC_REFUSAL;
     },
   });
-  return createUIMessageStreamResponse({ stream, headers: noStore });
+  return createUIMessageStreamResponse({ stream, headers: STREAM_HEADERS });
 }

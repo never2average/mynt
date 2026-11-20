@@ -696,6 +696,39 @@ test("activity is scrubbed of secrets before it is cut to length", async () => {
   assert.equal(activitySummary("a".repeat(399) + "😀"), "a".repeat(399));
 });
 
+test("activity streams the agent's words as it writes them, to a follower that asks, scrubbed, and read fresh when followed", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick();
+  const ev = (event) => ({ type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event });
+  const delta = (text) => ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+  const gh = "ghs_abcdefghijklmnopqrstuvwxyz0123456789";
+  // The token arrives in two pieces, in two reads.
+  sandboxes.log(sbx, ev({ type: "message_start", message: { id: "msg_1" } }), ev({ type: "content_block_start", index: 0, content_block: { type: "text" } }), delta("Pushing with "), delta(gh.slice(0, 12)));
+  await builds.tick();
+  sandboxes.log(sbx, delta(gh.slice(12) + " now"));
+  await builds.tick();
+  const follow = async (args) => (await call(dev, "get_build_activity", { build_id: started.id, ...args })).data;
+  let got = await follow({ after: 0, text_deltas: true });
+  assert.deepEqual(got.activity.map((a) => [a.type, a.summary, a.stream]), [["text_delta", "Pushing with ", "msg_1:0"], ["text_delta", "[redacted] ", "msg_1:0"]]);
+
+  // Followed with no tick: get_build_activity reads the log itself once the last read is over a second old.
+  sandboxes.log(sbx, { type: "assistant", parent_tool_use_id: null, message: { id: "msg_1", content: [{ type: "text", text: `Pushing with ${gh} now` }] } });
+  await new Promise((r) => setTimeout(r, 1100));
+  got = await follow({ after: got.cursor, text_deltas: true });
+  assert.deepEqual(got.activity.map((a) => [a.type, a.summary, a.stream]), [["text_delta", "now", "msg_1:0"], ["message", "Pushing with [redacted] now", "msg_1:0"]]);
+
+  // A caller that doesn't ask for them sees what it always did: the message, without its deltas.
+  const plain = await follow({ after: 0 });
+  assert.deepEqual(plain.activity.map((a) => [a.seq, a.type, a.summary]), [[4, "message", "Pushing with [redacted] now"]]);
+  assert.equal(plain.cursor, 4);
+  assert.deepEqual((await follow({ limit: 5 })).activity.map((a) => a.type), ["message"]);
+});
+
 test("remove_app deletes a removed app's stored build activity", async () => {
   const { builds, sandboxes, as, connect, call, pg } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
@@ -1463,6 +1496,12 @@ process.stdin.on("data", (d) => {
     const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
     if (m.type !== "user") continue;
     turns++;
+    const ev = (event) => console.log(JSON.stringify({ type: "stream_event", event, session_id: "sess_1", parent_tool_use_id: null, uuid: "u", api_message_id: "msg_1" }));
+    ev({ type: "message_start", message: { id: "msg_1", usage: { input_tokens: 9 } } });
+    ev({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "on it" } });
+    ev({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "npm" } });
+    ev({ type: "message_stop" });
     console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "on it: " + m.message.content }] } }));
     console.log(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.25 * turns }));
   }
@@ -1487,6 +1526,14 @@ process.stdin.on("data", (d) => {
   assert.equal(ran.token, "mynt_agent_t");
   assert.equal(ran.key, null, "an Anthropic key in the sandbox is never passed to the agent");
   assert.match(readFileSync(join(dir, "agent.jsonl"), "utf8"), /on it: Build it/);
+  // The agent's words as it writes them: asked for, and only their text kept, cut down to what Mynt reads.
+  assert.ok(ran.args.includes("--include-partial-messages"));
+  const events = readFileSync(join(dir, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((m) => m.type === "stream_event");
+  assert.deepEqual(events, [
+    { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "message_start", message: { id: "msg_1" } } },
+    { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } },
+    { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "on it" } } },
+  ]);
 });
 
 test("the runner ends a Claude Code that a background task keeps alive after its last result, keeping that result", async () => {

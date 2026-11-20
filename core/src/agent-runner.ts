@@ -64,7 +64,9 @@ mkdirSync(cfg.cwd, { recursive: true });
 // Only the model calls, through Mynt: no telemetry, update checks or other outside traffic.
 const env = { ...process.env, ...auth.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
 for (const k of ["ANTHROPIC_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"]) delete env[k];
-const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+// --include-partial-messages: the model's output as it's generated (stream_event lines), so Mynt can show the
+// agent's words as it writes them. Only their text is kept (see compact below).
+const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
   "--dangerously-skip-permissions", "--max-budget-usd", String(cfg.budgetUsd)];
 if (cfg.model) args.push("--model", cfg.model);
 // Mynt's MCP server, when the run gets one: the config holds the token, so it's private to this user.
@@ -146,6 +148,20 @@ const maybeEnd = () => {
   if (ended) settle();
 };
 
+// Of the partial-message events, only what Mynt shows is written to agent.jsonl, cut down to the fields it reads: a
+// message starting (its id), a text block starting, and each piece of text. The rest (tool inputs as they're
+// written, thinking, usage) is dropped: each whole block follows on its own line anyway.
+const compact = (m) => {
+  const e = m.event || {};
+  const keep = { type: "stream_event", parent_tool_use_id: m.parent_tool_use_id ?? null };
+  if (typeof m.api_message_id === "string") keep.api_message_id = m.api_message_id;
+  if (e.type === "message_start") return { ...keep, event: { type: e.type, message: { id: e.message && e.message.id } } };
+  if (e.type === "content_block_start" && e.content_block && e.content_block.type === "text") return { ...keep, event: { type: e.type, index: e.index, content_block: { type: "text" } } };
+  if (e.type === "content_block_delta" && e.delta && e.delta.type === "text_delta") return { ...keep, event: { type: e.type, index: e.index, delta: { type: "text_delta", text: e.delta.text } } };
+  return null;
+};
+const log = (line) => appendFileSync(join(dir, "agent.jsonl"), line + "\n");
+
 let buf = "";
 child.stdout.on("data", (d) => {
   lastOutput = Date.now();
@@ -155,13 +171,19 @@ child.stdout.on("data", (d) => {
     const line = buf.slice(0, i);
     buf = buf.slice(i + 1);
     if (!line.trim()) continue;
-    appendFileSync(join(dir, "agent.jsonl"), line + "\n");
     let m;
     try {
       m = JSON.parse(line);
     } catch {
+      log(line);
       continue;
     }
+    if (m && m.type === "stream_event") {
+      const kept = compact(m);
+      if (kept) log(JSON.stringify(kept));
+      continue;
+    }
+    log(line);
     if (m.type === "system" && m.subtype === "init") state.session_id = m.session_id ?? null;
     if (m.type === "system" && m.subtype === "background_tasks_changed") background = Array.isArray(m.tasks) ? m.tasks.length : 0;
     if (m.type === "result") {

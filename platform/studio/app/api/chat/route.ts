@@ -4,7 +4,8 @@ import { z } from "zod";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   ActivityFollower,
-  activityToParts,
+  activityToLiveParts,
+  LiveText,
   buildSummaries,
   capabilitiesFrom,
   chooseAction,
@@ -13,6 +14,7 @@ import {
   planSteer,
   START_BUSY_NOTE,
 } from "@/lib/chat";
+import { STREAM_HEADERS } from "@/lib/ai-route";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
 import { sessionStore, type Release, type Session } from "@/lib/session-store";
@@ -34,7 +36,11 @@ export const dynamic = "force-dynamic";
 // the request arrived: its last activity call can take up to the MCP client's 60 s timeout.
 export const maxDuration = 300;
 export const WATCH_MS = 220_000;
+// How often the agent's activity is read: often while it's active (its words show as it writes
+// them; Mynt reads the agent's log at most once a second however often it's asked), less so
+// while nothing is happening.
 const POLL_MS = 2_000;
+const ACTIVE_POLL_MS = 700;
 // A message sent twice (a double click, a retry, a second device) acts once.
 const SAME_MESSAGE_SECONDS = 10 * 60;
 const SAME_TEXT_SECONDS = 30;
@@ -150,7 +156,7 @@ export async function POST(req: Request) {
       return GENERIC_REFUSAL;
     },
   });
-  return createUIMessageStreamResponse({ stream, headers: { "Cache-Control": "no-store" } });
+  return createUIMessageStreamResponse({ stream, headers: STREAM_HEADERS });
 }
 
 let partCounter = 0;
@@ -255,7 +261,7 @@ async function converse(
     return;
   }
 
-  const follower = new ActivityFollower();
+  const follower = new ActivityFollower({ textDeltas: capabilities.textDeltas });
   let buildId: string;
   let skipTurnEnds = 0;
   let steered = false;
@@ -300,7 +306,7 @@ async function converse(
 }
 
 // Follows the build until the agent has answered, the build finishes, the deadline, or the
-// browser goes away.
+// browser goes away. The agent's words are written into the reply as they arrive (LiveText).
 async function watch(
   writer: UIMessageStreamWriter,
   mynt: Client,
@@ -312,31 +318,39 @@ async function watch(
   let phase: string | null = null;
   let toSkip = skip;
   let answered = false;
-  while (!opts.signal.aborted) {
-    const r = follower.take(await callStudioTool(mynt, "get_build_activity", follower.next(buildId)));
-    if (follower.missed) {
-      writeText(writer, "_Some of the agent's activity was too old to show._");
-      follower.missed = false;
-    }
-    // Items up to the end of the answer are shown; the interrupted turn's end is skipped.
-    const end = consumeTurnEnds(r.items, toSkip, r.status);
-    toSkip = end.skip;
-    answered ||= end.answered;
-    for (const part of activityToParts(r.items)) {
-      if (part.kind === "text") writeText(writer, part.text);
-      else {
+  const live = new LiveText((chunk) => writer.write(chunk), () => partId("t"));
+  try {
+    while (!opts.signal.aborted) {
+      const r = follower.take(await callStudioTool(mynt, "get_build_activity", follower.next(buildId)));
+      if (follower.missed) {
+        live.close();
+        writeText(writer, "_Some of the agent's activity was too old to show._");
+        follower.missed = false;
+      }
+      // Items up to the end of the answer are shown; the interrupted turn's end is skipped.
+      const end = consumeTurnEnds(r.items, toSkip, r.status);
+      toSkip = end.skip;
+      answered ||= end.answered;
+      for (const part of activityToLiveParts(r.items)) {
+        if (live.text(part) || part.kind !== "tool") continue;
+        live.close();
         const toolCallId = partId("c");
         writer.write({ type: "tool-input-available", toolCallId, toolName: part.toolName, input: part.input });
         writer.write({ type: "tool-output-available", toolCallId, output: {} });
       }
+      if (r.phaseMessage && r.phaseMessage !== phase) {
+        phase = r.phaseMessage;
+        live.close();
+        writeText(writer, `_${r.status ? `${r.status}: ` : ""}${phase}_`);
+      }
+      if (end.over) return answered ? "answered" : "finished";
+      // Read again soon while the agent is active (it wrote something, or is mid-message).
+      const wait = live.streaming || r.items.length > 0 ? ACTIVE_POLL_MS : POLL_MS;
+      if (Date.now() + wait > opts.deadline) return answered ? "answered" : "timeout";
+      await sleep(wait);
     }
-    if (r.phaseMessage && r.phaseMessage !== phase) {
-      phase = r.phaseMessage;
-      writeText(writer, `_${r.status ? `${r.status}: ` : ""}${phase}_`);
-    }
-    if (end.over) return answered ? "answered" : "finished";
-    if (Date.now() + POLL_MS > opts.deadline) return answered ? "answered" : "timeout";
-    await sleep(POLL_MS);
+    return "aborted";
+  } finally {
+    live.close();
   }
-  return "aborted";
 }

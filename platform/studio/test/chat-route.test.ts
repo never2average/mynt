@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
+import { readTimed } from "./stream-timing";
 
 // A fake Mynt: the tools the route calls, what it was asked, and the activity it reports.
 const fake = {
@@ -91,7 +92,11 @@ vi.mock("@/lib/mynt-client", () => {
         case "steer_build":
           return reply({ build_id: args.build_id, steered: true });
         case "get_build_activity":
-          return reply(fake.activity.shift() ?? { status: "coding", activity: [] });
+          {
+            // An entry may be a function: the activity as it is when Mynt is asked.
+            const next = fake.activity.shift();
+            return reply((typeof next === "function" ? next() : next) ?? { status: "coding", activity: [] });
+          }
         case "explode":
           return { isError: true, text: "Traceback: internal detail at /srv/secret.py line 3" };
         default:
@@ -251,6 +256,86 @@ describe("/api/chat", () => {
     expect((await post({ projectId: "app1", messages: [userMessage("Build it now please")] })).status).toBe(403);
     expect(fake.calls.some((c) => c.name === "start_build")).toBe(false);
   });
+});
+
+describe("/api/chat streaming the agent's words", () => {
+  const withDeltas = () => {
+    fake.tools = [
+      { name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {} } } },
+      { name: "get_build_activity", inputSchema: { type: "object", properties: { build_id: {}, limit: {}, after: {}, text_deltas: {} } } },
+    ];
+  };
+  const delta = (seq: number, summary: string, stream = "msg_1:0") => ({ type: "text_delta", summary, stream, seq });
+
+  it("asks for the words where Mynt offers them, and draws a message's words into one part that its whole message closes", async () => {
+    withDeltas();
+    fake.activity = [
+      // Without a cursor, Mynt answers newest first.
+      { status: "coding", activity: [delta(2, "the spec "), delta(1, "Reading ")], cursor: 2, first_seq: 1 },
+      {
+        status: "coding",
+        activity: [
+          delta(3, "now."),
+          { type: "message", summary: "Reading the spec now.", stream: "msg_1:0", seq: 4 },
+          { type: "tool_use", summary: 'Bash {"command":"npm test"}', seq: 5 },
+          { type: "message", summary: "Not streamed", seq: 6 },
+          { type: "turn_finished", summary: "success", seq: 7 },
+        ],
+        cursor: 7,
+        first_seq: 1,
+      },
+    ];
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    expect(fake.calls.filter((c) => c.name === "get_build_activity").map((c) => c.args)).toEqual([
+      { build_id: "new-build", limit: 200, text_deltas: true },
+      { build_id: "new-build", limit: 200, after: 2, text_deltas: true },
+    ]);
+    const shown = out.filter((c) => ["text-start", "text-delta", "text-end", "tool-input-available"].includes(c.type as string)).map((c) => [c.type, c.delta ?? c.toolName ?? ""]);
+    expect(shown).toEqual([
+      ["text-start", ""],
+      ["text-delta", "Reading "],
+      ["text-delta", "the spec "],
+      ["text-delta", "now."],
+      ["text-end", ""],
+      ["tool-input-available", "bashTool"],
+      ["text-start", ""],
+      ["text-delta", "Not streamed"],
+      ["text-end", ""],
+    ]);
+    // One part for the streamed message: its pieces share an id, and its whole text isn't printed again.
+    const ids = new Set(out.filter((c) => c.type === "text-delta").slice(0, 3).map((c) => c.id));
+    expect(ids.size).toBe(1);
+  });
+
+  it("streams in real time: the first words reach the browser before the agent has written the last", async () => {
+    withDeltas();
+    const pieces = ["I'll add ", "a savings ", "goal screen ", "with a progress ring."];
+    const producedAt: number[] = [];
+    // Mynt's activity as the agent writes: one more piece each time it's read.
+    fake.activity = pieces.map((piece, i) => () => {
+      producedAt.push(performance.now());
+      const last = i === pieces.length - 1;
+      const activity: unknown[] = [delta(i + 1, piece)];
+      if (last) activity.push({ type: "message", summary: pieces.join(""), stream: "msg_1:0", seq: i + 2 }, { type: "turn_finished", summary: "success", seq: i + 3 });
+      return { status: "coding", activity, cursor: last ? i + 3 : i + 1, first_seq: 1 };
+    });
+    const res = await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] });
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(res.headers.get("x-accel-buffering")).toBe("no");
+    const got = await readTimed(res);
+    const deltas = got.filter((c) => c.chunk.type === "text-delta");
+    expect(deltas.map((c) => c.chunk.delta)).toEqual(pieces);
+    expect(producedAt).toHaveLength(pieces.length);
+    const gaps = producedAt.slice(1).map((t, i) => t - producedAt[i]);
+    console.info(
+      `chat: first delta at +${(deltas[0].at - producedAt[0]).toFixed(1)} ms after Mynt reported it; ${(producedAt[pieces.length - 1] - deltas[0].at).toFixed(1)} ms before the last piece was reported; polls ${gaps.map((g) => g.toFixed(0)).join(", ")} ms apart`,
+    );
+    expect(deltas[0].at).toBeLessThan(producedAt[pieces.length - 1]);
+    for (let i = 0; i < pieces.length - 1; i++) expect(deltas[i].at).toBeLessThan(producedAt[i + 1]);
+    // While the agent is talking, Mynt is read about every 700 ms rather than every 2 s.
+    for (const g of gaps) expect(g).toBeLessThan(1500);
+  }, 15_000);
 });
 
 describe("/api/chat follow-ups", () => {

@@ -35,12 +35,16 @@ export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
 export type Capabilities = {
   /** start_build takes mode "session" and continue_from, and finish_build exists (session builds). */
   sessionBuilds: boolean;
+  /** get_build_activity takes text_deltas: the agent's words as it writes them. */
+  textDeltas?: boolean;
 };
 
 export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[]): Capabilities {
   const start = tools.find((t) => t.name === "start_build");
   const props = isObj(start?.inputSchema) && isObj(start.inputSchema.properties) ? start.inputSchema.properties : {};
-  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build") };
+  const activity = tools.find((t) => t.name === "get_build_activity");
+  const activityProps = isObj(activity?.inputSchema) && isObj(activity.inputSchema.properties) ? activity.inputSchema.properties : {};
+  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}) };
 }
 
 export type ChatAction =
@@ -137,7 +141,11 @@ export function consumeTurnEnds(items: ActivityItem[], skip: number, status: str
 /*  Activity                                                          */
 /* ------------------------------------------------------------------ */
 
-export type ActivityItem = { type: string; summary: string; seq?: number; at?: string };
+/**
+ * One entry of the agent's activity. A `text_delta` is the next words of a message the agent is
+ * writing; `stream` ties them to the message, whose own entry carries the same `stream` once it's whole.
+ */
+export type ActivityItem = { type: string; summary: string; seq?: number; at?: string; stream?: string };
 
 export type ActivityReply = {
   status: string | null;
@@ -151,7 +159,13 @@ export type ActivityReply = {
 
 function item(v: unknown): ActivityItem | null {
   if (!isObj(v) || typeof v.type !== "string" || typeof v.summary !== "string") return null;
-  return { type: v.type, summary: v.summary, ...(typeof v.seq === "number" ? { seq: v.seq } : {}), ...(typeof v.at === "string" ? { at: v.at } : {}) };
+  return {
+    type: v.type,
+    summary: v.summary,
+    ...(typeof v.seq === "number" ? { seq: v.seq } : {}),
+    ...(typeof v.at === "string" ? { at: v.at } : {}),
+    ...(typeof v.stream === "string" && v.stream ? { stream: v.stream } : {}),
+  };
 }
 
 /**
@@ -206,9 +220,13 @@ export class ActivityFollower {
   /** Entries were trimmed before they could be shown. */
   missed = false;
 
+  /** With `textDeltas`, it follows the agent's words as it writes them (where Mynt offers them). */
+  constructor(private readonly opts: { textDeltas?: boolean } = {}) {}
+
   /** Arguments for the next get_build_activity call. */
-  next(buildId: string): { build_id: string; limit: number; after?: number } {
-    return this.cursor === null ? { build_id: buildId, limit: 200 } : { build_id: buildId, limit: 200, after: this.cursor };
+  next(buildId: string): { build_id: string; limit: number; after?: number; text_deltas?: true } {
+    const deltas = this.opts.textDeltas ? { text_deltas: true as const } : {};
+    return this.cursor === null ? { build_id: buildId, limit: 200, ...deltas } : { build_id: buildId, limit: 200, after: this.cursor, ...deltas };
   }
 
   /** Feeds one reply; returns the items not seen before. */
@@ -239,8 +257,10 @@ export class ActivityFollower {
 /* ------------------------------------------------------------------ */
 
 export type ChatPart =
-  | { kind: "text"; text: string }
+  | { kind: "text"; text: string; stream?: string }
   | { kind: "tool"; toolName: string; input: Obj };
+/** A chat part, or the next words of a message the agent is writing. */
+export type LivePart = ChatPart | { kind: "delta"; text: string; stream: string };
 
 const FIELD = /"(command|file_path|path|pattern|notebook_path|url|description)"\s*:\s*"((?:[^"\\]|\\.)*)/g;
 
@@ -292,16 +312,78 @@ export function toolCard(name: string, input: Obj): { toolName: string; input: O
   }
 }
 
-/** Activity items as chat parts. A finished turn draws nothing. */
+/** Activity items as chat parts, with the words of messages as they're written. */
+export function activityToLiveParts(items: ActivityItem[]): LivePart[] {
+  return items.flatMap((i): LivePart[] => (i.type === "text_delta" ? (i.stream && i.summary ? [{ kind: "delta", text: i.summary, stream: i.stream }] : []) : activityToParts([i])));
+}
+
+/** Activity items as chat parts. A finished turn, and a message's words as they were written, draw nothing. */
 export function activityToParts(items: ActivityItem[]): ChatPart[] {
   return items.flatMap((i): ChatPart[] => {
-    if (i.type === "message") return i.summary.trim() ? [{ kind: "text", text: i.summary }] : [];
+    if (i.type === "message") return i.summary.trim() ? [{ kind: "text", text: i.summary, ...(i.stream ? { stream: i.stream } : {}) }] : [];
     if (i.type === "tool_use") {
       const { name, input } = parseToolSummary(i.summary);
       return [{ kind: "tool", ...toolCard(name, input) }];
     }
     return [];
   });
+}
+
+export type TextChunk = { type: "text-start"; id: string } | { type: "text-delta"; id: string; delta: string } | { type: "text-end"; id: string };
+
+/**
+ * The agent's messages as AI SDK text parts while it writes them: a message's words go into one
+ * open part (text-start once, a text-delta per piece) that its whole message closes (text-end)
+ * rather than printing it again. A message that wasn't streamed is a part of its own. Anything
+ * else drawn in between (a tool card, a phase line) closes the open part first; more words for
+ * that message then open a new one.
+ */
+export class LiveText {
+  private open: { id: string; stream: string } | null = null;
+  private shown = new Set<string>();
+  private n = 0;
+
+  constructor(
+    private readonly write: (chunk: TextChunk) => void,
+    private readonly newId: () => string = () => `live-${this.n++}`,
+  ) {}
+
+  /** Draws a text part from activityToParts; false for anything else (the caller closes, then draws it). */
+  text(part: LivePart): boolean {
+    if (part.kind === "delta") {
+      if (this.open?.stream !== part.stream) {
+        this.close();
+        this.open = { id: this.newId(), stream: part.stream };
+        this.shown.add(part.stream);
+        this.write({ type: "text-start", id: this.open.id });
+      }
+      this.write({ type: "text-delta", id: this.open.id, delta: part.text });
+      return true;
+    }
+    if (part.kind !== "text") return false;
+    if (part.stream && this.shown.has(part.stream)) {
+      // Its words were shown as they were written: the message is whole, so its part ends.
+      if (this.open?.stream === part.stream) this.close();
+      return true;
+    }
+    this.close();
+    const id = this.newId();
+    this.write({ type: "text-start", id });
+    this.write({ type: "text-delta", id, delta: part.text });
+    this.write({ type: "text-end", id });
+    return true;
+  }
+
+  /** Whether a message is being written into an open part. */
+  get streaming(): boolean {
+    return this.open !== null;
+  }
+
+  close() {
+    if (!this.open) return;
+    this.write({ type: "text-end", id: this.open.id });
+    this.open = null;
+  }
 }
 
 /** The agent finished answering: a turn ended, or the build is done. */

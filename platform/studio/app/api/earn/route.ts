@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { ChatBody, readCapped, TOO_LARGE } from "@/lib/ai-route";
+import { ChatBody, readCapped, STREAM_HEADERS, TOO_LARGE } from "@/lib/ai-route";
 import { historyFrom, runAsk, type LocalTool } from "@/lib/ask";
 import { z } from "zod";
 import { EARN_SYSTEM_PROMPT, earnContext, earnToolDefs, isEarnTool, PANEL_TOOL_DEFS, shownPools, validateDraft, type ChosenWallet } from "@/lib/earn";
@@ -191,5 +191,5 @@ export async function POST(req: Request) {
       return GENERIC_REFUSAL;
     },
   });
-  return createUIMessageStreamResponse({ stream, headers: noStore });
+  return createUIMessageStreamResponse({ stream, headers: STREAM_HEADERS });
 }
