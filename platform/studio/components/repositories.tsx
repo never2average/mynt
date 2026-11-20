@@ -3,18 +3,25 @@
 // The developer's connected GitHub repositories: up to five in the header's GitHub menu (with
 // Connect repository; components/github-control.tsx), all of them on the Settings page's Repositories tab, each with its approval (approved, waiting for
 // an admin and why, or rejected), and Connect repository, which calls connect_repository with an
-// owner/name and shows what Mynt answered. Server-renderable for the tests.
+// owner/name and shows what Mynt answered. The tab has one toolbar row (search, Status, Export
+// CSV, Connect repository) over a paged table. Server-renderable for the tests.
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { ExternalLink, GitBranchPlus } from "lucide-react"
+import { Download, ExternalLink, GitBranchPlus } from "lucide-react"
 
+import { FilterSelect } from "@/components/filter-controls"
+import { downloadCsv } from "@/components/licences-view"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { dateOf } from "@/components/members-view"
 import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { APPROVAL_LABELS, APPROVAL_TONE, connectResultText, REPOSITORY, type ConnectResult, type Repo } from "@/lib/repositories"
+import { toCsv } from "@/lib/compliance"
+import { APPROVAL_LABELS, APPROVAL_TONE, connectResultText, REPOSITORY, type ConnectResult, type Repo, type RepoApproval } from "@/lib/repositories"
+
+const STATUS_OPTIONS = (["approved", "pending", "rejected"] as RepoApproval[]).map((a) => ({ value: a, label: APPROVAL_LABELS[a] }))
 
 export type ReposState = { kind: "loading" } | { kind: "unsupported" } | { kind: "error"; message: string } | { kind: "ready"; repos: Repo[]; connect: boolean }
 
@@ -113,10 +120,7 @@ export function ConnectRepository({
   return (
     <>
       {trigger && <Button
-        size="sm"
-        variant="outline"
         disabled={!enabled}
-        title={enabled ? undefined : "Connecting repositories comes with Mynt's next update"}
         onClick={() => {
           setOpen(true)
           setResult(null)
@@ -128,13 +132,9 @@ export function ConnectRepository({
         Connect repository
       </Button>}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>Connect repository</DialogTitle>
-            <DialogDescription>
-              Lets Mynt&apos;s coding agent push branches and open pull requests on one of your GitHub repositories. If your linked GitHub account can push to it,
-              it&apos;s approved at once; otherwise an admin decides.
-            </DialogDescription>
           </DialogHeader>
           {result ? (
             <>
@@ -151,7 +151,10 @@ export function ConnectRepository({
                 void connect()
               }}
             >
-              <Input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/name" aria-label="Repository (owner/name)" maxLength={200} />
+              <label className="flex flex-col gap-1.5 text-sm font-medium">
+                Repository
+                <Input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/name" aria-label="Repository (owner/name)" maxLength={200} />
+              </label>
               {repository.trim() && !valid && <p className="text-sm text-muted-foreground">Enter it as owner/name, like octo-org/savings-app.</p>}
               {error && (
                 <p role="alert" className="text-sm text-destructive">
@@ -176,10 +179,17 @@ export function ConnectRepository({
 
 export function RepositoriesTab({ state, onConnected }: { state: ReposState; onConnected?: () => void }) {
   const [query, setQuery] = useState("")
-  const repos = state.kind === "ready" ? state.repos : []
-  const rows = useMemo(() => repos.filter((r) => matches(query, r.repository, APPROVAL_LABELS[r.approval], r.note)), [repos, query])
+  const [status, setStatus] = useState("")
+  const repos = useMemo(() => (state.kind === "ready" ? state.repos : []), [state])
+  const rows = useMemo(() => repos.filter((r) => (!status || r.approval === status) && matches(query, r.repository, APPROVAL_LABELS[r.approval], r.note)), [repos, query, status])
   const { page, pages, shown, setPage } = usePaged(rows)
-  if (state.kind === "loading") return <p className="text-sm text-muted-foreground">Loading repositories…</p>
+  if (state.kind === "loading")
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel="repositories" data-loading>
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    )
   if (state.kind === "error")
     return (
       <p role="alert" className="text-sm text-destructive">
@@ -192,12 +202,23 @@ export function RepositoriesTab({ state, onConnected }: { state: ReposState; onC
         Connected repositories aren&apos;t available yet. They come with Mynt&apos;s next update.
       </p>
     )
+  const exportCsv = () =>
+    downloadCsv("repositories.csv", toCsv(["Repository", "Status", "Note", "Connected"], rows.map((r) => [r.repository, APPROVAL_LABELS[r.approval], r.note, r.connectedAt?.slice(0, 10) ?? null])))
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel="repositories">
       <ListLayout
         search={query}
         onSearch={setQuery}
         searchLabel="Search repositories by name or status"
+        actions={
+          <>
+            <FilterSelect label="Status" value={status} options={STATUS_OPTIONS} onChange={setStatus} />
+            <Button variant="outline" onClick={exportCsv} disabled={!rows.length}>
+              <Download />
+              Export CSV
+            </Button>
+          </>
+        }
         cta={<ConnectRepository enabled={state.connect} onConnected={onConnected} />}
         page={page}
         pages={pages}

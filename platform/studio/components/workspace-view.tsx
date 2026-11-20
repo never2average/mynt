@@ -1,27 +1,32 @@
 "use client"
 
 // The Settings page (/settings): the tab bar (shadcn's line tabs, components/ui/tabs.tsx) first,
-// with no details card above it, each tab a table with its one toolbar row. Members and Invitations
+// with no details card above it, in the dashboard's layout: key figures in a Panel where the tab
+// is about counts, then one toolbar row over a paged table. Members and Invitations
 // (components/members-view.tsx), Apps (every app with its stage, owner and last build),
-// Repositories (the developer's own connected GitHub repositories) and
-// General (Manage organization, the identity provider's page for the workspace; rename; for
-// owners, archive, unarchive and relink, only where Mynt offers them).
+// Repositories (the developer's own connected GitHub repositories) and General (Organization
+// with Manage organization, the identity provider's page for the workspace; Name; for owners,
+// Archive, with unarchive and relink, only where Mynt offers them). Flat Panels, no cards.
 // Server-renderable for the tests.
 import Link from "next/link"
 import { useMemo, useState } from "react"
 import { Archive, Download, ExternalLink, Plus, RotateCcw } from "lucide-react"
 
+import { KpiRow } from "@/components/charts"
+import { Panel, Section } from "@/components/dashboard-panels"
+import { FilterSelect } from "@/components/filter-controls"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { downloadCsv } from "@/components/licences-view"
 import { dateOf, InvitationsTab, MembersTab, type MembersActions, type MembersData } from "@/components/members-view"
+import { StatusDot } from "@/components/promotion-view"
 import { RepositoriesTab, type ReposState } from "@/components/repositories"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toCsv } from "@/lib/compliance"
+import type { Kpi } from "@/lib/dashboard-visual"
 import { cn } from "@/lib/utils"
 import { Tab, TabList } from "@/components/ui/tabs"
 import { TAB_LABELS, WORKSPACE_TABS, type WorkspaceTab } from "@/lib/workspace-tabs"
@@ -67,9 +72,30 @@ export function TabSelector({ tab, onTab }: { tab: WorkspaceTab; onTab: (t: Work
   )
 }
 
+const STAGE_OPTIONS = STAGES.map((s) => ({ value: s, label: STAGE_LABELS[s] }))
+
+/** An app's stage as the dashboard shows status: a dot in words (Production green, Staging amber), Ideas as plain text. */
+export function StageMark({ stage }: { stage: Stage }) {
+  if (stage === "production") return <StatusDot tone="green" label={STAGE_LABELS[stage]} />
+  if (stage === "staging") return <StatusDot tone="amber" label={STAGE_LABELS[stage]} />
+  return (
+    <span className="text-xs font-medium text-muted-foreground" data-stage={stage}>
+      {STAGE_LABELS[stage]}
+    </span>
+  )
+}
+
+/** The Apps tab's key figures, counted from the apps Mynt listed. */
+export function appKpis(apps: WorkspaceApp[]): Kpi[] {
+  const kpi = (key: string, label: string, value: number): Kpi => ({ key, label, value, unit: "count", delta: null, spark: null, note: "" })
+  const count = (s: Stage) => apps.filter((a) => a.stage === s).length
+  return [kpi("apps", "Apps", apps.length), kpi("production", "Production", count("production")), kpi("staging", "Staging", count("staging")), kpi("ideas", "Ideas", count("idea"))]
+}
+
 export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: WorkspaceApp[] }) {
   const [query, setQuery] = useState("")
-  const rows = useMemo(() => apps.filter((a) => matches(query, a.name, STAGE_LABELS[a.stage], a.owner)), [apps, query])
+  const [stage, setStage] = useState("")
+  const rows = useMemo(() => apps.filter((a) => (!stage || a.stage === stage) && matches(query, a.name, STAGE_LABELS[a.stage], a.owner)), [apps, query, stage])
   const { page, pages, shown, setPage } = usePaged(rows)
   const exportCsv = () =>
     downloadCsv(
@@ -77,16 +103,24 @@ export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: Works
       toCsv(["App", "Stage", "Owner", "Last build", "Last build at"], rows.map((a) => [a.name, STAGE_LABELS[a.stage], a.owner, a.lastBuild?.status ?? null, a.lastBuild?.at ?? null])),
     )
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel="apps">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 lg:gap-5" data-tab-panel="apps">
+      <Panel id="app-kpis">
+        <section className="flex flex-col gap-3" data-section="kpis" aria-label="Key figures">
+          <KpiRow kpis={appKpis(apps)} />
+        </section>
+      </Panel>
       <ListLayout
         search={query}
         onSearch={setQuery}
         searchLabel="Search apps by name, stage or owner"
         actions={
-          <Button variant="outline" onClick={exportCsv} disabled={!rows.length}>
-            <Download />
-            Export CSV
-          </Button>
+          <>
+            <FilterSelect label="Stage" value={stage} options={STAGE_OPTIONS} onChange={setStage} />
+            <Button variant="outline" onClick={exportCsv} disabled={!rows.length}>
+              <Download />
+              Export CSV
+            </Button>
+          </>
         }
         cta={
           <Button asChild>
@@ -117,7 +151,7 @@ export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: Works
                 <TableRow key={a.id} data-app-row={a.id}>
                   <TableCell className="font-medium">{a.name}</TableCell>
                   <TableCell>
-                    <Badge variant="outline">{STAGE_LABELS[a.stage]}</Badge>
+                    <StageMark stage={a.stage} />
                   </TableCell>
                   <TableCell>{a.owner ?? <span className="text-muted-foreground">Not shown by Mynt</span>}</TableCell>
                   <TableCell className="text-muted-foreground">
@@ -174,33 +208,31 @@ export function SettingsTab({ info, actions, manageUrl = null }: { info: Workspa
     setMessage(failed ? { error: true, text: failed } : { error: false, text: done })
   }
   const ownerTools = info.isOwner && !w.personal && (info.tools.archive || info.tools.unarchive || info.tools.relink)
+  const canRename = info.canManage && info.tools.rename
+  const showArchive = !w.archivedAt && info.tools.archive
 
   return (
-    <div className="flex flex-col gap-4" data-tab-panel="general">
-      {manageUrl && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border p-4" data-manage-org>
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="text-sm font-medium">Organization</span>
-          </div>
-          <Button variant="outline" asChild>
-            <a href={manageUrl} target="_blank" rel="noopener noreferrer" data-manage-url>
-              <ExternalLink />
-              Manage organization
-            </a>
-          </Button>
-        </div>
-      )}
+    <div className="flex flex-col gap-4 lg:gap-5" data-tab-panel="general">
       {message && (
         <p role={message.error ? "alert" : "status"} className={cn("text-sm", message.error ? "text-destructive" : "font-medium")}>
           {message.text}
         </p>
       )}
-      <Card>
-        <CardHeader>
-          <CardTitle>Name</CardTitle>
-          <CardDescription>{info.canManage ? "Owners and admins can rename the workspace." : "Only the workspace's owners and admins can rename it."}</CardDescription>
-        </CardHeader>
-        <CardContent>
+      {manageUrl && (
+        <Panel id="organization">
+          <div className="flex flex-wrap items-center gap-3" data-manage-org>
+            <h2 className="min-w-0 flex-1 text-sm font-semibold">Organization</h2>
+            <Button variant="outline" asChild>
+              <a href={manageUrl} target="_blank" rel="noopener noreferrer" data-manage-url>
+                <ExternalLink />
+                Manage organization
+              </a>
+            </Button>
+          </div>
+        </Panel>
+      )}
+      <Panel id="name">
+        <Section id="workspace-name" title="Name">
           <form
             className="flex flex-col gap-2 sm:flex-row"
             data-rename-form
@@ -209,73 +241,73 @@ export function SettingsTab({ info, actions, manageUrl = null }: { info: Workspa
               void run(() => actions.rename(name), "Renamed.")
             }}
           >
-            <Input value={name} onChange={(e) => setName(e.target.value)} aria-label="Workspace name" maxLength={80} disabled={!info.canManage || !info.tools.rename} />
-            <Button type="submit" disabled={!info.canManage || !info.tools.rename || busy || !name.trim() || name.trim() === w.name}>
-              Rename workspace
+            <Input value={name} onChange={(e) => setName(e.target.value)} aria-label="Workspace name" maxLength={80} disabled={!canRename} />
+            <Button type="submit" disabled={!canRename || busy || !name.trim() || name.trim() === w.name}>
+              Save
             </Button>
           </form>
-        </CardContent>
-      </Card>
+        </Section>
+      </Panel>
 
       {ownerTools && (
-        <Card data-owner-settings>
-          <CardHeader>
-            <CardTitle>Archive</CardTitle>
-            <CardDescription>Owners only. Archiving freezes the workspace; 7 days later everyone is removed. Until then it can be undone.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            {w.orgMissingSince && info.tools.relink && (
-              <div className="flex flex-col gap-2" data-relink>
-                <p className="text-sm text-muted-foreground">
-                  Its organization was deleted in the identity provider on {dateOf(w.orgMissingSince) ?? "an unknown date"}, so the workspace is frozen. Give it a new
-                  organization with its members in it, or archive it.
-                </p>
-                <div>
+        <Panel id="archive">
+          <div data-owner-settings>
+            <Section
+              id="archive"
+              title="Archive"
+              action={
+                showArchive ? (
+                  <Button variant="outline" onClick={() => setConfirming(true)} disabled={busy} data-archive>
+                    <Archive />
+                    Archive workspace
+                  </Button>
+                ) : undefined
+              }
+            >
+              {w.orgMissingSince && info.tools.relink && (
+                <div className="flex flex-wrap items-center gap-3" data-relink>
+                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">
+                    Frozen: its organization was deleted in the identity provider on {dateOf(w.orgMissingSince) ?? "an unknown date"}.
+                  </p>
                   <Button variant="outline" onClick={() => void run(actions.relink, "It has a new organization, with its members in it.")} disabled={busy}>
                     Give it a new organization
                   </Button>
                 </div>
-              </div>
-            )}
-            {w.archivedAt ? (
-              info.tools.unarchive && (
-                <div className="flex flex-col gap-2" data-unarchive>
-                  <p className="text-sm text-muted-foreground">
+              )}
+              {w.archivedAt && info.tools.unarchive && (
+                <div className="flex flex-wrap items-center gap-3" data-unarchive>
+                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">
                     Archived on {dateOf(w.archivedAt) ?? "an unknown date"}.{" "}
                     {w.offboardingAt ? `Everyone is removed on ${dateOf(w.offboardingAt)} unless you unarchive it.` : ""}
                   </p>
-                  <div>
-                    <Button variant="outline" onClick={() => void run(actions.unarchive, "Unarchived. Nobody was removed.")} disabled={busy}>
-                      <RotateCcw />
-                      Unarchive workspace
-                    </Button>
-                  </div>
+                  <Button variant="outline" onClick={() => void run(actions.unarchive, "Unarchived. Nobody was removed.")} disabled={busy}>
+                    <RotateCcw />
+                    Unarchive workspace
+                  </Button>
                 </div>
-              )
-            ) : (
-              info.tools.archive && (
-                <div className="flex flex-wrap items-center gap-2" data-archive>
-                  {confirming ? (
-                    <>
-                      <span className="text-sm">Archive {w.name}? You can undo it for 7 days.</span>
-                      <Button variant="destructive" onClick={() => void run(actions.archive, "Archived. You can unarchive it for 7 days.")} disabled={busy}>
-                        Yes, archive workspace
-                      </Button>
-                      <Button variant="ghost" onClick={() => setConfirming(false)}>
-                        Cancel
-                      </Button>
-                    </>
-                  ) : (
-                    <Button variant="outline" onClick={() => setConfirming(true)}>
-                      <Archive />
-                      Archive workspace
-                    </Button>
-                  )}
-                </div>
-              )
-            )}
-          </CardContent>
-        </Card>
+              )}
+            </Section>
+          </div>
+        </Panel>
+      )}
+
+      {ownerTools && showArchive && (
+        <Dialog open={confirming} onOpenChange={setConfirming}>
+          <DialogContent className="sm:max-w-md" data-archive-confirm>
+            <DialogHeader>
+              <DialogTitle>Archive {w.name}?</DialogTitle>
+              <DialogDescription>Archiving freezes the workspace; 7 days later everyone is removed. Until then it can be undone.</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={() => void run(actions.archive, "Archived. You can unarchive it for 7 days.")} disabled={busy}>
+                Yes, archive workspace
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   )
@@ -302,9 +334,9 @@ export function WorkspaceView({
   repos?: ReposState // the developer's own repositories (not the workspace's)
   onReposChanged?: () => void
 }) {
-  const loading = <Skeleton className="h-64 w-full rounded-xl" />
+  const loading = <Skeleton className="h-64 w-full" data-loading />
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4" data-workspace-view>
+    <div className="flex min-h-0 flex-1 flex-col gap-4 lg:gap-5" data-workspace-view>
       <TabSelector tab={tab} onTab={onTab} />
       {tab === "members" && (members ? <MembersTab workspace={info.workspace} data={members} actions={memberActions} /> : loading)}
       {tab === "invitations" && (members ? <InvitationsTab workspace={info.workspace} data={members} actions={memberActions} /> : loading)}
