@@ -95,6 +95,8 @@ describe("an app's builder", () => {
     await act(async () => undefined);
     expect(fetched.filter((u) => u.includes("/panel?"))).toEqual(["/api/apps/app-1/panel?tab=licences"]);
     expect(container.querySelector('[data-panel-content="preview"]')?.textContent).toContain("No preview yet");
+    // A short label on the mock, not a sentence explaining it.
+    expect(container.querySelector('[data-panel-content="preview"]')?.textContent).not.toContain("coding agent");
     expect(container.querySelector("[data-chat-side]")?.textContent).toContain("the chat");
     expect(container.textContent).toContain("Round-up savings");
   });

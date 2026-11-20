@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
-import { appLicences, buildsFrom, eventsFrom, fromPnl, NOT_YET, updatedAgo, type AppActivity, type AppSdk, type AppSecurity } from "@/lib/app-panel";
+import { appLicences, buildsFrom, buildStatusLabel, buildTone, eventsFrom, fromPnl, NOT_YET, updatedAgo, type AppActivity, type AppSdk, type AppSecurity } from "@/lib/app-panel";
+import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { parseStudioCall } from "@/lib/studio-tools";
 
 // An app's information tabs (P&L, Licences, Security, SDK, Activity): what each shows with data,
@@ -99,6 +100,7 @@ vi.mock("@/lib/tokens", () => ({
 
 const route = await import("@/app/api/apps/[appId]/panel/route");
 const views = await import("@/components/app-panel-tabs");
+const { ProjectWelcome } = await import("@/components/assistant-ui/project-welcome");
 
 const get = async (tab: string, app = APP) => {
   const res = await route.GET(new Request(`http://localhost:3000/api/apps/${app}/panel?tab=${tab}`), { params: Promise.resolve({ appId: app }) });
@@ -226,6 +228,120 @@ describe("the tabs' content", () => {
   it("drops other apps' events and builds", () => {
     expect(eventsFrom({ events: [{ at: "x", action: "a", target: { type: "app", id: OTHER } }, { at: "y", action: "b", details: { app_id: OTHER } }, { at: "z", action: "c" }] }, APP).map((e) => e.action)).toEqual(["c"]);
     expect(buildsFrom({ builds: [{ id: "1", app_id: OTHER }, { id: "2", app_id: APP }] }, APP).map((b) => b.id)).toEqual(["2"]);
+  });
+});
+
+describe("the tabs' layout, as the dashboard's", () => {
+  const event = (i: number) => ({ at: `2026-11-${String(10 + (i % 10)).padStart(2, "0")}T10:00:00Z`, action: `action_${i}`, actor: "Ines", details: null });
+  const build = (i: number, status = "succeeded") => ({ id: `b${i}`, status, goal: `Goal ${i}`, at: "2026-11-12T00:00:00Z" });
+  const kpi = (html: string, key: string) => {
+    const el = document.createElement("div");
+    el.innerHTML = html;
+    return el.querySelector(`[data-kpi="${key}"] dd`)?.textContent;
+  };
+
+  it("P&L: key figures this period (unmeasured reads Not measured, never 0), two charts and the statement in a box", () => {
+    const html = renderToStaticMarkup(<views.PnlView pnl={fromPnl(PNL)!} />);
+    expect(html).toContain('data-row="app-pnl-kpis"');
+    expect(html).toContain("This month (Nov)");
+    expect(kpi(html, "money-moved")).toBe("Not measured");
+    expect(kpi(html, "costs")).toBe("$100.00");
+    expect(kpi(html, "net")).toBe("Not measured");
+    expect(html).toContain('data-section="app-pnl-revenue"');
+    expect(html).toContain('data-section="app-pnl-costs"');
+    expect(html).not.toContain('role="group"'); // no period or range controls on the charts
+    expect(html).not.toContain("n/m");
+    expect(html).toContain('rounded-lg border"><div data-slot="table-container"');
+    expect(html).toContain('<h2 id="section-app-pnl-statement" class="text-sm font-semibold">Statement</h2>');
+    expect(html).not.toContain("<h4");
+    // Nothing measured: each chart says so instead of drawing zeros.
+    const empty = fromPnl({ ...PNL, series: [{ start: "2026-11-01T00:00:00.000Z", revenue_cents: null, costs_cents: null, net_cents: null }] })!;
+    expect(renderToStaticMarkup(<views.PnlView pnl={empty} />).match(/data-pnl-empty="unmeasured"/g)).toHaveLength(2);
+  });
+
+  it("Licences: key figures, the production check as a section with a status dot, the table in a box and View all", () => {
+    const check = { id: "licences", label: "Every product licensed", status: "fail" as const, detail: "Savings isn't covered in California", fix: { label: "See licences", href: "/licences", external: false, tool: null } };
+    const html = renderToStaticMarkup(<views.LicencesTabView data={appLicences(COVERAGE, [{ id: "p1", name: "Card" }, { id: "p2", name: "Savings" }], check)} />);
+    expect(kpi(html, "states-covered")).toBe("1");
+    expect(kpi(html, "partly-covered")).toBe("1");
+    expect(kpi(html, "products")).toBe("2");
+    expect(html).not.toContain("every product covered in");
+    expect(html).toContain('data-section="app-production-check"');
+    expect(html).toMatch(/data-production-check="fail".*data-tone="red"/);
+    expect(html).not.toContain('data-slot="badge"');
+    expect(html).toContain('data-view-all="/licences"');
+    expect(html).toContain('href="/licences"');
+  });
+
+  it("Security: build checks as status dots, at most 10 events, View all to the security audits", () => {
+    const data: AppSecurity = {
+      available: true,
+      events: Array.from({ length: 14 }, (_, i) => event(i)),
+      eventsReason: null,
+      checks: [
+        { id: "build_verified", label: "Latest build verified", status: "pass", detail: null, fix: null },
+        { id: "audit_findings", label: "No open critical findings", status: "fail", detail: "1 high finding", fix: null },
+      ],
+      checksReason: null,
+    };
+    const html = renderToStaticMarkup(<views.SecurityView data={data} />);
+    expect(html).toContain('<h2 id="section-app-build-checks" class="text-sm font-semibold">Build checks</h2>');
+    expect(html).toMatch(/data-check="build_verified"[^]*data-tone="green"[^]*Passed/);
+    expect(html).toMatch(/data-check="audit_findings"[^]*data-tone="red"[^]*Failing/);
+    expect(html).not.toContain('data-slot="badge"');
+    expect(html.match(/data-event=/g)).toHaveLength(10);
+    expect(html).toContain('href="/audits?tab=security"');
+  });
+
+  it("SDK: each product is a panel with a section heading", () => {
+    const data = { available: true as const, products: [{ productId: "p1", name: "Card", version: "3", action: "issuance", access: "public", permitted: ["deep_link"], notPermitted: [], fields: ["name"], handOff: null, generatedClients: null, hasContract: false, error: null }] };
+    const html = renderToStaticMarkup(<views.SdkView data={data} />);
+    expect(html).toContain('data-row="sdk-p1"');
+    expect(html).toContain('<h2 id="section-sdk-p1" class="text-sm font-semibold">Card</h2>');
+    expect(html).toContain("v3");
+    expect(html).not.toContain("<h4");
+  });
+
+  it("Activity: at most 10 builds with status dots and View all to Builds; recent events with View all to the audits", () => {
+    const html = renderToStaticMarkup(
+      <views.ActivityView data={{ available: true, builds: [build(0, "failed"), ...Array.from({ length: 13 }, (_, i) => build(i + 1))], events: [event(1)], eventsReason: null }} />,
+    );
+    expect(html.match(/data-build=/g)).toHaveLength(10);
+    expect(html).toMatch(/data-build="b0"[^]*data-tone="red"[^]*Failed/);
+    expect(html).toContain('href="/builds"');
+    expect(html).toContain('<h2 id="section-app-recent-events" class="text-sm font-semibold">Recent events</h2>');
+    expect(html).toContain('href="/audits?tab=workspace"');
+  });
+
+  it("a build's status reads as a dot and a word", () => {
+    expect(buildTone("succeeded")).toBe("green");
+    expect(buildTone("failed")).toBe("red");
+    expect(buildTone("over_budget")).toBe("red");
+    expect(buildTone("coding")).toBe("amber");
+    expect(buildTone("unknown")).toBeNull();
+    expect(buildStatusLabel("over_budget")).toBe("Over budget");
+  });
+
+  it("loading shows skeleton blocks, not text", async () => {
+    vi.stubGlobal("fetch", () => new Promise(() => undefined));
+    const { container } = render(<views.AppInfoTab appId={APP} tab="pnl" active />);
+    await act(async () => undefined);
+    expect(container.querySelector("[data-loading]")?.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+    expect(container.textContent).not.toContain("Loading");
+    expect(container.textContent).toContain("Refresh");
+  });
+
+  it("the builder's welcome lists up to 5 builds with status dots and a View all to Builds", () => {
+    const conversations = Array.from({ length: 7 }, (_, i) => ({ id: `b${i}`, title: `Build ${i}`, status: i === 0 ? "failed" : "succeeded", phaseMessage: null, previewUrl: null, createdAt: "", updatedAt: "" }));
+    const html = renderToStaticMarkup(
+      <ProjectConversationsProvider value={{ projectId: APP, conversations, onSelectConversation: () => undefined }}>
+        <ProjectWelcome />
+      </ProjectConversationsProvider>,
+    );
+    expect(html).toContain('<h2 id="section-welcome-builds" class="text-sm font-semibold">Builds</h2>');
+    expect(html.match(/data-build=/g)).toHaveLength(5);
+    expect(html).toMatch(/data-build="b0"[^]*data-tone="red"[^]*Failed/);
+    expect(html).toContain('href="/builds"');
   });
 });
 

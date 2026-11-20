@@ -192,6 +192,18 @@ export function buildsFrom(reply: unknown, appId: string): BuildRow[] {
     .slice(0, 25);
 }
 
+// A build's status as a dot and a word, as the dashboard shows status: done green, stopped short
+// red, still going (or paused) amber; a status Mynt didn't send is just the word.
+export function buildTone(status: string): "green" | "amber" | "red" | null {
+  if (status === "succeeded") return "green";
+  if (/fail|block|over_budget|error/.test(status)) return "red";
+  return status === "unknown" || !status.trim() ? null : "amber";
+}
+export function buildStatusLabel(status: string): string {
+  const t = status.replace(/_/g, " ").trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : "Unknown";
+}
+
 export type PanelData = { pnl: AppPnl | NotYet; licences: AppLicences | NotYet; security: AppSecurity | NotYet; sdk: AppSdk | NotYet; activity: AppActivity | NotYet };
 
 export const checkLabel = (c: PromotionCheck) => `${c.label}: ${CHECK_LABELS[c.status]}`;
