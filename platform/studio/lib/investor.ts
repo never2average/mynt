@@ -7,6 +7,7 @@
 import type { Granularity, Range } from "./pnl";
 import type { LiquidityAccess, PoolHealth, PoolRow, Position, Withdrawal } from "./liquidity";
 import { WAITING } from "./liquidity";
+import { usdcBaseUnitsToCents } from "./wallets";
 
 // ---- which views the user's roles allow ----
 
@@ -55,7 +56,9 @@ export type Source = "devnet" | "rails";
 export const SOURCE_LABELS: Record<Source, string> = { devnet: "Devnet", rails: "Rails" };
 
 export type Totals = { committed: number | null; settled: number | null; queued: number | null; paid: number | null };
-export type Portfolio = { all: Totals; bySource: Partial<Record<Source, Totals>>; returns: null };
+// returns: what the portfolio was paid beyond its principal: on chain, the wind-down surplus claimed; rails pools can
+// pay back no more than went in, so theirs is a real 0. Null when an on-chain position's surplus is unknown.
+export type Portfolio = { all: Totals; bySource: Partial<Record<Source, Totals>>; returns: number | null };
 
 export type DepositStatus = "in_review" | "locked" | "available" | "queued" | "rejected" | "committed" | "exited";
 export type DepositRow = {
@@ -107,7 +110,9 @@ export function portfolioOf(positions: Position[]): Portfolio {
     bySource[source] = add(bySource[source] ?? ZERO, p.onChain ? onChainTotals(p) : railsTotals(p));
   }
   const all = Object.values(bySource).reduce<Totals>((t, s) => add(t, s), ZERO);
-  return { all, bySource, returns: null };
+  const surplus = positions.filter((p) => p.onChain).map((p) => (p.chain && p.chain.surplusClaimed !== null ? usdcBaseUnitsToCents(p.chain.surplusClaimed) : null));
+  const returns = surplus.some((x) => x === null) ? null : surplus.reduce<number>((n, x) => n + (x as number), 0);
+  return { all, bySource, returns };
 }
 
 export function depositRows(positions: Position[], pools: PoolRow[], now: number): DepositRow[] {

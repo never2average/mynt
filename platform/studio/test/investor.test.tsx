@@ -140,6 +140,27 @@ describe("the investor model", () => {
   });
 });
 
+describe("returns", () => {
+  it("measures returns: the wind-down surplus claimed on chain, and a real 0 for rails pools", () => {
+    const withSurplus = fromPositions({
+      positions: [
+        { source: "on-chain", pool_id: "p-chain", name: "Chain pool", wallet: "W1", principal: "4000000", deposited: "4000000", paid: "0", queued: "0", available_to_request: "0", surplus_claimed: "1250000", deposits: [], requests: [] },
+        { source: "rails", pool_id: "p-rails", name: "Rails pool", contributed_cents: 100000, balance_cents: 100000, withdrawn_cents: 0 },
+      ],
+    });
+    expect(portfolioOf(withSurplus).returns).toBe(125); // 1.25 USDC in cents
+    expect(portfolioOf(withSurplus.filter((p) => !p.onChain)).returns).toBe(0); // rails pay back no more than went in
+    // One on-chain position whose surplus isn't known: unmeasured, never a partial sum.
+    const unknown = fromPositions({
+      positions: [
+        { source: "on-chain", pool_id: "p-chain", name: "Chain pool", wallet: "W1", principal: "4000000", deposited: "4000000", paid: "0", queued: "0", available_to_request: "0", surplus_claimed: "1250000", deposits: [], requests: [] },
+        { source: "on-chain", pool_id: "p-chain-2", name: "Chain pool 2", wallet: "W2", principal: "1000000", deposited: "1000000", paid: "0", queued: "0", available_to_request: "0", surplus_claimed: null, deposits: [], requests: [] },
+      ],
+    });
+    expect(portfolioOf(unknown).returns).toBeNull();
+  });
+});
+
 describe("the investor view", () => {
   const wallets = { supported: true, balancesSupported: false, owner: "o", wallets: [{ address: "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", chain: "solana" as const, network: "Solana", balances: null }], manageUrl: null, treasury: { deposit: true, withdraw: true, status: true } };
   const activity = fromClassAudit({ rows: [{ id: "f1", at: "2026-11-14T10:00:00Z", class: "financial", kind: "liquidity.commit", summary: "Committed $5,000.00", status: "settled" }] }).rows;
@@ -170,7 +191,8 @@ describe("the investor view", () => {
     expect(html).toMatch(/data-kpi="pools"[\s\S]*?>2</);
     expect(html).toMatch(/data-kpi="committed"[\s\S]*?\$6,250\.00/);
     expect(html).toMatch(/data-split[\s\S]*?Devnet: committed \$1,250\.00[\s\S]*?Rails: committed \$5,000\.00/);
-    expect(html).toMatch(/data-kpi="returns"[\s\S]*?>Not measured<[\s\S]*?Mynt doesn.{1,6}t measure yield/);
+    // The fixture's on-chain position doesn't say what surplus it claimed, so Returns can't be measured: said so, never $0.
+    expect(html).toMatch(/data-kpi="returns"[\s\S]*?>Not measured<[\s\S]*?A surplus claim.{1,6}s amount isn.{1,6}t known/);
     expect(html).toMatch(/data-kpi="committed"[\s\S]*?data-sparkline="6"/);
     // Activity, with View all on its own row to the financial audit trail.
     expect(html).toContain("liquidity.commit");

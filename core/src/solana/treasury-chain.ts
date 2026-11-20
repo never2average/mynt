@@ -351,6 +351,9 @@ export type TreasuryEvent =
   | { name: "RequestCancelled" | "RequestVoided" | "RequestParked"; pool: string; depositor: string; request: string; seq: bigint; amount: bigint }
   | { name: "TermsApplied"; pool: string; attesters: [string, string] }
   | { name: "AttesterRemoved"; pool: string; attester: string }
+  // A wind-down: the surplus (vault less principal) the depositors share pro rata, and a depositor's claim of it.
+  | { name: "WindDownStarted"; pool: string; surplus: bigint; principal_at_proposal: bigint; principal: bigint }
+  | { name: "SurplusClaimed"; pool: string; depositor: string; amount: bigint }
   | { name: "other"; event: string };
 
 const EVENTS = ["DepositMade", "DepositRejected", "WithdrawalRequested", "WithdrawalPaid", "RequestCancelled", "RequestVoided", "RequestParked"] as const;
@@ -400,6 +403,10 @@ export function decodeEvent(data: Uint8Array): TreasuryEvent | null {
       }
       case "AttesterRemoved":
         return { name, pool: r.key(), attester: r.key() };
+      case "WindDownStarted":
+        return { name, pool: r.key(), surplus: r.u64(), principal_at_proposal: r.u64(), principal: r.u64() };
+      case "SurplusClaimed":
+        return { name, pool: r.key(), depositor: r.key(), amount: r.u64() };
       default:
         return { name: "other", event: name };
     }
@@ -422,6 +429,10 @@ export function encodeEvent(e: Exclude<TreasuryEvent, { name: "other" | "TermsAp
       return Uint8Array.from(Buffer.concat([head, k(e.pool), k(e.depositor), k(e.deposit), k(e.request), u64le(e.seq), u64le(e.amount), i64le(e.payable_at)]));
     case "WithdrawalPaid":
       return Uint8Array.from(Buffer.concat([head, k(e.pool), k(e.depositor), k(e.request), u64le(e.seq), u64le(e.amount), u64le(e.remaining), b(e.partial), b(e.parked), u64le(e.reserve_floor), u64le(e.vault_after)]));
+    case "WindDownStarted":
+      return Uint8Array.from(Buffer.concat([head, k(e.pool), u64le(e.surplus), u64le(e.principal_at_proposal), u64le(e.principal)]));
+    case "SurplusClaimed":
+      return Uint8Array.from(Buffer.concat([head, k(e.pool), k(e.depositor), u64le(e.amount)]));
     default:
       return Uint8Array.from(Buffer.concat([head, k(e.pool), k(e.depositor), k(e.request), u64le(e.seq), u64le(e.amount)]));
   }

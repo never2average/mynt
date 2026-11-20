@@ -1523,6 +1523,9 @@ export class TreasuryService {
     const addresses = pools.map((p) => p.pool_address as string);
     const { rows: deposits } = await this.db.query(`SELECT * FROM ${T}.treasury_deposits WHERE pool_address = ANY($1::text[]) AND depositor = ANY($2::text[]) ORDER BY seq`, [addresses, wallets]);
     const { rows: requests } = await this.db.query(`SELECT * FROM ${T}.treasury_requests WHERE pool_address = ANY($1::text[]) AND depositor = ANY($2::text[]) ORDER BY seq`, [addresses, wallets]);
+    // The wind-down surplus each wallet claimed: the only return a treasury pays. A claim recorded before Mynt read
+    // its amount (stored without one) leaves that wallet's total unknown.
+    const { rows: claims } = await this.db.query(`SELECT pool_address, data FROM ${T}.treasury_events WHERE event = 'SurplusClaimed' AND pool_address = ANY($1::text[])`, [addresses]);
     const nowS = Math.floor(this.now().getTime() / 1000);
     const out = [];
     for (const p of pools as Row[]) {
@@ -1535,6 +1538,8 @@ export class TreasuryService {
         const queued = sum(rs.filter((r) => r.status === "open" || r.status === "parked"), "remaining");
         const principal = sum(live, "remaining");
         const unlocked = live.filter((d) => Number(d.unlock_at) <= nowS && Number(d.review_until) <= nowS).reduce((n, d) => n + big(d.remaining) - big(d.queued), 0n);
+        const mine = claims.filter((c) => c.pool_address === p.pool_address && ((c.data as Row | null)?.depositor === wallet || (c.data as Row | null)?.depositor === undefined));
+        const surplus = mine.some((c) => (c.data as Row | null)?.amount === undefined) ? null : mine.reduce((n, c) => n + big((c.data as Row).amount), 0n);
         out.push({
           source: "on-chain" as const,
           cluster: p.cluster as Cluster,
@@ -1550,6 +1555,8 @@ export class TreasuryService {
           paid: units(sum(rs, "paid")),
           queued: units(queued),
           available_to_request: units(unlocked),
+          // What the wallet has been paid beyond its principal (wind-down surplus); null if a claim's amount is unknown.
+          surplus_claimed: surplus === null ? null : units(surplus),
           deposits: ds.map((d) => ({
             deposit: d.address as string, // the deposit record's address: prepare_treasury_withdrawal's `deposit`
             address: d.address as string,
