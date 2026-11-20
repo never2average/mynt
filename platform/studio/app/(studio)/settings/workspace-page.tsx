@@ -11,7 +11,7 @@ import { useRepositories } from "@/components/repositories";
 import { NO_SETTINGS_TOOLS, TabSelector, WorkspaceView, type SettingsActions, type WorkspaceApp, type WorkspaceInfo } from "@/components/workspace-view";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { CreateWorkspace } from "@/components/studio-gates";
+import { Input } from "@/components/ui/input";
 import type { Workspace } from "@/lib/workspaces";
 import type { ProjectItem } from "@/lib/project-types";
 import type { WorkspaceTab } from "@/lib/workspace-tabs";
@@ -121,16 +121,16 @@ export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <div className="flex min-h-0 w-full flex-1 flex-col p-4 lg:p-6">
+      <div className="@container/main flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6">
         {error ? (
-          <div className="flex flex-col gap-4">
+          <>
             <TabSelector tab={tab} onTab={onTab} />
             <WorkspaceUnavailable message={error} others={workspaces.filter((w) => !w.implicit && w.id !== selected.id)} onSelect={select} />
-          </div>
+          </>
         ) : info ? (
           <WorkspaceView tab={tab} onTab={onTab} info={info} members={members} apps={apps} memberActions={memberActions} settingsActions={settingsActions} repos={repos} onReposChanged={reloadRepos} />
         ) : (
-          <Skeleton className="h-40 w-full rounded-xl" />
+          <Skeleton className="h-40 w-full" />
         )}
       </div>
     </div>
@@ -152,9 +152,12 @@ export function WorkspaceUnavailable({ message, others, onSelect }: { message: s
     },
     [reload, select],
   );
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   return (
-    <div className="flex flex-col gap-4 rounded-lg border border-dashed p-6" data-workspace-unavailable>
-      <p role="alert" className="text-sm font-medium">
+    <div className="flex flex-col gap-3" data-workspace-unavailable>
+      <p role="alert" className="py-3 text-sm text-muted-foreground">
         {message}
       </p>
       {others.length > 0 && (
@@ -167,7 +170,30 @@ export function WorkspaceUnavailable({ message, others, onSelect }: { message: s
           ))}
         </div>
       )}
-      <CreateWorkspace onCreate={create} />
+      {/* A new workspace, inline: the gate's form without its page-centring wrapper. */}
+      <form
+        className="flex max-w-md flex-col gap-2 sm:flex-row"
+        data-create-workspace
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (busy || !name.trim()) return;
+          setBusy(true);
+          setFailed(null);
+          const err = await create(name.trim());
+          setBusy(false);
+          if (err) setFailed(err);
+        }}
+      >
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Acme Labs" aria-label="Workspace name" maxLength={80} />
+        <Button type="submit" disabled={busy || !name.trim()}>
+          {busy ? "Creating…" : "Create workspace"}
+        </Button>
+      </form>
+      {failed && (
+        <p role="alert" className="text-sm text-destructive">
+          {failed}
+        </p>
+      )}
     </div>
   );
 }

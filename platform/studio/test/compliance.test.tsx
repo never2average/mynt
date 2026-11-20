@@ -5,7 +5,7 @@ import countries110m from "world-atlas/countries-110m.json";
 import { AuditsView, NO_AUDIT_FILTERS } from "@/components/audits-view";
 import { CoverageMap, StatePanel, US_COUNTRY_ID, usStatus } from "@/components/coverage-view";
 import { rowsFromEvents } from "@/lib/audit-classes";
-import { LicencesView, licencesCsv } from "@/components/licences-view";
+import { licenceKpis, LicencesView, licencesCsv } from "@/components/licences-view";
 import { NotAvailableYet } from "@/components/not-available";
 import {
   allStates,
@@ -59,15 +59,24 @@ describe("coverage", () => {
     expect(all.find((s) => s.code === "WY")?.status).toBe("unavailable");
   });
 
-  it("draws the US map with every state, a legend with counts and the US / World selector", () => {
+  it("draws the US map with every state and a legend with counts; the region is the Licences toolbar's Region filter", () => {
     const html = renderToStaticMarkup(<CoverageMap coverage={coverage} region="us" onRegion={() => undefined} />);
     expect(html).toContain('data-legend="unlocked"');
     expect(html).toMatch(/Unlocked<\/span><span[^>]*>1</);
     expect(html).toMatch(/Available<\/span><span[^>]*>1</);
     expect(html).toMatch(/Unavailable<\/span><span[^>]*>49</);
-    expect(html).toMatch(/aria-pressed="true"[^>]*data-region="us"/);
-    expect(html).toMatch(/aria-pressed="false"[^>]*data-region="world"/);
+    expect(html).toContain('data-region-shown="us"');
     expect(html).toContain('aria-label="Map of US states by coverage"');
+    // No region buttons inside the map, and no subtitle sentence about the filters.
+    expect(html).not.toContain("data-region=");
+    expect(html).not.toContain("aria-pressed");
+    const filtered = renderToStaticMarkup(<CoverageMap coverage={coverage} region="us" onRegion={() => undefined} highlight={new Set(["CA"])} />);
+    expect(filtered).not.toContain("Showing the");
+    const bar = renderToStaticMarkup(<LicencesView licences={[]} view="map" region="us" coverage={{ kind: "ready", data: coverage }} />);
+    expect(bar).toMatch(/aria-label="Region: US"[^>]*data-filter="Region"/);
+    expect(renderToStaticMarkup(<LicencesView licences={[]} view="map" region="world" coverage={{ kind: "ready", data: coverage }} />)).toMatch(/aria-label="Region: World"/);
+    // The table view has no Region filter.
+    expect(renderToStaticMarkup(<LicencesView licences={[]} />)).not.toContain('data-filter="Region"');
   });
 
   it("uses one set of status colours, light and dark, in the legend, list and panel", async () => {
@@ -101,7 +110,7 @@ describe("coverage", () => {
     expect(html).toMatch(/data-legend="not-available"[\s\S]*?<span>Not available<\/span>/);
     expect(html).not.toContain("Every other country");
     expect(html).not.toContain("serves the US only");
-    expect(html).toMatch(/aria-pressed="true"[^>]*data-region="world"/);
+    expect(html).toContain('data-region-shown="world"');
   });
 });
 
@@ -141,30 +150,37 @@ describe("licences", () => {
     expect(html).toMatch(/<tr[^>]*data-expiry="expired"[\s\S]*?Expired/);
     expect(html).toMatch(/<tr[^>]*data-expiry="expiring"[\s\S]*?Expires soon/);
     for (const t of ["Search licences", 'data-filter="Partner"', 'data-filter="Status"', 'data-filter="Regulator"', 'data-filter="State"', 'data-filter="Expiring"']) expect(html).toContain(t);
-    // No count line and no inline Import note, in either view.
+    // No count line and no inline Import note, in either view (the table's pager, "Page x of y", is the only "of").
     const map = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} view="map" coverage={{ kind: "ready", data: coverage }} />);
-    for (const view of [html, map]) {
+    expect(html).toContain("4 rows · Page 1 of 1");
+    expect(map).not.toContain("data-pager");
+    for (const view of [html.replace(/Page \d+ of \d+/g, ""), map]) {
       expect(view).not.toMatch(/\d+ of \d+/);
       expect(view).not.toMatch(/>[^<]*admins to verify/);
     }
   });
 
-  it("has one toolbar row beside the search: filters, Import, Export, Invite partner and the view toggle", () => {
+  it("has one toolbar row beside the search: filters, Import, Export CSV, the Map / Table button and Invite partner last", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("data-table-view"));
-    const order = ['aria-label="Search licences"', 'aria-label="Partner"', 'aria-label="Regulator"', 'aria-label="State"', 'aria-label="Status"', 'aria-label="Expiring"', "data-import", "data-export", "data-invite-partner", "data-view-toggle"];
+    const order = ['aria-label="Search licences"', 'aria-label="Partner"', 'aria-label="Regulator"', 'aria-label="State"', 'aria-label="Status"', 'aria-label="Expiring"', "data-import", "data-export", "data-view-toggle", "data-invite-partner"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
     // Import isn't in Mynt yet: disabled, saying so only in its tooltip and accessible description.
     const note = "Import a CSV of licences for Mynt&#x27;s admins to verify. Coming with Mynt&#x27;s next update.";
     expect(bar).toMatch(new RegExp(`<button[^>]*disabled=""[^>]*title="${note}"[^>]*aria-description="${note}"[^>]*data-import`));
-    expect(bar).toMatch(/data-export[^>]*>[\s\S]*?Export</);
+    expect(bar).toMatch(/data-export[^>]*>[\s\S]*?Export CSV</);
     expect(bar).toMatch(/data-invite-partner[^>]*>[\s\S]*?Invite partner</);
-    // The toggle: an icon button named for the view it opens.
-    expect(bar).toMatch(/aria-label="Map view"[^>]*data-view-toggle="map"/);
+    // Invite partner is the page's one primary button: the default variant, not outline.
+    const invite = /<button[^>]*data-invite-partner[^>]*>/.exec(bar)![0];
+    expect(invite).toContain('data-variant="default"');
+    // The toggle: a labelled button naming the view it opens, never icon-only.
+    expect(bar).toMatch(/data-view-toggle="map"[^>]*>[\s\S]*?Map<\/button>/);
+    expect(bar).not.toContain('data-size="icon"');
     const map = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} view="map" coverage={{ kind: "ready", data: coverage }} />);
-    expect(map).toMatch(/aria-label="Table view"[^>]*data-view-toggle="table"/);
+    expect(map).toMatch(/data-view-toggle="table"[^>]*>[\s\S]*?Table<\/button>/);
+    expect(map).toMatch(/data-panel[^>]*>[\s\S]*?data-map-view/); // the map sits in a Panel
     expect(map).toContain("data-map-view");
     expect(map).not.toContain("data-table-view");
     expect(map).toContain('aria-label="Search licences"'); // the filters stay
@@ -177,6 +193,32 @@ describe("licences", () => {
 
   it("says when there are none", () => {
     expect(renderToStaticMarkup(<LicencesView licences={[]} now={NOW} />)).toContain("No licences yet");
+  });
+
+  it("shows key figures first, counted from the licences loaded; one no licence has data for reads Not measured, never 0", () => {
+    expect(licenceKpis(licences, NOW).map((k) => [k.label, k.value])).toEqual([
+      ["Licences", 4],
+      ["Active", 2],
+      ["Expiring soon", 1],
+      ["Expired", 1],
+    ]);
+    const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
+    expect(html.indexOf("data-kpis")).toBeGreaterThan(-1);
+    expect(html.indexOf("data-kpis")).toBeLessThan(html.indexOf("data-toolbar"));
+    expect(html).toMatch(/data-kpi="expiring"[\s\S]*?data-measured="true"[^>]*>1</);
+    // No expiry dates and no statuses: only the count is measured.
+    const bare = fromLicences({ licences: [{ partner: "Harbor Bank", number: "MT-9", states: ["CA"] }] });
+    expect(licenceKpis(bare, NOW).map((k) => k.value)).toEqual([1, null, null, null]);
+    const unmeasured = renderToStaticMarkup(<LicencesView licences={bare} now={NOW} />);
+    expect(unmeasured).toMatch(/data-kpi="expiring"[\s\S]*?data-measured="false"[^>]*>Not measured</);
+  });
+
+  it("pages the table 25 rows at a time", () => {
+    const many = fromLicences({ licences: Array.from({ length: 30 }, (_, i) => ({ partner: "Harbor Bank", number: `MT-${i}`, states: ["CA"], status: "active", expires_at: "2027-06-01" })) });
+    const html = renderToStaticMarkup(<LicencesView licences={many} now={NOW} />);
+    const body = /<tbody[^>]*>([\s\S]*?)<\/tbody>/.exec(html)![1];
+    expect(body.match(/<tr/g)).toHaveLength(25);
+    expect(html).toContain("30 rows · Page 1 of 2");
   });
 });
 
@@ -206,7 +248,7 @@ describe("audits", () => {
     const html = renderToStaticMarkup(
       <AuditsView rows={rowsFromEvents(page.events)} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["app.created"]} page={1} hasNext onPrev={() => undefined} onNext={() => undefined} />,
     );
-    for (const t of ['data-filter="Action"', 'data-filter="Member"', 'data-filter="App"', 'data-filter="Dates"', "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
+    for (const t of ['data-filter="Action"', 'data-filter="Member"', 'data-filter="App"', 'data-filter="Date range"', "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
     expect(html).toMatch(/<button[^>]*disabled[^>]*>[\s\S]*?Previous/);
   });
 });

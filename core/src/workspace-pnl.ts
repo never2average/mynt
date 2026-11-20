@@ -255,11 +255,12 @@ export async function workspacePnl(store: Store, workspaceId: string, apps: App[
       fromUsage(hostingUsage, hostingFrom),
       "Each hosted app's VM, its run time sampled from the provider and priced at FREESTYLE_USD_PER_HOUR",
     );
+  // Mynt bills nobody yet, so what it has charged is known: nothing. A measured $0, not a gap, so the totals add up.
   cost(
     "mynt_fees",
     "Mynt's fees",
-    null,
-    "Mynt doesn't charge workspaces anything yet: take rates are set per product line (define_take_rate) but there's no billing, so no fee is ever charged or recorded",
+    acc(),
+    "Mynt doesn't bill workspaces yet: take rates are set per product line (define_take_rate) but nothing is charged, so the fees charged are $0",
   );
   unmeasured.push({
     key: "app_earnings",
