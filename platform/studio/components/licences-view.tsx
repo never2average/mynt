@@ -1,26 +1,32 @@
 "use client"
 
-// The Licences page: the partner licences behind the workspace's products, as one table. One
-// toolbar row beside the full-width search: filters (partner, regulator, state, status, expiring
-// within N days), Import, Export (the filtered rows, as CSV), Invite partner and the view toggle,
-// which swaps the table for the coverage map in the same place, keeping the filters (US states,
-// or the world; components/coverage-view.tsx). Expired licences and those expiring within 60
-// days are marked with an icon and words, not colour alone. Import and Invite partner need Mynt
-// tools that don't exist yet, so they say so instead of doing anything. Server-renderable.
+// The Licences page: the partner licences behind the workspace's products. Key figures first
+// (licences, active, expiring soon, expired: counted from the licences loaded), then one toolbar
+// row beside the full-width search: filters (partner, regulator, state, status, expiring within N
+// days, and the map's region in the map view), Import, Export CSV (the filtered rows), the
+// labelled Map / Table button, which swaps the table for the coverage map in the same place,
+// keeping the filters (US states, or the world; components/coverage-view.tsx), and Invite partner
+// last. The table is paged 25 rows at a time. Expired licences and those expiring within 60 days
+// are marked with an icon and words, not colour alone. Import and Invite partner need Mynt tools
+// that don't exist yet, so they say so instead of doing anything. Server-renderable.
 import { useMemo, useState } from "react"
 import { AlertTriangle, Download, Map as MapIcon, Search, Table2, Upload, UserPlus, XCircle } from "lucide-react"
 
+import { KpiRow } from "@/components/charts"
+import { Panel } from "@/components/dashboard-panels"
 import { FilterSelect } from "@/components/filter-controls"
-import { CoverageMap, type MapRegion } from "@/components/coverage-view"
+import { CoverageMap, MAP_REGIONS, REGION_LABELS, type MapRegion } from "@/components/coverage-view"
+import { ListPager, usePaged } from "@/components/list-layout"
 import { NotReady } from "@/components/not-available"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import type { Kpi } from "@/lib/dashboard-visual"
 import {
   distinct,
+  EXPIRING_DAYS,
   EXPIRY_WINDOWS,
   expiryOf,
   filterLicences,
@@ -81,7 +87,7 @@ export function InvitePartner() {
   const [open, setOpen] = useState(false)
   return (
     <>
-      <Button variant="outline" onClick={() => setOpen(true)} data-invite-partner>
+      <Button onClick={() => setOpen(true)} data-invite-partner>
         <UserPlus />
         Invite partner
       </Button>
@@ -128,20 +134,30 @@ export function InvitePartner() {
   )
 }
 
+// A labelled button naming the view it opens: "Map" from the table, "Table" from the map.
 function ViewToggle({ view, onView }: { view: View; onView: (v: View) => void }) {
   const next: View = view === "table" ? "map" : "table"
-  const label = next === "map" ? "Map view" : "Table view"
   const Icon = next === "map" ? MapIcon : Table2
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button variant="outline" size="icon" aria-label={label} onClick={() => onView(next)} data-view-toggle={next}>
-          <Icon />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
+    <Button variant="outline" onClick={() => onView(next)} data-view-toggle={next}>
+      <Icon />
+      {next === "map" ? "Map" : "Table"}
+    </Button>
   )
+}
+
+/** The key figures, from the licences loaded. A figure no licence carries the data for is "Not measured", never 0. */
+export function licenceKpis(licences: Licence[], now = Date.now()): Kpi[] {
+  const dated = licences.some((l) => l.expiresAt && !Number.isNaN(Date.parse(l.expiresAt)))
+  const withStatus = licences.some((l) => l.status)
+  const count = (known: boolean, pick: (l: Licence) => boolean) => (known ? licences.filter(pick).length : null)
+  const k = (key: string, label: string, value: number | null, note: string): Kpi => ({ key, label, value, unit: "count", delta: null, spark: null, note })
+  return [
+    k("licences", "Licences", licences.length, "Behind your products"),
+    k("active", "Active", count(withStatus, (l) => l.status === "active" && expiryOf(l, now) !== "expired"), "In force today"),
+    k("expiring", "Expiring soon", count(dated, (l) => expiryOf(l, now) === "expiring"), `Within ${EXPIRING_DAYS} days`),
+    k("expired", "Expired", count(dated || withStatus, (l) => expiryOf(l, now) === "expired"), "No longer in force"),
+  ]
 }
 
 // Each filter is a compact control in the toolbar row (components/filter-controls.tsx).
@@ -173,11 +189,19 @@ export function LicencesView({
   const [f, setF] = useState<LicenceFilters>(initial)
   const shown = useMemo(() => filterLicences(licences, f, now), [licences, f, now])
   const highlight = useMemo(() => (licenceFiltersOn(f) ? new Set(shown.flatMap((l) => l.states)) : null), [f, shown])
-  const set = (k: keyof LicenceFilters) => (v: string) => setF({ ...f, [k]: v })
+  const { page, pages, shown: onPage, setPage } = usePaged(shown)
+  const set = (k: keyof LicenceFilters) => (v: string) => {
+    setF({ ...f, [k]: v })
+    setPage(1)
+  }
   const statuses = distinct(licences.map((l) => l.status)).filter((s) => s !== "expired")
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3" data-licences-page>
+    <div className="flex min-h-0 flex-1 flex-col gap-4 lg:gap-5" data-licences-page>
+      <Panel id="licence-figures">
+        <KpiRow kpis={licenceKpis(licences, now)} />
+      </Panel>
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2" data-toolbar>
         <div className="relative min-w-64 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -194,25 +218,32 @@ export function LicencesView({
           options={[{ value: "expired", label: "Expired" }, ...statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]}
         />
         <Select label="Expiring" value={f.within} onChange={set("within")} options={EXPIRY_WINDOWS.map((d) => ({ value: String(d), label: `Within ${d} days` }))} />
+        {view === "map" && (
+          // Always one region shown: clearing it goes back to the US.
+          <FilterSelect label="Region" value={region} onChange={(r) => onRegion(r === "world" ? "world" : "us")} options={MAP_REGIONS.map((r) => ({ value: r, label: REGION_LABELS[r] }))} />
+        )}
         <Button variant="outline" disabled title={IMPORT_NOTE} aria-description={IMPORT_NOTE} data-import>
           <Upload />
           Import
         </Button>
         <Button variant="outline" onClick={() => downloadCsv("licences.csv", licencesCsv(shown))} disabled={!shown.length} data-export>
           <Download />
-          Export
+          Export CSV
         </Button>
-        <InvitePartner />
         <ViewToggle view={view} onView={onView} />
+        <InvitePartner />
       </div>
       {view === "map" ? (
         coverage.kind === "ready" ? (
-          <CoverageMap coverage={coverage.data} region={region} onRegion={onRegion} highlight={highlight} />
+          <Panel id="coverage-map" className="min-h-0 flex-1 [&>*]:min-h-0">
+            <CoverageMap coverage={coverage.data} region={region} onRegion={onRegion} highlight={highlight} />
+          </Panel>
         ) : (
           <NotReady state={coverage} what="Coverage" />
         )
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto rounded-lg border" data-table-view>
+        <>
+        <div className="min-h-64 flex-1 overflow-auto rounded-lg border" data-table-view>
           <Table>
             <TableHeader className="sticky top-0 bg-card">
               <TableRow>
@@ -226,8 +257,8 @@ export function LicencesView({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {shown.length ? (
-                shown.map((l, i) => {
+              {onPage.length ? (
+                onPage.map((l, i) => {
                   const e = expiryOf(l, now)
                   return (
                     <TableRow
@@ -262,7 +293,10 @@ export function LicencesView({
             </TableBody>
           </Table>
         </div>
+        <ListPager page={page} pages={pages} total={shown.length} onPage={setPage} />
+        </>
       )}
+      </div>
     </div>
   )
 }

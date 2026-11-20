@@ -20,8 +20,8 @@ export function LicencesPage({ initialView, initialRegion }: { initialView: Lice
   const { state: licences } = useComplianceData("/api/licences", pickLicences);
   const remember = (v: LicencesView, r: MapRegion) => window.history.replaceState(null, "", v === "map" ? `/licences?view=map&region=${r}` : "/licences");
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <div className="flex min-h-0 w-full flex-1 flex-col p-4 lg:p-6">
+    <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div className="flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6">
         <LicencesPageView
           view={view}
           onView={(v) => {
