@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { devnetWallets, signAndSend, type BrowserWallet } from "@/lib/browser-wallet"
 import { shortAddress } from "@/lib/linked-accounts"
@@ -158,7 +158,6 @@ export function WalletPicker() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72" data-wallet-picker-menu>
-        <DropdownMenuLabel className="text-xs text-muted-foreground">Your linked wallets · balances on devnet</DropdownMenuLabel>
         {list.wallets.map((w) => (
           <DropdownMenuItem key={w.address} onSelect={() => choose(w.address)} data-wallet-option={w.address} aria-checked={chosen?.address === w.address} role="menuitemradio">
             <WalletRow w={w} />
