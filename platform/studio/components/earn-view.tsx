@@ -1,34 +1,34 @@
 "use client"
 
 // Earn's table tabs (/earn's right-hand panel, beside the assistant: components/earn-assistant.tsx),
-// by role, each in the dashboard's list layout: one toolbar row (search, filters, Export CSV, the
-// tab's CTA), then a full-height table paged 25 rows at a time:
+// by role, each ONE toolbar row (search, filters, Export CSV, the tab's CTA; the filters and Export
+// fold into a Filters menu when the panel is narrow) and ONE table filling the panel, paged 25 rows
+// at a time (components/list-layout.tsx PanelList):
 // - My pools (builders): their products' pools, each one's state, terms, latest verified
 //   health and withdrawal queue; "Propose pool" on a sponsored component of their firm's product.
 // - Opportunities (liquidity providers): pools open to commitments, their health and terms, and
 //   "Commit capital".
-// - My positions (liquidity providers): key figures, then committed, settled, queued and paid per
-//   position, "Request withdrawal", on-chain positions, and the firm's requests in each pool's queue.
+// - My positions (liquidity providers): committed, settled, queued, paid and available per
+//   position on rails and on chain, "Request withdrawal", each on-chain position's deposits in a
+//   sheet; Show · Withdrawal requests switches the table to the firm's requests in each queue.
 // Each form opens in a sheet from its labelled button. Nothing here moves money: Mynt records a
 // request, and the pool's sponsor moves the money on its approved rail. Server-renderable for the tests.
 import { useMemo, useState } from "react"
-import { OnChainPositions } from "@/components/earn-wallet"
+import { DevnetBadge, OnChainPositionSheet, UnverifiedBuildBadge } from "@/components/earn-wallet"
 import { newIdempotencyKey } from "@/lib/idempotency"
-import { Download } from "lucide-react"
 
-import { KpiRow } from "@/components/charts"
-import { Panel, Section } from "@/components/dashboard-panels"
 import { FilterSelect } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { ListLayout, usePaged } from "@/components/list-layout"
+import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL } from "@/components/list-layout"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toCsv } from "@/lib/compliance"
-import type { Kpi } from "@/lib/dashboard-visual"
-import { portfolioOf, positionExtras } from "@/lib/investor"
+import { portfolioOf } from "@/lib/investor"
+import { shortAddress } from "@/lib/linked-accounts"
+import { usdcText } from "@/lib/wallets"
 import {
   commitRefusal,
   filterPools,
@@ -39,6 +39,7 @@ import {
   parseUsd,
   percentOfBps,
   poolCommitBlock,
+  positionKey,
   proposalFrom,
   railsApproved,
   reserveText,
@@ -83,7 +84,7 @@ export function StageBadge({ stage }: { stage: PoolStage }) {
           ? "border-sky-500/60"
           : "border-dashed"
   return (
-    <Badge variant="outline" className={`${cls} whitespace-normal text-left`} data-stage={stage}>
+    <Badge variant="outline" className={`${cls} block max-w-48 truncate text-left`} title={STAGE_LABELS[stage]} data-stage={stage}>
       {STAGE_LABELS[stage]}
     </Badge>
   )
@@ -125,8 +126,9 @@ const MONEY_OPTIONS = [
   { value: "real", label: "Real money" },
 ]
 
-// A pool table's filters, as buttons in the toolbar row after the search.
-function PoolFilterControls({ f, setF, pools, stages, productLines }: { f: PoolFilters; setF: (f: PoolFilters) => void; pools: PoolRow[]; stages: PoolStage[]; productLines: boolean }) {
+// A pool table's filters, as buttons in the toolbar row after the search (or in its folded
+// Filters menu when the panel is narrow).
+export function PoolFilterControls({ f, setF, pools, stages, productLines }: { f: PoolFilters; setF: (f: PoolFilters) => void; pools: PoolRow[]; stages: PoolStage[]; productLines: boolean }) {
   const lines = [...new Set(pools.map((p) => p.productLine).filter((v): v is string => Boolean(v)))].sort()
   return (
     <>
@@ -136,27 +138,39 @@ function PoolFilterControls({ f, setF, pools, stages, productLines }: { f: PoolF
     </>
   )
 }
+export const poolFiltersOn = (f: PoolFilters) => [f.productLine, f.stage, f.money].filter(Boolean).length
 
-function ExportButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
+// What a form in a sheet answered: shown in the sheet in place of the form, until it's closed.
+export function FormDone({ message }: { message: string }) {
   return (
-    <Button variant="outline" onClick={onClick} disabled={disabled} data-export>
-      <Download />
-      Export CSV
-    </Button>
+    <p role="status" className="text-sm" data-form-done>
+      {message}
+    </p>
   )
 }
 
-function EmptyRow({ cols, children }: { cols: number; children: React.ReactNode }) {
+// A cell's text on one line: cut short with an ellipsis, the whole of it in its tooltip. A row is
+// never taller for long text, so the rows per page that fit the panel stay right. Empty text still
+// takes its line, so every row of a table is the same height.
+export function OneLine({ text, title, className }: { text: string; title?: string; className?: string }) {
   return (
-    <TableRow>
-      <TableCell colSpan={cols} className="py-10 text-center text-muted-foreground">
+    <span className={`block max-w-56 truncate ${className ?? ""}`} title={title ?? (text || undefined)}>
+      {text || "\u00a0"}
+    </span>
+  )
+}
+
+export function EmptyRow({ cols, children }: { cols: number; children: React.ReactNode }) {
+  return (
+    <TableRow data-empty-row>
+      <TableCell colSpan={cols} className="py-10 text-center !whitespace-normal text-muted-foreground">
         {children}
       </TableCell>
     </TableRow>
   )
 }
 
-const pagerOf = (paged: { page: number; pages: number; setPage: (p: number) => void }, total: number) => ({ page: paged.page, pages: paged.pages, total, onPage: paged.setPage })
+export const pagerOf = (paged: { page: number; pages: number; setPage: (p: number) => void }, total: number) => ({ page: paged.page, pages: paged.pages, total, onPage: paged.setPage })
 
 // ---- the builder ----
 
@@ -247,7 +261,8 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
   const [f, setF] = useState<PoolFilters>(NO_POOL_FILTERS)
   const [done, setDone] = useState<string | null>(null)
   const shown = useMemo(() => filterPools(pools, f), [pools, f])
-  const paged = usePaged(shown)
+  const fit = useFitRows()
+  const paged = usePaged(shown, fit.size)
   const filter = (n: PoolFilters) => {
     setF(n)
     paged.setPage(1)
@@ -264,45 +279,44 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
     )
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel="my-pools">
-      {proposeBlock && (
-        <p className="text-sm text-muted-foreground" data-sponsor-note>
-          {proposeBlock}
-        </p>
-      )}
-      {done && (
-        <p className="text-sm" role="status">
-          {done}
-        </p>
-      )}
-      <ListLayout
+    <>
+      <PanelList
+        id="my-pools"
         search={f.query}
         onSearch={(query) => filter({ ...f, query })}
         searchLabel="Search pools"
-        actions={
-          <>
-            <PoolFilterControls f={f} setF={filter} pools={pools} stages={["awaiting_approval", "sandbox", "uncleared", "cleared"]} productLines={false} />
-            <ExportButton onClick={exportCsv} disabled={!shown.length} />
-          </>
-        }
+        filters={<PoolFilterControls f={f} setF={filter} pools={pools} stages={["awaiting_approval", "sandbox", "uncleared", "cleared"]} productLines={false} />}
+        activeFilters={poolFiltersOn(f)}
+        onExport={exportCsv}
+        exportDisabled={!shown.length}
         cta={
-          <Button onClick={() => setForm({ kind: "propose" })} disabled={Boolean(proposeBlock)} title={proposeBlock ?? undefined} data-cta="propose">
+          // Why it can't be proposed is the button's tooltip, not a line of text above the table.
+          <Button
+            onClick={() => {
+              setDone(null)
+              setForm({ kind: "propose" })
+            }}
+            disabled={Boolean(proposeBlock)}
+            title={proposeBlock ?? undefined}
+            data-cta="propose"
+          >
             Propose pool
           </Button>
         }
+        areaRef={fit.ref}
         {...pagerOf(paged, shown.length)}
       >
         <Table>
           <TableHeader className="sticky top-0 bg-card">
             <TableRow>
               <TableHead>Pool</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Rails</TableHead>
-              <TableHead>Minimum reserve</TableHead>
-              <TableHead>Notice</TableHead>
-              <TableHead>Commitment limits</TableHead>
-              <TableHead>Latest health</TableHead>
+              <TableHead className={MID_COL}>State</TableHead>
+              <TableHead className={WIDE_COL}>Status</TableHead>
+              <TableHead className={WIDE_COL}>Rails</TableHead>
+              <TableHead className={WIDE_COL}>Minimum reserve</TableHead>
+              <TableHead className={WIDE_COL}>Notice</TableHead>
+              <TableHead className={WIDE_COL}>Commitment limits</TableHead>
+              <TableHead className={WIDE_COL}>Latest health</TableHead>
               <TableHead className="text-right">Withdrawal queue</TableHead>
             </TableRow>
           </TableHeader>
@@ -311,23 +325,24 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
               paged.shown.map((p) => (
                 <TableRow key={p.id} data-pool={p.id}>
                   <TableCell>
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {p.productName ?? p.productId}
-                      {p.componentKey ? ` · ${p.componentKey}` : ""}
-                    </div>
+                    <OneLine className="font-medium" text={p.name} />
+                    <OneLine className="text-xs text-muted-foreground" text={`${p.productName ?? p.productId}${p.componentKey ? ` · ${p.componentKey}` : ""}`} />
                   </TableCell>
-                  <TableCell>
+                  <TableCell className={MID_COL}>
                     <StageBadge stage={stageOf(p)} />
                   </TableCell>
-                  <TableCell className="max-w-56 whitespace-normal">{statusText(p)}</TableCell>
-                  <TableCell>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
-                  <TableCell className="whitespace-normal">{reserveText(p)}</TableCell>
-                  <TableCell>{noticeText(p.noticePeriodDays)}</TableCell>
-                  <TableCell className="tabular-nums">{limitsText(p)}</TableCell>
-                  <TableCell className="whitespace-normal" data-health>
-                    {healthText(p.health)}
-                    {p.health?.latestVerifiedEnd && !p.health.verified ? <div className="text-xs text-muted-foreground">Last verified to {dateOf(p.health.latestVerifiedEnd)}</div> : null}
+                  <TableCell className={WIDE_COL}>
+                    <OneLine text={statusText(p)} />
+                  </TableCell>
+                  <TableCell className={WIDE_COL}>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
+                  <TableCell className={WIDE_COL}>
+                    <OneLine text={reserveText(p)} />
+                  </TableCell>
+                  <TableCell className={WIDE_COL}>{noticeText(p.noticePeriodDays)}</TableCell>
+                  <TableCell className={`${WIDE_COL} tabular-nums`}>{limitsText(p)}</TableCell>
+                  <TableCell className={WIDE_COL} data-health>
+                    <OneLine text={healthText(p.health)} />
+                    <OneLine className="text-xs text-muted-foreground" text={p.health?.latestVerifiedEnd && !p.health.verified ? `Last verified to ${dateOf(p.health.latestVerifiedEnd)}` : ""} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums" data-queue>
                     {queue(p)}
@@ -339,20 +354,11 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
             )}
           </TableBody>
         </Table>
-      </ListLayout>
+      </PanelList>
       <FormSheet open={form?.kind === "propose" && Boolean(proposable?.length)} onClose={() => setForm(null)} title="Propose a pool" id="propose">
-        {proposable?.length ? (
-          <ProposeForm
-            options={proposable}
-            actions={actions}
-            onDone={(m) => {
-              setDone(m)
-              setForm(null)
-            }}
-          />
-        ) : null}
+        {done ? <FormDone message={done} /> : proposable?.length ? <ProposeForm options={proposable} actions={actions} onDone={setDone} /> : null}
       </FormSheet>
-    </div>
+    </>
   )
 }
 
@@ -560,7 +566,8 @@ function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { po
   const [f, setF] = useState<PoolFilters>(NO_POOL_FILTERS)
   const [done, setDone] = useState<string | null>(null)
   const shown = useMemo(() => filterPools(pools, f), [pools, f])
-  const paged = usePaged(shown)
+  const fit = useFitRows()
+  const paged = usePaged(shown, fit.size)
   const filter = (n: PoolFilters) => {
     setF(n)
     paged.setPage(1)
@@ -576,41 +583,41 @@ function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { po
       ),
     )
 
+  const open = (poolId?: string) => {
+    setDone(null)
+    setForm({ kind: "commit", poolId })
+  }
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel="opportunities">
-      {done && (
-        <p className="text-sm" role="status">
-          {done}
-        </p>
-      )}
-      <ListLayout
+    <>
+      <PanelList
+        id="opportunities"
         search={f.query}
         onSearch={(query) => filter({ ...f, query })}
         searchLabel="Search open pools"
-        actions={
-          <>
-            <PoolFilterControls f={f} setF={filter} pools={pools} stages={["sandbox", "cleared", "uncleared"]} productLines />
-            <ExportButton onClick={exportCsv} disabled={!shown.length} />
-          </>
-        }
+        filters={<PoolFilterControls f={f} setF={filter} pools={pools} stages={["sandbox", "cleared", "uncleared"]} productLines />}
+        activeFilters={poolFiltersOn(f)}
+        onExport={exportCsv}
+        exportDisabled={!shown.length}
         cta={
-          <Button onClick={() => setForm({ kind: "commit" })} disabled={!canCommit || !anyOpen} title={!canCommit ? "Committing capital comes with Mynt's next update" : !anyOpen ? "No pool is taking commitments right now" : undefined} data-cta="commit">
+          <Button onClick={() => open()} disabled={!canCommit || !anyOpen} title={!canCommit ? "Committing capital comes with Mynt's next update" : !anyOpen ? "No pool is taking commitments right now" : undefined} data-cta="commit">
             Commit capital
           </Button>
         }
+        areaRef={fit.ref}
         {...pagerOf(paged, shown.length)}
       >
         <Table>
           <TableHeader className="sticky top-0 bg-card">
             <TableRow>
               <TableHead>Pool</TableHead>
-              <TableHead>Product line</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Health</TableHead>
-              <TableHead>Minimum reserve</TableHead>
-              <TableHead>Notice</TableHead>
-              <TableHead>Commitment limits</TableHead>
+              <TableHead className={WIDE_COL}>Product line</TableHead>
+              <TableHead className={MID_COL}>State</TableHead>
+              <TableHead className={WIDE_COL}>Status</TableHead>
+              <TableHead className={WIDE_COL}>Health</TableHead>
+              <TableHead className={WIDE_COL}>Minimum reserve</TableHead>
+              <TableHead className={MID_COL}>Notice</TableHead>
+              <TableHead className={WIDE_COL}>Commitment limits</TableHead>
               <TableHead className="text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
@@ -621,23 +628,27 @@ function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { po
                 return (
                   <TableRow key={p.id} data-pool={p.id}>
                     <TableCell>
-                      <div className="font-medium">{p.name}</div>
-                      <div className="text-xs text-muted-foreground">{p.productName ?? p.productId}</div>
+                      <OneLine className="font-medium" text={p.name} />
+                      <OneLine className="text-xs text-muted-foreground" text={p.productName ?? p.productId} />
                     </TableCell>
-                    <TableCell>{p.productLine ?? "—"}</TableCell>
-                    <TableCell>
+                    <TableCell className={WIDE_COL}>{p.productLine ?? "—"}</TableCell>
+                    <TableCell className={MID_COL}>
                       <StageBadge stage={stageOf(p)} />
                     </TableCell>
-                    <TableCell className="max-w-56 whitespace-normal">{statusText(p)}</TableCell>
-                    <TableCell className="whitespace-normal" data-health>
-                      {healthText(p.health)}
-                      {p.health?.coverageBps !== null && p.health?.coverageBps !== undefined ? <div className="text-xs text-muted-foreground">Coverage {percentOfBps(p.health.coverageBps)}</div> : null}
+                    <TableCell className={WIDE_COL}>
+                      <OneLine text={statusText(p)} />
                     </TableCell>
-                    <TableCell className="whitespace-normal">{reserveText(p)}</TableCell>
-                    <TableCell>{noticeText(p.noticePeriodDays)}</TableCell>
-                    <TableCell className="tabular-nums">{limitsText(p)}</TableCell>
+                    <TableCell className={WIDE_COL} data-health>
+                      <OneLine text={healthText(p.health)} />
+                      <OneLine className="text-xs text-muted-foreground" text={p.health?.coverageBps !== null && p.health?.coverageBps !== undefined ? `Coverage ${percentOfBps(p.health.coverageBps)}` : ""} />
+                    </TableCell>
+                    <TableCell className={WIDE_COL}>
+                      <OneLine text={reserveText(p)} />
+                    </TableCell>
+                    <TableCell className={MID_COL}>{noticeText(p.noticePeriodDays)}</TableCell>
+                    <TableCell className={`${WIDE_COL} tabular-nums`}>{limitsText(p)}</TableCell>
                     <TableCell className="text-right">
-                      <Button size="sm" variant="outline" disabled={Boolean(blocked)} title={blocked ?? undefined} onClick={() => setForm({ kind: "commit", poolId: p.id })} data-commit={p.id}>
+                      <Button size="sm" variant="outline" disabled={Boolean(blocked)} title={blocked ?? undefined} onClick={() => open(p.id)} data-commit={p.id}>
                         Commit capital
                       </Button>
                     </TableCell>
@@ -649,221 +660,290 @@ function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { po
             )}
           </TableBody>
         </Table>
-      </ListLayout>
+      </PanelList>
       <FormSheet open={form?.kind === "commit" && pools.length > 0} onClose={() => setForm(null)} title="Commit capital" id="commit">
-        {form?.kind === "commit" && pools.length ? (
-          <CommitForm
-            key={form.poolId ?? "any"}
-            pools={pools}
-            positions={positions}
-            poolId={form.poolId}
-            canCommit={canCommit}
-            actions={actions}
-            onDone={(m) => {
-              setDone(m)
-              setForm(null)
-            }}
-          />
-        ) : null}
+        {done ? <FormDone message={done} /> : form?.kind === "commit" && pools.length ? <CommitForm key={form.poolId ?? "any"} pools={pools} positions={positions} poolId={form.poolId} canCommit={canCommit} actions={actions} onDone={setDone} /> : null}
       </FormSheet>
-    </div>
+    </>
   )
 }
 
-// My positions' key figures, from all the positions (on rails and on chain, summed as the investor
-// dashboard sums them). A figure Mynt doesn't give reads Not measured, never 0.
-export function positionKpis(positions: Position[]): Kpi[] {
-  const p = portfolioOf(positions)
-  const extra = positionExtras(positions)
-  const test = positions.some((x) => x.sandbox || x.onChain)
-  const note = `${positions.length} ${positions.length === 1 ? "position" : "positions"}${test ? " · includes test money" : ""}`
-  return [
-    { key: "committed", label: "Committed", value: p.all.committed, unit: "money", delta: null, spark: null, note },
-    { key: "settled", label: "Settled", value: p.all.settled, unit: "money", delta: null, spark: null, note },
-    { key: "available", label: "Available to withdraw", value: extra.available, unit: "money", delta: null, spark: null, note },
-    { key: "queued", label: "Queued for withdrawal", value: p.all.queued, unit: "money", delta: null, spark: null, note },
-  ]
+// My positions' one table shows either the positions (on rails and on chain) or the withdrawal
+// requests (the firm's queue on rails, and each wallet's requests on chain): the Show filter.
+type PositionsView = "positions" | "requests"
+const SHOW_OPTIONS = [
+  { value: "positions", label: "Positions" },
+  { value: "requests", label: "Withdrawal requests" },
+]
+
+// A figure Mynt doesn't give reads Not measured, never 0.
+const money = (cents: number | null) => (cents === null ? "Not measured" : usd(cents))
+const stateOf = (p: Position) => (p.state ? p.state.slice(3).toUpperCase() : null)
+
+// One position's amounts: a rails row as Mynt sends it; an on-chain row from its deposits and
+// requests (lib/investor.ts), where an amount Mynt didn't give is null.
+export function positionFigures(p: Position): { committed: number | null; settled: number | null; queued: number | null; paid: number | null; available: number | null } {
+  if (!p.onChain) return { committed: p.committedCents, settled: p.settledCents, queued: p.queuedCents, paid: p.paidCents, available: p.availableCents }
+  const t = portfolioOf([p]).all
+  return { ...t, available: Number.isFinite(p.availableCents) ? p.availableCents : null }
+}
+
+// A withdrawal request as a row of My positions' Show · Withdrawal requests: rails requests in
+// dollars, on-chain ones in USDC.
+type RequestRow = { key: string; pool: string; sandbox: boolean; onChain: boolean; wallet: string | null; place: string; asked: string; paid: string; status: string; payableFrom: string; why: string | null }
+export function requestRows(withdrawals: Withdrawal[], positions: Position[]): RequestRow[] {
+  const rails = withdrawals.map((w) => ({ key: w.id, pool: w.poolName ?? w.poolId, sandbox: w.sandbox, onChain: false, wallet: null, place: w.seq !== null ? `#${w.seq}` : "—", asked: usd(w.amountCents), paid: usd(w.settledCents), status: w.status.replace(/_/g, " "), payableFrom: dateOf(w.eligibleAt), why: w.waitingReason }))
+  const chain = positions.flatMap((p) =>
+    p.onChain && p.chain
+      ? p.chain.requests.map((r) => ({ key: r.address, pool: p.name, sandbox: p.sandbox, onChain: true, wallet: p.chain!.wallet, place: r.seq !== null ? `#${r.seq}` : shortAddress(r.address), asked: usdcText(r.amount), paid: usdcText(r.paid), status: r.status.replace(/_/g, " "), payableFrom: r.payableAt ? r.payableAt.slice(0, 10) : "—", why: null }))
+      : [],
+  )
+  return [...rails, ...chain]
 }
 
 function MyPositions({ positions: all, withdrawals, pools, canWithdraw, actions, form, setForm }: { positions: Position[]; withdrawals: Withdrawal[]; pools: PoolRow[]; canWithdraw: boolean; actions: LiquidityActions; form: OpenForm; setForm: (f: OpenForm) => void }) {
-  // Positions on rails in the table; on-chain ones (devnet, per wallet and deposit) below it.
-  const positions = useMemo(() => all.filter((p) => !p.onChain), [all])
-  const onChain = all.filter((p) => p.onChain && p.chain)
+  // Requests on rails are made from the rails positions; an on-chain position's deposits (and
+  // their Withdraw) open in a sheet from its row.
+  const rails = useMemo(() => all.filter((p) => !p.onChain), [all])
+  const [show, setShow] = useState<PositionsView>("positions")
   const [query, setQuery] = useState("")
-  const [money, setMoney] = useState("")
+  const [moneyFilter, setMoney] = useState("")
   const [done, setDone] = useState<string | null>(null)
-  const shown = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return positions.filter((p) => (!q || p.name.toLowerCase().includes(q) || p.productId.toLowerCase().includes(q)) && (!money || (money === "sandbox") === p.sandbox))
-  }, [positions, query, money])
-  const paged = usePaged(shown)
-  const anyAvailable = positions.some((p) => p.availableCents > 0)
+  const [deposits, setDeposits] = useState<Position | null>(null)
+  const q = query.trim().toLowerCase()
+  const keep = (sandbox: boolean, ...text: (string | null)[]) => (!q || text.some((t) => t?.toLowerCase().includes(q))) && (!moneyFilter || (moneyFilter === "sandbox") === sandbox)
+  const positions = all.filter((p) => (p.onChain ? Boolean(p.chain) : true) && keep(p.sandbox, p.name, p.productId, p.wallet))
+  const requests = requestRows(withdrawals, all).filter((r) => keep(r.sandbox, r.pool, r.wallet))
+  const fit = useFitRows()
+  const pagedPositions = usePaged(positions, fit.size)
+  const pagedRequests = usePaged(requests, fit.size)
+  const paged = show === "positions" ? pagedPositions : pagedRequests
+  const total = show === "positions" ? positions.length : requests.length
+  const first = () => {
+    pagedPositions.setPage(1)
+    pagedRequests.setPage(1)
+  }
+  const anyAvailable = rails.some((p) => p.availableCents > 0)
   const exportCsv = () =>
-    downloadCsv(
-      "my-positions.csv",
-      toCsv(
-        ["Pool", "Product", "US state", "Money", "Committed", "Settled", "Queued", "Paid", "Available"],
-        shown.map((p) => [p.name, p.productId, p.state ? p.state.slice(3).toUpperCase() : null, p.sandbox ? "Sandbox" : "Real money", usd(p.committedCents), usd(p.settledCents), usd(p.queuedCents), usd(p.paidCents), usd(p.availableCents)]),
-      ),
-    )
+    show === "positions"
+      ? downloadCsv(
+          "my-positions.csv",
+          toCsv(
+            ["Pool", "Product", "US state", "Money", "Wallet", "Committed", "Settled", "Queued", "Paid", "Available"],
+            positions.map((p) => {
+              const f = positionFigures(p)
+              return [p.name, p.productId, stateOf(p), p.sandbox ? "Sandbox" : "Real money", p.wallet, money(f.committed), money(f.settled), money(f.queued), money(f.paid), money(f.available)]
+            }),
+          ),
+        )
+      : downloadCsv(
+          "withdrawal-requests.csv",
+          toCsv(
+            ["Pool", "Wallet", "Place in queue", "Asked", "Paid", "Status", "Payable from", "Why it's waiting"],
+            requests.map((r) => [r.pool, r.wallet, r.place, r.asked, r.paid, r.status, r.payableFrom, r.why]),
+          ),
+        )
 
   return (
-    <div className="flex flex-col gap-4" data-tab-panel="my-positions">
-      <Panel id="position-figures">
-        <KpiRow kpis={positionKpis(all)} />
-      </Panel>
-      {done && (
-        <p className="text-sm" role="status">
-          {done}
-        </p>
-      )}
-      <ListLayout
+    <>
+      <PanelList
+        id="my-positions"
         search={query}
         onSearch={(v) => {
           setQuery(v)
-          paged.setPage(1)
+          first()
         }}
-        searchLabel="Search positions"
-        actions={
+        searchLabel={show === "positions" ? "Search positions" : "Search requests"}
+        filters={
           <>
             <FilterSelect
+              label="Show"
+              value={show}
+              onChange={(v) => {
+                setShow(v === "requests" ? "requests" : "positions")
+                first()
+              }}
+              options={SHOW_OPTIONS}
+            />
+            <FilterSelect
               label="Money"
-              value={money}
+              value={moneyFilter}
               onChange={(v) => {
                 setMoney(v)
-                paged.setPage(1)
+                first()
               }}
               options={MONEY_OPTIONS}
             />
-            <ExportButton onClick={exportCsv} disabled={!shown.length} />
           </>
         }
+        activeFilters={(show === "requests" ? 1 : 0) + (moneyFilter ? 1 : 0)}
+        onExport={exportCsv}
+        exportDisabled={!total}
         cta={
-          <Button onClick={() => setForm({ kind: "withdraw" })} disabled={!canWithdraw || !anyAvailable} title={!canWithdraw ? "Withdrawals come with Mynt's next update" : !anyAvailable ? "Nothing settled is available to withdraw" : undefined} data-cta="withdraw">
+          <Button
+            onClick={() => {
+              setDone(null)
+              setForm({ kind: "withdraw" })
+            }}
+            disabled={!canWithdraw || !anyAvailable}
+            title={!canWithdraw ? "Withdrawals come with Mynt's next update" : !anyAvailable ? "Nothing settled is available to withdraw" : undefined}
+            data-cta="withdraw"
+          >
             Request withdrawal
           </Button>
         }
-        {...pagerOf(paged, shown.length)}
+        areaRef={fit.ref}
+        {...pagerOf(paged, total)}
       >
-        <Table>
-          <TableHeader className="sticky top-0 bg-card">
-            <TableRow>
-              <TableHead>Pool</TableHead>
-              <TableHead>Money</TableHead>
-              <TableHead className="text-right">Committed</TableHead>
-              <TableHead className="text-right">Settled</TableHead>
-              <TableHead className="text-right">Queued</TableHead>
-              <TableHead className="text-right">Paid</TableHead>
-              <TableHead className="text-right">Available</TableHead>
-              <TableHead className="text-right">Action</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {paged.shown.length ? (
-              paged.shown.map((p) => (
-                <TableRow key={p.poolId} data-position={p.poolId}>
-                  <TableCell>
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {p.productId}
-                      {p.state ? ` · from ${p.state.slice(3).toUpperCase()}` : ""}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <Money sandbox={p.sandbox} />
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums" title="Settled in, plus what's still on its way in">
-                    {usd(p.committedCents)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{usd(p.settledCents)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{usd(p.queuedCents)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{usd(p.paidCents)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{usd(p.availableCents)}</TableCell>
-                  <TableCell className="text-right">
-                    <Button size="sm" variant="outline" disabled={!canWithdraw || p.availableCents <= 0} onClick={() => setForm({ kind: "withdraw", poolId: p.poolId })} data-withdraw={p.poolId}>
-                      Request withdrawal
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : (
-              <EmptyRow cols={8}>{positions.length ? "No positions match this search." : onChain.length ? "No positions on rails." : "No positions yet. Commit capital to an open pool to start one."}</EmptyRow>
-            )}
-          </TableBody>
-        </Table>
-      </ListLayout>
-      <OnChainPositions positions={onChain} pools={pools} />
-      <Panel id="withdrawal-requests">
-        <Section id="withdrawal-requests" title="Your withdrawal requests">
-          <div className="overflow-auto rounded-lg border">
-            <Table>
-              <TableHeader className="bg-card">
-                <TableRow>
-                  <TableHead>Pool</TableHead>
-                  <TableHead>Place in queue</TableHead>
-                  <TableHead className="text-right">Asked</TableHead>
-                  <TableHead className="text-right">Paid</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Payable from</TableHead>
-                  <TableHead>Why it&apos;s waiting</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {withdrawals.length ? (
-                  withdrawals.map((w) => (
-                    <TableRow key={w.id} data-withdrawal={w.id}>
+        {show === "positions" ? (
+          <Table>
+            <TableHeader className="sticky top-0 bg-card">
+              <TableRow>
+                <TableHead>Pool</TableHead>
+                <TableHead className={WIDE_COL}>Money</TableHead>
+                <TableHead className={`${WIDE_COL} text-right`}>Committed</TableHead>
+                <TableHead className={`${MID_COL} text-right`}>Settled</TableHead>
+                <TableHead className={`${WIDE_COL} text-right`}>Queued</TableHead>
+                <TableHead className={`${WIDE_COL} text-right`}>Paid</TableHead>
+                <TableHead className="text-right">Available</TableHead>
+                <TableHead className="text-right">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pagedPositions.shown.length ? (
+                pagedPositions.shown.map((p) => {
+                  const f = positionFigures(p)
+                  const pool = pools.find((x) => x.id === p.poolId) ?? null
+                  return (
+                    <TableRow key={positionKey(p)} {...(p.onChain ? { "data-on-chain-row": positionKey(p) } : { "data-position": p.poolId })}>
                       <TableCell>
-                        {w.poolName ?? w.poolId} {w.sandbox ? <Money sandbox /> : null}
+                        <OneLine className="font-medium" text={p.name} />
+                        {p.onChain && p.wallet ? (
+                          <OneLine className="font-mono text-xs text-muted-foreground" text={shortAddress(p.wallet)} title={p.wallet} />
+                        ) : (
+                          <OneLine className="text-xs text-muted-foreground" text={`${p.productId}${p.state ? ` · from ${stateOf(p)}` : ""}`} />
+                        )}
                       </TableCell>
-                      <TableCell className="tabular-nums">{w.seq !== null ? `#${w.seq}` : "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums">{usd(w.amountCents)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{usd(w.settledCents)}</TableCell>
-                      <TableCell className="capitalize">{w.status.replace(/_/g, " ")}</TableCell>
-                      <TableCell>{dateOf(w.eligibleAt)}</TableCell>
-                      <TableCell className="max-w-64 whitespace-normal text-muted-foreground">{w.waitingReason ?? "—"}</TableCell>
+                      <TableCell className={WIDE_COL}>
+                        <div className="flex flex-nowrap gap-1.5 overflow-hidden">
+                          <Money sandbox={p.sandbox} />
+                          {p.onChain && <DevnetBadge />}
+                          {p.onChain && pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
+                        </div>
+                      </TableCell>
+                      <TableCell className={`${WIDE_COL} text-right tabular-nums`} title="Settled in, plus what's still on its way in" data-committed>
+                        {money(f.committed)}
+                      </TableCell>
+                      <TableCell className={`${MID_COL} text-right tabular-nums`} data-settled>
+                        {money(f.settled)}
+                      </TableCell>
+                      <TableCell className={`${WIDE_COL} text-right tabular-nums`} data-queued>
+                        {money(f.queued)}
+                      </TableCell>
+                      <TableCell className={`${WIDE_COL} text-right tabular-nums`} data-paid>
+                        {money(f.paid)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums" data-available>
+                        {money(f.available)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {p.onChain ? (
+                          <Button size="sm" variant="outline" onClick={() => setDeposits(p)} data-open-deposits={positionKey(p)}>
+                            Deposits
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!canWithdraw || p.availableCents <= 0}
+                            onClick={() => {
+                              setDone(null)
+                              setForm({ kind: "withdraw", poolId: p.poolId })
+                            }}
+                            data-withdraw={p.poolId}
+                          >
+                            Request withdrawal
+                          </Button>
+                        )}
+                      </TableCell>
                     </TableRow>
-                  ))
-                ) : (
-                  <EmptyRow cols={7}>No withdrawal requests.</EmptyRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </Section>
-      </Panel>
-      <FormSheet open={form?.kind === "withdraw" && positions.length > 0} onClose={() => setForm(null)} title="Request withdrawal" id="withdraw">
-        {form?.kind === "withdraw" && positions.length ? (
-          <WithdrawForm
-            key={form.poolId ?? "any"}
-            positions={positions}
-            pools={pools}
-            poolId={form.poolId}
-            canWithdraw={canWithdraw}
-            actions={actions}
-            onDone={(m) => {
-              setDone(m)
-              setForm(null)
-            }}
-          />
-        ) : null}
+                  )
+                })
+              ) : (
+                <EmptyRow cols={8}>{all.length ? "No positions match this search." : "No positions yet. Commit capital to an open pool to start one."}</EmptyRow>
+              )}
+            </TableBody>
+          </Table>
+        ) : (
+          <Table>
+            <TableHeader className="sticky top-0 bg-card">
+              <TableRow>
+                <TableHead>Pool</TableHead>
+                <TableHead>Place in queue</TableHead>
+                <TableHead className="text-right">Asked</TableHead>
+                <TableHead className={`${WIDE_COL} text-right`}>Paid</TableHead>
+                <TableHead className={MID_COL}>Status</TableHead>
+                <TableHead className={MID_COL}>Payable from</TableHead>
+                <TableHead className={WIDE_COL}>Why it&apos;s waiting</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pagedRequests.shown.length ? (
+                pagedRequests.shown.map((r) => (
+                  <TableRow key={r.key} data-withdrawal={r.key}>
+                    <TableCell>
+                      <OneLine className="font-medium" text={r.pool} />
+                      <div className="flex h-5 flex-nowrap items-center gap-1.5 overflow-hidden">
+                        {r.sandbox && <Money sandbox />}
+                        {r.onChain && <DevnetBadge />}
+                        {r.wallet && (
+                          <span className="font-mono text-xs text-muted-foreground" title={r.wallet}>
+                            {shortAddress(r.wallet)}
+                          </span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="tabular-nums">{r.place}</TableCell>
+                    <TableCell className="text-right tabular-nums" data-asked>
+                      {r.asked}
+                    </TableCell>
+                    <TableCell className={`${WIDE_COL} text-right tabular-nums`} data-paid>
+                      {r.paid}
+                    </TableCell>
+                    <TableCell className={`${MID_COL} capitalize`} data-status>
+                      {r.status}
+                    </TableCell>
+                    <TableCell className={MID_COL}>{r.payableFrom}</TableCell>
+                    <TableCell className={`${WIDE_COL} text-muted-foreground`}>
+                      <OneLine text={r.why ?? "—"} />
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <EmptyRow cols={7}>{withdrawals.length || all.some((p) => p.chain?.requests.length) ? "No requests match this search." : "No withdrawal requests."}</EmptyRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+      </PanelList>
+      <OnChainPositionSheet position={deposits} pools={pools} onClose={() => setDeposits(null)} />
+      <FormSheet open={form?.kind === "withdraw" && rails.length > 0} onClose={() => setForm(null)} title="Request withdrawal" id="withdraw">
+        {done ? <FormDone message={done} /> : form?.kind === "withdraw" && rails.length ? <WithdrawForm key={form.poolId ?? "any"} positions={rails} pools={pools} poolId={form.poolId} canWithdraw={canWithdraw} actions={actions} onDone={setDone} /> : null}
       </FormSheet>
-    </div>
+    </>
   )
 }
 
 // ---- the page ----
 
-// One of Earn's table tabs in the right-hand panel: Opportunities, My positions or My pools. The
-// pool tables fill the panel; My positions scrolls as a page (figures, table, then its sections).
+// One of Earn's table tabs in the right-hand panel: Opportunities, My positions or My pools. Each
+// is one toolbar row and one table filling the panel (components/list-layout.tsx PanelList).
 export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "opportunities" | "my-positions" | "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
   const [form, setForm] = useState<OpenForm>(initialForm)
   const b = data.builder
   const lp = data.provider
-  return (
-    <div className={tab === "my-positions" ? "h-full overflow-y-auto p-4" : "flex h-full min-h-0 flex-col p-4"} data-tab-panel={tab}>
-      {tab === "my-pools" && b && <BuilderPools pools={b.pools} proposable={b.proposable} withdrawalsShown={b.withdrawalsShown} actions={actions} form={form} setForm={setForm} />}
-      {tab === "opportunities" && lp && <OpenPools pools={lp.pools} positions={lp.positions} canCommit={lp.canCommit} actions={actions} form={form} setForm={setForm} />}
-      {tab === "my-positions" && lp && <MyPositions positions={lp.positions} withdrawals={lp.withdrawals} pools={lp.pools} canWithdraw={lp.canWithdraw} actions={actions} form={form} setForm={setForm} />}
-    </div>
-  )
+  if (tab === "my-pools" && b) return <BuilderPools pools={b.pools} proposable={b.proposable} withdrawalsShown={b.withdrawalsShown} actions={actions} form={form} setForm={setForm} />
+  if (tab === "opportunities" && lp) return <OpenPools pools={lp.pools} positions={lp.positions} canCommit={lp.canCommit} actions={actions} form={form} setForm={setForm} />
+  if (tab === "my-positions" && lp) return <MyPositions positions={lp.positions} withdrawals={lp.withdrawals} pools={lp.pools} canWithdraw={lp.canWithdraw} actions={actions} form={form} setForm={setForm} />
+  return <div className="h-full" data-tab-panel={tab} />
 }

@@ -151,16 +151,22 @@ describe("Earn in the chat workspace", () => {
     render(<Earn data={lpData} messages={withDraft(draft())} acts={a} initialTab="drafts" />);
     expect(document.querySelector('[data-panel-tab="drafts"] [data-badge]')?.textContent).toBe("1");
     expect(calls).toHaveLength(0);
-    expect(document.querySelector('[data-draft="commit"]')!.textContent).toContain("Nothing has been sent");
-    // A panel per draft, not a card.
-    expect(document.querySelector('[data-draft="commit"] [data-panel]')).toBeTruthy();
+    // A row per draft in one table; the draft is reviewed in a sheet from its row, not a card.
+    expect(document.querySelector('[data-draft-row="d1"] [data-draft-status]')!.textContent).toBe("Ready to confirm");
+    expect(document.querySelector('[data-draft="commit"]')).toBeNull();
+    fireEvent.click(document.querySelector('[data-review="d1"]')!);
+    expect(document.querySelector('[data-sheet="draft"] [data-draft="commit"]')!.textContent).toContain("Nothing has been sent");
     expect(document.querySelector('[data-draft="commit"] [data-slot="card"]')).toBeNull();
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Commit capital" })));
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ kind: "commit", input: { pool_id: POOL, amount_cents: 5_000_000, state: "us-ny" } });
     expect(String(calls[0].input.idempotency_key)).toMatch(/^[A-Za-z0-9_-]{8,200}$/);
+    // Closing the sheet and looking at another tab keeps what was sent.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
     fireEvent.click(document.querySelector('[data-panel-tab="pools"]')!);
     fireEvent.click(document.querySelector('[data-panel-tab="drafts"]')!);
+    expect(document.querySelector('[data-draft-row="d1"] [data-draft-status]')!.textContent).toBe("Sent");
+    fireEvent.click(document.querySelector('[data-review="d1"]')!);
     expect(document.querySelector("[data-draft-done]")?.textContent).toContain("Deposit requested (movement m1, requested).");
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Commit capital" })));
     expect(calls).toHaveLength(1);
@@ -174,51 +180,56 @@ describe("Earn in the chat workspace", () => {
 });
 
 describe("the Pools and Drafts tabs", () => {
-  it("show the pools the conversation matched, lock-in and notice apart, and positions", () => {
+  it("show the pools the conversation matched, lock-in and notice apart, and what the user holds in each", async () => {
     const { poolIds } = panelFrom([{ role: "assistant", parts: [{ type: "data-earn-pools", data: { pool_ids: [UNCLEARED] } }] }]);
-    let viewed = 0;
-    render(<PoolsTab data={lpData} poolIds={poolIds} onViewPositions={() => viewed++} />);
-    // A table under a section (it was a grid of cards; the card-only Yield line went with them).
+    render(<PoolsTab data={lpData} poolIds={poolIds} />);
+    // One table (it was a grid of cards; the card-only Yield line went with them), the matched
+    // pools shown by the Show filter rather than a section heading.
     expect(document.querySelector("[data-card], [data-slot='card']")).toBeNull();
-    expect(screen.getByRole("heading", { name: "Matching pools" })).toBeTruthy();
+    expect(document.querySelectorAll("table")).toHaveLength(1);
+    expect(document.querySelector('[data-filter="Show"]')!.getAttribute("aria-label")).toBe("Show: Matched");
     expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(1);
     const row = document.querySelector(`tr[data-pool-row="${UNCLEARED}"]`)!;
     for (const s of ["Uncleared float", "Sandbox only — not yet cleared for real commitments", "$1,000.00 – $100,000.00 per firm"]) expect(row.textContent).toContain(s);
     expect(row.querySelector("[data-product]")!.textContent).toBe("card-credit · credit");
     expect(row.querySelector("[data-lock-in]")!.textContent).toBe("Not set");
     expect(row.querySelector("[data-notice]")!.textContent).toBe("90 days");
-    // Your positions: a preview table ending with View all, which opens the My positions tab.
-    const preview = document.querySelector(`[data-earn-positions] [data-position-preview="${POOL}"]`)!;
-    expect(preview.querySelector("[data-settled]")!.textContent).toBe("$5,000.00");
-    expect(preview.querySelector("[data-available]")!.textContent).toBe("$2,000.00");
-    fireEvent.click(screen.getByRole("button", { name: "View all" }));
-    expect(viewed).toBe(1);
+    // What the user holds in the pool is a column (the positions preview and its View all are gone;
+    // the whole list is the My positions tab).
+    expect(row.querySelector("[data-your-position]")!.textContent).toBe("—");
+    expect(document.querySelector("[data-earn-positions], [data-view-all]")).toBeNull();
+    // Show · All pools lists every pool open to the user.
+    fireEvent.keyDown(document.querySelector('[data-filter="Show"]')!, { key: "Enter" });
+    await act(async () => undefined);
+    await act(async () => void fireEvent.click(document.querySelector('[data-filter-option="all"]')!));
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
+    expect(document.querySelector(`tr[data-pool-row="${POOL}"] [data-your-position]`)!.textContent).toBe("$5,000.00");
     cleanup();
     render(<PoolsTab data={lpData} poolIds={null} />);
     expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
-    expect(document.querySelector("[data-earn-positions] [data-view-all] a")!.getAttribute("href")).toBe("/earn?tab=my-positions");
-  });
-
-  it("shows at most five positions in the Pools tab's preview", () => {
-    const many = fromPositions(Array.from({ length: 7 }, (_, i) => ({ pool_id: `pool-${i}`, name: `Pool ${i}`, product_id: "card-credit", balance_cents: 100, available_to_withdraw_cents: 0 })));
-    render(<PoolsTab data={{ ...lpData, provider: { ...lpData.provider!, positions: many } }} poolIds={null} />);
-    expect(document.querySelectorAll("[data-position-preview]")).toHaveLength(5);
+    expect(document.querySelector('[data-filter="Show"]')).toBeNull();
   });
 
   it("a draft the page's terms refuse can't be confirmed (an uncleared pool, over the limit)", async () => {
     const { a, calls } = actions();
     render(<DraftsTab data={lpData} drafts={[draft({ id: "d2", poolId: UNCLEARED, poolName: "Uncleared float" }), draft({ id: "d3", amountCents: 9_600_000 })]} actions={a} />);
-    const buttons = screen.getAllByRole("button", { name: "Commit capital" }) as HTMLButtonElement[];
-    expect(buttons.every((b) => b.disabled)).toBe(true);
-    await act(async () => buttons.forEach((b) => fireEvent.click(b)));
+    // Each row says why, and the sheet's button is off.
+    expect(document.querySelector('[data-draft-row="d2"] [data-draft-status]')!.textContent).toContain("A Mynt admin must clear this pool");
+    expect(document.querySelector('[data-draft-row="d3"] [data-draft-status]')!.textContent).toContain("over this pool's limit");
+    for (const id of ["d2", "d3"]) {
+      fireEvent.click(document.querySelector(`[data-review="${id}"]`)!);
+      const button = screen.getByRole("button", { name: "Commit capital" }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      await act(async () => void fireEvent.click(button));
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    }
     expect(calls).toHaveLength(0);
-    expect(document.body.textContent).toContain("A Mynt admin must clear this pool");
-    expect(document.body.textContent).toContain("over this pool's limit");
   });
 
   it("a draft shows the lock-in when Mynt sets one, the pool name in its own field, never as the amount", () => {
     const locked = fromPools([{ ...base, id: POOL, name: "$1,000.00", lock_in_days: 30 }]).map((p) => ({ ...p, queueLength: null, health: null }));
     render(<DraftsTab data={{ ...lpData, provider: { ...lpData.provider!, pools: locked } }} drafts={[draft({ poolName: "$1,000.00" })]} actions={actions().a} />);
+    fireEvent.click(document.querySelector("[data-review]")!);
     const card = document.querySelector('[data-draft="commit"]')!;
     expect(card.querySelector("[data-lock-in]")!.textContent).toBe("30 days");
     expect(card.querySelector("[data-notice]")!.textContent).toBe("90 days");
@@ -229,6 +240,7 @@ describe("the Pools and Drafts tabs", () => {
   it("a draft withdrawal needs the click too, and says payment depends on verified health", async () => {
     const { a, calls } = actions();
     render(<DraftsTab data={lpData} drafts={[draft({ kind: "withdraw", id: "w", amountCents: 200_000 } as Partial<Draft>)]} actions={a} />);
+    fireEvent.click(document.querySelector('[data-review="w"]')!);
     expect(document.body.textContent).toContain("only as far as the latest verified health snapshot keeps the pool above its minimum reserve");
     expect(calls).toHaveLength(0);
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Request withdrawal" })));

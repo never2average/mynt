@@ -146,12 +146,17 @@ const rails: LiquidityActions = {
 const depositDraft: Draft = { kind: "commit", id: "d1", poolId: POOL, poolName: "On-chain float", amountCents: 50_000, state: null, sandbox: true, onChain: true, wallet: SOL };
 const withdrawDraft: Draft = { kind: "withdraw", id: "w1", poolId: POOL, poolName: "On-chain float", amountCents: 20_000, sandbox: true, onChain: true, wallet: SOL, deposit: DEP1 };
 
-const renderDrafts = (s: EarnWalletState, drafts: Draft[] = [depositDraft]) =>
-  render(
+// Drafts is one table; a draft is reviewed and confirmed in the sheet its row's Review opens.
+const review = () => fireEvent.click(document.querySelector("[data-review]")!);
+const renderDrafts = (s: EarnWalletState, drafts: Draft[] = [depositDraft]) => {
+  const r = render(
     <EarnWalletProvider value={s}>
       <DraftsTab data={data} drafts={drafts} actions={rails} />
     </EarnWalletProvider>,
   );
+  review();
+  return r;
+};
 const click = async (el: Element) => act(async () => void fireEvent.click(el));
 const settle = () => act(async () => new Promise((r) => setTimeout(r, 30)));
 
@@ -394,6 +399,7 @@ describe("the on-chain deposit", () => {
         <DraftsTab data={{ ...data, provider: { ...data.provider!, pools: mainnet } }} drafts={[depositDraft]} actions={rails} />
       </EarnWalletProvider>,
     );
+    review();
     expect((screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(document.body.textContent).toContain("devnet only");
   });
@@ -513,12 +519,16 @@ describe("a prepared transaction older than its blockhash", () => {
 });
 
 describe("My positions on-chain", () => {
-  it("lists each deposit with amount, remaining, queued, unlock date and standing, and the requests", () => {
+  it("lists each deposit with amount, remaining, queued, unlock date and standing, and the requests", async () => {
     render(
       <EarnWalletProvider value={state()}>
         <EarnTable tab="my-positions" data={data} actions={rails} />
       </EarnWalletProvider>,
     );
+    // One row per wallet in the positions table; its deposits open in a sheet from the row.
+    const row = document.querySelector(`[data-on-chain-row="${POOL}|${SOL}"]`)!;
+    expect(row.querySelector("[data-devnet]")).toBeTruthy();
+    await click(row.querySelector("[data-open-deposits]")!);
     const section = document.querySelector("[data-on-chain-positions]")!;
     expect(section.querySelector("[data-devnet]")).toBeTruthy();
     expect(section.querySelector("[data-unverified-build]")).toBeTruthy();
@@ -547,6 +557,7 @@ describe("My positions on-chain", () => {
         <EarnTable tab="my-positions" data={data} actions={rails} />
       </EarnWalletProvider>,
     );
+    await click(document.querySelector("[data-open-deposits]")!);
     await click(document.querySelector(`[data-withdraw-deposit="${DEP1}"]`)!);
     // It opens in a sheet, not inline under the deposit.
     const form = document.querySelector(`[data-sheet="on-chain-withdraw"] [data-withdraw-form="${DEP1}"]`)!;
@@ -609,6 +620,7 @@ describe("a pool whose approvers changed", () => {
         <DraftsTab data={flaggedData} drafts={[depositDraft]} actions={rails} />
       </EarnWalletProvider>,
     );
+    review();
     const button = screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(document.body.textContent).toContain("deposits are paused until its builder re-registers it");

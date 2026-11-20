@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarView } from "@/components/app-sidebar";
-import { CommitForm, commitOutcome, EarnTable, positionKpis, ProposeForm, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
+import { CommitForm, commitOutcome, EarnTable, positionFigures, ProposeForm, requestRows, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -271,9 +271,11 @@ describe("withdrawals", () => {
     d.provider!.withdrawals = fromWithdrawals([{ id: "w-1", seq: 3, pool_id: CLEARED.id, pool_name: "Card float", amount_cents: 100_000, status: "queued", eligible_at: "2026-12-14T00:00:00Z", settled_cents: 0, waiting_reason: "Waiting out the notice period until 2026-12-14T00:00:00.000Z", sandbox: false }]);
     const html = view(d, "my-positions");
     for (const amount of ["$5,500.00", "$4,000.00", "$1,000.00", "$3,000.00"]) expect(html).toContain(amount);
-    expect(html).toContain("#3");
-    expect(html).toContain("2026-12-14");
-    expect(html).toContain("Waiting out the notice period");
+    // The queue is the same table's Show · Withdrawal requests (it was a section under the table).
+    expect(html).toMatch(/data-filter="Show"[^>]*>Show<span[^>]*>· Positions/);
+    expect(requestRows(d.provider!.withdrawals, d.provider!.positions)).toEqual([
+      { key: "w-1", pool: "Card float", sandbox: false, onChain: false, wallet: null, place: "#3", asked: "$1,000.00", paid: "$0.00", status: "queued", payableFrom: "2026-12-14", why: "Waiting out the notice period until 2026-12-14T00:00:00.000Z" },
+    ]);
   });
 
   it("the request form shows the notice period and that payment depends on verified health; it can't ask for more than is available", () => {
@@ -319,23 +321,20 @@ describe("the tables' layout (the dashboard's)", () => {
     expect(html).toContain("30 rows · Page 1 of 2");
   });
 
-  it("My positions opens with key figures from the positions, then the table, on-chain positions and withdrawal requests as sections", () => {
+  it("My positions is one table: no key figures or sections; each position's amounts are its columns", () => {
     const html = view(data({ access: { builder: false, liquidityProvider: true } }), "my-positions");
-    expect(html.indexOf('data-row="position-figures"')).toBeGreaterThan(-1);
-    expect(html.indexOf('data-row="position-figures"')).toBeLessThan(html.indexOf("data-list-layout"));
-    for (const k of ["committed", "settled", "available", "queued"]) expect(html).toContain(`data-kpi="${k}"`);
-    expect(html).toMatch(/<h2[^>]*class="text-sm font-semibold"[^>]*>Your withdrawal requests<\/h2>/);
-    expect(positionKpis([POSITION]).map((k) => [k.label, k.value])).toEqual([
-      ["Committed", 550_000],
-      ["Settled", 400_000],
-      ["Available to withdraw", 300_000],
-      ["Queued for withdrawal", 100_000],
-    ]);
-    // An on-chain deposit Mynt gave no amount for: Not measured, never 0.
+    expect(html).not.toContain("data-kpi");
+    expect(html).not.toContain("<h2");
+    expect([...html.matchAll(/<table/g)]).toHaveLength(1);
+    expect(positionFigures(POSITION)).toEqual({ committed: 550_000, settled: 400_000, queued: 100_000, paid: 100_000, available: 300_000 });
+    // An on-chain deposit Mynt gave no amount for: Not measured in its row, never 0.
     const unmeasured = fromPositions([{ source: "on-chain", pool_id: CLEARED.id, name: "Chain", product_id: "p", wallet: "W", deposits: [{ deposit: "D1" }], requests: [] }]);
-    const k = positionKpis(unmeasured);
-    expect(k.find((x) => x.key === "committed")!.value).toBeNull();
-    expect(k.find((x) => x.key === "settled")!.value).toBeNull();
+    expect(positionFigures(unmeasured[0])).toMatchObject({ committed: null, settled: null });
+    const d = data({ access: { builder: false, liquidityProvider: true } });
+    d.provider!.positions = unmeasured;
+    const chain = view(d, "my-positions");
+    expect(chain).toMatch(/data-committed="true">Not measured</);
+    expect(chain).toMatch(/data-settled="true">Not measured</);
   });
 });
 
