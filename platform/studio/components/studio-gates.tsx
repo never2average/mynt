@@ -52,7 +52,6 @@ export function CreateWorkspace({ onCreate }: { onCreate: (name: string) => Prom
         }}
       >
         <h2 className="text-lg font-semibold">Create your workspace</h2>
-        <p className="text-sm text-muted-foreground">Your apps, licences and audit trail live in a workspace. Name yours to start; you can invite your team later.</p>
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Acme Labs" aria-label="Workspace name" maxLength={80} autoFocus />
         {error && (
           <p role="alert" className="text-sm text-destructive">

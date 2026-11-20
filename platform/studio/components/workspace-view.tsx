@@ -181,7 +181,6 @@ export function SettingsTab({ info, actions, manageUrl = null }: { info: Workspa
         <div className="flex flex-wrap items-center gap-3 rounded-lg border p-4" data-manage-org>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className="text-sm font-medium">Organization</span>
-            <span className="text-sm text-muted-foreground">Members, roles and sign-in for this workspace&apos;s organization, on the identity provider&apos;s page.</span>
           </div>
           <Button variant="outline" asChild>
             <a href={manageUrl} target="_blank" rel="noopener noreferrer" data-manage-url>
