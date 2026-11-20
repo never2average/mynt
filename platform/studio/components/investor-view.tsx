@@ -1,50 +1,35 @@
 "use client"
 
-// The dashboard's investor view, for liquidity providers, in the builder view's statement style
-// (sections with headings and tables, no cards): the portfolio strip (committed, settled, queued
-// for withdrawal, paid out, returns), capital in against paid out per period (the P&L chart), each
-// deposit with its pool, source (Devnet or Rails), status and pool health, what comes up in the
-// next 30 days, the user's wallets with their balances, recent financial activity and what needs
-// attention about investing. Anything Mynt doesn't measure reads "Not measured", never 0; any part
-// whose tool this Mynt lacks says so. Model: lib/investor.ts. Server-renderable for the tests.
+// The dashboard's investor view, for liquidity providers, laid out as the builder view: Needs attention
+// (only when something needs you), the portfolio's key figures (committed, settled, queued for withdrawal,
+// paid out, returns), one toolbar row (search pools, Pool, Source, Date range) over Capital in and Paid
+// out, one chart above the other (the toolbar narrows those charts only), then recent financial activity
+// with View all. Positions, pools and wallets in detail are on Earn and in the header. Anything Mynt
+// doesn't measure reads "Not measured", never 0; any part whose tool this Mynt lacks says so.
+// Model: lib/investor.ts. Server-renderable for the tests.
 import Link from "next/link"
+import { useState } from "react"
+import { ChevronRight, Search } from "lucide-react"
 
-import { NeedsAttention, Panel, Section, SectionLink } from "@/components/dashboard-panels"
+import { NeedsAttention, Panel, Section } from "@/components/dashboard-panels"
+import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
 import { PnlChart } from "@/components/pnl"
-import { Donut, KpiRow } from "@/components/charts"
-import type { Kpi } from "@/lib/dashboard-visual"
-import { Badge } from "@/components/ui/badge"
+import { KpiRow } from "@/components/charts"
+import { dateRange, trimSeries, type Kpi } from "@/lib/dashboard-visual"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditRow } from "@/lib/audit-classes"
-import {
-  allocation,
-  HEALTH_LABELS,
-  healthState,
-  unlockBars,
-  type HealthState,
-  comingUp,
-  COMING_UP_DAYS,
-  COMING_UP_LABELS,
-  depositRows,
-  flowSeries,
-  investingItem,
-  portfolioOf,
-  SOURCE_LABELS,
-  statusText,
-  type Source,
-  type Totals,
-} from "@/lib/investor"
-import { healthText, type LiquidityData } from "@/lib/liquidity"
-import { money, NOT_MEASURED, type Granularity, type Range } from "@/lib/pnl"
+import { defaultInvestorFilter, filterPositions, flowSeries, investingItem, portfolioOf, SOURCE_LABELS, type InvestorFilter, type Source, type Totals } from "@/lib/investor"
+import type { LiquidityData } from "@/lib/liquidity"
+import { money, type Range } from "@/lib/pnl"
 import type { Loaded } from "@/lib/use-compliance"
-import { balancesText, type EarnWallets } from "@/lib/wallets"
-import { shortAddress } from "@/lib/linked-accounts"
+import type { EarnWallets } from "@/lib/wallets"
 import { cn } from "@/lib/utils"
 
 export const BALANCES_UNAVAILABLE = "Balances unavailable"
-const EARN_POSITIONS = "/earn?tab=my-positions"
 
 function NotReady({ state, what }: { state: Exclude<Loaded<unknown>, { kind: "ready" }>; what: string }) {
   if (state.kind === "loading") return <Skeleton className="h-16 w-full" />
@@ -52,14 +37,6 @@ function NotReady({ state, what }: { state: Exclude<Loaded<unknown>, { kind: "re
     <p className={cn("py-3 text-sm", state.kind === "error" ? "text-destructive" : "text-muted-foreground")} role={state.kind === "error" ? "alert" : undefined} data-empty="not-available">
       {state.kind === "error" ? state.message : state.kind === "unavailable" ? state.message : `${what} isn't available yet. It comes with Mynt's next update.`}
     </p>
-  )
-}
-
-function SourceBadge({ source }: { source: Source }) {
-  return (
-    <Badge variant="outline" className="font-normal" data-source={source}>
-      {SOURCE_LABELS[source]}
-    </Badge>
   )
 }
 
@@ -104,81 +81,42 @@ function PortfolioKpis({ positions, flows }: { positions: NonNullable<LiquidityD
   )
 }
 
-// ---- the unlock timeline: a mini Gantt per deposit ----
+// ---- the toolbar: search, Pool, Source, Date range ----
 
-const day = (t: number) => new Date(t).toISOString().slice(0, 10)
-
-function UnlockTimeline({ positions, now }: { positions: NonNullable<LiquidityData["provider"]>["positions"]; now: number }) {
-  const bars = unlockBars(positions, now)
-  if (!bars.length)
-    return (
-      <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
-        No devnet deposits with a lock-in
-      </p>
-    )
+function InvestorToolbar({ filter, onFilter, pools }: { filter: InvestorFilter; onFilter: (f: InvestorFilter) => void; pools: { id: string; name: string }[] }) {
+  const set = (patch: Partial<InvestorFilter>) => onFilter({ ...filter, ...patch })
   return (
-    <ol className="flex flex-col gap-2" data-unlocks>
-      {bars.map((b) => {
-        const span = b.end - b.start
-        const at = (t: number) => `${Math.min(100, Math.max(0, ((t - b.start) / span) * 100))}%`
-        const label = `${b.poolName}: in review until ${day(b.reviewEnd)}, locked until ${day(b.unlock)}, then available. ${statusText({ status: b.status, until: null })} today.`
-        return (
-          <li key={b.key} className="grid grid-cols-[minmax(0,8rem)_1fr] items-center gap-3" data-unlock={b.key} data-status={b.status}>
-            <span className="truncate text-xs">{b.poolName}</span>
-            <span className="relative block h-3 w-full overflow-hidden rounded-sm bg-muted" role="img" aria-label={label}>
-              <span className="absolute inset-y-0 bg-chart-3/70" style={{ left: "0%", width: at(b.reviewEnd) }} data-segment="review" />
-              <span className="absolute inset-y-0 bg-chart-2/70" style={{ left: at(b.reviewEnd), width: `calc(${at(b.unlock)} - ${at(b.reviewEnd)})` }} data-segment="locked" />
-              <span className="absolute inset-y-0 right-0 bg-chart-1/70" style={{ left: at(b.unlock) }} data-segment="available" />
-              <span className="absolute inset-y-[-2px] w-0.5 bg-foreground" style={{ left: at(b.now) }} data-now title="Now" />
-            </span>
-          </li>
-        )
-      })}
-      <li className="flex flex-wrap gap-x-4 gap-y-1 pt-1 text-xs text-muted-foreground" aria-hidden>
-        <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-chart-3/70" />In review</span>
-        <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-chart-2/70" />Locked</span>
-        <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-chart-1/70" />Available</span>
-        <span className="flex items-center gap-1.5"><span className="h-2.5 w-0.5 bg-foreground" />Now</span>
-      </li>
-    </ol>
+    <div className="flex flex-wrap items-center gap-2" data-toolbar data-chart-filters>
+      <div className="relative min-w-64 flex-1">
+        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input value={filter.query} onChange={(e) => set({ query: e.target.value, poolId: "all" })} placeholder="Search pools by name" className="pl-8" aria-label="Search pools" />
+      </div>
+      <FilterSelect label="Pool" value={filter.poolId === "all" ? "" : filter.poolId} onChange={(v) => set({ poolId: v || "all" })} options={pools.map((x) => ({ value: x.id, label: x.name }))} />
+      <FilterSelect
+        label="Source"
+        value={filter.source === "all" ? "" : filter.source}
+        onChange={(v) => set({ source: (v || "all") as InvestorFilter["source"] })}
+        options={(Object.keys(SOURCE_LABELS) as Source[]).map((x) => ({ value: x, label: SOURCE_LABELS[x] }))}
+      />
+      <DateRangeFilter
+        label="Date range"
+        from={filter.from}
+        to={filter.to}
+        onChange={(from, to) => {
+          // Cleared: back to the last six months.
+          const d = defaultInvestorFilter()
+          set(from ? { from, to: to || from } : { from: d.from, to: d.to })
+        }}
+      />
+    </div>
   )
 }
 
-// ---- pool health ----
-
-const HEALTH_TONE: Record<HealthState, string> = { healthy: "bg-emerald-500", at_risk: "bg-amber-500", paused: "bg-destructive", unknown: "bg-muted-foreground/40" }
-
-function PoolHealthList({ pools, held }: { pools: NonNullable<LiquidityData["provider"]>["pools"]; held: Set<string> }) {
-  const mine = pools.filter((p) => held.has(p.id))
-  if (!mine.length)
-    return (
-      <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
-        No pools held yet
-      </p>
-    )
-  return (
-    <ul className="flex flex-col divide-y" data-pool-health>
-      {mine.map((p) => {
-        const state = healthState(p)
-        return (
-          <li key={p.id} className="flex items-center gap-2 py-1.5 text-sm" data-pool={p.id} data-health={state}>
-            <span aria-hidden className={cn("size-2 shrink-0 rounded-full", HEALTH_TONE[state])} />
-            <span className="min-w-0 flex-1 truncate">{p.name}</span>
-            <span className="text-xs text-muted-foreground">{HEALTH_LABELS[state]}</span>
-          </li>
-        )
-      })}
-    </ul>
-  )
-}
-
-// ---- recent financial activity ----
-
-const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? iso : iso.slice(0, 16).replace("T", " ") + " UTC")
+// ---- recent financial activity, with View all ----
 
 function FinancialActivity({ state }: { state: Loaded<AuditRow[]> }) {
   return (
-    <Section id="financial-activity" title="Recent financial activity" action={<SectionLink href="/audits?tab=financial">Audits</SectionLink>}>
+    <Section id="financial-activity" title="Recent financial activity">
       {state.kind !== "ready" ? (
         <NotReady state={state} what="Financial activity" />
       ) : state.data.length === 0 ? (
@@ -207,36 +145,54 @@ function FinancialActivity({ state }: { state: Loaded<AuditRow[]> }) {
           </TableBody>
         </Table>
       )}
+      {/* The whole financial audit trail, on a row of its own at the bottom right. */}
+      <div className="flex justify-end border-t pt-3" data-view-all>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/audits?tab=financial">
+            View all
+            <ChevronRight />
+          </Link>
+        </Button>
+      </div>
     </Section>
   )
 }
 
+const when = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`
+
 export function InvestorView({
   liquidity,
-  wallets = { kind: "loading" },
   activity = { kind: "loading" },
   attention = { kind: "loading" },
-  granularity = "month",
-  periods = 6,
-  onGranularity,
-  onPeriods,
+  filter: initial,
   now = Date.now(),
 }: {
   liquidity: Loaded<LiquidityData>
+  /** Wallets are in the header now; accepted so callers needn't change. */
   wallets?: Loaded<EarnWallets>
   activity?: Loaded<AuditRow[]>
   attention?: Loaded<AttentionItem[]>
-  granularity?: Granularity
-  periods?: Range
-  onGranularity?: (g: Granularity) => void
-  onPeriods?: (p: Range) => void
+  /** The toolbar's starting filter (the last six months, everything, by default). */
+  filter?: InvestorFilter
   now?: number
 }) {
+  const [filter, setFilter] = useState<InvestorFilter>(initial ?? defaultInvestorFilter(new Date(now)))
   const provider = liquidity.kind === "ready" ? liquidity.data.provider : undefined
   const positionsState: Loaded<NonNullable<LiquidityData["provider"]>> =
     liquidity.kind !== "ready" ? liquidity : provider ? { kind: "ready", data: provider } : { kind: "unsupported" }
-  const flows = provider ? flowSeries(provider.positions, granularity, periods, now) : null
+  // The key figures: the whole portfolio, its last six months of history.
+  const kpiFlows = provider ? flowSeries(provider.positions, "month", 6, now) : null
+  // The charts: the positions the toolbar keeps, over the dates picked.
+  const range = dateRange(filter, new Date(now))
+  const shown = provider ? filterPositions(provider.positions, filter) : []
+  const flows = provider ? flowSeries(shown, range.granularity, range.periods as Range, now) : null
+  const chart: Loaded<{ series: NonNullable<typeof flows>["series"] }> = flows
+    ? { kind: "ready", data: { series: trimSeries(flows.series, filter.from, filter.to) } }
+    : (positionsState as Exclude<typeof positionsState, { kind: "ready" }>)
+  const pools = provider ? [...new Map(provider.positions.map((x) => [x.poolId, { id: x.poolId, name: x.name }])).values()] : []
+  const onChain = shown.some((x) => x.onChain)
   const investing: Loaded<AttentionItem[]> = attention.kind === "ready" ? { kind: "ready", data: attention.data.filter(investingItem) } : attention
+  const labels = { revenue: "Capital in", costs: "Paid out", netIncome: "Net" }
 
   return (
     <div className="flex flex-col gap-4 lg:gap-5" data-investor-view>
@@ -244,161 +200,37 @@ export function InvestorView({
 
       <Panel id="portfolio">
         <section className="flex min-w-0 flex-col gap-2" data-section="portfolio" aria-label="Your portfolio">
-          {positionsState.kind === "ready" ? <PortfolioKpis positions={positionsState.data.positions} flows={flows?.series ?? null} /> : <NotReady state={positionsState} what="Your positions" />}
+          {positionsState.kind === "ready" ? <PortfolioKpis positions={positionsState.data.positions} flows={kpiFlows?.series ?? null} /> : <NotReady state={positionsState} what="Your positions" />}
         </section>
       </Panel>
 
-      <Panel id="top" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <InvestorToolbar filter={filter} onFilter={setFilter} pools={pools} />
+      <Panel id="money">
         <PnlChart
-          state={flows ? { kind: "ready", data: { series: flows.series } } : (positionsState as Exclude<typeof positionsState, { kind: "ready" }>)}
-          granularity={granularity}
-          periods={periods}
-          onGranularity={onGranularity}
-          onPeriods={onPeriods}
+          state={chart}
+          granularity={range.granularity}
+          periods={range.periods as Range}
+          controls={false}
+          only="revenue"
           variant="area"
-          title="Capital in and paid out"
-          labels={{ revenue: "Capital in", costs: "Paid out", netIncome: "Net" }}
-          empty="Not measured yet: Mynt has no dated deposits or payouts for these periods."
-          note={flows?.railsUnmeasured && provider?.positions.some((p) => p.onChain) ? "Devnet deposits and payouts only: rails positions carry no dated history yet. Paid out counts in the period it became payable." : flows && provider?.positions.some((p) => p.onChain) ? "Paid out counts in the period it became payable." : undefined}
+          title="Capital in"
+          id="capital-in"
+          labels={labels}
+          empty="Not measured yet: Mynt has no dated deposits for these dates."
         />
-        <Section id="allocation" title="Allocation">
-          {positionsState.kind === "ready" ? (
-            <Donut title="Settled by pool" slices={allocation(positionsState.data.positions)} empty="Nothing settled in a pool yet" />
-          ) : (
-            <NotReady state={positionsState} what="Allocation" />
-          )}
-        </Section>
-      </Panel>
-
-      <Panel id="unlocks-and-health" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <Section id="unlocks" title="Unlock timeline">
-          {positionsState.kind === "ready" ? <UnlockTimeline positions={positionsState.data.positions} now={now} /> : <NotReady state={positionsState} what="Unlocks" />}
-        </Section>
-        <Section id="pool-health" title="Pool health">
-          {positionsState.kind === "ready" ? <PoolHealthList pools={positionsState.data.pools} held={new Set(positionsState.data.positions.map((p) => p.poolId))} /> : <NotReady state={positionsState} what="Pool health" />}
-        </Section>
-      </Panel>
-
-      <Panel id="positions">
-      <Section id="positions" title="Positions" action={<SectionLink href={EARN_POSITIONS}>Earn</SectionLink>}>
-        {positionsState.kind !== "ready" ? (
-          <NotReady state={positionsState} what="Your positions" />
-        ) : positionsState.data.positions.length === 0 ? (
-          <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
-            No positions yet. <Link href="/earn" className="font-medium hover:underline">Find a pool on Earn</Link>
-          </p>
-        ) : (
-          <Table data-positions>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Pool</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead className="text-right">Amount</TableHead>
-                <TableHead className="text-right">Remaining</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Pool health</TableHead>
-                <TableHead className="text-right">
-                  <span className="sr-only">Open</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {depositRows(positionsState.data.positions, positionsState.data.pools, now).map((r) => (
-                <TableRow key={r.key} data-deposit={r.key} data-status={r.status}>
-                  <TableCell className="max-w-48 truncate font-medium">{r.poolName}</TableCell>
-                  <TableCell>
-                    <SourceBadge source={r.source} />
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{money(r.amountCents)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(r.remainingCents)}</TableCell>
-                  <TableCell className="text-xs">{statusText(r)}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{healthText(r.health)}</TableCell>
-                  <TableCell className="text-right">
-                    <Link href={EARN_POSITIONS} className="text-sm font-medium hover:underline">
-                      Open in Earn
-                    </Link>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </Section>
-      </Panel>
-
-      <Panel id="coming-and-wallets" cols="@4xl/main:grid-cols-2">
-        <Section id="coming-up" title="Coming up">
-          {positionsState.kind !== "ready" ? (
-            <NotReady state={positionsState} what="Coming up" />
-          ) : (
-            (() => {
-              const items = comingUp(positionsState.data.positions, positionsState.data.withdrawals, now)
-              return items.length === 0 ? (
-                <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
-                  Nothing unlocks or becomes payable in the next {COMING_UP_DAYS} days
-                </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>When</TableHead>
-                      <TableHead>What</TableHead>
-                      <TableHead>Pool</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {items.map((c) => (
-                      <TableRow key={c.key} data-coming-up={c.kind}>
-                        <TableCell className="whitespace-nowrap text-xs tabular-nums">{c.at.slice(0, 10)}</TableCell>
-                        <TableCell className="text-xs">{COMING_UP_LABELS[c.kind]}</TableCell>
-                        <TableCell className="max-w-40 truncate">
-                          {c.poolName} <SourceBadge source={c.source} />
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">{money(c.amountCents)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )
-            })()
-          )}
-        </Section>
-
-        <Section id="wallets" title="Wallets">
-          {wallets.kind !== "ready" ? (
-            <NotReady state={wallets} what="Wallets" />
-          ) : !wallets.data.supported ? (
-            <NotReady state={{ kind: "unsupported" }} what="Linked wallets" />
-          ) : wallets.data.wallets.length === 0 ? (
-            <p className="py-3 text-sm text-muted-foreground" data-empty="nothing">
-              No wallets linked yet{wallets.data.manageUrl ? <> · <a href={wallets.data.manageUrl} rel="noreferrer" className="font-medium hover:underline">Link a wallet</a></> : null}
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Wallet</TableHead>
-                  <TableHead>Network</TableHead>
-                  <TableHead className="text-right">Balance (devnet)</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {wallets.data.wallets.map((w) => (
-                  <TableRow key={w.address} data-wallet={w.address}>
-                    <TableCell className="font-mono text-xs" title={w.address}>
-                      {shortAddress(w.address)}
-                    </TableCell>
-                    <TableCell className="text-xs">{w.network}</TableCell>
-                    <TableCell className={cn("text-right text-xs tabular-nums", !w.balances && "text-muted-foreground")}>
-                      {wallets.data.balancesSupported ? balancesText(w.balances) : BALANCES_UNAVAILABLE}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </Section>
+        <PnlChart
+          state={chart}
+          granularity={range.granularity}
+          periods={range.periods as Range}
+          controls={false}
+          only="costs"
+          variant="area"
+          title="Paid out"
+          id="paid-out"
+          labels={labels}
+          empty="Not measured yet: Mynt has no dated payouts for these dates."
+          note={flows?.railsUnmeasured && onChain ? "Devnet deposits and payouts only: rails positions carry no dated history yet. Paid out counts in the period it became payable." : onChain ? "Paid out counts in the period it became payable." : undefined}
+        />
       </Panel>
 
       <Panel id="financial-activity">

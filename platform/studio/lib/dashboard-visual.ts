@@ -128,7 +128,7 @@ export function dateRange(f: Pick<ChartFilter, "from" | "to">, now = new Date())
 }
 
 // The periods that overlap the range picked (the P&L counts back from now, so later ones are dropped too).
-export function trimSeries(series: PnlPeriod[], from: string, to: string): PnlPeriod[] {
+export function trimSeries<P extends Pick<PnlPeriod, "start" | "end">>(series: P[], from: string, to: string): P[] {
   return series.filter((p) => (!to || p.start.slice(0, 10) <= to) && (!from || p.end.slice(0, 10) > from));
 }
 

@@ -255,3 +255,22 @@ export function healthState(pool: Pick<PoolRow, "status" | "pauseKind" | "health
   if (h.verified === false || (h.coverageBps !== null && h.coverageBps < 10_000) || (h.headroomCents !== null && h.headroomCents < 0)) return "at_risk";
   return h.verified ? "healthy" : "unknown";
 }
+
+// ---- the investor dashboard's toolbar: Pool, Source, Date range, search ----
+
+// from / to: the first and last day the charts show, YYYY-MM-DD.
+export type InvestorFilter = { poolId: string; source: Source | "all"; from: string; to: string; query: string };
+const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// The last six months, every pool and source.
+export function defaultInvestorFilter(now = new Date()): InvestorFilter {
+  return { poolId: "all", source: "all", from: ymd(new Date(now.getFullYear(), now.getMonth() - 5, 1)), to: ymd(now), query: "" };
+}
+// The positions the toolbar keeps: one pool, else those whose pool name matches the search; then by source.
+export function filterPositions<P extends { poolId: string; name: string; onChain: boolean }>(positions: readonly P[], f: InvestorFilter): P[] {
+  const q = f.query.trim().toLowerCase();
+  return positions.filter(
+    (p) =>
+      (f.poolId === "all" ? !q || p.name.toLowerCase().includes(q) : p.poolId === f.poolId) &&
+      (f.source === "all" || (f.source === "devnet" ? p.onChain : !p.onChain)),
+  );
+}

@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { InvestorView, BALANCES_UNAVAILABLE } from "@/components/investor-view";
+import { InvestorView } from "@/components/investor-view";
 import { ModeSwitch } from "@/components/mode-switch";
-import { comingUp, depositRows, flowSeries, modesFor, MODE_KEY, portfolioOf, rememberedMode, rememberMode, statusText } from "@/lib/investor";
+import { comingUp, defaultInvestorFilter, depositRows, filterPositions, flowSeries, modesFor, MODE_KEY, portfolioOf, rememberedMode, rememberMode, statusText } from "@/lib/investor";
 import { fromPositions, fromWithdrawals, type LiquidityData } from "@/lib/liquidity";
 import { fromClassAudit } from "@/lib/audit-classes";
 
@@ -144,32 +144,55 @@ describe("the investor view", () => {
   const wallets = { supported: true, balancesSupported: false, owner: "o", wallets: [{ address: "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", chain: "solana" as const, network: "Solana", balances: null }], manageUrl: null, treasury: { deposit: true, withdraw: true, status: true } };
   const activity = fromClassAudit({ rows: [{ id: "f1", at: "2026-11-14T10:00:00Z", class: "financial", kind: "liquidity.commit", summary: "Committed $5,000.00", status: "settled" }] }).rows;
 
-  it("shows the portfolio, the chart, positions, coming up, wallets and financial activity in statement style", () => {
+  it("is laid out as the builder view: key figures, one toolbar over Capital in and Paid out, then financial activity", () => {
     const html = renderToStaticMarkup(
       <InvestorView liquidity={{ kind: "ready", data: liquidity }} wallets={{ kind: "ready", data: wallets }} activity={{ kind: "ready", data: activity }} attention={{ kind: "ready", data: [] }} now={NOW} />,
     );
     expect(html).not.toContain('data-slot="card"');
-    for (const s of ["portfolio", "pnl-chart", "allocation", "unlocks", "pool-health", "positions", "coming-up", "wallets", "financial-activity"]) expect(html).toContain(`data-section="${s}"`);
+    for (const s of ["portfolio", "capital-in", "paid-out", "financial-activity"]) expect(html).toContain(`data-section="${s}"`);
+    // Gone, as on the builder view: allocation, unlocks, pool health, positions, coming up, wallets, the combined chart.
+    for (const s of ["allocation", "unlocks", "pool-health", "positions", "coming-up", "wallets", "pnl-chart"]) expect(html).not.toContain(`data-section="${s}"`);
+    // In order: key figures, the toolbar, Capital in, Paid out below it, then activity.
+    const at = (m: string) => html.indexOf(m);
+    expect(at('data-section="portfolio"')).toBeLessThan(at("data-chart-filters"));
+    expect(at("data-chart-filters")).toBeLessThan(at('data-section="capital-in"'));
+    expect(at('data-section="capital-in"')).toBeLessThan(at('data-section="paid-out"'));
+    expect(at('data-section="paid-out"')).toBeLessThan(at('data-section="financial-activity"'));
+    // One toolbar: search pools, Pool, Source, Date range; no chart has its own controls.
+    expect(html.match(/data-chart-filters/g)).toHaveLength(1);
+    expect(html).toContain('aria-label="Search pools"');
+    for (const f of ["Pool", "Source", "Date range"]) expect(html).toContain(`data-filter="${f}"`);
+    expect(html).not.toContain('aria-label="Period"');
+    // The key figures are unchanged.
     expect(html).toMatch(/data-kpi="committed"[\s\S]*?\$6,250\.00/);
     expect(html).toMatch(/data-split[\s\S]*?Devnet: committed \$1,250\.00[\s\S]*?Rails: committed \$5,000\.00/);
     expect(html).toMatch(/data-kpi="returns"[\s\S]*?>Not measured<[\s\S]*?Mynt doesn.{1,6}t measure yield/);
-    // Committed and Paid out have their running history as sparklines; Settled has none (no history).
     expect(html).toMatch(/data-kpi="committed"[\s\S]*?data-sparkline="6"/);
-    expect(html).toMatch(/data-kpi="settled"[\s\S]*?data-sparkline="none"/);
-    expect(html).toContain("Capital in and paid out");
-    expect(html).toMatch(/data-deposit="Dep1"[\s\S]*?data-source="devnet"[\s\S]*?Locked until 2026-11-25/);
-    expect(html).toMatch(/data-deposit="rails-p-rails"[\s\S]*?data-source="rails"[\s\S]*?Verified · #7/);
-    expect(html).toContain('href="/earn?tab=my-positions"');
-    expect(html.match(/data-coming-up=/g)).toHaveLength(4);
-    expect(html).toContain(BALANCES_UNAVAILABLE);
+    // Activity, with View all on its own row to the financial audit trail.
     expect(html).toContain("liquidity.commit");
-    expect(html).toContain('href="/audits?tab=financial"');
+    expect(html).toMatch(/data-view-all[\s\S]*?href="\/audits\?tab=financial"[\s\S]*?View all/);
     expect(html).not.toContain("$0.00</dd>"); // nothing unmeasured shown as $0
   });
 
-  it("degrades without the tools: positions, wallets and activity each say they aren't available yet", () => {
+  it("narrows the charts by pool, source, search and dates", () => {
+    const positions = liquidity.provider!.positions;
+    const f = (o: Partial<ReturnType<typeof defaultInvestorFilter>>) => ({ ...defaultInvestorFilter(new Date(NOW)), ...o });
+    expect(filterPositions(positions, f({})).length).toBe(positions.length);
+    expect(filterPositions(positions, f({ source: "devnet" })).every((p) => p.onChain)).toBe(true);
+    expect(filterPositions(positions, f({ source: "rails" })).every((p) => !p.onChain)).toBe(true);
+    const one = positions[0];
+    expect(filterPositions(positions, f({ poolId: one.poolId })).map((p) => p.poolId)).toEqual([one.poolId]);
+    expect(filterPositions(positions, f({ query: one.name.slice(0, 3).toUpperCase() })).some((p) => p.poolId === one.poolId)).toBe(true);
+    expect(filterPositions(positions, f({ query: "no such pool" }))).toEqual([]);
+    const html = renderToStaticMarkup(<InvestorView liquidity={{ kind: "ready", data: liquidity }} now={NOW} filter={f({ source: "devnet", from: "2026-10-01", to: "2026-11-15" })} />);
+    expect(html).toMatch(/Source[\s\S]*?· Devnet/);
+    expect(html).toMatch(/Date range[\s\S]*?· 2026-10-01 – 2026-11-15/);
+  });
+
+  it("degrades without the tools: the portfolio, both charts and activity each say they aren't available yet", () => {
     const html = renderToStaticMarkup(<InvestorView liquidity={{ kind: "unsupported" }} wallets={{ kind: "unsupported" }} activity={{ kind: "unsupported" }} attention={{ kind: "unsupported" }} now={NOW} />);
-    expect(html.match(/data-empty="not-available"/g)!.length).toBeGreaterThanOrEqual(5);
+    expect(html.match(/data-empty="not-available"/g)!.length).toBeGreaterThanOrEqual(2);
+    expect(html.match(/data-pnl-empty=/g)!.length).toBe(2);
     expect(html).not.toContain("$0");
   });
 
