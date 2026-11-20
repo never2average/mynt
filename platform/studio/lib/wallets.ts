@@ -180,7 +180,8 @@ export type OnChainDeposit = {
   signature: string | null;
 };
 export type OnChainRequest = { address: string; deposit: string | null; seq: string | null; amount: bigint; remaining: bigint; paid: bigint; payableAt: string | null; status: string; signature: string | null };
-export type OnChainPosition = { wallet: string; principal: bigint; deposited: bigint; paid: bigint; queued: bigint; availableToRequest: bigint; deposits: OnChainDeposit[]; requests: OnChainRequest[] };
+// surplusClaimed: the wind-down surplus the wallet was paid (the treasury's only return); null when Mynt can't say.
+export type OnChainPosition = { wallet: string; principal: bigint; deposited: bigint; paid: bigint; queued: bigint; availableToRequest: bigint; surplusClaimed: bigint | null; deposits: OnChainDeposit[]; requests: OnChainRequest[] };
 
 const big0 = (v: unknown) => baseUnitsOf(v) ?? 0n;
 
@@ -198,6 +199,7 @@ export function reviveOnChainPosition(c: unknown): OnChainPosition | null {
     paid: big0(r.paid),
     queued: big0(r.queued),
     availableToRequest: big0(r.availableToRequest),
+    surplusClaimed: r.surplusClaimed == null ? null : big0(r.surplusClaimed),
     deposits: list(r.deposits).map((d) => ({ ...(d as unknown as OnChainDeposit), amount: big0(d.amount), remaining: big0(d.remaining), queued: big0(d.queued) })),
     requests: list(r.requests).map((q) => ({ ...(q as unknown as OnChainRequest), amount: big0(q.amount), remaining: big0(q.remaining), paid: big0(q.paid) })),
   };
@@ -215,7 +217,17 @@ export function onChainPositionFrom(row: Record<string, unknown>): OnChainPositi
     const address = str(r.address);
     return address ? [{ address, deposit: str(r.deposit), seq: baseUnitsOf(r.seq)?.toString() ?? null, amount: big0(r.amount), remaining: big0(r.remaining), paid: big0(r.paid), payableAt: str(r.payable_at), status: str(r.status) ?? "unknown", signature: str(r.signature) }] : [];
   });
-  return { wallet, principal: big0(row.principal), deposited: big0(row.deposited), paid: big0(row.paid), queued: big0(row.queued), availableToRequest: big0(row.available_to_request), deposits, requests };
+  return {
+    wallet,
+    principal: big0(row.principal),
+    deposited: big0(row.deposited),
+    paid: big0(row.paid),
+    queued: big0(row.queued),
+    availableToRequest: big0(row.available_to_request),
+    surplusClaimed: row.surplus_claimed == null ? null : baseUnitsOf(row.surplus_claimed),
+    deposits,
+    requests,
+  };
 }
 
 // Where one deposit stands: refused (and refunded), in its review window, locked in, fully

@@ -1576,3 +1576,28 @@ test("an address with devnet records can't become a mainnet treasury", async () 
   void m;
   void mainnetAttester;
 });
+
+test("a position reports the wind-down surplus its wallet claimed: the treasury's only return", async () => {
+  const s = await world();
+  const { poolId, address } = await registered(s);
+  const wallet = Keypair.generate().address;
+  const other = Keypair.generate().address;
+  s.linked.set(s.fundA.user.id, [{ chain: "solana", address: wallet, verified: true }]);
+  const now = Math.floor(Date.now() / 1000);
+  const claimed = (depositor, amount) => chain.encodeEvent({ name: "SurplusClaimed", pool: address, depositor, amount: BigInt(amount) });
+  const windDown = chain.encodeEvent({ name: "WindDownStarted", pool: address, surplus: 9_000_000n, principal_at_proposal: 4_000_000n, principal: 4_000_000n });
+  s.devnet.transactions.set(sigN(1), txOf(s.programId, depositMade(address, wallet, 0, 4_000_000, now)));
+  s.devnet.transactions.set(sigN(2), txOf(s.programId, windDown, claimed(wallet, 1_250_000), claimed(other, 7_000_000)));
+  s.devnet.signatures.set(address, [{ signature: sigN(2), slot: 2 }, { signature: sigN(1), slot: 1 }]);
+  await s.treasury.index();
+  // The decoder reads both events with their amounts.
+  const { rows } = await s.db.query("SELECT event, data FROM financial_products.treasury_events WHERE pool_address = $1 AND event IN ('SurplusClaimed', 'WindDownStarted') ORDER BY idx", [address]);
+  assert.deepEqual(rows.map((r) => r.event), ["WindDownStarted", "SurplusClaimed", "SurplusClaimed"]);
+  assert.equal(rows[1].data.amount, "1250000");
+  const mine = (await ok(s.fundA.client, "list_my_positions", {})).find((p) => p.source === "on-chain" && p.pool_id === poolId);
+  assert.equal(mine.surplus_claimed, 1_250_000, "its own claim only, not another wallet's");
+  // A claim stored before Mynt read amounts (no amount, no depositor): the wallet's total is unknown, never a partial sum.
+  await s.db.query("INSERT INTO financial_products.treasury_events (id, pool_address, signature, idx, slot, event, data) VALUES ($1, $2, 'old', 0, 0, 'SurplusClaimed', $3)", [randomUUID(), address, JSON.stringify({ name: "other", event: "SurplusClaimed" })]);
+  const later = (await ok(s.fundA.client, "list_my_positions", {})).find((p) => p.source === "on-chain" && p.pool_id === poolId);
+  assert.equal(later.surplus_claimed, null);
+});
