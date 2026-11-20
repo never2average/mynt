@@ -4,7 +4,7 @@
 // here too): using Mynt from your own AI agent over MCP. The agent picker and each agent's steps first
 // (components/connect-agent.tsx), then the server address, signing in, what the agent can do, things to
 // try and troubleshooting. The address is this site's origin + /mcp, read in the browser (no host in the code).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AgentInstructions, ConnectAgentPanel, mcpUrl } from "@/components/connect-agent";
 import { cn } from "@/lib/utils";
@@ -20,7 +20,7 @@ const SECTIONS = [
 
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   return (
-    <section id={id} className="scroll-mt-20 space-y-3" data-docs-section={id}>
+    <section id={id} className="scroll-mt-6 space-y-3" data-docs-section={id}>
       <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
       {children}
     </section>
@@ -67,6 +67,8 @@ function OnThisPage({ active, className, row = false }: { active: string; classN
 export default function ConnectPage() {
   const [url, setUrl] = useState("");
   const [active, setActive] = useState<string>(SECTIONS[0].id);
+  // The page scrolls in its own box (the studio shell fixes the window; every long page scrolls itself).
+  const scroller = useRef<HTMLDivElement>(null);
   useEffect(() => setUrl(mcpUrl(window.location.origin)), []);
   // Opened at #section (or redirected from /docs#section): go there once the page is drawn.
   useEffect(() => {
@@ -86,7 +88,7 @@ export default function ConnectPage() {
         const first = SECTIONS.find((s) => seen.get(s.id));
         if (first) setActive(first.id);
       },
-      { rootMargin: "-80px 0px -60% 0px" },
+      { root: scroller.current, rootMargin: "-24px 0px -60% 0px" },
     );
     for (const s of SECTIONS) {
       const el = document.getElementById(s.id);
@@ -96,15 +98,12 @@ export default function ConnectPage() {
   }, []);
 
   return (
+    <div ref={scroller} className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-connect-scroll>
     <div className="mx-auto flex w-full max-w-5xl gap-10 px-4 py-8 md:px-8" data-connect-page data-docs>
       <article className="min-w-0 flex-1 space-y-10">
         <OnThisPage active={active} row className="-mx-2 flex gap-1 overflow-x-auto pb-1 text-sm md:hidden" />
         <header className="space-y-2">
           <h1 className="text-2xl font-semibold tracking-tight">Connect your agent</h1>
-          <P>
-            Mynt is an MCP server. If you'd rather work in Claude, Claude Code, Cursor, VS Code or ChatGPT than in the studio, connect it to Mynt and ask for what you'd do here: look up licences, start and follow builds, check an app's
-            promotion gates, read audits. It signs in as you and sees only what you can see.
-          </P>
         </header>
 
         <Section id="connect" title="Connect an agent">
@@ -157,7 +156,8 @@ export default function ConnectPage() {
       </article>
 
       {/* On this page: on the right, set off by a vertical rule. */}
-      <OnThisPage active={active} className="sticky top-20 hidden h-fit w-52 shrink-0 space-y-1 border-l pl-6 text-sm md:block" />
+      <OnThisPage active={active} className="sticky top-6 hidden h-fit w-52 shrink-0 space-y-1 border-l pl-6 text-sm md:block" />
+    </div>
     </div>
   );
 }

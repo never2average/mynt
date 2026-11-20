@@ -4,7 +4,7 @@ import { DashboardView } from "@/components/dashboard-view";
 import { PnlChart, PnlStatement, PNL_NOT_AVAILABLE } from "@/components/pnl";
 import { facts, fromAppsAndBuilds, fromDashboardTool, NOT_MEASURED, usd } from "@/lib/dashboard";
 import { chartRows, fromPnl, MINUS, money, changeText, sumSeries } from "@/lib/pnl";
-import { appsForStage, chartApps, chartPnlUrl, DEFAULT_CHART_FILTER } from "@/lib/dashboard-visual";
+import { appsForStage, chartApps, chartPnlUrl, dateRange, DEFAULT_CHART_FILTER, defaultChartFilter, trimSeries } from "@/lib/dashboard-visual";
 
 // The dashboard never shows 0 for something Mynt doesn't measure.
 const render = (d: ReturnType<typeof fromDashboardTool>) => renderToStaticMarkup(<DashboardView dashboard={d} />);
@@ -177,7 +177,7 @@ describe("dashboard page", () => {
     const toolbar = html.slice(at("data-chart-filters"), at('data-section="money-moved"'));
     expect(toolbar).toContain('aria-label="Search apps"');
     for (const f of ["App", "App stage", "Date range"]) expect(toolbar).toContain(`data-filter="${f}"`);
-    expect(toolbar).toMatch(/Date range[\s\S]*?· Last 6 months/);
+    expect(toolbar).toMatch(new RegExp(`Date range[\\s\\S]*?· ${DEFAULT_CHART_FILTER.from} – ${DEFAULT_CHART_FILTER.to}`));
     expect(html).not.toContain('aria-label="Period"');
     expect(html).not.toContain("The newest entries in the audit trail");
     // Each row is its own outlined panel.
@@ -191,19 +191,31 @@ describe("dashboard page", () => {
       { id: "a3", name: "Card rewards", stage: "staging" as const, readiness: null },
     ];
     const f = (o: Partial<typeof DEFAULT_CHART_FILTER>) => ({ ...DEFAULT_CHART_FILTER, ...o });
-    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={f({ stage: "staging", range: "12w" })} />);
+    const html = renderToStaticMarkup(<DashboardView dashboard={dashboardWithApps} stages={{ kind: "ready", data: { checks: false, apps } }} filter={f({ stage: "staging", from: "2026-09-01", to: "2026-10-15" })} />);
     expect(html).toMatch(/App stage[\s\S]*?· Staging/);
-    expect(html).toMatch(/Date range[\s\S]*?· Last 12 weeks/);
+    expect(html).toMatch(/Date range[\s\S]*?· 2026-09-01 – 2026-10-15/);
     // The app picker offers the stage's apps; search narrows by name within the stage.
     expect(appsForStage(apps, "staging").map((a) => a.name)).toEqual(["Savings", "Card rewards"]);
     expect(chartApps(f({ stage: "staging", query: "card" }), apps).map((a) => a.id)).toEqual(["a3"]);
     expect(chartApps(f({ query: "CARD" }), apps).map((a) => a.id)).toEqual(["a1", "a3"]);
-    // What each asks the P&L route for.
+    // What each asks the P&L route for (the default: the last six months).
     expect(chartPnlUrl(f({}), apps)).toBe("/api/pnl?granularity=month&periods=6");
-    expect(chartPnlUrl(f({ appId: "a1", range: "3m" }), apps)).toBe("/api/pnl?granularity=month&periods=3&app=a1");
-    expect(chartPnlUrl(f({ stage: "staging", range: "12w" }), apps)).toBe("/api/pnl?granularity=week&periods=12&apps=a2,a3");
+    expect(chartPnlUrl(f({ appId: "a1" }), apps)).toBe("/api/pnl?granularity=month&periods=6&app=a1");
+    expect(chartPnlUrl(f({ stage: "staging" }), apps)).toBe("/api/pnl?granularity=month&periods=6&apps=a2,a3");
     expect(chartPnlUrl(f({ query: "card" }), apps)).toBe("/api/pnl?granularity=month&periods=6&apps=a1,a3");
-    expect(chartPnlUrl(f({ stage: "idea", range: "12m" }), apps)).toBe("/api/pnl?granularity=month&periods=12&apps=");
+    expect(chartPnlUrl(f({ stage: "idea" }), apps)).toBe("/api/pnl?granularity=month&periods=6&apps=");
+  });
+
+  it("asks for weeks or months enough to reach the first day picked, and shows only the periods inside the dates", () => {
+    const now = new Date(2026, 10, 20); // 20 November 2026
+    expect(dateRange({ from: "2026-10-21", to: "2026-11-20" }, now)).toEqual({ granularity: "week", periods: 6 });
+    expect(dateRange({ from: "2025-12-01", to: "2026-11-20" }, now)).toEqual({ granularity: "month", periods: 12 });
+    expect(dateRange({ from: "2026-03-01", to: "2026-05-31" }, now)).toEqual({ granularity: "month", periods: 9 });
+    expect(dateRange({ from: "2020-01-01", to: "2026-11-20" }, now)).toEqual({ granularity: "month", periods: 24 });
+    expect(defaultChartFilter(now)).toMatchObject({ from: "2026-06-01", to: "2026-11-20" });
+    const p = (start: string, end: string) => ({ start, end, revenue: 1, costs: 1, netIncome: 0 });
+    const series = [p("2026-03-01T00:00:00Z", "2026-04-01T00:00:00Z"), p("2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z"), p("2026-05-01T00:00:00Z", "2026-06-01T00:00:00Z"), p("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z")];
+    expect(trimSeries(series, "2026-04-15", "2026-05-31").map((x) => x.start.slice(0, 7))).toEqual(["2026-04", "2026-05"]);
   });
 
   it("adds up a stage's apps period by period, never filling an unmeasured one", () => {

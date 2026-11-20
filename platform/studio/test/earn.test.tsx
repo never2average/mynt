@@ -172,7 +172,9 @@ describe("a pool's state", () => {
     expect(html).toMatch(/data-queue="true"[^>]*>2</);
     // Capital isn't shown to builders by Mynt: said so, never 0.
     expect(html).toContain("Not shown to builders yet");
-    expect(html).toMatch(/data-sponsor-note="true"[^>]*>Pools can be proposed only on a component an approved licence provider sponsors/);
+    // No explainer under the pools when nothing stops a proposal (only a reason it can't be proposed shows there).
+    expect(html).not.toContain("data-sponsor-note");
+    expect(html).not.toContain("Pools can be proposed only on a component");
     expect(html).toMatch(/data-cta="propose"[^>]*>Propose pool</);
     expect(html).not.toMatch(/data-cta="propose"[^>]*disabled/);
   });

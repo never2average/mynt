@@ -72,7 +72,7 @@ function EarnThread({ chat }: { chat: Chat }) {
       <Thread
         Text={AskAiMarkdownText}
         placeholder={chat.messages.length ? "Ask a follow-up…" : "Describe an amount, a lock-in, a state or a product line…"}
-        welcome={<ChatWelcome title={WELCOME_TITLE} subtitle="The assistant explains pool terms and matches them to what you ask. It can't move money." chips={PROMPT_EXAMPLES} />}
+        welcome={<ChatWelcome title={WELCOME_TITLE} chips={PROMPT_EXAMPLES} />}
         note={<EarnDisclosure />}
         toolbar={<WalletPicker />}
       />
