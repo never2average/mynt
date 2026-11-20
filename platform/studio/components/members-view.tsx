@@ -41,8 +41,8 @@ export type MembersActions = {
   revoke(inviteId: string): Promise<string | null>
 }
 
-export const dateOf = (iso: string | null | undefined) =>
-  iso && !Number.isNaN(new Date(iso).getTime()) ? new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }) : null
+export { dateOf } from "@/lib/format-date"
+import { dateOf } from "@/lib/format-date"
 
 const roleName = (r: string) => r.charAt(0).toUpperCase() + r.slice(1)
 const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: roleName(r) }))
