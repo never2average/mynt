@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
 import { ASK_TOOLS, askToolDefs, historyFrom, isAskTool, mapLimited, MAX_CALLS_PER_QUESTION, MAX_CALLS_PER_STEP, MAX_OUTPUT_TOKENS, MAX_TOOL_RESULT, OVER_CAP, runAsk } from "@/lib/ask";
 import { STUDIO_TOOLS } from "@/lib/studio-tools";
+import { readTimed, sleep } from "./stream-timing";
 
 // A fake Mynt, a fake model and a fake sign-in.
-type Step = { text?: string; tool?: { name: string; input: Record<string, unknown> }; stop?: string };
+type Step = { text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> }; stop?: string };
 const fake = {
   session: undefined as Session | undefined,
   configured: true,
@@ -12,6 +13,7 @@ const fake = {
   requests: [] as { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
   logged: [] as string[],
+  producedAt: [] as number[],
 };
 
 vi.mock("@/lib/session", () => ({
@@ -73,7 +75,14 @@ function fakeLlm() {
       return {
         on: (_e: "text", cb: (d: string) => void) => listeners.push(cb),
         finalMessage: async () => {
-          if (step.text) for (const l of listeners) l(step.text);
+          // A step given in pieces is written a piece at a time, `gapMs` apart, as the model streams.
+          if (step.pieces)
+            for (const p of step.pieces) {
+              await sleep(step.gapMs ?? 0);
+              fake.producedAt.push(performance.now());
+              for (const l of listeners) l(p);
+            }
+          else if (step.text) for (const l of listeners) l(step.text);
           const content: unknown[] = [];
           if (step.text) content.push({ type: "text", text: step.text });
           if (step.tool) content.push({ type: "tool_use", id: `call-${fake.requests.length}`, name: step.tool.name, input: step.tool.input });
@@ -111,12 +120,31 @@ beforeEach(() => {
   fake.requests = [];
   fake.calls = [];
   fake.logged = [];
+  fake.producedAt = [];
   counts.clear();
   vi.spyOn(console, "error").mockImplementation((...args) => void fake.logged.push(args.join(" ")));
   vi.spyOn(console, "log").mockImplementation((...args) => void fake.logged.push(args.join(" ")));
 });
 
 describe("/api/ask", () => {
+  it("streams the answer as the model writes it: the first words reach the browser before the last are written, through headers that keep proxies from holding it back", async () => {
+    const pieces = ["You have ", "one app, ", "Round-up ", "savings."];
+    fake.steps = [{ pieces, gapMs: 150 }];
+    const res = await post({ messages: [question("Which apps do I have?")] });
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(res.headers.get("x-accel-buffering")).toBe("no");
+    const got = await readTimed(res);
+    const deltas = got.filter((c) => c.chunk.type === "text-delta");
+    expect(deltas.map((c) => c.chunk.delta)).toEqual(pieces); // a delta per piece, not one at the end
+    expect(fake.producedAt).toHaveLength(pieces.length);
+    const lastWritten = fake.producedAt[pieces.length - 1];
+    console.info(`ask: first delta at +${(deltas[0].at - fake.producedAt[0]).toFixed(1)} ms after the model wrote it; ${(lastWritten - deltas[0].at).toFixed(1)} ms before the last piece was written`);
+    expect(deltas[0].at).toBeLessThan(lastWritten);
+    // Each piece arrives before the next is written.
+    for (let i = 0; i < pieces.length - 1; i++) expect(deltas[i].at).toBeLessThan(fake.producedAt[i + 1]);
+  });
+
   it("refuses unauthenticated calls, both the status check and questions", async () => {
     fake.session = undefined;
     expect((await GET()).status).toBe(401);

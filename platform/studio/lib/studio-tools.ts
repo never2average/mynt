@@ -128,7 +128,7 @@ export const STUDIO_TOOLS = {
   list_builds: z.object({ status: z.string().max(40).optional(), app_id: id.optional(), workspace_id: workspaceId.optional() }).strict(),
   get_build: z.object({ build_id: id }).strict(),
   get_build_activity: z
-    .object({ build_id: id, limit: z.number().int().min(1).max(200).optional(), after: z.number().int().min(0).optional() })
+    .object({ build_id: id, limit: z.number().int().min(1).max(200).optional(), after: z.number().int().min(0).optional(), text_deltas: z.boolean().optional() })
     .strict(),
   // The chat: a message starts a build for the app, or steers the one running. `mode` and
   // `continue_from` are sent only where Mynt offers session builds (lib/chat.ts).

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   ActivityFollower,
+  activityToLiveParts,
   activityToParts,
+  LiveText,
+  type TextChunk,
   buildSummaries,
   buildToMessages,
   capabilitiesFrom,
@@ -257,5 +260,46 @@ describe("activity as messages", () => {
     const messages = buildToMessages({ id: "b", goal: "Build it please" }, { activity: [say("second"), say("first")] });
     expect(messages.map((m) => m.parts.map((p) => (p.kind === "text" ? p.text : "")))).toEqual([["Build it please"], ["first", "second"]]);
     expect(buildToMessages(null, null)).toEqual([]);
+  });
+});
+
+describe("the agent's words as it writes them", () => {
+  const d = (seq: number, summary: string, stream = "m:0") => ({ type: "text_delta", summary, stream, seq });
+
+  it("are offered where Mynt's get_build_activity takes text_deltas, and asked for only then", () => {
+    expect(capabilitiesFrom([{ name: "get_build_activity", inputSchema: { properties: { build_id: {}, text_deltas: {} } } }]).textDeltas).toBe(true);
+    expect(capabilitiesFrom([{ name: "get_build_activity", inputSchema: { properties: { build_id: {} } } }]).textDeltas).toBeUndefined();
+    expect(new ActivityFollower({ textDeltas: true }).next("b")).toEqual({ build_id: "b", limit: 200, text_deltas: true });
+    expect(new ActivityFollower().next("b")).toEqual({ build_id: "b", limit: 200 });
+  });
+
+  it("are left out of a past build's conversation, which shows each whole message", () => {
+    const items = [d(1, "Hel"), { type: "message", summary: "Hello", stream: "m:0", seq: 2 }];
+    expect(activityToParts(items)).toEqual([{ kind: "text", text: "Hello", stream: "m:0" }]);
+    expect(activityToLiveParts(items)).toEqual([{ kind: "delta", text: "Hel", stream: "m:0" }, { kind: "text", text: "Hello", stream: "m:0" }]);
+  });
+
+  it("go into one open part; something drawn between closes it, more words open another, and the whole message prints nothing again", () => {
+    const out: TextChunk[] = [];
+    let n = 0;
+    const live = new LiveText((c) => out.push(c), () => `p${n++}`);
+    for (const part of activityToLiveParts([d(1, "One "), d(2, "two ")])) live.text(part);
+    expect(live.streaming).toBe(true);
+    live.close(); // a tool card, say
+    for (const part of activityToLiveParts([d(3, "three"), { type: "message", summary: "One two three", stream: "m:0", seq: 4 }, { type: "message", summary: "Old style", seq: 5 }])) live.text(part);
+    expect(live.text({ kind: "tool", toolName: "bashTool", input: {} })).toBe(false);
+    expect(out).toEqual([
+      { type: "text-start", id: "p0" },
+      { type: "text-delta", id: "p0", delta: "One " },
+      { type: "text-delta", id: "p0", delta: "two " },
+      { type: "text-end", id: "p0" },
+      { type: "text-start", id: "p1" },
+      { type: "text-delta", id: "p1", delta: "three" },
+      { type: "text-end", id: "p1" },
+      { type: "text-start", id: "p2" },
+      { type: "text-delta", id: "p2", delta: "Old style" },
+      { type: "text-end", id: "p2" },
+    ]);
+    expect(live.streaming).toBe(false);
   });
 });

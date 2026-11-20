@@ -5,6 +5,7 @@ import { serialLoop } from "./worker.js";
 import { UsageMeter, usageSampleMs } from "./usage-meter.js";
 import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentBackend } from "./agent-host.js";
 import { CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
+import { StreamState, type ActivityEntry } from "./activity.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { accessStatus, productEntity } from "./access.js";
@@ -290,6 +291,8 @@ ${APP_REPOSITORIES_DDL}
     summary text NOT NULL,
     PRIMARY KEY (build_id, seq)
   );
+  -- Ties a message's streamed text (text_delta entries) to the message: the build's API message id and block index.
+  ALTER TABLE financial_products.build_activity ADD COLUMN IF NOT EXISTS stream text;
   CREATE TABLE IF NOT EXISTS financial_products.repo_connections (
     developer_id uuid NOT NULL REFERENCES financial_products.users(id),
     repository text NOT NULL,
@@ -392,6 +395,8 @@ const ACTIVITY_CHUNK = 256 * 1024;
 const ACTIVITY_CHUNKS_PER_TICK = 8;
 const ACTIVITY_CHUNKS_AT_END = 64;
 export const ACTIVITY_KEEP = 5000;
+// Someone following a build gets its log read at most this often (get_build_activity reads it when it's older).
+const ACTIVITY_FRESH_MS = 1000;
 
 // The complete lines in `buf`, read from the log one byte before the offset when `prefixed` (that byte is a newline
 // when the offset is at the start of a line), and how many bytes past the offset are now dealt with. A line longer
@@ -1077,19 +1082,42 @@ export class BuildService {
 
   // The agent's stored activity. Without `after`: the latest `limit` entries, newest first. With `after` (a cursor
   // from an earlier call): the entries after it, oldest first. `cursor` is the newest seq returned (or already
-  // seen), to pass as `after` next time; it stays put while nothing new has arrived.
-  async activity(build: Build, opts: { limit?: number; after?: number } = {}) {
+  // seen), to pass as `after` next time; it stays put while nothing new has arrived. The words of a message being
+  // written (text_delta entries) are returned only to a caller that asks for them (`textDeltas`), so a caller that
+  // doesn't know them sees what it always did.
+  async activity(build: Build, opts: { limit?: number; after?: number; textDeltas?: boolean } = {}) {
     const n = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 30)));
+    const deltas = opts.textDeltas === true;
     const rows = (
       opts.after == null
-        ? await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 ORDER BY seq DESC LIMIT $2", [build.id, n])
-        : await this.db.query("SELECT seq, at, type, summary FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 ORDER BY seq LIMIT $3", [build.id, opts.after, n])
+        ? await this.db.query("SELECT seq, at, type, summary, stream FROM financial_products.build_activity WHERE build_id = $1 AND ($3 OR type <> 'text_delta') ORDER BY seq DESC LIMIT $2", [build.id, n, deltas])
+        : await this.db.query("SELECT seq, at, type, summary, stream FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 AND ($4 OR type <> 'text_delta') ORDER BY seq LIMIT $3", [build.id, opts.after, n, deltas])
     ).rows as Row[];
-    const activity = rows.map((r) => ({ seq: Number(r.seq), at: iso(r.at)!, type: r.type as string, summary: r.summary as string }));
+    const activity = rows.map((r) => ({ seq: Number(r.seq), at: iso(r.at)!, type: r.type as string, summary: r.summary as string, ...(r.stream ? { stream: r.stream as string } : {}) }));
     // The oldest entry still kept: past the per-build limit, the oldest go, so a follower whose cursor is below
     // first_seq - 1 has missed some.
     const first = (await this.db.query("SELECT MIN(seq) AS m FROM financial_products.build_activity WHERE build_id = $1", [build.id])).rows[0] as Row | undefined;
     return { activity, cursor: activity.reduce((m, a) => Math.max(m, a.seq), opts.after ?? 0), first_seq: first?.m == null ? null : Number(first.m) };
+  }
+
+  // Someone is following the agent: read its log now if the last read is older than ACTIVITY_FRESH_MS and none is
+  // under way, one chunk, briefly. Rate-limited per build, so followers polling fast cost at most one read a second.
+  async freshenActivity(b: Build) {
+    if (!this.sandboxes || !b.sandbox_id || !AGENT_PHASES.includes(b.status)) return;
+    if (this.collecting.has(b.id) || Date.now() - (this.lastCollect.get(b.id) ?? 0) < ACTIVITY_FRESH_MS) return;
+    await this.collectActivitySafely(b, { maxChunks: 1, timeoutSeconds: 10 });
+  }
+
+  // Per build: when its log was last read, whether a read is under way, and what's known of the messages being
+  // written as of the offset read up to (see activity.ts). A reader that starts at another offset (another reader
+  // got there first, or Mynt restarted) starts without it.
+  private lastCollect = new Map<string, number>();
+  private collecting = new Set<string>();
+  private streams = new Map<string, { offset: number; state: StreamState }>();
+
+  private forgetActivity(buildId: string) {
+    this.lastCollect.delete(buildId);
+    this.streams.delete(buildId);
   }
 
   // Reads what the agent wrote to its stream-json log since last time into build_activity: a chunk at a time,
@@ -1098,13 +1126,23 @@ export class BuildService {
   // to the developer, never trusted.
   async collectActivity(b: Build, maxChunks = ACTIVITY_CHUNKS_PER_TICK, timeoutSeconds = 60): Promise<{ complete: boolean; offset: number } | null> {
     if (!this.sandboxes || !b.sandbox_id) return null;
+    this.collecting.add(b.id);
+    this.lastCollect.set(b.id, Date.now());
+    try {
+      return await this.readActivity(b, maxChunks, timeoutSeconds);
+    } finally {
+      this.collecting.delete(b.id);
+    }
+  }
+
+  private async readActivity(b: Build, maxChunks: number, timeoutSeconds: number): Promise<{ complete: boolean; offset: number }> {
     let offset = b.activity_offset;
     for (let i = 0; i < maxChunks; i++) {
       // From one byte before the offset, so the first byte says whether the offset is at the start of a line.
       const from = Math.max(0, offset - 1);
       const want = ACTIVITY_CHUNK + (offset > 0 ? 1 : 0);
-      const r = await this.sandboxes.exec(
-        b.sandbox_id,
+      const r = await this.sandboxes!.exec(
+        b.sandbox_id!,
         `f=${AGENT_DIR}/agent.jsonl; if [ -f "$f" ]; then tail -c +${from + 1} "$f" | head -c ${want} | base64 -w0; fi`,
         { timeoutSeconds },
       );
@@ -1112,10 +1150,15 @@ export class BuildService {
       const buf = Buffer.from(r.stdout.trim(), "base64");
       const { consumed, lines } = activityLines(buf, offset > 0, ACTIVITY_CHUNK);
       if (consumed === 0) return { complete: true, offset };
+      // The words of messages being written, carried from the last read only if it ended where this one starts;
+      // a copy, kept only if this read's offset is claimed.
+      const known = this.streams.get(b.id);
+      const state = known && known.offset === offset ? known.state.clone() : new StreamState();
       const entries = lines
         .map((line) => parseJson<Record<string, unknown>>(line))
         .filter((m): m is Record<string, unknown> => !!m)
-        .flatMap(summarizeAgentLine);
+        .flatMap((m) => state.entries(m));
+      entries.push(...state.flush());
       // All of the chunk's entries in one statement; if the database refuses that, one at a time, each on its own
       // savepoint, so an entry it won't take is dropped and the offset still moves on: one bad line never stalls it.
       let claimed: boolean;
@@ -1127,27 +1170,28 @@ export class BuildService {
       }
       if (!claimed) return { complete: true, offset };
       offset += consumed;
+      this.streams.set(b.id, { offset, state });
       if (buf.length < want) return { complete: true, offset }; // read to the end of what's there
     }
     return { complete: false, offset };
   }
 
-  private storeActivity(buildId: string, from: number, to: number, entries: { type: string; summary: string }[], oneByOne: boolean) {
+  private storeActivity(buildId: string, from: number, to: number, entries: ActivityEntry[], oneByOne: boolean) {
     return inTransaction(this.db, async (tx) => {
       const moved = await tx.query("UPDATE financial_products.build_runs SET activity_offset = $3 WHERE id = $1 AND activity_offset = $2 RETURNING id", [buildId, from, to]);
       if (moved.rows.length === 0) return false;
       if (entries.length === 0) return true;
       let top = Number(((await tx.query("SELECT COALESCE(MAX(seq), 0) AS m FROM financial_products.build_activity WHERE build_id = $1", [buildId])).rows[0] as Row).m);
-      const insert = "INSERT INTO financial_products.build_activity (build_id, seq, type, summary) VALUES ";
+      const insert = "INSERT INTO financial_products.build_activity (build_id, seq, type, summary, stream) VALUES ";
       if (!oneByOne) {
-        const values = entries.map((_, k) => `($1, $${k * 3 + 2}, $${k * 3 + 3}, $${k * 3 + 4})`);
-        await tx.query(insert + values.join(", "), [buildId, ...entries.flatMap((e, k) => [top + k + 1, e.type, e.summary])]);
+        const values = entries.map((_, k) => `($1, $${k * 4 + 2}, $${k * 4 + 3}, $${k * 4 + 4}, $${k * 4 + 5})`);
+        await tx.query(insert + values.join(", "), [buildId, ...entries.flatMap((e, k) => [top + k + 1, e.type, e.summary, e.stream ?? null])]);
         top += entries.length;
       } else {
         for (const e of entries) {
           await tx.query("SAVEPOINT activity_entry");
           try {
-            await tx.query(insert + "($1, $2, $3, $4)", [buildId, top + 1, e.type, e.summary]);
+            await tx.query(insert + "($1, $2, $3, $4, $5)", [buildId, top + 1, e.type, e.summary, e.stream ?? null]);
             await tx.query("RELEASE SAVEPOINT activity_entry");
             top += 1;
           } catch (err) {
@@ -1167,6 +1211,8 @@ export class BuildService {
   private async collectActivitySafely(b: Build, opts: { maxChunks?: number; timeoutSeconds?: number; toEnd?: boolean } = {}) {
     try {
       const r = await this.collectActivity(b, opts.maxChunks, opts.timeoutSeconds);
+      // Read to the end: nothing more will stream.
+      if (opts.toEnd) this.forgetActivity(b.id);
       if (r && !r.complete && opts.toEnd && this.sandboxes && b.sandbox_id) {
         const size = await this.sandboxes.exec(b.sandbox_id, `stat -c %s ${AGENT_DIR}/agent.jsonl 2>/dev/null || echo 0`, { timeoutSeconds: opts.timeoutSeconds ?? 30 });
         const left = Math.max(0, Number(size.stdout.trim()) - r.offset);
@@ -2300,13 +2346,20 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
         build_id: z.string(),
         limit: z.number().int().min(1).max(200).default(30),
         after: z.number().int().min(0).optional().describe("A cursor from an earlier call: only entries after it"),
+        text_deltas: z
+          .boolean()
+          .default(false)
+          .describe("Also return the words of a message as the agent writes it (text_delta entries, tied to the message by `stream`)"),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ build_id, limit, after }) => {
+    async ({ build_id, limit, after, text_deltas }) => {
+      // A follower (a cursor, or the words as they're written) gets the agent's log read now if it's over a second old.
+      const follow = after !== undefined || text_deltas;
       const b = await own(build_id);
       if (!b) return fail(`No build of yours with id '${build_id}'`);
-      return json({ status: b.status, phase_message: b.phase_message, ...(await builds.activity(b, { limit, after })) });
+      if (follow) await builds.freshenActivity(b);
+      return json({ status: b.status, phase_message: b.phase_message, ...(await builds.activity(b, { limit, after, textDeltas: text_deltas })) });
     },
   );
 
@@ -2503,31 +2556,4 @@ export function registerCodingAgentAdminTools(server: McpServer, builds: BuildSe
   );
 }
 
-// One line of Claude Code's stream-json output, as activity a developer can follow.
-// Summaries are stored and shown: control characters (NUL among them, which Postgres text refuses) go, secrets are
-// scrubbed before the text is cut (so a cut can't leave a partial token the patterns miss), and a cut never leaves
-// half a surrogate pair.
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
-export function activitySummary(text: string, limit = 400) {
-  const clean = redact(
-    text
-      .replace(LONE_SURROGATE, "�")
-      .replace(/[\u0000-\u001F\u007F]+/g, " ")
-      .replace(/\s+/g, " "),
-  );
-  return clean.slice(0, limit).replace(LONE_SURROGATE, "");
-}
-
-function summarizeAgentLine(m: Record<string, unknown>): { type: string; summary: string }[] {
-  const str = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? ""));
-  if (m.type === "result") return [{ type: "turn_finished", summary: activitySummary(`${str(m.subtype)}, US$${Number(m.total_cost_usd ?? 0).toFixed(2)}`) }];
-  const content = (m.message as { content?: unknown } | undefined)?.content;
-  if (m.type !== "assistant" || !Array.isArray(content)) return [];
-  return content.flatMap((c: Record<string, unknown>) =>
-    c.type === "text"
-      ? [{ type: "message", summary: activitySummary(str(c.text)) }]
-      : c.type === "tool_use"
-        ? [{ type: "tool_use", summary: activitySummary(`${str(c.name)} ${str(c.input)}`) }]
-        : [],
-  );
-}
+export { activitySummary } from "./activity.js";
