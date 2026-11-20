@@ -239,6 +239,41 @@ describe("an app's top bar", () => {
     expect(container.querySelector("[data-site-header]")).toBeNull();
   });
 
+  it("matches the page header: its height, padding, gap and title, a labelled Back, and labelled Search and New app from md", async () => {
+    const back: number[] = [];
+    const { container } = render(withProviders(<AppTopBar {...props} onBack={() => back.push(1)} />));
+    await act(async () => undefined);
+    const bar = container.querySelector("[data-app-top-bar]")!;
+    for (const c of ["h-(--header-height)", "px-4", "lg:px-6", "gap-2"]) expect(bar.className.split(" "), c).toContain(c);
+    expect(bar.querySelector("[data-app-name]")!.className).toContain("text-base font-medium");
+    const backButton = screen.getByRole("button", { name: "Back to all apps" });
+    expect(backButton.textContent).toBe("Back");
+    fireEvent.click(backButton);
+    expect(back).toEqual([1]);
+    // Labelled forms shown from md, the icon forms only below it.
+    const labelled = [...bar.querySelectorAll("[data-search-trigger], [data-new-app]")].filter((e) => e.closest(".hidden")?.className.includes("md:flex"));
+    expect(labelled.map((e) => e.textContent)).toEqual([expect.stringContaining("Search or ask AI"), "New app"]);
+    const icons = [...bar.querySelectorAll("[data-search-trigger], [data-new-app]")].filter((e) => e.closest(".md\\:hidden"));
+    expect(icons).toHaveLength(2);
+    // The preview's icon controls each have a name and a tooltip.
+    for (const name of ["Back in preview", "Forward in preview", "Reload preview", "Desktop", "Tablet", "Phone"]) {
+      const b = screen.getByRole("button", { name });
+      expect(b.getAttribute("data-state"), name).not.toBeNull(); // a Radix tooltip trigger
+    }
+    expect(screen.getByRole("link", { name: "Open preview in a new tab" }).getAttribute("data-state")).not.toBeNull();
+    // The plug and theme icon buttons stay.
+    expect(bar.querySelector("[data-connect-agent-open]")).not.toBeNull();
+    expect(bar.querySelector("[data-theme-switcher]")).not.toBeNull();
+  });
+
+  it("shows a preview control's tooltip on hover", async () => {
+    render(withProviders(<AppTopBar {...props} />));
+    await act(async () => {
+      fireEvent.focus(screen.getByRole("button", { name: "Reload preview" }));
+    });
+    expect((await screen.findAllByText("Reload preview")).length).toBeGreaterThan(0);
+  });
+
   it("switches the preview's width", () => {
     const picked: string[] = [];
     render(withProviders(<AppTopBar {...props} onDevice={(d) => picked.push(d)} />));

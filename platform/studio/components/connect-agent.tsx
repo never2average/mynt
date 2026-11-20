@@ -9,6 +9,7 @@ import { useEffect, useState } from "react"
 import { Check, Copy, ExternalLink, Plug } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Tab, TabList } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export type AgentId = "claude-code" | "claude" | "cursor" | "vscode" | "chatgpt" | "other"
@@ -126,20 +127,20 @@ export function AgentInstructions({ agent, url }: { agent: AgentId; url: string 
   }
 }
 
-// The agent picker and its steps, as the /connect page shows them.
+// The agent picker (the studio's line tabs, as Settings has) and its steps, as the /connect page shows them.
 export function ConnectAgentPanel() {
   const [agent, setAgent] = useState<AgentId>("claude-code")
   const [url, setUrl] = useState("")
   useEffect(() => setUrl(mcpUrl(window.location.origin)), [])
   return (
     <div className="flex flex-col gap-4" data-connect-agent>
-      <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Agent">
+      <TabList aria-label="Agent">
         {AGENTS.map((a) => (
-          <Button key={a.id} type="button" size="sm" variant={a.id === agent ? "secondary" : "ghost"} role="tab" aria-selected={a.id === agent} onClick={() => setAgent(a.id)} data-agent-tab={a.id}>
+          <Tab key={a.id} selected={a.id === agent} onClick={() => setAgent(a.id)} data-agent-tab={a.id}>
             {a.label}
-          </Button>
+          </Tab>
         ))}
-      </div>
+      </TabList>
       {url && <AgentInstructions agent={agent} url={url} />}
     </div>
   )
