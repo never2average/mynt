@@ -187,6 +187,8 @@ function periodStarts(granularity: Granularity, periods: Range, now: number): Da
  */
 export function flowSeries(positions: Position[], granularity: Granularity, periods: Range, now: number): { series: FlowPeriod[]; railsUnmeasured: boolean } {
   const onChain = positions.filter((p) => p.onChain);
+  // Rails positions whose movements came with their settlement dates.
+  const rails = positions.filter((p) => !p.onChain && Array.isArray(p.entries));
   const starts = periodStarts(granularity, periods, now);
   const ends = starts.map((s, i) => (i + 1 < starts.length ? starts[i + 1] : granularity === "month" ? new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 1, 1)) : new Date(s.getTime() + 7 * 86_400_000)));
   const series = starts.map((s, i): FlowPeriod => {
@@ -196,14 +198,16 @@ export function flowSeries(positions: Position[], granularity: Granularity, peri
       const t = iso ? Date.parse(iso) : NaN;
       return !Number.isNaN(t) && t >= from && t < to;
     };
-    if (!onChain.length) return { start: s.toISOString().slice(0, 10), end: ends[i].toISOString().slice(0, 10), revenue: null, costs: null, netIncome: null };
-    const ins = onChain.flatMap((p) => p.deposits.filter((d) => !d.rejected && within(d.settledAt)).map((d) => d.amountCents));
-    const outs = onChain.flatMap((p) => p.requests.filter((r) => within(r.payableAt)).map((r) => r.paidCents));
+    if (!onChain.length && !rails.length) return { start: s.toISOString().slice(0, 10), end: ends[i].toISOString().slice(0, 10), revenue: null, costs: null, netIncome: null };
+    const settledIn = (p: Position, kind: string) => (p.entries ?? []).filter((e) => e.kind === kind && within(e.settledAt)).map((e) => e.settledCents);
+    const ins = [...onChain.flatMap((p) => p.deposits.filter((d) => !d.rejected && within(d.settledAt)).map((d) => d.amountCents)), ...rails.flatMap((p) => settledIn(p, "deposit"))];
+    const outs = [...onChain.flatMap((p) => p.requests.filter((r) => within(r.payableAt)).map((r) => r.paidCents)), ...rails.flatMap((p) => settledIn(p, "withdrawal"))];
     const capitalIn = sum(ins);
     const paidOut = sum(outs);
     return { start: s.toISOString().slice(0, 10), end: ends[i].toISOString().slice(0, 10), revenue: capitalIn, costs: paidOut, netIncome: capitalIn === null || paidOut === null ? null : capitalIn - paidOut };
   });
-  return { series, railsUnmeasured: positions.some((p) => !p.onChain) };
+  // Rails positions sent without their dated movements stay out of the chart, and the chart says so.
+  return { series, railsUnmeasured: positions.some((p) => !p.onChain && !Array.isArray(p.entries)) };
 }
 
 // Needs attention items about investing: pools, positions, withdrawals or the treasury.

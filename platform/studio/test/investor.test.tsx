@@ -138,6 +138,33 @@ describe("the investor model", () => {
     const rails = flowSeries(positions.filter((p) => !p.onChain), "week", 3, NOW);
     expect(rails.series.every((s) => s.revenue === null && s.costs === null && s.netIncome === null)).toBe(true);
   });
+
+  it("dates rails positions by their settled movements once Mynt sends them", () => {
+    const dated = fromPositions({
+      positions: [
+        {
+          source: "rails",
+          pool_id: "p-dated",
+          name: "Dated rails pool",
+          contributed_cents: 300000,
+          balance_cents: 250000,
+          withdrawn_cents: 50000,
+          entries: [
+            { kind: "deposit", settled_amount_cents: 300000, settled_at: "2026-10-05T10:00:00Z" },
+            { kind: "withdrawal", settled_amount_cents: 50000, settled_at: "2026-11-02T10:00:00Z" },
+            { kind: "deposit", settled_amount_cents: null, settled_at: null }, // still on its way: not counted
+          ],
+        },
+      ],
+    });
+    const { series, railsUnmeasured } = flowSeries(dated, "month", 3, NOW);
+    expect(railsUnmeasured).toBe(false);
+    expect(series.map((s) => [s.start, s.revenue, s.costs])).toEqual([
+      ["2026-09-01", 0, 0],
+      ["2026-10-01", 300000, 0],
+      ["2026-11-01", 0, 50000],
+    ]);
+  });
 });
 
 describe("the investor view", () => {
