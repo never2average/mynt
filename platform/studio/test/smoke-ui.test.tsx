@@ -93,6 +93,15 @@ describe("the first-run workspace step", () => {
     expect(names).toEqual(["Acme Labs"]);
     expect(screen.getByRole("alert").textContent).toBe("That name is taken");
   });
+
+  it("is a page of its own, centred, in a panel with the dashboard's section heading", () => {
+    const html = renderToStaticMarkup(<CreateWorkspace onCreate={async () => null} />);
+    expect(html).toMatch(/data-gate="workspace"/);
+    expect(html).toMatch(/class="flex flex-1 flex-col items-center justify-center[^"]*" data-gate="workspace"/);
+    expect(html).toContain("data-panel");
+    expect(html).toMatch(/<h2 [^>]*class="text-sm font-semibold"[^>]*>Create your workspace<\/h2>/);
+    expect(renderToStaticMarkup(<DeveloperGate />)).toMatch(/<h2 class="text-sm font-semibold">/);
+  });
 });
 
 describe("workspaces in requests", () => {

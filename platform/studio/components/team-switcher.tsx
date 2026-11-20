@@ -13,7 +13,6 @@ import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -130,25 +129,25 @@ export function TeamSwitcher({
         </DropdownMenu>
 
         <Dialog open={showInvitations && invitations.length > 0} onOpenChange={setShowInvitations}>
-          <DialogContent className="sm:max-w-lg">
+          <DialogContent className="sm:max-w-lg" aria-describedby={undefined}>
             <DialogHeader>
               <DialogTitle>Invitations</DialogTitle>
-              <DialogDescription>You join a workspace only if you accept.</DialogDescription>
             </DialogHeader>
             <InvitationsList invitations={invitations} onAnswer={onAnswerInvitation} />
           </DialogContent>
         </Dialog>
 
         <Dialog open={creating} onOpenChange={setCreating}>
-          <DialogContent className="sm:max-w-md">
+          <DialogContent className="sm:max-w-md" aria-describedby={supported ? undefined : "create-workspace-unavailable"}>
             <DialogHeader>
               <DialogTitle>Create workspace</DialogTitle>
-              <DialogDescription>
-                {supported
-                  ? "A workspace keeps its own apps and members."
-                  : "Workspaces come with Mynt's next update. For now, everything is in your Personal workspace."}
-              </DialogDescription>
             </DialogHeader>
+            {/* Not an explanation: what stops creating one until Mynt supports workspaces. */}
+            {!supported && (
+              <p id="create-workspace-unavailable" className="text-sm text-muted-foreground" data-unavailable>
+                Workspaces come with Mynt's next update. For now, everything is in your Personal workspace.
+              </p>
+            )}
             <form
               onSubmit={(e) => {
                 e.preventDefault()

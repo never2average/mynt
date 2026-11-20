@@ -42,8 +42,39 @@ describe("connect your agent", () => {
     const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
     render(<ConnectPage />);
     await act(async () => {});
-    expect(document.querySelector("h1")!.textContent).toBe("Connect your agent");
+    // The page header names it ("Connect your agent"); the body doesn't repeat it.
+    expect(document.querySelector("[data-connect-page] h1")).toBeNull();
     expect(document.querySelector("[data-connect-page] [data-connect-agent]")).not.toBeNull();
+  });
+
+  it("is laid out in the dashboard's page frame, each section a panel with its section heading", async () => {
+    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
+    render(<ConnectPage />);
+    await act(async () => {});
+    const page = document.querySelector("[data-connect-page]")!;
+    expect(page.className).toContain("p-4");
+    expect(page.className).toContain("lg:p-6");
+    expect(page.className).not.toContain("max-w-5xl");
+    expect(document.querySelector("article")!.className).toMatch(/gap-4 lg:gap-5/);
+    for (const s of document.querySelectorAll("[data-docs-section]")) {
+      expect(s.className).toContain("rounded-lg border");
+      expect(s.querySelector("h2")!.className).toBe("text-sm font-semibold");
+    }
+    // No box inside the panel around the picker.
+    expect(document.querySelector('[data-docs-section="connect"] .rounded-lg.border')).toBeNull();
+  });
+
+  it("picks the agent with the studio's line tabs", async () => {
+    render(<ConnectAgentPanel />);
+    await act(async () => {});
+    const list = document.querySelector('[role="tablist"][aria-label="Agent"]')!;
+    expect(list.getAttribute("data-slot")).toBe("tabs-list");
+    expect(list.getAttribute("data-variant")).toBe("line");
+    const tab = list.querySelector('[data-agent-tab="claude-code"]')!;
+    expect(tab.getAttribute("data-slot")).toBe("tabs-trigger");
+    expect(tab.getAttribute("data-state")).toBe("active");
+    expect(list.querySelector('[data-agent-tab="cursor"]')!.getAttribute("data-state")).toBe("inactive");
+    expect(list.querySelector('[data-slot="button"]')).toBeNull();
   });
 
   it("switches agents on the page", async () => {

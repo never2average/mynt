@@ -22,10 +22,23 @@ describe("invitations", () => {
 
   it("show on the dashboard with Accept and Decline for each, and nothing when there are none", () => {
     const html = renderToStaticMarkup(<InvitationsBanner invitations={invitations} onAnswer={async () => null} />);
-    for (const t of ["invited to 2 workspaces", "only if you accept", "Gamma", "Invited by Sam Lee", "admin", "Build the workspace&#x27;s apps", "Delta", "until 2026-11-20"]) expect(html).toContain(t);
+    for (const t of ["invited to 2 workspaces", "Accepting lets you", "Gamma", "Invited by Sam Lee", "admin", "Build the workspace&#x27;s apps", "Delta", "until 2026-11-20"]) expect(html).toContain(t);
     expect((html.match(/>Accept</g) ?? []).length).toBe(2);
     expect((html.match(/>Decline</g) ?? []).length).toBe(2);
     expect(renderToStaticMarkup(<InvitationsBanner invitations={[]} onAnswer={async () => null} />)).toBe("");
+  });
+
+  it("are one flat panel with the dashboard's section heading and a row per invitation: no card, no subtitle, no padding of its own", () => {
+    const html = renderToStaticMarkup(<InvitationsBanner invitations={invitations} onAnswer={async () => null} />);
+    const panel = /^<div class="([^"]*)"[^>]*data-panel/.exec(html);
+    expect(panel, "the banner is a Panel").not.toBeNull();
+    expect(panel![1]).not.toMatch(/(^| )(p[xt]?-\d|shadow)/);
+    expect(html).not.toContain('data-slot="card');
+    expect(html).toMatch(/<h2 [^>]*class="text-sm font-semibold"/);
+    // Rows in the panel, split by dividers, not cards inside it.
+    const rows = [...html.matchAll(/<li class="([^"]*)" data-invitation=/g)].map((m) => m[1]);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r).not.toMatch(/(^| )(border|rounded[\w-]*)( |$)/);
   });
 });
 

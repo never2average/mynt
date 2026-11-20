@@ -198,7 +198,12 @@ export default function DashboardPage() {
 
   return (
     <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
+      {/* The invitations panel sits in the page frame's padding, lined up with the dashboard below. */}
+      {invitations.length > 0 && (
+        <div className="px-4 pt-4 lg:px-6 lg:pt-6" data-invitations-frame>
+          <InvitationsBanner invitations={invitations} onAnswer={answerInvitation} />
+        </div>
+      )}
       {/* Builder / Investor: "Dashboard / Builder ▾" in the page header (a breadcrumb with a dropdown). */}
       {modes.length > 1 && shown && (
         <HeaderTabs>

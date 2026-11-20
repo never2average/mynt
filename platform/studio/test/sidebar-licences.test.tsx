@@ -85,7 +85,8 @@ describe("the toggle's separator", () => {
     const sep = container.querySelector("[data-app-top-bar] [data-toggle-separator]")!;
     expect(sep.className).toContain("mx-2");
     expect(sep.previousElementSibling?.getAttribute("data-sidebar")).toBe("trigger");
-    expect(sep.nextElementSibling?.getAttribute("aria-label")).toBe("All apps");
+    expect(sep.nextElementSibling?.getAttribute("aria-label")).toBe("Back to all apps");
+    expect(sep.nextElementSibling?.textContent).toBe("Back");
     vi.unstubAllGlobals();
   });
 });

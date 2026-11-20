@@ -3,7 +3,8 @@
 // Connect your agent (/connect, from the header's plug button beside the theme switcher; /docs comes
 // here too): using Mynt from your own AI agent over MCP. The agent picker and each agent's steps first
 // (components/connect-agent.tsx), then the server address, signing in, what the agent can do, things to
-// try and troubleshooting. The address is this site's origin + /mcp, read in the browser (no host in the code).
+// try and troubleshooting, each a panel in the dashboard's page frame; the header names the page. The
+// address is this site's origin + /mcp, read in the browser (no host in the code).
 import { useEffect, useRef, useState } from "react";
 
 import { AgentInstructions, ConnectAgentPanel, mcpUrl } from "@/components/connect-agent";
@@ -18,11 +19,16 @@ const SECTIONS = [
   { id: "trouble", label: "Troubleshooting" },
 ] as const;
 
+// Each section is a flat outlined panel with the dashboard's section heading (components/dashboard-panels.tsx).
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   return (
-    <section id={id} className="scroll-mt-6 space-y-3" data-docs-section={id}>
-      <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-      {children}
+    <section id={id} className="scroll-mt-6 rounded-lg border" data-docs-section={id} data-panel aria-labelledby={`section-${id}`}>
+      <div className="flex flex-col gap-3 p-4">
+        <h2 id={`section-${id}`} className="text-sm font-semibold">
+          {title}
+        </h2>
+        {children}
+      </div>
     </section>
   );
 }
@@ -99,17 +105,12 @@ export default function ConnectPage() {
 
   return (
     <div ref={scroller} className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-connect-scroll>
-    <div className="mx-auto flex w-full max-w-5xl gap-10 px-4 py-8 md:px-8" data-connect-page data-docs>
-      <article className="min-w-0 flex-1 space-y-10">
+    <div className="flex w-full gap-10 p-4 lg:p-6" data-connect-page data-docs>
+      <article className="flex min-w-0 flex-1 flex-col gap-4 lg:gap-5">
         <OnThisPage active={active} row className="-mx-2 flex gap-1 overflow-x-auto pb-1 text-sm md:hidden" />
-        <header className="space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight">Connect your agent</h1>
-        </header>
 
         <Section id="connect" title="Connect an agent">
-          <div className="rounded-lg border p-4">
-            <ConnectAgentPanel />
-          </div>
+          <ConnectAgentPanel />
         </Section>
 
         <Section id="address" title="Server address">

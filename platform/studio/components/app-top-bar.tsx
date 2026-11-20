@@ -3,8 +3,10 @@
 // An app's top bar, in place of the page header inside an app, as Adorable's workspace top bar
 // lays it out (back to the app's builds or all apps, then the preview's browser controls) with
 // what Lovable-style builders add: the app's name and stage, the preview's width (desktop,
-// tablet, phone) and opening the preview in a new tab. Search and New app stay at the right as
-// icon buttons, with the GitHub and wallet controls (hidden on phones) beside New app, and the theme switcher last. Sticky. Beside the stage is the stage control: Promote to Staging or Production
+// tablet, phone) and opening the preview in a new tab, each icon with a tooltip. The bar matches the
+// page header (SiteHeader): its height, padding and title. A labelled Back; Search and New app stay at
+// the right, labelled as in the page header (icons below md), with the GitHub and wallet controls
+// (hidden on phones) beside New app, and the theme switcher last. Sticky. Beside the stage is the stage control: Promote to Staging or Production
 // (and Move back, for owners and admins), which opens the promotion checks
 // (components/promotion-view.tsx). The studio has no code view yet.
 import { useEffect, useState } from "react";
@@ -28,8 +30,10 @@ import { WalletControl } from "@/components/wallet-control";
 import { NewAppButton } from "@/components/site-header";
 import { SearchTrigger } from "@/components/studio-search";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { STAGE_LABELS, type Stage } from "@/lib/workspaces";
 
@@ -74,26 +78,22 @@ export type AppTopBarProps = {
 export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, previewUrl, iframeRef, device, onDevice, isMobile = false, mobileView = "chat", onShowChat }: AppTopBarProps) {
   const showPreviewControls = Boolean(previewUrl) && (!isMobile || mobileView === "preview");
   return (
-    <header className="sticky top-0 z-20 flex h-11 shrink-0 items-center gap-1 border-b bg-background px-2" data-app-top-bar>
-      <SidebarTrigger className="size-7" />
+    <header className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background px-4 lg:px-6" data-app-top-bar>
+      <SidebarTrigger />
       <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" data-toggle-separator />
       {isMobile && mobileView === "preview" ? (
-        <button type="button" onClick={onShowChat} className="flex items-center gap-1 rounded-md px-1.5 py-1 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground">
-          <ChevronLeftIcon className="size-3.5" /> Chat
-        </button>
+        <Button type="button" variant="ghost" size="sm" onClick={onShowChat} className="shrink-0 px-2 text-muted-foreground" data-show-chat>
+          <ChevronLeftIcon />
+          Chat
+        </Button>
       ) : (
-        <button
-          type="button"
-          onClick={onBack}
-          title={backLabel}
-          aria-label={backLabel}
-          className="flex shrink-0 items-center rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        >
-          <ChevronLeftIcon className="size-4" />
-        </button>
+        <Button type="button" variant="ghost" size="sm" onClick={onBack} title={`Back to ${backLabel.toLowerCase()}`} aria-label={`Back to ${backLabel.toLowerCase()}`} className="shrink-0 px-2 text-muted-foreground" data-app-back>
+          <ChevronLeftIcon />
+          Back
+        </Button>
       )}
       <div className="flex min-w-0 items-center gap-2 pr-2">
-        <h1 className="truncate text-sm font-semibold" data-app-name>
+        <h1 className="truncate text-base font-medium" data-app-name>
           {appName ?? "Loading app…"}
         </h1>
         {stage && (
@@ -111,17 +111,38 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
         <div className="flex-1" />
       )}
 
-      <div className="flex shrink-0 items-center gap-1 pl-1">
-        <SearchTrigger compact />
+      {/* As the page header has them: labelled Search and New app where there's room, icons below md. */}
+      <div className="flex shrink-0 items-center gap-2">
+        <span className="flex md:hidden">
+          <SearchTrigger compact />
+        </span>
+        <span className="hidden md:flex">
+          <SearchTrigger className="md:w-40 lg:w-48 xl:w-64" />
+        </span>
         <DeveloperOnly>
           {!isMobile && <GithubControl />}
           {!isMobile && <WalletControl compact />}
-          <NewAppButton compact />
+          <span className="flex md:hidden">
+            <NewAppButton compact />
+          </span>
+          <span className="hidden md:flex">
+            <NewAppButton />
+          </span>
         </DeveloperOnly>
         <ConnectAgentButton />
         <ThemeSwitcher compact />
       </div>
     </header>
+  );
+}
+
+/** An icon-only preview control's visible tooltip (its aria-label names it too). */
+function Tip({ label, children }: { label: string; children: React.ReactElement }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -178,15 +199,21 @@ export function PreviewControls({
 
   return (
     <div className="flex min-w-0 flex-1 items-center gap-1" data-preview-controls>
-      <button type="button" onClick={() => history("back")} className={iconButton} title="Back" aria-label="Back">
-        <ArrowLeftIcon className="size-3.5" />
-      </button>
-      <button type="button" onClick={() => history("forward")} className={iconButton} title="Forward" aria-label="Forward">
-        <ArrowRightIcon className="size-3.5" />
-      </button>
-      <button type="button" onClick={reload} className={iconButton} title="Reload" aria-label="Reload preview">
-        <RotateCwIcon className="size-3.5" />
-      </button>
+      <Tip label="Back in preview">
+        <button type="button" onClick={() => history("back")} className={iconButton} aria-label="Back in preview">
+          <ArrowLeftIcon className="size-3.5" />
+        </button>
+      </Tip>
+      <Tip label="Forward in preview">
+        <button type="button" onClick={() => history("forward")} className={iconButton} aria-label="Forward in preview">
+          <ArrowRightIcon className="size-3.5" />
+        </button>
+      </Tip>
+      <Tip label="Reload preview">
+        <button type="button" onClick={reload} className={iconButton} aria-label="Reload preview">
+          <RotateCwIcon className="size-3.5" />
+        </button>
+      </Tip>
       <form
         className="ml-1 min-w-0 flex-1"
         onSubmit={(e) => {
@@ -207,26 +234,28 @@ export function PreviewControls({
           {(Object.keys(DEVICES) as Device[]).map((d) => {
             const { label, icon: Icon } = DEVICES[d];
             return (
-              <button
-                key={d}
-                type="button"
-                onClick={() => onDevice(d)}
-                aria-pressed={device === d}
-                aria-label={label}
-                title={label}
-                className={cn("flex size-6 items-center justify-center rounded text-muted-foreground hover:text-foreground", device === d && "bg-muted text-foreground")}
-                data-device={d}
-              >
-                <Icon className="size-3.5" />
-              </button>
+              <Tip key={d} label={`${label} width`}>
+                <button
+                  type="button"
+                  onClick={() => onDevice(d)}
+                  aria-pressed={device === d}
+                  aria-label={label}
+                  className={cn("flex size-6 items-center justify-center rounded text-muted-foreground hover:text-foreground", device === d && "bg-muted text-foreground")}
+                  data-device={d}
+                >
+                  <Icon className="size-3.5" />
+                </button>
+              </Tip>
             );
           })}
         </div>
       )}
       {/* The preview is the owner's capability URL: opened only in their own browser, never sent elsewhere. */}
-      <a href={current} target="_blank" rel="noopener noreferrer" className={iconButton} title="Open preview in a new tab" aria-label="Open preview in a new tab">
-        <ExternalLinkIcon className="size-3.5" />
-      </a>
+      <Tip label="Open preview in a new tab">
+        <a href={current} target="_blank" rel="noopener noreferrer" className={iconButton} aria-label="Open preview in a new tab">
+          <ExternalLinkIcon className="size-3.5" />
+        </a>
+      </Tip>
     </div>
   );
 }
