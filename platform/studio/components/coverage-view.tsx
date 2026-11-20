@@ -17,7 +17,7 @@ import { ComposableMap, Geographies, Geography } from "react-simple-maps"
 import statesTopology from "us-atlas/states-10m.json"
 import countriesTopology from "world-atlas/countries-110m.json"
 
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import {
   allStates,
   countByStatus,
@@ -94,7 +94,8 @@ export function StatePanel({ state }: { state: CoverageState }) {
 
 export const MAP_REGIONS = ["us", "world"] as const
 export type MapRegion = (typeof MAP_REGIONS)[number]
-const REGION_LABELS: Record<MapRegion, string> = { us: "US", world: "World" }
+// The map's region is picked with the Licences toolbar's Region filter (components/licences-view.tsx).
+export const REGION_LABELS: Record<MapRegion, string> = { us: "US", world: "World" }
 
 /** The US on world-atlas (ISO 3166-1 numeric 840), coloured by the best status of its states. */
 export const US_COUNTRY_ID = "840"
@@ -103,25 +104,6 @@ export function usStatus(states: CoverageState[]): CoverageStatus {
   if (states.some((s) => s.status === "unlocked")) return "unlocked"
   if (states.some((s) => s.status === "available")) return "available"
   return "unavailable"
-}
-
-export function RegionSelector({ region, onRegion }: { region: MapRegion; onRegion: (r: MapRegion) => void }) {
-  return (
-    <div className="inline-flex items-center rounded-md border p-0.5" role="group" aria-label="Map">
-      {MAP_REGIONS.map((r) => (
-        <button
-          key={r}
-          type="button"
-          aria-pressed={region === r}
-          onClick={() => onRegion(r)}
-          className={cn("rounded px-3 py-1 text-sm text-muted-foreground hover:text-foreground", region === r && "bg-muted font-medium text-foreground")}
-          data-region={r}
-        >
-          {REGION_LABELS[r]}
-        </button>
-      ))}
-    </div>
-  )
 }
 
 function WorldLegend({ us }: { us: CoverageStatus }) {
@@ -174,16 +156,8 @@ export function CoverageMap({
   const us = usStatus(states)
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 rounded-lg border p-3" data-map-view data-region-shown={region}>
-      <div className="flex flex-wrap items-center gap-3">
-        <RegionSelector region={region} onRegion={onRegion} />
-        {region === "us" ? <CoverageLegend states={states} /> : <WorldLegend us={us} />}
-      </div>
-      {region === "us" && highlight && (
-        <p className="text-xs text-muted-foreground" data-map-filtered>
-          Showing the {highlight.size} {highlight.size === 1 ? "state" : "states"} covered by the licences matching your filters; the rest are dimmed.
-        </p>
-      )}
+    <div className="flex min-h-0 flex-1 flex-col gap-3" data-map-view data-region-shown={region} data-highlighted={highlight ? highlight.size : undefined}>
+      {region === "us" ? <CoverageLegend states={states} /> : <WorldLegend us={us} />}
       {region === "us" ? (
         <div
           className="relative"
@@ -302,12 +276,11 @@ export function CoverageMap({
         </div>
       )}
       <Sheet open={Boolean(opened)} onOpenChange={(o) => !o && setOpen(null)}>
-        <SheetContent>
+        <SheetContent aria-describedby={undefined}>
           {opened && (
             <>
               <SheetHeader>
                 <SheetTitle>{opened.name}</SheetTitle>
-                <SheetDescription>What serves customers in {opened.name}.</SheetDescription>
               </SheetHeader>
               <StatePanel state={opened} />
             </>

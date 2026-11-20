@@ -68,8 +68,8 @@ const day = (s: string) => {
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined
 }
 
-/** A date range on a calendar: click the first day, then the last (two months side by side). */
-export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable = true }: { from: string; to: string; onChange: (from: string, to: string) => void; label?: string; clearable?: boolean }) {
+/** A date range on a calendar: click the first day, then the last (two months side by side). Days after today only with future (for due dates). */
+export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable = true, future = false }: { from: string; to: string; onChange: (from: string, to: string) => void; label?: string; clearable?: boolean; future?: boolean }) {
   const active = Boolean(from || to)
   const text = active ? `${from || "…"} – ${to || "…"}` : null
   const selected: DateRange | undefined = from || to ? { from: day(from), to: day(to) } : undefined
@@ -89,7 +89,7 @@ export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable
           numberOfMonths={2}
           selected={selected}
           defaultMonth={day(from) ?? new Date()}
-          disabled={{ after: new Date() }}
+          disabled={future ? undefined : { after: new Date() }}
           onSelect={(r) => onChange(r?.from ? ymd(r.from) : "", r?.to ? ymd(r.to) : r?.from ? ymd(r.from) : "")}
         />
         {clearable && active && (
