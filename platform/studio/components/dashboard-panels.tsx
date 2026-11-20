@@ -156,7 +156,6 @@ export function AppsByStage({ state }: { state: Loaded<StagesData>; apps?: Dashb
     <Section
       id="apps-by-stage"
       title="Apps by stage"
-      description="Ideas → Staging → Production, through Mynt's checks"
       action={<SectionLink href="/settings?tab=apps">All apps</SectionLink>}
     >
       {state.kind !== "ready" ? (

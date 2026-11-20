@@ -597,8 +597,13 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Kotlin compiles
+        env:
+          # Release downloads signed in with the job's token: anonymous ones from runners get 404s and 429s.
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip
+          for i in 1 2 3 4 5; do gh release download v2.0.21 -R JetBrains/kotlin -p 'kotlin-compiler-2.0.21.zip*' --clobber && break; sleep $((i * 10)); done
+          echo "$(tr -d '[:space:]' < kotlin-compiler-2.0.21.zip.sha256)  kotlin-compiler-2.0.21.zip" | sha256sum -c
+          mv kotlin-compiler-2.0.21.zip kotlin.zip
           unzip -q kotlin.zip
           curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o json.jar https://repo1.maven.org/maven2/org/json/json/20240303/json-20240303.jar
           ./kotlinc/bin/kotlinc sdk-out/kotlin/src/main/kotlin -cp json.jar -d kotlin-sdk.jar

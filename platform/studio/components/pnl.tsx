@@ -278,7 +278,6 @@ export function PnlStatement({ state }: { state: Loaded<Pnl> }) {
         <h2 id="section-pnl-statement" className="text-sm font-semibold">
           Statement
         </h2>
-        <p className="hidden text-xs text-muted-foreground sm:block">What your apps earn, against what building and running them costs</p>
       </div>
       {state.kind !== "ready" ? (
         <PnlNotReady state={state} height="h-24" />

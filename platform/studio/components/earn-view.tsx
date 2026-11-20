@@ -262,10 +262,11 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
         </Button>
       </div>
       <StageFilters f={f} setF={(n) => (setF(n), setPage(0))} pools={pools} stages={["awaiting_approval", "sandbox", "uncleared", "cleared"]} productLines={false} />
-      <p className="text-sm text-muted-foreground" data-sponsor-note>
-        {proposeBlock ??
-          "Pools can be proposed only on a component an approved licence provider sponsors. Each one waits for that sponsor to approve it and name its deposit and withdrawal rails; real commitments also wait for a Mynt admin to clear the offering."}
-      </p>
+      {proposeBlock && (
+        <p className="text-sm text-muted-foreground" data-sponsor-note>
+          {proposeBlock}
+        </p>
+      )}
       {done && <p className="text-sm" role="status">{done}</p>}
       {form?.kind === "propose" && proposable?.length ? (
         <ProposeForm

@@ -194,7 +194,6 @@ export function RepositoriesTab({ state, onConnected }: { state: ReposState; onC
     )
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel="repositories">
-      <p className="text-sm text-muted-foreground">Your own GitHub repositories that builds can push to, in every workspace. Apps&apos; Mynt-managed repositories aren&apos;t listed.</p>
       <ListLayout
         search={query}
         onSearch={setQuery}
