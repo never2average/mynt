@@ -4,15 +4,23 @@
 // Activity (lib/app-panel.ts). Each is live while it's on screen: read when it's opened or the
 // page comes back into view, and every 30 seconds while both are visible (never while the page
 // is hidden), with when it was last read. Every request names this app. Tabs only show
-// information: promoting, moving back and the rest are actions elsewhere (the top bar).
+// information: promoting, moving back and the rest are actions elsewhere (the top bar). They're
+// laid out as the dashboard is (one column, the panel being narrow): key figures in a panel,
+// sections with headings, tables in a bordered box, and a View all row under a preview of a list.
 import { useCallback, useEffect, useRef, useState } from "react"
-import { RefreshCw } from "lucide-react"
+import Link from "next/link"
+import { ChevronRight, RefreshCw } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
+import { KpiRow } from "@/components/charts"
+import { Panel, Section } from "@/components/dashboard-panels"
+import { PnlChart } from "@/components/pnl"
+import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
-  checkLabel,
+  buildStatusLabel,
+  buildTone,
   LIVE_INTERVAL_MS,
   updatedAgo,
   type AppActivity,
@@ -24,7 +32,8 @@ import {
   type NotYet,
   type PanelEvent,
 } from "@/lib/app-panel"
-import { CHECK_LABELS } from "@/lib/promotions"
+import { deltaOf, type Kpi } from "@/lib/dashboard-visual"
+import { CHECK_LABELS, CHECK_TONE } from "@/lib/promotions"
 import { cn } from "@/lib/utils"
 
 const USD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
@@ -83,39 +92,96 @@ function NotYetNote({ reason }: { reason: string }) {
   )
 }
 
-function Events({ events, reason, empty }: { events: PanelEvent[] | null; reason: string | null; empty: string }) {
-  if (events === null) return <p className="text-sm text-muted-foreground">Not available yet. {reason}</p>
-  if (!events.length) return <p className="text-sm text-muted-foreground">{empty}</p>
+const Quiet = ({ children }: { children: React.ReactNode }) => <p className="text-sm text-muted-foreground">{children}</p>
+
+// A section previewing a longer list ends with a row linking to the whole of it, as on the dashboard.
+function ViewAll({ href }: { href: string }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>When</TableHead>
-          <TableHead>What</TableHead>
-          <TableHead>Who</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {events.map((e, i) => (
-          <TableRow key={`${e.at}-${i}`} data-event={e.action}>
-            <TableCell className="tabular-nums">{when(e.at)}</TableCell>
-            <TableCell className="whitespace-normal">
-              <span className="font-mono text-xs">{e.action}</span>
-              {e.details && <div className="max-w-80 truncate text-xs text-muted-foreground" title={e.details}>{e.details}</div>}
-            </TableCell>
-            <TableCell>{e.actor ?? "—"}</TableCell>
+    <div className="flex justify-end border-t pt-3" data-view-all={href}>
+      <Button asChild variant="outline" size="sm">
+        <Link href={href}>
+          View all
+          <ChevronRight />
+        </Link>
+      </Button>
+    </div>
+  )
+}
+
+// A table in its own bordered box; the panel is narrow, so a wide table scrolls inside the box.
+function TableBox({ children }: { children: React.ReactNode }) {
+  return <div className="min-w-0 overflow-auto rounded-lg border">{children}</div>
+}
+
+/** A build's status as the dashboard shows status: a coloured dot and a word. */
+export function BuildStatus({ status }: { status: string }) {
+  const tone = buildTone(status)
+  const label = buildStatusLabel(status)
+  return tone ? <StatusDot tone={tone} label={label} /> : <span className="text-xs text-muted-foreground">{label}</span>
+}
+
+// The most rows a tab previews of a list; the whole of it is a View all away.
+export const PANEL_ROWS = 10
+
+function Events({ events, reason, empty }: { events: PanelEvent[] | null; reason: string | null; empty: string }) {
+  if (events === null) return <Quiet>Not available yet. {reason}</Quiet>
+  if (!events.length) return <Quiet>{empty}</Quiet>
+  return (
+    <TableBox>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>When</TableHead>
+            <TableHead>What</TableHead>
+            <TableHead>Who</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {events.slice(0, PANEL_ROWS).map((e, i) => (
+            <TableRow key={`${e.at}-${i}`} data-event={e.action}>
+              <TableCell className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">{when(e.at)}</TableCell>
+              <TableCell className="whitespace-normal">
+                <span className="font-mono text-xs">{e.action}</span>
+                {e.details && (
+                  <div className="max-w-80 truncate text-xs text-muted-foreground" title={e.details}>
+                    {e.details}
+                  </div>
+                )}
+              </TableCell>
+              <TableCell>{e.actor ?? "—"}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableBox>
   )
 }
 
 // ---- the tabs' content ----
 
+// A statement figure; one Mynt didn't send is unmeasured (null), never 0.
+const figure = (v: Record<string, number | null>, key: string) => v[key] ?? null
+
 export function PnlView({ pnl }: { pnl: AppPnl }) {
-  const measured = pnl.series.map((p) => p.netCents).filter((v): v is number => v !== null)
-  const max = Math.max(1, ...measured.map(Math.abs))
+  const thisLabel = pnl.columns.find((c) => c.key === "this_period")?.label ?? "This period"
+  const kpi = (key: string, label: string, v: Record<string, number | null>, spark: (number | null)[], costLike = false): Kpi => ({
+    key,
+    label,
+    value: figure(v, "this_period"),
+    unit: "money",
+    delta: deltaOf({ this_period: figure(v, "this_period"), last_period: figure(v, "last_period"), year_to_date: figure(v, "year_to_date") }, costLike),
+    spark: pnl.series.length ? spark : null,
+  })
+  const kpis = [
+    kpi("money-moved", "Money moved", pnl.totals.revenue, pnl.series.map((p) => p.revenueCents)),
+    kpi("costs", "Costs", pnl.totals.costs, pnl.series.map((p) => p.costsCents), true),
+    kpi("net", "Net", pnl.totals.net, pnl.series.map((p) => p.netCents)),
+  ]
+  // The app's series in the dashboard chart's shape: an unmeasured period stays null, a gap.
+  const chart = {
+    kind: "ready" as const,
+    data: { series: pnl.series.map((p) => ({ start: p.start, end: "", revenue: p.revenueCents, costs: p.costsCents, netIncome: p.netCents })) },
+  }
   const row = (label: string, values: Record<string, number | null>, strong = false) => (
     <TableRow key={label} className={cn(strong && "font-medium")}>
       <TableCell className="whitespace-normal">{label}</TableCell>
@@ -128,164 +194,198 @@ export function PnlView({ pnl }: { pnl: AppPnl }) {
   )
   return (
     <div className="flex flex-col gap-4" data-pnl>
-      <div>
-        <h4 className="mb-2 text-sm font-medium">Net by period</h4>
-        <div className="flex h-28 items-end gap-2" role="img" aria-label="Net by period">
-          {pnl.series.map((p) => (
-            <div key={p.start} className="flex flex-1 flex-col items-center gap-1" data-period={p.start} title={`${p.start.slice(0, 10)}: ${money(p.netCents)}`}>
-              {p.netCents === null ? (
-                <div className="flex h-full w-full items-end justify-center text-[10px] text-muted-foreground">n/m</div>
-              ) : (
-                <div className={cn("w-full rounded-t", p.netCents < 0 ? "bg-destructive/70" : "bg-primary/70")} style={{ height: `${Math.max(2, (Math.abs(p.netCents) / max) * 100)}%` }} />
-              )}
-              <span className="text-[10px] text-muted-foreground tabular-nums">{p.start.slice(5, 7)}</span>
-            </div>
-          ))}
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">n/m: not measured (Mynt doesn&apos;t record every line in that period, so there&apos;s no total).</p>
-      </div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Line</TableHead>
-            {pnl.columns.map((c) => (
-              <TableHead key={c.key} className="text-right">
-                {c.label}
-              </TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {pnl.revenue.map((l) => row(l.label, l.values))}
-          {row("Revenue", pnl.totals.revenue, true)}
-          {pnl.costs.map((l) => row(l.label, l.values))}
-          {row("Costs", pnl.totals.costs, true)}
-          {row("Net", pnl.totals["net"], true)}
-        </TableBody>
-      </Table>
-      {pnl.unmeasured.length > 0 && (
-        <div className="text-xs text-muted-foreground" data-unmeasured>
-          <p className="font-medium">Not measured</p>
-          <ul className="list-disc pl-4">
-            {pnl.unmeasured.map((u) => (
-              <li key={u.label}>
-                {u.label}: {u.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <Panel id="app-pnl-kpis">
+        <Section id="app-pnl-kpis" title={thisLabel}>
+          <KpiRow kpis={kpis} />
+        </Section>
+      </Panel>
+      <Panel id="app-pnl-charts">
+        <PnlChart
+          state={chart}
+          granularity="month"
+          periods={6}
+          title="Money moved"
+          only="revenue"
+          controls={false}
+          id="app-pnl-revenue"
+          empty="Not measured yet: Mynt hasn't recorded money moved through this app for these periods."
+        />
+        <PnlChart
+          state={chart}
+          granularity="month"
+          periods={6}
+          title="Costs"
+          only="costs"
+          controls={false}
+          id="app-pnl-costs"
+          empty="Not measured yet: Mynt hasn't recorded this app's costs for these periods."
+        />
+      </Panel>
+      <Section id="app-pnl-statement" title="Statement">
+        <TableBox>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Line</TableHead>
+                {pnl.columns.map((c) => (
+                  <TableHead key={c.key} className="text-right">
+                    {c.label}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pnl.revenue.map((l) => row(l.label, l.values))}
+              {row("Revenue", pnl.totals.revenue, true)}
+              {pnl.costs.map((l) => row(l.label, l.values))}
+              {row("Costs", pnl.totals.costs, true)}
+              {row("Net", pnl.totals["net"], true)}
+            </TableBody>
+          </Table>
+        </TableBox>
+        {pnl.unmeasured.length > 0 && (
+          <div className="text-xs text-muted-foreground" data-unmeasured>
+            <p className="font-medium">Not measured</p>
+            <ul className="list-disc pl-4">
+              {pnl.unmeasured.map((u) => (
+                <li key={u.label}>
+                  {u.label}: {u.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </Section>
     </div>
   )
 }
 
 export function LicencesTabView({ data }: { data: AppLicences }) {
-  if (!data.products.length) return <p className="text-sm text-muted-foreground">This app uses no regulated products, so no licences are needed for it.</p>
+  if (!data.products.length) return <Quiet>This app uses no regulated products, so no licences are needed for it.</Quiet>
+  const kpis: Kpi[] = [
+    { key: "states-covered", label: "States covered", value: data.fullyCovered, unit: "count", delta: null, spark: null, note: "Every product" },
+    { key: "partly-covered", label: "Partly covered", value: data.states.length - data.fullyCovered, unit: "count", delta: null, spark: null, note: "Some products" },
+    { key: "products", label: "Products", value: data.products.length, unit: "count", delta: null, spark: null, note: data.products.map((p) => p.name).join(", ") },
+  ]
+  const check = data.productionCheck
   return (
-    <div className="flex flex-col gap-3" data-app-licences>
-      <p className="text-sm">
-        {data.products.map((p) => p.name).join(", ")}: every product covered in <strong className="tabular-nums">{data.fullyCovered}</strong> state(s); some covered in{" "}
-        <strong className="tabular-nums">{data.states.length - data.fullyCovered}</strong> more.
-      </p>
-      {data.productionCheck && (
-        <p className="text-sm" data-production-check={data.productionCheck.status}>
-          <Badge variant="outline">{checkLabel(data.productionCheck)}</Badge> {data.productionCheck.detail}
-          {data.productionCheck.fix?.label ? <span className="text-muted-foreground"> To fix: {data.productionCheck.fix.label}.</span> : null}
-        </p>
+    <div className="flex flex-col gap-4" data-app-licences>
+      <Panel id="app-licences-kpis">
+        <KpiRow kpis={kpis} />
+      </Panel>
+      {check && (
+        <Section id="app-production-check" title="Production check">
+          <div className="flex flex-col gap-1 text-sm" data-production-check={check.status}>
+            <div className="flex min-w-0 items-center gap-2">
+              <StatusDot tone={CHECK_TONE[check.status]} label={CHECK_LABELS[check.status]} />
+              <span className="min-w-0 truncate font-medium">{check.label}</span>
+            </div>
+            {check.detail && <p className="text-muted-foreground">{check.detail}</p>}
+            {check.fix?.label ? <p className="text-muted-foreground">To fix: {check.fix.label}.</p> : null}
+          </div>
+        </Section>
       )}
-      {data.states.length ? (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>State</TableHead>
-              <TableHead>Covered</TableHead>
-              <TableHead>Not covered</TableHead>
-              <TableHead>Licences</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {data.states.map((s) => (
-              <TableRow key={s.code} data-state={s.code} data-covered={s.missing.length ? "partly" : "fully"}>
-                <TableCell>{s.name}</TableCell>
-                <TableCell className="whitespace-normal">{s.covered.join(", ")}</TableCell>
-                <TableCell className="whitespace-normal text-muted-foreground">{s.missing.join(", ") || "—"}</TableCell>
-                <TableCell className="whitespace-normal text-xs">
-                  {s.licences.map((l, i) => (
-                    <div key={i}>
-                      {[l.type, l.regulator, l.number].filter(Boolean).join(" · ")}
-                      {l.status ? ` (${l.status})` : ""}
-                    </div>
-                  ))}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      ) : (
-        <p className="text-sm text-muted-foreground">None of this app&apos;s products is covered by a licence in force in any state yet.</p>
-      )}
+      <Section id="app-licences-states" title="Coverage by state">
+        {data.states.length ? (
+          <TableBox>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>State</TableHead>
+                  <TableHead>Covered</TableHead>
+                  <TableHead>Not covered</TableHead>
+                  <TableHead>Licences</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.states.map((s) => (
+                  <TableRow key={s.code} data-state={s.code} data-covered={s.missing.length ? "partly" : "fully"}>
+                    <TableCell>{s.name}</TableCell>
+                    <TableCell className="whitespace-normal">{s.covered.join(", ")}</TableCell>
+                    <TableCell className="whitespace-normal text-muted-foreground">{s.missing.join(", ") || "—"}</TableCell>
+                    <TableCell className="whitespace-normal text-xs">
+                      {s.licences.map((l, i) => (
+                        <div key={i}>
+                          {[l.type, l.regulator, l.number].filter(Boolean).join(" · ")}
+                          {l.status ? ` (${l.status})` : ""}
+                        </div>
+                      ))}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableBox>
+        ) : (
+          <Quiet>None of this app&apos;s products is covered by a licence in force in any state yet.</Quiet>
+        )}
+        <ViewAll href="/licences" />
+      </Section>
     </div>
   )
 }
 
 export function SecurityView({ data }: { data: AppSecurity }) {
   return (
-    <div className="flex flex-col gap-4" data-app-security>
-      <section>
-        <h4 className="mb-2 text-sm font-medium">Build checks</h4>
+    <div className="flex flex-col gap-5" data-app-security>
+      <Section id="app-build-checks" title="Build checks">
         {data.checks.length ? (
-          <ul className="flex flex-col gap-1 text-sm">
+          <ul className="flex flex-col divide-y text-sm">
             {data.checks.map((c) => (
-              <li key={c.id} data-check={c.id} data-status={c.status}>
-                <Badge variant="outline">{CHECK_LABELS[c.status]}</Badge> {c.label}
-                {c.detail && <span className="text-muted-foreground"> — {c.detail}</span>}
+              <li key={c.id} className="flex min-w-0 flex-col gap-0.5 py-1.5" data-check={c.id} data-status={c.status}>
+                <div className="flex min-w-0 items-center gap-2">
+                  <StatusDot tone={CHECK_TONE[c.status]} label={CHECK_LABELS[c.status]} />
+                  <span className="min-w-0 truncate">{c.label}</span>
+                </div>
+                {c.detail && <span className="text-xs text-muted-foreground">{c.detail}</span>}
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-sm text-muted-foreground">{data.checksReason ?? "No build checks to show."}</p>
+          <Quiet>{data.checksReason ?? "No build checks to show."}</Quiet>
         )}
-      </section>
-      <section>
-        <h4 className="mb-2 text-sm font-medium">Security events</h4>
+      </Section>
+      <Section id="app-security-events" title="Security events">
         <Events events={data.events} reason={data.eventsReason} empty="No security events for this app." />
-      </section>
+        <ViewAll href="/audits?tab=security" />
+      </Section>
     </div>
   )
 }
 
 export function SdkView({ data }: { data: AppSdk }) {
-  if (!data.products.length) return <p className="text-sm text-muted-foreground">This app uses no products yet, so there&apos;s no SDK reference for it.</p>
+  if (!data.products.length) return <Quiet>This app uses no products yet, so there&apos;s no SDK reference for it.</Quiet>
   return (
     <div className="flex flex-col gap-4" data-app-sdk>
       {data.products.map((p) => (
-        <section key={p.productId} className="rounded-lg border p-3 text-sm" data-sdk-product={p.productId}>
-          <h4 className="font-medium">
-            {p.name} {p.version && <span className="text-xs text-muted-foreground">v{p.version}</span>}
-          </h4>
-          {p.error ? (
-            <p className="text-muted-foreground">{p.error}</p>
-          ) : (
-            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-              <dt className="text-muted-foreground">Action</dt>
-              <dd>{p.action ?? "—"}</dd>
-              <dt className="text-muted-foreground">Access</dt>
-              <dd>{p.access ?? "—"}</dd>
-              <dt className="text-muted-foreground">Permitted</dt>
-              <dd className="font-mono text-xs">{p.permitted.join(", ") || "—"}</dd>
-              <dt className="text-muted-foreground">Fields</dt>
-              <dd className="font-mono text-xs break-all">{p.fields.join(", ") || "—"}</dd>
-              <dt className="text-muted-foreground">Contract</dt>
-              <dd>{p.hasContract ? "Published (v2 developer contract)" : "Not published for this product"}</dd>
-              {p.handOff && (
-                <>
-                  <dt className="text-muted-foreground">Hand-off</dt>
-                  <dd>{p.handOff}</dd>
-                </>
+        <Panel key={p.productId} id={`sdk-${p.productId}`}>
+          <div data-sdk-product={p.productId}>
+            <Section id={`sdk-${p.productId}`} title={p.name} action={p.version ? <span className="text-xs text-muted-foreground">v{p.version}</span> : undefined}>
+              {p.error ? (
+                <Quiet>{p.error}</Quiet>
+              ) : (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                  <dt className="text-muted-foreground">Action</dt>
+                  <dd>{p.action ?? "—"}</dd>
+                  <dt className="text-muted-foreground">Access</dt>
+                  <dd>{p.access ?? "—"}</dd>
+                  <dt className="text-muted-foreground">Permitted</dt>
+                  <dd className="font-mono text-xs">{p.permitted.join(", ") || "—"}</dd>
+                  <dt className="text-muted-foreground">Fields</dt>
+                  <dd className="font-mono text-xs break-all">{p.fields.join(", ") || "—"}</dd>
+                  <dt className="text-muted-foreground">Contract</dt>
+                  <dd>{p.hasContract ? "Published (v2 developer contract)" : "Not published for this product"}</dd>
+                  {p.handOff && (
+                    <>
+                      <dt className="text-muted-foreground">Hand-off</dt>
+                      <dd>{p.handOff}</dd>
+                    </>
+                  )}
+                </dl>
               )}
-            </dl>
-          )}
-        </section>
+            </Section>
+          </div>
+        </Panel>
       ))}
     </div>
   )
@@ -293,40 +393,44 @@ export function SdkView({ data }: { data: AppSdk }) {
 
 export function ActivityView({ data }: { data: AppActivity }) {
   return (
-    <div className="flex flex-col gap-4" data-app-activity>
-      <section>
-        <h4 className="mb-2 text-sm font-medium">Builds</h4>
+    <div className="flex flex-col gap-5" data-app-activity>
+      <Section id="app-builds" title="Builds">
         {data.builds === null ? (
-          <p className="text-sm text-muted-foreground">Not available yet.</p>
+          <Quiet>Not available yet.</Quiet>
         ) : data.builds.length ? (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>When</TableHead>
-                <TableHead>Goal</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.builds.map((b) => (
-                <TableRow key={b.id} data-build={b.id}>
-                  <TableCell className="tabular-nums">{when(b.at)}</TableCell>
-                  <TableCell className="max-w-72 truncate" title={b.goal ?? undefined}>
-                    {b.goal ?? "—"}
-                  </TableCell>
-                  <TableCell>{b.status}</TableCell>
+          <TableBox>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>When</TableHead>
+                  <TableHead>Goal</TableHead>
+                  <TableHead>Status</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {data.builds.slice(0, PANEL_ROWS).map((b) => (
+                  <TableRow key={b.id} data-build={b.id}>
+                    <TableCell className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">{when(b.at)}</TableCell>
+                    <TableCell className="max-w-72 truncate" title={b.goal ?? undefined}>
+                      {b.goal ?? "—"}
+                    </TableCell>
+                    <TableCell>
+                      <BuildStatus status={b.status} />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableBox>
         ) : (
-          <p className="text-sm text-muted-foreground">No builds yet.</p>
+          <Quiet>No builds yet.</Quiet>
         )}
-      </section>
-      <section>
-        <h4 className="mb-2 text-sm font-medium">Recent events</h4>
+        <ViewAll href="/builds" />
+      </Section>
+      <Section id="app-recent-events" title="Recent events">
         <Events events={data.events} reason={data.eventsReason} empty="No events for this app yet." />
-      </section>
+        <ViewAll href="/audits?tab=workspace" />
+      </Section>
     </div>
   )
 }
@@ -358,7 +462,13 @@ export function AppInfoTab({ appId, tab, active }: { appId: string; tab: InfoTab
         </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">
-        {state.kind === "loading" && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {state.kind === "loading" && (
+          <div className="flex flex-col gap-4" data-loading>
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-48 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </div>
+        )}
         {state.kind === "error" && (
           <p role="alert" className="text-sm text-destructive">
             {state.message}

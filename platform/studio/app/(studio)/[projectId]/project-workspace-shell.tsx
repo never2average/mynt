@@ -264,8 +264,7 @@ function PreviewPlaceholder() {
       </div>
 
       <p className="px-8 pt-6 text-center text-sm text-muted-foreground/60">
-        No preview yet. A build&apos;s preview shows here once Mynt&apos;s
-        coding agent has one running.
+        No preview yet
       </p>
       <div className="flex-1 overflow-hidden p-8">
         <div className="mx-auto max-w-md space-y-8">
