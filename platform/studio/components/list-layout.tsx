@@ -55,19 +55,26 @@ export function ListLayout({
         {cta}
       </div>
       <div className="min-h-64 flex-1 overflow-auto rounded-lg border">{children}</div>
-      <div className="flex items-center justify-end gap-2 text-sm">
-        <span className="text-muted-foreground">
-          {total} {total === 1 ? "row" : "rows"} · Page {page} of {pages}
-        </span>
-        <Button size="sm" variant="outline" onClick={() => onPage(page - 1)} disabled={page <= 1}>
-          <ChevronLeft />
-          Previous
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => onPage(page + 1)} disabled={page >= pages}>
-          Next
-          <ChevronRight />
-        </Button>
-      </div>
+      <ListPager page={page} pages={pages} total={total} onPage={onPage} />
+    </div>
+  )
+}
+
+/** The list's pager, under its table: "N rows · Page x of y", then Previous and Next. */
+export function ListPager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (page: number) => void }) {
+  return (
+    <div className="flex items-center justify-end gap-2 text-sm" data-pager>
+      <span className="text-muted-foreground">
+        {total} {total === 1 ? "row" : "rows"} · Page {page} of {pages}
+      </span>
+      <Button size="sm" variant="outline" onClick={() => onPage(page - 1)} disabled={page <= 1}>
+        <ChevronLeft />
+        Previous
+      </Button>
+      <Button size="sm" variant="outline" onClick={() => onPage(page + 1)} disabled={page >= pages}>
+        Next
+        <ChevronRight />
+      </Button>
     </div>
   )
 }

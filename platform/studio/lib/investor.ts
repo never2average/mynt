@@ -7,6 +7,7 @@
 import type { Granularity, Range } from "./pnl";
 import type { LiquidityAccess, PoolHealth, PoolRow, Position, Withdrawal } from "./liquidity";
 import { WAITING } from "./liquidity";
+import { usdcBaseUnitsToCents } from "./wallets";
 
 // ---- which views the user's roles allow ----
 
@@ -55,7 +56,9 @@ export type Source = "devnet" | "rails";
 export const SOURCE_LABELS: Record<Source, string> = { devnet: "Devnet", rails: "Rails" };
 
 export type Totals = { committed: number | null; settled: number | null; queued: number | null; paid: number | null };
-export type Portfolio = { all: Totals; bySource: Partial<Record<Source, Totals>>; returns: null };
+// returns: what the portfolio was paid beyond its principal: on chain, the wind-down surplus claimed; rails pools can
+// pay back no more than went in, so theirs is a real 0. Null when an on-chain position's surplus is unknown.
+export type Portfolio = { all: Totals; bySource: Partial<Record<Source, Totals>>; returns: number | null };
 
 export type DepositStatus = "in_review" | "locked" | "available" | "queued" | "rejected" | "committed" | "exited";
 export type DepositRow = {
@@ -107,7 +110,9 @@ export function portfolioOf(positions: Position[]): Portfolio {
     bySource[source] = add(bySource[source] ?? ZERO, p.onChain ? onChainTotals(p) : railsTotals(p));
   }
   const all = Object.values(bySource).reduce<Totals>((t, s) => add(t, s), ZERO);
-  return { all, bySource, returns: null };
+  const surplus = positions.filter((p) => p.onChain).map((p) => (p.chain && p.chain.surplusClaimed !== null ? usdcBaseUnitsToCents(p.chain.surplusClaimed) : null));
+  const returns = surplus.some((x) => x === null) ? null : surplus.reduce<number>((n, x) => n + (x as number), 0);
+  return { all, bySource, returns };
 }
 
 export function depositRows(positions: Position[], pools: PoolRow[], now: number): DepositRow[] {
@@ -187,6 +192,8 @@ function periodStarts(granularity: Granularity, periods: Range, now: number): Da
  */
 export function flowSeries(positions: Position[], granularity: Granularity, periods: Range, now: number): { series: FlowPeriod[]; railsUnmeasured: boolean } {
   const onChain = positions.filter((p) => p.onChain);
+  // Rails positions whose movements came with their settlement dates.
+  const rails = positions.filter((p) => !p.onChain && Array.isArray(p.entries));
   const starts = periodStarts(granularity, periods, now);
   const ends = starts.map((s, i) => (i + 1 < starts.length ? starts[i + 1] : granularity === "month" ? new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 1, 1)) : new Date(s.getTime() + 7 * 86_400_000)));
   const series = starts.map((s, i): FlowPeriod => {
@@ -196,14 +203,16 @@ export function flowSeries(positions: Position[], granularity: Granularity, peri
       const t = iso ? Date.parse(iso) : NaN;
       return !Number.isNaN(t) && t >= from && t < to;
     };
-    if (!onChain.length) return { start: s.toISOString().slice(0, 10), end: ends[i].toISOString().slice(0, 10), revenue: null, costs: null, netIncome: null };
-    const ins = onChain.flatMap((p) => p.deposits.filter((d) => !d.rejected && within(d.settledAt)).map((d) => d.amountCents));
-    const outs = onChain.flatMap((p) => p.requests.filter((r) => within(r.payableAt)).map((r) => r.paidCents));
+    if (!onChain.length && !rails.length) return { start: s.toISOString().slice(0, 10), end: ends[i].toISOString().slice(0, 10), revenue: null, costs: null, netIncome: null };
+    const settledIn = (p: Position, kind: string) => (p.entries ?? []).filter((e) => e.kind === kind && within(e.settledAt)).map((e) => e.settledCents);
+    const ins = [...onChain.flatMap((p) => p.deposits.filter((d) => !d.rejected && within(d.settledAt)).map((d) => d.amountCents)), ...rails.flatMap((p) => settledIn(p, "deposit"))];
+    const outs = [...onChain.flatMap((p) => p.requests.filter((r) => within(r.payableAt)).map((r) => r.paidCents)), ...rails.flatMap((p) => settledIn(p, "withdrawal"))];
     const capitalIn = sum(ins);
     const paidOut = sum(outs);
     return { start: s.toISOString().slice(0, 10), end: ends[i].toISOString().slice(0, 10), revenue: capitalIn, costs: paidOut, netIncome: capitalIn === null || paidOut === null ? null : capitalIn - paidOut };
   });
-  return { series, railsUnmeasured: positions.some((p) => !p.onChain) };
+  // Rails positions sent without their dated movements stay out of the chart, and the chart says so.
+  return { series, railsUnmeasured: positions.some((p) => !p.onChain && !Array.isArray(p.entries)) };
 }
 
 // Needs attention items about investing: pools, positions, withdrawals or the treasury.

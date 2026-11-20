@@ -47,11 +47,6 @@ function ClassTab({ auditClass, members, apps, initialAction }: { auditClass: Ex
     return <NotReady state={state as Exclude<typeof state, { kind: "ready" }>} what={auditClass === "workspace" ? "The audit trail" : "This tab"} />;
   return (
     <>
-      {state.kind === "ready" && !state.data.classes && (
-        <p className="text-xs text-muted-foreground" data-unclassified>
-          Mynt doesn&apos;t sort its records into classes yet, so this is the whole audit trail.
-        </p>
-      )}
       <AuditsView
         auditClass={auditClass}
         rows={state.kind === "ready" ? state.data.rows : []}
@@ -114,8 +109,8 @@ export default function AuditsPage() {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 w-full flex-1 flex-col gap-3 p-4 lg:p-6">
+    <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div className="flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6">
         <AuditTabs tab={tab} onTab={onTab} />
         <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel={tab}>
           {tab === "obligations" ? (

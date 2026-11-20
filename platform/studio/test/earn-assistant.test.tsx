@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { useChat } from "@ai-sdk/react";
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { DraftsTab, EarnWorkspace, PoolsTab, type EarnStatus } from "@/components/earn-assistant";
-import type { LiquidityActions } from "@/components/earn-view";
+import { EarnTable, type LiquidityActions } from "@/components/earn-view";
 import { panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn";
 import { fromPools, fromPositions, type LiquidityData } from "@/lib/liquidity";
 
@@ -152,6 +152,9 @@ describe("Earn in the chat workspace", () => {
     expect(document.querySelector('[data-panel-tab="drafts"] [data-badge]')?.textContent).toBe("1");
     expect(calls).toHaveLength(0);
     expect(document.querySelector('[data-draft="commit"]')!.textContent).toContain("Nothing has been sent");
+    // A panel per draft, not a card.
+    expect(document.querySelector('[data-draft="commit"] [data-panel]')).toBeTruthy();
+    expect(document.querySelector('[data-draft="commit"] [data-slot="card"]')).toBeNull();
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Commit capital" })));
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ kind: "commit", input: { pool_id: POOL, amount_cents: 5_000_000, state: "us-ny" } });
@@ -173,16 +176,33 @@ describe("Earn in the chat workspace", () => {
 describe("the Pools and Drafts tabs", () => {
   it("show the pools the conversation matched, lock-in and notice apart, and positions", () => {
     const { poolIds } = panelFrom([{ role: "assistant", parts: [{ type: "data-earn-pools", data: { pool_ids: [UNCLEARED] } }] }]);
-    render(<PoolsTab data={lpData} poolIds={poolIds} />);
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(1);
-    const card = document.querySelector(`[data-pool-card="${UNCLEARED}"]`)!;
-    for (const s of ["Uncleared float", "credit", "Sandbox only — not yet cleared for real commitments", "$1,000.00 – $100,000.00 per firm", "Not available yet"]) expect(card.textContent).toContain(s);
-    expect(card.querySelector("[data-lock-in]")!.textContent).toBe("Not set");
-    expect(card.querySelector("[data-notice]")!.textContent).toBe("90 days");
-    expect(document.querySelector("[data-earn-positions]")!.textContent).toContain("$5,000.00 settled · $2,000.00 available");
+    let viewed = 0;
+    render(<PoolsTab data={lpData} poolIds={poolIds} onViewPositions={() => viewed++} />);
+    // A table under a section (it was a grid of cards; the card-only Yield line went with them).
+    expect(document.querySelector("[data-card], [data-slot='card']")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Matching pools" })).toBeTruthy();
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(1);
+    const row = document.querySelector(`tr[data-pool-row="${UNCLEARED}"]`)!;
+    for (const s of ["Uncleared float", "Sandbox only — not yet cleared for real commitments", "$1,000.00 – $100,000.00 per firm"]) expect(row.textContent).toContain(s);
+    expect(row.querySelector("[data-product]")!.textContent).toBe("card-credit · credit");
+    expect(row.querySelector("[data-lock-in]")!.textContent).toBe("Not set");
+    expect(row.querySelector("[data-notice]")!.textContent).toBe("90 days");
+    // Your positions: a preview table ending with View all, which opens the My positions tab.
+    const preview = document.querySelector(`[data-earn-positions] [data-position-preview="${POOL}"]`)!;
+    expect(preview.querySelector("[data-settled]")!.textContent).toBe("$5,000.00");
+    expect(preview.querySelector("[data-available]")!.textContent).toBe("$2,000.00");
+    fireEvent.click(screen.getByRole("button", { name: "View all" }));
+    expect(viewed).toBe(1);
     cleanup();
     render(<PoolsTab data={lpData} poolIds={null} />);
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
+    expect(document.querySelector("[data-earn-positions] [data-view-all] a")!.getAttribute("href")).toBe("/earn?tab=my-positions");
+  });
+
+  it("shows at most five positions in the Pools tab's preview", () => {
+    const many = fromPositions(Array.from({ length: 7 }, (_, i) => ({ pool_id: `pool-${i}`, name: `Pool ${i}`, product_id: "card-credit", balance_cents: 100, available_to_withdraw_cents: 0 })));
+    render(<PoolsTab data={{ ...lpData, provider: { ...lpData.provider!, positions: many } }} poolIds={null} />);
+    expect(document.querySelectorAll("[data-position-preview]")).toHaveLength(5);
   });
 
   it("a draft the page's terms refuse can't be confirmed (an uncleared pool, over the limit)", async () => {
@@ -213,5 +233,26 @@ describe("the Pools and Drafts tabs", () => {
     expect(calls).toHaveLength(0);
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Request withdrawal" })));
     expect(calls).toEqual([{ kind: "withdraw", input: { pool_id: POOL, amount_cents: 200_000, idempotency_key: expect.any(String) } }]);
+  });
+});
+
+describe("the table tabs' forms", () => {
+  it("open in a sheet from their labelled CTA or row button, not inline in the tab", async () => {
+    render(<EarnTable tab="opportunities" data={lpData} actions={actions().a} />);
+    expect(document.querySelector('[data-form="commit"]')).toBeNull();
+    await act(async () => void fireEvent.click(document.querySelector(`[data-commit="${POOL}"]`)!));
+    const sheet = document.querySelector('[data-sheet="commit"]')!;
+    expect(sheet.querySelector('[data-form="commit"]')).toBeTruthy();
+    expect(sheet.textContent).toContain("Mynt never holds your funds");
+    expect((sheet.querySelector('select[aria-label="Pool"]') as HTMLSelectElement).value).toBe(POOL);
+    cleanup();
+    render(<EarnTable tab="my-positions" data={lpData} actions={actions().a} />);
+    await act(async () => void fireEvent.click(document.querySelector('[data-cta="withdraw"]')!));
+    expect(document.querySelector('[data-sheet="withdraw"] [data-form="withdraw"] [data-withdraw-terms]')).toBeTruthy();
+    cleanup();
+    const proposable = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "s1", sponsorName: "Harbor Bank" }];
+    render(<EarnTable tab="my-pools" data={{ ...builderData, builder: { ...builderData.builder!, proposable } }} actions={actions().a} />);
+    await act(async () => void fireEvent.click(document.querySelector('[data-cta="propose"]')!));
+    expect(document.querySelector('[data-sheet="propose"] [data-form="propose"]')!.textContent).toContain("Harbor Bank must approve it");
   });
 });

@@ -153,7 +153,7 @@ describe("Licences: only the table, the map in its place", () => {
     expect(html).not.toContain('data-slot="card"');
     expect(html).toContain("data-table-view");
     expect(html).toContain("MT-1");
-    expect(html).toMatch(/aria-label="Map view"/);
+    expect(html).toMatch(/data-view-toggle="map"[^>]*>[\s\S]*?Map<\/button>/);
   });
 
   it("the map view replaces the table in the same place; ?tab=coverage and ?view=map open it", () => {

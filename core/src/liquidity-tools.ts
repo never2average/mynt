@@ -101,7 +101,7 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
   // The firm's movements in a pool, for tracing a position line by line.
   const entriesOf = async (firm: string, poolId: string, sandbox: boolean) => {
     const { rows } = await store.db.query(`SELECT id, kind, amount_cents, amount_settled_cents, movement_id, ledger_state, movement_status, settled_at, refusal, claimed_at FROM ${T}.pool_movement_states WHERE lp_entity_id = $1 AND pool_id = $2 ORDER BY claimed_at, id`, [firm, poolId]);
-    return rows.map((r) => ({ sandbox, kind: r.kind as string, amount_cents: Number(r.amount_cents), settled_amount_cents: r.ledger_state === "settled" ? Number(r.amount_settled_cents) : null, movement_id: (r.movement_id as string | null) ?? null, ledger_state: r.ledger_state as string, movement_status: (r.movement_status as string | null) ?? null, refusal: (r.refusal as string | null) ?? null }));
+    return rows.map((r) => ({ sandbox, kind: r.kind as string, amount_cents: Number(r.amount_cents), settled_amount_cents: r.ledger_state === "settled" ? Number(r.amount_settled_cents) : null, movement_id: (r.movement_id as string | null) ?? null, ledger_state: r.ledger_state as string, movement_status: (r.movement_status as string | null) ?? null, refusal: (r.refusal as string | null) ?? null, settled_at: r.settled_at == null ? null : new Date(r.settled_at as string).toISOString(), claimed_at: r.claimed_at == null ? null : new Date(r.claimed_at as string).toISOString() }));
   };
 
   // A firm may see a pool's terms if it's approved and either sandbox or cleared, or if the firm is already in it.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { AuditsView, AuditTabs, CLASS_COLUMNS, NO_AUDIT_FILTERS, ObligationsView } from "@/components/audits-view";
+import { AuditsView, AuditTabs, CLASS_COLUMNS, dueWithin, NO_AUDIT_FILTERS, obligationKpis, ObligationsView } from "@/components/audits-view";
 import {
   AUDIT_CLASS_LABELS,
   auditClassOf,
@@ -69,7 +69,7 @@ describe("audit classes", () => {
     for (const t of ["Secret written to logs", "Cards", "Export CSV", "Search the audit trail", "Page 1"]) expect(html).toContain(t);
     // One toolbar row: the search, every filter, then Export CSV; no separate filters row.
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("<table"));
-    const order = ['aria-label="Search the audit trail"', 'data-filter="App"', 'data-filter="Kind"', 'data-filter="Severity"', 'data-filter="Status"', 'data-filter="Member"', 'data-filter="Dates"', "data-export"];
+    const order = ['aria-label="Search the audit trail"', 'data-filter="App"', 'data-filter="Kind"', 'data-filter="Severity"', 'data-filter="Status"', 'data-filter="Member"', 'data-filter="Date range"', "data-export"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
@@ -106,7 +106,7 @@ describe("audit classes", () => {
     expect(html).toMatch(/data-status="overdue"[\s\S]*?data-tone="red"[\s\S]*?Overdue/);
     for (const t of ["Filed 2026-10-10", "No evidence recorded", "Cards, Savings", "Money transmitter", "Export CSV", "<th", "Reason"]) expect(html).toContain(t);
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("<table"));
-    const order = ['aria-label="Search obligations"', 'data-filter="Partner"', 'data-filter="Regulator"', 'data-filter="Status"', 'data-filter="Product"', "data-export"];
+    const order = ['aria-label="Search obligations"', 'data-filter="Partner"', 'data-filter="Regulator"', 'data-filter="Status"', 'data-filter="Product"', 'data-filter="Date range"', "data-export"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
@@ -121,5 +121,42 @@ describe("audit classes", () => {
     expect(f({ partner: "e1", query: "audit" })).toEqual(["CA-MT-AUD"]);
     expect(f({ partner: "e2" })).toEqual(["TX-1", "obligation-3"]);
     expect(renderToStaticMarkup(<ObligationsView obligations={[]} />)).toContain("No obligations yet");
+  });
+
+  it("Licence obligations: key figures first, from the obligations loaded; Due soon reads Not measured when none has a due date", () => {
+    const now = Date.parse("2026-11-13T00:00:00Z");
+    // The fixture carries no due dates: Due soon isn't measured, never 0.
+    expect(obligationKpis(obligations, now).map((k) => [k.label, k.value])).toEqual([
+      ["Obligations", obligations.length],
+      ["Met", obligations.filter((o) => o.status === "met").length],
+      ["Due soon", null],
+      ["Overdue", 1],
+    ]);
+    const html = renderToStaticMarkup(<ObligationsView obligations={obligations} now={now} />);
+    expect(html.indexOf("data-kpis")).toBeGreaterThan(-1);
+    expect(html.indexOf("data-kpis")).toBeLessThan(html.indexOf("data-toolbar"));
+    expect(html).toMatch(/data-kpi="due-soon"[\s\S]*?data-measured="false"[^>]*>Not measured</);
+    const dated = fromObligations({
+      obligations: [
+        { obligation_id: "A", title: "Due in a week", status: "at_risk", due_at: "2026-11-20" },
+        { obligation_id: "B", title: "Met, due in a week", status: "met", due_at: "2026-11-20" },
+        { obligation_id: "C", title: "Due next year", status: "at_risk", due_at: "2027-06-01" },
+        { obligation_id: "D", title: "No due date", status: "unknown" },
+      ],
+    });
+    expect(obligationKpis(dated, now).find((k) => k.key === "due-soon")?.value).toBe(1);
+    // The Date range filter is on the due date; one without a due date is out once a range is set.
+    expect(dated.filter((o) => dueWithin(o, "2026-11-01", "2026-12-31")).map((o) => o.obligationId)).toEqual(["A", "B"]);
+    expect(dated.filter((o) => dueWithin(o, "", "")).map((o) => o.obligationId)).toEqual(["A", "B", "C", "D"]);
+  });
+
+  it("Licence obligations: paged 25 rows at a time, with short search placeholders on both tables", () => {
+    const many = fromObligations({ obligations: Array.from({ length: 30 }, (_, i) => ({ obligation_id: `O-${i}`, title: `Report ${i}`, status: "met" })) });
+    const html = renderToStaticMarkup(<ObligationsView obligations={many} />);
+    const body = /<tbody[^>]*>([\s\S]*?)<\/tbody>/.exec(html)![1];
+    expect(body.match(/<tr/g)).toHaveLength(25);
+    expect(html).toContain("30 rows · Page 1 of 2");
+    expect(html).toContain('placeholder="Search obligations"');
+    expect(view("security")).toContain('placeholder="Search records"');
   });
 });

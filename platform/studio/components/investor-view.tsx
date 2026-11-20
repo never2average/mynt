@@ -68,7 +68,7 @@ function PortfolioKpis({ positions, flows }: { positions: NonNullable<LiquidityD
     { key: "queued", label: "Queued for withdrawal", value: p.all.queued, unit: "money", delta: null, spark: null },
     { key: "paid", label: "Paid out", value: p.all.paid, unit: "money", delta: null, spark: running((f) => f.costs) },
     { key: "pools", label: "Pools held", value: extra.pools, unit: "count", delta: null, spark: null },
-    { key: "returns", label: "Returns", value: null, unit: "money", delta: null, spark: null, note: "Mynt doesn't measure yield" },
+    { key: "returns", label: "Returns", value: p.returns, unit: "money", delta: null, spark: null, note: p.returns === null ? "A surplus claim's amount isn't known" : "Wind-down surplus claimed; rails pools pay none" },
   ]
   return (
     <>

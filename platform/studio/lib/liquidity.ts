@@ -284,7 +284,20 @@ export type Position = {
   // On-chain rows only (list_my_positions' deposits[] and requests[]); [] for rails rows.
   deposits: OnChainDeposit[];
   requests: OnChainRequest[];
+  // Rails rows: each movement with when it settled (list_my_positions with include_entries); null when Mynt sent no
+  // entries, so the position's history is unknown. [] for on-chain rows (their history is deposits/requests).
+  entries: RailsEntry[] | null;
 };
+export type RailsEntry = { kind: string; settledCents: number | null; settledAt: string | null };
+
+function railsEntries(v: unknown): RailsEntry[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.filter(isObj).map((e) => ({
+    kind: str(e.kind) ?? "",
+    settledCents: typeof e.settled_amount_cents === "number" && Number.isSafeInteger(e.settled_amount_cents) ? e.settled_amount_cents : null,
+    settledAt: str(e.settled_at) ?? null,
+  }));
+}
 
 // USDC has 6 decimals: a cent is 10,000 base units. Amounts on chain are base units as strings.
 const baseToCents = (v: unknown): number | null => {
@@ -363,6 +376,7 @@ export function fromPositions(reply: unknown): Position[] {
         deposit: str(p.deposit) ?? str(p.deposit_address),
         deposits: p.source === "on-chain" ? onChainDeposits(p.deposits) : [],
         requests: p.source === "on-chain" ? onChainRequests(p.requests) : [],
+        entries: p.source === "on-chain" ? [] : railsEntries(p.entries),
       };
     })
     .filter((p) => p.poolId);
