@@ -13,30 +13,29 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
 import type { UIMessage } from "ai"
-import { Loader2 } from "lucide-react"
+import { ChevronRight, Loader2 } from "lucide-react"
+import Link from "next/link"
 import { useMemo, useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
+import { Panel, Section } from "@/components/dashboard-panels"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
 import { commitOutcome, EarnTable, Money, newIdempotencyKey, StageBadge, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Table, TableBody, TableHead, TableHeader, TableCell, TableRow } from "@/components/ui/table"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
 import { shortAddress } from "@/lib/linked-accounts"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import {
   commitRefusal,
   earnTabFromQuery,
-  healthText,
   limitsText,
   lockInText,
   noticeText,
-  percentOfBps,
-  reserveText,
   stageOf,
   statusText,
   TAB_LABELS,
@@ -103,19 +102,14 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
 
 // ---- the panel ----
 
-export function PoolCard({ pool }: { pool: PoolRow }) {
+// One pool as a row of the Pools table: its name and badges, product and line, lock-in, notice,
+// commitment limits and status.
+export function PoolRowView({ pool }: { pool: PoolRow }) {
   return (
-    <Card className="gap-3 py-4" data-pool-card={pool.id}>
-      <CardHeader className="px-4">
-        <CardTitle className="text-base">{pool.name}</CardTitle>
-        <CardDescription>
-          {pool.productName ?? pool.productId}
-          {pool.productLine ? ` · ${pool.productLine}` : ""}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-2 px-4 text-sm">
-        <div className="flex flex-wrap gap-1.5">
-          <StageBadge stage={stageOf(pool)} />
+    <TableRow data-pool-row={pool.id}>
+      <TableCell className="whitespace-normal">
+        <div className="font-medium">{pool.name}</div>
+        <div className="mt-1 flex flex-wrap gap-1.5">
           <Money sandbox={pool.sandbox} />
           {pool.treasury && (
             <Badge variant="outline" data-treasury={pool.treasury.cluster}>
@@ -126,33 +120,27 @@ export function PoolCard({ pool }: { pool: PoolRow }) {
           {pool.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
           {pool.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
         </div>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-          <dt className="text-muted-foreground">Lock-in</dt>
-          <dd data-lock-in>{lockInText(pool.lockInDays)}</dd>
-          <dt className="text-muted-foreground">Notice period</dt>
-          <dd data-notice>{noticeText(pool.noticePeriodDays)}</dd>
-          <dt className="text-muted-foreground">Minimum reserve</dt>
-          <dd>{reserveText(pool)}</dd>
-          <dt className="text-muted-foreground">Limits</dt>
-          <dd className="tabular-nums">{limitsText(pool)}</dd>
-          <dt className="text-muted-foreground">Health</dt>
-          <dd data-health>
-            {healthText(pool.health)}
-            {pool.health?.coverageBps != null ? ` · coverage ${percentOfBps(pool.health.coverageBps)}` : ""}
-          </dd>
-          <dt className="text-muted-foreground">Status</dt>
-          <dd>{statusText(pool)}</dd>
-          <dt className="text-muted-foreground">Yield</dt>
-          <dd className="text-muted-foreground">Not available yet</dd>
-        </dl>
-      </CardContent>
-    </Card>
+      </TableCell>
+      <TableCell className="whitespace-normal" data-product>
+        {pool.productName ?? pool.productId}
+        {pool.productLine ? ` · ${pool.productLine}` : ""}
+      </TableCell>
+      <TableCell data-lock-in>{lockInText(pool.lockInDays)}</TableCell>
+      <TableCell data-notice>{noticeText(pool.noticePeriodDays)}</TableCell>
+      <TableCell className="tabular-nums" data-limits>
+        {limitsText(pool)}
+      </TableCell>
+      <TableCell className="whitespace-normal">
+        <StageBadge stage={stageOf(pool)} />
+        <div className="mt-1 text-xs text-muted-foreground">{statusText(pool)}</div>
+      </TableCell>
+    </TableRow>
   )
 }
 
 // A draft from the assistant: nothing happens until the user clicks its button. It's checked again
 // here against the pool as the page has it, and Mynt checks everything again.
-export function DraftCard({ draft, pool, position, actions, canCommit, canWithdraw, newKey = newIdempotencyKey }: { draft: Draft; pool: PoolRow | null; position: Position | null; actions: LiquidityActions; canCommit: boolean; canWithdraw: boolean; newKey?: () => string }) {
+export function DraftPanel({ draft, pool, position, actions, canCommit, canWithdraw, newKey = newIdempotencyKey }: { draft: Draft; pool: PoolRow | null; position: Position | null; actions: LiquidityActions; canCommit: boolean; canWithdraw: boolean; newKey?: () => string }) {
   const [key, setKey] = useState(newKey)
   const [state, setState] = useState<{ kind: "idle" } | { kind: "busy" } | { kind: "done"; message: string } | { kind: "error"; message: string }>({ kind: "idle" })
   const commit = draft.kind === "commit"
@@ -198,120 +186,190 @@ export function DraftCard({ draft, pool, position, actions, canCommit, canWithdr
   }
 
   return (
-    <Card className="gap-3 border-primary/40 py-4" data-draft={draft.kind}>
-      <CardHeader className="px-4">
-        <CardTitle className="text-base">{commit ? "Draft commitment" : "Draft withdrawal"}</CardTitle>
-        <CardDescription>Proposed by the assistant. Nothing has been sent: review it, then confirm it yourself.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-1 px-4 text-sm">
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">Pool</span>
-          <span className="max-w-60 truncate rounded border bg-muted px-1.5 py-0.5 font-mono text-xs" title={draft.poolName} data-draft-pool>
-            {draft.poolName}
-          </span>
-          {draft.sandbox && <Money sandbox />}
-        </div>
-        <div className="tabular-nums">
-          <span className="text-muted-foreground">Amount</span> <span className="text-base font-semibold" data-draft-amount>{usd(draft.amountCents)}</span>
-        </div>
-        {pool && (
-          <div className="grid grid-cols-[auto_1fr] gap-x-3">
-            <span className="text-muted-foreground">Lock-in</span>
-            <span data-lock-in>{lockInText(pool.lockInDays)}</span>
-            <span className="text-muted-foreground">Notice period</span>
-            <span data-notice>{noticeText(pool.noticePeriodDays)}</span>
+    <div data-draft={draft.kind}>
+      <Panel id={`draft-${draft.id}`}>
+        <Section id={`draft-${draft.id}`} title={commit ? "Draft commitment" : "Draft withdrawal"} action={draft.sandbox ? <Money sandbox /> : undefined}>
+          <p className="text-sm text-muted-foreground">Nothing has been sent: review it, then confirm it yourself.</p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            <dt className="text-muted-foreground">Pool</dt>
+            <dd className="min-w-0">
+              <span className="block max-w-60 truncate font-medium" title={draft.poolName} data-draft-pool>
+                {draft.poolName}
+              </span>
+            </dd>
+            <dt className="text-muted-foreground">Amount</dt>
+            <dd className="font-semibold tabular-nums" data-draft-amount>
+              {usd(draft.amountCents)}
+            </dd>
+            {pool && (
+              <>
+                <dt className="text-muted-foreground">Lock-in</dt>
+                <dd data-lock-in>{lockInText(pool.lockInDays)}</dd>
+                <dt className="text-muted-foreground">Notice period</dt>
+                <dd data-notice>{noticeText(pool.noticePeriodDays)}</dd>
+              </>
+            )}
+            {draft.kind === "commit" && !onChain && draft.state && (
+              <>
+                <dt className="text-muted-foreground">From</dt>
+                <dd>{draft.state.slice(3).toUpperCase()}</dd>
+              </>
+            )}
+            {onChain && (
+              <>
+                <dt className="text-muted-foreground">{commit ? "From" : "To"}</dt>
+                <dd className="flex items-center gap-2" data-draft-wallet>
+                  <span className="font-mono text-xs">{draft.wallet ? shortAddress(draft.wallet) : "your chosen wallet"}</span>
+                  <DevnetBadge />
+                </dd>
+              </>
+            )}
+          </dl>
+          {pool && !onChain && <p className="text-sm text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</p>}
+          {onChain && <p className="text-sm text-muted-foreground">{commit ? "A USDC deposit on devnet, signed in your own wallet after you check Mynt's summary. Test money only." : "A USDC withdrawal on devnet back to your wallet, signed in your own wallet after you check Mynt's summary."}</p>}
+          {!onChain && refusal && state.kind !== "done" && (
+            <p className="text-sm text-amber-600 dark:text-amber-300" data-refusal>
+              {refusal}
+            </p>
+          )}
+          {state.kind === "done" && (
+            <p role="status" className="text-sm" data-draft-done>
+              {state.message}
+            </p>
+          )}
+          {state.kind === "error" && (
+            <p role="alert" className="text-sm text-destructive">
+              {state.message}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {onChain ? (
+              <OnChainAction kind={commit ? "deposit" : "withdrawal"} poolId={draft.poolId} amountBaseUnits={units} amountText={usd(draft.amountCents)} deposit={picked && "deposit" in picked ? picked.deposit : null} wallet={draft.wallet ?? null} blocked={onChainBlock} newKey={newKey} />
+            ) : (
+              <Button onClick={() => void confirm()} disabled={Boolean(refusal) || state.kind === "busy" || state.kind === "done"} data-confirm={draft.kind}>
+                {state.kind === "busy" && <Loader2 className="animate-spin" />}
+                {label}
+              </Button>
+            )}
           </div>
-        )}
-        {draft.kind === "commit" && !onChain && draft.state && (
-          <div>
-            <span className="text-muted-foreground">From:</span> {draft.state.slice(3).toUpperCase()}
-          </div>
-        )}
-        {onChain && (
-          <div className="flex items-center gap-2" data-draft-wallet>
-            <span className="text-muted-foreground">{commit ? "From:" : "To:"}</span>
-            <span className="font-mono text-xs">{draft.wallet ? shortAddress(draft.wallet) : "your chosen wallet"}</span>
-            <DevnetBadge />
-          </div>
-        )}
-        {pool && !onChain && <div className="text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</div>}
-        {onChain && <div className="text-muted-foreground">{commit ? "A USDC deposit on devnet, signed in your own wallet after you check Mynt's summary. Test money only." : "A USDC withdrawal on devnet back to your wallet, signed in your own wallet after you check Mynt's summary."}</div>}
-        {!onChain && refusal && state.kind !== "done" && (
-          <p className="text-amber-600 dark:text-amber-300" data-refusal>
-            {refusal}
-          </p>
-        )}
-        {state.kind === "done" && (
-          <p role="status" data-draft-done>
-            {state.message}
-          </p>
-        )}
-        {state.kind === "error" && (
-          <p role="alert" className="text-destructive">
-            {state.message}
-          </p>
-        )}
-      </CardContent>
-      <CardFooter className="px-4">
-        {onChain ? (
-          <OnChainAction kind={commit ? "deposit" : "withdrawal"} poolId={draft.poolId} amountBaseUnits={units} amountText={usd(draft.amountCents)} deposit={picked && "deposit" in picked ? picked.deposit : null} wallet={draft.wallet ?? null} blocked={onChainBlock} newKey={newKey} />
-        ) : (
-        <Button onClick={() => void confirm()} disabled={Boolean(refusal) || state.kind === "busy" || state.kind === "done"} data-confirm={draft.kind}>
-          {state.kind === "busy" && <Loader2 className="animate-spin" />}
-          {label}
-        </Button>
-        )}
-      </CardFooter>
-    </Card>
+        </Section>
+      </Panel>
+    </div>
   )
 }
 
-// Pools: the pools the assistant last matched (every pool open to the user until it has), and
-// the user's positions.
-export function PoolsTab({ data, poolIds }: { data: LiquidityData; poolIds: string[] | null }) {
+export const POSITIONS_PREVIEW = 5
+
+// Pools: the pools the assistant last matched (every pool open to the user until it has) as a
+// table, then a preview of the user's positions ending with View all (the My positions tab).
+export function PoolsTab({ data, poolIds, onViewPositions }: { data: LiquidityData; poolIds: string[] | null; onViewPositions?: () => void }) {
   const pools = [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])]
   const positions = data.provider?.positions ?? []
   const matched = poolIds && poolIds.length ? poolIds.map((id) => pools.find((p) => p.id === id)).filter((p): p is PoolRow => Boolean(p)) : pools
   return (
-    <div className="flex h-full flex-col gap-4 overflow-auto p-4" data-earn-pools-tab>
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">
-          {poolIds && poolIds.length ? "Matching pools" : "Pools open to you"} <Badge variant="secondary">{matched.length}</Badge>
-        </h3>
-        {matched.length ? <div className="grid gap-3 xl:grid-cols-2">{matched.map((p) => <PoolCard key={p.id} pool={p} />)}</div> : <p className="text-sm text-muted-foreground">No pools to show yet.</p>}
-      </section>
-      {data.provider && (
-        <section className="flex flex-col gap-2" data-earn-positions>
-          <h3 className="text-sm font-medium">Your positions</h3>
-          {positions.length ? (
-            positions.map((p) => (
-              <div key={positionKey(p)} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
-                <span>
-                  {p.name} {p.sandbox && <Money sandbox />} {p.onChain && <DevnetBadge />}
-                </span>
-                <span className="tabular-nums text-muted-foreground">
-                  {usd(p.settledCents)} settled · {usd(p.availableCents)} available
-                </span>
-              </div>
-            ))
+    <div className="flex h-full flex-col gap-4 overflow-y-auto p-4" data-earn-pools-tab>
+      <Panel id="earn-pools">
+        <Section
+          id="earn-pools"
+          title={poolIds && poolIds.length ? "Matching pools" : "Pools open to you"}
+          action={
+            <span className="text-xs text-muted-foreground tabular-nums" data-pool-count>
+              {matched.length} {matched.length === 1 ? "pool" : "pools"}
+            </span>
+          }
+        >
+          {matched.length ? (
+            <div className="overflow-auto rounded-lg border">
+              <Table>
+                <TableHeader className="sticky top-0 bg-card">
+                  <TableRow>
+                    <TableHead>Pool</TableHead>
+                    <TableHead>Product · line</TableHead>
+                    <TableHead>Lock-in</TableHead>
+                    <TableHead>Notice</TableHead>
+                    <TableHead>Commitment</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {matched.map((p) => (
+                    <PoolRowView key={p.id} pool={p} />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No positions yet.</p>
+            <p className="py-3 text-sm text-muted-foreground">No pools to show yet.</p>
           )}
-        </section>
+        </Section>
+      </Panel>
+      {data.provider && (
+        <div data-earn-positions>
+          <Panel id="earn-positions">
+            <Section id="earn-positions" title="Your positions">
+              {positions.length ? (
+                <div className="overflow-auto rounded-lg border">
+                  <Table>
+                    <TableHeader className="bg-card">
+                      <TableRow>
+                        <TableHead>Pool</TableHead>
+                        <TableHead className="text-right">Settled</TableHead>
+                        <TableHead className="text-right">Available</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {positions.slice(0, POSITIONS_PREVIEW).map((p) => (
+                        <TableRow key={positionKey(p)} data-position-preview={positionKey(p)}>
+                          <TableCell>
+                            <span className="font-medium">{p.name}</span> {p.sandbox && <Money sandbox />} {p.onChain && <DevnetBadge />}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums" data-settled>
+                            {usd(p.settledCents)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums" data-available>
+                            {usd(p.availableCents)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <p className="py-3 text-sm text-muted-foreground">No positions yet.</p>
+              )}
+              {/* The whole list is the My positions tab, on a row of its own at the bottom right. */}
+              <div className="flex justify-end border-t pt-3" data-view-all>
+                {onViewPositions ? (
+                  <Button variant="outline" size="sm" onClick={onViewPositions}>
+                    View all
+                    <ChevronRight />
+                  </Button>
+                ) : (
+                  <Button asChild variant="outline" size="sm">
+                    <Link href="/earn?tab=my-positions">
+                      View all
+                      <ChevronRight />
+                    </Link>
+                  </Button>
+                )}
+              </div>
+            </Section>
+          </Panel>
+        </div>
       )}
     </div>
   )
 }
 
-// Drafts: each draft the assistant proposed, as a card the user confirms (or not).
+// Drafts: each draft the assistant proposed, as a panel the user confirms (or not).
 export function DraftsTab({ data, drafts, actions }: { data: LiquidityData; drafts: Draft[]; actions: LiquidityActions }) {
   const pools = [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])]
   const positions = data.provider?.positions ?? []
   return (
-    <div className="flex h-full flex-col gap-3 overflow-auto p-4" data-earn-drafts-tab>
+    <div className="flex h-full flex-col gap-4 overflow-y-auto p-4" data-earn-drafts-tab>
       {drafts.length ? (
         drafts.map((d) => (
-          <DraftCard
+          <DraftPanel
             key={d.id}
             draft={d}
             pool={pools.find((p) => p.id === d.poolId) ?? null}
@@ -374,7 +432,7 @@ export function EarnWorkspace({
     )
 
   const content = (t: EarnTab) =>
-    t === "pools" ? <PoolsTab data={data} poolIds={poolIds} /> : t === "drafts" ? <DraftsTab data={data} drafts={drafts} actions={actions} /> : <EarnTable tab={t} data={data} actions={actions} />
+    t === "pools" ? <PoolsTab data={data} poolIds={poolIds} onViewPositions={available.includes("my-positions") ? () => choose("my-positions") : undefined} /> : t === "drafts" ? <DraftsTab data={data} drafts={drafts} actions={actions} /> : <EarnTable tab={t} data={data} actions={actions} />
 
   const shell = (
     <ChatWorkspaceShell
