@@ -4,7 +4,7 @@
 // (/earn), so both look the same and differ only in the tabs on the right. It's the builder's
 // layout, extracted:
 // - an optional sticky top bar (the app's own bar in the builder);
-// - the chat (thread and composer) on the left, alone (left-aligned) until there's something for
+// - the chat (thread and composer) on the left, alone (centred) until there's something for
 //   the right panel (the builder shows it as soon as an app is open; Earn after the first
 //   message, or when a link names a panel tab);
 // - the right panel: a tab strip at its top, then the selected tab's content, in the builder's
@@ -102,7 +102,13 @@ export function ChatWorkspaceShell({
   const gridColumns = !showPanel ? "1fr 0fr" : isMobile ? (mobileView === "chat" ? "1fr 0fr" : "0fr 1fr") : railed ? "1fr 2.75rem" : "2fr 3fr";
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden" data-chat-workspace data-panel-open={showPanel}>
+    <div
+      className="group/chat flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden"
+      data-chat-workspace
+      data-panel-open={showPanel}
+      // The chat (messages, composer, its note) is centred until the tabs panel is open beside it, then sits left.
+      data-chat-align={showPanel && !railed && !isMobile ? "left" : "center"}
+    >
       {topBar}
       <div
         className={cn("grid min-h-0 flex-1 pb-2", !isMobile && "transition-[grid-template-columns] duration-500 ease-in-out")}

@@ -47,6 +47,20 @@ describe("chat workspace: divider and collapsible panel", () => {
     expect(document.querySelector("[data-panel-rail]")).not.toBeNull();
   });
 
+  it("centres the chat while the tabs panel is closed or collapsed, and moves it left once the panel is open", async () => {
+    const root = () => document.querySelector("[data-chat-workspace]")!;
+    const { rerender } = render(<ChatWorkspaceShell chat={<div />} showPanel={false} tabs={tabs} tab="pools" onTab={() => {}} isMobile={false} />);
+    expect(root().getAttribute("data-chat-align")).toBe("center");
+    rerender(<ChatWorkspaceShell chat={<div />} showPanel tabs={tabs} tab="pools" onTab={() => {}} isMobile={false} />);
+    await act(async () => {});
+    expect(root().getAttribute("data-chat-align")).toBe("left");
+    await act(async () => void fireEvent.click(document.querySelector("[data-collapse-panel]")!));
+    expect(root().getAttribute("data-chat-align")).toBe("center");
+    cleanup();
+    render(<Shell isMobile />);
+    expect(root().getAttribute("data-chat-align")).toBe("center");
+  });
+
   it("has no collapse control on phones (one side at a time there)", () => {
     render(<Shell isMobile />);
     expect(document.querySelector("[data-collapse-panel]")).toBeNull();
