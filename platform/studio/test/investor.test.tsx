@@ -163,7 +163,11 @@ describe("the investor view", () => {
     expect(html).toContain('aria-label="Search pools"');
     for (const f of ["Pool", "Source", "Date range"]) expect(html).toContain(`data-filter="${f}"`);
     expect(html).not.toContain('aria-label="Period"');
-    // The key figures are unchanged.
+    // The key figures: a 4 x 2 grid, money in across the top, money out and the rest below.
+    expect(html).toContain('data-kpi-grid="4x2"');
+    const order = [...html.matchAll(/data-kpi="([a-z]+)"/g)].map((m) => m[1]);
+    expect(order).toEqual(["committed", "settled", "pending", "available", "queued", "paid", "pools", "returns"]);
+    expect(html).toMatch(/data-kpi="pools"[\s\S]*?>2</);
     expect(html).toMatch(/data-kpi="committed"[\s\S]*?\$6,250\.00/);
     expect(html).toMatch(/data-split[\s\S]*?Devnet: committed \$1,250\.00[\s\S]*?Rails: committed \$5,000\.00/);
     expect(html).toMatch(/data-kpi="returns"[\s\S]*?>Not measured<[\s\S]*?Mynt doesn.{1,6}t measure yield/);
@@ -171,7 +175,12 @@ describe("the investor view", () => {
     // Activity, with View all on its own row to the financial audit trail.
     expect(html).toContain("liquidity.commit");
     expect(html).toMatch(/data-view-all[\s\S]*?href="\/audits\?tab=financial"[\s\S]*?View all/);
-    expect(html).not.toContain("$0.00</dd>"); // nothing unmeasured shown as $0
+    // Nothing unmeasured shows as $0: Returns reads Not measured; a $0.00 is only ever a measured zero
+    // (nothing pending in: devnet deposits settle at once).
+    const returnsCell = /data-kpi="returns"[\s\S]*?<\/div>/.exec(html)![0];
+    expect(returnsCell).toContain("Not measured");
+    expect(returnsCell).not.toContain("$0");
+    for (const m of html.matchAll(/<dd[^>]*data-measured="(true|false)"[^>]*>\$0\.00</g)) expect(m[1]).toBe("true");
   });
 
   it("narrows the charts by pool, source, search and dates", () => {
