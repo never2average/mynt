@@ -175,7 +175,7 @@ export function PnlView({ pnl }: { pnl: AppPnl }) {
   const kpis = [
     kpi("money-moved", "Money moved", pnl.totals.revenue, pnl.series.map((p) => p.revenueCents)),
     kpi("costs", "Costs", pnl.totals.costs, pnl.series.map((p) => p.costsCents), true),
-    kpi("net", "Net", pnl.totals.net, pnl.series.map((p) => p.netCents)),
+    kpi("net", "Net", pnl.totals["net"], pnl.series.map((p) => p.netCents)),
   ]
   // The app's series in the dashboard chart's shape: an unmeasured period stays null, a gap.
   const chart = {
