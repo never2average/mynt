@@ -83,15 +83,15 @@ export const Thread: FC<{ welcome?: ReactNode; disabledNote?: string; note?: Rea
           }}
         />
 
-        <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mr-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background ${note ? "pb-2 md:pb-3" : "pb-4 md:pb-6"}`}>
+        <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mx-auto group-data-[chat-align=left]/chat:ml-0 mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background ${note ? "pb-2 md:pb-3" : "pb-4 md:pb-6"}`}>
           <ThreadScrollToBottom />
           <Composer placeholder={placeholder} toolbar={toolbar} />
           {disabledNote && (
-            <p className="aui-composer-disabled-note -mt-2 px-2 text-left text-xs text-muted-foreground">
+            <p className="aui-composer-disabled-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground">
               {disabledNote}
             </p>
           )}
-          {note && <div className="aui-composer-note -mt-2 px-2 text-left text-xs text-muted-foreground" data-composer-note>{note}</div>}
+          {note && <div className="aui-composer-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground" data-composer-note>{note}</div>}
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
@@ -181,7 +181,7 @@ const AssistantMessage: FC = () => {
   const Text = useContext(TextRenderer);
   return (
     <MessagePrimitive.Root
-      className="aui-assistant-message-root relative mr-auto w-full max-w-(--thread-max-width) animate-in py-3 duration-150 fade-in slide-in-from-bottom-1"
+      className="aui-assistant-message-root relative mx-auto group-data-[chat-align=left]/chat:ml-0 w-full max-w-(--thread-max-width) animate-in py-3 duration-150 fade-in slide-in-from-bottom-1"
       data-role="assistant"
     >
       <div className="aui-assistant-message-content px-2 text-sm leading-relaxed wrap-break-word text-foreground">
@@ -269,7 +269,7 @@ const AssistantActionBar: FC = () => {
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
-      className="aui-user-message-root mr-auto grid w-full max-w-(--thread-max-width) animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3 duration-150 fade-in slide-in-from-bottom-1 [&:where(>*)]:col-start-2"
+      className="aui-user-message-root mx-auto group-data-[chat-align=left]/chat:ml-0 grid w-full max-w-(--thread-max-width) animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3 duration-150 fade-in slide-in-from-bottom-1 [&:where(>*)]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />
@@ -302,7 +302,7 @@ const UserActionBar: FC = () => {
 
 const EditComposer: FC = () => {
   return (
-    <MessagePrimitive.Root className="aui-edit-composer-wrapper mr-auto flex w-full max-w-(--thread-max-width) flex-col px-2 py-3">
+    <MessagePrimitive.Root className="aui-edit-composer-wrapper mx-auto group-data-[chat-align=left]/chat:ml-0 flex w-full max-w-(--thread-max-width) flex-col px-2 py-3">
       <ComposerPrimitive.Root className="aui-edit-composer-root ml-auto flex w-full max-w-[85%] flex-col rounded-2xl bg-muted">
         <ComposerPrimitive.Input
           className="aui-edit-composer-input min-h-14 w-full resize-none bg-transparent p-4 text-sm text-foreground outline-none"
