@@ -66,6 +66,9 @@ describe("the connect page is the guide too (/docs comes here)", () => {
     const order = [...document.querySelectorAll("[data-docs-section]")].map((e) => e.getAttribute("data-docs-section"));
     expect(order).toEqual(["connect", "address", "sign-in", "access", "try", "trouble"]);
     expect(document.querySelector('[data-docs-section="connect"] [data-connect-agent]')).not.toBeNull();
+    // It scrolls in its own box, as every long studio page does (the shell fixes the window's height).
+    expect(document.querySelector("[data-connect-scroll]")!.className).toMatch(/min-h-0 flex-1 [^"]*overflow-y-auto/);
+    expect(document.querySelector("[data-connect-scroll] [data-connect-page]")).not.toBeNull();
     expect(document.querySelector('[data-docs-section="address"] [data-copy-value]')!.textContent).toBe(`${window.location.origin}/mcp`);
     expect(document.querySelector("[data-docs-link]")).toBeNull();
     // On this page sits on the right, after the guide, behind a vertical rule.
