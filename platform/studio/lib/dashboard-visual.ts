@@ -26,7 +26,7 @@ const line = (lines: PnlLine[], ...keys: string[]) => lines.find((l) => keys.inc
 
 /** The KPI row: money moved, build spend, hosting and apps live, each with its change and history. */
 export function builderKpis(pnl: Pnl | null, appsLive: number | null): Kpi[] {
-  const build = pnl ? line(pnl.costs, "coding_agents", "build_spend", "builds") : null;
+  const build = pnl ? line(pnl.costs, "build_agents", "coding_agents", "build_spend", "builds") : null;
   const hosting = pnl ? line(pnl.costs, "hosting") : null;
   return [
     {
