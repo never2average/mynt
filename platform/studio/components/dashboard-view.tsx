@@ -6,19 +6,19 @@
 import Link from "next/link"
 import { Plus, Search } from "lucide-react"
 
-import { FilterSelect } from "@/components/filter-controls"
+import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
 import { Input } from "@/components/ui/input"
 
 import { NeedsAttention, Panel, RecentActivity, type StageApp, type StagesData } from "@/components/dashboard-panels"
 import { PnlChart, PNL_NOT_AVAILABLE } from "@/components/pnl"
 import { KpiRow } from "@/components/charts"
 import { Skeleton } from "@/components/ui/skeleton"
-import { appsForStage, builderKpis, dateRange, DEFAULT_CHART_FILTER, type ChartFilter } from "@/lib/dashboard-visual"
+import { appsForStage, builderKpis, dateRange, DEFAULT_CHART_FILTER, defaultChartFilter, trimSeries, type ChartFilter } from "@/lib/dashboard-visual"
 import { Button } from "@/components/ui/button"
 import type { Dashboard } from "@/lib/dashboard"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditEvent } from "@/lib/compliance"
-import { DATE_RANGES, type Pnl } from "@/lib/pnl"
+import type { Pnl, Range } from "@/lib/pnl"
 import { STAGE_LABELS, STAGES } from "@/lib/workspaces"
 import type { Loaded } from "@/lib/use-compliance"
 
@@ -62,8 +62,11 @@ export function DashboardView({
 }) {
   const ready = pnl.kind === "ready" ? pnl.data : null
   const appsLive = stages.kind === "ready" ? stages.data.apps.filter((a) => a.stage === "production").length : null
-  const charts = chartPnl ?? pnl
-  const range = dateRange(filter.range)
+  const loaded = chartPnl ?? pnl
+  // Only the periods inside the dates picked.
+  const charts: Loaded<Pnl> = loaded.kind === "ready" ? { kind: "ready", data: { ...loaded.data, series: trimSeries(loaded.data.series, filter.from, filter.to) } } : loaded
+  const range = dateRange(filter)
+  const periods = range.periods as Range
   return (
     <div className="@container/main flex flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6" data-dashboard>
       <NeedsAttention state={attention} />
@@ -78,9 +81,9 @@ export function DashboardView({
       <ChartToolbar filter={filter} onFilter={onFilter} apps={stages.kind === "ready" ? stages.data.apps : []} />
       <Panel id="money">
         <div className="flex flex-col gap-4">
-          <PnlChart state={charts} granularity={range.granularity} periods={range.periods} controls={false} only="revenue" variant="area" title="Money moved" id="money-moved" empty="Not measured yet: Mynt hasn't recorded money moved for these periods." />
+          <PnlChart state={charts} granularity={range.granularity} periods={periods} controls={false} only="revenue" variant="area" title="Money moved" id="money-moved" empty="Not measured yet: Mynt hasn't recorded money moved for these periods." />
         </div>
-        <PnlChart state={charts} granularity={range.granularity} periods={range.periods} controls={false} only="costs" variant="area" title="Costs" id="costs" empty="Not measured yet: Mynt hasn't recorded costs for these periods." />
+        <PnlChart state={charts} granularity={range.granularity} periods={periods} controls={false} only="costs" variant="area" title="Costs" id="costs" empty="Not measured yet: Mynt hasn't recorded costs for these periods." />
       </Panel>
 
       <Panel id="activity">
@@ -111,7 +114,16 @@ function ChartToolbar({ filter, onFilter, apps }: { filter: ChartFilter; onFilte
         onChange={(v) => set({ stage: (v || "all") as ChartFilter["stage"], appId: "all" })}
         options={STAGES.map((st) => ({ value: st, label: STAGE_LABELS[st] }))}
       />
-      <FilterSelect label="Date range" value={filter.range} onChange={(v) => set({ range: (v || DEFAULT_CHART_FILTER.range) as ChartFilter["range"] })} options={DATE_RANGES.map((r) => ({ value: r.key, label: r.label }))} />
+      <DateRangeFilter
+        label="Date range"
+        from={filter.from}
+        to={filter.to}
+        onChange={(from, to) => {
+          // Cleared: back to the last six months.
+          const d = defaultChartFilter()
+          set(from ? { from, to: to || from } : { from: d.from, to: d.to })
+        }}
+      />
     </div>
   )
 }
