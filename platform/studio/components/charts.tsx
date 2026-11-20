@@ -47,14 +47,23 @@ export function Sparkline({ points, label }: { points: (number | null)[] | null;
 
 // ---- KPI row ----
 
-export function KpiRow({ kpis }: { kpis: Kpi[] }) {
+export function KpiRow({ kpis, grid = false }: { kpis: Kpi[]; grid?: boolean }) {
   return (
-    <dl className="grid grid-cols-2 gap-x-6 gap-y-4 @3xl/main:grid-cols-4 @3xl/main:divide-x" data-kpis>
+    <dl
+      className={
+        grid
+          ? // Four columns, two rows: a line between columns and between the rows.
+            "grid grid-cols-2 gap-y-4 @3xl/main:grid-cols-4 @3xl/main:gap-y-0 @3xl/main:[&>*:nth-child(4n+1)]:border-l-0 @3xl/main:[&>*:nth-child(n+5)]:border-t @3xl/main:[&>*]:border-l @3xl/main:[&>*]:py-3"
+          : "grid grid-cols-2 gap-x-6 gap-y-4 @3xl/main:grid-cols-4 @3xl/main:divide-x"
+      }
+      data-kpis
+      data-kpi-grid={grid ? "4x2" : undefined}
+    >
       {kpis.map((k) => {
         const measured = k.value !== null
         const Arrow = k.delta?.direction === "up" ? ArrowUp : k.delta?.direction === "down" ? ArrowDown : ArrowRight
         return (
-          <div key={k.key} className="flex min-w-0 flex-col gap-1 @3xl/main:px-4 @3xl/main:first:pl-0" data-kpi={k.key}>
+          <div key={k.key} className={cn("flex min-w-0 flex-col gap-1 @3xl/main:px-4", grid ? "@3xl/main:[&:nth-child(4n+1)]:pl-0" : "@3xl/main:first:pl-0")} data-kpi={k.key}>
             <dt className="text-xs text-muted-foreground">{k.label}</dt>
             <dd className={cn("font-semibold tabular-nums", measured ? "text-2xl" : "text-base text-muted-foreground")} data-measured={measured}>
               {k.unit === "money" ? money(k.value) : k.value === null ? NOT_MEASURED : k.value.toLocaleString("en-US")}

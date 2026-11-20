@@ -274,3 +274,14 @@ export function filterPositions<P extends { poolId: string; name: string; onChai
       (f.source === "all" || (f.source === "devnet" ? p.onChain : !p.onChain)),
   );
 }
+
+// The investor's other figures: what's on its way in, what may be asked for now, and how many pools they hold
+// (positions not exited). An amount Mynt doesn't report for a position leaves the total unmeasured.
+export function positionExtras(positions: readonly Pick<Position, "poolId" | "pendingInCents" | "availableCents" | "exited">[]): { pendingIn: number | null; available: number | null; pools: number } {
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    pendingIn: sum(positions.map((p) => num(p.pendingInCents))),
+    available: sum(positions.map((p) => num(p.availableCents))),
+    pools: new Set(positions.filter((p) => !p.exited).map((p) => p.poolId)).size,
+  };
+}

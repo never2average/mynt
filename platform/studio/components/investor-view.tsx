@@ -22,7 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import type { AttentionItem } from "@/lib/attention"
 import type { AuditRow } from "@/lib/audit-classes"
-import { defaultInvestorFilter, filterPositions, flowSeries, investingItem, portfolioOf, SOURCE_LABELS, type InvestorFilter, type Source, type Totals } from "@/lib/investor"
+import { defaultInvestorFilter, filterPositions, flowSeries, investingItem, portfolioOf, positionExtras, SOURCE_LABELS, type InvestorFilter, type Source, type Totals } from "@/lib/investor"
 import type { LiquidityData } from "@/lib/liquidity"
 import { money, type Range } from "@/lib/pnl"
 import type { Loaded } from "@/lib/use-compliance"
@@ -58,16 +58,21 @@ function PortfolioKpis({ positions, flows }: { positions: NonNullable<LiquidityD
     let n = 0
     return flows.map((f) => (pick(f) === null ? null : (n += pick(f)!)))
   }
+  const extra = positionExtras(positions)
+  // A 4 x 2 grid: money in (committed, settled, pending, available), then money out and the rest.
   const kpis: Kpi[] = [
     { key: "committed", label: "Committed", value: p.all.committed, unit: "money", delta: null, spark: running((f) => f.revenue) },
     { key: "settled", label: "Settled", value: p.all.settled, unit: "money", delta: null, spark: null },
+    { key: "pending", label: "Pending in", value: extra.pendingIn, unit: "money", delta: null, spark: null },
+    { key: "available", label: "Available to withdraw", value: extra.available, unit: "money", delta: null, spark: null },
     { key: "queued", label: "Queued for withdrawal", value: p.all.queued, unit: "money", delta: null, spark: null },
     { key: "paid", label: "Paid out", value: p.all.paid, unit: "money", delta: null, spark: running((f) => f.costs) },
+    { key: "pools", label: "Pools held", value: extra.pools, unit: "count", delta: null, spark: null },
     { key: "returns", label: "Returns", value: null, unit: "money", delta: null, spark: null, note: "Mynt doesn't measure yield" },
   ]
   return (
     <>
-      <KpiRow kpis={kpis} />
+      <KpiRow kpis={kpis} grid />
       {sources.length > 1 && (
         <p className="flex flex-wrap gap-x-4 text-xs text-muted-foreground" data-split>
           {sources.map((s) => (
