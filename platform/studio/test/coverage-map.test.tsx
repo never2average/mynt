@@ -46,16 +46,33 @@ describe("the coverage map", () => {
     expect(c.querySelector("[data-state]")).toBeNull();
   });
 
-  it("the US / World selector switches the map", async () => {
+  it("the toolbar's Region filter switches the map between the US and the world", async () => {
     const picked: string[] = [];
-    const c = await draw(<CoverageMap coverage={coverage} region="us" onRegion={(r) => picked.push(r)} />);
-    fireEvent.click(c.querySelector('[data-region="world"]')!);
+    const c = await draw(<LicencesView licences={licences} coverage={{ kind: "ready", data: coverage }} view="map" region="us" onRegion={(r) => picked.push(r)} />);
+    expect(c.querySelector('[data-filter="Region"]')!.getAttribute("aria-label")).toBe("Region: US");
+    await act(async () => {
+      fireEvent.keyDown(c.querySelector('[data-filter="Region"]')!, { key: "Enter" });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-filter-menu="Region"] [data-filter-option="world"]')!);
+    });
     expect(picked).toEqual(["world"]);
   });
 
-  it("dims the states the filtered licences don't cover, keeping their colour", async () => {
+  it("a state opens its side panel with the state's name and no subtitle", async () => {
+    const c = await draw(<CoverageMap coverage={coverage} region="us" onRegion={() => undefined} />);
+    await act(async () => {
+      fireEvent.click(c.querySelector('[data-state="CA"]')!);
+    });
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("California");
+    expect(dialog.textContent).toContain("Harbor Bank");
+    expect(dialog.textContent).not.toContain("What serves customers");
+  });
+
+  it("dims the states the filtered licences don't cover, keeping their colour, without a sentence about it", async () => {
     const c = await draw(<CoverageMap coverage={coverage} region="us" onRegion={() => undefined} highlight={new Set(["CA"])} />);
-    expect(c.textContent).toContain("Showing the 1 state covered by the licences matching your filters");
+    expect(c.textContent).not.toContain("Showing the");
     expect(c.querySelector('[data-state="CA"]')!.hasAttribute("data-dimmed")).toBe(false);
     const ny = c.querySelector('[data-state="NY"]')!;
     expect(ny.getAttribute("data-dimmed")).toBe("true");

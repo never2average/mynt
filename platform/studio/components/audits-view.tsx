@@ -2,22 +2,25 @@
 
 // The Audits page's tables. AuditsView: one class of the workspace's records (App security,
 // Financial activity or Workspace activity) as a paged table, with a full-width search over the
-// page shown, a filters row (kind, member, app, date range, and severity or status where the
-// class has them) and a labelled Export of the rows shown. ObligationsView: each licence's
+// page shown, then in the same toolbar row its filters (kind, member, app, date range, and
+// severity or status where the class has them) and a labelled Export CSV of the rows shown.
+// ObligationsView: key figures (obligations, met, due soon, overdue), then each licence's
 // regulatory obligations for the products it covers (met, at risk, overdue, with evidence),
-// searchable, filtered by partner, regulator, status and product, and exportable. Status is
-// never colour alone. Server-renderable for the tests.
+// searchable, filtered by partner, regulator, status, product and due date, exportable, and paged
+// 25 rows at a time. Status is never colour alone. Server-renderable for the tests.
 import { useMemo, useState } from "react"
 import { ChevronLeft, ChevronRight, Download, Search } from "lucide-react"
 
+import { KpiRow } from "@/components/charts"
+import { Panel } from "@/components/dashboard-panels"
 import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
+import { ListPager, usePaged } from "@/components/list-layout"
 import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
-  AUDIT_CLASS_HELP,
   AUDIT_CLASS_LABELS,
   AUDIT_CLASSES,
   filterObligations,
@@ -32,6 +35,7 @@ import {
   type ObligationStatus,
 } from "@/lib/audit-classes"
 import { distinct, toCsv } from "@/lib/compliance"
+import type { Kpi } from "@/lib/dashboard-visual"
 import { cn } from "@/lib/utils"
 import { Tab, TabList } from "@/components/ui/tabs"
 
@@ -39,7 +43,7 @@ export function AuditTabs({ tab, onTab }: { tab: AuditClass; onTab: (t: AuditCla
   return (
     <TabList aria-label="Audits">
       {AUDIT_CLASSES.map((t) => (
-        <Tab key={t} selected={tab === t} data-tab={t} title={AUDIT_CLASS_HELP[t]} onClick={() => onTab(t)}>
+        <Tab key={t} selected={tab === t} data-tab={t} onClick={() => onTab(t)}>
           {AUDIT_CLASS_LABELS[t]}
         </Tab>
       ))}
@@ -148,7 +152,7 @@ export function AuditsView({
       <div className="flex flex-wrap items-center gap-2" data-toolbar>
         <div className="relative min-w-64 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search this page: kind, person, target, summary or details" className="pl-8" aria-label="Search the audit trail" />
+          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search records" className="pl-8" aria-label="Search the audit trail" />
         </div>
         <FilterSelect label="App" value={filters.app_id} onChange={(v) => onFilters({ ...filters, app_id: v })} options={apps.map((x) => ({ value: x.id, label: x.name }))} />
         <FilterSelect label={auditClass === "workspace" ? "Action" : "Kind"} value={filters.action} onChange={(v) => onFilters({ ...filters, action: v })} options={actions.map((x) => ({ value: x, label: x }))} />
@@ -162,7 +166,7 @@ export function AuditsView({
           />
         ))}
         <FilterSelect label="Member" value={filters.user_id} onChange={(v) => onFilters({ ...filters, user_id: v })} options={members.map((m) => ({ value: m.id, label: m.name }))} />
-        <DateRangeFilter from={filters.from} to={filters.to} onChange={(from, to) => onFilters({ ...filters, from, to })} />
+        <DateRangeFilter label="Date range" from={filters.from} to={filters.to} onChange={(from, to) => onFilters({ ...filters, from, to })} />
         <Button variant="outline" onClick={exportCsv} disabled={!shown.length} data-export>
           <Download />
           Export CSV
@@ -227,11 +231,46 @@ export function ObligationStatusText({ status, reason = null }: { status: Obliga
 const partnersOf = (list: Obligation[]) =>
   [...new Map(list.flatMap((o) => (o.partnerId ? [[o.partnerId, o.partner ?? o.partnerId] as const] : []))).entries()].sort((a, b) => a[1].localeCompare(b[1]))
 
-export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }: { obligations: Obligation[]; initial?: ObligationFilters }) {
+export const DUE_SOON_DAYS = 30
+
+const dueAtOf = (o: Obligation) => (o.dueAt && !Number.isNaN(Date.parse(o.dueAt)) ? Date.parse(o.dueAt) : null)
+
+/** The key figures, from the obligations loaded. Due soon is "Not measured" when none has a due date, never 0. */
+export function obligationKpis(list: Obligation[], now = Date.now()): Kpi[] {
+  const dated = list.some((o) => dueAtOf(o) !== null)
+  const dueSoon = (o: Obligation) => {
+    const at = dueAtOf(o)
+    return o.status !== "met" && at !== null && at > now && at - now <= DUE_SOON_DAYS * 86_400_000
+  }
+  const k = (key: string, label: string, value: number | null, note: string): Kpi => ({ key, label, value, unit: "count", delta: null, spark: null, note })
+  return [
+    k("obligations", "Obligations", list.length, "Across your licences"),
+    k("met", "Met", list.filter((o) => o.status === "met").length, "With evidence"),
+    k("due-soon", "Due soon", dated ? list.filter(dueSoon).length : null, `Not met, due within ${DUE_SOON_DAYS} days`),
+    k("overdue", "Overdue", list.filter((o) => o.status === "overdue").length, "Past their due date"),
+  ]
+}
+
+// Due between two days (YYYY-MM-DD, inclusive); one without a due date is out once a range is set.
+export const dueWithin = (o: Obligation, from: string, to: string) => {
+  if (!from && !to) return true
+  const d = o.dueAt ? o.dueAt.slice(0, 10) : ""
+  return Boolean(d) && (!from || d >= from) && (!to || d <= to)
+}
+
+export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS, now = Date.now() }: { obligations: Obligation[]; initial?: ObligationFilters; now?: number }) {
   const [f, setF] = useState<ObligationFilters>(initial)
-  const shown = useMemo(() => filterObligations(obligations, f), [obligations, f])
-  const set = (k: keyof ObligationFilters) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value })
-  const pick = (k: keyof ObligationFilters) => (v: string) => setF({ ...f, [k]: v })
+  const [due, setDue] = useState({ from: "", to: "" })
+  const shown = useMemo(() => filterObligations(obligations, f).filter((o) => dueWithin(o, due.from, due.to)), [obligations, f, due])
+  const { page, pages, shown: onPage, setPage } = usePaged(shown)
+  const set = (k: keyof ObligationFilters) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    setF({ ...f, [k]: e.target.value })
+    setPage(1)
+  }
+  const pick = (k: keyof ObligationFilters) => (v: string) => {
+    setF({ ...f, [k]: v })
+    setPage(1)
+  }
   const counts = Object.fromEntries(OBLIGATION_STATUSES.map((s) => [s, obligations.filter((o) => o.status === s).length])) as Record<ObligationStatus, number>
   const exportCsv = () =>
     downloadCsv(
@@ -242,16 +281,30 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
       ),
     )
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3" data-audit-class="obligations">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 lg:gap-5" data-audit-class="obligations">
+      <Panel id="obligation-figures">
+        <KpiRow kpis={obligationKpis(obligations, now)} />
+      </Panel>
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2" data-toolbar>
         <div className="relative min-w-64 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={f.query} onChange={set("query")} placeholder="Search obligation, partner, regulator, product or evidence" className="pl-8" aria-label="Search obligations" />
+          <Input value={f.query} onChange={set("query")} placeholder="Search obligations" className="pl-8" aria-label="Search obligations" />
         </div>
         <FilterSelect label="Partner" value={f.partner} onChange={pick("partner")} options={partnersOf(obligations).map(([id, name]) => ({ value: id, label: name }))} />
         <FilterSelect label="Regulator" value={f.regulator} onChange={pick("regulator")} options={distinct(obligations.map((o) => o.regulator)).map((v) => ({ value: v, label: v }))} />
         <FilterSelect label="Status" value={f.status} onChange={pick("status")} options={OBLIGATION_STATUSES.map((st) => ({ value: st, label: `${OBLIGATION_LABELS[st]} (${counts[st]})` }))} />
         <FilterSelect label="Product" value={f.product} onChange={pick("product")} options={distinct(obligations.flatMap((o) => o.products)).map((v) => ({ value: v, label: v }))} />
+        <DateRangeFilter
+          label="Date range"
+          future
+          from={due.from}
+          to={due.to}
+          onChange={(from, to) => {
+            setDue({ from, to })
+            setPage(1)
+          }}
+        />
         <Button variant="outline" onClick={exportCsv} disabled={!shown.length} data-export>
           <Download />
           Export CSV
@@ -272,8 +325,8 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
             </TableRow>
           </TableHeader>
           <TableBody>
-            {shown.length ? (
-              shown.map((o) => (
+            {onPage.length ? (
+              onPage.map((o) => (
                 <TableRow key={`${o.licenceId ?? ""}-${o.obligationId}`} data-obligation={o.obligationId} data-status={o.status}>
                   <TableCell className="font-medium">{o.partner ?? "—"}</TableCell>
                   <TableCell>
@@ -308,6 +361,8 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }
             )}
           </TableBody>
         </Table>
+      </div>
+      <ListPager page={page} pages={pages} total={shown.length} onPage={setPage} />
       </div>
     </div>
   )
