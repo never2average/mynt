@@ -261,7 +261,7 @@ export function InvestorView({
           empty="Not measured yet: Mynt has no dated deposits or payouts for these periods."
           note={flows?.railsUnmeasured && provider?.positions.some((p) => p.onChain) ? "Devnet deposits and payouts only: rails positions carry no dated history yet. Paid out counts in the period it became payable." : flows && provider?.positions.some((p) => p.onChain) ? "Paid out counts in the period it became payable." : undefined}
         />
-        <Section id="allocation" title="Allocation" description="What's settled, by pool">
+        <Section id="allocation" title="Allocation">
           {positionsState.kind === "ready" ? (
             <Donut title="Settled by pool" slices={allocation(positionsState.data.positions)} empty="Nothing settled in a pool yet" />
           ) : (
@@ -271,16 +271,16 @@ export function InvestorView({
       </Panel>
 
       <Panel id="unlocks-and-health" cols="@4xl/main:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <Section id="unlocks" title="Unlock timeline" description="Each devnet deposit: review, then lock-in, then available">
+        <Section id="unlocks" title="Unlock timeline">
           {positionsState.kind === "ready" ? <UnlockTimeline positions={positionsState.data.positions} now={now} /> : <NotReady state={positionsState} what="Unlocks" />}
         </Section>
-        <Section id="pool-health" title="Pool health" description="Pools you hold">
+        <Section id="pool-health" title="Pool health">
           {positionsState.kind === "ready" ? <PoolHealthList pools={positionsState.data.pools} held={new Set(positionsState.data.positions.map((p) => p.poolId))} /> : <NotReady state={positionsState} what="Pool health" />}
         </Section>
       </Panel>
 
       <Panel id="positions">
-      <Section id="positions" title="Positions" description="Each deposit, with its pool's health" action={<SectionLink href={EARN_POSITIONS}>Earn</SectionLink>}>
+      <Section id="positions" title="Positions" action={<SectionLink href={EARN_POSITIONS}>Earn</SectionLink>}>
         {positionsState.kind !== "ready" ? (
           <NotReady state={positionsState} what="Your positions" />
         ) : positionsState.data.positions.length === 0 ? (
@@ -327,7 +327,7 @@ export function InvestorView({
       </Panel>
 
       <Panel id="coming-and-wallets" cols="@4xl/main:grid-cols-2">
-        <Section id="coming-up" title="Coming up" description={`Unlocks and payable withdrawals in the next ${COMING_UP_DAYS} days`}>
+        <Section id="coming-up" title="Coming up">
           {positionsState.kind !== "ready" ? (
             <NotReady state={positionsState} what="Coming up" />
           ) : (
@@ -365,7 +365,7 @@ export function InvestorView({
           )}
         </Section>
 
-        <Section id="wallets" title="Wallets" description="Your linked wallets, read-only here">
+        <Section id="wallets" title="Wallets">
           {wallets.kind !== "ready" ? (
             <NotReady state={wallets} what="Wallets" />
           ) : !wallets.data.supported ? (

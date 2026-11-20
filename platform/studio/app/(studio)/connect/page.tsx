@@ -101,10 +101,6 @@ export default function ConnectPage() {
         <OnThisPage active={active} row className="-mx-2 flex gap-1 overflow-x-auto pb-1 text-sm md:hidden" />
         <header className="space-y-2">
           <h1 className="text-2xl font-semibold tracking-tight">Connect your agent</h1>
-          <P>
-            Mynt is an MCP server. If you'd rather work in Claude, Claude Code, Cursor, VS Code or ChatGPT than in the studio, connect it to Mynt and ask for what you'd do here: look up licences, start and follow builds, check an app's
-            promotion gates, read audits. It signs in as you and sees only what you can see.
-          </P>
         </header>
 
         <Section id="connect" title="Connect an agent">
