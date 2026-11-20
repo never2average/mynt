@@ -75,12 +75,14 @@ describe("page-level tab bars", () => {
 });
 
 describe("Audits", () => {
-  it("has no explainer text under its tabs: a definition is at most the tab's tooltip", () => {
+  it("has no explainer text: none under its tabs, no tooltip help on them, no line about unclassified records", () => {
     const html = renderToStaticMarkup(<AuditTabs tab="security" onTab={() => undefined} />);
-    const text = html.replace(/<[^>]*>/g, " ");
-    for (const help of Object.values(AUDIT_CLASS_HELP)) expect(text).not.toContain(help);
+    for (const help of Object.values(AUDIT_CLASS_HELP)) expect(html).not.toContain(help);
+    expect(html).not.toMatch(/title="/);
     const page = readFileSync(join(root, "app/(studio)/audits/page.tsx"), "utf8");
     expect(page).not.toMatch(/AUDIT_CLASS_HELP/);
+    expect(page).not.toMatch(/sort its records into classes/);
+    expect(page).not.toContain("data-unclassified");
   });
 });
 

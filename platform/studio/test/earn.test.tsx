@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarView } from "@/components/app-sidebar";
-import { CommitForm, commitOutcome, EarnTable, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
+import { CommitForm, commitOutcome, EarnTable, positionKpis, ProposeForm, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -170,8 +170,9 @@ describe("a pool's state", () => {
     expect(html).toContain("Not verified · #7 to 2026-11-13");
     expect(html).toContain("Last verified to 2026-11-12");
     expect(html).toMatch(/data-queue="true"[^>]*>2</);
-    // Capital isn't shown to builders by Mynt: said so, never 0.
-    expect(html).toContain("Not shown to builders yet");
+    // Capital isn't shown to builders by Mynt, so there's no column that only ever said so (never 0 either).
+    expect(html).not.toContain("Not shown to builders yet");
+    expect(html).not.toContain("Committed / settled");
     // No explainer under the pools when nothing stops a proposal (only a reason it can't be proposed shows there).
     expect(html).not.toContain("data-sponsor-note");
     expect(html).not.toContain("Pools can be proposed only on a component");
@@ -190,9 +191,11 @@ describe("a pool's state", () => {
 
   it("the proposal form names the sponsor's approval and sends cents and basis points", () => {
     const d = data({ access: { builder: true, liquidityProvider: false } });
-    const html = view(d, "my-pools", { kind: "propose" });
-    expect(html).toContain("Harbor Bank must approve it and name the money rails");
+    // The form opens in a sheet from Propose pool (test/earn-assistant.test.tsx opens it); its one line says what proposing does.
     const option = d.builder!.proposable![0];
+    const html = renderToStaticMarkup(<ProposeForm options={[option]} actions={noActions} onDone={() => undefined} />);
+    expect(html).toContain("Harbor Bank must approve it and name the money rails");
+    expect(html).toContain("real-money commitments also wait for a Mynt admin to clear it");
     expect(proposalFrom({ option, name: " Float ", sandbox: true, reservePercent: "12.5", reserveFloor: "1,000", noticeDays: "14", minCommit: "500", maxCommit: "250,000.50" }, [option])).toEqual({
       product_id: "card-credit",
       component_key: "lending",
@@ -284,6 +287,55 @@ describe("withdrawals", () => {
     expect(withdrawalOutcome({ seq: 4, eligible_at: "2026-12-14T00:00:00Z", status: "queued" }, false)).toBe(
       "Added to the withdrawal queue as request #4, payable from 2026-12-14 at the earliest. It's paid in queue order, and only as far as the pool's latest verified health snapshot keeps it above its minimum reserve.",
     );
+  });
+});
+
+describe("the tables' layout (the dashboard's)", () => {
+  const order = (html: string, marks: string[]) => marks.map((m) => html.indexOf(m));
+  const inOrder = (at: number[]) => at.every((i) => i >= 0) && at.every((i, n) => n === 0 || at[n - 1] < i);
+
+  it("each table tab has one toolbar row: search, filter buttons, Export CSV, then its CTA; no native select filters", () => {
+    const lp = data({ access: { builder: false, liquidityProvider: true } });
+    const opp = view(lp, "opportunities");
+    expect(inOrder(order(opp, ['aria-label="Search open pools"', 'data-filter="Product line"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="commit"']))).toBe(true);
+    expect(opp).not.toContain("<select");
+    const pos = view(lp, "my-positions");
+    expect(inOrder(order(pos, ['aria-label="Search positions"', 'data-filter="Money"', "data-export", 'data-cta="withdraw"']))).toBe(true);
+    const pools = view(data({ access: { builder: true, liquidityProvider: false } }), "my-pools");
+    expect(inOrder(order(pools, ['aria-label="Search pools"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="propose"']))).toBe(true);
+    expect(pools).not.toContain('data-filter="Product line"');
+    for (const html of [opp, pos, pools]) {
+      expect(html).toContain("data-list-layout");
+      expect(html).toContain("sticky top-0 bg-card");
+      expect(html).not.toContain('data-slot="card"');
+    }
+  });
+
+  it("pages 25 rows at a time with the list pager", () => {
+    const d = data({ access: { builder: false, liquidityProvider: true } });
+    d.provider!.pools = Array.from({ length: 30 }, (_, i) => row({ id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`, name: `Pool ${i}` }));
+    const html = view(d, "opportunities");
+    expect([...html.matchAll(/<tr[^>]*data-pool="/g)]).toHaveLength(25);
+    expect(html).toContain("30 rows · Page 1 of 2");
+  });
+
+  it("My positions opens with key figures from the positions, then the table, on-chain positions and withdrawal requests as sections", () => {
+    const html = view(data({ access: { builder: false, liquidityProvider: true } }), "my-positions");
+    expect(html.indexOf('data-row="position-figures"')).toBeGreaterThan(-1);
+    expect(html.indexOf('data-row="position-figures"')).toBeLessThan(html.indexOf("data-list-layout"));
+    for (const k of ["committed", "settled", "available", "queued"]) expect(html).toContain(`data-kpi="${k}"`);
+    expect(html).toMatch(/<h2[^>]*class="text-sm font-semibold"[^>]*>Your withdrawal requests<\/h2>/);
+    expect(positionKpis([POSITION]).map((k) => [k.label, k.value])).toEqual([
+      ["Committed", 550_000],
+      ["Settled", 400_000],
+      ["Available to withdraw", 300_000],
+      ["Queued for withdrawal", 100_000],
+    ]);
+    // An on-chain deposit Mynt gave no amount for: Not measured, never 0.
+    const unmeasured = fromPositions([{ source: "on-chain", pool_id: CLEARED.id, name: "Chain", product_id: "p", wallet: "W", deposits: [{ deposit: "D1" }], requests: [] }]);
+    const k = positionKpis(unmeasured);
+    expect(k.find((x) => x.key === "committed")!.value).toBeNull();
+    expect(k.find((x) => x.key === "settled")!.value).toBeNull();
   });
 });
 

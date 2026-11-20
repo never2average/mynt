@@ -2,18 +2,20 @@
 
 // Earn's wallet: the picker in the chat bar (the user's verified linked wallets, each with its short
 // address, network and live devnet USDC and SOL balances, and Link wallet), the one-line
-// disclaimer under the composer, and the on-chain deposit and withdrawal on a draft's card. The
+// disclaimer under the composer, and the on-chain deposit and withdrawal on a draft. The
 // on-chain flow runs only from the user's own clicks: Prepare asks Mynt for an unsigned devnet
 // transaction and its summary; the summary shown is Mynt's, never the assistant's; Sign asks the
 // user's own browser wallet (which must be the chosen linked wallet) to sign and send it, untouched;
 // then the page follows its status until it's confirmed and reads the positions again. Mynt never
 // signs and never holds funds or keys. Devnet only: mainnet is never offered.
-import { createContext, Fragment, useContext, useEffect, useRef, useState, type ReactNode } from "react"
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react"
 import { Check, ChevronDown, Info, Link2, Loader2, Wallet } from "lucide-react"
 
+import { Panel, Section } from "@/components/dashboard-panels"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -489,120 +491,176 @@ export function DepositsPausedBadge({ reason }: { reason: string }) {
 
 // ---- on-chain positions (My positions) ----
 
-// Each wallet's position in an on-chain pool, deposit by deposit: amount, what's left, when it
-// unlocks, whether it's in review, locked or available, and what's queued, with Withdraw on each
-// deposit (choosing that deposit). Withdrawal requests are listed under it.
+// A wallet's totals in USDC: held, queued and available, laid out like the dashboard's key figures.
+function WalletFigures({ held, queued, available }: { held: bigint; queued: bigint; available: bigint }) {
+  const figures: [string, string, bigint][] = [
+    ["held", "Held", held],
+    ["queued", "Queued", queued],
+    ["available", "Available", available],
+  ]
+  return (
+    <dl className="grid grid-cols-3 divide-x" data-wallet-figures>
+      {figures.map(([key, label, value]) => (
+        <div key={key} className="flex min-w-0 flex-col gap-1 px-4 first:pl-0" data-figure={key}>
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="text-lg font-semibold tabular-nums">{usdcText(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+type OpenDeposit = { poolId: string; poolName: string; wallet: string; deposit: string; seq: string | null; free: bigint; noticeSeconds: number | null; minRequest: bigint | null }
+
+// Each wallet's position in an on-chain pool: its totals, then deposit by deposit (amount, what's
+// left, when it unlocks, whether it's in review, locked or available, and what's queued), with
+// Withdraw on each deposit opening a sheet for that deposit, then its withdrawal requests.
 export function OnChainPositions({ positions, pools }: { positions: Position[]; pools: PoolRow[] }) {
-  const [open, setOpen] = useState<string | null>(null)
+  const [open, setOpen] = useState<OpenDeposit | null>(null)
   if (!positions.length) return null
   return (
-    <section className="flex flex-col gap-3" data-on-chain-positions>
-      <h3 className="flex items-center gap-2 text-sm font-medium">
-        On-chain positions <DevnetBadge />
-      </h3>
-      {positions.map((p) => {
-        const c = p.chain!
-        const pool = pools.find((x) => x.id === p.poolId) ?? null
-        return (
-          <div key={positionKey(p)} className="flex flex-col gap-2 rounded-lg border p-3" data-on-chain-position={positionKey(p)}>
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">{p.name}</span>
-              <span className="font-mono text-xs text-muted-foreground" title={c.wallet}>
-                {shortAddress(c.wallet)}
-              </span>
-              {pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
-              {pool?.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
-              <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-                {usdcText(c.principal)} held · {usdcText(c.queued)} queued · {usdcText(c.availableToRequest)} available
-              </span>
-            </div>
-            <div className="overflow-auto rounded-md border">
-              <Table>
-                <TableHeader className="bg-card">
-                  <TableRow>
-                    <TableHead>Deposit</TableHead>
-                    <TableHead className="text-right">Amount</TableHead>
-                    <TableHead className="text-right">Remaining</TableHead>
-                    <TableHead className="text-right">Queued</TableHead>
-                    <TableHead>Unlocks</TableHead>
-                    <TableHead>Standing</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {c.deposits.length ? (
-                    c.deposits.map((d) => {
-                      const s = depositStanding(d)
-                      const id = `${positionKey(p)}|${d.deposit}`
-                      return (
-                        <Fragment key={d.deposit}>
-                          <TableRow data-deposit={d.deposit} data-standing={s.kind}>
-                            <TableCell className="font-mono text-xs" title={d.deposit}>
-                              {d.seq !== null ? `#${d.seq} · ` : ""}
-                              {shortAddress(d.deposit)}
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums">{usdcText(d.amount)}</TableCell>
-                            <TableCell className="text-right tabular-nums">{usdcText(d.remaining)}</TableCell>
-                            <TableCell className="text-right tabular-nums">{usdcText(d.queued)}</TableCell>
-                            <TableCell>{d.unlocksAt ? d.unlocksAt.slice(0, 10) : "—"}</TableCell>
-                            <TableCell>{standingText(s)}</TableCell>
-                            <TableCell className="text-right">
-                              <Button size="sm" variant="outline" disabled={s.kind !== "available"} title={s.kind !== "available" ? standingText(s) : undefined} onClick={() => setOpen(open === id ? null : id)} data-withdraw-deposit={d.deposit}>
-                                Withdraw
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                          {open === id && (
-                            <TableRow>
-                              <TableCell colSpan={7} className="whitespace-normal">
-                                <WithdrawDeposit poolId={p.poolId} wallet={c.wallet} deposit={d.deposit} free={s.free} noticeSeconds={pool?.treasury?.noticeSeconds ?? null} minRequest={pool?.treasury?.minRequest ?? null} />
+    <div data-on-chain-positions>
+      <Panel id="on-chain-positions">
+        <Section id="on-chain-positions" title="On-chain positions" action={<DevnetBadge />}>
+          {positions.map((p) => {
+            const c = p.chain!
+            const pool = pools.find((x) => x.id === p.poolId) ?? null
+            return (
+              <div key={positionKey(p)} className="flex flex-col gap-3 border-t pt-3 first:border-t-0 first:pt-0" data-on-chain-position={positionKey(p)}>
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <span className="font-medium">{p.name}</span>
+                  <span className="font-mono text-xs text-muted-foreground" title={c.wallet}>
+                    {shortAddress(c.wallet)}
+                  </span>
+                  {pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
+                  {pool?.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
+                </div>
+                <WalletFigures held={c.principal} queued={c.queued} available={c.availableToRequest} />
+                <div className="overflow-auto rounded-lg border">
+                  <Table>
+                    <TableHeader className="bg-card">
+                      <TableRow>
+                        <TableHead>Deposit</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                        <TableHead className="text-right">Remaining</TableHead>
+                        <TableHead className="text-right">Queued</TableHead>
+                        <TableHead>Unlocks</TableHead>
+                        <TableHead>Standing</TableHead>
+                        <TableHead className="text-right">Action</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {c.deposits.length ? (
+                        c.deposits.map((d) => {
+                          const s = depositStanding(d)
+                          return (
+                            <TableRow key={d.deposit} data-deposit={d.deposit} data-standing={s.kind}>
+                              <TableCell className="font-mono text-xs" title={d.deposit}>
+                                {d.seq !== null ? `#${d.seq} · ` : ""}
+                                {shortAddress(d.deposit)}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">{usdcText(d.amount)}</TableCell>
+                              <TableCell className="text-right tabular-nums">{usdcText(d.remaining)}</TableCell>
+                              <TableCell className="text-right tabular-nums">{usdcText(d.queued)}</TableCell>
+                              <TableCell>{d.unlocksAt ? d.unlocksAt.slice(0, 10) : "—"}</TableCell>
+                              <TableCell>{standingText(s)}</TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={s.kind !== "available"}
+                                  title={s.kind !== "available" ? standingText(s) : undefined}
+                                  onClick={() => setOpen({ poolId: p.poolId, poolName: p.name, wallet: c.wallet, deposit: d.deposit, seq: d.seq, free: s.free, noticeSeconds: pool?.treasury?.noticeSeconds ?? null, minRequest: pool?.treasury?.minRequest ?? null })}
+                                  data-withdraw-deposit={d.deposit}
+                                >
+                                  Withdraw
+                                </Button>
                               </TableCell>
                             </TableRow>
-                          )}
-                        </Fragment>
-                      )
-                    })
-                  ) : (
-                    <TableRow>
-                      <TableCell colSpan={7} className="py-4 text-center text-muted-foreground">
-                        No deposits from this wallet yet.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-            {c.requests.length > 0 && (
-              <ul className="flex flex-col gap-1 text-xs text-muted-foreground" data-on-chain-requests>
-                {c.requests.map((r) => (
-                  <li key={r.address} className="tabular-nums">
-                    Request {r.seq !== null ? `#${r.seq}` : shortAddress(r.address)}: {usdcText(r.amount)} asked, {usdcText(r.paid)} paid · {r.status}
-                    {r.payableAt ? ` · payable from ${r.payableAt.slice(0, 10)}` : ""}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )
-      })}
-    </section>
+                          )
+                        })
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={7} className="py-4 text-center text-muted-foreground">
+                            No deposits from this wallet yet.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+                {c.requests.length > 0 && (
+                  <div className="overflow-auto rounded-lg border" data-on-chain-requests>
+                    <Table>
+                      <TableHeader className="bg-card">
+                        <TableRow>
+                          <TableHead>Withdrawal request</TableHead>
+                          <TableHead className="text-right">Asked</TableHead>
+                          <TableHead className="text-right">Paid</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Payable from</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {c.requests.map((r) => (
+                          <TableRow key={r.address} data-on-chain-request={r.address}>
+                            <TableCell className="font-mono text-xs" title={r.address}>
+                              {r.seq !== null ? `#${r.seq}` : shortAddress(r.address)}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums" data-asked>
+                              {usdcText(r.amount)}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums" data-paid>
+                              {usdcText(r.paid)}
+                            </TableCell>
+                            <TableCell className="capitalize" data-status>
+                              {r.status}
+                            </TableCell>
+                            <TableCell>{r.payableAt ? r.payableAt.slice(0, 10) : "—"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </Section>
+      </Panel>
+      <Sheet open={open !== null} onOpenChange={(o) => !o && setOpen(null)}>
+        <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg" aria-describedby={undefined} data-sheet="on-chain-withdraw">
+          <SheetHeader>
+            <SheetTitle>{open ? `Withdraw from ${open.poolName}` : "Withdraw"}</SheetTitle>
+          </SheetHeader>
+          <div className="px-4 pb-4">{open && <WithdrawDeposit key={`${open.wallet}|${open.deposit}`} {...open} />}</div>
+        </SheetContent>
+      </Sheet>
+    </div>
   )
 }
 
 // One deposit's Withdraw: an amount in USDC (all that's available by default), then the on-chain flow.
-function WithdrawDeposit({ poolId, wallet, deposit, free, noticeSeconds, minRequest }: { poolId: string; wallet: string; deposit: string; free: bigint; noticeSeconds: number | null; minRequest: bigint | null }) {
+function WithdrawDeposit({ poolId, wallet, deposit, seq, free, noticeSeconds, minRequest }: OpenDeposit) {
   const [text, setText] = useState(usdcText(free).replace(/ USDC$/, "").replace(/,/g, ""))
   const amount = parseUsdc(text)
   const blocked = amount === null ? "Enter an amount in USDC, like 25 or 12.5." : amount > free ? `This deposit has ${usdcText(free)} available.` : minRequest !== null && amount < minRequest ? `This pool's smallest withdrawal request is ${usdcText(minRequest)}.` : null
   return (
-    <div className="flex flex-col gap-2" data-withdraw-form={deposit}>
+    <div className="flex flex-col gap-4" data-withdraw-form={deposit}>
+      <p className="text-sm text-muted-foreground" data-consequence>
+        Joins the pool&apos;s first-in, first-out queue and is paid to this wallet after the notice period ({durationText(noticeSeconds)}), only as far as the pool stays above its reserve.
+      </p>
+      <p className="text-sm">
+        <span className="text-muted-foreground">Deposit </span>
+        <span className="font-mono text-xs" title={deposit}>
+          {seq !== null ? `#${seq} · ` : ""}
+          {shortAddress(deposit)}
+        </span>
+      </p>
       <label className="flex max-w-xs flex-col gap-1 text-sm">
         Amount (USDC)
         <Input value={text} onChange={(e) => setText(e.target.value)} inputMode="decimal" aria-label="Amount in USDC" />
       </label>
-      <p className="text-xs text-muted-foreground">
-        Joins the pool&apos;s first-in, first-out queue and is paid to this wallet after the notice period ({durationText(noticeSeconds)}), only as far as the pool stays above its reserve.
-      </p>
       <OnChainAction kind="withdrawal" poolId={poolId} amountBaseUnits={amount ?? 0n} amountText={amount !== null ? usdcText(amount) : undefined} deposit={deposit} wallet={wallet} blocked={blocked} newKey={newIdempotencyKey} />
     </div>
   )

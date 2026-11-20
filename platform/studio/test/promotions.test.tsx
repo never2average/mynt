@@ -281,8 +281,69 @@ describe("the Settings page (once Workspace)", () => {
     expect(html(archived)).not.toContain(">Archive workspace<");
     const frozen = { ...withTools, workspace: { ...ws, orgMissingSince: "2026-11-09T00:00:00Z" } };
     expect(html(frozen)).toContain(">Give it a new organization<");
-    // Members can't rename.
-    expect(html({ ...info, canManage: false, isOwner: false })).toContain("Only the workspace&#x27;s owners and admins can rename it.");
+    // Members can't rename: the field and Save are disabled, with no explainer line.
+    const member = html({ ...info, canManage: false, isOwner: false });
+    expect(member).toMatch(/<input[^>]*aria-label="Workspace name"[^>]*disabled=""/);
+    expect(member).toMatch(/<button[^>]*type="submit"[^>]*disabled=""[^>]*>Save<\/button>/);
+    expect(member).not.toContain("can rename it");
+  });
+
+  it("General is flat Panels (Organization, Name, Archive) with no cards or explainer paragraphs", () => {
+    const withTools = { ...info, tools: { rename: true, archive: true, unarchive: true, relink: true } };
+    const html = renderToStaticMarkup(<SettingsTab info={withTools} actions={settings} manageUrl="https://accounts.example.test/organization" />);
+    expect(html).not.toContain('data-slot="card"');
+    expect(html).not.toContain("card-description");
+    expect(html).not.toContain("Owners only");
+    for (const row of ["organization", "name", "archive"]) expect(html).toContain(`data-row="${row}"`);
+    expect(html.indexOf('data-row="organization"')).toBeLessThan(html.indexOf('data-row="name"'));
+    expect(html.indexOf('data-row="name"')).toBeLessThan(html.indexOf('data-row="archive"'));
+    // Archive is a labelled button; the consequence is in its confirmation dialog, not on the page.
+    expect(html).toMatch(/data-archive[^>]*>[\s\S]*?Archive workspace</);
+    expect(html).not.toContain("Archiving freezes the workspace");
+  });
+
+  it("Apps: key figures by stage, then search, Stage, Export CSV and New app last; stage as a status dot in words", () => {
+    const html = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} settingsActions={settings} />);
+    const figure = (key: string) => new RegExp(`data-kpi="${key}"[\\s\\S]*?data-measured="true">(\\d+)<`).exec(html)?.[1];
+    expect([figure("apps"), figure("production"), figure("staging"), figure("ideas")]).toEqual(["2", "1", "0", "1"]);
+    const toolbar = ['aria-label="Search apps by name, stage or owner"', 'data-filter="Stage"', ">Export CSV<", 'href="/new"'].map((s) => html.indexOf(s));
+    expect(toolbar.every((i) => i > 0)).toBe(true);
+    expect([...toolbar].sort((a, b) => a - b)).toEqual(toolbar);
+    const row = /data-app-row="a1"[\s\S]*?<\/tr>/.exec(html)![0];
+    expect(row).toMatch(/data-tone="green"[\s\S]*?Production/);
+    expect(row).not.toContain('data-slot="badge"');
+    // Still loading: a Skeleton, never figures of 0.
+    const loading = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={null} memberActions={actions} settingsActions={settings} />);
+    expect(loading).not.toContain("data-kpi=");
+    expect(loading).toContain('data-slot="skeleton"');
+    expect(loading).not.toContain("rounded-xl");
+  });
+
+  it("Archive workspace opens a confirmation dialog with the consequence; Yes archives", async () => {
+    const archived: string[] = [];
+    const withTools = { ...info, tools: { rename: true, archive: true, unarchive: true, relink: true } };
+    render(<SettingsTab info={withTools} actions={{ ...settings, archive: async () => (archived.push("x"), null) }} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Archive workspace" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("Archiving freezes the workspace; 7 days later everyone is removed. Until then it can be undone.");
+    fireEvent.click(screen.getByRole("button", { name: "Yes, archive workspace" }));
+    await act(async () => undefined);
+    expect(archived).toEqual(["x"]);
+    expect(screen.getByText("Archived. You can unarchive it for 7 days.")).toBeTruthy();
+  });
+
+  it("Members: a member's role changes from its dropdown, not a native select", async () => {
+    const changed: [string, string][] = [];
+    const data = { ...membersData, members: [...membersData.members, { userId: "u2", name: "Sam", email: "sam@example.com", role: "member" as const }] };
+    render(<WorkspaceView tab="members" onTab={noop} info={info} members={data} apps={appsRows} memberActions={{ ...actions, changeRole: async (u: string, r: string) => (changed.push([u, r]), null) }} settingsActions={settings} />);
+    expect(document.querySelector("select")).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Role for sam@example.com" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await act(async () => undefined);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Admin" }));
+    await act(async () => undefined);
+    expect(changed).toEqual([["u2", "admin"]]);
   });
 
   it("is in the header's titles and search, and /members is still a page (it redirects), not an app", () => {

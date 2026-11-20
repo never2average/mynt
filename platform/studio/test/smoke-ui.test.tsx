@@ -120,6 +120,9 @@ describe("Settings with no workspace to show", () => {
     fireEvent.click(screen.getByRole("button", { name: "Beta" }));
     expect(picked).toEqual(["w2"]);
     expect(screen.getByRole("button", { name: "Create workspace" })).toBeTruthy();
+    // The form inline, not the full-page gate's centring wrapper; no dashed box.
+    expect(document.querySelector('[data-gate="workspace"]')).toBeNull();
+    expect(document.querySelector("[data-workspace-unavailable]")?.className).not.toContain("border-dashed");
     const page = readFileSync(join(root, "app/(studio)/settings/workspace-page.tsx"), "utf8");
     expect(page).toMatch(/error \? \([\s\S]*?<TabSelector tab=\{tab\} onTab=\{onTab\} \/>[\s\S]*?<WorkspaceUnavailable/);
   });

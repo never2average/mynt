@@ -283,9 +283,9 @@ describe("the assistant's drafts with a wallet", () => {
 describe("the on-chain deposit", () => {
   it("shows the pool's treasury on devnet", () => {
     render(<PoolsTab data={data} poolIds={null} />);
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-devnet]`)).toBeTruthy();
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-devnet]`)).toBeTruthy();
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
     cleanup();
     const verified = fromPools([{ ...base, id: POOL, name: "Verified", treasury: { ...TREASURY, verified_build: true } }]).map((p) => ({ ...p, productLine: null, queueLength: null, health: null }));
     render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: verified } }} poolIds={null} />);
@@ -529,7 +529,13 @@ describe("My positions on-chain", () => {
     expect(d2.textContent).toContain("Locked until 2099-12-14");
     expect((d2.querySelector("[data-withdraw-deposit]") as HTMLButtonElement).disabled).toBe(true);
     expect(section.querySelector(`[data-deposit="${DEP3}"]`)!.textContent).toContain("In review until 2099-01-02");
-    expect(section.querySelector("[data-on-chain-requests]")!.textContent).toContain("300 USDC asked, 0 USDC paid · open");
+    // The requests are a table under the deposits (they were a line of text before the dashboard design).
+    const request = section.querySelector("[data-on-chain-requests] [data-on-chain-request]")!;
+    expect(request.querySelector("[data-asked]")!.textContent).toBe("300 USDC");
+    expect(request.querySelector("[data-paid]")!.textContent).toBe("0 USDC");
+    expect(request.querySelector("[data-status]")!.textContent).toBe("open");
+    // The wallet's totals are figures, not a sentence.
+    expect([...section.querySelectorAll("[data-wallet-figures] [data-figure]")].map((f) => f.getAttribute("data-figure"))).toEqual(["held", "queued", "available"]);
     // Not in the rails table.
     expect(document.querySelector(`[data-position="${POOL}"]`)).toBeNull();
   });
@@ -542,7 +548,8 @@ describe("My positions on-chain", () => {
       </EarnWalletProvider>,
     );
     await click(document.querySelector(`[data-withdraw-deposit="${DEP1}"]`)!);
-    const form = document.querySelector(`[data-withdraw-form="${DEP1}"]`)!;
+    // It opens in a sheet, not inline under the deposit.
+    const form = document.querySelector(`[data-sheet="on-chain-withdraw"] [data-withdraw-form="${DEP1}"]`)!;
     const input = form.querySelector("input") as HTMLInputElement;
     expect(input.value).toBe("200");
     fireEvent.change(input, { target: { value: "250" } });

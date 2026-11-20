@@ -114,6 +114,40 @@ describe("the Repositories tab", () => {
     expect(html).toContain('aria-label="Search repositories by name or status"');
     expect(renderToStaticMarkup(<RepositoriesTab state={{ kind: "unsupported" }} />)).toContain('data-empty="not-available"');
   });
+
+  it("has one toolbar row: search, Status, Export CSV, then Connect repository as the primary button", () => {
+    const html = renderToStaticMarkup(<RepositoriesTab state={{ kind: "ready", repos, connect: true }} />);
+    const toolbar = ['aria-label="Search repositories by name or status"', 'data-filter="Status"', ">Export CSV<", "data-connect-repository"].map((s) => html.indexOf(s));
+    expect(toolbar.every((i) => i > 0)).toBe(true);
+    expect([...toolbar].sort((a, b) => a - b)).toEqual(toolbar);
+    const cta = /<button[^>]*data-connect-repository[^>]*>/.exec(html)![0];
+    expect(cta).toContain('data-variant="default"');
+    expect(cta).toContain("h-9");
+    // Disabled without an explanation in a title.
+    expect(renderToStaticMarkup(<ConnectRepository enabled={false} />)).not.toContain("title=");
+  });
+
+  it("filters by status", () => {
+    render(<RepositoriesTab state={{ kind: "ready", repos, connect: true }} />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Status" }), { key: "Enter" });
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Rejected" }));
+    expect(document.querySelectorAll("[data-repo-row]")).toHaveLength(1);
+    expect(document.querySelector('[data-repo-row="ines/vault"]')).toBeTruthy();
+  });
+
+  it("loads as Skeleton blocks, never 'Loading…' text", () => {
+    const html = renderToStaticMarkup(<RepositoriesTab state={{ kind: "loading" }} />);
+    expect(html).toContain('data-slot="skeleton"');
+    expect(html).not.toMatch(/Loading/);
+  });
+
+  it("the connect dialog has a short field label and no long description", () => {
+    render(<ConnectRepository enabled />);
+    fireEvent.click(screen.getByRole("button", { name: "Connect repository" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("Repository");
+    expect(dialog.textContent).not.toMatch(/push branches|an admin decides/);
+  });
 });
 
 describe("repositories route", () => {
