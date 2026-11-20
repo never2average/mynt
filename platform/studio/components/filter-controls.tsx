@@ -4,7 +4,8 @@
 // labelled button per filter opening its choices, and a date range. An active filter shows on
 // its control ("Status · Overdue", "Dates · 2026-11-01 – 2026-11-13") with Clear in its menu,
 // never as extra lines of text. Server-renderable (the menus open on the client).
-import { ChevronDown, X } from "lucide-react"
+import { CalendarDays, ChevronDown, X } from "lucide-react"
+import type { DateRange } from "react-day-picker"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -17,7 +18,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
+import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 export type FilterOption = { value: string; label: string }
@@ -60,32 +61,44 @@ export function FilterSelect({ label, value, options, onChange }: { label: strin
   )
 }
 
-export function DateRangeFilter({ from, to, onChange }: { from: string; to: string; onChange: (from: string, to: string) => void }) {
+// A day as YYYY-MM-DD in local time (what the calendar shows), and back.
+const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+const day = (s: string) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s)
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined
+}
+
+/** A date range on a calendar: click the first day, then the last (two months side by side). */
+export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable = true }: { from: string; to: string; onChange: (from: string, to: string) => void; label?: string; clearable?: boolean }) {
   const active = Boolean(from || to)
   const text = active ? `${from || "…"} – ${to || "…"}` : null
+  const selected: DateRange | undefined = from || to ? { from: day(from), to: day(to) } : undefined
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" className="h-9" aria-label={text ? `Dates: ${text}` : "Dates"} data-filter="Dates" data-active={active ? "true" : undefined}>
-          Dates
+        <Button variant="outline" size="sm" className="h-9" aria-label={text ? `${label}: ${text}` : label} data-filter={label} data-active={active ? "true" : undefined}>
+          <CalendarDays className="text-muted-foreground" />
+          {label}
           {text && <span className="font-normal text-muted-foreground tabular-nums">· {text}</span>}
           <ChevronDown className="text-muted-foreground" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="flex w-64 flex-col gap-2" data-filter-menu="Dates">
-        <label className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
-          From
-          <Input type="date" value={from} onChange={(e) => onChange(e.target.value, to)} className="h-9 w-40" aria-label="From" />
-        </label>
-        <label className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
-          To
-          <Input type="date" value={to} onChange={(e) => onChange(from, e.target.value)} className="h-9 w-40" aria-label="To" />
-        </label>
-        {active && (
-          <Button variant="ghost" size="sm" className="self-end" onClick={() => onChange("", "")} data-filter-clear>
-            <X />
-            Clear
-          </Button>
+      <PopoverContent align="end" className="w-auto p-0" data-filter-menu={label}>
+        <Calendar
+          mode="range"
+          numberOfMonths={2}
+          selected={selected}
+          defaultMonth={day(from) ?? new Date()}
+          disabled={{ after: new Date() }}
+          onSelect={(r) => onChange(r?.from ? ymd(r.from) : "", r?.to ? ymd(r.to) : r?.from ? ymd(r.from) : "")}
+        />
+        {clearable && active && (
+          <div className="flex justify-end border-t p-2">
+            <Button variant="ghost" size="sm" onClick={() => onChange("", "")} data-filter-clear>
+              <X />
+              Clear
+            </Button>
+          </div>
         )}
       </PopoverContent>
     </Popover>

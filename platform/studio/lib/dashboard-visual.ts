@@ -2,7 +2,7 @@
 // (get_workspace_pnl), the dashboard (get_developer_dashboard or apps and builds), the apps by
 // stage and their promotion checks. Pure, for the components and the tests. Amounts are integer
 // cents; anything Mynt doesn't measure stays null (a gap, "Not measured"), never 0.
-import { DATE_RANGES, type DateRangeKey } from "@/lib/pnl";
+import type { Granularity, PnlPeriod } from "@/lib/pnl";
 import type { StageApp } from "@/components/dashboard-panels";
 import type { Pnl, PnlLine, Values } from "./pnl";
 import type { Stage } from "./workspaces";
@@ -102,10 +102,35 @@ export function seriesSummary(label: string, points: { label: string; value: num
 
 // ---- the builder dashboard's chart filters: app, app stage, date range ----
 
-export type ChartFilter = { appId: string; stage: Stage | "all"; range: DateRangeKey; query: string };
-export const DEFAULT_CHART_FILTER: ChartFilter = { appId: "all", stage: "all", range: "6m", query: "" };
+// from / to: the first and last day shown, YYYY-MM-DD.
+export type ChartFilter = { appId: string; stage: Stage | "all"; from: string; to: string; query: string };
 
-export const dateRange = (key: DateRangeKey) => DATE_RANGES.find((r) => r.key === key) ?? DATE_RANGES[1];
+const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// The last six months: from the first of the month five months back to today.
+export function defaultChartFilter(now = new Date()): ChartFilter {
+  return { appId: "all", stage: "all", from: iso(new Date(now.getFullYear(), now.getMonth() - 5, 1)), to: iso(now), query: "" };
+}
+export const DEFAULT_CHART_FILTER: ChartFilter = defaultChartFilter();
+
+// Mynt's P&L comes per week or month, counting back from now: a range of up to about three months is asked
+// for in weeks, a longer one in months, enough periods to reach its first day (at most 24).
+const DAY = 86_400_000;
+export function dateRange(f: Pick<ChartFilter, "from" | "to">, now = new Date()): { granularity: Granularity; periods: number } {
+  const from = new Date(`${f.from}T00:00:00`);
+  const to = new Date(`${f.to || iso(now)}T00:00:00`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return { granularity: "month", periods: 6 };
+  const span = (to.getTime() - from.getTime()) / DAY;
+  // Weeks for a short range, when 24 weeks back from now reach its first day; months otherwise.
+  const weeks = Math.max(1, Math.ceil((now.getTime() - from.getTime()) / (7 * DAY)) + 1);
+  if (span <= 92 && weeks <= 24) return { granularity: "week", periods: weeks };
+  const months = (now.getFullYear() - from.getFullYear()) * 12 + (now.getMonth() - from.getMonth()) + 1;
+  return { granularity: "month", periods: Math.min(24, Math.max(1, months)) };
+}
+
+// The periods that overlap the range picked (the P&L counts back from now, so later ones are dropped too).
+export function trimSeries(series: PnlPeriod[], from: string, to: string): PnlPeriod[] {
+  return series.filter((p) => (!to || p.start.slice(0, 10) <= to) && (!from || p.end.slice(0, 10) > from));
+}
 
 // The apps the app picker offers: those in the chosen stage (all apps for every stage).
 export const appsForStage = (apps: readonly { id: string; name: string; stage: Stage }[], stage: ChartFilter["stage"]) => (stage === "all" ? [...apps] : apps.filter((a) => a.stage === stage));
@@ -120,7 +145,7 @@ export function chartApps<A extends { id: string; name: string; stage: Stage }>(
 // The P&L route for a filter: one app (?app=), the apps a stage or search narrows to added up (?apps=), or the
 // whole workspace when nothing narrows it.
 export function chartPnlUrl(f: ChartFilter, apps: readonly { id: string; name: string; stage: Stage }[]): string {
-  const r = dateRange(f.range);
+  const r = dateRange(f);
   const base = `/api/pnl?granularity=${r.granularity}&periods=${r.periods}`;
   if (f.appId !== "all") return `${base}&app=${encodeURIComponent(f.appId)}`;
   if (f.stage !== "all" || f.query.trim()) return `${base}&apps=${chartApps(f, apps).map((a) => encodeURIComponent(a.id)).join(",")}`;

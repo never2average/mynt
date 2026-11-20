@@ -258,10 +258,6 @@ export function SdkView({ data }: { data: AppSdk }) {
   if (!data.products.length) return <p className="text-sm text-muted-foreground">This app uses no products yet, so there&apos;s no SDK reference for it.</p>
   return (
     <div className="flex flex-col gap-4" data-app-sdk>
-      <p className="text-xs text-muted-foreground">
-        From each product&apos;s integration kit (get_product_sdk). Typed TypeScript and Python clients and an OpenAPI document come from an SDK release, which the coding agent makes for the app.
-        Devices use client sessions, never the app&apos;s key.
-      </p>
       {data.products.map((p) => (
         <section key={p.productId} className="rounded-lg border p-3 text-sm" data-sdk-product={p.productId}>
           <h4 className="font-medium">

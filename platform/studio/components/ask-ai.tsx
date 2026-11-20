@@ -81,7 +81,6 @@ function AskAiThread({ chat }: { chat: Chat }) {
         welcome={
           <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col justify-center gap-1 px-2 pb-6">
             <p className="text-base font-medium">What do you want to know?</p>
-            <p className="text-sm text-muted-foreground">Ask AI reads your Mynt data as you, and can&apos;t change anything.</p>
           </div>
         }
       />
