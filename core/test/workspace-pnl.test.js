@@ -175,7 +175,12 @@ test("each measured line from Mynt's records; unmeasured lines null with reasons
   const hosting = line(s.costs, "hosting");
   assert.deepEqual([hosting.measured, hosting.values.this_period], [true, 0], "not hosted by Mynt: a real 0");
 
-  for (const key of ["sandboxes", "mynt_fees"]) {
+  // Mynt bills nobody yet: its fees are a measured $0, not a gap.
+  const fees = line(s.costs, "mynt_fees");
+  assert.deepEqual([fees.measured, fees.values.this_period, fees.values.last_period, fees.values.year_to_date], [true, 0, 0, 0]);
+  assert.match(fees.source, /nothing is charged/);
+  assert.ok(!r.unmeasured.some((x) => x.key === "mynt_fees"));
+  for (const key of ["sandboxes"]) {
     const l = line(s.costs, key);
     assert.equal(l.measured, false, key);
     assert.deepEqual(l.values, { this_period: null, last_period: null, year_to_date: null }, key);
@@ -318,7 +323,11 @@ test("hosting and sandboxes after a build are recorded per app, and measured fro
   assert.equal(h.values.last_period, 0);
   const sb = line(s.costs, "sandboxes");
   assert.deepEqual([sb.measured, sb.values.this_period], [true, 75], "0.25 + 0.25 + 0.25 dollars after the build ended");
-  assert.equal(r.series.at(-1).costs_cents, null, "Mynt's fees are still unmeasured, so total costs are too");
+  // Every cost line is measured now (Mynt's fees are a real $0), so total costs are: the sum of the lines.
+  const thisPeriodCosts = s.costs.reduce((t, l) => t + l.values.this_period, 0);
+  assert.equal(r.series.at(-1).costs_cents, thisPeriodCosts);
+  assert.equal(s.totals.costs.this_period, thisPeriodCosts);
+  assert.equal(s.totals.net.this_period, s.totals.revenue.this_period - thisPeriodCosts);
   assert.ok(!r.unmeasured.some((u) => u.key === "hosting" || u.key === "sandboxes"));
   // One app: only its own machines.
   const starter = (await w.ana.call("get_workspace_pnl", { workspace_id: w.ws.id, app_id: w.starter.id })).data;
