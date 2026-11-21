@@ -33,13 +33,14 @@ export const canUseLiquidity = (roles: readonly string[]) => hasLiquidity(access
 
 // Earn's right-hand panel tabs (/earn?tab=...), beside its assistant: Pools (every pool open to
 // the user, showing the ones the conversation matched first), then the detailed tables by role,
-// then My strategies, what the assistant drafted (liquidity providers' only: builders can't commit).
+// then My strategies, what the assistant drafted (commitments and withdrawals for liquidity
+// providers, pool proposals for builders).
 export type LiquidityTab = "my-positions" | "my-pools";
 export type EarnTab = "pools" | LiquidityTab | "my-strategies";
 export const TAB_LABELS: Record<EarnTab, string> = { pools: "Pools", "my-positions": "My positions", "my-pools": "My pools", "my-strategies": "My strategies" };
 export function tabsFor(a: LiquidityAccess): EarnTab[] {
   if (!hasLiquidity(a)) return [];
-  return ["pools", ...(a.liquidityProvider ? (["my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : []), ...(a.liquidityProvider ? (["my-strategies"] as const) : [])];
+  return ["pools", ...(a.liquidityProvider ? (["my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : []), "my-strategies"];
 }
 // ?tab= on /earn, and /liquidity's old tabs: the panel tab it names. Opportunities (and
 // /liquidity's Open pools) were merged into Pools; Drafts is My strategies. The old "assistant"

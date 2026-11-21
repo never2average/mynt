@@ -123,7 +123,7 @@ describe("Earn in the chat workspace", () => {
     expect(tabIds()).toEqual(["pools", "my-positions", "my-strategies"]);
     cleanup();
     render(<Earn data={builderData} initialTab="my-pools" />);
-    expect(tabIds()).toEqual(["pools", "my-pools"]);
+    expect(tabIds()).toEqual(["pools", "my-pools", "my-strategies"]);
     cleanup();
     render(<Earn data={{ ...lpData, access: { builder: true, liquidityProvider: true }, builder: builderData.builder }} initialTab="my-pools" />);
     expect(tabIds()).toEqual(["pools", "my-positions", "my-pools", "my-strategies"]);
@@ -155,7 +155,7 @@ describe("Earn in the chat workspace", () => {
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("false");
     cleanup();
     // A tab the user doesn't have: Pools, panel closed.
-    render(<Earn data={builderData} initialTab="drafts" />);
+    render(<Earn data={builderData} initialTab="my-positions" />);
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("false");
   });
 
@@ -453,6 +453,69 @@ describe("past conversations", () => {
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Commit capital" })));
     expect(calls).toHaveLength(1);
     expect(calls[0].input).toMatchObject({ amount_cents: 200_000, idempotency_key: "key-kept-9" });
+  });
+
+  it("a builder's pool proposal: a card, Review opens Propose pool prefilled, confirm proposes once, and a restored thread keeps it sent", async () => {
+    window.localStorage.clear();
+    const options = [
+      { productId: "other", productName: "Other product", componentKey: "deposits", sponsorId: "66666666-6666-4666-8666-666666666666", sponsorName: "Other Bank" },
+      { productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: "Sponsor Bank" },
+    ];
+    const data: LiquidityData = { ...builderData, builder: { ...builderData.builder!, proposable: options } };
+    const terms = { product_id: "card-credit", component_key: "lending", name: "Card float", sandbox: false, min_reserve_bps: 1250, min_reserve_floor_cents: 50_000, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_050 };
+    const proposal = { kind: "proposal", id: "p1", poolName: "Card float", productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: options[1].sponsorId, sponsorName: "Sponsor Bank", sandbox: false, terms } as Draft;
+    const proposed: unknown[] = [];
+    let answer!: (r: { ok: true; reply: unknown }) => void;
+    const acts: LiquidityActions = { ...actions().a, propose: (input) => (proposed.push(input), new Promise((r) => (answer = r))) };
+    render(<Earn data={data} messages={withDraft(proposal)} acts={acts} initialTab="my-strategies" owner="u1" />);
+    const card = document.querySelector('[data-draft-card="p1"]')!;
+    expect(card.getAttribute("data-draft-kind")).toBe("proposal");
+    expect(card.querySelector("[data-draft-title]")!.textContent).toBe("Pool proposal");
+    expect(card.querySelector("[data-draft-product]")!.textContent).toBe("Card credit");
+    expect(card.querySelector("[data-draft-pool]")!.textContent).toBe("Card float");
+    expect(card.querySelector("[data-draft-amount]")).toBeNull();
+    expect(card.querySelector("[data-draft-terms]")!.textContent).toBe("Reserve 12.5%, at least $500.00 · Notice 30 days · $1,000.00 – $100,000.50 per firm");
+    expect(card.querySelector("[data-draft-status]")!.textContent).toBe("Ready to confirm");
+    expect(proposed).toHaveLength(0);
+    fireEvent.click(document.querySelector('[data-review="p1"]')!);
+    expect(screen.getByRole("heading", { name: "Review pool proposal" })).toBeTruthy();
+    const form = document.querySelector('[data-sheet="draft"] [data-draft="proposal"] [data-form="propose"]')!;
+    expect((form.querySelector('[aria-label="Sponsored component"]') as HTMLSelectElement).value).toBe("1");
+    const field = (label: string) => (form.querySelector(`[aria-label="${label}"]`) as HTMLInputElement).value;
+    expect([field("Pool name"), field("Minimum reserve percent"), field("Reserve floor"), field("Notice period days"), field("Smallest position"), field("Largest position")]).toEqual(["Card float", "12.5", "500", "30", "1000", "100000.50"]);
+    expect((form.querySelector('[aria-label="Sandbox pool"]') as HTMLInputElement).checked).toBe(false);
+    // Two clicks before Mynt answers send it once, with the draft's terms.
+    const submit = screen.getByRole("button", { name: "Propose pool" });
+    await act(async () => void fireEvent.click(submit));
+    await act(async () => void fireEvent.click(submit));
+    expect(proposed).toEqual([terms]);
+    await act(async () => answer({ ok: true, reply: null }));
+    expect(document.querySelector("[data-form-done]")!.textContent).toContain('Pool "Card float" proposed.');
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(document.querySelector('[data-draft-card="p1"] [data-draft-status]')!.textContent).toBe("Proposed");
+    fireEvent.click(document.querySelector('[data-review="p1"]')!);
+    expect(screen.queryByRole("button", { name: "Propose pool" })).toBeNull();
+    // The thread keeps it sent: restored, it can't be proposed again.
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    const kept = listThreads("u1")[0];
+    expect(kept.outcomes.p1).toEqual({ key: null, sent: expect.stringContaining('Pool "Card float" proposed.') });
+    cleanup();
+    render(<Earn data={data} acts={acts} owner="u1" />);
+    await act(async () => void fireEvent.click(historyButton()));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-thread="${kept.id}"]`)!));
+    fireEvent.click(document.querySelector('[data-panel-tab="my-strategies"]')!);
+    expect(document.querySelector('[data-draft-card="p1"] [data-draft-status]')!.textContent).toBe("Proposed");
+    fireEvent.click(document.querySelector('[data-review="p1"]')!);
+    expect(screen.queryByRole("button", { name: "Propose pool" })).toBeNull();
+    expect(proposed).toHaveLength(1);
+  });
+
+  it("a proposal whose component lost its sponsorship can't be sent", () => {
+    const proposal = { kind: "proposal", id: "p2", poolName: "Gone", productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: null, sandbox: true, terms: { product_id: "card-credit", component_key: "lending", name: "Gone", sandbox: true, min_reserve_bps: 2000, min_reserve_floor_cents: 0, notice_period_days: 0, min_commitment_cents: 100, max_commitment_cents: 200 } } as Draft;
+    render(<StrategiesTab data={builderData} drafts={[proposal]} actions={actions().a} />);
+    expect(document.querySelector('[data-draft-card="p2"] [data-draft-status]')!.textContent).toBe("This component has no approved sponsorship any more, so it can't have a pool.");
+    fireEvent.click(document.querySelector('[data-review="p2"]')!);
+    expect(screen.queryByRole("button", { name: "Propose pool" })).toBeNull();
   });
 
   it("without a user to keep them for, there's no history button", () => {

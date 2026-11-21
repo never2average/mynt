@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
-import { EARN_TOOLS, PANEL_TOOLS, validateDraft } from "@/lib/earn";
+import { EARN_TOOLS, PANEL_TOOLS, PROPOSAL_TOOL, validateDraft, validateProposal } from "@/lib/earn";
 import { fromPools, fromPositions } from "@/lib/liquidity";
 import { STUDIO_TOOLS } from "@/lib/studio-tools";
 import { readTimed, sleep } from "./stream-timing";
@@ -33,7 +33,11 @@ const POOLS = [pool(POOL), pool(UNCLEARED, { offering_cleared: false })];
 const WALLET = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
 const POSITIONS = [{ pool_id: POOL, name: "Pool 1", product_id: "their-product", sandbox: false, state: "us-ny", contributed_cents: 500_000, balance_cents: 500_000, available_to_withdraw_cents: 200_000 }];
 
-type Step = { text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> } };
+const SPONSOR = "22222222-2222-4222-8222-222222222222";
+const SPONSORSHIPS = [{ product_id: "their-product", component_key: "lending", status: "approved", provider_entity_id: SPONSOR, product: { name: "Their card" }, provider: { name: "Sponsor Bank" } }];
+const PROPOSAL = { product_id: "their-product", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 1250, min_reserve_floor_cents: 50_000, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 };
+
+type Step ={ text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> } };
 const fake = {
   session: undefined as Session | undefined,
   steps: [] as Step[],
@@ -71,6 +75,7 @@ vi.mock("@/lib/tokens", () => ({
       if (name === "list_my_positions") return ok(POSITIONS);
       if (name === "get_linked_accounts") return ok({ git: null, wallets: [{ chain: "solana", address: WALLET, verified: true }], manage_url: null });
       if (name === "get_wallet_balances") return ok({ sol_lamports: 1_000_000_000, usdc_base_units: 75_000_000 });
+      if (name === "list_my_sponsorships") return ok(SPONSORSHIPS);
       return ok([]);
     },
     close: async () => undefined,
@@ -232,6 +237,78 @@ describe("/api/earn", () => {
     const parts = await chunks(await ask("commit"));
     expect(parts.some((p) => p.type === "data-earn-draft")).toBe(false);
     expect((await (await GET()).json()).enabled).toBe(true);
+  });
+
+  it("offers draft_pool_proposal to builders only, never to a liquidity provider", async () => {
+    await chunks(await ask("propose a pool"));
+    expect(fake.requests[0].tools.map((t) => t.name)).not.toContain(PROPOSAL_TOOL);
+    as("developer", "innovator");
+    fake.requests = [];
+    await chunks(await ask("propose a pool"));
+    expect(fake.requests[0].tools.map((t) => t.name).sort()).toEqual([...EARN_TOOLS, ...PANEL_TOOLS, PROPOSAL_TOOL].sort());
+    expect(fake.requests[0].system[0].text).toContain("draft_pool_proposal");
+    expect(fake.requests[0].system[1].text).toContain("may draft a pool proposal");
+  });
+
+  it("a builder's valid proposal is drawn as a proposal draft and nothing is proposed", async () => {
+    as("developer", "innovator");
+    fake.steps = [{ tool: { name: PROPOSAL_TOOL, input: PROPOSAL } }, { text: "It's in My strategies." }];
+    const parts = await chunks(await ask("Propose a sandbox pool for lending"));
+    const draft = parts.find((p) => p.type === "data-earn-draft");
+    expect(draft?.data).toMatchObject({
+      kind: "proposal",
+      poolName: "Card float",
+      productId: "their-product",
+      productName: "Their card",
+      componentKey: "lending",
+      sponsorId: SPONSOR,
+      sponsorName: "Sponsor Bank",
+      sandbox: true,
+      terms: { product_id: "their-product", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 1250, min_reserve_floor_cents: 50_000, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 },
+    });
+    expect(typeof (draft?.data as { id: unknown }).id).toBe("string");
+    expect(fake.calls.map((c) => c.name)).not.toContain("create_pool");
+    expect(JSON.stringify(fake.requests[1].messages)).toContain("Nothing has been proposed");
+  });
+
+  it("an invalid proposal draws nothing and the model sees why, as a tool error", async () => {
+    as("developer", "innovator");
+    fake.steps = [{ tool: { name: PROPOSAL_TOOL, input: { ...PROPOSAL, min_commitment_cents: 20_000_000 } } }, { text: "ok" }];
+    let parts = await chunks(await ask("propose"));
+    expect(parts.some((p) => p.type === "data-earn-draft")).toBe(false);
+    const said = JSON.stringify(fake.requests[1].messages);
+    expect(said).toContain("Draft refused: The smallest commitment can't be more than the largest.");
+    expect(said).toContain('"is_error":true');
+    fake.requests = [];
+    fake.steps = [{ tool: { name: PROPOSAL_TOOL, input: { ...PROPOSAL, component_key: "deposits" } } }, { text: "ok" }];
+    parts = await chunks(await ask("propose"));
+    expect(parts.some((p) => p.type === "data-earn-draft")).toBe(false);
+    expect(JSON.stringify(fake.requests[1].messages)).toContain("They can propose on: Their card (product_id their-product), component lending");
+    // A liquidity provider asking for it anyway is refused without a draft.
+    as("liquidity_provider");
+    fake.requests = [];
+    fake.steps = [{ tool: { name: PROPOSAL_TOOL, input: PROPOSAL } }, { text: "ok" }];
+    parts = await chunks(await ask("propose"));
+    expect(parts.some((p) => p.type === "data-earn-draft")).toBe(false);
+    expect(JSON.stringify(fake.requests[1].messages)).toContain(`${PROPOSAL_TOOL} isn't available to this assistant`);
+  });
+});
+
+describe("validateProposal", () => {
+  const options = [{ productId: "their-product", productName: "Their card", componentKey: "lending", sponsorId: SPONSOR, sponsorName: "Sponsor Bank" }];
+  it("takes terms the Propose pool form takes and refuses the rest with the form's reason", () => {
+    expect(validateProposal(PROPOSAL, options, "p1")).toMatchObject({ draft: { kind: "proposal", id: "p1", terms: { min_reserve_bps: 1250, min_reserve_floor_cents: 50_000 } } });
+    expect(validateProposal({ ...PROPOSAL, name: "  " }, options, "p1")).toEqual({ error: "Name the pool." });
+    expect(validateProposal({ ...PROPOSAL, notice_period_days: 4000 }, options, "p1")).toEqual({ error: "The notice period is a whole number of days, 0 to 3650." });
+    expect(validateProposal({ ...PROPOSAL, min_commitment_cents: 0 }, options, "p1")).toEqual({ error: "Commitment limits are dollar amounts above zero." });
+    expect(validateProposal({ ...PROPOSAL, min_reserve_bps: 12.5 }, options, "p1")).toHaveProperty("error");
+    expect(validateProposal({ ...PROPOSAL, sandbox: "yes" }, options, "p1")).toHaveProperty("error");
+    expect(validateProposal(PROPOSAL, [], "p1")).toMatchObject({ error: expect.stringMatching(/must sponsor a component/) });
+    expect(validateProposal(PROPOSAL, null, "p1")).toEqual({ error: "Proposing pools comes with Mynt's next update." });
+    // Two sponsors of one component: the sponsor must be named, and then it's sent with the terms.
+    const two = [...options, { ...options[0], sponsorId: "55555555-5555-4555-8555-555555555555", sponsorName: "Other Bank" }];
+    expect(validateProposal(PROPOSAL, two, "p1")).toMatchObject({ error: expect.stringMatching(/name the sponsor/) });
+    expect(validateProposal({ ...PROPOSAL, sponsor_entity_id: SPONSOR }, two, "p1")).toMatchObject({ draft: { sponsorId: SPONSOR, terms: { sponsor_entity_id: SPONSOR } } });
   });
 });
 

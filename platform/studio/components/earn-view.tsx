@@ -170,15 +170,18 @@ export const pagerOf = (paged: { page: number; pages: number; setPage: (p: numbe
 
 // ---- the builder ----
 
-export function ProposeForm({ options, actions, onDone }: { options: Sponsored[]; actions: LiquidityActions; onDone: (message: string) => void }) {
-  const [option, setOption] = useState(0)
-  const [name, setName] = useState("")
-  const [sandbox, setSandbox] = useState(true)
-  const [reservePercent, setReservePercent] = useState("20")
-  const [reserveFloor, setReserveFloor] = useState("0")
-  const [noticeDays, setNoticeDays] = useState("30")
-  const [minCommit, setMinCommit] = useState("1000")
-  const [maxCommit, setMaxCommit] = useState("100000")
+// The form's fields as given (an assistant's draft proposal prefills them; My pools starts empty).
+export type ProposeFields = { option: number; name: string; sandbox: boolean; reservePercent: string; reserveFloor: string; noticeDays: string; minCommit: string; maxCommit: string }
+
+export function ProposeForm({ options, actions, onDone, initial }: { options: Sponsored[]; actions: LiquidityActions; onDone: (message: string) => void; initial?: ProposeFields }) {
+  const [option, setOption] = useState(initial?.option ?? 0)
+  const [name, setName] = useState(initial?.name ?? "")
+  const [sandbox, setSandbox] = useState(initial?.sandbox ?? true)
+  const [reservePercent, setReservePercent] = useState(initial?.reservePercent ?? "20")
+  const [reserveFloor, setReserveFloor] = useState(initial?.reserveFloor ?? "0")
+  const [noticeDays, setNoticeDays] = useState(initial?.noticeDays ?? "30")
+  const [minCommit, setMinCommit] = useState(initial?.minCommit ?? "1000")
+  const [maxCommit, setMaxCommit] = useState(initial?.maxCommit ?? "100000")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const picked = options[option] ?? null
