@@ -15,6 +15,7 @@ import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
 import { useWorkspace } from "@/components/workspace-context"
+import { useWorkspaceSettings, type WorkspaceSettings } from "@/components/workspace-settings"
 import {
   Sidebar,
   SidebarContent,
@@ -57,10 +58,11 @@ export type SidebarViewProps = {
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
   liquidity?: boolean
   developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
+  workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -73,6 +75,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
           onCreate={onCreateWorkspace}
           invitations={invitations}
           onAnswerInvitation={onAnswerInvitation}
+          settings={workspaceSettings}
         />}
       </SidebarHeader>
       <SidebarContent>
@@ -108,6 +111,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const access = useStudioAccess()
   const liquidity = hasLiquidity(access?.liquidity)
   const developer = access?.developer === true
+  const workspaceSettings = useWorkspaceSettings(selected, reload, developer && supported)
 
   // The selected workspace's apps (the API routes scope to it through the switcher's cookie).
   const loadApps = useCallback(async () => {
@@ -162,6 +166,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       onAnswerInvitation={answerInvitation}
       liquidity={liquidity}
       developer={access ? developer : true}
+      workspaceSettings={workspaceSettings}
     />
   )
 }
