@@ -33,6 +33,9 @@ const encodeToolGroup = (tools: ToolInfo[], isTrailing: boolean): string => {
   return JSON.stringify({ tools, isTrailing } satisfies EncodedGroup);
 };
 
+/** The group key of a run of reasoning parts (drawn as one Reasoning block, not a tool group). */
+export const REASONING_GROUP = "reasoning";
+
 export const groupConsecutiveToolCalls: GroupingFunction = (parts) => {
   const groups: MessagePartGroup[] = [];
   let currentToolIndices: number[] | null = null;
@@ -71,7 +74,10 @@ export const groupConsecutiveToolCalls: GroupingFunction = (parts) => {
         currentToolIndices = null;
         currentToolInfos = null;
       }
-      groups.push({ groupKey: undefined, indices: [i] });
+      // Consecutive reasoning parts make one collapsible Reasoning block.
+      const last = groups[groups.length - 1];
+      if (part?.type === "reasoning" && last?.groupKey === REASONING_GROUP) last.indices.push(i);
+      else groups.push({ groupKey: part?.type === "reasoning" ? REASONING_GROUP : undefined, indices: [i] });
     }
   }
 

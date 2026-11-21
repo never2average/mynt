@@ -8,6 +8,9 @@ const start = (id, lane = null) => ({ type: "stream_event", parent_tool_use_id: 
 const block = (index, id, lane = null) => ({ type: "stream_event", parent_tool_use_id: lane, api_message_id: id, event: { type: "content_block_start", index, content_block: { type: "text" } } });
 const delta = (index, text, id, lane = null) => ({ type: "stream_event", parent_tool_use_id: lane, api_message_id: id, event: { type: "content_block_delta", index, delta: { type: "text_delta", text } } });
 const said = (id, text, lane = null) => ({ type: "assistant", parent_tool_use_id: lane, message: { id, content: [{ type: "text", text }] } });
+const thinkBlock = (index, id, lane = null) => ({ type: "stream_event", parent_tool_use_id: lane, api_message_id: id, event: { type: "content_block_start", index, content_block: { type: "thinking" } } });
+const thinkDelta = (index, thinking, id, lane = null) => ({ type: "stream_event", parent_tool_use_id: lane, api_message_id: id, event: { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking } } });
+const thought = (id, thinking, lane = null) => ({ type: "assistant", parent_tool_use_id: lane, message: { id, content: [{ type: "thinking", thinking, signature: "sig" }] } });
 const ran = (id, command) => ({ type: "assistant", parent_tool_use_id: null, message: { id, content: [{ type: "tool_use", name: "Bash", input: { command } }] } });
 
 // Feeds lines in reads (each an array of lines), flushing after each read as the collector does.
@@ -45,41 +48,48 @@ test("without partial messages (or an older log) messages are stored as before, 
   assert.deepEqual(collect([[delta(0, "half a message ", "msg_9"), said("msg_9", "half a message whole")]]), [{ type: "message", summary: "half a message whole" }]);
 });
 
-test("a secret split across deltas never streams, in any split", () => {
-  const secrets = [
-    "ghs_abcdefghijklmnopqrstuvwxyz0123456789",
-    "sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
-    "mynt_agent_abcdefghijklmnop",
-    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop",
-  ];
-  const texts = [
-    ...secrets.map((s) => `Found the token ${s} in the env file, removing it.`),
-    "Set GITHUB_TOKEN=supersecretvalue123 then push.",
-    'Config has "password": "correct horse battery staple" and more.',
-    "Connect with postgres://admin:hunter2pass@db.internal:5432/app please.",
-    "Header Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 was sent.",
-    "The key:\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY-----\nthat was it.",
-  ];
-  const leaks = ["abcdefghij", "supersecret", "correct horse", "horse battery", "hunter2", "MIIEvQ", "AAAAAAAAAA"];
-  for (const text of texts) {
+const SECRETS = [
+  "ghs_abcdefghijklmnopqrstuvwxyz0123456789",
+  "sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+  "mynt_agent_abcdefghijklmnop",
+  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop",
+];
+const SECRET_TEXTS = [
+  ...SECRETS.map((s) => `Found the token ${s} in the env file, removing it.`),
+  "Set GITHUB_TOKEN=supersecretvalue123 then push.",
+  'Config has "password": "correct horse battery staple" and more.',
+  "Connect with postgres://admin:hunter2pass@db.internal:5432/app please.",
+  "Header Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 was sent.",
+  "The key:\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY-----\nthat was it.",
+];
+const LEAKS = ["abcdefghij", "supersecret", "correct horse", "horse battery", "hunter2", "MIIEvQ", "AAAAAAAAAA"];
+
+// Every secret text, split every way across deltas of one block (text or thinking): nothing that goes out, streamed or
+// stored, holds a secret, and apart from a key block (which stops its stream) the whole scrubbed text streams.
+function checkSecretSplits({ open, piece, whole, deltaType }) {
+  const shownOf = (entries) => entries.filter((e) => e.type === deltaType && e.stream === "m:0").map((e) => e.summary).join("");
+  for (const text of SECRET_TEXTS) {
     // Every two-way split, and every three-way split on a stride.
     const splits = [];
     for (let i = 1; i < text.length; i++) splits.push([text.slice(0, i), text.slice(i)]);
     for (let i = 1; i < text.length; i += 3) for (let j = i + 1; j < text.length; j += 5) splits.push([text.slice(0, i), text.slice(i, j), text.slice(j)]);
     for (const pieces of splits) {
       // Each piece in its own read, so each is flushed (and so could leak) on its own.
-      const reads = [[start("m"), block(0, "m")], ...pieces.map((p) => [delta(0, p, "m")]), [said("m", text)]];
+      const reads = [[start("m"), open(0, "m")], ...pieces.map((p) => [piece(0, p, "m")]), [whole("m", text)]];
       const out = collect(reads);
-      const shown = streamed(out, "m:0");
-      for (const leak of leaks) assert.ok(!shown.includes(leak), `${JSON.stringify(pieces)} streamed ${JSON.stringify(shown)}`);
-      for (const e of out) for (const leak of leaks) assert.ok(!e.summary.includes(leak), `${JSON.stringify(pieces)} stored ${JSON.stringify(e)}`);
-      // Held back, not lost: apart from a key block (which stops its stream), the whole scrubbed text streams.
+      const shown = shownOf(out);
+      for (const leak of LEAKS) assert.ok(!shown.includes(leak), `${JSON.stringify(pieces)} streamed ${JSON.stringify(shown)}`);
+      for (const e of out) for (const leak of LEAKS) assert.ok(!e.summary.includes(leak), `${JSON.stringify(pieces)} stored ${JSON.stringify(e)}`);
       if (!text.includes("BEGIN")) {
         assert.equal(shown, redact(text), JSON.stringify(pieces));
         assert.equal(out[out.length - 1].stream, "m:0");
       }
     }
   }
+}
+
+test("a secret split across deltas never streams, in any split", () => {
+  checkSecretSplits({ open: block, piece: delta, whole: said, deltaType: "text_delta" });
 });
 
 test("streamed text only ever extends what was sent; a block whose scrubbed text changes stops streaming and its message stands alone", () => {
@@ -119,4 +129,43 @@ test("a state is carried between reads by copy: a read that isn't kept leaves it
   collect([[delta(0, "two ", "m")]], copy);
   const out = collect([[delta(0, "three ", "m"), said("m", "one three ")]], s);
   assert.equal(out.filter((e) => e.type === "text_delta").map((e) => e.summary).join(""), "three ");
+});
+
+test("thinking streams as thinking_delta entries, coalesced per read, closed by its thinking entry, beside the message's text", () => {
+  const out = collect([
+    [start("msg_1"), thinkBlock(0, "msg_1"), thinkDelta(0, "The user wants ", "msg_1"), thinkDelta(0, "a sav", "msg_1")],
+    [thinkDelta(0, "ings page.", "msg_1"), thought("msg_1", "The user wants a savings page."), block(1, "msg_1"), delta(1, "Building ", "msg_1")],
+    [said("msg_1", "Building it.")],
+  ]);
+  assert.deepEqual(out, [
+    { type: "thinking_delta", summary: "The user wants a ", stream: "msg_1:0" }, // "sav" is held back
+    { type: "thinking_delta", summary: "savings ", stream: "msg_1:0" }, // flushed as the whole block arrives
+    { type: "thinking_delta", summary: "page.", stream: "msg_1:0" }, // the rest, when the block is whole
+    { type: "thinking", summary: "The user wants a savings page.", stream: "msg_1:0" },
+    { type: "text_delta", summary: "Building ", stream: "msg_1:1" },
+    { type: "text_delta", summary: "it.", stream: "msg_1:1" },
+    { type: "message", summary: "Building it.", stream: "msg_1:1" },
+  ]);
+  // A thinking block whose text the model left out adds nothing; one that wasn't streamed stands alone.
+  assert.deepEqual(collect([[start("m"), thinkBlock(0, "m"), thought("m", ""), thought("m2", "Plain thought")]]), [{ type: "thinking", summary: "Plain thought" }]);
+  // A thinking delta never feeds a text block, nor a text delta a thinking block.
+  assert.deepEqual(collect([[start("x"), thinkBlock(0, "x"), block(1, "x"), delta(0, "wrong ", "x"), thinkDelta(1, "wrong ", "x")]]), []);
+});
+
+test("a secret split across thinking deltas never streams, in any split", () => {
+  checkSecretSplits({ open: thinkBlock, piece: thinkDelta, whole: thought, deltaType: "thinking_delta" });
+});
+
+test("thinking whose scrubbed text would change what was sent stops streaming, and its thinking entry stands alone", () => {
+  const key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----";
+  const out = collect([
+    [start("m"), thinkBlock(0, "m"), thinkDelta(0, "Found: ", "m")],
+    [thinkDelta(0, "-----BEGIN PRIVATE KEY-----\n", "m")],
+    [thinkDelta(0, "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY----- done", "m")],
+    [thought("m", `Found: ${key} done`)],
+  ]);
+  assert.ok(out.every((e) => !e.summary.includes("MIIEvQ")), JSON.stringify(out));
+  const last = out[out.length - 1];
+  assert.equal(last.type, "thinking");
+  assert.equal(last.stream, undefined);
 });

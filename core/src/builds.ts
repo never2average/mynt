@@ -1083,15 +1083,20 @@ export class BuildService {
   // The agent's stored activity. Without `after`: the latest `limit` entries, newest first. With `after` (a cursor
   // from an earlier call): the entries after it, oldest first. `cursor` is the newest seq returned (or already
   // seen), to pass as `after` next time; it stays put while nothing new has arrived. The words of a message being
-  // written (text_delta entries) are returned only to a caller that asks for them (`textDeltas`), so a caller that
-  // doesn't know them sees what it always did.
-  async activity(build: Build, opts: { limit?: number; after?: number; textDeltas?: boolean } = {}) {
+  // written (text_delta entries) are returned only to a caller that asks for them (`textDeltas`), and the agent's
+  // thinking (`thinking` entries, and thinking_delta ones to a caller that also asks for deltas) only to a caller that
+  // asks for its reasoning (`reasoning`), so a caller that doesn't know them sees what it always did.
+  async activity(build: Build, opts: { limit?: number; after?: number; textDeltas?: boolean; reasoning?: boolean } = {}) {
     const n = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 30)));
-    const deltas = opts.textDeltas === true;
+    const hidden = [
+      ...(opts.textDeltas === true ? [] : ["text_delta"]),
+      ...(opts.reasoning === true ? [] : ["thinking"]),
+      ...(opts.reasoning === true && opts.textDeltas === true ? [] : ["thinking_delta"]),
+    ];
     const rows = (
       opts.after == null
-        ? await this.db.query("SELECT seq, at, type, summary, stream FROM financial_products.build_activity WHERE build_id = $1 AND ($3 OR type <> 'text_delta') ORDER BY seq DESC LIMIT $2", [build.id, n, deltas])
-        : await this.db.query("SELECT seq, at, type, summary, stream FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 AND ($4 OR type <> 'text_delta') ORDER BY seq LIMIT $3", [build.id, opts.after, n, deltas])
+        ? await this.db.query("SELECT seq, at, type, summary, stream FROM financial_products.build_activity WHERE build_id = $1 AND NOT (type = ANY($3::text[])) ORDER BY seq DESC LIMIT $2", [build.id, n, hidden])
+        : await this.db.query("SELECT seq, at, type, summary, stream FROM financial_products.build_activity WHERE build_id = $1 AND seq > $2 AND NOT (type = ANY($4::text[])) ORDER BY seq LIMIT $3", [build.id, opts.after, n, hidden])
     ).rows as Row[];
     const activity = rows.map((r) => ({ seq: Number(r.seq), at: iso(r.at)!, type: r.type as string, summary: r.summary as string, ...(r.stream ? { stream: r.stream as string } : {}) }));
     // The oldest entry still kept: past the per-build limit, the oldest go, so a follower whose cursor is below
@@ -2350,16 +2355,20 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
           .boolean()
           .default(false)
           .describe("Also return the words of a message as the agent writes it (text_delta entries, tied to the message by `stream`)"),
+        reasoning: z
+          .boolean()
+          .default(false)
+          .describe("Also return the agent's reasoning, scrubbed of secrets as its messages are: `thinking` entries, and with text_deltas its words as it thinks (thinking_delta entries, tied to their `thinking` entry by `stream`)"),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ build_id, limit, after, text_deltas }) => {
+    async ({ build_id, limit, after, text_deltas, reasoning }) => {
       // A follower (a cursor, or the words as they're written) gets the agent's log read now if it's over a second old.
       const follow = after !== undefined || text_deltas;
       const b = await own(build_id);
       if (!b) return fail(`No build of yours with id '${build_id}'`);
       if (follow) await builds.freshenActivity(b);
-      return json({ status: b.status, phase_message: b.phase_message, ...(await builds.activity(b, { limit, after, textDeltas: text_deltas })) });
+      return json({ status: b.status, phase_message: b.phase_message, ...(await builds.activity(b, { limit, after, textDeltas: text_deltas, reasoning })) });
     },
   );
 

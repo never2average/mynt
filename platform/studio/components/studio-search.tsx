@@ -22,7 +22,7 @@ import { SEARCH_GROUPS, searchIndex, searchStudio, type SearchItem, type SearchS
 import { cn } from "@/lib/utils";
 import { withWorkspace } from "@/lib/workspaces";
 import { useStudioAccess } from "@/lib/use-liquidity-access";
-import { askFetch } from "@/lib/ask-client";
+import { askFetch, withoutReasoning } from "@/lib/ask-client";
 
 export type SearchMode = "search" | "ai";
 
@@ -205,7 +205,7 @@ function StudioSearchDialog() {
 
   // The conversation lives here, so it outlasts the modal closing.
   // Failures come back as a sentence, never raw JSON (lib/ask-client.ts).
-  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/ask", fetch: askFetch }), []);
+  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/ask", fetch: askFetch, prepareSendMessagesRequest: withoutReasoning }), []);
   const chat = useChat<UIMessage>({ id: "studio-ask-ai", transport });
   const pendingQuestion = useRef<string | null>(null);
 

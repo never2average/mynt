@@ -5,12 +5,12 @@ import { STUDIO_TOOLS } from "@/lib/studio-tools";
 import { readTimed, sleep } from "./stream-timing";
 
 // A fake Mynt, a fake model and a fake sign-in.
-type Step = { text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> }; stop?: string };
+type Step = { thinking?: string[]; text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> }; stop?: string };
 const fake = {
   session: undefined as Session | undefined,
   configured: true,
   steps: [] as Step[],
-  requests: [] as { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number }[],
+  requests: [] as { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
   logged: [] as string[],
   producedAt: [] as number[],
@@ -68,22 +68,30 @@ vi.mock("@/lib/mynt-client", () => {
 
 function fakeLlm() {
   return {
-    stream: (params: { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number }) => {
-      fake.requests.push({ tools: params.tools, messages: structuredClone(params.messages), system: params.system, max_tokens: params.max_tokens });
+    stream: (params: { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }) => {
+      fake.requests.push({ tools: params.tools, messages: structuredClone(params.messages), system: params.system, max_tokens: params.max_tokens, thinking: params.thinking });
       const step = fake.steps.shift() ?? { text: "Done." };
-      const listeners: ((d: string) => void)[] = [];
+      // The SDK's stream events by name: "text" deltas, "thinking" deltas, and "contentBlock" as each block ends.
+      const on = new Map<string, ((v: never) => void)[]>();
+      const emit = (name: string, v: unknown) => on.get(name)?.forEach((cb) => cb(v as never));
       return {
-        on: (_e: "text", cb: (d: string) => void) => listeners.push(cb),
+        on: (e: string, cb: (v: never) => void) => void on.set(e, [...(on.get(e) ?? []), cb]),
         finalMessage: async () => {
+          // A step that thinks first streams its thinking, then ends that block, before any text.
+          if (step.thinking) {
+            for (const t of step.thinking) emit("thinking", t);
+            emit("contentBlock", { type: "thinking", thinking: step.thinking.join(""), signature: "sig-1" });
+          }
           // A step given in pieces is written a piece at a time, `gapMs` apart, as the model streams.
           if (step.pieces)
             for (const p of step.pieces) {
               await sleep(step.gapMs ?? 0);
               fake.producedAt.push(performance.now());
-              for (const l of listeners) l(p);
+              emit("text", p);
             }
-          else if (step.text) for (const l of listeners) l(step.text);
+          else if (step.text) emit("text", step.text);
           const content: unknown[] = [];
+          if (step.thinking) content.push({ type: "thinking", thinking: step.thinking.join(""), signature: "sig-1" });
           if (step.text) content.push({ type: "text", text: step.text });
           if (step.tool) content.push({ type: "tool_use", id: `call-${fake.requests.length}`, name: step.tool.name, input: step.tool.input });
           return { content, stop_reason: step.stop ?? (step.tool ? "tool_use" : "end_turn") };
@@ -143,6 +151,31 @@ describe("/api/ask", () => {
     expect(deltas[0].at).toBeLessThan(lastWritten);
     // Each piece arrives before the next is written.
     for (let i = 0; i < pieces.length - 1; i++) expect(deltas[i].at).toBeLessThan(fake.producedAt[i + 1]);
+  });
+
+  it("asks for summarized adaptive thinking and streams it as reasoning parts before the answer's text, never logging it", async () => {
+    fake.steps = [{ thinking: ["Looking up ", "their apps."], tool: { name: "list_my_apps", input: {} } }, { thinking: ["One app found."], text: "You have one app." }];
+    const out = await chunks(await post({ messages: [question("Which apps do I have?")] }));
+    expect(fake.requests.map((r) => r.thinking)).toEqual([
+      { type: "adaptive", display: "summarized" },
+      { type: "adaptive", display: "summarized" },
+    ]);
+    const shown = out.filter((c) => /^(reasoning|text)-/.test(String(c.type))).map((c) => [c.type, c.id, c.delta ?? null]);
+    expect(shown).toEqual([
+      ["reasoning-start", "r1", null],
+      ["reasoning-delta", "r1", "Looking up "],
+      ["reasoning-delta", "r1", "their apps."],
+      ["reasoning-end", "r1", null],
+      ["reasoning-start", "r2", null],
+      ["reasoning-delta", "r2", "One app found."],
+      ["reasoning-end", "r2", null],
+      ["text-start", "t1", null],
+      ["text-delta", "t1", "You have one app."],
+      ["text-end", "t1", null],
+    ]);
+    // The read ran between the two thinking blocks.
+    expect(out.findIndex((c) => c.type === "tool-input-available")).toBeGreaterThan(out.findIndex((c) => c.type === "reasoning-end"));
+    expect(fake.logged.join("\n")).not.toContain("their apps");
   });
 
   it("refuses unauthenticated calls, both the status check and questions", async () => {
@@ -232,6 +265,46 @@ describe("Ask AI's tools", () => {
       { role: "user", content: "c" },
     ]);
     expect(historyFrom([{ role: "assistant", parts: [{ type: "text", text: "b" }] }])).toBeNull();
+  });
+
+  it("emits reasoning from thinking deltas, one part per thinking block, and sends thinking blocks back unchanged across tool turns", async () => {
+    const seen: unknown[][] = [];
+    const turns = [
+      { deltas: ["Check ", "whoami."], content: [{ type: "thinking", thinking: "Check whoami.", signature: "sig-a" }, { type: "tool_use", id: "c1", name: "whoami", input: {} }], stop_reason: "tool_use" },
+      { deltas: ["Got it."], content: [{ type: "thinking", thinking: "Got it.", signature: "sig-b" }, { type: "text", text: "You are u1." }], stop_reason: "end_turn" },
+    ];
+    let i = 0;
+    const llm = {
+      stream: (p: { messages: unknown[] }) => {
+        seen.push(structuredClone(p.messages));
+        const turn = turns[i++];
+        const on = new Map<string, ((v: never) => void)[]>();
+        const emit = (name: string, v: unknown) => on.get(name)?.forEach((cb) => cb(v as never));
+        return {
+          on: (e: string, cb: (v: never) => void) => void on.set(e, [...(on.get(e) ?? []), cb]),
+          finalMessage: async () => {
+            for (const d of turn.deltas) emit("thinking", d);
+            emit("thinking", ""); // an empty delta (display omitted) opens nothing
+            emit("contentBlock", turn.content[0]);
+            const text = turn.content.find((b) => b.type === "text") as { text: string } | undefined;
+            if (text) emit("text", text.text);
+            return { content: turn.content, stop_reason: turn.stop_reason };
+          },
+        };
+      },
+    };
+    const events: string[] = [];
+    await runAsk([{ role: "user", content: "who am I?" }], {
+      llm: llm as never,
+      model: "m",
+      tools: [],
+      workspaceId: null,
+      callTool: async () => ({ text: "{}", isError: false }),
+      emit: (e) => void events.push("delta" in e ? `${e.type}:${e.delta}` : e.type === "tool" ? `tool:${e.name}` : e.type),
+    });
+    expect(events).toEqual(["reasoning-start", "reasoning:Check ", "reasoning:whoami.", "reasoning-end", "tool:whoami", "reasoning-start", "reasoning:Got it.", "reasoning-end", "text-start", "text:You are u1.", "text-end"]);
+    // The second request carries the first turn whole: its thinking block, signature included, before its tool call.
+    expect(seen[1][1]).toEqual({ role: "assistant", content: turns[0].content });
   });
 
   it("stop at the step limit", async () => {

@@ -1,5 +1,7 @@
 // The coding agent's stream-json output (Claude Code with --include-partial-messages) as activity a developer can
 // follow: its messages, the commands it runs and the files it edits, and, while it writes a message, the words so far.
+// Its thinking (the reasoning text the API returns to Claude Code) is followed the same way: thinking_delta entries
+// while a thinking block is written, then a finished `thinking` entry, scrubbed exactly as text is.
 //
 // Everything stored is shown to people, so every piece of text is scrubbed of secrets (redact, as sandbox_run output
 // is). A message being written arrives in small deltas, and a secret can be split across two of them, so deltas are
@@ -38,7 +40,11 @@ export function activitySummary(text: string, limit = 400) {
   return clean.slice(0, limit).replace(LONE_SURROGATE, "");
 }
 
-type Block = { id: string; raw: string; sent: string; live: boolean; touched: boolean };
+type Kind = "text" | "thinking";
+type Block = { id: string; kind: Kind; raw: string; sent: string; live: boolean; touched: boolean };
+// Each kind of block's entries: the words as they're written, and the whole block.
+const DELTA: Record<Kind, string> = { text: "text_delta", thinking: "thinking_delta" };
+const WHOLE: Record<Kind, string> = { text: "message", thinking: "thinking" };
 type Lane = { message: string | null; blocks: Map<number, Block> };
 
 // What's known of the messages being written, per lane (the lead agent, and each sub-agent by the tool call that
@@ -75,13 +81,15 @@ export class StreamState {
     if (m.type !== "assistant" || !Array.isArray(message?.content)) return out;
     const id = typeof message.id === "string" ? message.id : null;
     for (const c of message.content as Record<string, unknown>[]) {
-      if (c?.type === "text") out.push(...this.finish(key, id, str(c.text)));
+      if (c?.type === "text") out.push(...this.finish(key, id, str(c.text), "text"));
+      // Thinking with no text (its display omitted, or redacted) adds nothing.
+      else if (c?.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim()) out.push(...this.finish(key, id, c.thinking, "thinking"));
       else if (c?.type === "tool_use") out.push({ type: "tool_use", summary: activitySummary(`${str(c.name)} ${str(c.input)}`) });
     }
     return out;
   }
 
-  // The text deltas accumulated since the last flush, one entry per block: the settled part, scrubbed.
+  // The text and thinking deltas accumulated since the last flush, one entry per block: the settled part, scrubbed.
   flush(): ActivityEntry[] {
     const out: ActivityEntry[] = [];
     for (const lane of this.lanes.values()) {
@@ -91,7 +99,7 @@ export class StreamState {
         const end = Math.max(b.raw.lastIndexOf(" "), b.raw.lastIndexOf("\n"));
         if (end < 0) continue;
         const piece = this.extend(b, redact(b.raw.slice(0, end + 1)));
-        if (piece) out.push({ type: "text_delta", summary: piece, stream: b.id });
+        if (piece) out.push({ type: DELTA[b.kind], summary: piece, stream: b.id });
       }
     }
     return out;
@@ -124,40 +132,43 @@ export class StreamState {
     if (index === null) return;
     const msg = apiId ?? lane.message;
     if (e.type === "content_block_start") {
-      if ((e.content_block as { type?: unknown } | undefined)?.type !== "text" || !msg) return;
+      const kind = (e.content_block as { type?: unknown } | undefined)?.type;
+      if ((kind !== "text" && kind !== "thinking") || !msg) return;
       if (lane.message !== msg) {
         lane.message = msg;
         lane.blocks.clear();
       }
-      lane.blocks.set(index, { id: `${msg}:${index}`, raw: "", sent: "", live: true, touched: false });
+      lane.blocks.set(index, { id: `${msg}:${index}`, kind, raw: "", sent: "", live: true, touched: false });
       return;
     }
     if (e.type === "content_block_delta") {
       const d = (e.delta ?? {}) as Record<string, unknown>;
-      if (d.type !== "text_delta" || typeof d.text !== "string" || lane.message !== msg) return;
+      const piece = d.type === "text_delta" ? d.text : d.type === "thinking_delta" ? d.thinking : undefined;
+      if (typeof piece !== "string" || lane.message !== msg) return;
       const b = lane.blocks.get(index);
-      if (!b || !b.live) return;
-      b.raw += streamClean(d.text);
+      if (!b || !b.live || DELTA[b.kind] !== d.type) return;
+      b.raw += streamClean(piece);
       if (b.raw.length > STREAM_TEXT_MAX) b.live = false;
       else b.touched = true;
     }
   }
 
-  // A text block's full message: the rest of its streamed text first (the full text scrubbed whole, if it extends
-  // what was sent), then the message, tied to the stream so a follower closes it rather than printing it twice.
-  // A message that wasn't streamed, or stopped streaming, carries no stream and is shown on its own.
-  private finish(key: string, id: string | null, text: string): ActivityEntry[] {
+  // A text (or thinking) block's whole entry: the rest of its streamed text first (the full text scrubbed whole, if
+  // it extends what was sent), then the entry, tied to the stream so a follower closes it rather than printing it
+  // twice. A block that wasn't streamed, or stopped streaming, carries no stream and is shown on its own.
+  private finish(key: string, id: string | null, text: string, kind: Kind): ActivityEntry[] {
     const lane = this.lanes.get(key);
     const summary = activitySummary(text);
-    if (!lane || !id || lane.message !== id) return [{ type: "message", summary }];
-    const index = [...lane.blocks.keys()].sort((a, b) => a - b)[0];
+    const alone = [{ type: WHOLE[kind], summary }];
+    if (!lane || !id || lane.message !== id) return alone;
+    const index = [...lane.blocks.entries()].filter(([, x]) => x.kind === kind).map(([i]) => i).sort((a, b) => a - b)[0];
     const b = index === undefined ? undefined : lane.blocks.get(index);
-    if (!b) return [{ type: "message", summary }];
+    if (!b) return alone;
     lane.blocks.delete(index!);
     const full = streamClean(text);
     const rest = full.length > STREAM_TEXT_MAX ? "" : this.extend(b, redact(full));
-    if (!b.live || full.length > STREAM_TEXT_MAX) return [{ type: "message", summary }];
-    return [...(rest ? [{ type: "text_delta", summary: rest, stream: b.id }] : []), { type: "message", summary, stream: b.id }];
+    if (!b.live || full.length > STREAM_TEXT_MAX) return alone;
+    return [...(rest ? [{ type: DELTA[kind], summary: rest, stream: b.id }] : []), { type: WHOLE[kind], summary, stream: b.id }];
   }
 }
 
