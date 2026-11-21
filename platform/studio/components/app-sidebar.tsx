@@ -6,11 +6,14 @@
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
 // foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
 // New app is in every page's header; Builds isn't in the sidebar (/builds still works).
+// With Earn, Search chats sits above the pages (an icon with a tooltip when collapsed): the user's
+// Earn chats in this browser, searched in a centred pop-up; open, the five most recent are listed too.
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
+import { Coins, FileBadge, History, LayoutDashboard, MessageSquare, Search, Settings } from "lucide-react"
 
+import { ChatSearchDialog } from "@/components/chat-search"
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
@@ -21,12 +24,14 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
+import { listThreads, OPEN_THREAD, THREADS_CHANGED, type EarnThreadRecord } from "@/lib/earn-history"
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
@@ -59,11 +64,17 @@ export type SidebarViewProps = {
   liquidity?: boolean
   developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
+  chats?: SidebarChats | null // Search chats and Recent chats; none without Earn or a known user
 }
 
+// The user's Earn chats in this browser, and what picking one (or New conversation) does.
+export type SidebarChats = { threads: EarnThreadRecord[]; onPick: (id: string) => void; onNew: () => void }
+const RECENT_CHATS = 5
+
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, chats = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
+  const [searching, setSearching] = useState(false)
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -81,6 +92,14 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
+            {chats && (
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="Search chats" onClick={() => setSearching(true)} data-search-chats>
+                  <Search />
+                  <span>Search chats</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            )}
             {[...(developer ? PAGES : PAGES.slice(0, 1)), ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
@@ -93,8 +112,24 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
+        {chats && chats.threads.length > 0 && (
+          <SidebarGroup className="group-data-[collapsible=icon]:hidden" data-recent-chats>
+            <SidebarGroupLabel>Recent chats</SidebarGroupLabel>
+            <SidebarMenu>
+              {chats.threads.slice(0, RECENT_CHATS).map((t) => (
+                <SidebarMenuItem key={t.id}>
+                  <SidebarMenuButton onClick={() => chats.onPick(t.id)} title={t.title} data-recent-chat={t.id}>
+                    <MessageSquare />
+                    <span>{t.title}</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroup>
+        )}
         {developer && <NavFolders groups={groups} activeAppId={appId} />}
       </SidebarContent>
+      {chats && <ChatSearchDialog open={searching} onOpenChange={setSearching} threads={chats.threads} onPick={chats.onPick} onNew={chats.onNew} />}
       <SidebarFooter>
         <NavUser user={account} />
       </SidebarFooter>
@@ -123,9 +158,33 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       setGroups(groupByStage([]))
     }
     // The account is known once the apps have loaded (roles, name and email come together).
-    const s = (await fetch("/api/session", { cache: "no-store" }).then((r) => r.json()).catch(() => null)) as Account | null
-    if (s) setAccount({ name: s.name ?? null, email: s.email ?? null })
+    const s = (await fetch("/api/session", { cache: "no-store" }).then((r) => r.json()).catch(() => null)) as (Account & { historyOwner?: string | null }) | null
+    if (s) {
+      setAccount({ name: s.name ?? null, email: s.email ?? null })
+      setOwner(s.historyOwner ?? null)
+    }
   }, [selected, developer])
+
+  // The user's Earn chats in this browser, kept current as Earn saves them (here or in another tab).
+  const router = useRouter()
+  const [owner, setOwner] = useState<string | null>(null)
+  const [threads, setThreads] = useState<EarnThreadRecord[]>([])
+  useEffect(() => {
+    const read = () => setThreads(listThreads(owner))
+    read()
+    window.addEventListener(THREADS_CHANGED, read)
+    window.addEventListener("storage", read)
+    return () => {
+      window.removeEventListener(THREADS_CHANGED, read)
+      window.removeEventListener("storage", read)
+    }
+  }, [owner])
+  // On Earn already, the thread opens in place; elsewhere, Earn opens on it.
+  const openThread = (id: string | null) => {
+    if (pathname === "/earn") window.dispatchEvent(new CustomEvent<string | null>(OPEN_THREAD, { detail: id }))
+    else router.push(id ? `/earn?thread=${encodeURIComponent(id)}` : "/earn")
+  }
+  const chats: SidebarChats | null = liquidity && owner ? { threads, onPick: (id) => openThread(id), onNew: () => openThread(null) } : null
 
   useEffect(() => {
     setGroups(null)
@@ -167,6 +226,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       liquidity={liquidity}
       developer={access ? developer : true}
       workspaceSettings={workspaceSettings}
+      chats={chats}
     />
   )
 }

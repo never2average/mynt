@@ -70,6 +70,7 @@ export function saveThread(owner: string | null, thread: EarnThreadRecord, s: St
   for (;;) {
     try {
       s.setItem(HISTORY_KEY, JSON.stringify({ ...all, [owner]: mine }));
+      announceThreads();
       return mine;
     } catch {
       if (mine.length <= 1) return listThreads(owner, s);
@@ -85,3 +86,50 @@ export const threadDate = (iso: string) => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 };
+
+// Told to the sidebar's chat search whenever this browser's threads change.
+export const THREADS_CHANGED = "mynt:earn-threads-changed";
+export function announceThreads() {
+  try {
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(THREADS_CHANGED));
+  } catch {
+    // nothing listens outside a browser
+  }
+}
+
+// The sidebar's Search chats, already on Earn: open this thread (detail: its id; null for a new one)
+// without reloading the page.
+export const OPEN_THREAD = "mynt:earn-open-thread";
+
+// A thread's words, on one line: what the chat search looks through.
+export function threadText(t: EarnThreadRecord): string {
+  return t.messages
+    .flatMap((m) => (m.parts ?? []).map((p) => (p.type === "text" ? p.text : "")))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export type ThreadMatch = { thread: EarnThreadRecord; snippet: string | null };
+
+// The threads whose title or words contain every word of the query (any case), in the order given, each
+// with the words around its first match. An empty query matches every thread, with no snippet.
+export function searchThreads(threads: EarnThreadRecord[], query: string, around = 40): ThreadMatch[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return threads.map((thread) => ({ thread, snippet: null }));
+  const out: ThreadMatch[] = [];
+  for (const thread of threads) {
+    const text = threadText(thread);
+    const hay = `${thread.title} ${text}`.toLowerCase();
+    if (!words.every((w) => hay.includes(w))) continue;
+    const i = text.toLowerCase().indexOf(words[0]);
+    if (i < 0) {
+      out.push({ thread, snippet: null });
+      continue;
+    }
+    const start = Math.max(0, i - around);
+    const end = Math.min(text.length, i + words[0].length + around);
+    out.push({ thread, snippet: `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}` });
+  }
+  return out;
+}

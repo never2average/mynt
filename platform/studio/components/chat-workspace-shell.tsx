@@ -9,14 +9,17 @@
 //   message, or when a link names a panel tab);
 // - the right panel: a tab strip at its top, then the selected tab's content, in the builder's
 //   2fr / 3fr split with the same easing;
-// - a visible divider between chat and panel, and (desktop) a button to collapse the panel to a
-//   slim rail and back, remembered per browser;
+// - a visible divider between chat and panel, and (desktop) a button to collapse the panel away,
+//   remembered per browser; collapsed (or not open yet), Show tabs floats at the chat's top right,
+//   beside whatever the page puts there (Earn's Past conversations);
 // - on phones, one side at a time, switched by the round button (or the top bar's back control).
 import { useEffect, useState, type ReactNode } from "react";
 import { MessageSquareIcon, PanelRightCloseIcon, PanelRightIcon, PanelRightOpenIcon } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils"
 import { Tab, TabList } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export type PanelTab = { id: string; label: string; badge?: number; content: ReactNode };
 export type MobileView = "chat" | "panel";
@@ -66,9 +69,15 @@ export function ChatWorkspaceShell({
   mobileView: controlledMobile,
   onMobileView,
   isMobile: forcedMobile,
+  chatCorner,
+  onOpenPanel,
 }: {
   topBar?: ReactNode;
   chat: ReactNode;
+  // Floating at the chat's top right (e.g. Past conversations); on desktop, Show tabs sits beside it
+  // whenever the panel is collapsed or not open yet (onOpenPanel opens one that isn't).
+  chatCorner?: ReactNode;
+  onOpenPanel?: () => void;
   showPanel: boolean;
   tabs: PanelTab[];
   tab: string;
@@ -99,7 +108,13 @@ export function ChatWorkspaceShell({
   };
   const railed = showPanel && !isMobile && collapsed;
 
-  const gridColumns = !showPanel ? "1fr 0fr" : isMobile ? (mobileView === "chat" ? "1fr 0fr" : "0fr 1fr") : railed ? "1fr 2.75rem" : "2fr 3fr";
+  // Collapsed, the panel takes no room: Show tabs, in the chat's top-right corner, brings it back.
+  const gridColumns = !showPanel ? "1fr 0fr" : isMobile ? (mobileView === "chat" ? "1fr 0fr" : "0fr 1fr") : railed ? "1fr 0fr" : "2fr 3fr";
+  const canShowTabs = !isMobile && tabs.length > 0 && (railed || (!showPanel && Boolean(onOpenPanel)));
+  const showTabs = () => {
+    if (railed) collapse(false);
+    else onOpenPanel?.();
+  };
 
   return (
     <div
@@ -116,12 +131,27 @@ export function ChatWorkspaceShell({
       >
         <div className={cn("relative min-w-0 overflow-hidden", isMobile && showPanel && mobileView === "panel" && "hidden")} data-chat-side>
           {chat}
+          {(chatCorner || canShowTabs) && (
+            <div className="absolute top-3 right-3 z-10 flex items-center gap-2" data-chat-corner>
+              {chatCorner}
+              {canShowTabs && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" size="icon-sm" className="rounded-full bg-background" aria-label="Show tabs" onClick={showTabs} data-expand-panel>
+                      <PanelRightOpenIcon />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">Show tabs ({current?.label ?? "panel"})</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+          )}
         </div>
         <div
           className={cn(
             "flex min-w-0 flex-col overflow-hidden",
             // A visible divide between the chat and the tabs.
-            !isMobile && showPanel && "border-l bg-muted/20",
+            !isMobile && showPanel && !railed && "border-l bg-muted/20",
             !isMobile && "transition-opacity duration-500",
             showPanel && (!isMobile || mobileView === "panel") ? "opacity-100" : !isMobile && "pointer-events-none opacity-0",
             isMobile && (mobileView === "chat" || !showPanel) && "hidden",
@@ -129,20 +159,6 @@ export function ChatWorkspaceShell({
           data-panel-side
           data-panel-collapsed={railed}
         >
-          {railed && (
-            <div className="flex h-full flex-col items-center pt-2" data-panel-rail>
-              <button
-                type="button"
-                onClick={() => collapse(false)}
-                className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
-                title={`Show tabs (${current?.label ?? "panel"})`}
-                aria-label="Show tabs"
-                data-expand-panel
-              >
-                <PanelRightOpenIcon className="size-4" />
-              </button>
-            </div>
-          )}
           {showPanel && current && !railed && (
             <>
               <PanelTabStrip tabs={tabs} tab={current.id} onTab={onTab} header={panelHeader} onCollapse={isMobile ? undefined : () => collapse(true)} />

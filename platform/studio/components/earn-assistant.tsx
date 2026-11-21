@@ -16,12 +16,13 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
 import type { UIMessage } from "ai"
-import { History, Loader2, Plus } from "lucide-react"
+import { History, Loader2 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
+import { ChatSearchDialog } from "@/components/chat-search"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { FilterSelect } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
@@ -30,11 +31,10 @@ import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
 import { CommitForm, commitOutcome, EarnTable, FormDone, FormSheet, Money, newIdempotencyKey, pagerOf, PoolFilterControls, poolFiltersOn, StageStatus, withdrawalOutcome, type LiquidityActions, type OpenForm } from "@/components/earn-view"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
-import { listThreads, newThreadId, saveThread, threadDate, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
+import { listThreads, newThreadId, OPEN_THREAD, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
 import { shortAddress } from "@/lib/linked-accounts"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import { toCsv } from "@/lib/compliance"
@@ -106,76 +106,28 @@ export function PastConversations({ history }: { history: EarnHistory }) {
   const [open, setOpen] = useState(false)
   return (
     <>
-      <div className="absolute top-3 right-3 z-10" data-earn-history>
+      <span className="flex" data-earn-history>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="outline" size="icon-sm" className="rounded-full bg-background" aria-label="Past conversations" onClick={() => setOpen(true)} data-history-button>
               <History />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="left">Past conversations</TooltipContent>
+          <TooltipContent side="bottom">Past conversations</TooltipContent>
         </Tooltip>
-      </div>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex h-[65vh] w-full max-w-[calc(100%-2rem)] flex-col sm:w-[65vw] sm:max-w-[65vw]" aria-describedby={undefined} data-dialog="history">
-          <DialogHeader>
-            <DialogTitle>Past conversations</DialogTitle>
-          </DialogHeader>
-          <div className="flex min-h-0 flex-1 flex-col gap-3">
-            <Button
-              className="self-start"
-              onClick={() => {
-                history.onNew()
-                setOpen(false)
-              }}
-              data-new-conversation
-            >
-              <Plus />
-              New conversation
-            </Button>
-            {history.threads.length ? (
-              <ul className="-mx-2 flex min-h-0 flex-1 flex-col overflow-y-auto" data-thread-list>
-                {history.threads.map((t) => (
-                  <li key={t.id}>
-                    <button
-                      type="button"
-                      className="flex w-full min-w-0 flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted aria-[current=true]:bg-muted"
-                      aria-current={t.id === history.current ? "true" : undefined}
-                      onClick={() => {
-                        history.onPick(t.id)
-                        setOpen(false)
-                      }}
-                      data-thread={t.id}
-                    >
-                      <span className="w-full truncate text-sm font-medium" title={t.title} data-thread-title>
-                        {t.title}
-                      </span>
-                      <span className="text-xs text-muted-foreground" data-thread-date>
-                        {threadDate(t.updatedAt)}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-muted-foreground" data-history-empty>
-                No past conversations yet.
-              </p>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      </span>
+      <ChatSearchDialog open={open} onOpenChange={setOpen} threads={history.threads} current={history.current} onPick={history.onPick} onNew={history.onNew} />
     </>
   )
 }
 
 // The chat side: the assistant, or, without a model, the same centred prompt that can't be used.
-export function EarnChat({ chat, status, history }: { chat: Chat; status: EarnStatus; history?: EarnHistory | null }) {
+// (Past conversations floats at the chat's top right, beside Show tabs: ChatWorkspaceShell's chatCorner.)
+export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
   if (status === "enabled")
     return (
       <div className="relative h-full" data-earn-chat>
         <EarnThread chat={chat} />
-        {history && <PastConversations history={history} />}
       </div>
     )
   return (
@@ -714,6 +666,7 @@ export function EarnWorkspace({
   isMobile,
   wallet,
   historyOwner = null,
+  initialThread = null,
 }: {
   wallet?: EarnWalletState
   chat: Chat
@@ -723,6 +676,7 @@ export function EarnWorkspace({
   initialTab?: string | null
   isMobile?: boolean
   historyOwner?: string | null // whose past conversations these are (a hash of the user); none kept without one
+  initialThread?: string | null // ?thread=: a chat picked in the sidebar's Search chats, opened once known
 }) {
   const available = tabsFor(data.access)
   const wanted = earnTabFromQuery(initialTab)
@@ -764,6 +718,29 @@ export function EarnWorkspace({
     setOutcomes(restoredOutcomes(kept))
     setSeenDrafts(panelFrom(messages as never).drafts.length)
   }
+  // A chat picked from the sidebar's Search chats arrives as ?thread=; it's opened once, when this
+  // user's threads are known.
+  const openedInitial = useRef(false)
+  useEffect(() => {
+    if (openedInitial.current || !historyOwner || !initialThread) return
+    openedInitial.current = true
+    const t = listThreads(historyOwner).find((x) => x.id === initialThread)
+    if (t) switchTo(t.id, t.messages, t.outcomes)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyOwner, initialThread])
+  // Picked from the sidebar's Search chats while already on Earn.
+  const switchRef = useRef(switchTo)
+  switchRef.current = switchTo
+  useEffect(() => {
+    const open = (e: Event) => {
+      const id = (e as CustomEvent<string | null>).detail
+      if (!id) return switchRef.current(newThreadId(), [], {})
+      const t = listThreads(historyOwner).find((x) => x.id === id)
+      if (t) switchRef.current(t.id, t.messages, t.outcomes)
+    }
+    window.addEventListener(OPEN_THREAD, open)
+    return () => window.removeEventListener(OPEN_THREAD, open)
+  }, [historyOwner])
   const history: EarnHistory | null = historyOwner
     ? {
         threads,
@@ -800,7 +777,9 @@ export function EarnWorkspace({
 
   const shell = (
     <ChatWorkspaceShell
-      chat={<EarnChat chat={chat} status={status} history={history} />}
+      chat={<EarnChat chat={chat} status={status} />}
+      chatCorner={status === "enabled" && history ? <PastConversations history={history} /> : null}
+      onOpenPanel={() => setOpened(true)}
       showPanel={opened || chat.messages.length > 0}
       tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t) }))}
       tab={tab}

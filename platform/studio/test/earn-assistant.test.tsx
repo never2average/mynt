@@ -372,8 +372,11 @@ describe("past conversations", () => {
     const sent: string[] = [];
     render(<Earn data={lpData} sent={sent} owner="u1" />);
     const button = historyButton();
-    expect(button.closest("[data-earn-history]")!.className.split(" ")).toEqual(expect.arrayContaining(["absolute", "top-3", "right-3"]));
+    // In the chat's top-right corner, with Show tabs beside it while the panel isn't open.
+    const corner = button.closest("[data-chat-corner]")!;
+    expect(corner.className.split(" ")).toEqual(expect.arrayContaining(["absolute", "top-3", "right-3"]));
     expect(button.closest("[data-chat-side]")).toBeTruthy();
+    expect(corner.querySelector("[data-expand-panel]")!.getAttribute("aria-label")).toBe("Show tabs");
     // Ask a question: once the answer settles, the thread is saved under this user.
     await act(async () => void fireEvent.click(document.querySelector('[data-chip="$50k, 90-day lock-in, US credit"]')!));
     await act(async () => new Promise((r) => setTimeout(r, 50)));
@@ -404,6 +407,33 @@ describe("past conversations", () => {
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
     // Restoring alone doesn't move it up the list.
     expect(listThreads("u1").map((t) => t.id)[1]).toBe("old");
+  });
+
+  it("Past conversations is a chat search: a search box over the recent chats, narrowed as the user types, with the matching words", async () => {
+    window.localStorage.clear();
+    window.localStorage.setItem(
+      HISTORY_KEY,
+      JSON.stringify({ u1: [thread("old", "Older question", "2026-11-20T10:00:00Z"), thread("tb", "Treasury bills ladder", "2026-11-21T10:00:00Z")] }),
+    );
+    render(<Earn data={lpData} owner="u1" />);
+    await act(async () => void fireEvent.click(historyButton()));
+    const dialog = document.querySelector('[data-dialog="history"]')!;
+    const box = dialog.querySelector("[data-chat-search]") as HTMLInputElement;
+    expect(box.getAttribute("placeholder")).toBe("Search chats");
+    expect(dialog.querySelector("[data-list-heading]")!.textContent).toBe("Recent");
+    expect([...dialog.querySelectorAll("[data-thread-title]")].map((t) => t.textContent)).toEqual(["Treasury bills ladder", "Older question"]);
+    // Typing narrows the list to matches (title or words, any case), each with the words around the match.
+    await act(async () => void fireEvent.change(box, { target: { value: "about OLDER" } }));
+    expect([...dialog.querySelectorAll("[data-thread-title]")].map((t) => t.textContent)).toEqual(["Older question"]);
+    expect(dialog.querySelector("[data-list-heading]")!.textContent).toBe("1 chat");
+    expect(dialog.querySelector("[data-thread-snippet]")!.textContent).toContain("About Older question.");
+    await act(async () => void fireEvent.change(box, { target: { value: "nothing like this" } }));
+    expect(dialog.querySelector("[data-no-matches]")).not.toBeNull();
+    // Down then Enter opens the first match.
+    await act(async () => void fireEvent.change(box, { target: { value: "treasury" } }));
+    await act(async () => void fireEvent.keyDown(box, { key: "ArrowDown" }));
+    await act(async () => void fireEvent.keyDown(box, { key: "Enter" }));
+    expect(document.body.textContent).toContain("About Treasury bills ladder.");
   });
 
   it("a restored draft keeps its idempotency key, and one already sent stays sent", async () => {
