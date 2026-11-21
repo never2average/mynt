@@ -1,13 +1,21 @@
 "use client"
 
 // From shadcn/ui's sidebar-07 block (team-switcher.tsx, MIT): the workspace switcher at the top
-// of the sidebar. Its menu lists the user's workspaces, then Invitations (N) when they have
-// pending ones, and Create workspace. The workspace's members are on the Workspace page, a fixed
-// item in the sidebar.
+// of the sidebar. Its menu lists the user's workspaces, then the selected workspace's own settings
+// for those allowed them (Rename workspace, Archive or Unarchive workspace, each opening a Sheet:
+// components/workspace-settings.tsx), Invitations (N) when they have pending ones, and Create
+// workspace. The workspace's members are on the Settings page, a fixed item in the sidebar.
 import * as React from "react"
-import { ChevronsUpDown, Mail, Plus } from "lucide-react"
+import { Archive, ChevronsUpDown, Link2, Mail, Pencil, Plus, RotateCcw } from "lucide-react"
 
 import { InvitationsList } from "@/components/invitations"
+import {
+  allowedSettings,
+  SETTING_LABELS,
+  WorkspaceSettingSheets,
+  type WorkspaceSetting,
+  type WorkspaceSettings,
+} from "@/components/workspace-settings"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -36,6 +44,7 @@ import type { Invitation } from "@/lib/invitations"
 import type { Workspace } from "@/lib/workspaces"
 
 const initial = (name: string) => (name.trim()[0] ?? "W").toUpperCase()
+const SETTING_ICONS = { rename: Pencil, archive: Archive, unarchive: RotateCcw, relink: Link2 } as const
 
 export function TeamSwitcher({
   workspaces,
@@ -45,6 +54,7 @@ export function TeamSwitcher({
   onCreate,
   invitations = [],
   onAnswerInvitation = async () => null,
+  settings,
 }: {
   workspaces: Workspace[]
   selected: Workspace
@@ -53,6 +63,7 @@ export function TeamSwitcher({
   onCreate: (name: string) => Promise<string | null> // an error to show, or null
   invitations?: Invitation[]
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
+  settings?: WorkspaceSettings // the selected workspace's settings and their calls; none: no settings items
 }) {
   const [showInvitations, setShowInvitations] = React.useState(false)
   const { isMobile } = useSidebar()
@@ -60,6 +71,9 @@ export function TeamSwitcher({
   const [name, setName] = React.useState("")
   const [error, setError] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState(false)
+  const [setting, setSetting] = React.useState<WorkspaceSetting | null>(null)
+  // Only for the workspace the info describes (never a stale one's, while the next loads).
+  const allowed = settings?.info && settings.info.workspace.id === selected.id ? allowedSettings(settings.info) : []
 
   const create = async () => {
     if (busy) return
@@ -111,6 +125,18 @@ export function TeamSwitcher({
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
+            {allowed.map((k) => {
+              const Icon = SETTING_ICONS[k]
+              return (
+                <DropdownMenuItem key={k} className="gap-2 p-2" onSelect={() => setSetting(k)} data-workspace-setting={k}>
+                  <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
+                    <Icon className="size-4" />
+                  </div>
+                  <div className="font-medium">{SETTING_LABELS[k]}</div>
+                </DropdownMenuItem>
+              )
+            })}
+            {allowed.length > 0 && <DropdownMenuSeparator />}
             {invitations.length > 0 && (
               <DropdownMenuItem className="gap-2 p-2" onSelect={() => setShowInvitations(true)}>
                 <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
@@ -127,6 +153,10 @@ export function TeamSwitcher({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {settings?.info && (
+          <WorkspaceSettingSheets open={setting} onClose={() => setSetting(null)} workspace={settings.info.workspace} actions={settings.actions} />
+        )}
 
         <Dialog open={showInvitations && invitations.length > 0} onOpenChange={setShowInvitations}>
           <DialogContent className="sm:max-w-lg" aria-describedby={undefined}>
