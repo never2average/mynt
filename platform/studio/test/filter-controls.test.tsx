@@ -5,7 +5,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { useState } from "react";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { FacetChips, facetsOn, FilterSelect, FiltersPopover, toggled, type Facet } from "@/components/filter-controls";
+import { anyOf, FacetChips, facetsOn, FilterSelect, FiltersPopover, picksOf, toggled, type Facet } from "@/components/filter-controls";
 
 beforeAll(() => {
   globalThis.ResizeObserver ??= class {
@@ -83,5 +83,12 @@ describe("the Filters popover's content", () => {
     expect(facetsOn([{ id: "a", label: "A", options: [], selected: ["x", "y"], onChange: () => undefined }, { id: "b", label: "B", options: [], selected: [], onChange: () => undefined }])).toBe(2);
     expect(toggled(["a", "b"], "a")).toEqual(["b"]);
     expect(toggled(["b"], "a")).toEqual(["b", "a"]);
+  });
+
+  it("reads a facet's picks from many values or one (an older single-value filter), and matches any of them", () => {
+    expect([picksOf(["a", "", "b"]), picksOf("a"), picksOf(""), picksOf(undefined)]).toEqual([["a", "b"], ["a"], [], []]);
+    expect([anyOf([], "x"), anyOf("", null), anyOf(["a", "b"], "b"), anyOf("a", "b"), anyOf(["a"], null)]).toEqual([true, true, true, false, false]);
+    // A row with several values (a licence's states) matches when any of them is picked.
+    expect([anyOf(["TX", "NJ"], ["NY", "NJ"]), anyOf(["TX"], ["NY", "NJ"])]).toEqual([true, false]);
   });
 });

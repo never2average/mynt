@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Download, ExternalLink, GitBranchPlus } from "lucide-react"
 
-import { FilterSelect } from "@/components/filter-controls"
+import { FiltersPopover } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { dateOf } from "@/lib/format-date"
@@ -179,9 +179,9 @@ export function ConnectRepository({
 
 export function RepositoriesTab({ state, onConnected }: { state: ReposState; onConnected?: () => void }) {
   const [query, setQuery] = useState("")
-  const [status, setStatus] = useState("")
+  const [status, setStatus] = useState<string[]>([])
   const repos = useMemo(() => (state.kind === "ready" ? state.repos : []), [state])
-  const rows = useMemo(() => repos.filter((r) => (!status || r.approval === status) && matches(query, r.repository, APPROVAL_LABELS[r.approval], r.note)), [repos, query, status])
+  const rows = useMemo(() => repos.filter((r) => (!status.length || status.includes(r.approval)) && matches(query, r.repository, APPROVAL_LABELS[r.approval], r.note)), [repos, query, status])
   const { page, pages, shown, setPage } = usePaged(rows)
   if (state.kind === "loading")
     return (
@@ -212,7 +212,7 @@ export function RepositoriesTab({ state, onConnected }: { state: ReposState; onC
         searchLabel="Search repositories by name or status"
         actions={
           <>
-            <FilterSelect label="Status" value={status} options={STATUS_OPTIONS} onChange={setStatus} />
+            <FiltersPopover facets={[{ id: "status", label: "Status", options: STATUS_OPTIONS, selected: status, onChange: setStatus }]} onClear={() => setStatus([])} />
             <Button variant="outline" onClick={exportCsv} disabled={!rows.length}>
               <Download />
               Export CSV

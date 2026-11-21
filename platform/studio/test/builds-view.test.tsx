@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
+import { clearAll, filtersButton, headings, oneFiltersButton, openFilters, toggle } from "./facet-helpers";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/builds",
@@ -40,10 +41,10 @@ describe("the Builds page", () => {
     expect(failed).toContain('role="alert"');
   });
 
-  it("has one toolbar row: search, App, Status, Date range, Export CSV, then New app as the primary call to action", () => {
+  it("has one toolbar row: search, one Filters button, Date range, Export CSV, then New app as the primary call to action", () => {
     const html = renderToStaticMarkup(<BuildsView rows={rows} />);
     const bar = html.slice(html.indexOf("data-list-layout"), html.indexOf("<table"));
-    const order = ['aria-label="Search builds"', 'data-filter="App"', 'data-filter="Status"', 'data-filter="Date range"', "data-export", "data-new-app"];
+    const order = ['aria-label="Search builds"', "data-filters-menu-button", 'data-filter="Date range"', "data-export", "data-new-app"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
@@ -80,14 +81,36 @@ describe("the Builds page", () => {
   it("narrows the table from the toolbar's App filter", async () => {
     const { container: c } = render(<BuildsView rows={rows} />);
     expect(c.querySelectorAll("tbody tr")).toHaveLength(4);
-    await act(async () => {
-      fireEvent.keyDown(c.querySelector('[data-filter="App"]')!, { key: "Enter" });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-filter-menu="App"] [data-filter-option="a1"]')!);
-    });
+    await openFilters(c);
+    await toggle("app", "a1");
     expect(c.querySelectorAll("tbody tr")).toHaveLength(2);
     expect(c.textContent).toContain("2 rows · Page 1 of 1");
+  });
+
+  it("puts App and Status in one Filters popover: any of the picks within a facet, every facet, and one Clear all", async () => {
+    const { container: c } = render(<BuildsView rows={rows} />);
+    oneFiltersButton(c.querySelector("[data-list-layout]") ?? c);
+    expect(filtersButton(c).textContent).toBe("Filters");
+    await openFilters(c);
+    expect(headings()).toEqual(["App", "Status"]);
+    const ids = () => [...c.querySelectorAll("tbody tr[data-build]")].map((r) => r.getAttribute("data-build"));
+    await toggle("status", "succeeded");
+    await toggle("status", "queued");
+    expect(ids()).toEqual(["b1", "b4"]); // any of the statuses
+    expect(filtersButton(c).textContent).toBe("Filters· 2");
+    await toggle("app", "a2");
+    expect(ids()).toEqual(["b4"]); // and the app
+    expect(filtersButton(c).getAttribute("aria-label")).toBe("Filters: 3 on");
+    await clearAll();
+    expect(ids()).toHaveLength(4);
+    expect(filtersButton(c).textContent).toBe("Filters");
+  });
+
+  it("filters by any of several apps or statuses, and still takes one value", () => {
+    const f = (o: Partial<typeof NO_BUILD_FILTERS>) => filterBuilds(rows, { ...NO_BUILD_FILTERS, ...o }).map((r) => r.id);
+    expect(f({ status: ["failed", "coding"] })).toEqual(["b2", "b3"]);
+    expect(f({ appId: ["a1"], status: ["failed", "coding"] })).toEqual(["b2"]);
+    expect(f({ appId: "a1", status: "" })).toEqual(["b1", "b2"]);
   });
 
   it("loads with skeletons, never Loading… text, and says when there are none", () => {

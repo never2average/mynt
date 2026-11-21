@@ -2,7 +2,7 @@
 
 // The Workspace page's Members and Invitations tabs: the workspace's members and its pending
 // invites. Members starts with its key figures (counted from the members Mynt listed); each tab
-// then has one toolbar row (search, Role, Export CSV, Invite member) over a paged table. Owners
+// then has one toolbar row (search, one Filters popover with Role, Export CSV, Invite member) over a paged table. Owners
 // and admins invite by email with a role, change roles, remove members and withdraw invites;
 // everyone else sees the members only, with Invite member disabled (Mynt shows pending invites
 // only to owners and admins). Server-renderable, so the tests check the role gating without a
@@ -12,7 +12,7 @@ import { ChevronDown, Download, Mail, Trash2, UserPlus } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
-import { FilterSelect } from "@/components/filter-controls"
+import { FiltersPopover } from "@/components/filter-controls"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { downloadCsv } from "@/components/licences-view"
 import { Badge } from "@/components/ui/badge"
@@ -164,10 +164,10 @@ function ExportCsv({ onClick, disabled }: { onClick: () => void; disabled: boole
 
 export function MembersTab({ workspace, data, actions }: { workspace: Workspace; data: MembersData; actions: MembersActions }) {
   const [query, setQuery] = useState("")
-  const [role, setRole] = useState("")
+  const [role, setRole] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const rows = useMemo(() => data.members.filter((m) => (!role || m.role === role) && matches(query, m.name, m.email, m.role)), [data.members, query, role])
+  const rows = useMemo(() => data.members.filter((m) => (!role.length || role.includes(m.role)) && matches(query, m.name, m.email, m.role)), [data.members, query, role])
   const { page, pages, shown, setPage } = usePaged(rows)
   if (!data.supported) return <NotSupported data={data} />
 
@@ -198,7 +198,7 @@ export function MembersTab({ workspace, data, actions }: { workspace: Workspace;
         searchLabel="Search members by name, email or role"
         actions={
           <>
-            <FilterSelect label="Role" value={role} options={ROLE_OPTIONS} onChange={setRole} />
+            <FiltersPopover facets={[{ id: "role", label: "Role", options: ROLE_OPTIONS, selected: role, onChange: setRole }]} onClear={() => setRole([])} />
             <ExportCsv onClick={exportCsv} disabled={!rows.length} />
           </>
         }
@@ -267,10 +267,10 @@ export function MembersTab({ workspace, data, actions }: { workspace: Workspace;
 
 export function InvitationsTab({ workspace, data, actions }: { workspace: Workspace; data: MembersData; actions: MembersActions }) {
   const [query, setQuery] = useState("")
-  const [role, setRole] = useState("")
+  const [role, setRole] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const rows = useMemo(() => data.invites.filter((i) => (!role || i.role === role) && matches(query, i.email, i.role)), [data.invites, query, role])
+  const rows = useMemo(() => data.invites.filter((i) => (!role.length || role.includes(i.role)) && matches(query, i.email, i.role)), [data.invites, query, role])
   const { page, pages, shown, setPage } = usePaged(rows)
   if (!data.supported) return <NotSupported data={data} />
   if (!data.canManage)
@@ -302,7 +302,7 @@ export function InvitationsTab({ workspace, data, actions }: { workspace: Worksp
         searchLabel="Search invitations by email or role"
         actions={
           <>
-            <FilterSelect label="Role" value={role} options={ASSIGNABLE_OPTIONS} onChange={setRole} />
+            <FiltersPopover facets={[{ id: "role", label: "Role", options: ASSIGNABLE_OPTIONS, selected: role, onChange: setRole }]} onClear={() => setRole([])} />
             <ExportCsv onClick={exportCsv} disabled={!rows.length} />
           </>
         }
