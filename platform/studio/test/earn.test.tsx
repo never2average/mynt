@@ -82,10 +82,10 @@ const view = (d: LiquidityData, tab?: "pools" | "my-positions" | "my-pools", for
 };
 
 describe("Earn by role", () => {
-  it("everyone with a liquidity role gets Pools; builders (developer or innovator) My pools; liquidity providers My positions and My strategies", () => {
+  it("everyone with a liquidity role gets Pools and My strategies; builders (developer or innovator) My pools; liquidity providers My positions", () => {
     expect(accessFrom(["developer", "consumer", "innovator"])).toEqual({ builder: true, liquidityProvider: false });
     expect(accessFrom(["liquidity_provider"])).toEqual({ builder: false, liquidityProvider: true });
-    expect(tabsFor(accessFrom(["innovator"]))).toEqual(["pools", "my-pools"]);
+    expect(tabsFor(accessFrom(["innovator"]))).toEqual(["pools", "my-pools", "my-strategies"]);
     expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["pools", "my-positions", "my-strategies"]);
     expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["pools", "my-positions", "my-pools", "my-strategies"]);
     expect(tabsFor(accessFrom(["consumer"]))).toEqual([]);
