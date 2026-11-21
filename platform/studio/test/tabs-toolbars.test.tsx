@@ -90,7 +90,7 @@ describe("the header's controls", () => {
   const SOLANA = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
   const linked = fromLinkedAccounts({ git: { username: "ines" }, wallets: [{ address: SOLANA, chain: "solana" }], manage_url: "https://accounts.example.test/user" });
 
-  it("are one outlined group: GitHub with the GitHub mark, the wallet with a wallet icon and the Solana mark, the theme an outlined icon button", async () => {
+  it("are one outlined group: GitHub with the GitHub mark, the wallet with a wallet icon and no chain mark, the theme an outlined icon button", async () => {
     render(
       <ThemeProvider>
         <TooltipProvider>
@@ -108,7 +108,7 @@ describe("the header's controls", () => {
     const wallet = document.querySelector('[data-wallet-control="linked"]')!;
     expect(wallet.getAttribute("data-variant")).toBe("outline");
     expect(wallet.querySelector("svg.lucide-wallet")).not.toBeNull();
-    expect(wallet.querySelector('svg[data-brand-icon="solana"][data-network-mark="solana"]')).not.toBeNull();
+    expect(wallet.querySelector("[data-brand-icon], [data-network-mark]")).toBeNull();
     const theme = screen.getByRole("button", { name: "Theme" });
     expect(theme.getAttribute("data-variant")).toBe("outline");
     expect(theme.className).toContain("size-8");

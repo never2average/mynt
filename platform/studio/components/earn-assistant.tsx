@@ -30,7 +30,7 @@ import { ViewSwitch } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { CARD_GRID, COL, PanelList, useFitCards, useFitRows, usePaged } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
-import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
+import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, LinkedWallet, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
 import {
   CommitForm,
   commitOutcome,
@@ -60,7 +60,6 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
 import { listThreads, newThreadId, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
-import { shortAddress } from "@/lib/linked-accounts"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import { toCsv } from "@/lib/compliance"
 import {
@@ -633,14 +632,13 @@ export function DraftPanel({
           <>
             <dt className="text-muted-foreground">{commit ? "From" : "To"}</dt>
             <dd className="flex items-center gap-2" data-draft-wallet>
-              <span className="font-mono text-xs">{draft.wallet ? shortAddress(draft.wallet) : "your chosen wallet"}</span>
+              {draft.wallet ? <LinkedWallet address={draft.wallet} /> : <span className="text-xs">your chosen wallet</span>}
               <DevnetBadge />
             </dd>
           </>
         )}
       </dl>
       {pool && !onChain && <p className="text-sm text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</p>}
-      {onChain && <p className="text-sm text-muted-foreground">{commit ? "A USDC deposit on devnet, signed in your own wallet after you check Mynt's summary. Test money only." : "A USDC withdrawal on devnet back to your wallet, signed in your own wallet after you check Mynt's summary."}</p>}
       {!onChain && refusal && state.kind !== "done" && (
         <p className="text-sm text-amber-600 dark:text-amber-300" data-refusal>
           {refusal}

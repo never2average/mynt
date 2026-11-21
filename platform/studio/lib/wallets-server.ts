@@ -7,7 +7,7 @@ import { balancesFrom, CLUSTER, NO_WALLETS, walletsFrom, type EarnWallet, type E
 
 // Earn's wallets, read from Mynt as the signed-in user (lib/wallets.ts): the verified wallets
 // linked to their sign-in and, where Mynt has get_wallet_balances, each Solana wallet's devnet
-// balances. A balance Mynt can't give is null ("Balances unavailable"), never 0.
+// balances. A balance Mynt can't give is null ("Not measured"), never 0.
 
 // Whose list this is, for remembering the chosen wallet per user in the browser: a hash, so the
 // browser never stores the user's id.
