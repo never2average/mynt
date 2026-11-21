@@ -173,6 +173,8 @@ export const STUDIO_TOOLS = {
       min_commitment_cents: cents,
       max_commitment_cents: cents,
       sponsor_entity_id: uuid.optional(),
+      // A retry with the same key and terms is the pool Mynt already made, never a second one.
+      idempotency_key: idempotencyKey.optional(),
     })
     .strict(),
   commit_to_pool: z.object({ pool_id: uuid, amount_cents: cents, state: usState, idempotency_key: idempotencyKey }).strict(),

@@ -241,6 +241,12 @@ describe("writes", () => {
     const res = await pools.POST(post("/api/liquidity/pools", { ...terms, product_id: "own-product" }));
     expect(res.status).toBe(200);
     expect(called("create_pool")[0].args).toEqual({ ...terms, product_id: "own-product" });
+    // An idempotency key goes through to Mynt as given; a malformed one is refused before Mynt is asked.
+    const keyed = await pools.POST(post("/api/liquidity/pools", { ...terms, product_id: "own-product", idempotency_key: KEY }));
+    expect(keyed.status).toBe(200);
+    expect(called("create_pool")[1].args).toEqual({ ...terms, product_id: "own-product", idempotency_key: KEY });
+    expect((await pools.POST(post("/api/liquidity/pools", { ...terms, product_id: "own-product", idempotency_key: "short" }))).status).toBe(400);
+    expect(called("create_pool")).toHaveLength(2);
     as("liquidity_provider");
     expect((await pools.POST(post("/api/liquidity/pools", { ...terms, product_id: "own-product" }))).status).toBe(403);
   });

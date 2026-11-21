@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { productsAnsweredBy } from "./access.js";
@@ -198,11 +198,30 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
           min_commitment_cents: Cents.default(1).describe("A firm's smallest total position in this pool, integer cents"),
           max_commitment_cents: Cents.describe("A firm's largest total position in this pool, integer cents"),
           sponsor_entity_id: z.string().uuid().optional().describe("If more than one licence provider sponsors the component"),
+          idempotency_key: IdemKey.optional().describe("Optional: a key you choose for this proposal. Repeating the call with the same key and the same arguments returns the pool made the first time, not a second one; the same key with different arguments is refused"),
         },
       },
-      async ({ product_id, component_key, name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, sponsor_entity_id }) => {
+      async ({ product_id, component_key, name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, sponsor_entity_id, idempotency_key }) => {
         const u = await me();
         if (!u.entity_id) return fail(noFirm);
+        // A key is the caller's own: the same key from someone else is a different proposal.
+        const key = idempotency_key === undefined ? null : `create-pool:${user.id}:${idempotency_key}`;
+        const fingerprint = createHash("sha256")
+          .update(JSON.stringify([product_id, component_key, name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, sponsor_entity_id ?? null]))
+          .digest("hex");
+        const replay = async () => {
+          if (!key) return null;
+          const { rows } = await store.db.query(`SELECT id, idempotency_fingerprint FROM ${T}.liquidity_pools WHERE idempotency_key = $1`, [key]);
+          if (!rows[0]) return null;
+          if (rows[0].idempotency_fingerprint !== fingerprint) {
+            await audit("create_pool_refused", product_id, { component_key, reason: "idempotency_conflict" });
+            return fail("That idempotency key was already used to propose a different pool; use a new key for a new proposal", { code: "idempotency_conflict" });
+          }
+          await audit("create_pool", rows[0].id as string, { product_id, component_key, sandbox, replay: true });
+          return json({ ...(await getPool(store, rows[0].id as string)), replay: true });
+        };
+        const earlier = await replay();
+        if (earlier) return earlier;
         if (min_commitment_cents > max_commitment_cents) return fail("min_commitment_cents can't be more than max_commitment_cents");
         const record = (await productsAnsweredBy(store, u)).find((p) => p.product.id === product_id);
         if (!record || record.entity_id !== u.entity_id) return fail(`No product of your firm with id '${product_id}'`);
@@ -214,11 +233,14 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         }
         if (sponsors.length > 1) return fail("More than one licence provider sponsors that component: name the pool's sponsor with sponsor_entity_id", { sponsors });
         const id = randomUUID();
-        await store.db.query(
-          `INSERT INTO ${T}.liquidity_pools (id, product_id, component_key, sponsor_entity_id, name, sandbox, status, pause_kind, pause_reason, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, 'paused', 'awaiting_approval', 'Waiting for the sponsoring licence provider to approve it', $7, $8, $9, $10, $11, $12)`,
-          [id, product_id, component_key, sponsors[0], name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, user.id],
+        const { rows: inserted } = await store.db.query(
+          `INSERT INTO ${T}.liquidity_pools (id, product_id, component_key, sponsor_entity_id, name, sandbox, status, pause_kind, pause_reason, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, created_by, idempotency_key, idempotency_fingerprint)
+           VALUES ($1, $2, $3, $4, $5, $6, 'paused', 'awaiting_approval', 'Waiting for the sponsoring licence provider to approve it', $7, $8, $9, $10, $11, $12, $13, $14)
+           ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
+          [id, product_id, component_key, sponsors[0], name, sandbox, min_reserve_bps, min_reserve_floor_cents, notice_period_days, min_commitment_cents, max_commitment_cents, user.id, key, key ? fingerprint : null],
         );
+        // Two calls with one key at once: the one that lost the race answers as a retry of the one that won.
+        if (!inserted[0]) return (await replay()) ?? fail("That pool couldn't be saved; try again");
         await audit("create_pool", id, { product_id, component_key, sponsor: sponsors[0], sandbox });
         return json(await getPool(store, id));
       },
