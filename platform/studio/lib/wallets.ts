@@ -77,7 +77,8 @@ function decimal(baseUnits: string, decimals: number, maxFraction: number): stri
 }
 export const usdcText = (baseUnits: string | bigint) => `${decimal(String(baseUnits), 6, 6)} USDC`;
 export const solText = (lamports: string) => `${decimal(lamports, 9, 4)} SOL`;
-export const balancesText = (b: Balances | null) => (b ? `${usdcText(b.usdcBaseUnits)} · ${solText(b.solLamports)}` : "Balances unavailable");
+// A balance Mynt can't give reads "Not measured", never 0.
+export const balancesText = (b: Balances | null) => (b ? `${usdcText(b.usdcBaseUnits)} · ${solText(b.solLamports)}` : "Not measured");
 // Pools count in integer cents; USDC has 6 decimals, so a cent is 10,000 base units.
 export const centsToUsdcBaseUnits = (cents: number) => String(BigInt(cents) * 10_000n);
 // Base units to whole cents, rounded down (what may be asked for is never overstated).

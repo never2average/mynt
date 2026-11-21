@@ -169,12 +169,13 @@ describe("the Workspace page's Members and Invitations tabs", () => {
     expect(invites).not.toContain("border-dashed");
   });
 
-  it("Members: key figures counted from the loaded members, then search, Role, Export CSV and Invite member last", () => {
+  it("Members: key figures counted from the loaded members, then search, one Filters button (Role), Export CSV and Invite member last", () => {
     const html = membersHtml({ ...members, members: [...members.members, { userId: "u3", name: "Ana", email: "ana@example.com", role: "admin" }] });
     const figure = (key: string) => new RegExp(`data-kpi="${key}"[\\s\\S]*?data-measured="true">(\\d+)<`).exec(html)?.[1];
     expect([figure("members"), figure("owners"), figure("admins"), figure("developers")]).toEqual(["3", "1", "1", "1"]);
     expect(html.indexOf("data-kpis")).toBeLessThan(html.indexOf("data-list-layout"));
-    const toolbar = ['aria-label="Search members by name, email or role"', 'data-filter="Role"', ">Export CSV<", "data-invite-member"].map((s) => html.indexOf(s));
+    const toolbar = ['aria-label="Search members by name, email or role"', "data-filters-menu-button", ">Export CSV<", "data-invite-member"].map((s) => html.indexOf(s));
+    expect(html).not.toContain('data-filter="Role"');
     expect(toolbar.every((i) => i > 0)).toBe(true);
     expect([...toolbar].sort((a, b) => a - b)).toEqual(toolbar);
     // The role cell is a labelled dropdown button, never a native select.
@@ -184,9 +185,10 @@ describe("the Workspace page's Members and Invitations tabs", () => {
     expect(roleButton.replace(/<[^>]+>/g, "").trim()).toBe("Member");
   });
 
-  it("Invitations: search, Role, Export CSV and Invite member", () => {
+  it("Invitations: search, one Filters button (Role), Export CSV and Invite member", () => {
     const html = invitationsHtml(members);
-    const toolbar = ['aria-label="Search invitations by email or role"', 'data-filter="Role"', ">Export CSV<", "data-invite-member"].map((s) => html.indexOf(s));
+    const toolbar = ['aria-label="Search invitations by email or role"', "data-filters-menu-button", ">Export CSV<", "data-invite-member"].map((s) => html.indexOf(s));
+    expect(html).not.toContain('data-filter="Role"');
     expect(toolbar.every((i) => i > 0)).toBe(true);
     expect([...toolbar].sort((a, b) => a - b)).toEqual(toolbar);
   });

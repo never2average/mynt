@@ -1,8 +1,47 @@
 name: CI
-# workflow_dispatch: the toolchain watcher runs CI on the branches it opens (its pushes start no workflows).
-on: [push, pull_request, workflow_dispatch]
+# Pull requests run once (not again for the branch push), and only the jobs whose part of the repository changed;
+# main runs everything after each merge. workflow_dispatch: the toolchain watcher runs CI on the branches it opens
+# (its pushes start no workflows), and gets everything too.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+# A newer push to the same pull request cancels its older run; main's runs always finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # Which parts of the repository a pull request changes. core: the server and everything built from it (its tests,
+  # Caddy site, partner demo, Solana programs, SDKs, starter apps), with deploy/ and docs/ (its tests read the docs);
+  # platform: the studio and the chat. The workflow
+  # itself and the root package files count for both. Outside a pull request, everything runs.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.f.outputs.core }}
+      platform: ${{ steps.f.outputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "core=true" >> "$GITHUB_OUTPUT"; echo "platform=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE...$HEAD")
+          echo "$files"
+          shared='^(\.github/|package\.json$|package-lock\.json$)'
+          if grep -qE "^(core/|deploy/|docs/)|$shared" <<< "$files"; then echo "core=true" >> "$GITHUB_OUTPUT"; else echo "core=false" >> "$GITHUB_OUTPUT"; fi
+          if grep -qE "^platform/|$shared" <<< "$files"; then echo "platform=true" >> "$GITHUB_OUTPUT"; else echo "platform=false" >> "$GITHUB_OUTPUT"; fi
   test:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -32,6 +71,8 @@ jobs:
   # Mynt's Caddy site as the host installer renders it, with and without Mynt Studio on the same domain: Caddy
   # itself adapts it, and every path Mynt serves must still reach Mynt (the studio gets the rest).
   caddy-site:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -54,6 +95,8 @@ jobs:
   # The partner walkthrough (docs/demo.md) as a presenter runs it, so its narrated output is in the log. npm test
   # runs it too (test/partner-walkthrough.test.js), with its checks and that it leaves nothing behind.
   partner-demo:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -74,6 +117,8 @@ jobs:
   # coding agents' template Anchor program verifiably and tests it on a local validator, exactly as Mynt's verify
   # sandbox does (src/solana/toolchain.ts).
   solana-program:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-24.04
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -376,6 +421,8 @@ jobs:
   # programs, then its tests on a local validator. The build must match the hash recorded in
   # schemas/solana-treasury-template.json, and the mainnet program gate's hard rules must still refuse it.
   solana-treasury:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-24.04
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -466,6 +513,8 @@ jobs:
   # platform/packages/auth): each app's tests, type check and production build. For the studio, also: it and the
   # sign-in code name no real host or IP address and none of the wording Mynt doesn't use.
   platform:
+    needs: changes
+    if: needs.changes.outputs.platform == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -511,6 +560,8 @@ jobs:
   # The starter app the coding agents scaffold (api, web, Expo mobile) compiles against a freshly generated SDK,
   # and its Compose images build.
   starter-app:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -575,6 +626,8 @@ jobs:
           docker compose --profile mobile down -v
   # Generates every device SDK for a defined product and compiles the native ones with their own toolchains.
   client-sdks:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     # Pinned to a runner with docker. Swift builds inside the official swift:5.10 image, so it doesn't depend on
     # setup-swift fetching signing keys from a keyserver (keyserver.ubuntu.com outages broke this job).
     runs-on: ubuntu-24.04
@@ -622,6 +675,8 @@ jobs:
   # The native mobile starters (templates/mynt-app-mobile), scaffolded the way the coding agents do it against a
   # freshly generated SDK, and compiled with each platform's own toolchain.
   starter-android:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -655,6 +710,8 @@ jobs:
           ./gradlew :app:assembleDebug --stacktrace
           test -f app/build/outputs/apk/debug/app-debug.apk
   starter-flutter:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The MCP server and everything it ships live in core/.
     defaults:
@@ -691,6 +748,8 @@ jobs:
           flutter test
           flutter build apk --debug
   starter-ios:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: macos-latest
     # The MCP server and everything it ships live in core/.
     defaults:

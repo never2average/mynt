@@ -29,7 +29,7 @@ import type { Loaded } from "@/lib/use-compliance"
 import type { EarnWallets } from "@/lib/wallets"
 import { cn } from "@/lib/utils"
 
-export const BALANCES_UNAVAILABLE = "Balances unavailable"
+export const BALANCES_UNAVAILABLE = "Not measured"
 
 function NotReady({ state, what }: { state: Exclude<Loaded<unknown>, { kind: "ready" }>; what: string }) {
   if (state.kind === "loading") return <Skeleton className="h-16 w-full" />
@@ -210,6 +210,8 @@ export function InvestorView({
       </Panel>
 
       <InvestorToolbar filter={filter} onFilter={setFilter} pools={pools} />
+      {/* Capital in and Paid out: each its own panel, side by side on wide screens. */}
+      <div className="grid gap-4 lg:gap-5 @4xl/main:grid-cols-2" data-chart-pair>
       <Panel id="money">
         <PnlChart
           state={chart}
@@ -223,6 +225,8 @@ export function InvestorView({
           labels={labels}
           empty="Not measured yet: Mynt has no dated deposits for these dates."
         />
+      </Panel>
+      <Panel id="paid-out">
         <PnlChart
           state={chart}
           granularity={range.granularity}
@@ -237,6 +241,7 @@ export function InvestorView({
           note={flows?.railsUnmeasured && onChain ? "Devnet deposits and payouts only: rails positions carry no dated history yet. Paid out counts in the period it became payable." : onChain ? "Paid out counts in the period it became payable." : undefined}
         />
       </Panel>
+      </div>
 
       <Panel id="financial-activity">
         <FinancialActivity state={activity} />

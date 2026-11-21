@@ -43,6 +43,10 @@ export function useSlashMenu(commands: readonly SlashCommand[], inputRef: RefObj
   const open = query !== null && items.length > 0 && dismissed !== text;
   const [active, setActive] = useState(0);
   useEffect(() => setActive(0), [query]);
+  // Once the button's "/" is in the input, typing drives the menu again (deleting the "/" closes it).
+  useEffect(() => {
+    if (forced === "" && typed !== null) setForced(null);
+  }, [forced, typed]);
 
   const setText = useCallback((t: string) => aui.composer().setText(t), [aui]);
   const choose = useCallback(
@@ -63,8 +67,11 @@ export function useSlashMenu(commands: readonly SlashCommand[], inputRef: RefObj
   const dismiss = useCallback(() => setDismissed(text), [text]);
   const openMenu = useCallback(() => {
     setDismissed(null);
-    if (!text) setText("/");
-    else if (slashQuery(text) === null) setForced(text);
+    if (!text) {
+      // The menu lists everything at once, without waiting for the "/" to reach the composer's store.
+      setForced("");
+      setText("/");
+    } else if (slashQuery(text) === null) setForced(text);
     setTimeout(() => focusEnd(inputRef.current), 0);
   }, [text, setText, inputRef]);
 

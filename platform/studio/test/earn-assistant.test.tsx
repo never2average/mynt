@@ -138,7 +138,7 @@ describe("Earn in the chat workspace", () => {
       expect(selected()).toBe("pools");
       expect(document.querySelector('[data-panel-tab="my-positions"]')).toBeNull();
       expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("Invested");
-      expect([...document.querySelectorAll("[data-pool-card]")].map((c) => c.getAttribute("data-pool-card"))).toEqual([POOL]);
+      expect([...document.querySelectorAll("[data-pool-row]")].map((c) => c.getAttribute("data-pool-row"))).toEqual([POOL]);
       cleanup();
     }
     // The old Opportunities (and /liquidity's Open pools) is Pools, opened, showing all pools.
@@ -148,7 +148,7 @@ describe("Earn in the chat workspace", () => {
       expect(selected()).toBe("pools");
       expect(document.querySelector('[data-panel-tab="opportunities"]')).toBeNull();
       expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("All");
-      expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+      expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
       cleanup();
     }
     // Drafts is My strategies.
@@ -167,7 +167,7 @@ describe("Earn in the chat workspace", () => {
     render(<Earn data={{ ...builderData, builder: { ...builderData.builder!, pools } }} initialTab="my-positions" />);
     expect(selected()).toBe("pools");
     expect(document.querySelector("[data-view-switch]")).toBeNull();
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
   });
 
   it("counts drafts on the My strategies tab, and a draft is sent only by the user's click, once, even after looking at another tab", async () => {
@@ -215,43 +215,43 @@ describe("Earn in the chat workspace", () => {
 });
 
 describe("the Pools and My strategies tabs", () => {
-  it("Pools (Opportunities merged in): the pools the conversation matched as cards, lock-in and notice apart, what the user holds in each, and Commit capital", async () => {
+  it("Pools (Opportunities merged in): the pools the conversation matched as a table, lock-in and notice apart, what the user holds in each, and Commit capital", async () => {
     const { poolIds } = panelFrom([{ role: "assistant", parts: [{ type: "data-earn-pools", data: { pool_ids: [UNCLEARED] } }] }]);
     render(<PoolsTab data={lpData} poolIds={poolIds} actions={actions().a} />);
-    // Cards (flat, one per pool, none nested), the matched pools shown by the Show filter.
-    expect(document.querySelectorAll("table")).toHaveLength(0);
-    expect(document.querySelector("[data-slot='card']")).toBeNull();
+    // One table (no cards), a row per pool, the matched pools shown by the Show filter.
+    expect(document.querySelectorAll("table")).toHaveLength(1);
+    expect(document.querySelector("[data-card], [data-card-grid], [data-slot='card']")).toBeNull();
+    expect([...document.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Pool", "State", "Money", "Lock-in", "Notice", "Limits", "Reserve", "Health", "Your position", "Queued", "Paid", "Waiting requests", "Actions"]);
     expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("Matched");
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(1);
-    const card = document.querySelector(`[data-pool-card="${UNCLEARED}"]`)!;
-    expect(card.className.split(" ")).toEqual(expect.arrayContaining(["rounded-lg", "border", "p-3"]));
-    expect(card.querySelector("[data-card]")).toBeNull();
+    expect(document.querySelectorAll("tr[data-pool-row]")).toHaveLength(1);
+    const card = document.querySelector(`[data-pool-row="${UNCLEARED}"]`)!;
     for (const s of ["Uncleared float", "Sandbox only — not yet cleared for real commitments", "$1,000.00 – $100,000.00 per firm"]) expect(card.textContent).toContain(s);
     expect(card.querySelector("[data-product]")!.textContent).toBe("card-credit · credit");
     expect(card.querySelector("[data-lock-in]")!.textContent).toBe("Not set");
     expect(card.querySelector("[data-notice]")!.textContent).toBe("90 days");
-    expect(card.querySelector("[data-health]")!.textContent).toContain("Health Not available yet");
+    expect(card.querySelector("[data-health]")!.textContent).toBe("Not available yet");
     expect(card.querySelector("[data-your-position]")!.textContent).toBe("—");
-    // Opportunities' Commit capital: on the toolbar and on each card, off (with why) where it can't.
+    // Opportunities' Commit capital: on the toolbar and on each row, off (with why) where it can't.
     expect(document.querySelector('[data-toolbar] [data-cta="commit"]')).toBeTruthy();
     expect((card.querySelector(`[data-commit="${UNCLEARED}"]`) as HTMLButtonElement).disabled).toBe(true);
     expect(document.querySelector("[data-earn-positions], [data-view-all]")).toBeNull();
     // All lists every pool open to the user.
     await act(async () => void fireEvent.click(document.querySelector('[data-view-switch] [data-view-option="all"]')!));
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-your-position]`)!.textContent).toBe("$5,000.00");
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-your-position]`)!.textContent).toBe("$5,000.00");
     expect((document.querySelector(`[data-commit="${POOL}"]`) as HTMLButtonElement).disabled).toBe(false);
     expect(document.querySelector("[data-pager]")!.textContent).toContain("2 pools · Page 1 of 1");
     cleanup();
     // Without matched pools there's no Matched view.
     render(<PoolsTab data={lpData} poolIds={null} actions={actions().a} />);
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
     expect([...document.querySelectorAll("[data-view-switch] [data-view-option]")].map((o) => o.getAttribute("data-view-option"))).toEqual(["all", "invested"]);
     cleanup();
-    // A builder sees the pools, without Commit capital.
+    // A builder sees the pools, without Commit capital (and without the position and Actions columns).
     render(<PoolsTab data={{ ...builderData, builder: { ...builderData.builder!, pools } }} poolIds={null} actions={actions().a} />);
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
     expect(document.querySelector('[data-cta="commit"], [data-commit]')).toBeNull();
+    expect([...document.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Pool", "State", "Money", "Lock-in", "Notice", "Limits", "Reserve", "Health"]);
   });
 
   it("a draft the page's terms refuse can't be confirmed (an uncleared pool, over the limit)", async () => {
@@ -306,26 +306,26 @@ describe("a liquidity provider's position, on its pool's card (My positions fold
 
   it("a card with a position shows it, its waiting requests, and labelled Details and Withdraw; one without has neither", () => {
     render(<PoolsTab data={withRequests} poolIds={null} actions={actions().a} />);
-    const card = document.querySelector(`[data-pool-card="${POOL}"]`)!;
+    const card = document.querySelector(`[data-pool-row="${POOL}"]`)!;
     expect(card.getAttribute("data-invested")).toBe("true");
     expect(card.querySelector("[data-your-position]")!.textContent).toBe("$5,000.00");
     expect(card.querySelector("[data-waiting-requests]")!.textContent).toBe("2 withdrawal requests: 1 queued, 1 parked");
-    expect(card.querySelector(`[data-card-details="${POOL}"]`)!.textContent).toBe("Details");
-    expect(card.querySelector(`[data-card-withdraw="${POOL}"]`)!.textContent).toBe("Withdraw");
-    const other = document.querySelector(`[data-pool-card="${UNCLEARED}"]`)!;
+    expect(card.querySelector(`[data-row-details="${POOL}"]`)!.textContent).toBe("Details");
+    expect(card.querySelector(`[data-row-withdraw="${POOL}"]`)!.textContent).toBe("Withdraw");
+    const other = document.querySelector(`[data-pool-row="${UNCLEARED}"]`)!;
     expect(other.querySelector("[data-your-position]")!.textContent).toBe("—");
-    expect(other.querySelector("[data-card-details], [data-card-withdraw], [data-waiting-requests]")).toBeNull();
+    expect(other.querySelector("[data-row-details], [data-row-withdraw], [data-waiting-requests]")).toBeNull();
   });
 
   it("Withdraw opens the withdrawal form for that pool; Details opens a sheet with the position's amounts and its withdrawal requests", async () => {
     const { a, calls } = actions();
     render(<PoolsTab data={withRequests} poolIds={null} actions={a} />);
-    await act(async () => void fireEvent.click(document.querySelector(`[data-card-withdraw="${POOL}"]`)!));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-row-withdraw="${POOL}"]`)!));
     const form = document.querySelector('[data-sheet="withdraw"] [data-form="withdraw"]')!;
     expect((form.querySelector('select[aria-label="Pool"]') as HTMLSelectElement).value).toBe(POOL);
     expect(calls).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    await act(async () => void fireEvent.click(document.querySelector(`[data-card-details="${POOL}"]`)!));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-row-details="${POOL}"]`)!));
     const sheet = document.querySelector('[data-sheet="position-details"]')!;
     expect(sheet.querySelector('[data-slot="sheet-title"]')?.textContent ?? sheet.textContent).toContain("Card float");
     const rails = sheet.querySelector(`[data-rails-position="${POOL}"]`)!;
@@ -351,9 +351,9 @@ describe("a liquidity provider's position, on its pool's card (My positions fold
     HTMLAnchorElement.prototype.click = () => undefined; // jsdom can't download
     try {
       render(<PoolsTab data={withRequests} poolIds={null} actions={actions().a} />);
-      expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+      expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(2);
       await act(async () => void fireEvent.click(document.querySelector('[data-view-switch] [data-view-option="invested"]')!));
-      expect([...document.querySelectorAll("[data-pool-card]")].map((c) => c.getAttribute("data-pool-card"))).toEqual([POOL]);
+      expect([...document.querySelectorAll("[data-pool-row]")].map((c) => c.getAttribute("data-pool-row"))).toEqual([POOL]);
       expect(document.querySelector("[data-pager]")!.textContent).toContain("1 pool · Page 1 of 1");
       await act(async () => void fireEvent.click(document.querySelector("[data-filters-menu-button]")!));
       await act(async () => void fireEvent.click(document.querySelector("[data-filters-menu] [data-export]")!));
@@ -368,8 +368,8 @@ describe("a liquidity provider's position, on its pool's card (My positions fold
     cleanup();
     // Not invested anywhere: Invested says so.
     render(<PoolsTab data={{ ...lpData, provider: { ...lpData.provider!, positions: [] } }} poolIds={null} actions={actions().a} initialView="invested" />);
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(0);
-    expect(document.querySelector("[data-empty-cards]")!.textContent).toContain("No positions yet");
+    expect(document.querySelectorAll("[data-pool-row]")).toHaveLength(0);
+    expect(document.querySelector("[data-empty-row]")!.textContent).toContain("No positions yet");
   });
 });
 
@@ -384,7 +384,7 @@ describe("the table tabs' forms", () => {
     expect((sheet.querySelector('select[aria-label="Pool"]') as HTMLSelectElement).value).toBe(POOL);
     cleanup();
     render(<PoolsTab data={lpData} poolIds={null} actions={actions().a} />);
-    await act(async () => void fireEvent.click(document.querySelector(`[data-card-withdraw="${POOL}"]`)!));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-row-withdraw="${POOL}"]`)!));
     expect(document.querySelector('[data-sheet="withdraw"] [data-form="withdraw"] [data-withdraw-terms]')).toBeTruthy();
     cleanup();
     const proposable = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "s1", sponsorName: "Harbor Bank" }];
@@ -410,7 +410,7 @@ describe("no outlined badges around long content", () => {
       cleanup();
     }
     render(<PoolsTab data={d} poolIds={null} actions={actions().a} />);
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-stage="cleared"]`)!.getAttribute("data-tone")).toBe("green");
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-stage="cleared"]`)!.getAttribute("data-tone")).toBe("green");
     expect(document.querySelector("[data-attesters-flag]")!.getAttribute("data-tone")).toBe("amber");
   });
 });
@@ -463,11 +463,13 @@ describe("past conversations", () => {
     const sent: string[] = [];
     render(<Earn data={lpData} sent={sent} owner="u1" />);
     const button = historyButton();
-    // In the chat's top-right corner, with Show tabs beside it while the panel isn't open.
+    // In the chat's top-right corner, with a button per tab beside it while the panel isn't open
+    // (a liquidity provider's: Pools and My strategies), each opening the panel on that tab.
     const corner = button.closest("[data-chat-corner]")!;
     expect(corner.className.split(" ")).toEqual(expect.arrayContaining(["absolute", "top-3", "right-3"]));
     expect(button.closest("[data-chat-side]")).toBeTruthy();
-    expect(corner.querySelector("[data-expand-panel]")!.getAttribute("aria-label")).toBe("Show tabs");
+    expect([...corner.querySelectorAll("[data-expand-panel]")].map((b) => b.getAttribute("aria-label"))).toEqual(["Open Pools", "Open My strategies"]);
+    expect(corner.querySelector('[aria-label="Show tabs"]')).toBeNull();
     // Ask a question: once the answer settles, the thread is saved under this user.
     await act(async () => void fireEvent.click(document.querySelector('[data-chip="$50k, 90-day lock-in, US credit"]')!));
     await act(async () => new Promise((r) => setTimeout(r, 50)));

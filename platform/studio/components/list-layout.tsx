@@ -23,7 +23,7 @@ export function usePaged<T>(rows: T[], size = PAGE_SIZE) {
   return { page: current, pages, shown, setPage }
 }
 
-// A panel's table never scrolls: it shows as many rows as fit the table area's height (at least
+// A panel's table never scrolls down (only sideways, when it's wider than the panel): it shows as many rows as fit the table area's height (at least
 // MIN_ROWS), measured again whenever the panel is resized, collapsed or opened, and the pager
 // moves through the rest. Before anything is measured (or on the server) it is PAGE_SIZE.
 export const MIN_ROWS = 5
@@ -95,12 +95,18 @@ export function useFitCards(cardPx: number, fallback = 6): { ref: (el: HTMLEleme
   return { ref: setEl, size }
 }
 
-// Columns a narrow panel leaves out (the table never scrolls sideways either): MID ones show from
-// a 32rem panel, WIDE ones from 42rem, WIDEST ones from 64rem (a table with many columns). Every
-// column is in Export CSV at any width.
-export const MID_COL = "hidden @lg/list:table-cell"
-export const WIDE_COL = "hidden @2xl/list:table-cell"
-export const WIDEST_COL = "hidden @5xl/list:table-cell"
+// A panel's table shows every column at every width, each with a min width for what it holds; a
+// table wider than its panel scrolls sideways inside it (PanelList's table area), never down (the
+// pager pages). The first column (the row's name) stays pinned while it scrolls. Every column is in
+// Export CSV too.
+export const COL = {
+  name: "sticky left-0 z-10 min-w-56 bg-card", // the row's name, and a muted line under it
+  short: "min-w-28", // a word or two: a state, a number of days
+  text: "min-w-48", // a phrase: a status, a health reading
+  wide: "min-w-60", // a longer phrase: limits, a reserve, waiting requests
+  money: "min-w-32 text-right tabular-nums",
+  actions: "w-px min-w-36 text-right", // as wide as its buttons
+} as const
 
 export function ListLayout({
   search,
@@ -229,13 +235,15 @@ export function PanelList({
           </div>
         )}
       </div>
-      {/* No scrolling, down or across: the page holds as many rows as fit, and long text truncates. */}
+      {/* No scrolling down: the page holds as many rows (or cards) as fit. A table wider than the
+          panel scrolls sideways in the table area (shadcn's own scroll wrapper is turned off, so
+          the area is the one scroller and the pinned first column sticks to it). */}
       {cards ? (
         <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden" data-table-area data-card-area>
           {children}
         </div>
       ) : (
-        <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden rounded-lg border [&_[data-slot=table-container]]:overflow-hidden [&_td]:truncate" data-table-area>
+        <div ref={areaRef} className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded-lg border [&_[data-slot=table-container]]:overflow-visible [&_td]:px-3 [&_th]:px-3" data-table-area>
           {children}
         </div>
       )}

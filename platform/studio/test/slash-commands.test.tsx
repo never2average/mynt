@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useChat } from "@ai-sdk/react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk";
@@ -258,9 +258,9 @@ describe("slash commands in Earn's composer", () => {
     expect(button.textContent).toBe("/");
     expect(button.closest("[data-composer-toolbar]")).toBeTruthy();
     await act(async () => void fireEvent.click(button));
-    await settle();
-    expect(input().value).toBe("/");
+    // The menu lists every command at once; the "/" reaches the input through the composer's store.
     expect(names()).toContain("strategies");
+    await waitFor(() => expect(input().value).toBe("/"));
     // With a message already typed, the button lists every command without replacing it.
     await type("half a thought");
     expect(menu()).toBeNull();
