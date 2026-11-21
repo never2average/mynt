@@ -57,6 +57,44 @@ export function useFitRows(fallback = PAGE_SIZE): { ref: (el: HTMLElement | null
   return { ref: setEl, size }
 }
 
+// A panel's cards never scroll either: as many rows of cards as fit the card area's height (at
+// least one), times the columns the grid has at the panel's width (CARD_GRID: one column in a
+// narrow panel, two from a 36rem one, set by the container query and read back from the grid).
+// A card's height is the first card's, measured; before that (or on the server) it is `cardPx`.
+export const CARD_GRID = "grid grid-cols-1 gap-3 @xl/list:grid-cols-2"
+const CARD_GAP_PX = 12 // gap-3
+
+export function cardsThatFit(area: number, card: number, columns: number): number {
+  return Math.max(1, Math.floor((area + CARD_GAP_PX) / (card + CARD_GAP_PX))) * Math.max(1, columns)
+}
+
+function gridColumns(grid: HTMLElement | null): number {
+  if (!grid || typeof window === "undefined") return 1
+  const cols = window.getComputedStyle(grid).gridTemplateColumns
+  return cols && cols !== "none" ? cols.trim().split(/\s+/).length : 1
+}
+
+export function useFitCards(cardPx: number, fallback = 6): { ref: (el: HTMLElement | null) => void; size: number } {
+  const [el, setEl] = useState<HTMLElement | null>(null)
+  const [size, setSize] = useState(fallback)
+  const measure = useCallback(() => {
+    if (!el) return
+    const area = el.clientHeight
+    if (!area) return // collapsed or hidden: keep the last size until it shows again
+    const card = el.querySelector<HTMLElement>("[data-card]")?.offsetHeight || cardPx
+    const n = cardsThatFit(area, card, gridColumns(el.querySelector<HTMLElement>("[data-card-grid]")))
+    setSize((s) => (s === n ? s : n))
+  }, [el, cardPx])
+  useIsoLayoutEffect(() => measure())
+  useEffect(() => {
+    if (!el || typeof ResizeObserver === "undefined") return
+    const ro = new ResizeObserver(() => measure())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [el, measure])
+  return { ref: setEl, size }
+}
+
 // Columns a narrow panel leaves out (the table never scrolls sideways either): MID ones show from
 // a 32rem panel, WIDE ones from 42rem. Every column is in Export CSV at any width.
 export const MID_COL = "hidden @lg/list:table-cell"
@@ -121,12 +159,16 @@ export function PanelList({
   cta,
   children,
   areaRef,
+  cards,
+  noun,
   page,
   pages,
   total,
   onPage,
 }: {
   id: string
+  cards?: boolean // the children are a card grid (CARD_GRID), not a table: no frame around them
+  noun?: [string, string] // what the pager counts, singular and plural ("rows" by default)
   areaRef?: (el: HTMLElement | null) => void // useFitRows' ref: the rows per page follow this area's height
   search: string
   onSearch: (q: string) => void
@@ -191,20 +233,26 @@ export function PanelList({
         )}
       </div>
       {/* No scrolling, down or across: the page holds as many rows as fit, and long text truncates. */}
-      <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden rounded-lg border [&_[data-slot=table-container]]:overflow-hidden [&_td]:truncate" data-table-area>
-        {children}
-      </div>
-      <ListPager page={page} pages={pages} total={total} onPage={onPage} />
+      {cards ? (
+        <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden" data-table-area data-card-area>
+          {children}
+        </div>
+      ) : (
+        <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden rounded-lg border [&_[data-slot=table-container]]:overflow-hidden [&_td]:truncate" data-table-area>
+          {children}
+        </div>
+      )}
+      <ListPager page={page} pages={pages} total={total} onPage={onPage} noun={noun} />
     </div>
   )
 }
 
 /** The list's pager, under its table: "N rows · Page x of y", then Previous and Next. */
-export function ListPager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (page: number) => void }) {
+export function ListPager({ page, pages, total, onPage, noun = ["row", "rows"] }: { page: number; pages: number; total: number; onPage: (page: number) => void; noun?: [string, string] }) {
   return (
     <div className="flex items-center justify-end gap-2 text-sm" data-pager>
       <span className="text-muted-foreground">
-        {total} {total === 1 ? "row" : "rows"} · Page {page} of {pages}
+        {total} {total === 1 ? noun[0] : noun[1]} · Page {page} of {pages}
       </span>
       <Button size="sm" variant="outline" onClick={() => onPage(page - 1)} disabled={page <= 1}>
         <ChevronLeft />

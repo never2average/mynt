@@ -1,11 +1,13 @@
 "use client";
 
-// Earn (/earn): the investing assistant in the studio's chat workspace, with Pools, Opportunities,
-// My positions, My pools (builders) and Drafts on the right (components/earn-assistant.tsx).
-// ?tab=pools|opportunities|my-positions|my-pools|drafts picks the right-hand tab; a table or the
-// drafts opens the panel at once. Old links (?tab=assistant, /liquidity) keep working. The chat
-// bar's wallet picker reads /api/earn/wallets; the chosen wallet is remembered per user in this
-// browser and sent with every message (only its address: the server checks it's the user's).
+// Earn (/earn): the investing assistant in the studio's chat workspace, with Pools, My positions,
+// My pools (builders) and My strategies on the right (components/earn-assistant.tsx).
+// ?tab=pools|my-positions|my-pools|my-strategies picks the right-hand tab; a table or My
+// strategies opens the panel at once. Old links keep working: ?tab=opportunities is Pools showing
+// all pools, ?tab=drafts is My strategies, ?tab=assistant and /liquidity too. The chat bar's
+// wallet picker reads /api/earn/wallets; the chosen wallet is remembered per user in this browser
+// and sent with every message (only its address: the server checks it's the user's). The same
+// list's owner (a hash of the user) keys the past conversations kept in this browser.
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { askFetch } from "@/lib/ask-client";
@@ -153,7 +155,7 @@ export default function EarnPage() {
   if (state.kind === "ready")
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <EarnWorkspace chat={chat} status={status} data={state.data} actions={actions} initialTab={tab} wallet={wallet} />
+        <EarnWorkspace chat={chat} status={status} data={state.data} actions={actions} initialTab={tab} wallet={wallet} historyOwner={wallets?.owner ?? null} />
       </div>
     );
   return (
