@@ -29,7 +29,7 @@ import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { ViewSwitch } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { COL, PanelList, useFitRows, usePaged } from "@/components/list-layout"
-import { APPROVAL_LABELS, ApprovalStatus, ApprovalSteps, linearSteps, type ApprovalState, type Step } from "@/components/approval"
+import { APPROVAL_LABELS, ApprovalStatus, ApprovalSteps, ApprovalSummary, linearSteps, type ApprovalState, type Step } from "@/components/approval"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, LinkedWallet, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState, type OnChainFlow } from "@/components/earn-wallet"
 import { shortAddress } from "@/lib/linked-accounts"
 import {
@@ -46,12 +46,14 @@ import {
   pagerOf,
   poolFacets,
   PositionDetailsSheet,
+  correctionsOf,
   proposeConsequence,
   ProposeForm,
   StageStatus,
   waitingText,
   WithdrawForm,
   withdrawalOutcome,
+  type DetailsView,
   type Holding,
   type LiquidityActions,
   type OpenForm,
@@ -80,6 +82,7 @@ import {
   poolsViewFromQuery,
   reserveText,
   stageOf,
+  stateName,
   statusText,
   TAB_LABELS,
   tabOpensPanel,
@@ -218,7 +221,8 @@ export function poolColumns(provider: boolean, withActions: boolean): { label: s
 // One pool as a table row: its name with product and line under it; its state and status; sandbox
 // or real money (and its on-chain treasury); its terms; its reserve and latest health; then, for
 // liquidity providers, what they hold in it (settled, queued and paid, and any withdrawal requests
-// still waiting) and its buttons: Details and Withdraw where they hold a position, and Commit capital.
+// still waiting, and any correction to their state that needs their answer) and its buttons: Details
+// and Withdraw where they hold a position, Respond on a correction, and Commit capital.
 function PoolTableRow({
   pool,
   holding,
@@ -226,6 +230,7 @@ function PoolTableRow({
   actionsColumn,
   commit,
   withdraw,
+  respond,
   onDetails,
 }: {
   pool: PoolRow
@@ -234,12 +239,14 @@ function PoolTableRow({
   actionsColumn: boolean // the table has its Actions column (empty on a row with no button)
   commit?: { blocked: string | null; onClick: () => void }
   withdraw?: { blocked: string | null; onClick: () => void }
+  respond?: { blocked: string | null; onClick: () => void } // a correction to the firm's state waits for its answer
   onDetails?: () => void
 }) {
   const product = `${pool.productName ?? pool.productId}${pool.productLine ? ` · ${pool.productLine}` : ""}`
   const coverage = pool.health?.coverageBps !== null && pool.health?.coverageBps !== undefined ? `Coverage ${percentOfBps(pool.health.coverageBps)}` : ""
   const f = holding ? holdingFigures(holding) : null
   const waiting = waitingText(holding)
+  const correction = correctionsOf(holding)[0] ?? null
   const line = "block max-w-56 truncate"
   const sub = `${line} text-xs text-muted-foreground`
   return (
@@ -307,9 +314,10 @@ function PoolTableRow({
             <span data-your-paid>{f ? f.paid : "—"}</span>
           </TableCell>
           <TableCell className={COL.wide}>
+            {correction && <ApprovalStatus state="needs-answer" reason={`US state ${stateName(correction.fromState)} → ${stateName(correction.toState)}`} className="max-w-56" data-correction-status />}
             {waiting ? (
               <ApprovalStatus state="waiting" label={waiting} className="max-w-56" data-waiting-requests />
-            ) : (
+            ) : correction ? null : (
               <span className="text-muted-foreground">{holding ? "None" : "—"}</span>
             )}
           </TableCell>
@@ -321,6 +329,11 @@ function PoolTableRow({
             {holding && onDetails && (
               <Button size="sm" variant="outline" onClick={onDetails} data-row-details={pool.id}>
                 Details
+              </Button>
+            )}
+            {holding && respond && correction && (
+              <Button size="sm" variant="default" disabled={Boolean(respond.blocked)} title={respond.blocked ?? undefined} onClick={respond.onClick} data-row-respond={pool.id}>
+                Respond
               </Button>
             )}
             {holding && withdraw && (
@@ -382,6 +395,7 @@ export function PoolsTab({
   const [done, setDone] = useState<string | null>(null)
   const [deposits, setDeposits] = useState<Position | null>(null)
   const [details, setDetails] = useState<string | null>(null)
+  const [detailsView, setDetailsView] = useState<DetailsView>(null)
   const base = view === "matched" && matchedIds ? matchedIds.map((id) => pools.find((p) => p.id === id)).filter((p): p is PoolRow => Boolean(p)) : view === "invested" ? pools.filter((p) => holdingOf(p.id)) : pools
   const shown = filterPools(base, f)
   const fit = useFitRows()
@@ -428,6 +442,18 @@ export function PoolsTab({
         }),
       ),
     )
+  // Respond on a row: its Details sheet, opened at the correction's approval panel.
+  const respondOf = (poolId: string, h: Holding): { blocked: string | null; onClick: () => void } | undefined => {
+    const c = correctionsOf(h)[0]
+    if (!c) return undefined
+    return {
+      blocked: lp?.canRespond ? null : "Answering a state correction comes with Mynt's next update",
+      onClick: () => {
+        setDetailsView({ kind: "correction", correction: c })
+        setDetails(poolId)
+      },
+    }
+  }
   const rails = lp ? lp.positions.filter((p) => !p.onChain) : []
   const detailsPool = details ? (pools.find((p) => p.id === details) ?? null) : null
 
@@ -489,6 +515,7 @@ export function PoolsTab({
                     holding={h}
                     commit={lp && actions ? { blocked: commitBlock(p), onClick: () => openCommit(p.id) } : undefined}
                     withdraw={h && actions ? withdrawOf(h) : undefined}
+                    respond={h && actions?.respond ? respondOf(p.id, h) : undefined}
                     onDetails={h ? () => setDetails(p.id) : undefined}
                   />
                 )
@@ -510,7 +537,20 @@ export function PoolsTab({
         </FormSheet>
       )}
       {lp && <OnChainPositionSheet position={deposits} pools={lp.pools} onClose={() => setDeposits(null)} />}
-      {lp && <PositionDetailsSheet name={detailsPool?.name ?? ""} holding={details ? holdingOf(details) : null} withdrawals={withdrawals} pools={lp.pools} onClose={() => setDetails(null)} />}
+      {lp && (
+        <PositionDetailsSheet
+          name={detailsPool?.name ?? ""}
+          holding={details ? holdingOf(details) : null}
+          withdrawals={withdrawals}
+          pools={lp.pools}
+          onClose={() => setDetails(null)}
+          view={detailsView}
+          onView={setDetailsView}
+          actions={actions}
+          canCancel={Boolean(lp.canCancel)}
+          canRespond={Boolean(lp.canRespond)}
+        />
+      )}
     </div>
   )
 }
@@ -608,22 +648,6 @@ function DeclineButton({ id, disabled, onDecline }: { id: string; disabled: bool
   )
 }
 
-// What will happen, as an approval sheet's summary: one term a line.
-function Summary({ rows }: { rows: ([string, React.ReactNode, string] | null | false)[] }) {
-  return (
-    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-lg border p-3 text-sm" data-approval-summary>
-      {rows
-        .filter((r): r is [string, React.ReactNode, string] => Boolean(r))
-        .map(([label, value, id]) => (
-          <div key={id} className="contents" data-summary-row={id}>
-            <dt className="text-muted-foreground">{label}</dt>
-            <dd className="min-w-0">{value}</dd>
-          </div>
-        ))}
-    </dl>
-  )
-}
-
 // A draft from the assistant, as its approval sheet shows it: where the approval stands, what will
 // happen, then Approve and Decline. Nothing happens until the user clicks Approve (on chain, then
 // signs in their own wallet).
@@ -688,7 +712,7 @@ export function DraftPanel({
   return (
     <div className="flex flex-col gap-4" data-draft={draft.kind}>
       <ApprovalSteps steps={draftSteps(o, onChain, chain)} />
-      <Summary
+      <ApprovalSummary
         rows={[
           [
             "Pool",
@@ -809,7 +833,7 @@ export function ProposalPanel({ draft, options, actions, outcome, onOutcome, new
   return (
     <div className="flex flex-col gap-4" data-draft="proposal">
       <ApprovalSteps steps={draftSteps(o, false)} />
-      <Summary
+      <ApprovalSummary
         rows={[
           ["Pool", <span key="pool" className="block max-w-60 truncate font-medium" title={draft.poolName} data-draft-pool>{draft.poolName}</span>, "pool"],
           ["Product", <span key="product">{`${draft.productName}${draft.componentKey ? ` · ${draft.componentKey}` : ""}`}</span>, "product"],

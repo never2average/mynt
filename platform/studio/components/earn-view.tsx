@@ -12,11 +12,13 @@
 // components/earn-assistant.tsx.) Every column shows at every width; a table wider than
 // the panel scrolls sideways. Also here: the forms (commit, withdraw, propose), and what a
 // liquidity provider holds in a pool (holdingIn), which Pools' rows show, with the row's Details
-// sheet (PositionDetailsSheet: amounts, deposits and withdrawal requests, on rails and on chain).
+// sheet (PositionDetailsSheet: amounts, deposits and withdrawal requests, on rails and on chain;
+// Cancel request on a queued or parked request, and Respond on a correction to the firm's state).
 // Each form opens in a sheet from its labelled button. Nothing here moves money: Mynt records a
 // request, and the pool's sponsor moves the money on its approved rail. Server-renderable for the tests.
-import { useMemo, useState } from "react"
-import { ApprovalSteps, type Step } from "@/components/approval"
+import { useMemo, useRef, useState } from "react"
+import { Loader2 } from "lucide-react"
+import { ApprovalStatus, ApprovalSteps, ApprovalSummary, linearSteps, type Step } from "@/components/approval"
 import { OnChainHolding, type OpenDeposit } from "@/components/earn-wallet"
 import { newIdempotencyKey } from "@/lib/idempotency"
 
@@ -34,7 +36,11 @@ import { shortAddress } from "@/lib/linked-accounts"
 import { usdcText } from "@/lib/wallets"
 import {
   CAPITAL_COLUMNS,
+  cancellable,
   capitalCell,
+  correctionSourceText,
+  stateName,
+  type StateCorrection,
   commitRefusal,
   filterPools,
   type CapitalCell,
@@ -73,6 +79,10 @@ export type LiquidityActions = {
   propose(input: ProposeInput): Promise<ActionResult>
   commit(input: { pool_id: string; amount_cents: number; state: string; idempotency_key: string }): Promise<ActionResult>
   withdraw(input: { pool_id: string; amount_cents: number; idempotency_key: string }): Promise<ActionResult>
+  // Neither takes an idempotency key (cancel_withdrawal, respond_to_state_correction): each panel
+  // sends once per click and refuses a second click while the first is on its way.
+  cancel?(withdrawalId: string): Promise<ActionResult>
+  respond?(correctionId: string, answer: { accept: boolean; reason?: string }): Promise<ActionResult>
 }
 export type OpenForm = { kind: "propose" } | { kind: "commit"; poolId?: string } | { kind: "withdraw"; poolId?: string } | null
 
@@ -728,8 +738,10 @@ function RailsFigures({ p }: { p: Position }) {
   )
 }
 
-function RequestsTable({ rows }: { rows: RequestRow[] }) {
+function RequestsTable({ rows, cancelBlock, onCancel }: { rows: RequestRow[]; cancelBlock?: (key: string) => string | null | undefined; onCancel?: (key: string) => void }) {
   if (!rows.length) return <p className="text-sm text-muted-foreground">No withdrawal requests.</p>
+  // An Actions column only when some request can be cancelled here.
+  const actions = Boolean(onCancel && cancelBlock && rows.some((r) => cancelBlock(r.key) !== undefined))
   return (
     <div className="overflow-auto rounded-lg border" data-rails-requests>
       <Table>
@@ -741,53 +753,270 @@ function RequestsTable({ rows }: { rows: RequestRow[] }) {
             <TableHead>Status</TableHead>
             <TableHead>Payable from</TableHead>
             <TableHead>Why it&apos;s waiting</TableHead>
+            {actions && <TableHead className="text-right">Actions</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((r) => (
-            <TableRow key={r.key} data-withdrawal={r.key}>
-              <TableCell className="tabular-nums">{r.place}</TableCell>
-              <TableCell className="text-right tabular-nums" data-asked>
-                {r.asked}
-              </TableCell>
-              <TableCell className="text-right tabular-nums" data-paid>
-                {r.paid}
-              </TableCell>
-              <TableCell className="capitalize" data-status>
-                {r.status}
-              </TableCell>
-              <TableCell>{r.payableFrom}</TableCell>
-              <TableCell className="text-muted-foreground">
-                <OneLine text={r.why ?? "—"} />
-              </TableCell>
-            </TableRow>
-          ))}
+          {rows.map((r) => {
+            const block = cancelBlock?.(r.key)
+            return (
+              <TableRow key={r.key} data-withdrawal={r.key}>
+                <TableCell className="tabular-nums">{r.place}</TableCell>
+                <TableCell className="text-right tabular-nums" data-asked>
+                  {r.asked}
+                </TableCell>
+                <TableCell className="text-right tabular-nums" data-paid>
+                  {r.paid}
+                </TableCell>
+                <TableCell className="capitalize" data-status>
+                  {r.status}
+                </TableCell>
+                <TableCell>{r.payableFrom}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  <OneLine text={r.why ?? "—"} />
+                </TableCell>
+                {actions && (
+                  <TableCell className="text-right">
+                    {block !== undefined && (
+                      <Button size="sm" variant="outline" disabled={Boolean(block)} title={block ?? undefined} onClick={() => onCancel!(r.key)} data-cancel-request={r.key}>
+                        Cancel request
+                      </Button>
+                    )}
+                  </TableCell>
+                )}
+              </TableRow>
+            )
+          })}
         </TableBody>
       </Table>
     </div>
   )
 }
 
-// A pool card's Details: what the user holds in the pool, on rails (its amounts and the firm's
-// withdrawal requests there) and per wallet on chain (its deposits, each with Withdraw, and its
-// requests). Withdraw on a deposit turns the sheet into that deposit's withdrawal.
-export function PositionDetailsSheet({ name, holding, withdrawals, pools, onClose }: { name: string; holding: Holding | null; withdrawals: Withdrawal[]; pools: PoolRow[]; onClose: () => void }) {
+// ---- cancelling a request, answering a state correction ----
+
+// What a pool's Details sheet shows instead of the position: a request's cancellation or a
+// correction's answer, each an approval panel. The request or correction is kept as it was when
+// the panel opened, so the panel still shows it after Mynt's answer (the next read drops a
+// correction that's been answered).
+export type DetailsView = { kind: "cancel"; withdrawal: Withdrawal } | { kind: "correction"; correction: StateCorrection } | null
+type AnswerState = { kind: "idle" } | { kind: "busy" } | { kind: "done"; message: string } | { kind: "error"; message: string }
+const answerSteps = (labels: string[], s: AnswerState): Step[] =>
+  s.kind === "done" ? linearSteps(labels, labels.length) : s.kind === "busy" ? linearSteps(labels, 1) : s.kind === "error" ? linearSteps(labels, 1, "failed") : linearSteps(labels, 0)
+
+// Sends once: a second click while the first is on its way, or after it's done, sends nothing.
+function useOnce() {
+  const [s, setS] = useState<AnswerState>({ kind: "idle" })
+  const sending = useRef(false)
+  const run = async (send: () => Promise<ActionResult>, done: string) => {
+    if (sending.current) return
+    sending.current = true
+    setS({ kind: "busy" })
+    const r = await send()
+    if ("error" in r) {
+      sending.current = false
+      return setS({ kind: "error", message: r.error })
+    }
+    setS({ kind: "done", message: done })
+  }
+  return { s, run }
+}
+
+function AnswerMessages({ s }: { s: AnswerState }) {
+  if (s.kind === "done")
+    return (
+      <p role="status" className="text-sm" data-answer-done>
+        {s.message}
+      </p>
+    )
+  if (s.kind === "error") return <Alert>{s.message}</Alert>
+  return null
+}
+
+// Cancel a queued or parked request (cancel_withdrawal): Review, Cancel, Done.
+export function CancelRequestPanel({ withdrawal: w, cancel, onBack }: { withdrawal: Withdrawal; cancel: (withdrawalId: string) => Promise<ActionResult>; onBack: () => void }) {
+  const { s, run } = useOnce()
+  const effect = "It leaves the queue, and nothing more is paid on it. Anything already on its way carries on."
+  return (
+    <div className="flex flex-col gap-4" data-cancel-panel={w.id}>
+      <ApprovalSteps steps={answerSteps(["Review", "Cancel", "Done"], s)} />
+      <ApprovalSummary
+        rows={[
+          [
+            "Pool",
+            <span key="pool" className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="block max-w-60 truncate font-medium" data-cancel-pool>
+                {w.poolName ?? w.poolId}
+              </span>
+              <Money sandbox={w.sandbox} />
+            </span>,
+            "pool",
+          ],
+          ["Amount", <span key="amount" className="font-semibold tabular-nums" data-cancel-amount>{usd(w.amountCents)}</span>, "amount"],
+          ["Place in queue", <span key="place" className="tabular-nums" data-cancel-place>{w.seq !== null ? `#${w.seq}` : "—"}</span>, "place"],
+          ["Status", <span key="status" className="capitalize">{w.status.replace(/_/g, " ")}</span>, "status"],
+          w.inFlightCents > 0 && ["On its way", <span key="in-flight" className="tabular-nums">{usd(w.inFlightCents)}</span>, "in-flight"],
+          ["What cancelling does", <span key="effect" data-approval-effect>{effect}</span>, "effect"],
+        ]}
+      />
+      <AnswerMessages s={s} />
+      <div className="flex flex-wrap items-center gap-2" data-approval-footer>
+        {s.kind === "done" ? (
+          <Button variant="outline" onClick={onBack} data-back>
+            Back to position
+          </Button>
+        ) : (
+          <>
+            <Button variant="destructive" disabled={s.kind === "busy"} onClick={() => void run(() => cancel(w.id), "Cancelled. The request has left the queue.")} data-confirm-cancel={w.id}>
+              {s.kind === "busy" && <Loader2 className="animate-spin" />}
+              Cancel request
+            </Button>
+            <Button variant="outline" disabled={s.kind === "busy"} onClick={onBack} data-keep>
+              Keep it
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Answer a correction to the US state the firm's capital moves from (respond_to_state_correction):
+// Accept or Dispute, with an optional reason. Review, Answer, Done.
+export function CorrectionPanel({ correction: c, poolName, sandbox, respond, onBack }: { correction: StateCorrection; poolName: string; sandbox: boolean; respond: (correctionId: string, answer: { accept: boolean; reason?: string }) => Promise<ActionResult>; onBack: () => void }) {
+  const { s, run } = useOnce()
+  const [reason, setReason] = useState("")
+  const applied = c.status === "applied"
+  const from = stateName(c.fromState)
+  const to = stateName(c.toState)
+  const effect = applied ? `It's applied already. Accepting keeps it; disputing puts ${from} back.` : `Nothing changes until you accept. Accepting moves your capital to ${to}, and your parked requests go back to their place; disputing leaves it as it is.`
+  const answer = (accept: boolean) => {
+    const why = reason.trim()
+    const done = accept ? (applied ? "Accepted. Your state stays " + to + "." : "Accepted. Your capital now moves from " + to + ".") : applied ? "Disputed. Your capital moves from " + from + " again." : "Disputed. Nothing changed."
+    return run(() => respond(c.id, why ? { accept, reason: why } : { accept }), done)
+  }
+  return (
+    <div className="flex flex-col gap-4" data-correction-panel={c.id}>
+      <ApprovalSteps steps={answerSteps(["Review", "Answer", "Done"], s)} />
+      <ApprovalSummary
+        rows={[
+          [
+            "Pool",
+            <span key="pool" className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="block max-w-60 truncate font-medium">{poolName}</span>
+              <Money sandbox={sandbox} />
+            </span>,
+            "pool",
+          ],
+          ["US state", <span key="change" className="font-semibold" data-correction-change>{`${from} → ${to}`}</span>, "change"],
+          ["Corrected by", <span key="source">{correctionSourceText(c.source)}</span>, "source"],
+          ["Status", <span key="status">{applied ? "Applied" : "Waiting for your acceptance"}</span>, "status"],
+          c.reason !== null && ["Why", <span key="why" data-correction-reason>{c.reason}</span>, "why"],
+          c.disputeUntil !== null && ["Dispute by", <span key="until">{dateOf(c.disputeUntil)}</span>, "until"],
+          ["What your answer does", <span key="effect" data-approval-effect>{effect}</span>, "effect"],
+        ]}
+      />
+      {s.kind !== "done" && (
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-medium">Reason (optional)</span>
+          <textarea
+            value={reason}
+            maxLength={1000}
+            rows={3}
+            disabled={s.kind === "busy"}
+            onChange={(e) => setReason(e.target.value)}
+            className="rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20"
+            data-correction-reason-input
+          />
+        </label>
+      )}
+      <AnswerMessages s={s} />
+      <div className="flex flex-wrap items-center gap-2" data-approval-footer>
+        {s.kind === "done" ? (
+          <Button variant="outline" onClick={onBack} data-back>
+            Back to position
+          </Button>
+        ) : (
+          <>
+            <Button disabled={s.kind === "busy"} onClick={() => void answer(true)} data-answer="accept">
+              Accept correction
+            </Button>
+            <Button variant="outline" disabled={s.kind === "busy"} onClick={() => void answer(false)} data-answer="dispute">
+              Dispute correction
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// The state corrections waiting for the firm's answer on a holding's positions.
+export const correctionsOf = (h: Holding | null): StateCorrection[] => (h ? h.positions.flatMap((p) => p.corrections ?? []) : [])
+
+// A pool card's Details: what the user holds in the pool, on rails (its amounts, any correction to
+// its state waiting for an answer with Respond, and the firm's withdrawal requests there, each
+// queued or parked one with Cancel request) and per wallet on chain (its deposits, each with
+// Withdraw, and its requests). Withdraw on a deposit turns the sheet into that deposit's
+// withdrawal; Cancel request and Respond turn it into their approval panel (`view`).
+export function PositionDetailsSheet({
+  name,
+  holding,
+  withdrawals,
+  pools,
+  onClose,
+  view = null,
+  onView,
+  actions,
+  canCancel = false,
+  canRespond = false,
+}: {
+  name: string
+  holding: Holding | null
+  withdrawals: Withdrawal[]
+  pools: PoolRow[]
+  onClose: () => void
+  view?: DetailsView
+  onView?: (v: DetailsView) => void
+  actions?: Pick<LiquidityActions, "cancel" | "respond">
+  canCancel?: boolean
+  canRespond?: boolean
+}) {
   const [open, setOpen] = useState<OpenDeposit | null>(null)
   const close = () => {
     setOpen(null)
+    onView?.(null)
     onClose()
   }
+  const back = () => onView?.(null)
   const rails = holding?.rails ?? null
-  const railsRequests = rails ? requestRows(withdrawals.filter((w) => w.poolId === rails.poolId), []) : []
+  const railsWithdrawals = rails ? withdrawals.filter((w) => w.poolId === rails.poolId) : []
+  const railsRequests = requestRows(railsWithdrawals, [])
   const opened = open ? (holding?.chain.find((p) => p.chain?.wallet === open.wallet) ?? null) : null
+  const corrections = correctionsOf(holding)
+  const cancel = actions?.cancel
+  const respond = actions?.respond
+  // undefined: no Cancel request on that row (not queued or parked); a string: why it's off.
+  const cancelBlock = (key: string): string | null | undefined => {
+    const w = railsWithdrawals.find((x) => x.id === key)
+    if (!w || !cancellable(w)) return undefined
+    return canCancel ? null : "Cancelling a withdrawal request comes with Mynt's next update"
+  }
+  const respondBlock = canRespond ? undefined : "Answering a state correction comes with Mynt's next update"
+  const sheetId = view?.kind === "cancel" ? "cancel-request" : view?.kind === "correction" ? "state-correction" : open ? "on-chain-withdraw" : "position-details"
+  const title = view?.kind === "cancel" ? "Cancel withdrawal request" : view?.kind === "correction" ? "Respond to state correction" : open ? `Withdraw from ${open.poolName}` : name
   return (
     <Sheet open={Boolean(holding)} onOpenChange={(o) => !o && close()}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl" aria-describedby={undefined} data-sheet={open ? "on-chain-withdraw" : "position-details"}>
+      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl" aria-describedby={undefined} data-sheet={sheetId}>
         <SheetHeader>
-          <SheetTitle>{open ? `Withdraw from ${open.poolName}` : name}</SheetTitle>
+          <SheetTitle>{title}</SheetTitle>
         </SheetHeader>
         <div className="flex flex-col gap-5 px-4 pb-4">
-          {open && opened ? (
+          {view?.kind === "cancel" && cancel ? (
+            <CancelRequestPanel key={view.withdrawal.id} withdrawal={view.withdrawal} cancel={cancel} onBack={back} />
+          ) : view?.kind === "correction" && respond ? (
+            <CorrectionPanel key={view.correction.id} correction={view.correction} poolName={name} sandbox={rails?.sandbox ?? false} respond={respond} onBack={back} />
+          ) : open && opened ? (
             <OnChainHolding position={opened} pools={pools} open={open} onOpen={setOpen} />
           ) : holding ? (
             <>
@@ -798,7 +1027,25 @@ export function PositionDetailsSheet({ name, holding, withdrawals, pools, onClos
                     <Money sandbox={rails.sandbox} />
                   </h3>
                   <RailsFigures p={rails} />
-                  <RequestsTable rows={railsRequests} />
+                  {corrections.map((c) => (
+                    <div key={c.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3 text-sm" data-correction={c.id}>
+                      <ApprovalStatus state="needs-answer" reason={c.reason} data-correction-status />
+                      <span className="min-w-0 flex-1 truncate">{`US state ${stateName(c.fromState)} → ${stateName(c.toState)}`}</span>
+                      {respond && (
+                        <Button size="sm" variant="outline" disabled={Boolean(respondBlock)} title={respondBlock} onClick={() => onView?.({ kind: "correction", correction: c })} data-respond={c.id}>
+                          Respond
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                  <RequestsTable
+                    rows={railsRequests}
+                    cancelBlock={cancel ? cancelBlock : undefined}
+                    onCancel={(key) => {
+                      const w = railsWithdrawals.find((x) => x.id === key)
+                      if (w) onView?.({ kind: "cancel", withdrawal: w })
+                    }}
+                  />
                 </section>
               )}
               {holding.chain.map((p) => (

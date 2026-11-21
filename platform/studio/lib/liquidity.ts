@@ -345,6 +345,25 @@ export function fromWithdrawals(reply: unknown): Withdrawal[] {
 // Still in the queue: not yet paid, cancelled or ended.
 export const WAITING = new Set(["queued", "parked", "paying"]);
 export const queueLength = (ws: Withdrawal[], poolId: string) => ws.filter((w) => w.poolId === poolId && WAITING.has(w.status)).length;
+// What cancel_withdrawal takes: a request on rails still queued or parked (a paying one carries on).
+export const CANCELLABLE = new Set(["queued", "parked"]);
+export const cancellable = (w: Withdrawal) => CANCELLABLE.has(w.status);
+
+// A correction to the US state a firm's capital moves from in a pool, waiting for the firm's answer
+// (list_my_positions' state_corrections_to_answer, answered with respond_to_state_correction). A
+// sponsor's is pending until the firm accepts it; an admin's is applied already and may be disputed
+// until disputeUntil.
+export type StateCorrection = { id: string; fromState: string | null; toState: string | null; source: string | null; status: string; reason: string | null; disputeUntil: string | null };
+function stateCorrections(v: unknown): StateCorrection[] {
+  return (Array.isArray(v) ? v : []).filter(isObj).flatMap((c) => {
+    const id = str(c.id);
+    if (!id) return [];
+    return [{ id, fromState: str(c.from_state), toState: str(c.to_state), source: str(c.source), status: str(c.status) ?? "unknown", reason: str(c.reason), disputeUntil: str(c.dispute_until) }];
+  });
+}
+// "us-ny" as "NY".
+export const stateName = (s: string | null) => (s ? (/^us-[a-z]{2}$/.test(s) ? s.slice(3).toUpperCase() : s) : "—");
+export const correctionSourceText = (source: string | null) => (source === "sponsor_corrected" ? "The pool's sponsor" : source === "admin_corrected" ? "A Mynt admin" : (source ?? "—"));
 
 export type Position = {
   poolId: string;
@@ -373,6 +392,8 @@ export type Position = {
   // Rails rows: each movement with when it settled (list_my_positions with include_entries); null when Mynt sent no
   // entries, so the position's history is unknown. [] for on-chain rows (their history is deposits/requests).
   entries: RailsEntry[] | null;
+  // Corrections to its US state waiting for the firm's answer; absent when Mynt sends none.
+  corrections?: StateCorrection[];
 };
 export type RailsEntry = { kind: string; settledCents: number | null; settledAt: string | null };
 
@@ -463,6 +484,7 @@ export function fromPositions(reply: unknown): Position[] {
         deposits: p.source === "on-chain" ? onChainDeposits(p.deposits) : [],
         requests: p.source === "on-chain" ? onChainRequests(p.requests) : [],
         entries: p.source === "on-chain" ? [] : railsEntries(p.entries),
+        corrections: stateCorrections(p.state_corrections_to_answer),
       };
     })
     .filter((p) => p.poolId);
@@ -583,7 +605,7 @@ export type LiquidityData = {
   supported: boolean;
   access: LiquidityAccess;
   builder?: { pools: PoolRow[]; proposable: Sponsored[] | null; withdrawalsShown: boolean };
-  provider?: { pools: PoolRow[]; positions: Position[]; withdrawals: Withdrawal[]; canCommit: boolean; canWithdraw: boolean };
+  provider?: { pools: PoolRow[]; positions: Position[]; withdrawals: Withdrawal[]; canCommit: boolean; canWithdraw: boolean; canCancel?: boolean; canRespond?: boolean };
   unavailable?: ("builder" | "provider")[]; // sections that failed to load; the rest still shows
 };
 

@@ -1,7 +1,7 @@
 "use client"
 
 // Approval, the same on all three Earn tabs: ApprovalStatus (a dot and its words: what a row waits
-// on, with the reason in its tooltip) and ApprovalSteps (where an approval stands: each step done,
+// on, with the reason in its tooltip), ApprovalSummary (an approval sheet's terms) and ApprovalSteps (where an approval stands: each step done,
 // current, still to come, skipped, failed or declined; compact in a table cell, full in a sheet).
 // Built from the studio's own StatusDot and lucide icons.
 import { Check, Minus, X } from "lucide-react"
@@ -9,11 +9,12 @@ import { Check, Minus, X } from "lucide-react"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { cn } from "@/lib/utils"
 
-export type ApprovalState = "needs-approval" | "sign" | "sending" | "done" | "declined" | "blocked" | "failed" | "waiting"
+export type ApprovalState = "needs-approval" | "needs-answer" | "sign" | "sending" | "done" | "declined" | "blocked" | "failed" | "waiting"
 
-const TONE: Record<ApprovalState, DotTone> = { "needs-approval": "blue", sign: "blue", sending: "gray", done: "green", declined: "gray", blocked: "amber", failed: "red", waiting: "amber" }
+const TONE: Record<ApprovalState, DotTone> = { "needs-approval": "blue", "needs-answer": "blue", sign: "blue", sending: "gray", done: "green", declined: "gray", blocked: "amber", failed: "red", waiting: "amber" }
 export const APPROVAL_LABELS: Record<ApprovalState, string> = {
   "needs-approval": "Needs your approval",
+  "needs-answer": "Needs your answer",
   sign: "Sign in wallet",
   sending: "Sending…",
   done: "Done",
@@ -29,7 +30,23 @@ export function ApprovalStatus({ state, label, reason, className, ...rest }: { s
   return <StatusDot tone={TONE[state]} label={text} title={reason ?? text} className={cn("max-w-full min-w-0 overflow-hidden font-normal", state === "failed" && "text-destructive", className)} data-approval-status={state} {...rest} />
 }
 
-export type StepState = "done" | "current" | "todo" | "skipped" | "failed" | "declined"
+/** What will happen, as an approval sheet's summary: one term a line ([label, value, id]). */
+export function ApprovalSummary({ rows }: { rows: ([string, React.ReactNode, string] | null | false)[] }) {
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-lg border p-3 text-sm" data-approval-summary>
+      {rows
+        .filter((r): r is [string, React.ReactNode, string] => Boolean(r))
+        .map(([label, value, id]) => (
+          <div key={id} className="contents" data-summary-row={id}>
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="min-w-0">{value}</dd>
+          </div>
+        ))}
+    </dl>
+  )
+}
+
+export type StepState ="done" | "current" | "todo" | "skipped" | "failed" | "declined"
 export type Step = { label: string; state: StepState; title?: string }
 
 /** Steps in order, the one at `current` in progress (all done once `current` is past the end). */

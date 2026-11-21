@@ -114,6 +114,8 @@ export async function loadLiquidity(mynt: Client, access: LiquidityAccess): Prom
         withdrawals: (withdrawals ?? []).filter((w) => held.has(w.poolId)),
         canCommit: names.has("commit_to_pool"),
         canWithdraw: names.has("request_withdrawal"),
+        canCancel: names.has("cancel_withdrawal"),
+        canRespond: names.has("respond_to_state_correction"),
       };
     } catch (err) {
       // One section failing (a reply this studio can't read) leaves that section out, not
