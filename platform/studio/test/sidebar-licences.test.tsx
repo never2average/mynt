@@ -54,9 +54,13 @@ const withSidebar = (ui: React.ReactNode, open = true) => (
 const openFolders = (c: HTMLElement) => [...c.querySelectorAll("[data-active-folder=true]")].map((e) => e.getAttribute("data-folder"));
 
 describe("the collapsed sidebar", () => {
-  it("shows its icons clearly: 20px in centred 36px buttons", () => {
+  it("fits its buttons to the rail: 32px (the 3rem rail less the group's padding), the leading icon 20px, nothing pushed off-centre", () => {
     const html = renderToStaticMarkup(<UiSidebarProvider defaultOpen={false}><SidebarMenu><SidebarMenuItem><SidebarMenuButton isActive>x</SidebarMenuButton></SidebarMenuItem></SidebarMenu></UiSidebarProvider>);
-    for (const c of ["group-data-[collapsible=icon]:size-9!", "group-data-[collapsible=icon]:[&amp;&gt;svg]:size-5", "group-data-[collapsible=icon]:justify-center"]) expect(html).toContain(c);
+    for (const c of ["group-data-[collapsible=icon]:size-8!", "group-data-[collapsible=icon]:p-1.5!", "group-data-[collapsible=icon]:[&amp;&gt;svg:first-child]:size-5"]) expect(html).toContain(c);
+    // A 36px button overflowed the 32px column, and centring the whole row (icon, label, count, chevron)
+    // pushed the icon out of view; neither again.
+    expect(html).not.toContain("group-data-[collapsible=icon]:size-9!");
+    expect(html).not.toContain("group-data-[collapsible=icon]:justify-center");
   });
 
   it("is exactly the icon width (3rem) for the inset variant, with no side padding, so icons are centred", () => {

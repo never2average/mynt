@@ -56,8 +56,7 @@ describe("session cookie", () => {
 
     clock.now = 3 * 24 * 60 * 60 * 1000; // used again after 3 days
     const res = await session.GET();
-    // historyOwner: whose Earn chats in this browser are this user's, a 22-character hash of the user (never a token).
-    expect(await res.json()).toEqual({ signedIn: true, name: null, email: null, historyOwner: expect.stringMatching(/^[\w-]{22}$/) });
+    expect(await res.json()).toEqual({ signedIn: true, name: null, email: null });
     const cookie = res.headers.get("set-cookie") ?? "";
     expect(cookie).toContain(`=${fake.id}`);
     expect(cookie).toMatch(/Max-Age=604800/);
