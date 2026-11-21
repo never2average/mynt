@@ -96,9 +96,11 @@ export function useFitCards(cardPx: number, fallback = 6): { ref: (el: HTMLEleme
 }
 
 // Columns a narrow panel leaves out (the table never scrolls sideways either): MID ones show from
-// a 32rem panel, WIDE ones from 42rem. Every column is in Export CSV at any width.
+// a 32rem panel, WIDE ones from 42rem, WIDEST ones from 64rem (a table with many columns). Every
+// column is in Export CSV at any width.
 export const MID_COL = "hidden @lg/list:table-cell"
 export const WIDE_COL = "hidden @2xl/list:table-cell"
+export const WIDEST_COL = "hidden @5xl/list:table-cell"
 
 export function ListLayout({
   search,

@@ -1601,3 +1601,46 @@ test("a position reports the wind-down surplus its wallet claimed: the treasury'
   const later = (await ok(s.fundA.client, "list_my_positions", {})).find((p) => p.source === "on-chain" && p.pool_id === poolId);
   assert.equal(later.surplus_claimed, null);
 });
+
+test("a treasury pool's capital totals: principal from the pool account, the rest from the indexer, null until each is known", async () => {
+  const s = await world();
+  const { poolId, address } = await registered(s, { treasury: { principal: 6_500_000 } });
+  const capitalAs = async (client) => (await ok(client, "list_pools", {})).find((p) => p.id === poolId);
+  // Registered, not indexed yet: the pool account's principal is known, the indexed sums aren't (never 0).
+  let row = await capitalAs(s.builder.client);
+  assert.equal(row.capital.on_chain.unit, "usdc_base_units");
+  assert.equal(row.capital.on_chain.principal, 6_500_000);
+  assert.deepEqual([row.capital.on_chain.deposited, row.capital.on_chain.indexed_principal, row.capital.on_chain.queued, row.capital.on_chain.paid_out, row.capital.on_chain.indexed_at], [null, null, null, null, null]);
+  for (const k of ["deposited", "indexed_principal", "queued", "paid_out"]) assert.match(row.capital.on_chain.not_measured[k], /indexer hasn't read/);
+  assert.equal(row.capital.rails.principal_cents, 0, "nothing on the pool's rails");
+
+  const [a, b] = [Keypair.generate().address, Keypair.generate().address];
+  const now = Math.floor(Date.now() / 1000);
+  const deposit = chain.depositAddress(s.programId, address, 0);
+  const request = chain.requestAddress(s.programId, address, 0);
+  const sig = (n) => base58Encode(Buffer.alloc(64, 100 + n));
+  const tx = (...events) => ({ slot: 10, meta: { err: null, logMessages: logs(s.programId, ...events) } });
+  s.devnet.transactions.set(sig(1), tx({ name: "DepositMade", pool: address, depositor: a, deposit, seq: 0n, amount: 5_000_000n, settled_at: BigInt(now - 7200), review_until: BigInt(now - 7200), unlock_at: BigInt(now - 3600), principal_after: 5_000_000n }));
+  s.devnet.transactions.set(sig(2), tx({ name: "DepositMade", pool: address, depositor: b, deposit: chain.depositAddress(s.programId, address, 1), seq: 1n, amount: 3_000_000n, settled_at: BigInt(now), review_until: BigInt(now), unlock_at: BigInt(now), principal_after: 8_000_000n }));
+  s.devnet.transactions.set(sig(3), tx({ name: "WithdrawalRequested", pool: address, depositor: a, deposit, request, seq: 0n, amount: 2_000_000n, payable_at: BigInt(now - 60) }));
+  s.devnet.transactions.set(sig(4), tx({ name: "WithdrawalPaid", pool: address, depositor: a, request, seq: 0n, amount: 1_500_000n, remaining: 500_000n, partial: true, parked: false, reserve_floor: 0n, vault_after: 0n }));
+  s.devnet.signatures.set(address, [4, 3, 2, 1].map((n) => ({ signature: sig(n), slot: n })));
+  await s.treasury.index();
+  for (const client of [s.builder.client, s.sponsor.client, s.admin.client]) {
+    row = await capitalAs(client);
+    const c = row.capital.on_chain;
+    assert.deepEqual({ principal: c.principal, deposited: c.deposited, indexed_principal: c.indexed_principal, queued: c.queued, paid_out: c.paid_out, not_measured: c.not_measured }, { principal: 6_500_000, deposited: 8_000_000, indexed_principal: 6_500_000, queued: 500_000, paid_out: 1_500_000, not_measured: {} });
+    assert.match(c.indexed_at, /^\d{4}-\d{2}-\d{2}T/);
+  }
+  // A liquidity provider in the pool sees it, but never the totals over other firms' wallets.
+  const asFund = await capitalAs(s.fundA.client);
+  assert.equal(asFund.capital, null);
+  assert.ok(asFund.capital_not_shown);
+  // The pool account gone from the chain: its principal is unknown, with why.
+  s.devnet.accounts.delete(address);
+  s.treasury.cache.clear();
+  row = await capitalAs(s.builder.client);
+  assert.equal(row.capital.on_chain.principal, null);
+  assert.match(row.capital.on_chain.not_measured.principal, /couldn't be read/);
+  assert.equal(row.capital.on_chain.deposited, 8_000_000, "what was indexed still stands");
+});

@@ -1450,3 +1450,32 @@ test("a sponsor's pending correction doesn't take away the firm's right to dispu
   assert.equal(stale.isError, true);
   assert.equal((await t.position(t.fundA)).state, "us-ny");
 });
+
+test("a pool's capital totals: measured from the ledger for its builder, sponsor and admins, and hidden from everyone else", async () => {
+  const s = await world();
+  await s.funded(s.fundA, 50_000);
+  await s.commit(s.fundB, 20_000); // asked for, not settled
+  await s.snapshot({ reserves: 2_000_000, obligations: 1_000_000 });
+  await s.requestOut(s.fundA, 10_000);
+  await s.tick();
+  const [claim] = await s.claims();
+  await s.settle(claim.movement_id);
+  await s.tick();
+  await s.requestOut(s.fundA, 5_000); // waiting in the queue: the worker hasn't run since
+  const expected = { principal_cents: 40_000, settled_in_cents: 50_000, pending_in_cents: 20_000, queued_withdrawal_cents: 5_000, pending_out_cents: 0, paid_out_cents: 10_000, unresolved_cents: 0, firms_with_balance: 1 };
+  for (const who of [s.builder.client, s.provider.client, s.admin]) {
+    const row = (await ok(who, "list_pools", {})).find((p) => p.id === s.pool.id);
+    assert.deepEqual(row.capital, { rails: expected, on_chain: null });
+  }
+  // A new pool with nothing in it: measured, and nothing there.
+  const empty = await s.createPool();
+  const row = (await ok(s.builder.client, "list_pools", {})).find((p) => p.id === empty.id);
+  assert.equal(row.capital.rails.principal_cents, 0);
+  assert.equal(row.capital.rails.firms_with_balance, 0);
+  // A liquidity provider sees the pool but not its totals; another builder doesn't see the pool at all.
+  const asFund = (await ok(s.fundA.client, "list_pools", {})).find((p) => p.id === s.pool.id);
+  assert.equal(asFund.capital, null);
+  assert.match(asFund.capital_not_shown, /builder, its sponsor or an admin/);
+  const other = await s.firm("Other builder", ["innovator"]);
+  assert.ok(!(await ok(other.client, "list_pools", {})).some((p) => p.id === s.pool.id));
+});
