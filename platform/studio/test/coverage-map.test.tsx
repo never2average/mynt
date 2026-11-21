@@ -7,6 +7,7 @@ import { useState } from "react";
 import { CoverageMap } from "@/components/coverage-view";
 import { LicencesView } from "@/components/licences-view";
 import { fromCoverage, fromLicences } from "@/lib/compliance";
+import { clearAll, filtersButton, headings, oneFiltersButton, openFilters, toggle } from "./facet-helpers";
 
 afterEach(cleanup);
 
@@ -82,29 +83,49 @@ describe("the coverage map", () => {
 });
 
 describe("the Licences toolbar's view toggle", () => {
+  it("puts Partner, Regulator, State, Status and Expiring in one Filters popover: any of within a facet, every facet, one Clear all", async () => {
+    const more = fromLicences({
+      licences: [
+        { partner: "Harbor Bank", number: "MT-1", regulator: "CA DFPI", states: ["CA"], status: "active", expires_at: "2027-06-01" },
+        { partner: "Harbor Bank", number: "L-2", regulator: "NY DFS", states: ["NY"], status: "suspended", expires_at: "2027-06-01" },
+        { partner: "Prairie Trust", number: "MT-3", regulator: "TX DOB", states: ["TX"], status: "active", expires_at: "2027-06-01" },
+      ],
+    });
+    const c = await draw(<LicencesView licences={more} />);
+    // Region is the map's (one region shown), so it isn't a list filter and isn't in the table view.
+    oneFiltersButton(c.querySelector("[data-toolbar]")!);
+    await openFilters(c);
+    expect(headings()).toEqual(["Partner", "Regulator", "State", "Status", "Expiring"]);
+    const numbers = () => [...c.querySelectorAll("[data-table-view] tbody tr")].map((r) => r.children[3]?.textContent);
+    await toggle("regulator", "CA DFPI");
+    await toggle("regulator", "TX DOB");
+    expect(numbers()).toEqual(["MT-1", "MT-3"]);
+    await toggle("partner", "Harbor Bank");
+    expect(numbers()).toEqual(["MT-1"]);
+    expect(filtersButton(c).textContent).toBe("Filters· 3");
+    await clearAll();
+    expect(numbers()).toEqual(["MT-1", "L-2", "MT-3"]);
+    expect(filtersButton(c).textContent).toBe("Filters");
+  });
   it("swaps the table for the map in the same place, keeping the filters", async () => {
     const Harness = () => {
       const [view, setView] = useState<"table" | "map">("table");
       return <LicencesView licences={licences} coverage={{ kind: "ready", data: coverage }} view={view} onView={setView} />;
     };
     const c = await draw(<Harness />);
-    // The Partner filter: a compact control in the toolbar row, opening its choices.
-    await act(async () => {
-      fireEvent.keyDown(c.querySelector('[data-filter="Partner"]')!, { key: "Enter" });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-filter-menu="Partner"] [data-filter-option="Harbor Bank"]')!);
-    });
+    // The Partner filter: a chip in the toolbar's one Filters popover.
+    await openFilters(c);
+    await toggle("partner", "Harbor Bank");
     expect(c.querySelectorAll("[data-table-view] tbody tr")).toHaveLength(1);
-    // Shown on the control, with Clear in its menu; not as an extra line of text.
-    expect(c.querySelector('[data-filter="Partner"]')!.getAttribute("aria-label")).toBe("Partner: Harbor Bank");
-    expect(c.querySelector('[data-filter="Partner"]')!.textContent).toContain("· Harbor Bank");
+    // Counted on the Filters button, with Clear all in its popover; not as an extra line of text.
+    expect(filtersButton(c).getAttribute("aria-label")).toBe("Filters: 1 on");
+    expect(filtersButton(c).textContent).toBe("Filters· 1");
     await act(async () => {
       fireEvent.click(c.querySelector('[data-view-toggle="map"]')!);
     });
     expect(c.querySelector("[data-table-view]")).toBeNull();
     expect(c.querySelector("[data-map-view]")).not.toBeNull();
-    expect(c.querySelector('[data-filter="Partner"]')!.getAttribute("data-active")).toBe("true"); // the filters stay
+    expect(filtersButton(c).getAttribute("data-active")).toBe("true"); // the filters stay
     // The filtered licence covers California only: the rest are dimmed.
     expect(c.querySelector('[data-state="CA"]')!.hasAttribute("data-dimmed")).toBe(false);
     expect(c.querySelector('[data-state="TX"]')!.getAttribute("data-dimmed")).toBe("true");
@@ -112,15 +133,11 @@ describe("the Licences toolbar's view toggle", () => {
       fireEvent.click(c.querySelector('[data-view-toggle="table"]')!);
     });
     expect(c.querySelectorAll("[data-table-view] tbody tr")).toHaveLength(1);
-    // Clear puts every licence back.
-    await act(async () => {
-      fireEvent.keyDown(c.querySelector('[data-filter="Partner"]')!, { key: "Enter" });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-filter-menu="Partner"] [data-filter-clear]')!);
-    });
+    // Clear all puts every licence back.
+    await openFilters(c);
+    await clearAll();
     expect(c.querySelectorAll("[data-table-view] tbody tr")).toHaveLength(2);
-    expect(c.querySelector('[data-filter="Partner"]')!.hasAttribute("data-active")).toBe(false);
+    expect(filtersButton(c).hasAttribute("data-active")).toBe(false);
   });
 
   it("Invite partner opens a form whose sending waits on Mynt; it never emails the partner", async () => {

@@ -2,8 +2,8 @@
 
 // The Licences page: the partner licences behind the workspace's products. Key figures first
 // (licences, active, expiring soon, expired: counted from the licences loaded), then one toolbar
-// row beside the full-width search: filters (partner, regulator, state, status, expiring within N
-// days, and the map's region in the map view), Import, Export CSV (the filtered rows), the
+// row beside the full-width search: one Filters popover (partner, regulator, state, status,
+// expiring within N days), the map's region in the map view, Import, Export CSV (the filtered rows), the
 // labelled Map / Table button, which swaps the table for the coverage map in the same place,
 // keeping the filters (US states, or the world; components/coverage-view.tsx), and Invite partner
 // last. The table is paged 25 rows at a time. Expired licences and those expiring within 60 days
@@ -14,7 +14,7 @@ import { AlertTriangle, Download, Map as MapIcon, Search, Table2, Upload, UserPl
 
 import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
-import { FilterSelect } from "@/components/filter-controls"
+import { FilterSelect, FiltersPopover, picksOf, type Facet } from "@/components/filter-controls"
 import { CoverageMap, MAP_REGIONS, REGION_LABELS, type MapRegion } from "@/components/coverage-view"
 import { ListPager, usePaged } from "@/components/list-layout"
 import { NotReady } from "@/components/not-available"
@@ -160,11 +160,6 @@ export function licenceKpis(licences: Licence[], now = Date.now()): Kpi[] {
   ]
 }
 
-// Each filter is a compact control in the toolbar row (components/filter-controls.tsx).
-function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; all?: string; options: { value: string; label: string }[] }) {
-  return <FilterSelect label={label} value={value} onChange={onChange} options={options} />
-}
-
 const opts = (values: string[]) => values.map((v) => ({ value: v, label: v }))
 
 export function LicencesView({
@@ -190,11 +185,25 @@ export function LicencesView({
   const shown = useMemo(() => filterLicences(licences, f, now), [licences, f, now])
   const highlight = useMemo(() => (licenceFiltersOn(f) ? new Set(shown.flatMap((l) => l.states)) : null), [f, shown])
   const { page, pages, shown: onPage, setPage } = usePaged(shown)
-  const set = (k: keyof LicenceFilters) => (v: string) => {
-    setF({ ...f, [k]: v })
+  const set = (patch: Partial<LicenceFilters>) => {
+    setF({ ...f, ...patch })
     setPage(1)
   }
   const statuses = distinct(licences.map((l) => l.status)).filter((s) => s !== "expired")
+  const facet = (id: "partner" | "regulator" | "state" | "status" | "within", label: string, options: { value: string; label: string }[]): Facet => ({
+    id,
+    label,
+    options,
+    selected: picksOf(f[id]),
+    onChange: (v) => set({ [id]: v } as Partial<LicenceFilters>),
+  })
+  const facets = [
+    facet("partner", "Partner", opts(distinct(licences.map((l) => l.partner)))),
+    facet("regulator", "Regulator", opts(distinct(licences.map((l) => l.regulator)))),
+    facet("state", "State", opts(distinct(licences.flatMap((l) => l.states)))),
+    facet("status", "Status", [{ value: "expired", label: "Expired" }, ...statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]),
+    facet("within", "Expiring", EXPIRY_WINDOWS.map((d) => ({ value: String(d), label: `Within ${d} days` }))),
+  ]
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 lg:gap-5" data-licences-page>
@@ -205,19 +214,9 @@ export function LicencesView({
       <div className="flex flex-wrap items-center gap-2" data-toolbar>
         <div className="relative min-w-64 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={f.query} onChange={(e) => set("query")(e.target.value)} placeholder="Search partner, type, regulator, number or state" className="pl-8" aria-label="Search licences" />
+          <Input value={f.query} onChange={(e) => set({ query: e.target.value })} placeholder="Search partner, type, regulator, number or state" className="pl-8" aria-label="Search licences" />
         </div>
-        <Select label="Partner" value={f.partner} onChange={set("partner")} all="All partners" options={opts(distinct(licences.map((l) => l.partner)))} />
-        <Select label="Regulator" value={f.regulator} onChange={set("regulator")} all="All regulators" options={opts(distinct(licences.map((l) => l.regulator)))} />
-        <Select label="State" value={f.state} onChange={set("state")} all="All states" options={opts(distinct(licences.flatMap((l) => l.states)))} />
-        <Select
-          label="Status"
-          value={f.status}
-          onChange={set("status")}
-          all="All statuses"
-          options={[{ value: "expired", label: "Expired" }, ...statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]}
-        />
-        <Select label="Expiring" value={f.within} onChange={set("within")} options={EXPIRY_WINDOWS.map((d) => ({ value: String(d), label: `Within ${d} days` }))} />
+        <FiltersPopover facets={facets} onClear={() => set({ partner: [], regulator: [], state: [], status: [], within: [] })} />
         {view === "map" && (
           // Always one region shown: clearing it goes back to the US.
           <FilterSelect label="Region" value={region} onChange={(r) => onRegion(r === "world" ? "world" : "us")} options={MAP_REGIONS.map((r) => ({ value: r, label: REGION_LABELS[r] }))} />
