@@ -57,7 +57,7 @@ import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
-import { listThreads, newThreadId, OPEN_THREAD, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
+import { listThreads, newThreadId, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
 import { shortAddress } from "@/lib/linked-accounts"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import { toCsv } from "@/lib/compliance"
@@ -931,19 +931,6 @@ export function EarnWorkspace({
     if (t) switchTo(t.id, t.messages, t.outcomes)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyOwner, initialThread])
-  // Picked from the sidebar's Search chats while already on Earn.
-  const switchRef = useRef(switchTo)
-  switchRef.current = switchTo
-  useEffect(() => {
-    const open = (e: Event) => {
-      const id = (e as CustomEvent<string | null>).detail
-      if (!id) return switchRef.current(newThreadId(), [], {})
-      const t = listThreads(historyOwner).find((x) => x.id === id)
-      if (t) switchRef.current(t.id, t.messages, t.outcomes)
-    }
-    window.addEventListener(OPEN_THREAD, open)
-    return () => window.removeEventListener(OPEN_THREAD, open)
-  }, [historyOwner])
   const history: EarnHistory | null = historyOwner
     ? {
         threads,
