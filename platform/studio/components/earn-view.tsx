@@ -173,15 +173,26 @@ export const pagerOf = (paged: { page: number; pages: number; setPage: (p: numbe
 // The form's fields as given (an assistant's draft proposal prefills them; My pools starts empty).
 export type ProposeFields = { option: number; name: string; sandbox: boolean; reservePercent: string; reserveFloor: string; noticeDays: string; minCommit: string; maxCommit: string }
 
-export function ProposeForm({ options, actions, onDone, initial }: { options: Sponsored[]; actions: LiquidityActions; onDone: (message: string) => void; initial?: ProposeFields }) {
-  const [option, setOption] = useState(initial?.option ?? 0)
-  const [name, setName] = useState(initial?.name ?? "")
-  const [sandbox, setSandbox] = useState(initial?.sandbox ?? true)
-  const [reservePercent, setReservePercent] = useState(initial?.reservePercent ?? "20")
-  const [reserveFloor, setReserveFloor] = useState(initial?.reserveFloor ?? "0")
-  const [noticeDays, setNoticeDays] = useState(initial?.noticeDays ?? "30")
-  const [minCommit, setMinCommit] = useState(initial?.minCommit ?? "1000")
-  const [maxCommit, setMaxCommit] = useState(initial?.maxCommit ?? "100000")
+// Every proposal goes with an idempotency key, so sending it again (a double click, a retry after
+// a network error) is the pool Mynt already made, never a second one. A key given by the caller (an
+// assistant's draft keeps its own with the thread) is used as it is; otherwise the form makes one
+// when it opens, and a new one when the terms change or Mynt refuses them.
+export function ProposeForm({ options, actions, onDone, initial, idempotencyKey, newKey = newIdempotencyKey }: { options: Sponsored[]; actions: LiquidityActions; onDone: (message: string) => void; initial?: ProposeFields; idempotencyKey?: string; newKey?: () => string }) {
+  const [option, setOptionRaw] = useState(initial?.option ?? 0)
+  const [name, setNameRaw] = useState(initial?.name ?? "")
+  const [sandbox, setSandboxRaw] = useState(initial?.sandbox ?? true)
+  const [reservePercent, setReservePercentRaw] = useState(initial?.reservePercent ?? "20")
+  const [reserveFloor, setReserveFloorRaw] = useState(initial?.reserveFloor ?? "0")
+  const [noticeDays, setNoticeDaysRaw] = useState(initial?.noticeDays ?? "30")
+  const [minCommit, setMinCommitRaw] = useState(initial?.minCommit ?? "1000")
+  const [maxCommit, setMaxCommitRaw] = useState(initial?.maxCommit ?? "100000")
+  const [ownKey, setOwnKey] = useState(newKey)
+  const key = idempotencyKey ?? ownKey
+  const edit = <T,>(f: (v: T) => void) => (v: T) => {
+    f(v)
+    if (idempotencyKey === undefined) setOwnKey(newKey())
+  }
+  const [setOption, setName, setSandbox, setReservePercent, setReserveFloor, setNoticeDays, setMinCommit, setMaxCommit] = [edit(setOptionRaw), edit(setNameRaw), edit(setSandboxRaw), edit(setReservePercentRaw), edit(setReserveFloorRaw), edit(setNoticeDaysRaw), edit(setMinCommitRaw), edit(setMaxCommitRaw)]
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const picked = options[option] ?? null
@@ -199,9 +210,12 @@ export function ProposeForm({ options, actions, onDone, initial }: { options: Sp
           e.preventDefault()
           if ("error" in input || busy) return setError("error" in input ? input.error : null)
           setBusy(true)
-          void actions.propose(input).then((r) => {
+          void actions.propose({ ...input, idempotency_key: key }).then((r) => {
             setBusy(false)
-            if ("error" in r) return setError(r.error)
+            if ("error" in r) {
+              if (r.refused && idempotencyKey === undefined) setOwnKey(newKey())
+              return setError(r.error)
+            }
             onDone(`Pool "${input.name}" proposed. It's waiting for ${sponsor} to approve it and name its rails.`)
           })
         }}

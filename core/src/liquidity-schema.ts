@@ -40,6 +40,12 @@ export const LIQUIDITY_TABLES = `
     CHECK (min_commitment_cents <= max_commitment_cents)
   );
   CREATE INDEX IF NOT EXISTS liquidity_pools_product_idx ON ${T}.liquidity_pools (product_id);
+  -- create_pool's idempotency key, scoped to the caller (create-pool:<user id>:<key>), and a fingerprint of the
+  -- arguments it was first used with: a retry with the same key and arguments is the same pool, different ones are
+  -- refused. A pool made without a key has neither (NULLs never collide in the unique index).
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS idempotency_key text;
+  ALTER TABLE ${T}.liquidity_pools ADD COLUMN IF NOT EXISTS idempotency_fingerprint text;
+  CREATE UNIQUE INDEX IF NOT EXISTS liquidity_pools_idempotency_idx ON ${T}.liquidity_pools (idempotency_key);
   -- What needs a person, until a person has dealt with it: not a note that ages out. negative_balance: a settlement or
   -- return took a firm below zero. double_claim: a settlement refused because the amount was re-paid another way.
   -- link_conflict: a ledger row exists that its claim can't be tied to.

@@ -485,6 +485,8 @@ export type ProposeInput = {
   min_commitment_cents: number;
   max_commitment_cents: number;
   sponsor_entity_id?: string;
+  // Sending the same key and terms again is the pool Mynt already made, never a second one.
+  idempotency_key?: string;
 };
 
 // The proposal form's values, as typed, to create_pool's arguments, or why not.

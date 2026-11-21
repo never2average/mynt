@@ -1479,3 +1479,36 @@ test("a pool's capital totals: measured from the ledger for its builder, sponsor
   const other = await s.firm("Other builder", ["innovator"]);
   assert.ok(!(await ok(other.client, "list_pools", {})).some((p) => p.id === s.pool.id));
 });
+
+test("create_pool with an idempotency key: a retry is the same pool, a changed proposal is refused, and keys are each caller's own", async () => {
+  const s = await world({ makePool: false });
+  const args = { product_id: s.productId, component_key: "account", name: "Retried", sandbox: true, min_reserve_bps: 100, min_reserve_floor_cents: 0, notice_period_days: 0, max_commitment_cents: 1000 };
+  const count = async () => (await s.db.query("SELECT count(*)::int AS n FROM financial_products.liquidity_pools")).rows[0].n;
+  const first = await ok(s.builder.client, "create_pool", { ...args, idempotency_key: "proposal-0001" });
+  assert.equal(first.replay, undefined);
+  const again = await ok(s.builder.client, "create_pool", { ...args, idempotency_key: "proposal-0001" });
+  assert.equal(again.id, first.id);
+  assert.equal(again.replay, true);
+  assert.equal(await count(), 1, "a retry makes no second pool");
+  assert.ok(!("idempotency_key" in again), "the stored key isn't shown");
+
+  const changed = await callTool(s.builder.client, "create_pool", { ...args, max_commitment_cents: 2000, idempotency_key: "proposal-0001" });
+  assert.equal(changed.isError, true);
+  assert.equal(changed.data.code, "idempotency_conflict");
+  assert.match(changed.data.error, /different pool/);
+  assert.equal(await count(), 1);
+
+  // Someone else at the same firm with the same key proposes their own pool.
+  const { user: colleague } = await s.store.createUser("Builder Co colleague", ["innovator"]);
+  await s.store.setUserEntity(colleague.id, s.builder.entity.id);
+  colleague.entity_id = s.builder.entity.id;
+  const theirs = await ok(await s.connect(colleague), "create_pool", { ...args, idempotency_key: "proposal-0001" });
+  assert.notEqual(theirs.id, first.id);
+  assert.equal(await count(), 2);
+
+  // Without a key, every call is a new pool, as before.
+  const a = await ok(s.builder.client, "create_pool", args);
+  const b = await ok(s.builder.client, "create_pool", args);
+  assert.notEqual(a.id, b.id);
+  assert.equal(await count(), 4);
+});
