@@ -18,7 +18,7 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
 import type { UIMessage } from "ai"
-import { History, Loader2 } from "lucide-react"
+import { History, Layers, Loader2, Target, Wallet } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
@@ -145,6 +145,9 @@ export function PastConversations({ history }: { history: EarnHistory }) {
     </>
   )
 }
+
+// Each tab's icon: shown beside Past conversations while the panel is collapsed (ChatWorkspaceShell).
+const TAB_ICONS: Record<EarnTab, typeof Layers> = { pools: Layers, "my-pools": Wallet, "my-strategies": Target }
 
 // The chat side: the assistant, or, without a model, the same centred prompt that can't be used.
 // (Past conversations floats at the chat's top right, beside Show tabs: ChatWorkspaceShell's chatCorner.)
@@ -968,7 +971,7 @@ export function EarnWorkspace({
       chatCorner={status === "enabled" && history ? <PastConversations history={history} /> : null}
       onOpenPanel={() => setOpened(true)}
       showPanel={opened || chat.messages.length > 0}
-      tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t) }))}
+      tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t), icon: TAB_ICONS[t] }))}
       tab={tab}
       onTab={(id) => {
         choose(id)

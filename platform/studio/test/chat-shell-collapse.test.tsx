@@ -92,4 +92,20 @@ describe("chat workspace: divider and collapsible panel", () => {
     render(<Shell isMobile />);
     expect(document.querySelector("[data-collapse-panel]")).toBeNull();
   });
+
+  it("collapsed, tabs with icons show one button each beside the corner, opening the panel on that tab", async () => {
+    const Icon = () => <svg />;
+    const iconTabs = tabs.map((t) => ({ ...t, icon: Icon, badge: t.id === "drafts" ? 2 : undefined }));
+    window.localStorage.setItem("mynt.chat-panel.collapsed", "1");
+    const picked: string[] = [];
+    render(<ChatWorkspaceShell chat={<div />} chatCorner={<button data-history-button>h</button>} showPanel tabs={iconTabs} tab="pools" onTab={(id) => picked.push(id)} isMobile={false} />);
+    await act(async () => {});
+    const corner = document.querySelector("[data-chat-corner]")!;
+    expect([...corner.querySelectorAll("button")].map((b) => (b.hasAttribute("data-history-button") ? "history" : b.getAttribute("aria-label")))).toEqual(["history", "Open Pools", "Open Drafts"]);
+    expect(corner.querySelector('[data-expand-panel="drafts"] [data-tab-badge]')!.textContent).toBe("2");
+    await act(async () => void fireEvent.click(corner.querySelector('[data-expand-panel="drafts"]')!));
+    expect(picked).toEqual(["drafts"]);
+    expect(document.querySelector("[data-panel-side]")!.getAttribute("data-panel-collapsed")).toBe("false");
+    expect(document.querySelector("[data-panel-tabs]")).not.toBeNull();
+  });
 });
