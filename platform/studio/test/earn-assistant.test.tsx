@@ -834,3 +834,174 @@ describe("approval: My strategies' statuses, Decline and the approval sheet; My 
     expect(status.textContent).toBe("1 withdrawal request: 1 parked");
   });
 });
+
+describe("cancelling a withdrawal request and answering a state correction, from Pools", () => {
+  const steps = (root: ParentNode) => [...root.querySelectorAll("[data-approval-steps] [data-step]")].map((s) => `${s.getAttribute("data-step")}:${s.getAttribute("data-step-state")}`);
+  const W1 = "55555555-5555-4555-8555-555555555551";
+  const W2 = "55555555-5555-4555-8555-555555555552";
+  const W3 = "55555555-5555-4555-8555-555555555553";
+  const C = "66666666-6666-4666-8666-666666666666";
+  const withRequests: LiquidityData = {
+    ...lpData,
+    provider: {
+      ...lpData.provider!,
+      canCancel: true,
+      canRespond: true,
+      withdrawals: fromWithdrawals([
+        { id: W1, seq: 3, pool_id: POOL, pool_name: "Card float", amount_cents: 100_000, status: "queued", eligible_at: "2027-02-12T00:00:00Z", settled_cents: 0, sandbox: false },
+        { id: W2, seq: 4, pool_id: POOL, pool_name: "Card float", amount_cents: 50_000, status: "parked", eligible_at: null, settled_cents: 0, waiting_reason: "The rail doesn't serve this state", sandbox: false },
+        { id: W3, seq: 5, pool_id: POOL, pool_name: "Card float", amount_cents: 20_000, status: "paying", eligible_at: null, settled_cents: 0, sandbox: false },
+      ]),
+    },
+  };
+  const withCorrection: LiquidityData = {
+    ...withRequests,
+    provider: {
+      ...withRequests.provider!,
+      positions: fromPositions([
+        {
+          pool_id: POOL,
+          name: "Card float",
+          product_id: "card-credit",
+          state: "us-ny",
+          balance_cents: 500_000,
+          available_to_withdraw_cents: 200_000,
+          state_corrections_to_answer: [{ id: C, from_state: "us-ny", to_state: "us-nj", source: "sponsor_corrected", status: "pending", reason: "Your firm's address is in New Jersey", dispute_until: null, answer_with: "respond_to_state_correction" }],
+        },
+      ]),
+    },
+  };
+  const openDetails = async () => {
+    await act(async () => void fireEvent.click(document.querySelector(`[data-row-details="${POOL}"]`)!));
+    return document.querySelector('[data-sheet="position-details"]')!;
+  };
+
+  it("a queued or parked request has Cancel request, a paying one doesn't; it opens the approval sheet and sends once", async () => {
+    let answer!: (r: { ok: true; reply: unknown } | { error: string }) => void;
+    const sent: string[] = [];
+    const a: LiquidityActions = { ...actions().a, cancel: (id) => (sent.push(id), new Promise((r) => (answer = r))) };
+    render(<PoolsTab data={withRequests} poolIds={null} actions={a} />);
+    const details = await openDetails();
+    expect(details.querySelector(`[data-cancel-request="${W1}"]`)!.textContent).toBe("Cancel request");
+    expect(details.querySelector(`[data-cancel-request="${W2}"]`)!.textContent).toBe("Cancel request");
+    expect(details.querySelector(`[data-cancel-request="${W3}"]`)).toBeNull();
+    await act(async () => void fireEvent.click(details.querySelector(`[data-cancel-request="${W1}"]`)!));
+    const sheet = document.querySelector('[data-sheet="cancel-request"]')!;
+    expect(screen.getByRole("heading", { name: "Cancel withdrawal request" })).toBeTruthy();
+    expect(steps(sheet)).toEqual(["Review:current", "Cancel:todo", "Done:todo"]);
+    const summary = sheet.querySelector("[data-approval-summary]")!;
+    expect([...summary.querySelectorAll("[data-summary-row]")].map((r) => r.getAttribute("data-summary-row"))).toEqual(["pool", "amount", "place", "status", "effect"]);
+    expect(summary.querySelector("[data-cancel-pool]")!.textContent).toBe("Card float");
+    expect(summary.querySelector("[data-cancel-amount]")!.textContent).toBe("$1,000.00");
+    expect(summary.querySelector("[data-cancel-place]")!.textContent).toBe("#3");
+    expect(summary.querySelector("[data-approval-effect]")!.textContent).toContain("leaves the queue");
+    const footer = sheet.querySelector("[data-approval-footer]")!;
+    expect([...footer.querySelectorAll("button")].map((b) => [b.textContent, b.getAttribute("data-variant")])).toEqual([
+      ["Cancel request", "destructive"],
+      ["Keep it", "outline"],
+    ]);
+    // Two clicks before Mynt answers send it once.
+    await act(async () => void fireEvent.click(footer.querySelector("[data-confirm-cancel]")!));
+    await act(async () => void fireEvent.click(footer.querySelector("[data-confirm-cancel]")!));
+    expect(sent).toEqual([W1]);
+    expect(steps(sheet)).toEqual(["Review:done", "Cancel:current", "Done:todo"]);
+    await act(async () => answer({ ok: true, reply: { withdrawal_id: W1, status: "cancelled" } }));
+    expect(steps(document.querySelector('[data-sheet="cancel-request"]')!)).toEqual(["Review:done", "Cancel:done", "Done:done"]);
+    expect(document.querySelector("[data-answer-done]")!.textContent).toContain("Cancelled");
+    expect(sent).toEqual([W1]);
+    // Back to the position.
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Back to position" })));
+    expect(document.querySelector('[data-sheet="position-details"]')).toBeTruthy();
+  });
+
+  it("Keep it closes the cancellation without calling Mynt; a refusal is shown and may be tried again", async () => {
+    const sent: string[] = [];
+    let reply: { ok: true; reply: unknown } | { error: string } = { error: "That request is paying; only a queued request can be cancelled" };
+    const a: LiquidityActions = { ...actions().a, cancel: async (id) => (sent.push(id), reply) };
+    render(<PoolsTab data={withRequests} poolIds={null} actions={a} />);
+    const details = await openDetails();
+    await act(async () => void fireEvent.click(details.querySelector(`[data-cancel-request="${W2}"]`)!));
+    expect(document.querySelector('[data-sheet="cancel-request"] [data-cancel-place]')!.textContent).toBe("#4");
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Keep it" })));
+    expect(document.querySelector('[data-sheet="cancel-request"]')).toBeNull();
+    expect(document.querySelector('[data-sheet="position-details"]')).toBeTruthy();
+    expect(sent).toEqual([]);
+    // A refusal: Failed, Mynt's words, and the button again.
+    await act(async () => void fireEvent.click(document.querySelector(`[data-cancel-request="${W2}"]`)!));
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Cancel request" })));
+    expect(screen.getByRole("alert").textContent).toBe("That request is paying; only a queued request can be cancelled");
+    expect(steps(document.querySelector('[data-sheet="cancel-request"]')!)).toEqual(["Review:done", "Cancel:failed", "Done:todo"]);
+    reply = { ok: true, reply: null };
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Cancel request" })));
+    expect(sent).toEqual([W2, W2]);
+  });
+
+  it("without Mynt's cancel_withdrawal the button is off, saying why", async () => {
+    const a: LiquidityActions = { ...actions().a, cancel: async () => ({ ok: true, reply: null }) };
+    render(<PoolsTab data={{ ...withRequests, provider: { ...withRequests.provider!, canCancel: false } }} poolIds={null} actions={a} />);
+    const details = await openDetails();
+    const b = details.querySelector(`[data-cancel-request="${W1}"]`) as HTMLButtonElement;
+    expect(b.disabled).toBe(true);
+    expect(b.title).toBe("Cancelling a withdrawal request comes with Mynt's next update");
+  });
+
+  it("a pending state correction shows Needs your answer on its row; Respond shows what Mynt proposes and sends the chosen answer once", async () => {
+    let answer!: (r: { ok: true; reply: unknown } | { error: string }) => void;
+    const sent: { id: string; answer: { accept: boolean; reason?: string } }[] = [];
+    const a: LiquidityActions = { ...actions().a, cancel: async () => ({ ok: true, reply: null }), respond: (id, x) => (sent.push({ id, answer: x }), new Promise((r) => (answer = r))) };
+    render(<PoolsTab data={withCorrection} poolIds={null} actions={a} />);
+    const row = document.querySelector(`[data-pool-row="${POOL}"]`)!;
+    const status = row.querySelector("[data-correction-status]")!;
+    expect(status.textContent).toBe("Needs your answer");
+    expect(status.getAttribute("data-approval-status")).toBe("needs-answer");
+    expect(status.getAttribute("title")).toBe("US state NY → NJ");
+    // The other pool, without a position, has none.
+    expect(document.querySelector(`[data-pool-row="${UNCLEARED}"] [data-correction-status], [data-row-respond="${UNCLEARED}"]`)).toBeNull();
+    expect(row.querySelector(`[data-row-respond="${POOL}"]`)!.textContent).toBe("Respond");
+    await act(async () => void fireEvent.click(row.querySelector(`[data-row-respond="${POOL}"]`)!));
+    const sheet = document.querySelector('[data-sheet="state-correction"]')!;
+    expect(screen.getByRole("heading", { name: "Respond to state correction" })).toBeTruthy();
+    expect(steps(sheet)).toEqual(["Review:current", "Answer:todo", "Done:todo"]);
+    const summary = sheet.querySelector("[data-approval-summary]")!;
+    // Only what Mynt gave: no dispute deadline on a pending correction.
+    expect([...summary.querySelectorAll("[data-summary-row]")].map((r) => r.getAttribute("data-summary-row"))).toEqual(["pool", "change", "source", "status", "why", "effect"]);
+    expect(summary.querySelector("[data-correction-change]")!.textContent).toBe("NY → NJ");
+    expect(summary.querySelector("[data-correction-reason]")!.textContent).toBe("Your firm's address is in New Jersey");
+    expect(summary.textContent).toContain("The pool's sponsor");
+    const footer = sheet.querySelector("[data-approval-footer]")!;
+    expect([...footer.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Accept correction", "Dispute correction"]);
+    fireEvent.change(sheet.querySelector("[data-correction-reason-input]")!, { target: { value: "  Our office is still in New York " } });
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Dispute correction" })));
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Dispute correction" })));
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Accept correction" })));
+    expect(sent).toEqual([{ id: C, answer: { accept: false, reason: "Our office is still in New York" } }]);
+    expect(steps(sheet)).toEqual(["Review:done", "Answer:current", "Done:todo"]);
+    await act(async () => answer({ ok: true, reply: { correction_id: C, status: "disputed" } }));
+    expect(steps(document.querySelector('[data-sheet="state-correction"]')!)).toEqual(["Review:done", "Answer:done", "Done:done"]);
+    expect(document.querySelector("[data-answer-done]")!.textContent).toBe("Disputed. Nothing changed.");
+    expect(sent).toHaveLength(1);
+  });
+
+  it("an admin's applied correction says until when it can be disputed; Accept sends accept without a reason; Details lists it with Respond", async () => {
+    const sent: { id: string; answer: { accept: boolean; reason?: string } }[] = [];
+    const a: LiquidityActions = { ...actions().a, respond: async (id, x) => (sent.push({ id, answer: x }), { ok: true, reply: null }) };
+    const applied: LiquidityData = {
+      ...withCorrection,
+      provider: {
+        ...withCorrection.provider!,
+        positions: fromPositions([{ pool_id: POOL, name: "Card float", product_id: "card-credit", state: "us-nj", balance_cents: 500_000, state_corrections_to_answer: [{ id: C, from_state: "us-ny", to_state: "us-nj", source: "admin_corrected", status: "applied", reason: null, dispute_until: "2026-12-05T00:00:00.000Z" }] }]),
+      },
+    };
+    render(<PoolsTab data={applied} poolIds={null} actions={a} />);
+    const details = await openDetails();
+    const item = details.querySelector(`[data-correction="${C}"]`)!;
+    expect(item.querySelector("[data-correction-status]")!.textContent).toBe("Needs your answer");
+    await act(async () => void fireEvent.click(item.querySelector(`[data-respond="${C}"]`)!));
+    const summary = document.querySelector('[data-sheet="state-correction"] [data-approval-summary]')!;
+    expect([...summary.querySelectorAll("[data-summary-row]")].map((r) => r.getAttribute("data-summary-row"))).toEqual(["pool", "change", "source", "status", "until", "effect"]);
+    expect(summary.textContent).toContain("A Mynt admin");
+    expect(summary.textContent).toContain("2026-12-05");
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Accept correction" })));
+    expect(sent).toEqual([{ id: C, answer: { accept: true } }]);
+  });
+});

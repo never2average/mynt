@@ -15,7 +15,7 @@ const states = () => [...document.querySelectorAll("[data-step]")].map((s) => `$
 
 describe("ApprovalStatus", () => {
   it("is a dot and its words, one tone per state", () => {
-    const tones: Record<ApprovalState, string> = { "needs-approval": "blue", sign: "blue", sending: "gray", done: "green", declined: "gray", blocked: "amber", failed: "red", waiting: "amber" };
+    const tones: Record<ApprovalState, string> = { "needs-approval": "blue", "needs-answer": "blue", sign: "blue", sending: "gray", done: "green", declined: "gray", blocked: "amber", failed: "red", waiting: "amber" };
     for (const [state, tone] of Object.entries(tones) as [ApprovalState, string][]) {
       render(<ApprovalStatus state={state} />);
       expect(status().textContent, state).toBe(APPROVAL_LABELS[state]);
@@ -25,7 +25,7 @@ describe("ApprovalStatus", () => {
       expect(status().closest('[data-slot="badge"]')).toBeNull();
       cleanup();
     }
-    expect([APPROVAL_LABELS["needs-approval"], APPROVAL_LABELS.sign, APPROVAL_LABELS.sending, APPROVAL_LABELS.declined]).toEqual(["Needs your approval", "Sign in wallet", "Sending…", "Declined"]);
+    expect([APPROVAL_LABELS["needs-approval"], APPROVAL_LABELS["needs-answer"], APPROVAL_LABELS.sign, APPROVAL_LABELS.sending, APPROVAL_LABELS.declined]).toEqual(["Needs your approval", "Needs your answer", "Sign in wallet", "Sending…", "Declined"]);
   });
 
   it("an error is red, its reason in the tooltip; a label replaces the words", () => {

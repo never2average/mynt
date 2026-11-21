@@ -30,7 +30,7 @@ async function post(path: string, body: unknown): Promise<ActionResult> {
   }
   const data = (await res?.json().catch(() => null)) as Record<string, unknown> | null;
   if (!res?.ok) return { error: typeof data?.message === "string" ? data.message : "Couldn't reach Mynt. Please try again.", refused: res?.status === 422 };
-  return { ok: true, reply: data?.pool ?? data?.commitment ?? data?.withdrawal ?? null };
+  return { ok: true, reply: data?.pool ?? data?.commitment ?? data?.withdrawal ?? data?.correction ?? null };
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<{ ok: true; body: T } | { error: string }> {
@@ -139,6 +139,8 @@ export default function EarnPage() {
     propose: (input) => after(post("/api/liquidity/pools", input)),
     commit: (input) => after(post("/api/liquidity/commit", input)),
     withdraw: (input) => after(post("/api/liquidity/withdraw", input)),
+    cancel: (id) => after(post(`/api/liquidity/withdrawals/${encodeURIComponent(id)}/cancel`, {})),
+    respond: (id, answer) => after(post(`/api/liquidity/corrections/${encodeURIComponent(id)}`, answer)),
   };
 
   const wallet: EarnWalletState = {
