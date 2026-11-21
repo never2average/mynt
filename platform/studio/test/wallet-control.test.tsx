@@ -17,6 +17,7 @@ const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { fromDashboardTool } = await import("@/lib/dashboard");
 const { resetStudioAccess } = await import("@/lib/use-liquidity-access");
 const { fromLinkedAccounts, networkOf, NOT_LINKED, shortAddress, UNKNOWN_NETWORK } = await import("@/lib/linked-accounts");
+type BrowserWallet = import("@/lib/browser-wallet").BrowserWallet;
 
 const ADDRESS = "0x52908400098527886E0F7030069857D2E4169EE7";
 const SOLANA = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
@@ -111,8 +112,14 @@ describe("the header's wallet control", () => {
     render(<WalletControl linked={withWallet} access={both} />);
     const trigger = screen.getByRole("button", { name: /^Wallet / });
     expect(trigger.textContent).toContain("7EcDhS…FLtV");
-    expect(trigger.querySelector("[data-network]")?.textContent).toBe("Solana");
+    // The network is named once, in the menu, as text: never on the button, never as a mark or badge.
+    expect(trigger.textContent).not.toContain("Solana");
+    expect(trigger.querySelector("[data-brand-icon], [data-network-mark], [data-slot='badge']")).toBeNull();
     const menu = await open();
+    expect(menu.querySelector("[data-network]")?.textContent).toBe("Solana");
+    expect(menu.textContent!.match(/Solana/g)).toHaveLength(1);
+    expect(menu.querySelector("[data-slot='badge']")).toBeNull();
+    expect(menu.textContent).not.toContain("Crypto wallet");
     expect(menu.querySelector("[data-full-address]")?.textContent).toBe(SOLANA);
     expect(menu.querySelector('[data-liquidity-link="Manage pools"]')?.getAttribute("href")).toBe("/earn?tab=my-pools");
     expect(menu.querySelector('[data-liquidity-link="Provide liquidity"]')?.getAttribute("href")).toBe("/earn?tab=opportunities");
@@ -137,9 +144,39 @@ describe("the header's wallet control", () => {
     expect((await open()).querySelector("[data-liquidity-link]")).toBeNull();
   });
 
-  it("an address that doesn't fit its chain says Unknown network", () => {
+  it("an address that doesn't fit its chain says Unknown network", async () => {
     render(<WalletControl linked={fromLinkedAccounts({ wallets: [{ address: ADDRESS, chain: "solana" }] })} access={both} />);
-    expect(screen.getByRole("button", { name: /^Wallet / }).textContent).toContain(UNKNOWN_NETWORK);
+    expect((await open()).querySelector("[data-network]")?.textContent).toBe(UNKNOWN_NETWORK);
+  });
+
+  it("names the wallet app with its own name and icon once a browser wallet has connected the address", async () => {
+    const icon = `data:image/svg+xml;base64,${btoa("<svg>p</svg>")}`;
+    const phantom = { version: "1.0.0", name: "Phantom", icon, chains: ["solana:devnet"], accounts: [{ address: SOLANA, publicKey: new Uint8Array(32), chains: ["solana:devnet"], features: [] }], features: {} } as unknown as BrowserWallet;
+    render(<WalletControl linked={withWallet} access={both} browserWallets={[phantom]} />);
+    const trigger = screen.getByRole("button", { name: /^Wallet / });
+    expect(trigger.querySelector('[data-wallet-app="Phantom"]')?.textContent).toBe("Phantom");
+    expect(trigger.querySelector("img")?.getAttribute("src")).toBe(icon);
+    expect(trigger.querySelector("svg.lucide-wallet")).toBeNull();
+    expect(trigger.textContent).toContain("7EcDhS…FLtV");
+    const menu = await open();
+    expect(menu.querySelector('[data-wallet-app="Phantom"]')).not.toBeNull();
+    expect(menu.querySelector("[data-connect-wallet]")).toBeNull(); // already named
+  });
+
+  it("with no known app: the short address only, and Connect wallet lists the detected wallets or says none was found", async () => {
+    const solflare = { version: "1.0.0", name: "Solflare", icon: `data:image/svg+xml;base64,${btoa("<svg>s</svg>")}`, chains: ["solana:devnet"], accounts: [], features: {} } as unknown as BrowserWallet;
+    render(<WalletControl linked={withWallet} access={both} browserWallets={[solflare]} />);
+    const trigger = screen.getByRole("button", { name: /^Wallet / });
+    expect(trigger.querySelector("[data-wallet-app]")).toBeNull();
+    expect(trigger.querySelector("svg.lucide-wallet")).not.toBeNull();
+    let menu = await open();
+    await act(async () => void fireEvent.click(menu.querySelector("[data-connect-wallet]")!));
+    expect([...document.querySelectorAll("[data-detected-wallet]")].map((e) => e.textContent)).toEqual(["Solflare"]);
+    cleanup();
+    render(<WalletControl linked={withWallet} access={both} browserWallets={[]} />);
+    menu = await open();
+    await act(async () => void fireEvent.click(menu.querySelector("[data-connect-wallet]")!));
+    expect(document.querySelector("[data-no-wallet-detected]")?.textContent).toBe("No wallet found in this browser.");
   });
 
   it("without a wallet: Link wallet, to the account page in the same tab", () => {
@@ -157,7 +194,7 @@ describe("the header's wallet control", () => {
     expect(button.getAttribute("title")).toBe(NOT_YET);
   });
 
-  it("in an app's top bar: compact, the short address without the network badge", async () => {
+  it("in an app's top bar: compact, the short address only", async () => {
     resetStudioAccess();
     vi.stubGlobal("fetch", async (url: string) =>
       new Response(JSON.stringify(url.startsWith("/api/linked-accounts") ? { linked: withWallet } : url.startsWith("/api/liquidity/access") ? { access: both, developer: true } : {}), { status: 200 }),

@@ -6,9 +6,10 @@
 // hands Mynt's unsigned transaction to the wallet untouched, the wallet asks the user to approve
 // it, signs it and sends it, and the studio gets back only the signature. Called only from the
 // user's own click, never from the assistant.
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getWallets } from "@wallet-standard/app";
 import type { Wallet, WalletAccount } from "@wallet-standard/base";
-import { StandardConnect, type StandardConnectFeature } from "@wallet-standard/features";
+import { StandardConnect, StandardEvents, type StandardConnectFeature, type StandardEventsFeature } from "@wallet-standard/features";
 import { SolanaSignAndSendTransaction, type SolanaSignAndSendTransactionFeature } from "@solana/wallet-standard-features";
 import bs58 from "bs58";
 import { DEVNET_CHAIN } from "./wallets";
@@ -27,6 +28,75 @@ export function devnetWallets(source: () => readonly Wallet[] = () => (typeof wi
   } catch {
     return [];
   }
+}
+
+// ---- naming the wallet app ----
+
+// The wallet app as it names itself: its own name and icon from its Wallet Standard registration
+// (the icon only when it's an image data URI, as the standard requires). Mynt draws no brand marks.
+export type WalletApp = { name: string; icon: string | null };
+export const appOf = (w: Wallet): WalletApp => ({ name: w.name, icon: typeof w.icon === "string" && w.icon.startsWith("data:image/") ? w.icon : null });
+
+// The app holding `address`: a detected wallet that has connected that account to this page.
+// Null when none has (a linked wallet with no known app shows its short address only).
+export function walletAppFor(address: string, wallets: readonly Wallet[]): WalletApp | null {
+  const w = wallets.find((x) => x.accounts.some((a) => a.address === address));
+  return w ? appOf(w) : null;
+}
+
+// Connect: the wallet asks the user to approve this page, and then its accounts are known (so a
+// linked wallet shows the app's name). Nothing is signed. Only from the user's own click.
+export async function connectWallet(wallet: Wallet): Promise<{ accounts: string[] } | { error: string }> {
+  try {
+    const connect = (wallet.features as StandardConnectFeature)[StandardConnect];
+    return { accounts: (await connect.connect()).accounts.map((a) => a.address) };
+  } catch {
+    return { error: `${wallet.name} didn't connect.` };
+  }
+}
+
+// The detected wallets, kept current as wallets register, unregister or change accounts. Empty on
+// the server and on the first render (so the page hydrates the same), read once mounted.
+export function useBrowserWallets(read: () => Wallet[] = devnetWallets): [Wallet[], () => void] {
+  const [list, setList] = useState<Wallet[]>([]);
+  const readRef = useRef(read);
+  useEffect(() => {
+    readRef.current = read;
+  });
+  const refresh = useCallback(() => setList(readRef.current()), []);
+  useEffect(() => {
+    let watching: (() => void)[] = [];
+    const watch = () => {
+      watching.forEach((off) => off());
+      watching = readRef.current().flatMap((w) => {
+        const events = (w.features as Partial<StandardEventsFeature>)[StandardEvents];
+        try {
+          return events ? [events.on("change", refresh)] : [];
+        } catch {
+          return [];
+        }
+      });
+    };
+    const again = () => {
+      refresh();
+      watch();
+    };
+    let offs: (() => void)[] = [];
+    try {
+      if (typeof window !== "undefined") {
+        const api = getWallets();
+        offs = [api.on("register", again), api.on("unregister", again)];
+      }
+    } catch {
+      // No Wallet Standard registry here: the list stays as first read.
+    }
+    again();
+    return () => {
+      offs.forEach((off) => off());
+      watching.forEach((off) => off());
+    };
+  }, [refresh]);
+  return [list, refresh];
 }
 
 export function base64ToBytes(b64: string): Uint8Array {

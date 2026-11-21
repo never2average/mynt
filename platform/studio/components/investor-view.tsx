@@ -29,7 +29,7 @@ import type { Loaded } from "@/lib/use-compliance"
 import type { EarnWallets } from "@/lib/wallets"
 import { cn } from "@/lib/utils"
 
-export const BALANCES_UNAVAILABLE = "Balances unavailable"
+export const BALANCES_UNAVAILABLE = "Not measured"
 
 function NotReady({ state, what }: { state: Exclude<Loaded<unknown>, { kind: "ready" }>; what: string }) {
   if (state.kind === "loading") return <Skeleton className="h-16 w-full" />
