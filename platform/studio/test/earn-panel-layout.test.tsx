@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
-// Earn's three right-hand tabs in the narrow, resizable panel: Pools and My strategies as cards, My
-// pools as one table; one toolbar row that never wraps (the action last and inside it), one
-// labelled Filters popover of facet chips (Export CSV joins it while the panel is narrow), and
-// nothing that scrolls: the rows (or cards) per page
-// follow the list area's height (and, for cards, the columns the panel's width gives).
+// Earn's three right-hand tabs in the narrow, resizable panel: Pools and My pools as one table
+// each, and My strategies too; one toolbar row that never wraps (the action last and inside it),
+// one labelled Filters popover of facet chips (Export CSV joins it while the panel is narrow), and
+// nothing that scrolls down: the rows per page follow the list area's height. A table shows every
+// column at every width, each with a min width, and scrolls sideways when it's wider than the panel.
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { PoolsTab, StrategiesTab } from "@/components/earn-assistant";
 import { EarnTable, type LiquidityActions } from "@/components/earn-view";
-import { CARD_GRID, cardsThatFit, MIN_ROWS, rowsThatFit } from "@/components/list-layout";
+import { MIN_ROWS, rowsThatFit } from "@/components/list-layout";
 import type { Draft } from "@/lib/earn";
 import { fromPools, fromPositions, type LiquidityData } from "@/lib/liquidity";
 
@@ -27,7 +27,7 @@ beforeAll(() => {
   } as unknown as typeof ResizeObserver;
   Element.prototype.scrollIntoView ??= function () {};
   // jsdom lays nothing out: the list area's height is what the test says; rows, the header and
-  // cards measure 0, so the defaults (41px a row, 40px the header, the tab's card height) apply.
+  // measure 0, so the defaults (41px a row, 40px the header) apply.
   Object.defineProperty(HTMLElement.prototype, "clientHeight", {
     configurable: true,
     get(this: HTMLElement) {
@@ -70,39 +70,23 @@ const actions: LiquidityActions = { propose: async () => ({ ok: true, reply: nul
 const draft: Draft = { kind: "commit", id: "d1", poolId: POOL, poolName: "Pool 0", amountCents: 500_000, state: "us-ny", sandbox: false };
 const drafts = (n: number): Draft[] => Array.from({ length: n }, (_, i) => ({ ...draft, id: `d${i}` }));
 
-type TabCase = { id: string; cards: boolean; cta: string | null; facets: string[]; view: boolean; render: () => React.ReactElement };
+type TabCase = { id: string; columns: number; cta: string | null; facets: string[]; view: boolean; render: () => React.ReactElement };
 const TABS: TabCase[] = [
-  { id: "pools", cards: true, cta: "commit", facets: ["Product line", "State", "Money"], view: true, render: () => <PoolsTab data={data} poolIds={[POOL]} actions={actions} /> },
-  { id: "my-pools", cards: false, cta: "propose", facets: ["State", "Money"], view: false, render: () => <EarnTable tab="my-pools" data={data} actions={actions} /> },
-  { id: "my-strategies", cards: true, cta: null, facets: ["Kind"], view: false, render: () => <StrategiesTab data={data} drafts={[draft]} actions={actions} /> },
+  { id: "pools", columns: 9, cta: "commit", facets: ["Product line", "State", "Money"], view: true, render: () => <PoolsTab data={data} poolIds={[POOL]} actions={actions} /> },
+  { id: "my-pools", columns: 9, cta: "propose", facets: ["State", "Money"], view: false, render: () => <EarnTable tab="my-pools" data={data} actions={actions} /> },
+  { id: "my-strategies", columns: 6, cta: null, facets: ["Kind"], view: false, render: () => <StrategiesTab data={data} drafts={[draft]} actions={actions} /> },
 ];
 
 describe("each Earn tab", () => {
   for (const t of TABS) {
-    it(`${t.id}: ${t.cards ? "one flat card grid" : "one table"} filling the panel, one toolbar row that never wraps, its action last and inside it`, () => {
+    it(`${t.id}: one table filling the panel, one toolbar row that never wraps, its action last and inside it`, () => {
       render(t.render());
       const panel = document.querySelector(`[data-tab-panel="${t.id}"]`)!;
       expect(panel).toBeTruthy();
       expect(panel.className).toContain("@container/list");
       expect(panel.className).toMatch(/\bh-full\b/);
-      if (t.cards) {
-        expect(document.querySelectorAll("table")).toHaveLength(0);
-        const grid = panel.querySelector("[data-card-grid]")!;
-        expect(grid.className).toBe(CARD_GRID);
-        expect(grid.className.split(" ")).toEqual(expect.arrayContaining(["grid-cols-1", "@xl/list:grid-cols-2"]));
-        // Flat cards: a border, rounded-lg, p-3; no card in a card, no shadcn Card, no frame round the grid.
-        const cards = [...grid.querySelectorAll("[data-card]")];
-        expect(cards.length).toBeGreaterThan(0);
-        for (const c of cards) {
-          expect(c.className.split(" ")).toEqual(expect.arrayContaining(["rounded-lg", "border", "p-3"]));
-          expect(c.className).not.toMatch(/shadow/);
-          expect(c.querySelector("[data-card]")).toBeNull();
-        }
-        expect(document.querySelector("[data-slot='card']")).toBeNull();
-        expect(panel.querySelector("[data-table-area]")!.className).not.toContain("border");
-      } else {
-        expect(document.querySelectorAll("table")).toHaveLength(1);
-      }
+      expect(document.querySelectorAll("table")).toHaveLength(1);
+      expect(document.querySelector("[data-card], [data-card-grid], [data-slot='card']")).toBeNull();
       // Nothing stacked above or below the list: the toolbar, the list area, the pager.
       expect([...panel.children].map((c) => [...c.attributes].map((a) => a.name).find((n) => ["data-toolbar", "data-table-area", "data-pager"].includes(n)))).toEqual(["data-toolbar", "data-table-area", "data-pager"]);
       expect(document.querySelector("[data-kpi], [data-panel], [data-view-all], h2")).toBeNull();
@@ -153,7 +137,7 @@ describe("each Earn tab", () => {
     const two = manyPools(2).map((p, i) => ({ ...p, sandbox: i === 1, offeringCleared: i === 0 ? p.offeringCleared : false }));
     render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: two }, builder: undefined }} poolIds={null} actions={actions} />);
     const button = () => document.querySelector("[data-filters-menu-button]")!;
-    const cards = () => document.querySelectorAll("[data-pool-card]").length;
+    const cards = () => document.querySelectorAll("[data-pool-row]").length;
     expect(cards()).toBe(2);
     await act(async () => void fireEvent.click(button()));
     const chip = (facet: string, value: string) => document.querySelector(`[data-filters-menu] [data-facet="${facet}"] [data-chip="${value}"]`) as HTMLButtonElement;
@@ -189,22 +173,55 @@ describe("each Earn tab", () => {
   });
 });
 
-describe("nothing scrolls", () => {
-  it("has no scrolling container: the list area and the tab hide what doesn't fit, and long text truncates", () => {
+describe("nothing scrolls down; a wide table scrolls sideways", () => {
+  it("a table's area is the one sideways scroller and never scrolls down", () => {
     for (const t of TABS) {
       render(t.render());
       const panel = document.querySelector(`[data-tab-panel="${t.id}"]`)!;
       const area = panel.querySelector("[data-table-area]")!;
-      // shadcn's Table wraps the table in a div with overflow-x-auto; the area turns it to hidden
-      // (the [&_[data-slot=table-container]] rule), so it's the one class let through here.
-      for (const el of [panel, area, ...area.querySelectorAll("*:not([data-slot=table-container])")]) expect(el.getAttribute("class") ?? "", t.id).not.toMatch(/overflow-(y-|x-)?(auto|scroll)\b/);
-      expect(area.className).toContain("overflow-hidden");
-      if (!t.cards) {
-        expect(area.className).toContain("[&_[data-slot=table-container]]:overflow-hidden");
-        expect(area.className).toContain("[&_td]:truncate");
-      }
+      const classes = area.className.split(" ");
+      // The area scrolls across, never down; shadcn's own overflow-x-auto wrapper is turned off
+      // (the [&_[data-slot=table-container]] rule), so there is one scroller and the pinned
+      // first column sticks to it. Cells are px-3.
+      expect(classes, t.id).toEqual(expect.arrayContaining(["overflow-x-auto", "overflow-y-hidden", "[&_[data-slot=table-container]]:overflow-visible", "[&_td]:px-3", "[&_th]:px-3"]));
+      // Nothing inside scrolls (shadcn's wrapper is the one class let through, turned off above).
+      for (const el of [panel, ...area.querySelectorAll("*:not([data-slot=table-container])")]) expect(el.getAttribute("class") ?? "", t.id).not.toMatch(/overflow-(y-|x-)?(auto|scroll)\b/);
+      expect(area.className).not.toMatch(/overflow-y-(auto|scroll)/);
       cleanup();
     }
+  });
+
+  it("every column of each Earn table shows at every width, with a min width; the first is pinned; headers don't wrap", () => {
+    for (const t of TABS) {
+      render(t.render());
+      const panel = document.querySelector(`[data-tab-panel="${t.id}"]`)!;
+      const heads = [...panel.querySelectorAll("thead th")];
+      expect(heads.length, t.id).toBeGreaterThanOrEqual(t.columns);
+      for (const th of heads) {
+        expect(th.className, `${t.id} ${th.textContent}`).toMatch(/\bmin-w-\d+\b/);
+        expect(th.className).toContain("whitespace-nowrap");
+      }
+      for (const el of panel.querySelectorAll("th, td")) expect(el.className, t.id).not.toMatch(/(^|\s)hidden(\s|$)|table-cell/);
+      expect(heads[0].className.split(" ")).toEqual(expect.arrayContaining(["sticky", "left-0", "bg-card"]));
+      for (const td of panel.querySelectorAll("tbody tr:not([data-empty-row]) > td:first-child")) expect(td.className.split(" ")).toEqual(expect.arrayContaining(["sticky", "left-0", "bg-card"]));
+      // Money columns are right-aligned figures.
+      const money = heads.filter((th) => th.className.includes("min-w-32"));
+      expect(money.length, t.id).toBeGreaterThan(0);
+      for (const th of money) expect(th.className.split(" ")).toEqual(expect.arrayContaining(["text-right", "tabular-nums"]));
+      cleanup();
+    }
+  });
+
+  it("Pools pages its table rows by the area's height, like My pools, and follows a resize", async () => {
+    areaHeight = 40 + 2 + 41 * 6;
+    render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: manyPools(20) } }} poolIds={null} actions={actions} />);
+    const rows = () => document.querySelectorAll("tr[data-pool-row]").length;
+    expect(rows()).toBe(6);
+    expect(document.querySelector("[data-pager]")!.textContent).toContain("20 pools · Page 1 of 4");
+    areaHeight = 40 + 2 + 41 * 10;
+    await act(async () => resize!());
+    expect(rows()).toBe(10);
+    expect(document.querySelector("[data-pager]")!.textContent).toContain("Page 1 of 2");
   });
 
   it("shows as many table rows a page as fit the table area's height, at least five, and follows a resize", async () => {
@@ -230,33 +247,16 @@ describe("nothing scrolls", () => {
     expect(rowsThatFit(1000, 40, 53)).toBe(18); // (1000 - 40 - 2) / 53 two-line rows
   });
 
-  it("shows as many cards a page as fit the card area: rows by its height, columns by the grid at the panel's width", async () => {
-    expect(cardsThatFit(500, 140, 1)).toBe(3); // (500 + 12) / (140 + 12)
-    expect(cardsThatFit(500, 140, 2)).toBe(6);
-    expect(cardsThatFit(50, 140, 2)).toBe(2); // never less than one row
-    // My strategies: 124px cards before one is measured, one column (jsdom has no grid layout).
-    areaHeight = (124 + 12) * 4 - 12;
+  it("My strategies pages its table rows by the area's height too, and follows a resize", async () => {
+    areaHeight = 40 + 2 + 41 * 4;
     render(<StrategiesTab data={data} drafts={drafts(20)} actions={actions} />);
-    const cards = () => document.querySelectorAll("[data-draft-card]").length;
-    expect(cards()).toBe(4);
-    expect(document.querySelector("[data-pager]")!.textContent).toContain("20 strategies · Page 1 of 5");
+    const rows = () => document.querySelectorAll("tr[data-draft-row]").length;
+    expect(rows()).toBe(MIN_ROWS);
+    expect(document.querySelector("[data-pager]")!.textContent).toContain("20 strategies · Page 1 of 4");
     expect(document.querySelector("[data-pager]")!.lastElementChild!.textContent).toBe("Next");
-    // A wider panel: the grid has two columns, so twice the cards on a page.
-    const real = window.getComputedStyle.bind(window);
-    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element) => (el.hasAttribute("data-card-grid") ? ({ gridTemplateColumns: "300px 300px" } as CSSStyleDeclaration) : real(el)));
+    areaHeight = 40 + 2 + 41 * 8;
     await act(async () => resize!());
-    expect(cards()).toBe(8);
+    expect(rows()).toBe(8);
     expect(document.querySelector("[data-pager]")!.textContent).toContain("Page 1 of 3");
-    // Shorter: fewer rows of cards.
-    areaHeight = (124 + 12) * 2 - 12;
-    await act(async () => resize!());
-    expect(cards()).toBe(4);
-    cleanup();
-    // Pools: liquidity providers' cards (with their position line and buttons) are 200px before one is measured.
-    vi.restoreAllMocks();
-    areaHeight = (200 + 12) * 3 - 12;
-    render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: manyPools(10) } }} poolIds={null} actions={actions} />);
-    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(3);
-    expect(document.querySelector("[data-pager]")!.textContent).toContain("10 pools · Page 1 of 4");
   });
 });

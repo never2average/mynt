@@ -10,11 +10,12 @@ import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk";
 import type { UseChatHelpers } from "@ai-sdk/react";
 import type { UIMessage } from "ai";
 import { Loader2, MessageSquarePlus, Search, Sparkles, X } from "lucide-react";
-import type { MouseEvent } from "react";
+import { useCallback, useMemo, type MouseEvent } from "react";
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown";
 import { Thread } from "@/components/assistant-ui/thread";
 import { isStudioPath } from "@/lib/studio-search";
+import type { SlashCommand } from "@/lib/slash-commands";
 import { Button } from "@/components/ui/button";
 
 export type AskStatus = "loading" | "enabled" | "disabled";
@@ -71,13 +72,25 @@ export function AskAiUnavailable({ status }: { status: Exclude<AskStatus, "enabl
   );
 }
 
-function AskAiThread({ chat }: { chat: Chat }) {
+// The composer's slash commands: New chat, and questions Ask AI answers from Mynt's reads (lib/ask.ts).
+export const askCommands = (onNewChat: () => void): SlashCommand[] => [
+  { name: "new", description: "Clear the conversation", run: onNewChat },
+  { name: "apps", description: "Ask about your apps and their stages", template: "List my apps with their stage and latest build" },
+  { name: "builds", description: "Ask about an app's builds", template: "Show the latest builds of " },
+  { name: "licences", description: "Ask about the partner licences behind your products", template: "Which partner licences cover " },
+  { name: "coverage", description: "Ask where your products can serve customers", template: "Where can my products serve customers in " },
+  { name: "audits", description: "Ask about the audit trail", template: "What changed in the audit trail " },
+];
+
+function AskAiThread({ chat, onNewChat }: { chat: Chat; onNewChat: () => void }) {
   const runtime = useAISDKRuntime(chat);
+  const commands = useMemo(() => askCommands(onNewChat), [onNewChat]);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <Thread
         Text={AskAiMarkdownText}
         placeholder={chat.messages.length ? "Ask a follow-up…" : "Ask about your apps, builds, members or licences…"}
+        commands={commands}
         welcome={
           <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col justify-center gap-1 px-2 pb-6">
             <p className="text-base font-medium">What do you want to know?</p>
@@ -111,14 +124,15 @@ export function AskAiPanel({
     e.stopPropagation();
     if (isStudioPath(href)) onNavigate(href);
   };
-  const newChat = () => {
-    void chat.stop();
-    chat.setMessages([]);
-  };
+  const { stop, setMessages } = chat;
+  const newChat = useCallback(() => {
+    void stop();
+    setMessages([]);
+  }, [stop, setMessages]);
   return (
     <div className="flex h-full min-h-0 flex-col" role="region" aria-label="Ask AI" data-ask-ai-panel onClickCapture={onClickCapture}>
       <AskAiHeader onBack={onBack} onNewChat={newChat} onClose={onClose} canClear={chat.messages.length > 0} />
-      <div className="flex min-h-0 flex-1 flex-col">{status === "enabled" ? <AskAiThread chat={chat} /> : <AskAiUnavailable status={status} />}</div>
+      <div className="flex min-h-0 flex-1 flex-col">{status === "enabled" ? <AskAiThread chat={chat} onNewChat={newChat} /> : <AskAiUnavailable status={status} />}</div>
     </div>
   );
 }

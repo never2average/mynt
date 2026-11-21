@@ -13,7 +13,7 @@
 //   remembered per browser; collapsed (or not open yet), Show tabs floats at the chat's top right,
 //   beside whatever the page puts there (Earn's Past conversations);
 // - on phones, one side at a time, switched by the round button (or the top bar's back control).
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { MessageSquareIcon, PanelRightCloseIcon, PanelRightIcon, PanelRightOpenIcon } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils"
@@ -21,7 +21,8 @@ import { Tab, TabList } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
-export type PanelTab = { id: string; label: string; badge?: number; content: ReactNode };
+// icon: when every tab has one, the collapsed panel shows them as buttons beside the chat's corner.
+export type PanelTab = { id: string; label: string; badge?: number; content: ReactNode; icon?: ComponentType };
 export type MobileView = "chat" | "panel";
 const COLLAPSE_KEY = "mynt.chat-panel.collapsed";
 
@@ -134,7 +135,37 @@ export function ChatWorkspaceShell({
           {(chatCorner || canShowTabs) && (
             <div className="absolute top-3 right-3 z-10 flex items-center gap-2" data-chat-corner>
               {chatCorner}
-              {canShowTabs && (
+              {/* Tabs with icons (Earn's): one button per tab, opening the panel on it. Otherwise one Show tabs. */}
+              {canShowTabs && tabs.every((t) => t.icon) &&
+                tabs.map((t) => {
+                  const Icon = t.icon!;
+                  return (
+                    <Tooltip key={t.id}>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="icon-sm"
+                          className="relative rounded-full bg-background"
+                          aria-label={`Open ${t.label}`}
+                          onClick={() => {
+                            onTab(t.id);
+                            showTabs();
+                          }}
+                          data-expand-panel={t.id}
+                        >
+                          <Icon />
+                          {t.badge ? (
+                            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground px-1 text-[10px] font-medium text-background tabular-nums" data-tab-badge>
+                              {t.badge}
+                            </span>
+                          ) : null}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">{t.label}</TooltipContent>
+                    </Tooltip>
+                  );
+                })}
+              {canShowTabs && !tabs.every((t) => t.icon) && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button variant="outline" size="icon-sm" className="rounded-full bg-background" aria-label="Show tabs" onClick={showTabs} data-expand-panel>

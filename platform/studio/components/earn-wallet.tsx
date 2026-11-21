@@ -1,7 +1,9 @@
 "use client"
 
-// Earn's wallet: the picker in the chat bar (the user's verified linked wallets, each with its short
-// address, network and live devnet USDC and SOL balances, and Link wallet), the one-line
+// Earn's wallet: the picker in the chat bar (the user's verified linked wallets, one row each: the
+// wallet app's own icon and name when a browser wallet has connected it, else the short address,
+// and its live devnet USDC and SOL balances or Not measured; the network named once; Connect wallet
+// and Link wallet), the one-line
 // disclaimer under the composer, and the on-chain deposit and withdrawal on a draft. The
 // on-chain flow runs only from the user's own clicks: Prepare asks Mynt for an unsigned devnet
 // transaction and its summary; the summary shown is Mynt's, never the assistant's; Sign asks the
@@ -11,15 +13,15 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react"
 import { Check, ChevronDown, ChevronLeft, Info, Link2, Loader2, Wallet } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { StatusDot } from "@/components/promotion-view"
+import { ConnectWalletItems, NO_WALLET_DETECTED, WalletAppIcon, WalletName } from "@/components/wallet-identity"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { devnetWallets, signAndSend, type BrowserWallet } from "@/lib/browser-wallet"
+import { appOf, devnetWallets, signAndSend, useBrowserWallets, walletAppFor, type BrowserWallet, type WalletApp } from "@/lib/browser-wallet"
 import { shortAddress } from "@/lib/linked-accounts"
 import { positionKey, type LiquidityData, type PoolRow, type Position } from "@/lib/liquidity"
 import { newIdempotencyKey } from "@/lib/idempotency"
@@ -63,11 +65,12 @@ export function EarnDisclosure() {
   )
 }
 
+// The one-word test-money marker, as muted text (no outlined badge): each surface says it once.
 export function DevnetBadge() {
   return (
-    <Badge variant="outline" className="border-sky-500/60" data-devnet>
+    <span className="shrink-0 text-xs text-muted-foreground" data-devnet>
       Devnet
-    </Badge>
+    </span>
   )
 }
 
@@ -105,17 +108,34 @@ export const useEarnWallet = () => useContext(WalletContext)
 
 // ---- the picker ----
 
-function WalletRow({ w }: { w: EarnWallet }) {
+// A linked wallet named on its own (a draft's From, a position's header): the app's icon and name
+// when a detected browser wallet has connected it, else a wallet icon and the short address.
+export function LinkedWallet({ address }: { address: string }) {
+  const [detected] = useBrowserWallets(useEarnWallet().browserWallets)
+  const app = walletAppFor(address, detected)
   return (
-    <span className="flex min-w-0 flex-col">
-      <span className="flex items-center gap-1.5">
-        <span className="font-mono text-xs">{shortAddress(w.address)}</span>
-        <span className="text-xs text-muted-foreground">{w.network}</span>
-      </span>
-      {w.chain === "solana" && (
+    <span className="flex min-w-0 items-center gap-1.5" data-linked-wallet={address}>
+      <WalletAppIcon app={app} />
+      <WalletName address={address} app={app} />
+    </span>
+  )
+}
+
+// One wallet: the app's icon and name when known, else the short address; its balances (or Not
+// measured); and its network only when it isn't the Solana the menu already names.
+function WalletRow({ w, app }: { w: EarnWallet; app: WalletApp | null }) {
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2">
+      <WalletAppIcon app={app} />
+      <span className="flex min-w-0 flex-col">
+        <WalletName address={w.address} app={app} />
         <span className="text-xs text-muted-foreground tabular-nums" data-wallet-balances>
           {balancesText(w.balances)}
-          {w.balances ? " · devnet" : ""}
+        </span>
+      </span>
+      {w.network !== "Solana" && (
+        <span className="ml-auto shrink-0 text-xs text-muted-foreground" data-network>
+          {w.network}
         </span>
       )}
     </span>
@@ -123,7 +143,8 @@ function WalletRow({ w }: { w: EarnWallet }) {
 }
 
 export function WalletPicker() {
-  const { list, chosen, choose } = useEarnWallet()
+  const { list, chosen, choose, browserWallets } = useEarnWallet()
+  const [detected, refresh] = useBrowserWallets(browserWallets)
   if (!list) return <span className="h-8" data-wallet-picker="loading" />
   if (!list.supported)
     return (
@@ -149,25 +170,33 @@ export function WalletPicker() {
       </Button>
     )
   }
+  const chosenApp = chosen ? walletAppFor(chosen.address, detected) : null
+  const unnamed = list.wallets.some((w) => w.chain === "solana" && !walletAppFor(w.address, detected))
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button type="button" size="sm" variant="ghost" className="h-8 gap-1.5" aria-label={chosen ? `Wallet ${chosen.address}` : "Choose a wallet"} data-wallet-picker="wallets">
-          <Wallet />
-          <span className="font-mono text-xs">{chosen ? shortAddress(chosen.address) : "Choose wallet"}</span>
-          {chosen?.chain === "solana" && <span className="text-xs text-muted-foreground">Devnet</span>}
+          <WalletAppIcon app={chosenApp} />
+          {chosen ? <WalletName address={chosen.address} app={chosenApp} /> : <span className="text-xs">Choose wallet</span>}
+          {/* The test-money marker, said once on this surface. */}
+          {chosen?.chain === "solana" && <DevnetBadge />}
           <ChevronDown className="size-3.5 opacity-60" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72" data-wallet-picker-menu>
+        {list.wallets.some((w) => w.chain === "solana") && (
+          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground" data-wallet-network>
+            Solana
+          </DropdownMenuLabel>
+        )}
         {list.wallets.map((w) => (
           <DropdownMenuItem key={w.address} onSelect={() => choose(w.address)} data-wallet-option={w.address} aria-checked={chosen?.address === w.address} role="menuitemradio">
-            <WalletRow w={w} />
+            <WalletRow w={w} app={walletAppFor(w.address, detected)} />
             {chosen?.address === w.address && <Check className="ml-auto" />}
           </DropdownMenuItem>
         ))}
-        {!list.balancesSupported && <p className="px-2 py-1 text-xs text-muted-foreground">Live balances come with Mynt&apos;s next update.</p>}
         <DropdownMenuSeparator />
+        {unnamed && <ConnectWalletItems wallets={detected} onConnected={refresh} />}
         {list.manageUrl ? (
           <DropdownMenuItem asChild data-wallet-link>
             <a href={list.manageUrl} rel="noreferrer">
@@ -188,6 +217,7 @@ export function WalletPicker() {
 
 // ---- the on-chain deposit and withdrawal ----
 
+export type OnChainFlow = Flow
 type Flow =
   | { kind: "idle" }
   | { kind: "preparing" }
@@ -238,6 +268,9 @@ export function OnChainAction({
   blocked,
   newKey,
   now = Date.now,
+  label: givenLabel,
+  beside,
+  onFlow,
 }: {
   kind: "deposit" | "withdrawal"
   poolId: string
@@ -248,9 +281,15 @@ export function OnChainAction({
   blocked: string | null
   newKey: () => string
   now?: () => number
+  label?: string // the button that asks Mynt to prepare it (an approval sheet's Approve)
+  beside?: ReactNode // shown beside that button (an approval sheet's Decline)
+  onFlow?: (flow: OnChainFlow) => void // told each step, for an approval's steps and status
 }) {
   const { list, chosen, treasury, browserWallets, onSettled, pollMs = 2000, settleDelaysMs = SETTLE_DELAYS_MS } = useEarnWallet()
   const [flow, setFlow] = useState<Flow>({ kind: "idle" })
+  const tell = useRef(onFlow)
+  tell.current = onFlow
+  useEffect(() => tell.current?.(flow), [flow])
   const live = useRef(true)
   useEffect(() => {
     live.current = true
@@ -276,7 +315,7 @@ export function OnChainAction({
             : tooBig
               ? "That amount is too large."
               : blocked
-  const label = kind === "deposit" ? `Deposit from ${address ? shortAddress(address) : "your wallet"} · devnet` : `Withdraw to ${address ? shortAddress(address) : "your wallet"} · devnet`
+  const label = givenLabel ?? (kind === "deposit" ? `Deposit from ${address ? shortAddress(address) : "your wallet"}` : `Withdraw to ${address ? shortAddress(address) : "your wallet"}`)
 
   const ask = () =>
     treasury.prepare({ kind, pool_id: poolId, wallet: address!, amount_usdc_base_units: Number(amountBaseUnits), ...(kind === "withdrawal" && deposit ? { deposit } : {}), idempotency_key: newKey() })
@@ -357,11 +396,12 @@ export function OnChainAction({
               {flow.message}
             </p>
           )}
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <Button onClick={() => void prepare()} disabled={Boolean(reason) || flow.kind === "preparing"} data-prepare={kind}>
               {flow.kind === "preparing" && <Loader2 className="animate-spin" />}
               {label}
             </Button>
+            {beside}
           </div>
         </>
       ) : null}
@@ -369,7 +409,7 @@ export function OnChainAction({
       {shown && (
         <div className="flex flex-col gap-2 rounded-lg border p-3 text-sm" data-prepared>
           <div className="flex flex-wrap items-center gap-2 font-medium">
-            Mynt&apos;s summary <DevnetBadge />
+            Mynt&apos;s summary
             {shown.summary.verifiedBuild === false && <UnverifiedBuildBadge />}
           </div>
           {flow.kind === "review" && flow.changed && (
@@ -400,7 +440,6 @@ export function OnChainAction({
               </>
             )}
           </dl>
-          <p className="text-muted-foreground">Your wallet shows the transaction again before you approve it. Mynt never signs it and never holds the money.</p>
           {flow.kind === "refreshing" ? (
             <p role="status" className="flex items-center gap-2" data-refreshing>
               <Loader2 className="size-4 animate-spin" /> Refreshing…
@@ -413,7 +452,7 @@ export function OnChainAction({
             <div className="flex flex-wrap gap-2">
               {installed.map((w) => (
                 <Button key={w.name} onClick={() => void sign(w)} data-sign-with={w.name}>
-                  {w.icon?.startsWith("data:image/") && <img src={w.icon} alt="" className="size-4" />}
+                  {appOf(w).icon && <WalletAppIcon app={appOf(w)} />}
                   Sign in {w.name}
                 </Button>
               ))}
@@ -424,7 +463,7 @@ export function OnChainAction({
           ) : (
             <div className="flex flex-col gap-2">
               <p className="text-amber-600 dark:text-amber-300" data-no-browser-wallet>
-                No Solana wallet that can sign on devnet was found in this browser. Install or unlock one, then prepare again.
+                {NO_WALLET_DETECTED}
               </p>
               <div>
                 <Button variant="outline" onClick={() => setFlow({ kind: "idle" })}>
@@ -439,14 +478,14 @@ export function OnChainAction({
       {flow.kind === "sent" && (
         <p role="status" className="flex flex-col gap-1 text-sm" data-tx="pending">
           <span className="flex items-center gap-2">
-            <Loader2 className="size-4 animate-spin" /> {flow.stage === "processed" ? "Processed on devnet. Waiting for it to be confirmed…" : "Sent on devnet. Waiting for it to be confirmed…"}
+            <Loader2 className="size-4 animate-spin" /> {flow.stage === "processed" ? "Processed. Waiting for it to be confirmed…" : "Sent. Waiting for it to be confirmed…"}
           </span>
           <Signature signature={flow.signature} />
         </p>
       )}
       {flow.kind === "confirmed" && (
         <p role="status" className="flex flex-col gap-1 text-sm" data-tx="confirmed">
-          <span>Confirmed on devnet.</span>
+          <span>Confirmed.</span>
           {flow.updating === "yes" ? (
             <span className="flex items-center gap-2 text-muted-foreground" data-updating-positions>
               <Loader2 className="size-4 animate-spin" /> Updating positions…
@@ -553,9 +592,7 @@ export function OnChainHolding({ position: p, pools, open, onOpen: setOpen }: { 
   return (
             <div className="flex flex-col gap-3" data-on-chain-positions data-on-chain-position={positionKey(p)}>
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-mono text-xs text-muted-foreground" title={c.wallet}>
-                  {shortAddress(c.wallet)}
-                </span>
+                <LinkedWallet address={c.wallet} />
                 <DevnetBadge />
                 {pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
                 {pool?.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
@@ -662,12 +699,13 @@ function WithdrawDeposit({ poolId, wallet, deposit, seq, free, noticeSeconds, mi
       <p className="text-sm text-muted-foreground" data-consequence>
         Joins the pool&apos;s first-in, first-out queue and is paid to this wallet after the notice period ({durationText(noticeSeconds)}), only as far as the pool stays above its reserve.
       </p>
-      <p className="text-sm">
-        <span className="text-muted-foreground">Deposit </span>
+      <p className="flex flex-wrap items-center gap-1.5 text-sm">
+        <span className="text-muted-foreground">Deposit</span>
         <span className="font-mono text-xs" title={deposit}>
           {seq !== null ? `#${seq} · ` : ""}
           {shortAddress(deposit)}
         </span>
+        <DevnetBadge />
       </p>
       <label className="flex max-w-xs flex-col gap-1 text-sm">
         Amount (USDC)

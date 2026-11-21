@@ -13,7 +13,7 @@ import { Download, Plus } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
-import { FilterSelect } from "@/components/filter-controls"
+import { FiltersPopover } from "@/components/filter-controls"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { downloadCsv } from "@/components/licences-view"
 import { dateOf, InvitationsTab, MembersTab, type MembersActions, type MembersData } from "@/components/members-view"
@@ -90,8 +90,8 @@ export function appKpis(apps: WorkspaceApp[]): Kpi[] {
 
 export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: WorkspaceApp[] }) {
   const [query, setQuery] = useState("")
-  const [stage, setStage] = useState("")
-  const rows = useMemo(() => apps.filter((a) => (!stage || a.stage === stage) && matches(query, a.name, STAGE_LABELS[a.stage], a.owner)), [apps, query, stage])
+  const [stage, setStage] = useState<string[]>([])
+  const rows = useMemo(() => apps.filter((a) => (!stage.length || stage.includes(a.stage)) && matches(query, a.name, STAGE_LABELS[a.stage], a.owner)), [apps, query, stage])
   const { page, pages, shown, setPage } = usePaged(rows)
   const exportCsv = () =>
     downloadCsv(
@@ -111,7 +111,7 @@ export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: Works
         searchLabel="Search apps by name, stage or owner"
         actions={
           <>
-            <FilterSelect label="Stage" value={stage} options={STAGE_OPTIONS} onChange={setStage} />
+            <FiltersPopover facets={[{ id: "stage", label: "Stage", options: STAGE_OPTIONS, selected: stage, onChange: setStage }]} onClear={() => setStage([])} />
             <Button variant="outline" onClick={exportCsv} disabled={!rows.length}>
               <Download />
               Export CSV

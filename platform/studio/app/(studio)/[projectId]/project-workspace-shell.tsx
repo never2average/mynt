@@ -12,7 +12,7 @@ import { AppTopBar, DEVICES, type Device } from "@/components/app-top-bar";
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell";
 
 import { AppInfoTab } from "@/components/app-panel-tabs";
-import { APP_TABS, APP_TAB_LABELS, type AppTab } from "@/lib/app-panel";
+import { APP_TABS, APP_TAB_LABELS, isAppTab, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
 
 // The builder's right-hand tabs: the live preview (the default; its controls are in the top bar),
 // then the app's P&L, Licences, Security, SDK and Activity, each live and for this app only.
@@ -190,6 +190,18 @@ export function ProjectWorkspaceShell({
   // Another app opens on its preview.
   useEffect(() => {
     setPanelTab("preview");
+  }, [projectId]);
+  // The chat's slash commands (/preview, /pnl, …) show a tab, on phones in place of the chat.
+  useEffect(() => {
+    const onPanelTab = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId?: string | null; tab?: unknown }>).detail;
+      if (!detail || !isAppTab(detail.tab)) return;
+      if (projectId && detail.projectId && detail.projectId !== projectId) return;
+      setPanelTab(detail.tab);
+      setMobileView("preview");
+    };
+    window.addEventListener(PANEL_TAB_EVENT, onPanelTab);
+    return () => window.removeEventListener(PANEL_TAB_EVENT, onPanelTab);
   }, [projectId]);
   const panelVisible = !isMobile || mobileView === "preview";
   const [device, setDevice] = useState<Device>("desktop");

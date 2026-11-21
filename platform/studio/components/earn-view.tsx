@@ -7,19 +7,22 @@
 //   settling in, queued for withdrawal, paid out: Not measured, with why, when Mynt couldn't tell),
 //   terms, latest verified health and withdrawal queue; "Propose pool" on a sponsored component of
 //   their firm's product.
-// (Pools, every pool open to the user with "Commit capital", and My strategies are cards, in
-// components/earn-assistant.tsx.) Also here: the forms (commit, withdraw, propose), and what a
-// liquidity provider holds in a pool (holdingIn), which Pools' cards show, with the card's Details
+//   Its Approval column shows each pool's approval steps (components/approval.tsx).
+// (Pools, every pool open to the user with "Commit capital", and My strategies are tables too, in
+// components/earn-assistant.tsx.) Every column shows at every width; a table wider than
+// the panel scrolls sideways. Also here: the forms (commit, withdraw, propose), and what a
+// liquidity provider holds in a pool (holdingIn), which Pools' rows show, with the row's Details
 // sheet (PositionDetailsSheet: amounts, deposits and withdrawal requests, on rails and on chain).
 // Each form opens in a sheet from its labelled button. Nothing here moves money: Mynt records a
 // request, and the pool's sponsor moves the money on its approved rail. Server-renderable for the tests.
 import { useMemo, useState } from "react"
+import { ApprovalSteps, type Step } from "@/components/approval"
 import { OnChainHolding, type OpenDeposit } from "@/components/earn-wallet"
 import { newIdempotencyKey } from "@/lib/idempotency"
 
 import type { Facet } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL, WIDEST_COL } from "@/components/list-layout"
+import { COL, PanelList, useFitRows, usePaged } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -170,11 +173,35 @@ export const pagerOf = (paged: { page: number; pages: number; setPage: (p: numbe
 // The form's fields as given (an assistant's draft proposal prefills them; My pools starts empty).
 export type ProposeFields = { option: number; name: string; sandbox: boolean; reservePercent: string; reserveFloor: string; noticeDays: string; minCommit: string; maxCommit: string }
 
+// What proposing a pool does, in one line.
+export const proposeConsequence = (sponsor: string) =>
+  `The pool starts paused: ${sponsor} must approve it and name the money rails before it takes any commitment, and real-money commitments also wait for a Mynt admin to clear it.`
+
 // Every proposal goes with an idempotency key, so sending it again (a double click, a retry after
 // a network error) is the pool Mynt already made, never a second one. A key given by the caller (an
 // assistant's draft keeps its own with the thread) is used as it is; otherwise the form makes one
 // when it opens, and a new one when the terms change or Mynt refuses them.
-export function ProposeForm({ options, actions, onDone, initial, idempotencyKey, newKey = newIdempotencyKey }: { options: Sponsored[]; actions: LiquidityActions; onDone: (message: string) => void; initial?: ProposeFields; idempotencyKey?: string; newKey?: () => string }) {
+export function ProposeForm({
+  options,
+  actions,
+  onDone,
+  initial,
+  idempotencyKey,
+  newKey = newIdempotencyKey,
+  submitLabel = "Propose pool",
+  beside,
+  consequence = true,
+}: {
+  options: Sponsored[]
+  actions: LiquidityActions
+  onDone: (message: string) => void
+  initial?: ProposeFields
+  idempotencyKey?: string
+  newKey?: () => string
+  submitLabel?: string // an approval sheet's "Approve"
+  beside?: React.ReactNode // beside the submit button (an approval sheet's Decline)
+  consequence?: boolean // the line saying what proposing does (an approval sheet says it in its summary)
+}) {
   const [option, setOptionRaw] = useState(initial?.option ?? 0)
   const [name, setNameRaw] = useState(initial?.name ?? "")
   const [sandbox, setSandboxRaw] = useState(initial?.sandbox ?? true)
@@ -198,9 +225,11 @@ export function ProposeForm({ options, actions, onDone, initial, idempotencyKey,
 
   return (
     <div className="flex flex-col gap-4" data-form="propose">
-      <p className="text-sm text-muted-foreground" data-consequence>
-        The pool starts paused: {sponsor} must approve it and name the money rails before it takes any commitment, and real-money commitments also wait for a Mynt admin to clear it.
-      </p>
+      {consequence && (
+        <p className="text-sm text-muted-foreground" data-consequence>
+          {proposeConsequence(sponsor)}
+        </p>
+      )}
       <form
         className="grid gap-3 sm:grid-cols-2"
         onSubmit={(e) => {
@@ -256,9 +285,10 @@ export function ProposeForm({ options, actions, onDone, initial, idempotencyKey,
           <Input value={maxCommit} onChange={(e) => setMaxCommit(e.target.value)} inputMode="decimal" aria-label="Largest position" />
         </label>
         <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
-          <Button type="submit" disabled={busy || "error" in input}>
-            Propose pool
+          <Button type="submit" disabled={busy || "error" in input} data-submit="propose">
+            {submitLabel}
           </Button>
+          {beside}
           {"error" in input ? <span className="text-sm text-muted-foreground">{input.error}</span> : null}
         </div>
         {error && <Alert>{error}</Alert>}
@@ -267,8 +297,27 @@ export function ProposeForm({ options, actions, onDone, initial, idempotencyKey,
   )
 }
 
-// My pools' capital columns: principal from a 32rem panel, the queue from 42rem, the rest from 64rem.
-const CAPITAL_COL: Record<CapitalFigure, string> = { principal: MID_COL, queued: WIDE_COL, settledIn: WIDEST_COL, pendingIn: WIDEST_COL, paidOut: WIDEST_COL }
+// A pool's road to taking commitments, as Mynt records it (core/src/liquidity-tools.ts): proposed
+// (paused, awaiting approval), approved by its sponsoring licence provider (approved_at, with its
+// rails), cleared by a Mynt admin for real money (offering_cleared; a sandbox pool skips it), then
+// open. The first step not done is the current one.
+export const POOL_APPROVAL_STEPS = ["Proposed", "Sponsor approved", "Admin approved", "Open"] as const
+export function poolApprovalSteps(p: PoolRow): Step[] {
+  const done = [true, Boolean(p.approvedAt), p.sandbox || p.offeringCleared, p.status === "open" || (p.status === "closed" && Boolean(p.approvedAt))]
+  const at = done.findIndex((d, i) => !d && !(i === 2 && p.sandbox))
+  return POOL_APPROVAL_STEPS.map((label, i): Step => {
+    if (i === 2 && p.sandbox) return { label, state: "skipped", title: "not needed for a sandbox pool" }
+    if (done[i]) return { label, state: "done" }
+    if (i === at) return { label, state: "current", title: i === 1 ? "waiting for the sponsoring licence provider to approve it and name its rails" : i === 2 ? "waiting for a Mynt admin to clear it for real money" : statusText(p) }
+    return { label, state: "todo" }
+  })
+}
+const approvalText = (p: PoolRow) => {
+  const s = poolApprovalSteps(p)
+  const at = s.find((x) => x.state === "current")
+  return at ? `${at.label}: ${at.title ?? "current step"}` : "Open"
+}
+
 // In Export CSV, a figure Mynt didn't measure says so and why.
 const capitalText = (c: CapitalCell) => (c.why && c.text === "Not measured" ? `Not measured (${c.why})` : c.text)
 
@@ -288,8 +337,8 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
     downloadCsv(
       "my-pools.csv",
       toCsv(
-        ["Pool", "Product", "Component", "State", "Status", "Rails", ...CAPITAL_COLUMNS.map((c) => c.label), "Minimum reserve", "Notice", "Commitment limits", "Latest health", "Withdrawal queue"],
-        shown.map((p) => [p.name, p.productName ?? p.productId, p.componentKey, STAGE_LABELS[stageOf(p)], statusText(p), railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet", ...CAPITAL_COLUMNS.map((c) => capitalText(capitalCell(p, c.key))), reserveText(p), noticeText(p.noticePeriodDays), limitsText(p), healthText(p.health), queue(p)]),
+        ["Pool", "Product", "Component", "State", "Approval", "Status", "Rails", ...CAPITAL_COLUMNS.map((c) => c.label), "Minimum reserve", "Notice", "Commitment limits", "Latest health", "Withdrawal queue"],
+        shown.map((p) => [p.name, p.productName ?? p.productId, p.componentKey, STAGE_LABELS[stageOf(p)], approvalText(p), statusText(p), railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet", ...CAPITAL_COLUMNS.map((c) => capitalText(capitalCell(p, c.key))), reserveText(p), noticeText(p.noticePeriodDays), limitsText(p), healthText(p.health), queue(p)]),
       ),
     )
 
@@ -324,61 +373,65 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
         <Table>
           <TableHeader className="sticky top-0 bg-card">
             <TableRow>
-              <TableHead>Pool</TableHead>
-              <TableHead className={MID_COL}>State</TableHead>
-              <TableHead className={WIDE_COL}>Status</TableHead>
-              <TableHead className={WIDE_COL}>Rails</TableHead>
+              <TableHead className={COL.name}>Pool</TableHead>
+              <TableHead className={COL.short}>State</TableHead>
+              <TableHead className={COL.wide}>Approval</TableHead>
+              <TableHead className={COL.text}>Status</TableHead>
+              <TableHead className={COL.wide}>Rails</TableHead>
               {CAPITAL_COLUMNS.map((c) => (
-                <TableHead key={c.key} className={`${CAPITAL_COL[c.key]} text-right`}>
+                <TableHead key={c.key} className={COL.money}>
                   {c.label}
                 </TableHead>
               ))}
-              <TableHead className={WIDE_COL}>Minimum reserve</TableHead>
-              <TableHead className={WIDE_COL}>Notice</TableHead>
-              <TableHead className={WIDE_COL}>Commitment limits</TableHead>
-              <TableHead className={WIDE_COL}>Latest health</TableHead>
-              <TableHead className="text-right">Withdrawal queue</TableHead>
+              <TableHead className={COL.wide}>Minimum reserve</TableHead>
+              <TableHead className={COL.short}>Notice</TableHead>
+              <TableHead className={COL.wide}>Commitment limits</TableHead>
+              <TableHead className={COL.text}>Latest health</TableHead>
+              <TableHead className={COL.money}>Withdrawal queue</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {paged.shown.length ? (
               paged.shown.map((p) => (
                 <TableRow key={p.id} data-pool={p.id}>
-                  <TableCell>
+                  <TableCell className={COL.name}>
                     <OneLine className="font-medium" text={p.name} />
                     <OneLine className="text-xs text-muted-foreground" text={`${p.productName ?? p.productId}${p.componentKey ? ` · ${p.componentKey}` : ""}`} />
                   </TableCell>
-                  <TableCell className={MID_COL}>
+                  <TableCell className={COL.short}>
                     <StageStatus stage={stageOf(p)} />
                   </TableCell>
-                  <TableCell className={WIDE_COL}>
+                  <TableCell className={COL.wide} data-approval>
+                    <ApprovalSteps steps={poolApprovalSteps(p)} compact />
+                  </TableCell>
+                  <TableCell className={COL.text}>
                     <OneLine text={statusText(p)} />
                   </TableCell>
-                  <TableCell className={WIDE_COL}>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
+                  <TableCell className={COL.wide}>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
                   {CAPITAL_COLUMNS.map((c) => {
                     const cell = capitalCell(p, c.key)
                     return (
-                      <TableCell key={c.key} className={`${CAPITAL_COL[c.key]} text-right tabular-nums`} data-capital={c.key} title={cell.why ?? undefined}>
-                        <OneLine text={cell.text} />
+                      <TableCell key={c.key} className={COL.money} data-capital={c.key} title={cell.why ?? undefined}>
+                        <OneLine className="ml-auto" text={cell.text} />
                       </TableCell>
                     )
                   })}
-                  <TableCell className={WIDE_COL}>
+                  <TableCell className={COL.wide}>
                     <OneLine text={reserveText(p)} />
                   </TableCell>
-                  <TableCell className={WIDE_COL}>{noticeText(p.noticePeriodDays)}</TableCell>
-                  <TableCell className={`${WIDE_COL} tabular-nums`}>{limitsText(p)}</TableCell>
-                  <TableCell className={WIDE_COL} data-health>
+                  <TableCell className={COL.short}>{noticeText(p.noticePeriodDays)}</TableCell>
+                  <TableCell className={`${COL.wide} tabular-nums`}>{limitsText(p)}</TableCell>
+                  <TableCell className={COL.text} data-health>
                     <OneLine text={healthText(p.health)} />
                     <OneLine className="text-xs text-muted-foreground" text={p.health?.latestVerifiedEnd && !p.health.verified ? `Last verified to ${dateOf(p.health.latestVerifiedEnd)}` : ""} />
                   </TableCell>
-                  <TableCell className="text-right tabular-nums" data-queue>
+                  <TableCell className={COL.money} data-queue>
                     {queue(p)}
                   </TableCell>
                 </TableRow>
               ))
             ) : (
-              <EmptyRow cols={9 + CAPITAL_COLUMNS.length}>{pools.length ? "No pools match these filters." : "No pools yet. Propose one on a sponsored component of your product."}</EmptyRow>
+              <EmptyRow cols={10 + CAPITAL_COLUMNS.length}>{pools.length ? "No pools match these filters." : "No pools yet. Propose one on a sponsored component of your product."}</EmptyRow>
             )}
           </TableBody>
         </Table>
