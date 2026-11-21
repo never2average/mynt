@@ -12,6 +12,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { Check, ChevronDown, ChevronLeft, Info, Link2, Loader2, Wallet } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
+import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -217,9 +218,7 @@ function Signature({ signature }: { signature: string }) {
 
 export function UnverifiedBuildBadge() {
   return (
-    <Badge variant="outline" className="border-amber-500/60" title="Mynt hasn't rebuilt this treasury program from its template at this address, so its code isn't verified. Devnet accepts it; test money only." data-unverified-build>
-      Unverified build
-    </Badge>
+    <StatusDot tone="amber" label="Unverified build" title="Mynt hasn't rebuilt this treasury program from its template at this address, so its code isn't verified. Devnet accepts it; test money only." data-unverified-build />
   )
 }
 
@@ -482,9 +481,7 @@ export const showsTransaction = (data: LiquidityData, signature: string) =>
 
 export function DepositsPausedBadge({ reason }: { reason: string }) {
   return (
-    <Badge variant="outline" className="border-amber-500/60 whitespace-normal text-left" title={reason} data-attesters-flag>
-      Deposits paused: approvers changed
-    </Badge>
+    <StatusDot tone="amber" label="Deposits paused: approvers changed" title={reason} data-attesters-flag />
   )
 }
 

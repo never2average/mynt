@@ -26,11 +26,13 @@ import {
 import { cn } from "@/lib/utils"
 import type { Stage } from "@/lib/workspaces"
 
-const DOT: Record<"green" | "amber" | "red", string> = { green: "bg-emerald-500", amber: "bg-amber-500", red: "bg-red-500" }
+export type DotTone = "green" | "amber" | "red" | "blue" | "gray"
+const DOT: Record<DotTone, string> = { green: "bg-emerald-500", amber: "bg-amber-500", red: "bg-red-500", blue: "bg-sky-500", gray: "bg-muted-foreground/50" }
 
-export function StatusDot({ tone, label }: { tone: "green" | "amber" | "red"; label: string }) {
+// A status as a coloured dot and its words. Extra props (a title, data-* hooks, classes) go on the outer span.
+export function StatusDot({ tone, label, className, ...rest }: { tone: DotTone; label: string; className?: string } & Omit<React.HTMLAttributes<HTMLSpanElement>, "children">) {
   return (
-    <span className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium" data-tone={tone}>
+    <span {...rest} className={cn("inline-flex shrink-0 items-center gap-1.5 text-xs font-medium", className)} data-tone={tone}>
       <span aria-hidden className={cn("size-2.5 rounded-full", DOT[tone])} />
       {label}
     </span>
