@@ -237,6 +237,45 @@ describe("a pool's state", () => {
     expect(view(d)).toContain("Proposing pools comes with Mynt&#x27;s next update.");
   });
 
+  it("My pools shows each pool's capital totals, and Not measured with why when Mynt couldn't tell", () => {
+    const rails = { principal_cents: 4_000_000, settled_in_cents: 5_000_000, pending_in_cents: 2_000_000, queued_withdrawal_cents: 500_000, pending_out_cents: 0, paid_out_cents: 1_000_000, unresolved_cents: 0, firms_with_balance: 1 };
+    const zero = { ...rails, principal_cents: 0, settled_in_cents: 0, pending_in_cents: 0, queued_withdrawal_cents: 0, paid_out_cents: 0, firms_with_balance: 0 };
+    const onRails = row({ name: "On rails", capital: { rails, on_chain: null } });
+    const onChain = row({
+      id: "11111111-1111-4111-8111-111111111120",
+      name: "On chain",
+      capital: { rails: zero, on_chain: { unit: "usdc_base_units", cluster: "devnet", principal: 6_500_000, deposited: null, indexed_principal: null, queued: null, paid_out: null, indexed_at: null, not_measured: { deposited: "The indexer hasn't read this treasury's history yet", queued: "The indexer hasn't read this treasury's history yet", paid_out: "The indexer hasn't read this treasury's history yet" } } },
+    });
+    const older = row({ id: "11111111-1111-4111-8111-111111111121", name: "Older Mynt" });
+    const d = data({ access: { builder: true, liquidityProvider: false } });
+    d.builder!.pools = [onRails, onChain, older];
+    const html = view(d, "my-pools");
+    for (const label of ["Principal", "Settled in", "Settling in", "Queued for withdrawal", "Paid out"]) expect(html).toContain(`>${label}</th>`);
+    const cell = (pool: string, key: string) => html.match(new RegExp(`data-pool="${pool}".*?data-capital="${key}"[^>]*>(.*?)</td>`))?.[0] ?? "";
+    // Rails: dollars, measured.
+    expect(cell(onRails.id, "principal")).toContain("$40,000.00");
+    expect(cell(onRails.id, "settledIn")).toContain("$50,000.00");
+    expect(cell(onRails.id, "pendingIn")).toContain("$20,000.00");
+    expect(cell(onRails.id, "queued")).toContain("$5,000.00");
+    expect(cell(onRails.id, "paidOut")).toContain("$10,000.00");
+    // On chain: the pool account's principal in USDC; what the indexer hasn't read is Not measured, never 0.
+    expect(cell(onChain.id, "principal")).toContain("6.5 USDC");
+    expect(cell(onChain.id, "settledIn")).toMatch(/title="The indexer hasn&#x27;t read this treasury&#x27;s history yet"[^>]*>.*Not measured/);
+    expect(cell(onChain.id, "paidOut")).toContain("Not measured");
+    expect(cell(onChain.id, "paidOut")).not.toContain("0 USDC");
+    // A Mynt that doesn't report totals: Not measured, saying so.
+    expect(cell(older.id, "principal")).toMatch(/title="This Mynt doesn&#x27;t report pool totals yet"[^>]*>.*Not measured/);
+    expect(cell(older.id, "principal")).not.toContain("$0.00");
+    // Hidden by panel width like the other columns: principal first, then the queue, then the rest.
+    expect(html).toMatch(/class="[^"]*hidden @lg\/list:table-cell[^"]*"[^>]*>Principal</);
+    expect(html).toMatch(/class="[^"]*hidden @2xl\/list:table-cell[^"]*"[^>]*>Queued for withdrawal</);
+    expect(html).toMatch(/class="[^"]*hidden @5xl\/list:table-cell[^"]*"[^>]*>Paid out</);
+    // A liquidity provider's view of a pool: the totals aren't theirs, and say why.
+    const theirs = fromPools([poolRow({ capital: null, capital_not_shown: "Only the pool's builder, its sponsor or an admin sees its totals" })])[0];
+    expect(theirs.capital).toBeNull();
+    expect(theirs.capitalWhy).toBe("Only the pool's builder, its sponsor or an admin sees its totals");
+  });
+
   it("the proposal form names the sponsor's approval and sends cents and basis points", () => {
     const d = data({ access: { builder: true, liquidityProvider: false } });
     // The form opens in a sheet from Propose pool (test/earn-assistant.test.tsx opens it); its one line says what proposing does.

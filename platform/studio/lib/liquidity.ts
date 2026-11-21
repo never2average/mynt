@@ -8,7 +8,7 @@
 // capital and ask for it back. Money only ever moves on a rail the pool's sponsoring licence
 // provider approved; Mynt never holds anyone's funds or keys.
 
-import { onChainPositionFrom, reviveOnChainPosition, treasuryFrom, usdcBaseUnitsToCents, type OnChainPosition, type Treasury } from "./wallets";
+import { baseUnitsOf, onChainPositionFrom, reviveOnChainPosition, treasuryFrom, usdcBaseUnitsToCents, usdcText, type OnChainPosition, type Treasury } from "./wallets";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -105,7 +105,69 @@ export type Pool = {
   offeringCleared: boolean;
   createdAt: string | null;
   treasury: Treasury | null; // an on-chain USDC treasury (lib/wallets.ts), when the pool has one
+  capital: PoolCapital | null; // the pool's totals, for its builder, sponsor or an admin; null when Mynt didn't give them
+  capitalWhy: string | null; // why capital is null
 };
+
+// A pool's capital as list_pools totals it over every firm and wallet (core/src/liquidity-tools.ts
+// withCapital). Rails figures are integer cents; on-chain ones USDC base units as decimal strings
+// (strings, so the page's JSON carries them exactly). A figure Mynt couldn't measure is null, with
+// its reason in notMeasured: never shown as 0.
+export type PoolCapital = {
+  rails: { principalCents: number | null; settledInCents: number | null; pendingInCents: number | null; queuedCents: number | null; paidOutCents: number | null; unresolvedCents: number | null } | null;
+  onChain: { principal: string | null; deposited: string | null; queued: string | null; paidOut: string | null; indexedAt: string | null; notMeasured: Record<string, string> } | null;
+};
+export const CAPITAL_NOT_REPORTED = "This Mynt doesn't report pool totals yet";
+
+function capitalFrom(v: unknown): PoolCapital | null {
+  if (!isObj(v)) return null;
+  const r = isObj(v.rails) ? v.rails : null;
+  const c = isObj(v.on_chain) ? v.on_chain : null;
+  const units = (x: unknown) => baseUnitsOf(x)?.toString() ?? null;
+  const why = c && isObj(c.not_measured) ? Object.fromEntries(Object.entries(c.not_measured).filter((e): e is [string, string] => typeof e[1] === "string")) : {};
+  return {
+    rails: r ? { principalCents: num(r.principal_cents), settledInCents: num(r.settled_in_cents), pendingInCents: num(r.pending_in_cents), queuedCents: num(r.queued_withdrawal_cents), paidOutCents: num(r.paid_out_cents), unresolvedCents: num(r.unresolved_cents) } : null,
+    onChain: c ? { principal: units(c.principal), deposited: units(c.deposited), queued: units(c.queued), paidOut: units(c.paid_out), indexedAt: str(c.indexed_at), notMeasured: why } : null,
+  };
+}
+
+// One figure of a pool's capital as a cell: its text, and why when it reads Not measured.
+export type CapitalCell = { text: string; why: string | null };
+export type CapitalFigure = "principal" | "settledIn" | "pendingIn" | "queued" | "paidOut";
+export const CAPITAL_COLUMNS: { key: CapitalFigure; label: string }[] = [
+  { key: "principal", label: "Principal" },
+  { key: "settledIn", label: "Settled in" },
+  { key: "pendingIn", label: "Settling in" },
+  { key: "queued", label: "Queued for withdrawal" },
+  { key: "paidOut", label: "Paid out" },
+];
+const RAILS_KEY: Record<CapitalFigure, keyof NonNullable<PoolCapital["rails"]>> = { principal: "principalCents", settledIn: "settledInCents", pendingIn: "pendingInCents", queued: "queuedCents", paidOut: "paidOutCents" };
+// On chain, a deposit settles in the transaction that makes it: nothing is ever settling in.
+const CHAIN_KEY: Record<CapitalFigure, { key: keyof Omit<NonNullable<PoolCapital["onChain"]>, "notMeasured" | "indexedAt">; reason: string } | null> = {
+  principal: { key: "principal", reason: "principal" },
+  settledIn: { key: "deposited", reason: "deposited" },
+  pendingIn: null,
+  queued: { key: "queued", reason: "queued" },
+  paidOut: { key: "paidOut", reason: "paid_out" },
+};
+const NOT_MEASURED = "Not measured";
+
+// A pool's figure: on rails in dollars; in an on-chain treasury in USDC (with the rails' dollars
+// beside it if the rails hold money too). Never 0 for something unknown.
+export function capitalCell(p: Pool, figure: CapitalFigure): CapitalCell {
+  const cap = p.capital;
+  if (!cap) return { text: NOT_MEASURED, why: p.capitalWhy ?? CAPITAL_NOT_REPORTED };
+  const railsCents = cap.rails ? cap.rails[RAILS_KEY[figure]] : null;
+  const railsText = railsCents === null ? null : usd(railsCents);
+  if (!cap.onChain) return railsText === null ? { text: NOT_MEASURED, why: "Mynt didn't give this pool's rails figures" } : { text: railsText, why: null };
+  const r = cap.rails;
+  const railsHoldMoney = Boolean(r && [r.settledInCents, r.pendingInCents, r.queuedCents, r.paidOutCents].some((c) => (c ?? 0) > 0));
+  const spec = CHAIN_KEY[figure];
+  if (!spec) return railsHoldMoney && railsText !== null ? { text: railsText, why: null } : { text: "—", why: "On chain, a deposit settles in the transaction that makes it" };
+  const chain = cap.onChain[spec.key];
+  if (chain === null) return { text: NOT_MEASURED, why: cap.onChain.notMeasured[spec.reason] ?? "Mynt didn't measure this on chain" };
+  return { text: railsHoldMoney && railsText !== null ? `${usdcText(chain)} + ${railsText}` : usdcText(chain), why: null };
+}
 
 export function fromPools(reply: unknown): Pool[] {
   return list(reply, "pools")
@@ -134,6 +196,8 @@ export function fromPools(reply: unknown): Pool[] {
       offeringCleared: p.offering_cleared === true,
       createdAt: str(p.created_at),
       treasury: treasuryFrom(p.treasury),
+      capital: capitalFrom(p.capital),
+      capitalWhy: isObj(p.capital) ? null : (str(p.capital_not_shown) ?? CAPITAL_NOT_REPORTED),
     }))
     .filter((p) => p.id && p.productId);
 }
