@@ -57,44 +57,6 @@ export function useFitRows(fallback = PAGE_SIZE): { ref: (el: HTMLElement | null
   return { ref: setEl, size }
 }
 
-// A panel's cards never scroll either: as many rows of cards as fit the card area's height (at
-// least one), times the columns the grid has at the panel's width (CARD_GRID: one column in a
-// narrow panel, two from a 36rem one, set by the container query and read back from the grid).
-// A card's height is the first card's, measured; before that (or on the server) it is `cardPx`.
-export const CARD_GRID = "grid grid-cols-1 gap-3 @xl/list:grid-cols-2"
-const CARD_GAP_PX = 12 // gap-3
-
-export function cardsThatFit(area: number, card: number, columns: number): number {
-  return Math.max(1, Math.floor((area + CARD_GAP_PX) / (card + CARD_GAP_PX))) * Math.max(1, columns)
-}
-
-function gridColumns(grid: HTMLElement | null): number {
-  if (!grid || typeof window === "undefined") return 1
-  const cols = window.getComputedStyle(grid).gridTemplateColumns
-  return cols && cols !== "none" ? cols.trim().split(/\s+/).length : 1
-}
-
-export function useFitCards(cardPx: number, fallback = 6): { ref: (el: HTMLElement | null) => void; size: number } {
-  const [el, setEl] = useState<HTMLElement | null>(null)
-  const [size, setSize] = useState(fallback)
-  const measure = useCallback(() => {
-    if (!el) return
-    const area = el.clientHeight
-    if (!area) return // collapsed or hidden: keep the last size until it shows again
-    const card = el.querySelector<HTMLElement>("[data-card]")?.offsetHeight || cardPx
-    const n = cardsThatFit(area, card, gridColumns(el.querySelector<HTMLElement>("[data-card-grid]")))
-    setSize((s) => (s === n ? s : n))
-  }, [el, cardPx])
-  useIsoLayoutEffect(() => measure())
-  useEffect(() => {
-    if (!el || typeof ResizeObserver === "undefined") return
-    const ro = new ResizeObserver(() => measure())
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [el, measure])
-  return { ref: setEl, size }
-}
-
 // A panel's table shows every column at every width, each with a min width for what it holds; a
 // table wider than its panel scrolls sideways inside it (PanelList's table area), never down (the
 // pager pages). The first column (the row's name) stays pinned while it scrolls. Every column is in
@@ -169,7 +131,6 @@ export function PanelList({
   cta,
   children,
   areaRef,
-  cards,
   noun,
   page,
   pages,
@@ -177,7 +138,6 @@ export function PanelList({
   onPage,
 }: {
   id: string
-  cards?: boolean // the children are a card grid (CARD_GRID), not a table: no frame around them
   noun?: [string, string] // what the pager counts, singular and plural ("rows" by default)
   areaRef?: (el: HTMLElement | null) => void // useFitRows' ref: the rows per page follow this area's height
   search: string
@@ -235,18 +195,12 @@ export function PanelList({
           </div>
         )}
       </div>
-      {/* No scrolling down: the page holds as many rows (or cards) as fit. A table wider than the
-          panel scrolls sideways in the table area (shadcn's own scroll wrapper is turned off, so
-          the area is the one scroller and the pinned first column sticks to it). */}
-      {cards ? (
-        <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden" data-table-area data-card-area>
-          {children}
-        </div>
-      ) : (
-        <div ref={areaRef} className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded-lg border [&_[data-slot=table-container]]:overflow-visible [&_td]:px-3 [&_th]:px-3" data-table-area>
-          {children}
-        </div>
-      )}
+      {/* No scrolling down: the page holds as many rows as fit. A table wider than the panel
+          scrolls sideways in the table area (shadcn's own scroll wrapper is turned off, so the
+          area is the one scroller and the pinned first column sticks to it). */}
+      <div ref={areaRef} className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded-lg border [&_[data-slot=table-container]]:overflow-visible [&_td]:px-3 [&_th]:px-3" data-table-area>
+        {children}
+      </div>
       <ListPager page={page} pages={pages} total={total} onPage={onPage} noun={noun} />
     </div>
   )
