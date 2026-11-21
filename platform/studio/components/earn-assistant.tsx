@@ -6,10 +6,10 @@
 // message the right panel opens beside it with Pools (every pool open to the user as a table,
 // showing the ones the conversation matched first, with Commit capital for liquidity providers and,
 // on the pools they're invested in, their position with Withdraw and Details), My pools (builders)
-// and My strategies (liquidity providers: the commitments and
-// withdrawals the assistant drafted for liquidity providers, and the pool proposals it drafted for
-// builders, as cards, each confirmed only by the user's own click, which calls the same routes as
-// the tables and My pools' Propose pool; the assistant can't send anything itself). The chat bar has
+// and My strategies (the commitments and withdrawals the assistant drafted for liquidity
+// providers, and the pool proposals it drafted for builders, as a table, each approved only by the
+// user's own click in its approval sheet, which calls the same routes as the tables and My pools'
+// Propose pool, or declined; the assistant can't send anything itself). The chat bar has
 // the wallet picker, and a draft for a pool with an on-chain treasury is a devnet deposit or
 // withdrawal the user signs in their own wallet (components/earn-wallet.tsx). The chat's top right
 // has Past conversations: this user's earlier Earn threads in this browser (lib/earn-history.ts),
@@ -28,9 +28,10 @@ import { ChatSearchDialog } from "@/components/chat-search"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { ViewSwitch } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { CARD_GRID, COL, PanelList, useFitCards, useFitRows, usePaged } from "@/components/list-layout"
-import { StatusDot, type DotTone } from "@/components/promotion-view"
-import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, LinkedWallet, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
+import { COL, PanelList, useFitRows, usePaged } from "@/components/list-layout"
+import { APPROVAL_LABELS, ApprovalStatus, ApprovalSteps, linearSteps, type ApprovalState, type Step } from "@/components/approval"
+import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, LinkedWallet, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState, type OnChainFlow } from "@/components/earn-wallet"
+import { shortAddress } from "@/lib/linked-accounts"
 import {
   CommitForm,
   commitOutcome,
@@ -45,6 +46,7 @@ import {
   pagerOf,
   poolFacets,
   PositionDetailsSheet,
+  proposeConsequence,
   ProposeForm,
   StageStatus,
   waitingText,
@@ -176,18 +178,6 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
 
 // ---- the panel ----
 
-// Every line of a card is one line (cut short, the whole of it in its tooltip), so all cards of a
-// tab are one height and the cards per page that fit the panel stay right.
-const STRATEGY_CARD_PX = 124
-
-function EmptyCards({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex h-full items-center justify-center rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground" data-empty-cards>
-      {children}
-    </div>
-  )
-}
-
 const ALL_STAGES: PoolStage[] = ["awaiting_approval", "sandbox", "uncleared", "cleared"]
 const VIEW_LABELS: Record<PoolsView, string> = { matched: "Matched", all: "All", invested: "Invested" }
 
@@ -309,9 +299,7 @@ function PoolTableRow({
           </TableCell>
           <TableCell className={COL.wide}>
             {waiting ? (
-              <span className={`${line} text-amber-600 dark:text-amber-300`} title={waiting} data-waiting-requests>
-                {waiting}
-              </span>
+              <ApprovalStatus state="waiting" label={waiting} className="max-w-56" data-waiting-requests />
             ) : (
               <span className="text-muted-foreground">{holding ? "None" : "—"}</span>
             )}
@@ -550,13 +538,86 @@ export function draftCheck(draft: MoneyDraft, pool: PoolRow | null, position: Po
   return { commit, onChain, units, picked, onChainBlock, refusal }
 }
 
-// What became of a draft confirmed on rails, and the idempotency key it was (or will be) sent
-// with. The workspace keeps it (and saves it with the thread), so neither closing the sheet nor coming back to the thread later lets it be sent twice.
-type DraftState = { kind: "idle" } | { kind: "busy" } | { kind: "done"; message: string } | { kind: "error"; message: string }
+// What became of a draft, and the idempotency key it was (or will be) sent with. The workspace
+// keeps it (and saves it with the thread), so neither closing the sheet nor coming back to the
+// thread later lets it be sent twice. A declined draft is never sent.
+type DraftState = { kind: "idle" } | { kind: "busy" } | { kind: "done"; message: string } | { kind: "error"; message: string } | { kind: "declined" }
 export type DraftOutcome = { state: DraftState; key: string | null }
 const NOT_SENT: DraftOutcome = { state: { kind: "idle" }, key: null }
 
-// A draft from the assistant, as its sheet shows it: nothing happens until the user clicks its button.
+// Where an on-chain draft's signing stands (components/earn-wallet.tsx OnChainAction), for its
+// row's status and its sheet's steps. Only the page knows it, so it isn't saved with the thread.
+export type ChainStep = { kind: "idle" } | { kind: "preparing" } | { kind: "sign" } | { kind: "sending" } | { kind: "confirmed"; signature: string } | { kind: "failed"; message: string; signed: boolean }
+const chainStepOf = (f: OnChainFlow): ChainStep =>
+  f.kind === "preparing"
+    ? { kind: "preparing" }
+    : f.kind === "review" || f.kind === "refreshing" || f.kind === "signing"
+      ? { kind: "sign" }
+      : f.kind === "sent"
+        ? { kind: "sending" }
+        : f.kind === "confirmed"
+          ? { kind: "confirmed", signature: f.signature }
+          : f.kind === "failed"
+            ? { kind: "failed", message: f.error, signed: true }
+            : f.kind === "error"
+              ? { kind: "failed", message: f.message, signed: false }
+              : { kind: "idle" }
+
+const RAIL_STEPS = ["Review", "Approve", "Done"]
+const CHAIN_STEPS = ["Review", "Approve", "Sign in wallet", "Done"]
+
+// The approval sheet's steps for a draft: Review, Approve, (on chain) Sign in wallet, Done.
+export function draftSteps(o: DraftOutcome, onChain: boolean, chain: ChainStep = { kind: "idle" }): Step[] {
+  const labels = onChain ? CHAIN_STEPS : RAIL_STEPS
+  const s = o.state.kind
+  if (s === "declined") return linearSteps(labels, 1, "declined")
+  if (s === "done") return linearSteps(labels, labels.length)
+  if (!onChain) return s === "busy" ? linearSteps(labels, 1) : s === "error" ? linearSteps(labels, 1, "failed") : linearSteps(labels, 0)
+  switch (chain.kind) {
+    case "preparing":
+      return linearSteps(labels, 1)
+    case "sign":
+      return linearSteps(labels, 2)
+    case "sending":
+      return linearSteps(labels, 3)
+    case "confirmed":
+      return linearSteps(labels, 4)
+    case "failed":
+      return linearSteps(labels, chain.signed ? 2 : 1, "failed")
+    default:
+      return linearSteps(labels, 0)
+  }
+}
+
+// The Decline button: the draft is marked declined (and kept so with the thread); it's never sent.
+function DeclineButton({ id, disabled, onDecline }: { id: string; disabled: boolean; onDecline?: () => void }) {
+  if (!onDecline) return null
+  return (
+    <Button variant="outline" onClick={onDecline} disabled={disabled} data-decline={id}>
+      Decline
+    </Button>
+  )
+}
+
+// What will happen, as an approval sheet's summary: one term a line.
+function Summary({ rows }: { rows: ([string, React.ReactNode, string] | null | false)[] }) {
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-lg border p-3 text-sm" data-approval-summary>
+      {rows
+        .filter((r): r is [string, React.ReactNode, string] => Boolean(r))
+        .map(([label, value, id]) => (
+          <div key={id} className="contents" data-summary-row={id}>
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="min-w-0">{value}</dd>
+          </div>
+        ))}
+    </dl>
+  )
+}
+
+// A draft from the assistant, as its approval sheet shows it: where the approval stands, what will
+// happen, then Approve and Decline. Nothing happens until the user clicks Approve (on chain, then
+// signs in their own wallet).
 export function DraftPanel({
   draft,
   pool,
@@ -567,6 +628,8 @@ export function DraftPanel({
   newKey = newIdempotencyKey,
   outcome,
   onOutcome,
+  onChainStep,
+  onDecline,
 }: {
   draft: MoneyDraft
   pool: PoolRow | null
@@ -577,16 +640,22 @@ export function DraftPanel({
   newKey?: () => string
   outcome?: DraftOutcome
   onOutcome?: (o: DraftOutcome) => void
+  onChainStep?: (s: ChainStep) => void
+  onDecline?: () => void
 }) {
   const [local, setLocal] = useState<DraftOutcome>(NOT_SENT)
   const o = outcome ?? local
   const set = onOutcome ?? setLocal
   const state = o.state
+  const [chain, setChain] = useState<ChainStep>({ kind: "idle" })
+  // An on-chain draft already done when its sheet opened says so; one signed while it's open keeps
+  // the wallet flow's own confirmation on screen.
+  const [doneAtOpen] = useState(state.kind === "done")
   const { commit, onChain, units, picked, onChainBlock, refusal } = draftCheck(draft, pool, position, canCommit, canWithdraw)
-  const label = commit ? "Commit capital" : "Request withdrawal"
+  const closed = state.kind === "done" || state.kind === "declined"
 
   const confirm = async () => {
-    if (refusal || state.kind === "busy" || state.kind === "done") return
+    if (refusal || state.kind === "busy" || closed) return
     const key = o.key ?? newKey()
     set({ state: { kind: "busy" }, key })
     const r = draft.kind === "commit"
@@ -595,53 +664,67 @@ export function DraftPanel({
     if ("error" in r) return set({ state: { kind: "error", message: r.error }, key: r.refused ? null : key })
     set({ state: { kind: "done", message: commit ? commitOutcome(r.reply, draft.sandbox) : withdrawalOutcome(r.reply, draft.sandbox) }, key })
   }
+  const flow = (f: OnChainFlow) => {
+    const s = chainStepOf(f)
+    setChain(s)
+    onChainStep?.(s)
+    if (s.kind === "confirmed" && state.kind !== "done") set({ state: { kind: "done", message: `Signed in your wallet and confirmed (transaction ${shortAddress(s.signature)}).` }, key: o.key })
+  }
+  const inFlight = state.kind === "busy" || chain.kind === "preparing" || chain.kind === "sign" || chain.kind === "sending"
+  const decline = <DeclineButton id={draft.id} disabled={closed || inFlight} onDecline={onDecline} />
+  const effect = commit
+    ? "It counts in your position once it settles. Withdrawals later wait the notice period and are paid only while the pool stays above its minimum reserve."
+    : "Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve."
 
   return (
     <div className="flex flex-col gap-4" data-draft={draft.kind}>
-      <p className="text-sm text-muted-foreground">Nothing has been sent: review it, then confirm it yourself.</p>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-muted-foreground">Pool</dt>
-        <dd className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="block max-w-60 truncate font-medium" title={draft.poolName} data-draft-pool>
-            {draft.poolName}
-          </span>
-          {draft.sandbox && <Money sandbox />}
-        </dd>
-        <dt className="text-muted-foreground">Amount</dt>
-        <dd className="font-semibold tabular-nums" data-draft-amount>
-          {usd(draft.amountCents)}
-        </dd>
-        {pool && (
-          <>
-            <dt className="text-muted-foreground">Lock-in</dt>
-            <dd data-lock-in>{lockInText(pool.lockInDays)}</dd>
-            <dt className="text-muted-foreground">Notice period</dt>
-            <dd data-notice>{noticeText(pool.noticePeriodDays)}</dd>
-          </>
-        )}
-        {draft.kind === "commit" && !onChain && draft.state && (
-          <>
-            <dt className="text-muted-foreground">From</dt>
-            <dd>{draft.state.slice(3).toUpperCase()}</dd>
-          </>
-        )}
-        {onChain && (
-          <>
-            <dt className="text-muted-foreground">{commit ? "From" : "To"}</dt>
-            <dd className="flex items-center gap-2" data-draft-wallet>
+      <ApprovalSteps steps={draftSteps(o, onChain, chain)} />
+      <Summary
+        rows={[
+          [
+            "Pool",
+            <span key="pool" className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="block max-w-60 truncate font-medium" title={draft.poolName} data-draft-pool>
+                {draft.poolName}
+              </span>
+              {draft.sandbox && <Money sandbox />}
+            </span>,
+            "pool",
+          ],
+          [
+            "Amount",
+            <span key="amount" className="font-semibold tabular-nums" data-draft-amount>
+              {usd(draft.amountCents)}
+            </span>,
+            "amount",
+          ],
+          pool && ["Lock-in", <span key="lock-in" data-lock-in>{lockInText(pool.lockInDays)}</span>, "lock-in"],
+          pool && ["Notice period", <span key="notice" data-notice>{noticeText(pool.noticePeriodDays)}</span>, "notice"],
+          pool && commit && ["Limits", <span key="limits" className="tabular-nums">{limitsText(pool)}</span>, "limits"],
+          pool && ["Minimum reserve", <span key="reserve">{reserveText(pool)}</span>, "reserve"],
+          draft.kind === "commit" && !onChain && Boolean(draft.state) && ["From", <span key="from">{draft.state!.slice(3).toUpperCase()}</span>, "from"],
+          onChain && [
+            commit ? "From" : "To",
+            <span key="wallet" className="flex items-center gap-2" data-draft-wallet>
               {draft.wallet ? <LinkedWallet address={draft.wallet} /> : <span className="text-xs">your chosen wallet</span>}
               <DevnetBadge />
-            </dd>
-          </>
-        )}
-      </dl>
-      {pool && !onChain && <p className="text-sm text-muted-foreground">{commit ? `${limitsText(pool)}.` : `Paid first in, first out after the notice period, and only as far as the latest verified health snapshot keeps the pool above its minimum reserve.`}</p>}
-      {!onChain && refusal && state.kind !== "done" && (
+            </span>,
+            "wallet",
+          ],
+          pool && ["What happens", <span key="effect" data-approval-effect>{effect}</span>, "effect"],
+        ]}
+      />
+      {!onChain && refusal && !closed && (
         <p className="text-sm text-amber-600 dark:text-amber-300" data-refusal>
           {refusal}
         </p>
       )}
-      {state.kind === "done" && (
+      {state.kind === "declined" && (
+        <p role="status" className="text-sm text-muted-foreground" data-draft-declined>
+          Declined. Nothing was sent.
+        </p>
+      )}
+      {state.kind === "done" && (!onChain || doneAtOpen) && (
         <p role="status" className="text-sm" data-draft-done>
           {state.message}
         </p>
@@ -651,14 +734,19 @@ export function DraftPanel({
           {state.message}
         </p>
       )}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2" data-approval-footer>
         {onChain ? (
-          <OnChainAction kind={commit ? "deposit" : "withdrawal"} poolId={draft.poolId} amountBaseUnits={units} amountText={usd(draft.amountCents)} deposit={picked && "deposit" in picked ? picked.deposit : null} wallet={draft.wallet ?? null} blocked={onChainBlock} newKey={newKey} />
+          state.kind === "declined" || (state.kind === "done" && doneAtOpen) ? null : (
+            <OnChainAction kind={commit ? "deposit" : "withdrawal"} poolId={draft.poolId} amountBaseUnits={units} amountText={usd(draft.amountCents)} deposit={picked && "deposit" in picked ? picked.deposit : null} wallet={draft.wallet ?? null} blocked={onChainBlock} newKey={newKey} label="Approve" beside={decline} onFlow={flow} />
+          )
         ) : (
-          <Button onClick={() => void confirm()} disabled={Boolean(refusal) || state.kind === "busy" || state.kind === "done"} data-confirm={draft.kind}>
-            {state.kind === "busy" && <Loader2 className="animate-spin" />}
-            {label}
-          </Button>
+          <>
+            <Button onClick={() => void confirm()} disabled={Boolean(refusal) || state.kind === "busy" || closed} data-confirm={draft.kind}>
+              {state.kind === "busy" && <Loader2 className="animate-spin" />}
+              Approve
+            </Button>
+            {decline}
+          </>
         )}
       </div>
     </div>
@@ -676,11 +764,12 @@ export function proposalBlock(draft: ProposalDraft, options: Sponsored[] | null)
 export const proposalTermsText = (t: ProposalDraft["terms"]) =>
   `Reserve ${percentOfBps(t.min_reserve_bps)}, at least ${usd(t.min_reserve_floor_cents)} · Notice ${noticeText(t.notice_period_days)} · ${usd(t.min_commitment_cents)} – ${usd(t.max_commitment_cents)} per firm`
 
-// A pool proposal from the assistant, as its sheet shows it: the Propose pool form, prefilled from
-// the draft. It's sent with the draft's idempotency key, kept in its outcome (and saved with the
-// thread), so a retry after a network error, or after coming back to the thread, is the pool Mynt
-// may already have made, never a second one. Only a refusal from Mynt lets go of the key.
-export function ProposalPanel({ draft, options, actions, outcome, onOutcome, newKey = newIdempotencyKey }: { draft: ProposalDraft; options: Sponsored[] | null; actions: LiquidityActions; outcome?: DraftOutcome; onOutcome?: (o: DraftOutcome) => void; newKey?: () => string }) {
+// A pool proposal from the assistant, as its approval sheet shows it: its steps and summary, then
+// the Propose pool form, prefilled from the draft, with Approve and Decline. It's sent with the
+// draft's idempotency key, kept in its outcome (and saved with the thread), so a retry after a
+// network error, or after coming back to the thread, is the pool Mynt may already have made, never
+// a second one. Only a refusal from Mynt lets go of the key.
+export function ProposalPanel({ draft, options, actions, outcome, onOutcome, newKey = newIdempotencyKey, onDecline }: { draft: ProposalDraft; options: Sponsored[] | null; actions: LiquidityActions; outcome?: DraftOutcome; onOutcome?: (o: DraftOutcome) => void; newKey?: () => string; onDecline?: () => void }) {
   const [local, setLocal] = useState<DraftOutcome>(NOT_SENT)
   const o = outcome ?? local
   const set = onOutcome ?? setLocal
@@ -689,18 +778,12 @@ export function ProposalPanel({ draft, options, actions, outcome, onOutcome, new
   const [fresh, setFresh] = useState(newKey)
   const key = o.key ?? fresh
   const block = proposalBlock(draft, options)
-  if (o.state.kind === "done") return <FormDone message={o.state.message} />
-  if (block || !options)
-    return (
-      <p className="text-sm text-amber-600 dark:text-amber-300" data-refusal>
-        {block}
-      </p>
-    )
-  const option = options.indexOf(proposalOptions(options, draft.productId, draft.componentKey, draft.sponsorId)[0])
+  const closed = o.state.kind === "done" || o.state.kind === "declined"
+  const decline = <DeclineButton id={draft.id} disabled={closed || o.state.kind === "busy"} onDecline={onDecline} />
   const once: LiquidityActions = {
     ...actions,
     propose: async (input) => {
-      if (sending.current || o.state.kind === "busy") return { error: "This proposal is already being sent." }
+      if (sending.current || o.state.kind === "busy" || closed) return { error: "This proposal is already being sent." }
       sending.current = true
       const sent = input.idempotency_key ?? key
       set({ state: { kind: "busy" }, key: sent })
@@ -713,9 +796,38 @@ export function ProposalPanel({ draft, options, actions, outcome, onOutcome, new
       return r
     },
   }
+  const option = options && !block ? options.indexOf(proposalOptions(options, draft.productId, draft.componentKey, draft.sponsorId)[0]) : -1
   return (
-    <div data-draft="proposal">
-      <ProposeForm options={options} actions={once} idempotencyKey={key} initial={{ option, ...proposalFields(draft.terms) }} onDone={(message) => set({ state: { kind: "done", message }, key })} />
+    <div className="flex flex-col gap-4" data-draft="proposal">
+      <ApprovalSteps steps={draftSteps(o, false)} />
+      <Summary
+        rows={[
+          ["Pool", <span key="pool" className="block max-w-60 truncate font-medium" title={draft.poolName} data-draft-pool>{draft.poolName}</span>, "pool"],
+          ["Product", <span key="product">{`${draft.productName}${draft.componentKey ? ` · ${draft.componentKey}` : ""}`}</span>, "product"],
+          ["Sponsor", <span key="sponsor">{draft.sponsorName ?? "Not named"}</span>, "sponsor"],
+          ["Money", <Money key="money" sandbox={draft.sandbox} />, "money"],
+          ["Terms", <span key="terms" data-draft-terms>{proposalTermsText(draft.terms)}</span>, "terms"],
+          ["What happens", <span key="effect" data-approval-effect>{proposeConsequence(draft.sponsorName ?? "The sponsoring licence provider")}</span>, "effect"],
+        ]}
+      />
+      {o.state.kind === "done" ? (
+        <FormDone message={o.state.message} />
+      ) : o.state.kind === "declined" ? (
+        <p role="status" className="text-sm text-muted-foreground" data-draft-declined>
+          Declined. Nothing was sent.
+        </p>
+      ) : block || !options ? (
+        <>
+          <p className="text-sm text-amber-600 dark:text-amber-300" data-refusal>
+            {block}
+          </p>
+          <div className="flex flex-wrap items-center gap-2" data-approval-footer>
+            {decline}
+          </div>
+        </>
+      ) : (
+        <ProposeForm options={options} actions={once} idempotencyKey={key} initial={{ option, ...proposalFields(draft.terms) }} onDone={(message) => set({ state: { kind: "done", message }, key })} submitLabel="Approve" beside={decline} consequence={false} />
+      )}
     </div>
   )
 }
@@ -727,15 +839,27 @@ const KIND_OPTIONS = [
 const PROPOSAL_OPTION = { value: "proposal", label: "Pool proposal" }
 
 // Draft outcomes as a thread keeps them (lib/earn-history.ts), and back: the key a draft was (or
-// will be) sent with, and what Mynt answered once it was sent.
+// will be) sent with, what Mynt answered once it was sent, and whether the user declined it.
 export const savedOutcomes = (all: Record<string, DraftOutcome>): Record<string, SavedOutcome> =>
-  Object.fromEntries(Object.entries(all).map(([id, o]) => [id, { key: o.key, sent: o.state.kind === "done" ? o.state.message : null }]))
+  Object.fromEntries(Object.entries(all).map(([id, o]) => [id, { key: o.key, sent: o.state.kind === "done" ? o.state.message : null, ...(o.state.kind === "declined" ? { declined: true as const } : {}) }]))
 export const restoredOutcomes = (all: Record<string, SavedOutcome>): Record<string, DraftOutcome> =>
-  Object.fromEntries(Object.entries(all).map(([id, o]) => [id, { key: o.key, state: o.sent !== null ? { kind: "done", message: o.sent } : { kind: "idle" } } as DraftOutcome]))
+  Object.fromEntries(Object.entries(all).map(([id, o]) => [id, { key: o.key, state: o.sent !== null ? { kind: "done", message: o.sent } : o.declined ? { kind: "declined" } : { kind: "idle" } } as DraftOutcome]))
+
+// My strategies' columns: every one shows at every width, each with a min width for what it holds.
+export const STRATEGY_COLUMNS = [
+  { label: "Strategy", className: COL.name },
+  { label: "Pool", className: COL.text },
+  { label: "Amount", className: COL.money },
+  { label: "Terms", className: COL.wide },
+  { label: "Status", className: COL.text },
+  { label: "Actions", className: COL.actions },
+]
 
 // My strategies: what the assistant drafted for the user (commitments and withdrawals, or pool
-// proposals for a builder), one card each, reviewed and confirmed (or not) in a sheet from its card's Review. The outcomes are the
-// workspace's when it passes them (so a thread keeps them), else this tab's own.
+// proposals for a builder), one table row each, with its approval status. Review opens the
+// approval sheet (its steps, what will happen, Approve and Decline); Decline on the row or in the
+// sheet marks it declined, never sent. The outcomes are the workspace's when it passes them (so a
+// thread keeps them), else this tab's own.
 export function StrategiesTab({
   data,
   drafts,
@@ -756,28 +880,54 @@ export function StrategiesTab({
   const [own, setOwn] = useState<Record<string, DraftOutcome>>({})
   const outcomes = given ?? own
   const setOutcome = (id: string, o: DraftOutcome) => (onOutcome ? onOutcome(id, o) : setOwn((all) => ({ ...all, [id]: o })))
+  const [chain, setChain] = useState<Record<string, ChainStep>>({})
   const [open, setOpen] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [kind, setKind] = useState<string[]>([])
   const proposable = data.builder?.proposable ?? null
   const poolOf = (d: MoneyDraft) => pools.find((p) => p.id === d.poolId) ?? null
   const positionOf = (d: MoneyDraft) => positions.find((p) => p.poolId === d.poolId && (d.kind === "withdraw" && d.onChain ? p.onChain && p.wallet === d.wallet : !p.onChain)) ?? null
-  const statusOf = (d: Draft): { text: string; tone: DotTone } => {
-    const o = outcomes[d.id] ?? NOT_SENT
-    if (o.state.kind === "done") return { text: d.kind === "proposal" ? "Proposed" : "Sent", tone: "green" }
-    if (o.state.kind === "busy") return { text: "Sending…", tone: "gray" }
-    if (o.state.kind === "error") return { text: o.state.message, tone: "red" }
+  const outcomeOf = (d: Draft) => outcomes[d.id] ?? NOT_SENT
+  const statusOf = (d: Draft): { state: ApprovalState; label?: string; reason?: string } => {
+    const o = outcomeOf(d)
+    if (o.state.kind === "declined") return { state: "declined" }
+    if (o.state.kind === "done") return { state: "done", label: d.kind === "proposal" ? "Proposed" : d.onChain || (d.kind === "commit" && poolOf(d)?.treasury) ? "Done" : "Sent", reason: o.state.message }
+    if (o.state.kind === "busy") return { state: "sending" }
+    if (o.state.kind === "error") return { state: "failed", reason: o.state.message }
     if (d.kind === "proposal") {
       const block = proposalBlock(d, proposable)
-      return block ? { text: block, tone: "amber" } : { text: "Ready to confirm", tone: "blue" }
+      return block ? { state: "blocked", label: block, reason: block } : { state: "needs-approval" }
     }
     const c = draftCheck(d, poolOf(d), positionOf(d), canCommit, canWithdraw)
-    if (c.onChain) return c.onChainBlock ? { text: c.onChainBlock, tone: "amber" } : { text: "Ready to sign in your wallet", tone: "blue" }
-    return c.refusal ? { text: c.refusal, tone: "amber" } : { text: "Ready to confirm", tone: "blue" }
+    if (c.onChain) {
+      const s = chain[d.id]
+      if (s?.kind === "preparing" || s?.kind === "sending") return { state: "sending" }
+      if (s?.kind === "sign") return { state: "sign" }
+      if (s?.kind === "failed") return { state: "failed", reason: s.message }
+      return c.onChainBlock ? { state: "blocked", label: c.onChainBlock, reason: c.onChainBlock } : { state: "needs-approval" }
+    }
+    return c.refusal ? { state: "blocked", label: c.refusal, reason: c.refusal } : { state: "needs-approval" }
+  }
+  // A draft can be declined until it's sent (or being sent, or waiting in the wallet).
+  const declinable = (d: Draft) => {
+    const s = outcomeOf(d).state.kind
+    const c = chain[d.id]?.kind
+    return s !== "done" && s !== "declined" && s !== "busy" && c !== "preparing" && c !== "sign" && c !== "sending" && c !== "confirmed"
+  }
+  const decline = (d: Draft) => {
+    if (!declinable(d)) return
+    setOutcome(d.id, { state: { kind: "declined" }, key: outcomeOf(d).key })
+    setOpen(null)
+  }
+  // Closing the sheet before anything was signed lets go of the wallet step (it starts again on Review).
+  const close = () => {
+    const id = open
+    if (id && (chain[id]?.kind === "preparing" || chain[id]?.kind === "sign")) setChain((all) => ({ ...all, [id]: { kind: "idle" } }))
+    setOpen(null)
   }
   const q = query.trim().toLowerCase()
   const shown = drafts.filter((d) => (!q || d.poolName.toLowerCase().includes(q) || (d.kind === "proposal" && d.productName.toLowerCase().includes(q))) && (!kind.length || kind.includes(d.kind)))
-  const fit = useFitCards(STRATEGY_CARD_PX)
+  const fit = useFitRows()
   const paged = usePaged(shown, fit.size)
   const kindText = (d: Draft) => (d.kind === "commit" ? "Commitment" : d.kind === "proposal" ? "Pool proposal" : "Withdrawal request")
   const termsOf = (d: Draft) => {
@@ -785,16 +935,22 @@ export function StrategiesTab({
     const pool = poolOf(d)
     return pool ? `Lock-in ${lockInText(pool.lockInDays)} · Notice ${noticeText(pool.noticePeriodDays)}` : "Terms not available"
   }
-  const exportCsv = () => downloadCsv("my-strategies.csv", toCsv(["Strategy", "Pool", "Amount", "Terms", "Status"], shown.map((d) => [kindText(d), d.poolName, d.kind === "proposal" ? "" : usd(d.amountCents), termsOf(d), statusOf(d).text])))
+  const statusWords = (d: Draft) => {
+    const s = statusOf(d)
+    const label = s.label ?? APPROVAL_LABELS[s.state]
+    return s.state === "failed" && s.reason ? `${label}: ${s.reason}` : label
+  }
+  const exportCsv = () => downloadCsv("my-strategies.csv", toCsv(["Strategy", "Pool", "Amount", "Terms", "Status"], shown.map((d) => [kindText(d), d.poolName, d.kind === "proposal" ? "—" : usd(d.amountCents), termsOf(d), statusWords(d)])))
   const current = drafts.find((d) => d.id === open) ?? null
   const kindOptions = [...(data.access.liquidityProvider ? KIND_OPTIONS : []), ...(data.access.builder ? [PROPOSAL_OPTION] : [])]
   const asked = [data.access.liquidityProvider && "a commitment or a withdrawal", data.access.builder && "a pool proposal"].filter(Boolean).join(", or ")
+  const line = "block max-w-56 truncate"
+  const sub = `${line} text-xs text-muted-foreground`
 
   return (
     <div className="h-full" data-earn-strategies-tab>
       <PanelList
         id="my-strategies"
-        cards
         noun={["strategy", "strategies"]}
         search={query}
         onSearch={(v) => {
@@ -823,67 +979,83 @@ export function StrategiesTab({
         areaRef={fit.ref}
         {...pagerOf(paged, shown.length)}
       >
-        {paged.shown.length ? (
-          <div className={CARD_GRID} data-card-grid>
-            {paged.shown.map((d) => {
-              const s = statusOf(d)
-              return (
-                <div key={d.id} className="flex min-w-0 flex-col gap-1 rounded-lg border p-3" data-card data-draft-card={d.id} data-draft-kind={d.kind}>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-medium" data-draft-title>
-                      {kindText(d)}
-                    </span>
-                    {d.kind !== "proposal" && (
-                      <span className="shrink-0 font-semibold tabular-nums" data-draft-amount>
-                        {usd(d.amountCents)}
+        <Table>
+          <TableHeader className="sticky top-0 bg-card">
+            <TableRow>
+              {STRATEGY_COLUMNS.map((c) => (
+                <TableHead key={c.label} className={c.className}>
+                  {c.label}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {paged.shown.length ? (
+              paged.shown.map((d) => {
+                const s = statusOf(d)
+                const needsYou = s.state === "needs-approval" || s.state === "sign"
+                const onChain = d.kind !== "proposal" && (d.onChain || (d.kind === "commit" && Boolean(poolOf(d)?.treasury)))
+                return (
+                  <TableRow key={d.id} data-draft-row={d.id} data-draft-kind={d.kind}>
+                    <TableCell className={COL.name}>
+                      <span className={`${line} font-medium`} data-draft-title>
+                        {kindText(d)}
                       </span>
-                    )}
-                  </div>
-                  <div className="flex h-5 min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-                    {d.kind === "proposal" && (
-                      <>
-                        <span className="min-w-0 truncate" title={d.productName} data-draft-product>
-                          {d.productName}
-                        </span>
-                        <span aria-hidden>·</span>
-                      </>
-                    )}
-                    <span className="min-w-0 truncate" title={d.poolName} data-draft-pool>
-                      {d.poolName}
-                    </span>
-                    {d.sandbox && (
-                      <>
-                        <span aria-hidden>·</span>
-                        <Money sandbox />
-                      </>
-                    )}
-                    {d.kind !== "proposal" && (d.onChain || (d.kind === "commit" && poolOf(d)?.treasury)) && <DevnetBadge />}
-                  </div>
-                  <div className="truncate text-sm" title={termsOf(d)} data-draft-terms>
-                    {termsOf(d)}
-                  </div>
-                  <div className="flex items-center justify-between gap-2 pt-1">
-                    <StatusDot tone={s.tone} label={s.text} title={s.text} className="min-w-0 shrink overflow-hidden font-normal" data-draft-status />
-                    <Button size="sm" variant="outline" className="shrink-0" onClick={() => setOpen(d.id)} data-review={d.id}>
-                      Review
-                    </Button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        ) : (
-          <EmptyCards>{drafts.length ? "No strategies match these filters." : `No strategies yet. Ask the assistant to draft ${asked}; you confirm each one yourself.`}</EmptyCards>
-        )}
+                      <span className={`${sub} flex items-center gap-1.5`}>
+                        {d.kind === "proposal" ? (
+                          <span className="min-w-0 truncate" title={d.productName} data-draft-product>
+                            {d.productName}
+                          </span>
+                        ) : (
+                          <Money sandbox={d.sandbox} />
+                        )}
+                        {onChain && <DevnetBadge />}
+                      </span>
+                    </TableCell>
+                    <TableCell className={COL.text}>
+                      <span className={line} title={d.poolName} data-draft-pool>
+                        {d.poolName}
+                      </span>
+                      {d.kind === "proposal" && d.sandbox && <Money sandbox />}
+                    </TableCell>
+                    <TableCell className={`${COL.money} font-medium`}>
+                      <span data-draft-amount>{d.kind === "proposal" ? "—" : usd(d.amountCents)}</span>
+                    </TableCell>
+                    <TableCell className={COL.wide}>
+                      <span className="block max-w-72 truncate" title={termsOf(d)} data-draft-terms>
+                        {termsOf(d)}
+                      </span>
+                    </TableCell>
+                    <TableCell className={COL.text}>
+                      <ApprovalStatus state={s.state} label={s.label} reason={s.reason} className="max-w-56" data-draft-status />
+                    </TableCell>
+                    <TableCell className={COL.actions}>
+                      <div className="flex items-center justify-end gap-2" data-row-actions>
+                        <Button size="sm" variant={needsYou ? "default" : "outline"} onClick={() => setOpen(d.id)} data-review={d.id}>
+                          Review
+                        </Button>
+                        <Button size="sm" variant="outline" disabled={!declinable(d)} onClick={() => decline(d)} data-row-decline={d.id}>
+                          Decline
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
+            ) : (
+              <EmptyRow cols={STRATEGY_COLUMNS.length}>{drafts.length ? "No strategies match these filters." : `No strategies yet. Ask the assistant to draft ${asked}; you approve each one yourself.`}</EmptyRow>
+            )}
+          </TableBody>
+        </Table>
       </PanelList>
-      <Sheet open={current !== null} onOpenChange={(o) => !o && setOpen(null)}>
+      <Sheet open={current !== null} onOpenChange={(o) => !o && close()}>
         <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg" aria-describedby={undefined} data-sheet="draft">
           <SheetHeader>
-            <SheetTitle>{current?.kind === "withdraw" ? "Review withdrawal" : current?.kind === "proposal" ? "Review pool proposal" : "Review commitment"}</SheetTitle>
+            <SheetTitle>{current?.kind === "withdraw" ? "Approve withdrawal request" : current?.kind === "proposal" ? "Approve pool proposal" : "Approve commitment"}</SheetTitle>
           </SheetHeader>
           <div className="px-4 pb-4">
             {current?.kind === "proposal" && (
-              <ProposalPanel key={current.id} draft={current} options={proposable} actions={actions} outcome={outcomes[current.id] ?? NOT_SENT} onOutcome={(o) => setOutcome(current.id, o)} />
+              <ProposalPanel key={current.id} draft={current} options={proposable} actions={actions} outcome={outcomeOf(current)} onOutcome={(o) => setOutcome(current.id, o)} onDecline={() => decline(current)} />
             )}
             {current && current.kind !== "proposal" && (
               <DraftPanel
@@ -894,8 +1066,10 @@ export function StrategiesTab({
                 actions={actions}
                 canCommit={canCommit}
                 canWithdraw={canWithdraw}
-                outcome={outcomes[current.id] ?? NOT_SENT}
+                outcome={outcomeOf(current)}
                 onOutcome={(o) => setOutcome(current.id, o)}
+                onChainStep={(s) => setChain((all) => ({ ...all, [current.id]: s }))}
+                onDecline={() => decline(current)}
               />
             )}
           </div>

@@ -152,7 +152,7 @@ const rails: LiquidityActions = {
 const depositDraft: Draft = { kind: "commit", id: "d1", poolId: POOL, poolName: "On-chain float", amountCents: 50_000, state: null, sandbox: true, onChain: true, wallet: SOL };
 const withdrawDraft: Draft = { kind: "withdraw", id: "w1", poolId: POOL, poolName: "On-chain float", amountCents: 20_000, sandbox: true, onChain: true, wallet: SOL, deposit: DEP1 };
 
-// My strategies is one card per draft; a draft is reviewed and confirmed in the sheet its card's Review opens.
+// My strategies is a table, a row per draft; a draft is approved in the approval sheet its row's Review opens.
 const review = () => fireEvent.click(document.querySelector("[data-review]")!);
 const renderDrafts = (s: EarnWalletState, drafts: Draft[] = [depositDraft]) => {
   const r = render(
@@ -373,7 +373,7 @@ describe("the on-chain deposit", () => {
     expect(s.prepares).toHaveLength(0);
     expect(connect).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Commit capital" })).toBeNull();
-    const prepare = screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" });
+    const prepare = screen.getByRole("button", { name: "Approve" });
     await click(prepare);
     expect(s.prepares).toEqual([{ kind: "deposit", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 500_000_000, idempotency_key: expect.stringMatching(/^[A-Za-z0-9_-]{8,200}$/) }]);
     // Mynt's summary, not the assistant's words; still nothing signed.
@@ -406,7 +406,7 @@ describe("the on-chain deposit", () => {
   it("refuses when the browser wallet isn't the chosen linked wallet, before signing", async () => {
     const { wallet, signAndSendTransaction } = fakeWallet(SOL2);
     renderDrafts(state({ browserWallets: () => [wallet] }));
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
+    await click(screen.getByRole("button", { name: "Approve" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     expect(signAndSendTransaction).not.toHaveBeenCalled();
     const err = document.querySelector("[data-on-chain-error]")!.textContent!;
@@ -419,13 +419,13 @@ describe("the on-chain deposit", () => {
     const s = state({ browserWallets: () => [wallet] });
     s.treasury.prepare = async () => ({ prepared: prepared({ wallet: SOL2 }) });
     renderDrafts(s);
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
+    await click(screen.getByRole("button", { name: "Approve" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     expect(signAndSendTransaction).not.toHaveBeenCalled();
     expect(document.querySelector("[data-on-chain-error]")!.textContent).toContain("different wallet");
     cleanup();
     renderDrafts(state({ browserWallets: () => [] }));
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
+    await click(screen.getByRole("button", { name: "Approve" }));
     expect(document.querySelector("[data-no-browser-wallet]")!.textContent).toBe("No wallet found in this browser.");
   });
 
@@ -434,7 +434,7 @@ describe("the on-chain deposit", () => {
     const s = state({ browserWallets: () => [wallet] });
     s.treasury.status = async () => ({ status: "failed", stage: "failed", error: "Lock-in longer than you agreed to" });
     renderDrafts(s);
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
+    await click(screen.getByRole("button", { name: "Approve" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
     expect(document.querySelector("[data-tx=failed]")!.textContent).toContain("Lock-in longer than you agreed to");
@@ -446,7 +446,7 @@ describe("the on-chain deposit", () => {
     const s = state({ browserWallets: () => [wallet] });
     renderDrafts(s, [withdrawDraft]);
     expect(screen.queryByRole("button", { name: "Request withdrawal" })).toBeNull();
-    await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV" }));
+    await click(screen.getByRole("button", { name: "Approve" }));
     expect(s.prepares[0]).toMatchObject({ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 200_000_000, deposit: DEP1 });
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
@@ -456,7 +456,7 @@ describe("the on-chain deposit", () => {
   it("degrades: without Mynt's treasury tools it says on-chain deposits are coming soon; without a Solana wallet it asks for one", async () => {
     const s = state({ list: list({ treasury: { deposit: false, withdraw: false, status: false } }) });
     renderDrafts(s);
-    const button = screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(document.body.textContent).toContain("On-chain deposits coming soon.");
     await click(button);
@@ -474,7 +474,7 @@ describe("the on-chain deposit", () => {
       </EarnWalletProvider>,
     );
     review();
-    expect((screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
     expect(document.body.textContent).toContain("devnet only");
   });
 });
@@ -686,7 +686,7 @@ describe("after a confirmed transaction", () => {
       },
     });
     renderDrafts(s);
-    await click(screen.getByRole("button", { name: /Deposit from/ }));
+    await click(screen.getByRole("button", { name: "Approve" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
     expect(document.querySelector("[data-updating-positions]")!.textContent).toContain("Updating positions…");
@@ -713,7 +713,7 @@ describe("a pool whose approvers changed", () => {
       </EarnWalletProvider>,
     );
     review();
-    const button = screen.getByRole("button", { name: /Deposit from/ }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(document.body.textContent).toContain("deposits are paused until its builder re-registers it");
     await click(button);
@@ -726,5 +726,48 @@ describe("a pool whose approvers changed", () => {
     expect(treasuryRefusal(JSON.stringify({ error: "x", code: "attesters_changed" }))!.message).toBe("This pool's approvers changed; deposits are paused until its builder re-registers it.");
     expect(treasuryRefusal(JSON.stringify({ error: "x", code: "rate_limited" }))!.message).toBe("Too many requests — try again in a minute.");
     for (const code of ["unexpected_attesters", "not_pool_owner", "wrong_cluster"]) expect(treasuryRefusal(JSON.stringify({ error: "x", code })), code).not.toBeNull();
+  });
+});
+
+describe("an on-chain draft's approval", () => {
+  const steps = () => [...document.querySelectorAll('[data-sheet="draft"] [data-approval-steps] [data-step]')].map((s) => `${s.getAttribute("data-step")}:${s.getAttribute("data-step-state")}`);
+  const status = () => document.querySelector('[data-draft-row="d1"] [data-draft-status]')!;
+
+  it("has a Sign in wallet step: Approve asks Mynt to prepare it, then the row and the steps wait on the wallet, then it's Done", async () => {
+    const { wallet, signAndSendTransaction } = fakeWallet(SOL);
+    renderDrafts(state({ browserWallets: () => [wallet] }));
+    expect(steps()).toEqual(["Review:current", "Approve:todo", "Sign in wallet:todo", "Done:todo"]);
+    // The summary names the wallet it comes from; the footer is Approve and Decline.
+    expect(document.querySelector('[data-approval-summary] [data-summary-row="wallet"]')!.textContent).toContain("From");
+    expect(document.querySelector(`[data-approval-summary] [data-linked-wallet="${SOL}"]`)).toBeTruthy();
+    expect([...document.querySelectorAll("[data-approval-footer] button")].map((b) => b.textContent)).toEqual(["Approve", "Decline"]);
+    expect(status().textContent).toBe("Needs your approval");
+    await click(screen.getByRole("button", { name: "Approve" }));
+    expect(steps()).toEqual(["Review:done", "Approve:done", "Sign in wallet:current", "Done:todo"]);
+    expect(status().textContent).toBe("Sign in wallet");
+    expect(status().getAttribute("data-approval-status")).toBe("sign");
+    // While it waits on the wallet it can't be declined.
+    expect((document.querySelector('[data-row-decline="d1"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(signAndSendTransaction).not.toHaveBeenCalled();
+    await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
+    await settle();
+    expect(signAndSendTransaction).toHaveBeenCalledTimes(1);
+    expect(steps()).toEqual(["Review:done", "Approve:done", "Sign in wallet:done", "Done:done"]);
+    expect(status().textContent).toBe("Done");
+    expect(railCalls).toHaveLength(0);
+  });
+
+  it("closing the sheet before signing lets go of the wallet step; Decline then works", async () => {
+    const { wallet } = fakeWallet(SOL);
+    renderDrafts(state({ browserWallets: () => [wallet] }));
+    await click(screen.getByRole("button", { name: "Approve" }));
+    expect(status().textContent).toBe("Sign in wallet");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(status().textContent).toBe("Needs your approval");
+    await click(document.querySelector('[data-row-decline="d1"]')!);
+    expect(status().textContent).toBe("Declined");
+    review();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(document.querySelector("[data-draft-declined]")).toBeTruthy();
   });
 });

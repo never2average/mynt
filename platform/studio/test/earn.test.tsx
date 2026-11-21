@@ -374,7 +374,7 @@ describe("withdrawals", () => {
     expect(card).toMatch(/data-your-queued="true">\$1,000\.00</);
     expect(card).toMatch(/data-your-paid="true">\$1,000\.00</);
     // Pending and parked requests show on the card (a paid one doesn't wait any more).
-    expect(card).toMatch(/data-waiting-requests="true">2 withdrawal requests: 1 queued, 1 parked</);
+    expect(card).toMatch(/data-approval-status="waiting" data-waiting-requests="true"[^>]*data-tone="amber"><span aria-hidden="true"[^>]*><\/span>2 withdrawal requests: 1 queued, 1 parked</);
     expect(requestRows([d.provider!.withdrawals[0]], d.provider!.positions)).toEqual([
       { key: "w-1", pool: "Card float", sandbox: false, onChain: false, wallet: null, place: "#3", asked: "$1,000.00", paid: "$0.00", status: "queued", payableFrom: "2026-12-14", why: "Waiting out the notice period until 2026-12-14T00:00:00.000Z" },
     ]);

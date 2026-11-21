@@ -217,6 +217,7 @@ export function WalletPicker() {
 
 // ---- the on-chain deposit and withdrawal ----
 
+export type OnChainFlow = Flow
 type Flow =
   | { kind: "idle" }
   | { kind: "preparing" }
@@ -267,6 +268,9 @@ export function OnChainAction({
   blocked,
   newKey,
   now = Date.now,
+  label: givenLabel,
+  beside,
+  onFlow,
 }: {
   kind: "deposit" | "withdrawal"
   poolId: string
@@ -277,9 +281,15 @@ export function OnChainAction({
   blocked: string | null
   newKey: () => string
   now?: () => number
+  label?: string // the button that asks Mynt to prepare it (an approval sheet's Approve)
+  beside?: ReactNode // shown beside that button (an approval sheet's Decline)
+  onFlow?: (flow: OnChainFlow) => void // told each step, for an approval's steps and status
 }) {
   const { list, chosen, treasury, browserWallets, onSettled, pollMs = 2000, settleDelaysMs = SETTLE_DELAYS_MS } = useEarnWallet()
   const [flow, setFlow] = useState<Flow>({ kind: "idle" })
+  const tell = useRef(onFlow)
+  tell.current = onFlow
+  useEffect(() => tell.current?.(flow), [flow])
   const live = useRef(true)
   useEffect(() => {
     live.current = true
@@ -305,7 +315,7 @@ export function OnChainAction({
             : tooBig
               ? "That amount is too large."
               : blocked
-  const label = kind === "deposit" ? `Deposit from ${address ? shortAddress(address) : "your wallet"}` : `Withdraw to ${address ? shortAddress(address) : "your wallet"}`
+  const label = givenLabel ?? (kind === "deposit" ? `Deposit from ${address ? shortAddress(address) : "your wallet"}` : `Withdraw to ${address ? shortAddress(address) : "your wallet"}`)
 
   const ask = () =>
     treasury.prepare({ kind, pool_id: poolId, wallet: address!, amount_usdc_base_units: Number(amountBaseUnits), ...(kind === "withdrawal" && deposit ? { deposit } : {}), idempotency_key: newKey() })
@@ -386,11 +396,12 @@ export function OnChainAction({
               {flow.message}
             </p>
           )}
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <Button onClick={() => void prepare()} disabled={Boolean(reason) || flow.kind === "preparing"} data-prepare={kind}>
               {flow.kind === "preparing" && <Loader2 className="animate-spin" />}
               {label}
             </Button>
+            {beside}
           </div>
         </>
       ) : null}

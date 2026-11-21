@@ -14,7 +14,8 @@ export const HISTORY_KEY = "mynt.earn.threads";
 export const MAX_THREADS = 30;
 const TITLE_CHARS = 120;
 
-export type SavedOutcome = { key: string | null; sent: string | null }; // sent: what Mynt answered, once sent
+// sent: what Mynt answered, once sent; declined: the user declined the draft, so it's never sent.
+export type SavedOutcome = { key: string | null; sent: string | null; declined?: true };
 export type EarnThreadRecord = { id: string; title: string; updatedAt: string; messages: UIMessage[]; outcomes: Record<string, SavedOutcome> };
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
 
