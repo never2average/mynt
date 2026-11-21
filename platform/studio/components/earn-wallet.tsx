@@ -457,7 +457,7 @@ export function OnChainAction({
             </span>
           ) : (
             <span className="text-muted-foreground" data-positions-late>
-              Mynt is still catching up: it&apos;ll show in My positions shortly.
+              Mynt is still catching up: it&apos;ll show on your pool&apos;s card in Pools shortly.
             </span>
           )}
           <Signature signature={flow.signature} />
@@ -485,7 +485,7 @@ export function DepositsPausedBadge({ reason }: { reason: string }) {
   )
 }
 
-// ---- on-chain positions (My positions) ----
+// ---- on-chain positions (a pool card's Withdraw and Details, on Pools) ----
 
 // A wallet's totals in USDC: held, queued and available, laid out like the dashboard's key figures.
 function WalletFigures({ held, queued, available }: { held: bigint; queued: bigint; available: bigint }) {
@@ -506,16 +506,15 @@ function WalletFigures({ held, queued, available }: { held: bigint; queued: bigi
   )
 }
 
-type OpenDeposit = { poolId: string; poolName: string; wallet: string; deposit: string; seq: string | null; free: bigint; noticeSeconds: number | null; minRequest: bigint | null }
+export type OpenDeposit = { poolId: string; poolName: string; wallet: string; deposit: string; seq: string | null; free: bigint; noticeSeconds: number | null; minRequest: bigint | null }
 
-// One wallet's position in an on-chain pool, in a sheet opened from its row in My positions: its
-// totals, then deposit by deposit (amount, what's left, when it unlocks, whether it's in review,
-// locked or available, and what's queued), then its withdrawal requests. Withdraw on a deposit
-// turns the sheet into that deposit's withdrawal, with Back to return to the deposits.
+// One wallet's position in an on-chain pool, in a sheet opened from its pool card's Withdraw on
+// Pools: its totals, then deposit by deposit (amount, what's left, when it unlocks, whether it's in
+// review, locked or available, and what's queued), then its withdrawal requests. Withdraw on a
+// deposit turns the sheet into that deposit's withdrawal, with Back to return to the deposits.
 export function OnChainPositionSheet({ position: p, pools, onClose }: { position: Position | null; pools: PoolRow[]; onClose: () => void }) {
   const [open, setOpen] = useState<OpenDeposit | null>(null)
   const c = p?.chain ?? null
-  const pool = p ? (pools.find((x) => x.id === p.poolId) ?? null) : null
   const close = () => {
     setOpen(null)
     onClose()
@@ -526,18 +525,32 @@ export function OnChainPositionSheet({ position: p, pools, onClose }: { position
         <SheetHeader>
           <SheetTitle>{open ? `Withdraw from ${open.poolName}` : p ? p.name : "Deposits"}</SheetTitle>
         </SheetHeader>
-        <div className="flex flex-col gap-4 px-4 pb-4">
-          {p && c && open ? (
-            <>
-              <div>
-                <Button variant="outline" size="sm" onClick={() => setOpen(null)} data-back-to-deposits>
-                  <ChevronLeft />
-                  Back to deposits
-                </Button>
-              </div>
-              <WithdrawDeposit key={`${open.wallet}|${open.deposit}`} {...open} />
-            </>
-          ) : p && c ? (
+        <div className="flex flex-col gap-4 px-4 pb-4">{p && c ? <OnChainHolding position={p} pools={pools} open={open} onOpen={setOpen} /> : null}</div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+// One wallet's on-chain position, as the deposits sheet and a pool card's Details show it: the
+// wallet's totals, its deposits (each with Withdraw) and its requests; with a deposit opened, that
+// deposit's withdrawal and Back to deposits.
+export function OnChainHolding({ position: p, pools, open, onOpen: setOpen }: { position: Position; pools: PoolRow[]; open: OpenDeposit | null; onOpen: (d: OpenDeposit | null) => void }) {
+  const c = p.chain
+  const pool = pools.find((x) => x.id === p.poolId) ?? null
+  if (!c) return null
+  if (open)
+    return (
+      <>
+        <div>
+          <Button variant="outline" size="sm" onClick={() => setOpen(null)} data-back-to-deposits>
+            <ChevronLeft />
+            Back to deposits
+          </Button>
+        </div>
+        <WithdrawDeposit key={`${open.wallet}|${open.deposit}`} {...open} />
+      </>
+    )
+  return (
             <div className="flex flex-col gap-3" data-on-chain-positions data-on-chain-position={positionKey(p)}>
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span className="font-mono text-xs text-muted-foreground" title={c.wallet}>
@@ -636,10 +649,6 @@ export function OnChainPositionSheet({ position: p, pools, onClose }: { position
                 </div>
               )}
             </div>
-          ) : null}
-        </div>
-      </SheetContent>
-    </Sheet>
   )
 }
 

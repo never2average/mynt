@@ -1,25 +1,23 @@
 "use client"
 
-// Earn's table tabs (/earn's right-hand panel, beside the assistant: components/earn-assistant.tsx),
-// by role, each ONE toolbar row (search, filters, Export CSV, the tab's CTA; the filters and Export
-// fold into a Filters menu when the panel is narrow) and ONE table filling the panel, paged 25 rows
-// at a time (components/list-layout.tsx PanelList):
+// Earn's table tab (/earn's right-hand panel, beside the assistant: components/earn-assistant.tsx),
+// ONE toolbar row (search, the Filters popover, Export CSV, the tab's CTA) and ONE table filling the
+// panel, paged as many rows as fit (components/list-layout.tsx PanelList):
 // - My pools (builders): their products' pools, each one's state, capital (principal, settled in,
 //   settling in, queued for withdrawal, paid out: Not measured, with why, when Mynt couldn't tell),
 //   terms, latest verified health and withdrawal queue; "Propose pool" on a sponsored component of
 //   their firm's product.
 // (Pools, every pool open to the user with "Commit capital", and My strategies are cards, in
-// components/earn-assistant.tsx.)
-// - My positions (liquidity providers): committed, settled, queued, paid and available per
-//   position on rails and on chain, "Request withdrawal", each on-chain position's deposits in a
-//   sheet; Show · Withdrawal requests switches the table to the firm's requests in each queue.
+// components/earn-assistant.tsx.) Also here: the forms (commit, withdraw, propose), and what a
+// liquidity provider holds in a pool (holdingIn), which Pools' cards show, with the card's Details
+// sheet (PositionDetailsSheet: amounts, deposits and withdrawal requests, on rails and on chain).
 // Each form opens in a sheet from its labelled button. Nothing here moves money: Mynt records a
 // request, and the pool's sponsor moves the money on its approved rail. Server-renderable for the tests.
 import { useMemo, useState } from "react"
-import { DevnetBadge, OnChainPositionSheet, UnverifiedBuildBadge } from "@/components/earn-wallet"
+import { OnChainHolding, type OpenDeposit } from "@/components/earn-wallet"
 import { newIdempotencyKey } from "@/lib/idempotency"
 
-import { FilterSelect } from "@/components/filter-controls"
+import type { Facet } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL, WIDEST_COL } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
@@ -55,8 +53,10 @@ import {
   usd,
   withdrawalRefusal,
   withdrawalTerms,
+  WAITING,
   type LiquidityData,
   type PoolFilters,
+  type PoolMoney,
   type PoolRow,
   type PoolStage,
   type Position,
@@ -122,19 +122,16 @@ const MONEY_OPTIONS = [
   { value: "real", label: "Real money" },
 ]
 
-// A pool table's filters, as buttons in the toolbar row after the search (or in its folded
-// Filters menu when the panel is narrow).
-export function PoolFilterControls({ f, setF, pools, stages, productLines }: { f: PoolFilters; setF: (f: PoolFilters) => void; pools: PoolRow[]; stages: PoolStage[]; productLines: boolean }) {
+// A pool list's facets for the toolbar's one Filters popover: Product line (where asked for),
+// State and Money, each any number of choices.
+export function poolFacets(f: PoolFilters, setF: (f: PoolFilters) => void, pools: PoolRow[], stages: PoolStage[], productLines: boolean): Facet[] {
   const lines = [...new Set(pools.map((p) => p.productLine).filter((v): v is string => Boolean(v)))].sort()
-  return (
-    <>
-      {productLines && <FilterSelect label="Product line" value={f.productLine} onChange={(productLine) => setF({ ...f, productLine })} options={lines.map((l) => ({ value: l, label: l }))} />}
-      <FilterSelect label="State" value={f.stage} onChange={(v) => setF({ ...f, stage: v as PoolFilters["stage"] })} options={stages.map((s) => ({ value: s, label: STAGE_LABELS[s] }))} />
-      <FilterSelect label="Money" value={f.money} onChange={(v) => setF({ ...f, money: v as PoolFilters["money"] })} options={MONEY_OPTIONS} />
-    </>
-  )
+  return [
+    ...(productLines ? [{ id: "product-line", label: "Product line", options: lines.map((l) => ({ value: l, label: l })), selected: f.productLine, onChange: (productLine: string[]) => setF({ ...f, productLine }) }] : []),
+    { id: "state", label: "State", options: stages.map((s) => ({ value: s, label: STAGE_LABELS[s] })), selected: f.stage, onChange: (v) => setF({ ...f, stage: v as PoolStage[] }) },
+    { id: "money", label: "Money", options: MONEY_OPTIONS, selected: f.money, onChange: (v) => setF({ ...f, money: v as PoolMoney[] }) },
+  ]
 }
-export const poolFiltersOn = (f: PoolFilters) => [f.productLine, f.stage, f.money].filter(Boolean).length
 
 // What a form in a sheet answered: shown in the sheet in place of the form, until it's closed.
 export function FormDone({ message }: { message: string }) {
@@ -303,8 +300,8 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
         search={f.query}
         onSearch={(query) => filter({ ...f, query })}
         searchLabel="Search pools"
-        filters={<PoolFilterControls f={f} setF={filter} pools={pools} stages={["awaiting_approval", "sandbox", "uncleared", "cleared"]} productLines={false} />}
-        activeFilters={poolFiltersOn(f)}
+        facets={poolFacets(f, filter, pools, ["awaiting_approval", "sandbox", "uncleared", "cleared"], false)}
+        onClearFilters={() => filter({ ...NO_POOL_FILTERS, query: f.query })}
         onExport={exportCsv}
         exportDisabled={!shown.length}
         cta={
@@ -593,14 +590,6 @@ export function WithdrawForm({ positions, pools, poolId, canWithdraw, actions, o
   )
 }
 
-// My positions' one table shows either the positions (on rails and on chain) or the withdrawal
-// requests (the firm's queue on rails, and each wallet's requests on chain): the Show filter.
-type PositionsView = "positions" | "requests"
-const SHOW_OPTIONS = [
-  { value: "positions", label: "Positions" },
-  { value: "requests", label: "Withdrawal requests" },
-]
-
 // A figure Mynt doesn't give reads Not measured, never 0.
 const money = (cents: number | null) => (cents === null ? "Not measured" : usd(cents))
 const stateOf = (p: Position) => (p.state ? p.state.slice(3).toUpperCase() : null)
@@ -613,8 +602,7 @@ export function positionFigures(p: Position): { committed: number | null; settle
   return { ...t, available: Number.isFinite(p.availableCents) ? p.availableCents : null }
 }
 
-// A withdrawal request as a row of My positions' Show · Withdrawal requests: rails requests in
-// dollars, on-chain ones in USDC.
+// A withdrawal request as a row of a pool's Details: rails requests in dollars, on-chain ones in USDC.
 type RequestRow = { key: string; pool: string; sandbox: boolean; onChain: boolean; wallet: string | null; place: string; asked: string; paid: string; status: string; payableFrom: string; why: string | null }
 export function requestRows(withdrawals: Withdrawal[], positions: Position[]): RequestRow[] {
   const rails = withdrawals.map((w) => ({ key: w.id, pool: w.poolName ?? w.poolId, sandbox: w.sandbox, onChain: false, wallet: null, place: w.seq !== null ? `#${w.seq}` : "—", asked: usd(w.amountCents), paid: usd(w.settledCents), status: w.status.replace(/_/g, " "), payableFrom: dateOf(w.eligibleAt), why: w.waitingReason }))
@@ -626,248 +614,161 @@ export function requestRows(withdrawals: Withdrawal[], positions: Position[]): R
   return [...rails, ...chain]
 }
 
-function MyPositions({ positions: all, withdrawals, pools, canWithdraw, actions, form, setForm }: { positions: Position[]; withdrawals: Withdrawal[]; pools: PoolRow[]; canWithdraw: boolean; actions: LiquidityActions; form: OpenForm; setForm: (f: OpenForm) => void }) {
-  // Requests on rails are made from the rails positions; an on-chain position's deposits (and
-  // their Withdraw) open in a sheet from its row.
-  const rails = useMemo(() => all.filter((p) => !p.onChain), [all])
-  const [show, setShow] = useState<PositionsView>("positions")
-  const [query, setQuery] = useState("")
-  const [moneyFilter, setMoney] = useState("")
-  const [done, setDone] = useState<string | null>(null)
-  const [deposits, setDeposits] = useState<Position | null>(null)
-  const q = query.trim().toLowerCase()
-  const keep = (sandbox: boolean, ...text: (string | null)[]) => (!q || text.some((t) => t?.toLowerCase().includes(q))) && (!moneyFilter || (moneyFilter === "sandbox") === sandbox)
-  const positions = all.filter((p) => (p.onChain ? Boolean(p.chain) : true) && keep(p.sandbox, p.name, p.productId, p.wallet))
-  const requests = requestRows(withdrawals, all).filter((r) => keep(r.sandbox, r.pool, r.wallet))
-  const fit = useFitRows()
-  const pagedPositions = usePaged(positions, fit.size)
-  const pagedRequests = usePaged(requests, fit.size)
-  const paged = show === "positions" ? pagedPositions : pagedRequests
-  const total = show === "positions" ? positions.length : requests.length
-  const first = () => {
-    pagedPositions.setPage(1)
-    pagedRequests.setPage(1)
-  }
-  const anyAvailable = rails.some((p) => p.availableCents > 0)
-  const exportCsv = () =>
-    show === "positions"
-      ? downloadCsv(
-          "my-positions.csv",
-          toCsv(
-            ["Pool", "Product", "US state", "Money", "Wallet", "Committed", "Settled", "Queued", "Paid", "Available"],
-            positions.map((p) => {
-              const f = positionFigures(p)
-              return [p.name, p.productId, stateOf(p), p.sandbox ? "Sandbox" : "Real money", p.wallet, money(f.committed), money(f.settled), money(f.queued), money(f.paid), money(f.available)]
-            }),
-          ),
-        )
-      : downloadCsv(
-          "withdrawal-requests.csv",
-          toCsv(
-            ["Pool", "Wallet", "Place in queue", "Asked", "Paid", "Status", "Payable from", "Why it's waiting"],
-            requests.map((r) => [r.pool, r.wallet, r.place, r.asked, r.paid, r.status, r.payableFrom, r.why]),
-          ),
-        )
+// ---- a liquidity provider's position in a pool (on its card in Pools) ----
 
+// On-chain requests that no longer wait.
+const ENDED = new Set(["paid", "settled", "cancelled", "canceled", "closed", "rejected"])
+
+// What a liquidity provider holds in one pool, over its positions there (one on rails, one per
+// wallet on chain): the summed figures (null when any of them isn't measured), and the withdrawal
+// requests still waiting, counted by status (queued, parked, paying; on chain, those not yet paid).
+export type Holding = {
+  positions: Position[]
+  rails: Position | null
+  chain: Position[]
+  figures: { settled: number | null; queued: number | null; paid: number | null; available: number | null }
+  waiting: { status: string; count: number }[]
+}
+export function holdingIn(poolId: string, positions: Position[], withdrawals: Withdrawal[]): Holding | null {
+  const mine = positions.filter((p) => p.poolId === poolId && (!p.onChain || Boolean(p.chain)))
+  if (!mine.length) return null
+  const figs = mine.map(positionFigures)
+  const total = (k: "settled" | "queued" | "paid" | "available") => (figs.some((f) => f[k] === null) ? null : figs.reduce((n, f) => n + (f[k] as number), 0))
+  const statuses = [
+    ...withdrawals.filter((w) => w.poolId === poolId && WAITING.has(w.status)).map((w) => w.status),
+    ...mine.flatMap((p) => (p.chain ? p.chain.requests.filter((r) => r.remaining > 0n && !ENDED.has(r.status)).map((r) => r.status) : [])),
+  ]
+  const waiting = [...new Set(statuses)].map((status) => ({ status: status.replace(/_/g, " "), count: statuses.filter((s) => s === status).length }))
+  return { positions: mine, rails: mine.find((p) => !p.onChain) ?? null, chain: mine.filter((p) => p.onChain), figures: { settled: total("settled"), queued: total("queued"), paid: total("paid"), available: total("available") }, waiting }
+}
+// "$4,000.00", its queue and what's been paid, as a card's line says them.
+export const holdingFigures = (h: Holding) => ({ held: money(h.figures.settled), queued: money(h.figures.queued), paid: money(h.figures.paid), available: money(h.figures.available) })
+// "2 withdrawal requests: 1 queued, 1 parked", or "" with none waiting.
+export function waitingText(h: Holding | null): string {
+  if (!h?.waiting.length) return ""
+  const n = h.waiting.reduce((s, w) => s + w.count, 0)
+  return `${n} withdrawal ${n === 1 ? "request" : "requests"}: ${h.waiting.map((w) => `${w.count} ${w.status}`).join(", ")}`
+}
+
+// A rails position's amounts, laid out like the dashboard's key figures.
+function RailsFigures({ p }: { p: Position }) {
+  const f = positionFigures(p)
+  const figures: [string, string, string][] = [
+    ["committed", "Committed", money(f.committed)],
+    ["settled", "Settled", money(f.settled)],
+    ["queued", "Queued", money(f.queued)],
+    ["paid", "Paid", money(f.paid)],
+    ["available", "Available", money(f.available)],
+    ["state", "US state", stateOf(p) ?? "—"],
+  ]
   return (
-    <>
-      <PanelList
-        id="my-positions"
-        search={query}
-        onSearch={(v) => {
-          setQuery(v)
-          first()
-        }}
-        searchLabel={show === "positions" ? "Search positions" : "Search requests"}
-        filters={
-          <>
-            <FilterSelect
-              label="Show"
-              value={show}
-              onChange={(v) => {
-                setShow(v === "requests" ? "requests" : "positions")
-                first()
-              }}
-              options={SHOW_OPTIONS}
-            />
-            <FilterSelect
-              label="Money"
-              value={moneyFilter}
-              onChange={(v) => {
-                setMoney(v)
-                first()
-              }}
-              options={MONEY_OPTIONS}
-            />
-          </>
-        }
-        activeFilters={(show === "requests" ? 1 : 0) + (moneyFilter ? 1 : 0)}
-        onExport={exportCsv}
-        exportDisabled={!total}
-        cta={
-          <Button
-            onClick={() => {
-              setDone(null)
-              setForm({ kind: "withdraw" })
-            }}
-            disabled={!canWithdraw || !anyAvailable}
-            title={!canWithdraw ? "Withdrawals come with Mynt's next update" : !anyAvailable ? "Nothing settled is available to withdraw" : undefined}
-            data-cta="withdraw"
-          >
-            Request withdrawal
-          </Button>
-        }
-        areaRef={fit.ref}
-        {...pagerOf(paged, total)}
-      >
-        {show === "positions" ? (
-          <Table>
-            <TableHeader className="sticky top-0 bg-card">
-              <TableRow>
-                <TableHead>Pool</TableHead>
-                <TableHead className={WIDE_COL}>Money</TableHead>
-                <TableHead className={`${WIDE_COL} text-right`}>Committed</TableHead>
-                <TableHead className={`${MID_COL} text-right`}>Settled</TableHead>
-                <TableHead className={`${WIDE_COL} text-right`}>Queued</TableHead>
-                <TableHead className={`${WIDE_COL} text-right`}>Paid</TableHead>
-                <TableHead className="text-right">Available</TableHead>
-                <TableHead className="text-right">Action</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {pagedPositions.shown.length ? (
-                pagedPositions.shown.map((p) => {
-                  const f = positionFigures(p)
-                  const pool = pools.find((x) => x.id === p.poolId) ?? null
-                  return (
-                    <TableRow key={positionKey(p)} {...(p.onChain ? { "data-on-chain-row": positionKey(p) } : { "data-position": p.poolId })}>
-                      <TableCell>
-                        <OneLine className="font-medium" text={p.name} />
-                        {p.onChain && p.wallet ? (
-                          <OneLine className="font-mono text-xs text-muted-foreground" text={shortAddress(p.wallet)} title={p.wallet} />
-                        ) : (
-                          <OneLine className="text-xs text-muted-foreground" text={`${p.productId}${p.state ? ` · from ${stateOf(p)}` : ""}`} />
-                        )}
-                      </TableCell>
-                      <TableCell className={WIDE_COL}>
-                        <div className="flex flex-nowrap gap-1.5 overflow-hidden">
-                          <Money sandbox={p.sandbox} />
-                          {p.onChain && <DevnetBadge />}
-                          {p.onChain && pool?.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
-                        </div>
-                      </TableCell>
-                      <TableCell className={`${WIDE_COL} text-right tabular-nums`} title="Settled in, plus what's still on its way in" data-committed>
-                        {money(f.committed)}
-                      </TableCell>
-                      <TableCell className={`${MID_COL} text-right tabular-nums`} data-settled>
-                        {money(f.settled)}
-                      </TableCell>
-                      <TableCell className={`${WIDE_COL} text-right tabular-nums`} data-queued>
-                        {money(f.queued)}
-                      </TableCell>
-                      <TableCell className={`${WIDE_COL} text-right tabular-nums`} data-paid>
-                        {money(f.paid)}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums" data-available>
-                        {money(f.available)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {p.onChain ? (
-                          <Button size="sm" variant="outline" onClick={() => setDeposits(p)} data-open-deposits={positionKey(p)}>
-                            Deposits
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={!canWithdraw || p.availableCents <= 0}
-                            onClick={() => {
-                              setDone(null)
-                              setForm({ kind: "withdraw", poolId: p.poolId })
-                            }}
-                            data-withdraw={p.poolId}
-                          >
-                            Request withdrawal
-                          </Button>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })
-              ) : (
-                <EmptyRow cols={8}>{all.length ? "No positions match this search." : "No positions yet. Commit capital to an open pool to start one."}</EmptyRow>
+    <dl className="grid grid-cols-3 gap-y-3" data-rails-figures>
+      {figures.map(([key, label, value]) => (
+        <div key={key} className="flex min-w-0 flex-col gap-1 pr-4" data-figure={key}>
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="text-lg font-semibold tabular-nums" {...{ [`data-${key}`]: "true" }}>
+            {value}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function RequestsTable({ rows }: { rows: RequestRow[] }) {
+  if (!rows.length) return <p className="text-sm text-muted-foreground">No withdrawal requests.</p>
+  return (
+    <div className="overflow-auto rounded-lg border" data-rails-requests>
+      <Table>
+        <TableHeader className="bg-card">
+          <TableRow>
+            <TableHead>Place in queue</TableHead>
+            <TableHead className="text-right">Asked</TableHead>
+            <TableHead className="text-right">Paid</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Payable from</TableHead>
+            <TableHead>Why it&apos;s waiting</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r) => (
+            <TableRow key={r.key} data-withdrawal={r.key}>
+              <TableCell className="tabular-nums">{r.place}</TableCell>
+              <TableCell className="text-right tabular-nums" data-asked>
+                {r.asked}
+              </TableCell>
+              <TableCell className="text-right tabular-nums" data-paid>
+                {r.paid}
+              </TableCell>
+              <TableCell className="capitalize" data-status>
+                {r.status}
+              </TableCell>
+              <TableCell>{r.payableFrom}</TableCell>
+              <TableCell className="text-muted-foreground">
+                <OneLine text={r.why ?? "—"} />
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  )
+}
+
+// A pool card's Details: what the user holds in the pool, on rails (its amounts and the firm's
+// withdrawal requests there) and per wallet on chain (its deposits, each with Withdraw, and its
+// requests). Withdraw on a deposit turns the sheet into that deposit's withdrawal.
+export function PositionDetailsSheet({ name, holding, withdrawals, pools, onClose }: { name: string; holding: Holding | null; withdrawals: Withdrawal[]; pools: PoolRow[]; onClose: () => void }) {
+  const [open, setOpen] = useState<OpenDeposit | null>(null)
+  const close = () => {
+    setOpen(null)
+    onClose()
+  }
+  const rails = holding?.rails ?? null
+  const railsRequests = rails ? requestRows(withdrawals.filter((w) => w.poolId === rails.poolId), []) : []
+  const opened = open ? (holding?.chain.find((p) => p.chain?.wallet === open.wallet) ?? null) : null
+  return (
+    <Sheet open={Boolean(holding)} onOpenChange={(o) => !o && close()}>
+      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl" aria-describedby={undefined} data-sheet={open ? "on-chain-withdraw" : "position-details"}>
+        <SheetHeader>
+          <SheetTitle>{open ? `Withdraw from ${open.poolName}` : name}</SheetTitle>
+        </SheetHeader>
+        <div className="flex flex-col gap-5 px-4 pb-4">
+          {open && opened ? (
+            <OnChainHolding position={opened} pools={pools} open={open} onOpen={setOpen} />
+          ) : holding ? (
+            <>
+              {rails && (
+                <section className="flex flex-col gap-3" data-rails-position={rails.poolId}>
+                  <h3 className="flex items-center gap-2 text-sm font-semibold">
+                    On rails
+                    <Money sandbox={rails.sandbox} />
+                  </h3>
+                  <RailsFigures p={rails} />
+                  <RequestsTable rows={railsRequests} />
+                </section>
               )}
-            </TableBody>
-          </Table>
-        ) : (
-          <Table>
-            <TableHeader className="sticky top-0 bg-card">
-              <TableRow>
-                <TableHead>Pool</TableHead>
-                <TableHead>Place in queue</TableHead>
-                <TableHead className="text-right">Asked</TableHead>
-                <TableHead className={`${WIDE_COL} text-right`}>Paid</TableHead>
-                <TableHead className={MID_COL}>Status</TableHead>
-                <TableHead className={MID_COL}>Payable from</TableHead>
-                <TableHead className={WIDE_COL}>Why it&apos;s waiting</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {pagedRequests.shown.length ? (
-                pagedRequests.shown.map((r) => (
-                  <TableRow key={r.key} data-withdrawal={r.key}>
-                    <TableCell>
-                      <OneLine className="font-medium" text={r.pool} />
-                      <div className="flex h-5 flex-nowrap items-center gap-1.5 overflow-hidden">
-                        {r.sandbox && <Money sandbox />}
-                        {r.onChain && <DevnetBadge />}
-                        {r.wallet && (
-                          <span className="font-mono text-xs text-muted-foreground" title={r.wallet}>
-                            {shortAddress(r.wallet)}
-                          </span>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="tabular-nums">{r.place}</TableCell>
-                    <TableCell className="text-right tabular-nums" data-asked>
-                      {r.asked}
-                    </TableCell>
-                    <TableCell className={`${WIDE_COL} text-right tabular-nums`} data-paid>
-                      {r.paid}
-                    </TableCell>
-                    <TableCell className={`${MID_COL} capitalize`} data-status>
-                      {r.status}
-                    </TableCell>
-                    <TableCell className={MID_COL}>{r.payableFrom}</TableCell>
-                    <TableCell className={`${WIDE_COL} text-muted-foreground`}>
-                      <OneLine text={r.why ?? "—"} />
-                    </TableCell>
-                  </TableRow>
-                ))
-              ) : (
-                <EmptyRow cols={7}>{withdrawals.length || all.some((p) => p.chain?.requests.length) ? "No requests match this search." : "No withdrawal requests."}</EmptyRow>
-              )}
-            </TableBody>
-          </Table>
-        )}
-      </PanelList>
-      <OnChainPositionSheet position={deposits} pools={pools} onClose={() => setDeposits(null)} />
-      <FormSheet open={form?.kind === "withdraw" && rails.length > 0} onClose={() => setForm(null)} title="Request withdrawal" id="withdraw">
-        {done ? <FormDone message={done} /> : form?.kind === "withdraw" && rails.length ? <WithdrawForm key={form.poolId ?? "any"} positions={rails} pools={pools} poolId={form.poolId} canWithdraw={canWithdraw} actions={actions} onDone={setDone} /> : null}
-      </FormSheet>
-    </>
+              {holding.chain.map((p) => (
+                <section key={positionKey(p)} className="flex flex-col gap-3" data-chain-position={positionKey(p)}>
+                  <h3 className="text-sm font-semibold">On chain</h3>
+                  <OnChainHolding position={p} pools={pools} open={null} onOpen={setOpen} />
+                </section>
+              ))}
+            </>
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
   )
 }
 
 // ---- the page ----
 
-// One of Earn's table tabs in the right-hand panel: My positions or My pools. Each
-// is one toolbar row and one table filling the panel (components/list-layout.tsx PanelList).
-export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "my-positions" | "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
+// Earn's table tab in the right-hand panel: My pools, one toolbar row and one table filling the
+// panel (components/list-layout.tsx PanelList).
+export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
   const [form, setForm] = useState<OpenForm>(initialForm)
   const b = data.builder
-  const lp = data.provider
   if (tab === "my-pools" && b) return <BuilderPools pools={b.pools} proposable={b.proposable} withdrawalsShown={b.withdrawalsShown} actions={actions} form={form} setForm={setForm} />
-  if (tab === "my-positions" && lp) return <MyPositions positions={lp.positions} withdrawals={lp.withdrawals} pools={lp.pools} canWithdraw={lp.canWithdraw} actions={actions} form={form} setForm={setForm} />
   return <div className="h-full" data-tab-panel={tab} />
 }

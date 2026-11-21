@@ -4,8 +4,9 @@
 // builder (components/chat-workspace-shell.tsx), with different tabs on the right. The chat starts
 // as the big centred prompt ("What do you want to earn?") with example chips; after the first
 // message the right panel opens beside it with Pools (every pool open to the user as cards,
-// showing the ones the conversation matched first, with Commit capital for liquidity providers),
-// My positions, My pools (builders) and My strategies (liquidity providers: the commitments and
+// showing the ones the conversation matched first, with Commit capital for liquidity providers and,
+// on the pools they're invested in, their position with Withdraw and Details), My pools (builders)
+// and My strategies (liquidity providers: the commitments and
 // withdrawals the assistant drafted for liquidity providers, and the pool proposals it drafted for
 // builders, as cards, each confirmed only by the user's own click, which calls the same routes as
 // the tables and My pools' Propose pool; the assistant can't send anything itself). The chat bar has
@@ -25,12 +26,33 @@ import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatSearchDialog } from "@/components/chat-search"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
-import { FilterSelect } from "@/components/filter-controls"
+import { ViewSwitch } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { CARD_GRID, PanelList, useFitCards, usePaged } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
-import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
-import { CommitForm, commitOutcome, EarnTable, FormDone, FormSheet, Money, newIdempotencyKey, pagerOf, PoolFilterControls, poolFiltersOn, ProposeForm, StageStatus, withdrawalOutcome, type LiquidityActions, type OpenForm } from "@/components/earn-view"
+import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
+import {
+  CommitForm,
+  commitOutcome,
+  EarnTable,
+  FormDone,
+  FormSheet,
+  holdingFigures,
+  holdingIn,
+  Money,
+  newIdempotencyKey,
+  pagerOf,
+  poolFacets,
+  PositionDetailsSheet,
+  ProposeForm,
+  StageStatus,
+  waitingText,
+  WithdrawForm,
+  withdrawalOutcome,
+  type Holding,
+  type LiquidityActions,
+  type OpenForm,
+} from "@/components/earn-view"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -51,7 +73,7 @@ import {
   noticeText,
   percentOfBps,
   poolCommitBlock,
-  poolsShowAllFromQuery,
+  poolsViewFromQuery,
   reserveText,
   stageOf,
   statusText,
@@ -65,6 +87,7 @@ import {
   type PoolFilters,
   type PoolRow,
   type PoolStage,
+  type PoolsView,
   type Position,
   type Sponsored,
 } from "@/lib/liquidity"
@@ -137,7 +160,7 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
       <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-center justify-center gap-2 text-center">
         <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">{WELCOME_TITLE}</h1>
         <p className="text-sm text-muted-foreground" role="status">
-          {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. The Pools and My positions tabs still work."}
+          {status === "loading" ? "Checking the assistant…" : "AI is not configured on this studio. Pools and the other tabs still work."}
         </p>
       </div>
       <div className="mx-auto group-data-[chat-align=left]/chat:ml-0 flex w-full max-w-(--thread-max-width) flex-col gap-4 pb-2 md:pb-3">
@@ -155,7 +178,7 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
 // Every line of a card is one line (cut short, the whole of it in its tooltip), so all cards of a
 // tab are one height and the cards per page that fit the panel stay right.
 const POOL_CARD_PX = 140 // name, details, state, terms, reserve and health: before the first card is measured
-const POOL_CARD_LP_PX = 180 // the same, then your position and Commit capital
+const POOL_CARD_LP_PX = 200 // the same, then your position and the card's buttons
 const STRATEGY_CARD_PX = 124
 
 function EmptyCards({ children }: { children: React.ReactNode }) {
@@ -167,14 +190,33 @@ function EmptyCards({ children }: { children: React.ReactNode }) {
 }
 
 // One pool as a card: its name; product, money and treasury; its state; its terms; its reserve
-// and latest health; then, for liquidity providers, what they hold in it and Commit capital.
-export function PoolCard({ pool, yours, commit }: { pool: PoolRow; yours?: string; commit?: { blocked: string | null; onClick: () => void } }) {
+// and latest health; then, for liquidity providers, what they hold in it (settled, queued and
+// paid, and any withdrawal requests still waiting) and its buttons: Details and Withdraw where they
+// hold a position, and Commit capital.
+export function PoolCard({
+  pool,
+  holding,
+  provider = false,
+  commit,
+  withdraw,
+  onDetails,
+}: {
+  pool: PoolRow
+  holding?: Holding | null
+  provider?: boolean // a liquidity provider's card: the position line shows, "—" without one
+  commit?: { blocked: string | null; onClick: () => void }
+  withdraw?: { blocked: string | null; onClick: () => void }
+  onDetails?: () => void
+}) {
   const product = `${pool.productName ?? pool.productId}${pool.productLine ? ` · ${pool.productLine}` : ""}`
   const terms = `Lock-in ${lockInText(pool.lockInDays)} · Notice ${noticeText(pool.noticePeriodDays)} · ${limitsText(pool)}`
   const coverage = pool.health?.coverageBps !== null && pool.health?.coverageBps !== undefined ? ` · Coverage ${percentOfBps(pool.health.coverageBps)}` : ""
   const health = `Minimum reserve ${reserveText(pool)} · Health ${healthText(pool.health)}${coverage}`
+  const f = holding ? holdingFigures(holding) : null
+  const waiting = waitingText(holding ?? null)
+  const position = f ? `Your position ${f.held} · Queued ${f.queued} · Paid ${f.paid}${waiting ? ` · ${waiting}` : ""}` : "Your position —"
   return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-lg border p-3" data-card data-pool-card={pool.id}>
+    <div className="flex min-w-0 flex-col gap-1 rounded-lg border p-3" data-card data-pool-card={pool.id} data-invested={holding ? "true" : undefined}>
       <div className="truncate font-medium" title={pool.name} data-pool-name>
         {pool.name}
       </div>
@@ -208,18 +250,47 @@ export function PoolCard({ pool, yours, commit }: { pool: PoolRow; yours?: strin
       <div className="truncate text-xs text-muted-foreground" title={health} data-health>
         {health}
       </div>
-      {(yours !== undefined || commit) && (
-        <div className="flex items-center justify-between gap-2 pt-1">
-          <span className="min-w-0 truncate text-xs text-muted-foreground">
-            {yours !== undefined && (
-              <>
-                Your position{" "}
-                <span className="font-medium text-foreground tabular-nums" data-your-position>
-                  {yours}
-                </span>
-              </>
-            )}
+      {provider && (
+        <div className="truncate text-xs text-muted-foreground" title={position} data-position-line>
+          Your position{" "}
+          <span className="font-medium text-foreground tabular-nums" data-your-position>
+            {f ? f.held : "—"}
           </span>
+          {f && (
+            <>
+              {" "}
+              · Queued{" "}
+              <span className="tabular-nums" data-your-queued>
+                {f.queued}
+              </span>{" "}
+              · Paid{" "}
+              <span className="tabular-nums" data-your-paid>
+                {f.paid}
+              </span>
+            </>
+          )}
+          {waiting && (
+            <>
+              {" · "}
+              <span className="text-amber-600 dark:text-amber-300" data-waiting-requests>
+                {waiting}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+      {(commit || (holding && (withdraw || onDetails))) && (
+        <div className="flex items-center justify-end gap-2 pt-1" data-card-actions>
+          {holding && onDetails && (
+            <Button size="sm" variant="outline" className="shrink-0" onClick={onDetails} data-card-details={pool.id}>
+              Details
+            </Button>
+          )}
+          {holding && withdraw && (
+            <Button size="sm" variant="outline" className="shrink-0" disabled={Boolean(withdraw.blocked)} title={withdraw.blocked ?? undefined} onClick={withdraw.onClick} data-card-withdraw={pool.id}>
+              Withdraw
+            </Button>
+          )}
           {commit && (
             <Button size="sm" variant="outline" className="shrink-0" disabled={Boolean(commit.blocked)} title={commit.blocked ?? undefined} onClick={commit.onClick} data-commit={pool.id}>
               Commit capital
@@ -231,36 +302,51 @@ export function PoolCard({ pool, yours, commit }: { pool: PoolRow; yours?: strin
   )
 }
 
-// What a liquidity provider holds in a pool, settled, over all its positions there (on rails and
-// on chain); "—" when it holds none.
-const heldIn = (positions: Position[], poolId: string) => {
-  const mine = positions.filter((p) => p.poolId === poolId)
-  return mine.length ? usd(mine.reduce((n, p) => n + p.settledCents, 0)) : "—"
-}
-
 const ALL_STAGES: PoolStage[] = ["awaiting_approval", "sandbox", "uncleared", "cleared"]
+const VIEW_LABELS: Record<PoolsView, string> = { matched: "Matched", all: "All", invested: "Invested" }
 
-// Pools: every pool open to the user, as cards, with what a liquidity provider holds in each and
-// its Commit capital (and the toolbar's). Once the assistant has matched pools, Show · Matched
-// shows only those, until the user picks All pools (a link to the old Opportunities starts on All
-// pools). The whole list of positions is the My positions tab.
-export function PoolsTab({ data, poolIds, actions, showAll = false, initialForm = null }: { data: LiquidityData; poolIds: string[] | null; actions?: LiquidityActions; showAll?: boolean; initialForm?: OpenForm }) {
+// Pools: every pool open to the user, as cards. The toolbar's view switch picks which: Matched (the
+// pools the assistant matched, shown first once it has; only then), All, and Invested (liquidity
+// providers: the pools they hold a position in; always offered to them, empty until they hold one).
+// A liquidity provider's card shows what they hold there, with Withdraw (the withdrawal form, or an
+// on-chain position's deposits) and Details (its amounts, deposits and withdrawal requests), and
+// Commit capital (also the toolbar's CTA). A new match from the assistant shows Matched again.
+export function PoolsTab({
+  data,
+  poolIds,
+  actions,
+  showAll = false,
+  initialView = null,
+  initialForm = null,
+}: {
+  data: LiquidityData
+  poolIds: string[] | null
+  actions?: LiquidityActions
+  showAll?: boolean // a link to the old Opportunities: All
+  initialView?: PoolsView | null // a link's view (?tab=my-positions is Invested)
+  initialForm?: OpenForm
+}) {
   const pools = useMemo(() => {
     const all = [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])]
     return all.filter((p, i) => all.findIndex((x) => x.id === p.id) === i)
   }, [data])
   const lp = data.provider ?? null
-  const positions = lp ? lp.positions : null
+  const withdrawals = lp?.withdrawals ?? []
+  const holdings = useMemo(() => new Map(lp ? pools.map((p) => [p.id, holdingIn(p.id, lp.positions, lp.withdrawals)] as const) : []), [lp, pools])
+  const holdingOf = (id: string) => holdings.get(id) ?? null
   const matchedIds = poolIds && poolIds.length ? poolIds : null
+  const views: PoolsView[] = [...(matchedIds ? (["matched"] as const) : []), "all", ...(lp ? (["invested"] as const) : [])]
   // A new match from the assistant shows the matched pools again.
   const sig = matchedIds?.join(",") ?? ""
-  const [scope, setScope] = useState({ sig, all: showAll })
-  if (scope.sig !== sig) setScope({ sig, all: false })
-  const matchedOnly = Boolean(matchedIds) && !(scope.sig === sig && scope.all)
+  const [scope, setScope] = useState<{ sig: string; view: PoolsView | null }>({ sig, view: initialView ?? (showAll ? "all" : null) })
+  if (scope.sig !== sig) setScope({ sig, view: null })
+  const view: PoolsView = scope.view && views.includes(scope.view) ? scope.view : matchedIds ? "matched" : "all"
   const [f, setF] = useState<PoolFilters>(NO_POOL_FILTERS)
   const [form, setForm] = useState<OpenForm>(initialForm)
   const [done, setDone] = useState<string | null>(null)
-  const base = matchedOnly && matchedIds ? matchedIds.map((id) => pools.find((p) => p.id === id)).filter((p): p is PoolRow => Boolean(p)) : pools
+  const [deposits, setDeposits] = useState<Position | null>(null)
+  const [details, setDetails] = useState<string | null>(null)
+  const base = view === "matched" && matchedIds ? matchedIds.map((id) => pools.find((p) => p.id === id)).filter((p): p is PoolRow => Boolean(p)) : view === "invested" ? pools.filter((p) => holdingOf(p.id)) : pools
   const shown = filterPools(base, f)
   const fit = useFitCards(lp ? POOL_CARD_LP_PX : POOL_CARD_PX)
   const paged = usePaged(shown, fit.size)
@@ -279,14 +365,32 @@ export function PoolsTab({ data, poolIds, actions, showAll = false, initialForm 
     setDone(null)
     setForm({ kind: "commit", poolId })
   }
+  // Withdraw on a card: the withdrawal form for a position on rails; for one on chain only, its
+  // deposits (each with its own Withdraw).
+  const withdrawOf = (h: Holding): { blocked: string | null; onClick: () => void } =>
+    h.rails
+      ? {
+          blocked: !lp?.canWithdraw ? "Withdrawals come with Mynt's next update" : h.rails.availableCents <= 0 ? "Nothing settled is available to withdraw" : null,
+          onClick: () => {
+            setDone(null)
+            setForm({ kind: "withdraw", poolId: h.rails!.poolId })
+          },
+        }
+      : { blocked: null, onClick: () => setDeposits(h.chain[0] ?? null) }
   const exportCsv = () =>
     downloadCsv(
       "pools.csv",
       toCsv(
-        ["Pool", "Product", "Product line", "Lock-in", "Notice", "Commitment limits", "Minimum reserve", "Health", "State", "Status", ...(positions ? ["Your position (settled)"] : [])],
-        shown.map((p) => [p.name, p.productName ?? p.productId, p.productLine, lockInText(p.lockInDays), noticeText(p.noticePeriodDays), limitsText(p), reserveText(p), healthText(p.health), STAGE_LABELS[stageOf(p)], statusText(p), ...(positions ? [heldIn(positions, p.id)] : [])]),
+        ["Pool", "Product", "Product line", "Lock-in", "Notice", "Commitment limits", "Minimum reserve", "Health", "State", "Status", ...(lp ? ["Your position (settled)", "Queued", "Paid", "Available", "Withdrawal requests waiting"] : [])],
+        shown.map((p) => {
+          const h = holdingOf(p.id)
+          const fig = h ? holdingFigures(h) : null
+          return [p.name, p.productName ?? p.productId, p.productLine, lockInText(p.lockInDays), noticeText(p.noticePeriodDays), limitsText(p), reserveText(p), healthText(p.health), STAGE_LABELS[stageOf(p)], statusText(p), ...(lp ? (fig ? [fig.held, fig.queued, fig.paid, fig.available, waitingText(h) || "None"] : ["—", "—", "—", "—", "—"]) : [])]
+        }),
       ),
     )
+  const rails = lp ? lp.positions.filter((p) => !p.onChain) : []
+  const detailsPool = details ? (pools.find((p) => p.id === details) ?? null) : null
 
   return (
     <div className="h-full" data-earn-pools-tab>
@@ -297,26 +401,21 @@ export function PoolsTab({ data, poolIds, actions, showAll = false, initialForm 
         search={f.query}
         onSearch={(query) => filter({ ...f, query })}
         searchLabel="Search pools"
-        filters={
-          <>
-            {matchedIds && (
-              <FilterSelect
-                label="Show"
-                value={matchedOnly ? "matched" : "all"}
-                onChange={(v) => {
-                  setScope({ sig, all: v !== "matched" })
-                  paged.setPage(1)
-                }}
-                options={[
-                  { value: "matched", label: "Matched" },
-                  { value: "all", label: "All pools" },
-                ]}
-              />
-            )}
-            <PoolFilterControls f={f} setF={filter} pools={pools} stages={ALL_STAGES} productLines />
-          </>
+        view={
+          views.length > 1 ? (
+            <ViewSwitch
+              label="Show"
+              value={view}
+              options={views.map((v) => ({ value: v, label: VIEW_LABELS[v] }))}
+              onChange={(v) => {
+                setScope({ sig, view: v })
+                paged.setPage(1)
+              }}
+            />
+          ) : undefined
         }
-        activeFilters={poolFiltersOn(f) + (matchedOnly ? 1 : 0)}
+        facets={poolFacets(f, filter, pools, ALL_STAGES, true)}
+        onClearFilters={() => filter({ ...NO_POOL_FILTERS, query: f.query })}
         onExport={exportCsv}
         exportDisabled={!shown.length}
         cta={
@@ -331,12 +430,23 @@ export function PoolsTab({ data, poolIds, actions, showAll = false, initialForm 
       >
         {paged.shown.length ? (
           <div className={CARD_GRID} data-card-grid>
-            {paged.shown.map((p) => (
-              <PoolCard key={p.id} pool={p} yours={positions ? heldIn(positions, p.id) : undefined} commit={lp && actions ? { blocked: commitBlock(p), onClick: () => openCommit(p.id) } : undefined} />
-            ))}
+            {paged.shown.map((p) => {
+              const h = holdingOf(p.id)
+              return (
+                <PoolCard
+                  key={p.id}
+                  pool={p}
+                  provider={Boolean(lp)}
+                  holding={h}
+                  commit={lp && actions ? { blocked: commitBlock(p), onClick: () => openCommit(p.id) } : undefined}
+                  withdraw={h && actions ? withdrawOf(h) : undefined}
+                  onDetails={h ? () => setDetails(p.id) : undefined}
+                />
+              )
+            })}
           </div>
         ) : (
-          <EmptyCards>{base.length ? "No pools match these filters." : "No pools to show yet."}</EmptyCards>
+          <EmptyCards>{view === "invested" && !base.length ? "No positions yet. Commit capital to an open pool to start one." : base.length ? "No pools match these filters." : "No pools to show yet."}</EmptyCards>
         )}
       </PanelList>
       {lp && actions && (
@@ -344,6 +454,13 @@ export function PoolsTab({ data, poolIds, actions, showAll = false, initialForm 
           {done ? <FormDone message={done} /> : form?.kind === "commit" && lp.pools.length ? <CommitForm key={form.poolId ?? "any"} pools={lp.pools} positions={lp.positions} poolId={form.poolId} canCommit={lp.canCommit} actions={actions} onDone={setDone} /> : null}
         </FormSheet>
       )}
+      {lp && actions && (
+        <FormSheet open={form?.kind === "withdraw" && rails.length > 0} onClose={() => setForm(null)} title="Request withdrawal" id="withdraw">
+          {done ? <FormDone message={done} /> : form?.kind === "withdraw" && rails.length ? <WithdrawForm key={form.poolId ?? "any"} positions={rails} pools={lp.pools} poolId={form.poolId} canWithdraw={lp.canWithdraw} actions={actions} onDone={setDone} /> : null}
+        </FormSheet>
+      )}
+      {lp && <OnChainPositionSheet position={deposits} pools={lp.pools} onClose={() => setDeposits(null)} />}
+      {lp && <PositionDetailsSheet name={detailsPool?.name ?? ""} holding={details ? holdingOf(details) : null} withdrawals={withdrawals} pools={lp.pools} onClose={() => setDetails(null)} />}
     </div>
   )
 }
@@ -589,7 +706,7 @@ export function StrategiesTab({
   const setOutcome = (id: string, o: DraftOutcome) => (onOutcome ? onOutcome(id, o) : setOwn((all) => ({ ...all, [id]: o })))
   const [open, setOpen] = useState<string | null>(null)
   const [query, setQuery] = useState("")
-  const [kind, setKind] = useState("")
+  const [kind, setKind] = useState<string[]>([])
   const proposable = data.builder?.proposable ?? null
   const poolOf = (d: MoneyDraft) => pools.find((p) => p.id === d.poolId) ?? null
   const positionOf = (d: MoneyDraft) => positions.find((p) => p.poolId === d.poolId && (d.kind === "withdraw" && d.onChain ? p.onChain && p.wallet === d.wallet : !p.onChain)) ?? null
@@ -607,7 +724,7 @@ export function StrategiesTab({
     return c.refusal ? { text: c.refusal, tone: "amber" } : { text: "Ready to confirm", tone: "blue" }
   }
   const q = query.trim().toLowerCase()
-  const shown = drafts.filter((d) => (!q || d.poolName.toLowerCase().includes(q) || (d.kind === "proposal" && d.productName.toLowerCase().includes(q))) && (!kind || d.kind === kind))
+  const shown = drafts.filter((d) => (!q || d.poolName.toLowerCase().includes(q) || (d.kind === "proposal" && d.productName.toLowerCase().includes(q))) && (!kind.length || kind.includes(d.kind)))
   const fit = useFitCards(STRATEGY_CARD_PX)
   const paged = usePaged(shown, fit.size)
   const kindText = (d: Draft) => (d.kind === "commit" ? "Commitment" : d.kind === "proposal" ? "Pool proposal" : "Withdrawal request")
@@ -633,18 +750,22 @@ export function StrategiesTab({
           paged.setPage(1)
         }}
         searchLabel="Search strategies"
-        filters={
-          <FilterSelect
-            label="Kind"
-            value={kind}
-            onChange={(v) => {
+        facets={[
+          {
+            id: "kind",
+            label: "Kind",
+            options: kindOptions,
+            selected: kind,
+            onChange: (v) => {
               setKind(v)
               paged.setPage(1)
-            }}
-            options={kindOptions}
-          />
-        }
-        activeFilters={kind ? 1 : 0}
+            },
+          },
+        ]}
+        onClearFilters={() => {
+          setKind([])
+          paged.setPage(1)
+        }}
         onExport={exportCsv}
         exportDisabled={!shown.length}
         areaRef={fit.ref}
@@ -761,7 +882,7 @@ export function EarnWorkspace({
   const wanted = earnTabFromQuery(initialTab)
   const [tab, setTab] = useState<EarnTab>(available.includes(wanted) ? wanted : "pools")
   const [opened, setOpened] = useState(tabOpensPanel(initialTab) && available.includes(wanted))
-  const [showAll] = useState(() => poolsShowAllFromQuery(initialTab))
+  const [poolsView] = useState(() => poolsViewFromQuery(initialTab))
   const { poolIds, drafts } = panelFrom(chat.messages as never)
 
   // What became of each draft, kept here (not in the tab) so a thread keeps it too.
@@ -847,11 +968,11 @@ export function EarnWorkspace({
 
   const content = (t: EarnTab) =>
     t === "pools" ? (
-      <PoolsTab data={data} poolIds={poolIds} actions={actions} showAll={showAll} />
+      <PoolsTab data={data} poolIds={poolIds} actions={actions} initialView={poolsView} />
     ) : t === "my-strategies" ? (
       <StrategiesTab data={data} drafts={drafts} actions={actions} outcomes={outcomes} onOutcome={(id, o) => setOutcomes((all) => ({ ...all, [id]: o }))} />
     ) : (
-      <EarnTable tab={t} data={data} actions={actions} />
+      <EarnTable tab="my-pools" data={data} actions={actions} />
     )
 
   const shell = (

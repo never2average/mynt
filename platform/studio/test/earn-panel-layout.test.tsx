@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// Earn's four right-hand tabs in the narrow, resizable panel: Pools and My strategies as cards, My
-// positions and My pools as one table each; one toolbar row that never wraps (the action last and
-// inside it), the filters and Export CSV folded into a labelled Filters menu while the panel is
-// narrow (a container query on the panel), and nothing that scrolls: the rows (or cards) per page
+// Earn's three right-hand tabs in the narrow, resizable panel: Pools and My strategies as cards, My
+// pools as one table; one toolbar row that never wraps (the action last and inside it), one
+// labelled Filters popover of facet chips (Export CSV joins it while the panel is narrow), and
+// nothing that scrolls: the rows (or cards) per page
 // follow the list area's height (and, for cards, the columns the panel's width gives).
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
@@ -70,12 +70,11 @@ const actions: LiquidityActions = { propose: async () => ({ ok: true, reply: nul
 const draft: Draft = { kind: "commit", id: "d1", poolId: POOL, poolName: "Pool 0", amountCents: 500_000, state: "us-ny", sandbox: false };
 const drafts = (n: number): Draft[] => Array.from({ length: n }, (_, i) => ({ ...draft, id: `d${i}` }));
 
-type TabCase = { id: string; cards: boolean; cta: string | null; filters: string[]; render: () => React.ReactElement };
+type TabCase = { id: string; cards: boolean; cta: string | null; facets: string[]; view: boolean; render: () => React.ReactElement };
 const TABS: TabCase[] = [
-  { id: "pools", cards: true, cta: "commit", filters: ["Show", "Product line", "State", "Money"], render: () => <PoolsTab data={data} poolIds={[POOL]} actions={actions} /> },
-  { id: "my-positions", cards: false, cta: "withdraw", filters: ["Show", "Money"], render: () => <EarnTable tab="my-positions" data={data} actions={actions} /> },
-  { id: "my-pools", cards: false, cta: "propose", filters: ["State", "Money"], render: () => <EarnTable tab="my-pools" data={data} actions={actions} /> },
-  { id: "my-strategies", cards: true, cta: null, filters: ["Kind"], render: () => <StrategiesTab data={data} drafts={[draft]} actions={actions} /> },
+  { id: "pools", cards: true, cta: "commit", facets: ["Product line", "State", "Money"], view: true, render: () => <PoolsTab data={data} poolIds={[POOL]} actions={actions} /> },
+  { id: "my-pools", cards: false, cta: "propose", facets: ["State", "Money"], view: false, render: () => <EarnTable tab="my-pools" data={data} actions={actions} /> },
+  { id: "my-strategies", cards: true, cta: null, facets: ["Kind"], view: false, render: () => <StrategiesTab data={data} drafts={[draft]} actions={actions} /> },
 ];
 
 describe("each Earn tab", () => {
@@ -122,30 +121,71 @@ describe("each Earn tab", () => {
         expect(slot.contains(cta)).toBe(true);
         expect(slot.className).toContain("shrink-0");
       }
-      // The filters show inline only in a wide panel; a narrow one has the Filters menu instead.
-      const inline = toolbar.querySelector("[data-filters-inline]")!;
-      expect(inline.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "@3xl/list:flex", "shrink-0"]));
-      expect([...inline.querySelectorAll("[data-filter]")].map((f) => f.getAttribute("data-filter"))).toEqual(t.filters);
-      expect(toolbar.querySelector("[data-export-inline]")!.className).toContain("@3xl/list:block");
+      // One Filters button at every width, and no filter dropdowns in the row; Export CSV shows in
+      // the row only in a wide panel (a narrow one has it in the Filters popover).
+      expect(toolbar.querySelector("[data-filters-inline], [data-filter]")).toBeNull();
       const folded = toolbar.querySelector("[data-filters-folded]")!;
-      expect(folded.className.split(" ")).toEqual(expect.arrayContaining(["shrink-0", "@3xl/list:hidden"]));
-      expect(folded.querySelector("[data-filters-menu-button]")!.textContent).toContain("Filters");
+      expect(folded.className.split(" ")).toContain("shrink-0");
+      expect(folded.className).not.toContain("hidden");
+      expect(folded.querySelector("[data-filters-menu-button]")!.textContent).toBe("Filters");
+      expect(toolbar.querySelectorAll("[data-filters-menu-button]")).toHaveLength(1);
+      expect(toolbar.querySelector("[data-export-inline]")!.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "@3xl/list:block"]));
+      // Pools' view switch comes right after the search; the other tabs have none.
+      const view = toolbar.querySelector("[data-toolbar-view]");
+      if (t.view) expect(view?.previousElementSibling?.querySelector("input")).toBeTruthy();
+      else expect(view).toBeNull();
+    });
+
+    it(`${t.id}: the Filters popover has one heading per facet (${t.facets.join(", ")}), chips and one Clear all; no dropdowns inside`, async () => {
+      render(t.render());
+      await act(async () => void fireEvent.click(document.querySelector("[data-filters-menu-button]")!));
+      const menu = document.querySelector("[data-filters-menu]")!;
+      expect([...menu.querySelectorAll("[data-facet-heading]")].map((h) => h.textContent)).toEqual(t.facets);
+      expect(menu.querySelectorAll("[data-chip]").length).toBeGreaterThan(0);
+      expect(menu.querySelector("[data-filter], [data-slot='dropdown-menu-trigger'], select, [role='menu']")).toBeNull();
+      expect([...menu.querySelectorAll("button")].filter((b) => b.textContent === "Clear all")).toHaveLength(1);
+      // In a narrow panel (jsdom lays nothing out, so the row's Export CSV has no width) Export CSV is here, beside Clear all.
+      expect(menu.querySelector("[data-export]")!.textContent).toBe("Export CSV");
     });
   }
 
-  it("the folded Filters menu holds every filter and Export CSV, each labelled", async () => {
-    render(<PoolsTab data={data} poolIds={null} actions={actions} />);
-    const button = document.querySelector("[data-filters-menu-button]")!;
-    await act(async () => void fireEvent.click(button));
-    const menu = document.querySelector("[data-filters-menu]")!;
-    expect([...menu.querySelectorAll("[data-filter]")].map((f) => f.textContent)).toEqual(["Product line", "State", "Money"]);
-    expect(menu.querySelector("[data-export]")!.textContent).toBe("Export CSV");
+  it("chips pick any number per facet, the Filters button counts them, and Clear all clears them", async () => {
+    const two = manyPools(2).map((p, i) => ({ ...p, sandbox: i === 1, offeringCleared: i === 0 ? p.offeringCleared : false }));
+    render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: two }, builder: undefined }} poolIds={null} actions={actions} />);
+    const button = () => document.querySelector("[data-filters-menu-button]")!;
+    const cards = () => document.querySelectorAll("[data-pool-card]").length;
+    expect(cards()).toBe(2);
+    await act(async () => void fireEvent.click(button()));
+    const chip = (facet: string, value: string) => document.querySelector(`[data-filters-menu] [data-facet="${facet}"] [data-chip="${value}"]`) as HTMLButtonElement;
+    await act(async () => void fireEvent.click(chip("money", "real")));
+    expect(chip("money", "real").getAttribute("aria-pressed")).toBe("true");
+    expect(button().textContent).toBe("Filters· 1");
+    expect(button().getAttribute("aria-label")).toBe("Filters: 1 on");
+    expect(cards()).toBe(1);
+    // A second choice in the same facet widens it (either one).
+    await act(async () => void fireEvent.click(chip("money", "sandbox")));
+    expect(button().textContent).toBe("Filters· 2");
+    expect(cards()).toBe(2);
+    // Another facet narrows it (both facets must match).
+    await act(async () => void fireEvent.click(chip("state", "cleared")));
+    expect(button().textContent).toBe("Filters· 3");
+    expect(cards()).toBe(1);
+    await act(async () => void fireEvent.click(document.querySelector("[data-filters-menu] [data-filters-clear]")!));
+    expect(button().textContent).toBe("Filters");
+    expect(cards()).toBe(2);
+    expect((document.querySelector("[data-filters-menu] [data-filters-clear]") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("an active filter shows its count on the Filters button", () => {
+  it("the view switch (Matched · All · Invested) isn't a filter: it doesn't count on the Filters button", () => {
     render(<PoolsTab data={data} poolIds={[POOL]} actions={actions} />);
-    // Show · Matched is on until the user picks All pools.
-    expect(document.querySelector("[data-filters-menu-button]")!.textContent).toContain("· 1");
+    expect([...document.querySelectorAll("[data-view-switch] [data-view-option]")].map((o) => o.textContent)).toEqual(["Matched", "All", "Invested"]);
+    expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("Matched");
+    expect(document.querySelector("[data-filters-menu-button]")!.textContent).toBe("Filters");
+    // Below 36rem it folds to one compact button naming the view, with no heading inside.
+    const compact = document.querySelector("[data-view-compact]")!;
+    expect(compact.className).toContain("@xl/list:hidden");
+    expect(document.querySelector("[data-view-switch]")!.className).toContain("@xl/list:inline-flex");
+    expect(compact.querySelector("button")!.textContent).toBe("Matched");
   });
 });
 
@@ -212,9 +252,9 @@ describe("nothing scrolls", () => {
     await act(async () => resize!());
     expect(cards()).toBe(4);
     cleanup();
-    // Pools: liquidity providers' cards (with Commit capital) are 180px before one is measured.
+    // Pools: liquidity providers' cards (with their position line and buttons) are 200px before one is measured.
     vi.restoreAllMocks();
-    areaHeight = (180 + 12) * 3 - 12;
+    areaHeight = (200 + 12) * 3 - 12;
     render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: manyPools(10) } }} poolIds={null} actions={actions} />);
     expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(3);
     expect(document.querySelector("[data-pager]")!.textContent).toContain("10 pools · Page 1 of 4");
