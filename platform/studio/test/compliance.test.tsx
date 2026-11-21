@@ -145,11 +145,22 @@ describe("licences", () => {
     expect(f({ within: "" })).toHaveLength(4);
   });
 
+  it("filters by any of several picks within a filter, and every filter that has one", () => {
+    const f = (o: Partial<typeof NO_LICENCE_FILTERS>) => filterLicences(licences, { ...NO_LICENCE_FILTERS, ...o }, NOW).map((l) => l.number);
+    expect(f({ regulator: ["CA DFPI", "TX DOB"] })).toEqual(["MT-1", "MT-3"]);
+    expect(f({ state: ["NJ", "TX"] })).toEqual(["L-2", "MT-3", "L-4"]);
+    expect(f({ status: ["expired", "suspended"] })).toEqual(["MT-3", "L-4"]);
+    expect(f({ within: ["30", "365"] })).toEqual(["MT-1", "L-2"]);
+    expect(f({ partner: ["Prairie Trust"], status: ["expired", "expiring"] })).toEqual(["MT-3"]);
+    expect(f({ partner: [], state: [] })).toHaveLength(4);
+  });
+
   it("highlights expired and expiring rows with words, not colour alone", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     expect(html).toMatch(/<tr[^>]*data-expiry="expired"[\s\S]*?Expired/);
     expect(html).toMatch(/<tr[^>]*data-expiry="expiring"[\s\S]*?Expires soon/);
-    for (const t of ["Search licences", 'data-filter="Partner"', 'data-filter="Status"', 'data-filter="Regulator"', 'data-filter="State"', 'data-filter="Expiring"']) expect(html).toContain(t);
+    for (const t of ["Search licences", "data-filters-menu-button"]) expect(html).toContain(t);
+    for (const t of ['data-filter="Partner"', 'data-filter="Status"', 'data-filter="Regulator"', 'data-filter="State"', 'data-filter="Expiring"']) expect(html).not.toContain(t);
     // No count line and no inline Import note, in either view (the table's pager, "Page x of y", is the only "of").
     const map = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} view="map" coverage={{ kind: "ready", data: coverage }} />);
     expect(html).toContain("4 rows · Page 1 of 1");
@@ -163,7 +174,7 @@ describe("licences", () => {
   it("has one toolbar row beside the search: filters, Import, Export CSV, the Map / Table button and Invite partner last", () => {
     const html = renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />);
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("data-table-view"));
-    const order = ['aria-label="Search licences"', 'aria-label="Partner"', 'aria-label="Regulator"', 'aria-label="State"', 'aria-label="Status"', 'aria-label="Expiring"', "data-import", "data-export", "data-view-toggle", "data-invite-partner"];
+    const order = ['aria-label="Search licences"', "data-filters-menu-button", "data-import", "data-export", "data-view-toggle", "data-invite-partner"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
@@ -248,7 +259,8 @@ describe("audits", () => {
     const html = renderToStaticMarkup(
       <AuditsView rows={rowsFromEvents(page.events)} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["app.created"]} page={1} hasNext onPrev={() => undefined} onNext={() => undefined} />,
     );
-    for (const t of ['data-filter="Action"', 'data-filter="Member"', 'data-filter="App"', 'data-filter="Date range"', "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
+    expect(html).not.toMatch(/data-filter="(Action|Member|App)"/);
+    for (const t of ["data-filters-menu-button", 'data-filter="Date range"', "Export CSV", "Page 1", "2026-11-12 10:00 UTC", "app: Round-up savings", "user: u9"]) expect(html).toContain(t);
     expect(html).toMatch(/<button[^>]*disabled[^>]*>[\s\S]*?Previous/);
   });
 });

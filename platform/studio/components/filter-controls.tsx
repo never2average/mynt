@@ -1,19 +1,18 @@
 "use client"
 
-// The compact filter controls that sit in a table's one toolbar row, after its search: a
-// labelled button per filter opening its choices, and a date range. An active filter shows on
-// its control ("Status · Overdue", "Dates · 2026-11-01 – 2026-11-13") with Clear in its menu,
-// never as extra lines of text; the menu doesn't repeat the button's label. Server-renderable
-// (the menus open on the client).
-//
-// For a narrow panel (Earn's tabs), the facets go in ONE "Filters" popover instead (FiltersPopover):
-// a heading per facet with its choices as chips (any number per facet), and one Clear all. A view
-// switch (Matched · All · Invested) is a segmented control beside it (ViewSwitch).
+// The filter controls that sit in a table's one toolbar row, after its search. A list's facets go
+// in ONE "Filters" popover (FiltersPopover): a heading per facet with its choices as chips (any
+// number per facet; a row matches any of a facet's picks, and every facet that has one), one
+// Clear all, and the count on the button ("Filters · 2"). A date range is its own calendar button
+// beside it (DateRangeFilter). FilterSelect stays for a single choice that isn't a list filter
+// (the map's region, a chart's app). A view switch (Matched · All · Invested) is a segmented
+// control (ViewSwitch). Server-renderable (the menus open on the client).
 import { CalendarDays, Check, ChevronDown, SlidersHorizontal, X } from "lucide-react"
 import type { DateRange } from "react-day-picker"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+export { anyOf, picksOf, type Picks } from "@/lib/facets"
 import {
   DropdownMenu,
   DropdownMenuContent,

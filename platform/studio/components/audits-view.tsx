@@ -2,8 +2,8 @@
 
 // The Audits page's tables. AuditsView: one class of the workspace's records (App security,
 // Financial activity or Workspace activity) as a paged table, with a full-width search over the
-// page shown, then in the same toolbar row its filters (kind, member, app, date range, and
-// severity or status where the class has them) and a labelled Export CSV of the rows shown.
+// page shown, then in the same toolbar row one Filters popover (app, kind, severity or status
+// where the class has them, member), the date range, and a labelled Export CSV of the rows shown.
 // ObligationsView: key figures (obligations, met, due soon, overdue), then each licence's
 // regulatory obligations for the products it covers (met, at risk, overdue, with evidence),
 // searchable, filtered by partner, regulator, status, product and due date, exportable, and paged
@@ -13,7 +13,7 @@ import { ChevronLeft, ChevronRight, Download, Search } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
-import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
+import { anyOf, DateRangeFilter, FiltersPopover, picksOf, type Facet, type Picks } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { ListPager, usePaged } from "@/components/list-layout"
 import { StatusDot } from "@/components/promotion-view"
@@ -51,8 +51,36 @@ export function AuditTabs({ tab, onTab }: { tab: AuditClass; onTab: (t: AuditCla
   )
 }
 
-export type AuditFilters = { action: string; user_id: string; app_id: string; from: string; to: string }
-export const NO_AUDIT_FILTERS: AuditFilters = { action: "", user_id: "", app_id: "", from: "", to: "" }
+// Action (kind), member and app take any number of picks; one value still works (?action=).
+export type AuditFilters = { action: Picks; user_id: Picks; app_id: Picks; from: string; to: string }
+export const NO_AUDIT_FILTERS: AuditFilters = { action: [], user_id: [], app_id: [], from: "", to: "" }
+const SERVER_FACETS = ["action", "user_id", "app_id"] as const
+
+/** Whether any of the filters is set (a pick or a date). */
+export const auditFiltersOn = (f: AuditFilters) => Boolean(f.from || f.to) || SERVER_FACETS.some((k) => picksOf(f[k]).length > 0)
+
+/**
+ * The /api/audit query for a page of a class: Mynt filters by one action, member or app, so a
+ * facet with exactly one pick is sent; one with several isn't, and the rows Mynt returns are
+ * narrowed to any of them here (auditRowMatches).
+ */
+export function auditQuery(auditClass: string, f: AuditFilters, cursor = ""): string {
+  const params = new URLSearchParams({ class: auditClass })
+  for (const k of SERVER_FACETS) {
+    const picks = picksOf(f[k])
+    if (picks.length === 1) params.set(k, picks[0])
+  }
+  if (f.from) params.set("from", f.from)
+  if (f.to) params.set("to", f.to)
+  if (cursor) params.set("cursor", cursor)
+  return `/api/audit?${params}`
+}
+
+/** Whether a row Mynt returned is any of the picks of each facet with several (one pick, Mynt already filtered by). */
+export function auditRowMatches(r: AuditRow, f: AuditFilters): boolean {
+  const many = (v: Picks) => (picksOf(v).length > 1 ? v : [])
+  return anyOf(many(f.action), r.kind) && anyOf(many(f.user_id), r.actor.id) && anyOf(many(f.app_id), r.appId)
+}
 export type Option = { id: string; name: string }
 
 const when = (iso: string) => {
@@ -131,11 +159,29 @@ export function AuditsView({
   loading?: boolean
 }) {
   const [query, setQuery] = useState("")
-  const [local, setLocal] = useState<{ severity: string; status: string }>({ severity: "", status: "" })
+  const [local, setLocal] = useState<{ severity: string[]; status: string[] }>({ severity: [], status: [] })
   const shown = useMemo(
-    () => searchRows(rows, query).filter((r) => (!local.severity || r.severity === local.severity) && (!local.status || r.status === local.status)),
-    [rows, query, local],
+    () => searchRows(rows, query).filter((r) => auditRowMatches(r, filters) && anyOf(local.severity, r.severity) && anyOf(local.status, r.status)),
+    [rows, query, local, filters],
   )
+  const facets: Facet[] = [
+    { id: "app", label: "App", options: apps.map((x) => ({ value: x.id, label: x.name })), selected: picksOf(filters.app_id), onChange: (v) => onFilters({ ...filters, app_id: v }) },
+    { id: "action", label: auditClass === "workspace" ? "Action" : "Kind", options: actions.map((x) => ({ value: x, label: x })), selected: picksOf(filters.action), onChange: (v) => onFilters({ ...filters, action: v }) },
+    ...CLASS_FIELDS[auditClass].map(
+      (k): Facet => ({
+        id: k,
+        label: k === "severity" ? "Severity" : "Status",
+        options: distinct(rows.map((r) => r[k])).map((v) => ({ value: v, label: v.replace(/_/g, " ") })),
+        selected: local[k],
+        onChange: (v) => setLocal({ ...local, [k]: v }),
+      }),
+    ),
+    { id: "member", label: "Member", options: members.map((m) => ({ value: m.id, label: m.name })), selected: picksOf(filters.user_id), onChange: (v) => onFilters({ ...filters, user_id: v }) },
+  ]
+  const clear = () => {
+    setLocal({ severity: [], status: [] })
+    onFilters({ ...filters, action: [], user_id: [], app_id: [] })
+  }
   const columns = CLASS_COLUMNS[auditClass]
   const appName = (id: string | null) => (id ? (apps.find((a) => a.id === id)?.name ?? id) : "—")
   const exportCsv = () =>
@@ -154,18 +200,7 @@ export function AuditsView({
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search records" className="pl-8" aria-label="Search the audit trail" />
         </div>
-        <FilterSelect label="App" value={filters.app_id} onChange={(v) => onFilters({ ...filters, app_id: v })} options={apps.map((x) => ({ value: x.id, label: x.name }))} />
-        <FilterSelect label={auditClass === "workspace" ? "Action" : "Kind"} value={filters.action} onChange={(v) => onFilters({ ...filters, action: v })} options={actions.map((x) => ({ value: x, label: x }))} />
-        {CLASS_FIELDS[auditClass].map((k) => (
-          <FilterSelect
-            key={k}
-            label={k === "severity" ? "Severity" : "Status"}
-            value={local[k]}
-            onChange={(v) => setLocal({ ...local, [k]: v })}
-            options={distinct(rows.map((r) => r[k])).map((v) => ({ value: v, label: v.replace(/_/g, " ") }))}
-          />
-        ))}
-        <FilterSelect label="Member" value={filters.user_id} onChange={(v) => onFilters({ ...filters, user_id: v })} options={members.map((m) => ({ value: m.id, label: m.name }))} />
+        <FiltersPopover facets={facets} onClear={clear} />
         <DateRangeFilter label="Date range" from={filters.from} to={filters.to} onChange={(from, to) => onFilters({ ...filters, from, to })} />
         <Button variant="outline" onClick={exportCsv} disabled={!shown.length} data-export>
           <Download />
@@ -267,11 +302,21 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS, 
     setF({ ...f, [k]: e.target.value })
     setPage(1)
   }
-  const pick = (k: keyof ObligationFilters) => (v: string) => {
+  const pick = (k: Exclude<keyof ObligationFilters, "query">) => (v: string[]) => {
     setF({ ...f, [k]: v })
     setPage(1)
   }
   const counts = Object.fromEntries(OBLIGATION_STATUSES.map((s) => [s, obligations.filter((o) => o.status === s).length])) as Record<ObligationStatus, number>
+  const facets: Facet[] = [
+    { id: "partner", label: "Partner", options: partnersOf(obligations).map(([id, name]) => ({ value: id, label: name })), selected: picksOf(f.partner), onChange: pick("partner") },
+    { id: "regulator", label: "Regulator", options: distinct(obligations.map((o) => o.regulator)).map((v) => ({ value: v, label: v })), selected: picksOf(f.regulator), onChange: pick("regulator") },
+    { id: "status", label: "Status", options: OBLIGATION_STATUSES.map((st) => ({ value: st, label: `${OBLIGATION_LABELS[st]} (${counts[st]})` })), selected: picksOf(f.status), onChange: pick("status") },
+    { id: "product", label: "Product", options: distinct(obligations.flatMap((o) => o.products)).map((v) => ({ value: v, label: v })), selected: picksOf(f.product), onChange: pick("product") },
+  ]
+  const clear = () => {
+    setF({ ...f, partner: [], regulator: [], status: [], product: [] })
+    setPage(1)
+  }
   const exportCsv = () =>
     downloadCsv(
       "licence-obligations.csv",
@@ -291,10 +336,7 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS, 
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={f.query} onChange={set("query")} placeholder="Search obligations" className="pl-8" aria-label="Search obligations" />
         </div>
-        <FilterSelect label="Partner" value={f.partner} onChange={pick("partner")} options={partnersOf(obligations).map(([id, name]) => ({ value: id, label: name }))} />
-        <FilterSelect label="Regulator" value={f.regulator} onChange={pick("regulator")} options={distinct(obligations.map((o) => o.regulator)).map((v) => ({ value: v, label: v }))} />
-        <FilterSelect label="Status" value={f.status} onChange={pick("status")} options={OBLIGATION_STATUSES.map((st) => ({ value: st, label: `${OBLIGATION_LABELS[st]} (${counts[st]})` }))} />
-        <FilterSelect label="Product" value={f.product} onChange={pick("product")} options={distinct(obligations.flatMap((o) => o.products)).map((v) => ({ value: v, label: v }))} />
+        <FiltersPopover facets={facets} onClear={clear} />
         <DateRangeFilter
           label="Date range"
           future

@@ -67,13 +67,14 @@ describe("audit classes", () => {
     const html = view("security");
     expect(CLASS_COLUMNS.security.map((c) => c.label)).toEqual(["When", "App", "Kind", "Summary", "Severity", "Status", "Who"]);
     for (const t of ["Secret written to logs", "Cards", "Export CSV", "Search the audit trail", "Page 1"]) expect(html).toContain(t);
-    // One toolbar row: the search, every filter, then Export CSV; no separate filters row.
+    // One toolbar row: the search, one Filters button (its facets: test/audits.test.tsx), the date range, then Export CSV; no separate filters row.
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("<table"));
-    const order = ['aria-label="Search the audit trail"', 'data-filter="App"', 'data-filter="Kind"', 'data-filter="Severity"', 'data-filter="Status"', 'data-filter="Member"', 'data-filter="Date range"', "data-export"];
+    const order = ['aria-label="Search the audit trail"', "data-filters-menu-button", 'data-filter="Date range"', "data-export"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
-    expect(html).not.toContain("data-filters");
+    expect(bar.match(/data-filters-menu-button/g)).toHaveLength(1);
+    expect(bar).not.toMatch(/data-filter="(App|Kind|Severity|Status|Member)"/);
     expect(html).not.toContain("<select");
     expect(html).toMatch(/data-tone="red"[^>]*>[\s\S]*?High/);
     expect(html).toMatch(/data-tone="amber"[^>]*>[\s\S]*?Medium/);
@@ -83,12 +84,11 @@ describe("audit classes", () => {
     expect(CLASS_COLUMNS.financial.map((c) => c.label)).toEqual(["When", "App", "Kind", "Summary", "Status", "Who", "Target"]);
     expect(CLASS_COLUMNS.workspace.map((c) => c.label)).toEqual(["When", "Who", "Action", "Target", "Summary"]);
     const fin = view("financial");
-    expect(fin).not.toContain('data-filter="Severity"');
-    expect(fin).toContain('data-filter="Status"');
+    expect(fin).toContain("data-filters-menu-button"); // Status but no Severity in its popover: test/audits.test.tsx
     // Before Mynt classifies: the trail as it is, under Workspace activity.
     const trail = fromAudit({ events: [{ at: "2026-11-12T10:00:00Z", actor: { name: "Ines" }, action: "member.invited", target: { type: "user", id: "u9" } }] }).events;
     const ws = view("workspace", rowsFromEvents(trail));
-    for (const t of ['data-filter="Action"', "member.invited", "user: u9", "Ines"]) expect(ws).toContain(t);
+    for (const t of ["data-filters-menu-button", "member.invited", "user: u9", "Ines"]) expect(ws).toContain(t);
   });
 
   it("Licence obligations: per licence and product, met / at risk / overdue in words, with evidence", () => {
@@ -106,7 +106,7 @@ describe("audit classes", () => {
     expect(html).toMatch(/data-status="overdue"[\s\S]*?data-tone="red"[\s\S]*?Overdue/);
     for (const t of ["Filed 2026-10-10", "No evidence recorded", "Cards, Savings", "Money transmitter", "Export CSV", "<th", "Reason"]) expect(html).toContain(t);
     const bar = html.slice(html.indexOf("data-toolbar"), html.indexOf("<table"));
-    const order = ['aria-label="Search obligations"', 'data-filter="Partner"', 'data-filter="Regulator"', 'data-filter="Status"', 'data-filter="Product"', 'data-filter="Date range"', "data-export"];
+    const order = ['aria-label="Search obligations"', "data-filters-menu-button", 'data-filter="Date range"', "data-export"];
     const at = order.map((t) => bar.indexOf(t));
     expect(at.every((i) => i >= 0), JSON.stringify(at)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
@@ -120,6 +120,10 @@ describe("audit classes", () => {
     expect(f({ product: "Savings" })).toEqual(["CA-MT-Q"]);
     expect(f({ partner: "e1", query: "audit" })).toEqual(["CA-MT-AUD"]);
     expect(f({ partner: "e2" })).toEqual(["TX-1", "obligation-3"]);
+    // Any of several picks within a filter, and every filter that has one.
+    expect(f({ status: ["met", "overdue"] })).toEqual(["CA-MT-Q", "TX-1"]);
+    expect(f({ partner: ["e1"], status: ["met", "overdue"] })).toEqual(["CA-MT-Q"]);
+    expect(f({ product: ["Savings", "Cards"] })).toEqual(["CA-MT-Q", "CA-MT-AUD"]);
     expect(renderToStaticMarkup(<ObligationsView obligations={[]} />)).toContain("No obligations yet");
   });
 

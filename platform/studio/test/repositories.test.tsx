@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
+import { clearAll, filtersButton, headings, openFilters, toggle } from "./facet-helpers";
 
 // The dashboard's GitHub tile: the username, up to five connected repositories with their
 // approval, View all, and Connect repository (connect_repository), plus the route behind it.
@@ -115,9 +116,10 @@ describe("the Repositories tab", () => {
     expect(renderToStaticMarkup(<RepositoriesTab state={{ kind: "unsupported" }} />)).toContain('data-empty="not-available"');
   });
 
-  it("has one toolbar row: search, Status, Export CSV, then Connect repository as the primary button", () => {
+  it("has one toolbar row: search, one Filters button (Status), Export CSV, then Connect repository as the primary button", () => {
     const html = renderToStaticMarkup(<RepositoriesTab state={{ kind: "ready", repos, connect: true }} />);
-    const toolbar = ['aria-label="Search repositories by name or status"', 'data-filter="Status"', ">Export CSV<", "data-connect-repository"].map((s) => html.indexOf(s));
+    const toolbar = ['aria-label="Search repositories by name or status"', "data-filters-menu-button", ">Export CSV<", "data-connect-repository"].map((s) => html.indexOf(s));
+    expect(html).not.toContain('data-filter="Status"');
     expect(toolbar.every((i) => i > 0)).toBe(true);
     expect([...toolbar].sort((a, b) => a - b)).toEqual(toolbar);
     const cta = /<button[^>]*data-connect-repository[^>]*>/.exec(html)![0];
@@ -127,12 +129,19 @@ describe("the Repositories tab", () => {
     expect(renderToStaticMarkup(<ConnectRepository enabled={false} />)).not.toContain("title=");
   });
 
-  it("filters by status", () => {
+  it("filters by status: any of the picked statuses, from one Filters popover with one Clear all", async () => {
     render(<RepositoriesTab state={{ kind: "ready", repos, connect: true }} />);
-    fireEvent.keyDown(screen.getByRole("button", { name: "Status" }), { key: "Enter" });
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Rejected" }));
+    expect(filtersButton().textContent).toBe("Filters");
+    await openFilters();
+    expect(headings()).toEqual(["Status"]);
+    await toggle("status", "rejected");
     expect(document.querySelectorAll("[data-repo-row]")).toHaveLength(1);
     expect(document.querySelector('[data-repo-row="ines/vault"]')).toBeTruthy();
+    await toggle("status", "pending");
+    expect([...document.querySelectorAll("[data-repo-row]")].map((r) => r.getAttribute("data-repo-row"))).toEqual(["ines/cards", "ines/vault"]);
+    expect(filtersButton().textContent).toBe("Filters· 2");
+    await clearAll();
+    expect(document.querySelectorAll("[data-repo-row]")).toHaveLength(3);
   });
 
   it("loads as Skeleton blocks, never 'Loading…' text", () => {
