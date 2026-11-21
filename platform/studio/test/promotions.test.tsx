@@ -16,7 +16,9 @@ const { PromotionView, StageControl, MoveBackForm } = await import("@/components
 const { AppTopBar } = await import("@/components/app-top-bar");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
-const { WorkspaceView, SettingsTab, NO_SETTINGS_TOOLS } = await import("@/components/workspace-view");
+const { WorkspaceView, NO_SETTINGS_TOOLS } = await import("@/components/workspace-view");
+const { allowedSettings, RenameWorkspaceSheet, ConfirmWorkspaceSheet } = await import("@/components/workspace-settings");
+import type { WorkspaceInfo } from "@/components/workspace-view";
 const { NeedsAttention, AppsByStage, RecentActivity } = await import("@/components/dashboard-panels");
 const { DashboardView } = await import("@/components/dashboard-view");
 const { TeamSwitcher } = await import("@/components/team-switcher");
@@ -234,9 +236,9 @@ const actions = { invite: async () => null, changeRole: async () => null, remove
 const settings = { rename: async () => null, archive: async () => null, unarchive: async () => null, relink: async () => null };
 
 describe("the Settings page (once Workspace)", () => {
-  it("has no details card: the page starts with the line tab bar; Manage organization is a labelled button in General", () => {
-    const view = (tab: "apps" | "general", m: Parameters<typeof WorkspaceView>[0]["members"] = membersData) =>
-      renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={m} apps={appsRows} memberActions={actions} settingsActions={settings} />);
+  it("has no details card: the page starts with the line tab bar", () => {
+    const view = (tab: "apps", m: Parameters<typeof WorkspaceView>[0]["members"] = membersData) =>
+      renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={m} apps={appsRows} memberActions={actions} />);
     const html = view("apps");
     expect(html).not.toContain("data-workspace-card");
     expect(html).not.toContain('data-slot="card"');
@@ -244,20 +246,15 @@ describe("the Settings page (once Workspace)", () => {
     // The tab bar comes first, in the shared line variant.
     expect(html.indexOf('role="tablist"')).toBeLessThan(html.indexOf('data-tab-panel="apps"'));
     expect(html).toMatch(/role="tablist" aria-label="Settings" data-slot="tabs-list" data-variant="line"/);
-    const general = view("general");
-    expect(general).toMatch(/data-manage-org[\s\S]*?href="https:\/\/accounts\.example\.test\/organization"[^>]*>[\s\S]*?Manage organization/);
-    // No manage_url from Mynt: no button.
-    expect(view("general", { ...membersData, manageUrl: null })).not.toContain("Manage organization");
   });
 
-  it("has Members, Invitations, Apps, Repositories and General tabs, from ?tab= (the old Settings tab is General)", () => {
-    expect([tabOf("members"), tabOf("invitations"), tabOf("apps"), tabOf("general"), tabOf("settings"), tabOf("nope"), tabOf(undefined)]).toEqual(["members", "invitations", "apps", "general", "general", "members", "members"]);
-    const view = (tab: "members" | "invitations" | "apps" | "general") =>
-      renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} settingsActions={settings} />);
+  it("has Members, Invitations, Apps and Repositories tabs, from ?tab=", () => {
+    expect([tabOf("members"), tabOf("invitations"), tabOf("apps"), tabOf("repositories"), tabOf("nope"), tabOf(undefined)]).toEqual(["members", "invitations", "apps", "repositories", "members", "members"]);
+    const view = (tab: "members" | "invitations" | "apps") =>
+      renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} />);
     const html = view("apps");
     const tabs = [...html.matchAll(/role="tab" aria-selected="(true|false)" data-tab="(\w+)"/g)].map((m) => [m[2], m[1]]);
-    expect(tabs).toEqual([["members", "false"], ["invitations", "false"], ["apps", "true"], ["repositories", "false"], ["general", "false"]]);
-    expect(html).toContain(">General<");
+    expect(tabs).toEqual([["members", "false"], ["invitations", "false"], ["apps", "true"], ["repositories", "false"]]);
     expect(html).toContain('role="tablist" aria-label="Settings"');
     expect(html).toContain('data-tab-panel="apps"');
     expect(html).toContain('href="/a1/b1"');
@@ -266,44 +263,24 @@ describe("the Settings page (once Workspace)", () => {
     expect(html).toMatch(/>\s*New app\s*</);
     expect(view("members")).toContain('data-tab-panel="members"');
     expect(view("invitations")).toContain('data-tab-panel="invitations"');
-    expect(view("general")).toContain("data-rename-form");
-    expect(view("general")).toContain('data-tab-panel="general"');
   });
 
-  it("shows archive controls only to owners, and only where Mynt has the tools", () => {
-    const html = (i: typeof info) => renderToStaticMarkup(<SettingsTab info={i} actions={settings} />);
-    expect(html(info)).not.toContain("data-owner-settings"); // this Mynt has no archive tools yet
-    const withTools = { ...info, tools: { rename: true, archive: true, unarchive: true, relink: true } };
-    expect(html(withTools)).toContain(">Archive workspace<");
-    expect(html({ ...withTools, isOwner: false })).not.toContain("data-owner-settings");
-    const archived = { ...withTools, workspace: { ...ws, archivedAt: "2026-11-10T00:00:00Z", offboardingAt: "2026-11-17T00:00:00Z" } };
-    expect(html(archived)).toContain(">Unarchive workspace<");
-    expect(html(archived)).not.toContain(">Archive workspace<");
-    const frozen = { ...withTools, workspace: { ...ws, orgMissingSince: "2026-11-09T00:00:00Z" } };
-    expect(html(frozen)).toContain(">Give it a new organization<");
-    // Members can't rename: the field and Save are disabled, with no explainer line.
-    const member = html({ ...info, canManage: false, isOwner: false });
-    expect(member).toMatch(/<input[^>]*aria-label="Workspace name"[^>]*disabled=""/);
-    expect(member).toMatch(/<button[^>]*type="submit"[^>]*disabled=""[^>]*>Save<\/button>/);
-    expect(member).not.toContain("can rename it");
-  });
-
-  it("General is flat Panels (Organization, Name, Archive) with no cards or explainer paragraphs", () => {
-    const withTools = { ...info, tools: { rename: true, archive: true, unarchive: true, relink: true } };
-    const html = renderToStaticMarkup(<SettingsTab info={withTools} actions={settings} manageUrl="https://accounts.example.test/organization" />);
-    expect(html).not.toContain('data-slot="card"');
-    expect(html).not.toContain("card-description");
-    expect(html).not.toContain("Owners only");
-    for (const row of ["organization", "name", "archive"]) expect(html).toContain(`data-row="${row}"`);
-    expect(html.indexOf('data-row="organization"')).toBeLessThan(html.indexOf('data-row="name"'));
-    expect(html.indexOf('data-row="name"')).toBeLessThan(html.indexOf('data-row="archive"'));
-    // Archive is a labelled button; the consequence is in its confirmation dialog, not on the page.
-    expect(html).toMatch(/data-archive[^>]*>[\s\S]*?Archive workspace</);
-    expect(html).not.toContain("Archiving freezes the workspace");
+  it("has no General tab; ?tab=general and the old ?tab=settings open the first tab", () => {
+    for (const tab of ["members", "apps"] as const) {
+      const html = renderToStaticMarkup(<WorkspaceView tab={tab} onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} />);
+      expect(html).not.toContain(">General<");
+      expect(html).not.toContain('data-tab="general"');
+      expect(html).not.toContain('data-tab-panel="general"');
+      expect(html).not.toContain("data-rename-form");
+      expect(html).not.toContain("Manage organization");
+    }
+    expect(tabOf("general")).toBe("members");
+    expect(tabOf("settings")).toBe("members");
+    expect(tabOf(["general"][0])).toBe("members");
   });
 
   it("Apps: key figures by stage, then search, Stage, Export CSV and New app last; stage as a status dot in words", () => {
-    const html = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} settingsActions={settings} />);
+    const html = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} />);
     const figure = (key: string) => new RegExp(`data-kpi="${key}"[\\s\\S]*?data-measured="true">(\\d+)<`).exec(html)?.[1];
     expect([figure("apps"), figure("production"), figure("staging"), figure("ideas")]).toEqual(["2", "1", "0", "1"]);
     const toolbar = ['aria-label="Search apps by name, stage or owner"', 'data-filter="Stage"', ">Export CSV<", 'href="/new"'].map((s) => html.indexOf(s));
@@ -313,30 +290,16 @@ describe("the Settings page (once Workspace)", () => {
     expect(row).toMatch(/data-tone="green"[\s\S]*?Production/);
     expect(row).not.toContain('data-slot="badge"');
     // Still loading: a Skeleton, never figures of 0.
-    const loading = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={null} memberActions={actions} settingsActions={settings} />);
+    const loading = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={null} memberActions={actions} />);
     expect(loading).not.toContain("data-kpi=");
     expect(loading).toContain('data-slot="skeleton"');
     expect(loading).not.toContain("rounded-xl");
   });
 
-  it("Archive workspace opens a confirmation dialog with the consequence; Yes archives", async () => {
-    const archived: string[] = [];
-    const withTools = { ...info, tools: { rename: true, archive: true, unarchive: true, relink: true } };
-    render(<SettingsTab info={withTools} actions={{ ...settings, archive: async () => (archived.push("x"), null) }} />);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Archive workspace" }));
-    const dialog = screen.getByRole("dialog");
-    expect(dialog.textContent).toContain("Archiving freezes the workspace; 7 days later everyone is removed. Until then it can be undone.");
-    fireEvent.click(screen.getByRole("button", { name: "Yes, archive workspace" }));
-    await act(async () => undefined);
-    expect(archived).toEqual(["x"]);
-    expect(screen.getByText("Archived. You can unarchive it for 7 days.")).toBeTruthy();
-  });
-
   it("Members: a member's role changes from its dropdown, not a native select", async () => {
     const changed: [string, string][] = [];
     const data = { ...membersData, members: [...membersData.members, { userId: "u2", name: "Sam", email: "sam@example.com", role: "member" as const }] };
-    render(<WorkspaceView tab="members" onTab={noop} info={info} members={data} apps={appsRows} memberActions={{ ...actions, changeRole: async (u: string, r: string) => (changed.push([u, r]), null) }} settingsActions={settings} />);
+    render(<WorkspaceView tab="members" onTab={noop} info={info} members={data} apps={appsRows} memberActions={{ ...actions, changeRole: async (u: string, r: string) => (changed.push([u, r]), null) }} />);
     expect(document.querySelector("select")).toBeNull();
     const trigger = screen.getByRole("button", { name: "Role for sam@example.com" });
     fireEvent.keyDown(trigger, { key: "Enter" });
@@ -373,6 +336,119 @@ describe("the Settings page (once Workspace)", () => {
   });
 });
 
+describe("the workspace's settings, in the switcher's menu", () => {
+  const all = { rename: true, archive: true, unarchive: true, relink: true };
+  const owner = { ...info, tools: all };
+  const admin = { ...owner, workspace: { ...ws, role: "admin" as const }, isOwner: false };
+  const member = { ...owner, workspace: { ...ws, role: "member" as const }, isOwner: false, canManage: false };
+
+  it("are allowed as General allowed them: rename for owners and admins, archive and unarchive for owners, only where Mynt has the tools", () => {
+    expect(allowedSettings(owner)).toEqual(["rename", "archive"]);
+    expect(allowedSettings(admin)).toEqual(["rename"]);
+    expect(allowedSettings(member)).toEqual([]);
+    expect(allowedSettings(null)).toEqual([]);
+    expect(allowedSettings({ ...owner, supported: false })).toEqual([]);
+    expect(allowedSettings({ ...owner, tools: NO_SETTINGS_TOOLS })).toEqual([]);
+    expect(allowedSettings({ ...owner, workspace: { ...ws, personal: true } })).toEqual(["rename"]);
+    expect(allowedSettings({ ...owner, workspace: { ...ws, archivedAt: "2026-11-10T00:00:00Z" } })).toEqual(["rename", "unarchive"]);
+    expect(allowedSettings({ ...owner, workspace: { ...ws, orgMissingSince: "2026-11-09T00:00:00Z" } })).toEqual(["rename", "archive", "relink"]);
+  });
+
+  const openMenu = async (i: WorkspaceInfo | null) => {
+    render(
+      <TooltipProvider>
+        <SidebarProvider>
+          <TeamSwitcher workspaces={[i?.workspace ?? ws]} selected={i?.workspace ?? ws} supported onSelect={noop} onCreate={async () => null} settings={{ info: i, actions: settings }} />
+        </SidebarProvider>
+      </TooltipProvider>,
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Switch workspace" }), { key: "Enter" });
+    await act(async () => undefined);
+    return screen.getAllByRole("menuitem").map((m) => m.textContent?.trim());
+  };
+
+  it("shows Rename workspace and Archive workspace to an owner, as labelled items", async () => {
+    const items = await openMenu(owner);
+    expect(items).toContain("Rename workspace");
+    expect(items).toContain("Archive workspace");
+    expect(items).not.toContain("Unarchive workspace");
+    expect(items).toContain("Create workspace");
+  });
+
+  it("shows Unarchive workspace, not Archive, to an owner of an archived workspace", async () => {
+    const items = await openMenu({ ...owner, workspace: { ...ws, archivedAt: "2026-11-10T00:00:00Z" } });
+    expect(items).toContain("Unarchive workspace");
+    expect(items).not.toContain("Archive workspace");
+  });
+
+  it("shows an admin Rename workspace only", async () => {
+    const items = await openMenu(admin);
+    expect(items).toContain("Rename workspace");
+    expect(items).not.toContain("Archive workspace");
+  });
+
+  it("shows a member neither", async () => {
+    const items = await openMenu(member);
+    expect(items).not.toContain("Rename workspace");
+    expect(items).not.toContain("Archive workspace");
+    expect(items).not.toContain("Unarchive workspace");
+    expect(items).toContain("Create workspace");
+  });
+
+  it("shows nothing while the info is loading", async () => {
+    const items = await openMenu(null);
+    expect(items.filter((t) => t?.includes("workspace") && t !== "Create workspace")).toEqual([]);
+  });
+
+  it("Rename workspace's sheet: the name and Save, no subtitle; Save renames and closes", async () => {
+    const renamed: string[] = [];
+    let open = true;
+    render(<RenameWorkspaceSheet open workspace={ws} onOpenChange={(o) => (open = o)} onRename={async (n) => (renamed.push(n), null)} />);
+    const sheet = screen.getByRole("dialog");
+    expect(sheet.textContent).toContain("Rename workspace");
+    expect(sheet.querySelector('[data-slot="sheet-description"]')).toBeNull();
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true); // unchanged
+    fireEvent.change(screen.getByRole("textbox", { name: "Workspace name" }), { target: { value: "Acme Labs" } });
+    fireEvent.click(save);
+    await act(async () => undefined);
+    expect(renamed).toEqual(["Acme Labs"]);
+    expect(open).toBe(false);
+  });
+
+  it("Rename workspace's sheet shows Mynt's refusal and stays open", async () => {
+    render(<RenameWorkspaceSheet open workspace={ws} onOpenChange={noop} onRename={async () => "Only the workspace's owners and admins can rename it."} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Workspace name" }), { target: { value: "X" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await act(async () => undefined);
+    expect(screen.getByRole("alert").textContent).toBe("Only the workspace's owners and admins can rename it.");
+  });
+
+  it("Archive workspace's sheet confirms with the consequence; Yes archives", async () => {
+    const archived: string[] = [];
+    render(<ConfirmWorkspaceSheet kind="archive" open workspace={ws} onOpenChange={noop} onConfirm={async () => (archived.push("x"), null)} />);
+    const sheet = screen.getByRole("dialog");
+    expect(sheet.textContent).toContain("Archive Acme?");
+    expect(sheet.textContent).toContain("Archiving freezes the workspace; 7 days later everyone is removed. Until then it can be undone.");
+    fireEvent.click(screen.getByRole("button", { name: "Yes, archive workspace" }));
+    await act(async () => undefined);
+    expect(archived).toEqual(["x"]);
+    expect(screen.getByText("Archived. You can unarchive it for 7 days.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Yes, archive workspace" })).toBeNull();
+  });
+
+  it("Unarchive workspace's sheet says when everyone is removed; Yes unarchives", async () => {
+    const done: string[] = [];
+    const archivedWs = { ...ws, archivedAt: "2026-11-10T00:00:00Z", offboardingAt: "2026-11-17T00:00:00Z" };
+    render(<ConfirmWorkspaceSheet kind="unarchive" open workspace={archivedWs} onOpenChange={noop} onConfirm={async () => (done.push("x"), null)} />);
+    expect(screen.getByRole("dialog").textContent).toContain("unless you unarchive it");
+    fireEvent.click(screen.getByRole("button", { name: "Yes, unarchive workspace" }));
+    await act(async () => undefined);
+    expect(done).toEqual(["x"]);
+    expect(screen.getByText("Unarchived. Nobody was removed.")).toBeTruthy();
+  });
+});
+
 describe("/members", () => {
   it("redirects to the Settings page's Members tab", async () => {
     const { default: MembersPage } = await import("@/app/(studio)/members/page");
@@ -387,7 +463,7 @@ describe("/members", () => {
 });
 
 describe("/workspace", () => {
-  it("redirects to Settings on the same tab, its old Settings tab to General", async () => {
+  it("redirects to Settings on the same tab, its old Settings tab (and General) to the first tab", async () => {
     const { default: WorkspacePage } = await import("@/app/(studio)/workspace/page");
     const to = async (tab?: string) => {
       try {
@@ -398,7 +474,8 @@ describe("/workspace", () => {
     };
     expect(await to("apps")).toContain("/settings?tab=apps");
     expect(await to("repositories")).toContain("/settings?tab=repositories");
-    expect(await to("settings")).toContain("/settings?tab=general");
+    expect(await to("settings")).toContain("/settings?tab=members");
+    expect(await to("general")).toContain("/settings?tab=members");
     expect(await to()).toContain("/settings?tab=members");
   });
 });

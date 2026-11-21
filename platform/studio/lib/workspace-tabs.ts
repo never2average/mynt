@@ -1,6 +1,8 @@
 // The Settings page's tabs (/settings?tab=...), shared by its server page and its views. The
-// workspace's own settings are its General tab (once called Settings: ?tab=settings still opens it).
-export const WORKSPACE_TABS = ["members", "invitations", "apps", "repositories", "general"] as const;
+// first is the default: an unknown tab, or one that's gone (General, once Settings: renaming and
+// archiving are in the workspace switcher's menu), opens it.
+export const WORKSPACE_TABS = ["members", "invitations", "apps", "repositories"] as const;
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
-export const TAB_LABELS: Record<WorkspaceTab, string> = { members: "Members", invitations: "Invitations", apps: "Apps", repositories: "Repositories", general: "General" };
-export const tabOf = (v: unknown): WorkspaceTab => (v === "settings" ? "general" : WORKSPACE_TABS.includes(v as WorkspaceTab) ? (v as WorkspaceTab) : "members");
+export const DEFAULT_TAB: WorkspaceTab = WORKSPACE_TABS[0];
+export const TAB_LABELS: Record<WorkspaceTab, string> = { members: "Members", invitations: "Invitations", apps: "Apps", repositories: "Repositories" };
+export const tabOf = (v: unknown): WorkspaceTab => (WORKSPACE_TABS.includes(v as WorkspaceTab) ? (v as WorkspaceTab) : DEFAULT_TAB);

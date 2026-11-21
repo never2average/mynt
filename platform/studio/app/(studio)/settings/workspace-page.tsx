@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MembersActions, MembersData } from "@/components/members-view";
 import { useWorkspace } from "@/components/workspace-context";
 import { useRepositories } from "@/components/repositories";
-import { NO_SETTINGS_TOOLS, TabSelector, WorkspaceView, type SettingsActions, type WorkspaceApp, type WorkspaceInfo } from "@/components/workspace-view";
+import { NO_SETTINGS_TOOLS, TabSelector, WorkspaceView, type WorkspaceApp, type WorkspaceInfo } from "@/components/workspace-view";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,7 +24,7 @@ const read = async <T,>(url: string): Promise<{ ok: boolean; body: (T & { messag
 };
 
 export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
-  const { selected, loading, reload, workspaces, select } = useWorkspace();
+  const { selected, loading, workspaces, select } = useWorkspace();
   const [tab, setTab] = useState<WorkspaceTab>(initialTab);
   const [info, setInfo] = useState<WorkspaceInfo | null>(null);
   const [members, setMembers] = useState<MembersData | null>(null);
@@ -89,20 +89,6 @@ export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
     };
   }, [id, loadMembers, send]);
 
-  const settingsActions: SettingsActions = useMemo(() => {
-    const base = `/api/workspaces/${id}`;
-    const then = async (failed: string | null) => {
-      if (!failed) await Promise.all([reload(), loadInfo()]);
-      return failed;
-    };
-    return {
-      rename: async (name) => then(await send(base, "PATCH", { name })),
-      archive: async () => then(await send(base, "POST", { action: "archive" })),
-      unarchive: async () => then(await send(base, "POST", { action: "unarchive" })),
-      relink: async () => then(await send(base, "POST", { action: "relink" })),
-    };
-  }, [id, reload, loadInfo, send]);
-
   // Each app with its owner's name (from the members), stage and newest build.
   const apps: WorkspaceApp[] | null = useMemo(() => {
     if (!projects) return null;
@@ -128,7 +114,7 @@ export function WorkspacePage({ initialTab }: { initialTab: WorkspaceTab }) {
             <WorkspaceUnavailable message={error} others={workspaces.filter((w) => !w.implicit && w.id !== selected.id)} onSelect={select} />
           </>
         ) : info ? (
-          <WorkspaceView tab={tab} onTab={onTab} info={info} members={members} apps={apps} memberActions={memberActions} settingsActions={settingsActions} repos={repos} onReposChanged={reloadRepos} />
+          <WorkspaceView tab={tab} onTab={onTab} info={info} members={members} apps={apps} memberActions={memberActions} repos={repos} onReposChanged={reloadRepos} />
         ) : (
           <Skeleton className="h-40 w-full" />
         )}

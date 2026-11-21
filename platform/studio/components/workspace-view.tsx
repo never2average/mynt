@@ -4,16 +4,15 @@
 // with no details card above it, in the dashboard's layout: key figures in a Panel where the tab
 // is about counts, then one toolbar row over a paged table. Members and Invitations
 // (components/members-view.tsx), Apps (every app with its stage, owner and last build),
-// Repositories (the developer's own connected GitHub repositories) and General (Organization
-// with Manage organization, the identity provider's page for the workspace; Name; for owners,
-// Archive, with unarchive and relink, only where Mynt offers them). Flat Panels, no cards.
+// Repositories (the developer's own connected repositories). Renaming, archiving and unarchiving
+// the workspace are in the workspace switcher's menu (components/workspace-settings.tsx).
 // Server-renderable for the tests.
 import Link from "next/link"
 import { useMemo, useState } from "react"
-import { Archive, Download, ExternalLink, Plus, RotateCcw } from "lucide-react"
+import { Download, Plus } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
-import { Panel, Section } from "@/components/dashboard-panels"
+import { Panel } from "@/components/dashboard-panels"
 import { FilterSelect } from "@/components/filter-controls"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { downloadCsv } from "@/components/licences-view"
@@ -21,13 +20,10 @@ import { dateOf, InvitationsTab, MembersTab, type MembersActions, type MembersDa
 import { StatusDot } from "@/components/promotion-view"
 import { RepositoriesTab, type ReposState } from "@/components/repositories"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toCsv } from "@/lib/compliance"
 import type { Kpi } from "@/lib/dashboard-visual"
-import { cn } from "@/lib/utils"
 import { Tab, TabList } from "@/components/ui/tabs"
 import { TAB_LABELS, WORKSPACE_TABS, type WorkspaceTab } from "@/lib/workspace-tabs"
 import { STAGE_LABELS, STAGES, type Stage, type Workspace } from "@/lib/workspaces"
@@ -185,134 +181,6 @@ export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: Works
   )
 }
 
-export function SettingsTab({ info, actions, manageUrl = null }: { info: WorkspaceInfo; actions: SettingsActions; manageUrl?: string | null }) {
-  const w = info.workspace
-  const [name, setName] = useState(w.name)
-  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-
-  if (!info.supported)
-    return (
-      <p className="rounded-lg border border-dashed px-6 py-10 text-center text-sm text-muted-foreground" data-tab-panel="general" data-empty="not-available">
-        {info.message ?? "Workspace settings come with Mynt's workspaces."}
-      </p>
-    )
-
-  const run = async (act: () => Promise<string | null>, done: string) => {
-    if (busy) return
-    setBusy(true)
-    const failed = await act()
-    setBusy(false)
-    setConfirming(false)
-    setMessage(failed ? { error: true, text: failed } : { error: false, text: done })
-  }
-  const ownerTools = info.isOwner && !w.personal && (info.tools.archive || info.tools.unarchive || info.tools.relink)
-  const canRename = info.canManage && info.tools.rename
-  const showArchive = !w.archivedAt && info.tools.archive
-
-  return (
-    <div className="flex flex-col gap-4 lg:gap-5" data-tab-panel="general">
-      {message && (
-        <p role={message.error ? "alert" : "status"} className={cn("text-sm", message.error ? "text-destructive" : "font-medium")}>
-          {message.text}
-        </p>
-      )}
-      {manageUrl && (
-        <Panel id="organization">
-          <div className="flex flex-wrap items-center gap-3" data-manage-org>
-            <h2 className="min-w-0 flex-1 text-sm font-semibold">Organization</h2>
-            <Button variant="outline" asChild>
-              <a href={manageUrl} target="_blank" rel="noopener noreferrer" data-manage-url>
-                <ExternalLink />
-                Manage organization
-              </a>
-            </Button>
-          </div>
-        </Panel>
-      )}
-      <Panel id="name">
-        <Section id="workspace-name" title="Name">
-          <form
-            className="flex flex-col gap-2 sm:flex-row"
-            data-rename-form
-            onSubmit={(e) => {
-              e.preventDefault()
-              void run(() => actions.rename(name), "Renamed.")
-            }}
-          >
-            <Input value={name} onChange={(e) => setName(e.target.value)} aria-label="Workspace name" maxLength={80} disabled={!canRename} />
-            <Button type="submit" disabled={!canRename || busy || !name.trim() || name.trim() === w.name}>
-              Save
-            </Button>
-          </form>
-        </Section>
-      </Panel>
-
-      {ownerTools && (
-        <Panel id="archive">
-          <div data-owner-settings>
-            <Section
-              id="archive"
-              title="Archive"
-              action={
-                showArchive ? (
-                  <Button variant="outline" onClick={() => setConfirming(true)} disabled={busy} data-archive>
-                    <Archive />
-                    Archive workspace
-                  </Button>
-                ) : undefined
-              }
-            >
-              {w.orgMissingSince && info.tools.relink && (
-                <div className="flex flex-wrap items-center gap-3" data-relink>
-                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">
-                    Frozen: its organization was deleted in the identity provider on {dateOf(w.orgMissingSince) ?? "an unknown date"}.
-                  </p>
-                  <Button variant="outline" onClick={() => void run(actions.relink, "It has a new organization, with its members in it.")} disabled={busy}>
-                    Give it a new organization
-                  </Button>
-                </div>
-              )}
-              {w.archivedAt && info.tools.unarchive && (
-                <div className="flex flex-wrap items-center gap-3" data-unarchive>
-                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">
-                    Archived on {dateOf(w.archivedAt) ?? "an unknown date"}.{" "}
-                    {w.offboardingAt ? `Everyone is removed on ${dateOf(w.offboardingAt)} unless you unarchive it.` : ""}
-                  </p>
-                  <Button variant="outline" onClick={() => void run(actions.unarchive, "Unarchived. Nobody was removed.")} disabled={busy}>
-                    <RotateCcw />
-                    Unarchive workspace
-                  </Button>
-                </div>
-              )}
-            </Section>
-          </div>
-        </Panel>
-      )}
-
-      {ownerTools && showArchive && (
-        <Dialog open={confirming} onOpenChange={setConfirming}>
-          <DialogContent className="sm:max-w-md" data-archive-confirm>
-            <DialogHeader>
-              <DialogTitle>Archive {w.name}?</DialogTitle>
-              <DialogDescription>Archiving freezes the workspace; 7 days later everyone is removed. Until then it can be undone.</DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button variant="ghost" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-              <Button variant="destructive" onClick={() => void run(actions.archive, "Archived. You can unarchive it for 7 days.")} disabled={busy}>
-                Yes, archive workspace
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
-    </div>
-  )
-}
-
 export function WorkspaceView({
   tab,
   onTab,
@@ -320,7 +188,6 @@ export function WorkspaceView({
   members,
   apps,
   memberActions,
-  settingsActions,
   repos = { kind: "loading" },
   onReposChanged,
 }: {
@@ -330,7 +197,6 @@ export function WorkspaceView({
   members: MembersData | null
   apps: WorkspaceApp[] | null
   memberActions: MembersActions
-  settingsActions: SettingsActions
   repos?: ReposState // the developer's own repositories (not the workspace's)
   onReposChanged?: () => void
 }) {
@@ -342,7 +208,6 @@ export function WorkspaceView({
       {tab === "invitations" && (members ? <InvitationsTab workspace={info.workspace} data={members} actions={memberActions} /> : loading)}
       {tab === "apps" && (apps ? <AppsTab workspace={info.workspace} apps={apps} /> : loading)}
       {tab === "repositories" && <RepositoriesTab state={repos} onConnected={onReposChanged} />}
-      {tab === "general" && <SettingsTab info={info} actions={settingsActions} manageUrl={members?.manageUrl ?? null} />}
     </div>
   )
 }
