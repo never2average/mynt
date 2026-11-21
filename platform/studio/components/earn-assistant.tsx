@@ -30,6 +30,7 @@ import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
 import { CommitForm, commitOutcome, EarnTable, FormDone, FormSheet, Money, newIdempotencyKey, pagerOf, PoolFilterControls, poolFiltersOn, StageStatus, withdrawalOutcome, type LiquidityActions, type OpenForm } from "@/components/earn-view"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
@@ -99,7 +100,8 @@ function EarnThread({ chat }: { chat: Chat }) {
 export type EarnHistory = { threads: EarnThreadRecord[]; current: string; onPick: (id: string) => void; onNew: () => void }
 
 // The round button floating at the chat's top right (icon only, named by its tooltip and label),
-// and the sheet it opens: New conversation, then this user's threads, newest first.
+// and the centred pop-up it opens (about two thirds of the screen): New conversation, then this user's threads,
+// newest first.
 export function PastConversations({ history }: { history: EarnHistory }) {
   const [open, setOpen] = useState(false)
   return (
@@ -114,12 +116,12 @@ export function PastConversations({ history }: { history: EarnHistory }) {
           <TooltipContent side="left">Past conversations</TooltipContent>
         </Tooltip>
       </div>
-      <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent side="left" className="w-full sm:max-w-sm" aria-describedby={undefined} data-sheet="history">
-          <SheetHeader>
-            <SheetTitle>Past conversations</SheetTitle>
-          </SheetHeader>
-          <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4">
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="flex h-[65vh] w-full max-w-[calc(100%-2rem)] flex-col sm:w-[65vw] sm:max-w-[65vw]" aria-describedby={undefined} data-dialog="history">
+          <DialogHeader>
+            <DialogTitle>Past conversations</DialogTitle>
+          </DialogHeader>
+          <div className="flex min-h-0 flex-1 flex-col gap-3">
             <Button
               className="self-start"
               onClick={() => {
@@ -161,8 +163,8 @@ export function PastConversations({ history }: { history: EarnHistory }) {
               </p>
             )}
           </div>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
