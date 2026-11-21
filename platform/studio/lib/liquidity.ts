@@ -31,26 +31,31 @@ export const hasLiquidity = (a: LiquidityAccess | null | undefined) => Boolean(a
 // Whether the studio's liquidity routes serve this session at all (Mynt checks every call again).
 export const canUseLiquidity = (roles: readonly string[]) => hasLiquidity(accessFrom(roles));
 
-// Earn's right-hand panel tabs (/earn?tab=...), beside its assistant: the pools the conversation
-// matched, then the detailed tables by role, then the assistant's drafts (liquidity providers'
-// only: builders can't commit).
-export type LiquidityTab = "opportunities" | "my-positions" | "my-pools";
-export type EarnTab = "pools" | LiquidityTab | "drafts";
-export const TAB_LABELS: Record<EarnTab, string> = { pools: "Pools", opportunities: "Opportunities", "my-positions": "My positions", "my-pools": "My pools", drafts: "Drafts" };
+// Earn's right-hand panel tabs (/earn?tab=...), beside its assistant: Pools (every pool open to
+// the user, showing the ones the conversation matched first), then the detailed tables by role,
+// then My strategies, what the assistant drafted (liquidity providers' only: builders can't commit).
+export type LiquidityTab = "my-positions" | "my-pools";
+export type EarnTab = "pools" | LiquidityTab | "my-strategies";
+export const TAB_LABELS: Record<EarnTab, string> = { pools: "Pools", "my-positions": "My positions", "my-pools": "My pools", "my-strategies": "My strategies" };
 export function tabsFor(a: LiquidityAccess): EarnTab[] {
   if (!hasLiquidity(a)) return [];
-  return ["pools", ...(a.liquidityProvider ? (["opportunities", "my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : []), ...(a.liquidityProvider ? (["drafts"] as const) : [])];
+  return ["pools", ...(a.liquidityProvider ? (["my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : []), ...(a.liquidityProvider ? (["my-strategies"] as const) : [])];
 }
-// ?tab= on /earn, and /liquidity's old tabs: the panel tab it names. The old "assistant" (and
-// anything unknown) is Pools.
+// ?tab= on /earn, and /liquidity's old tabs: the panel tab it names. Opportunities (and
+// /liquidity's Open pools) were merged into Pools; Drafts is My strategies. The old "assistant"
+// (and anything unknown) is Pools.
+const ALL_POOLS_TABS = ["opportunities", "open-pools"];
 export function earnTabFromQuery(tab: unknown): EarnTab {
-  if (tab === "open-pools" || tab === "opportunities") return "opportunities";
-  if (tab === "my-positions" || tab === "my-pools" || tab === "drafts") return tab;
+  if (tab === "my-positions" || tab === "my-pools" || tab === "my-strategies") return tab;
+  if (tab === "drafts") return "my-strategies";
   return "pools";
 }
-export const earnTabFromLiquidity = earnTabFromQuery;
-// A link that names a table or the drafts opens the panel straight away, before any message.
-export const tabOpensPanel = (tab: unknown) => earnTabFromQuery(tab) !== "pools";
+// A link to the old Opportunities lands on Pools showing all pools, not only the matched ones.
+export const poolsShowAllFromQuery = (tab: unknown) => typeof tab === "string" && ALL_POOLS_TABS.includes(tab);
+// /liquidity's tabs as the /earn?tab= to redirect to (Open pools keeps showing all pools).
+export const earnTabFromLiquidity = (tab: unknown): string => (poolsShowAllFromQuery(tab) ? "opportunities" : earnTabFromQuery(tab));
+// A link that names a table, all pools or My strategies opens the panel straight away, before any message.
+export const tabOpensPanel = (tab: unknown) => earnTabFromQuery(tab) !== "pools" || poolsShowAllFromQuery(tab);
 // The header wallet control's links, by role.
 export function walletLinksFor(a: LiquidityAccess | null | undefined): { label: string; href: string }[] {
   if (!a) return [];

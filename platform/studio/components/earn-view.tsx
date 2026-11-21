@@ -6,8 +6,8 @@
 // at a time (components/list-layout.tsx PanelList):
 // - My pools (builders): their products' pools, each one's state, terms, latest verified
 //   health and withdrawal queue; "Propose pool" on a sponsored component of their firm's product.
-// - Opportunities (liquidity providers): pools open to commitments, their health and terms, and
-//   "Commit capital".
+// (Pools, every pool open to the user with "Commit capital", and My strategies are cards, in
+// components/earn-assistant.tsx.)
 // - My positions (liquidity providers): committed, settled, queued, paid and available per
 //   position on rails and on chain, "Request withdrawal", each on-chain position's deposits in a
 //   sheet; Show · Withdrawal requests switches the table to the firm's requests in each queue.
@@ -20,7 +20,7 @@ import { newIdempotencyKey } from "@/lib/idempotency"
 import { FilterSelect } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL } from "@/components/list-layout"
-import { Badge } from "@/components/ui/badge"
+import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -37,7 +37,6 @@ import {
   NO_POOL_FILTERS,
   noticeText,
   parseUsd,
-  percentOfBps,
   poolCommitBlock,
   positionKey,
   proposalFrom,
@@ -74,27 +73,18 @@ export { newIdempotencyKey }
 const dateOf = (iso: string | null) => (iso ? iso.slice(0, 10) : "—")
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null
 
-export function StageBadge({ stage }: { stage: PoolStage }) {
-  const cls =
-    stage === "cleared"
-      ? "border-emerald-500/60"
-      : stage === "uncleared"
-        ? "border-amber-500/60"
-        : stage === "sandbox"
-          ? "border-sky-500/60"
-          : "border-dashed"
-  return (
-    <Badge variant="outline" className={`${cls} block max-w-48 truncate text-left`} title={STAGE_LABELS[stage]} data-stage={stage}>
-      {STAGE_LABELS[stage]}
-    </Badge>
-  )
+// A pool's state as a dot and its words (never a badge: the words are a sentence).
+const STAGE_TONE: Record<PoolStage, DotTone> = { cleared: "green", uncleared: "amber", sandbox: "blue", awaiting_approval: "gray" }
+export function StageStatus({ stage }: { stage: PoolStage }) {
+  return <StatusDot tone={STAGE_TONE[stage]} label={STAGE_LABELS[stage]} title={STAGE_LABELS[stage]} className="max-w-full overflow-hidden font-normal" data-stage={stage} />
 }
 
+// Sandbox or real money, as plain text.
 export function Money({ sandbox }: { sandbox: boolean }) {
   return (
-    <Badge variant="outline" data-money={sandbox ? "sandbox" : "real"}>
+    <span className="shrink-0 text-xs text-muted-foreground" data-money={sandbox ? "sandbox" : "real"}>
       {sandbox ? "Sandbox" : "Real money"}
-    </Badge>
+    </span>
   )
 }
 
@@ -329,7 +319,7 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
                     <OneLine className="text-xs text-muted-foreground" text={`${p.productName ?? p.productId}${p.componentKey ? ` · ${p.componentKey}` : ""}`} />
                   </TableCell>
                   <TableCell className={MID_COL}>
-                    <StageBadge stage={stageOf(p)} />
+                    <StageStatus stage={stageOf(p)} />
                   </TableCell>
                   <TableCell className={WIDE_COL}>
                     <OneLine text={statusText(p)} />
@@ -559,112 +549,6 @@ export function WithdrawForm({ positions, pools, poolId, canWithdraw, actions, o
         {error && <Alert>{error}</Alert>}
       </form>
     </div>
-  )
-}
-
-function OpenPools({ pools, positions, canCommit, actions, form, setForm }: { pools: PoolRow[]; positions: Position[]; canCommit: boolean; actions: LiquidityActions; form: OpenForm; setForm: (f: OpenForm) => void }) {
-  const [f, setF] = useState<PoolFilters>(NO_POOL_FILTERS)
-  const [done, setDone] = useState<string | null>(null)
-  const shown = useMemo(() => filterPools(pools, f), [pools, f])
-  const fit = useFitRows()
-  const paged = usePaged(shown, fit.size)
-  const filter = (n: PoolFilters) => {
-    setF(n)
-    paged.setPage(1)
-  }
-  const position = (id: string) => positions.find((p) => p.poolId === id)
-  const anyOpen = pools.some((p) => !poolCommitBlock(p, position(p.id)))
-  const exportCsv = () =>
-    downloadCsv(
-      "opportunities.csv",
-      toCsv(
-        ["Pool", "Product", "Product line", "State", "Status", "Health", "Minimum reserve", "Notice", "Commitment limits"],
-        shown.map((p) => [p.name, p.productName ?? p.productId, p.productLine, STAGE_LABELS[stageOf(p)], statusText(p), healthText(p.health), reserveText(p), noticeText(p.noticePeriodDays), limitsText(p)]),
-      ),
-    )
-
-  const open = (poolId?: string) => {
-    setDone(null)
-    setForm({ kind: "commit", poolId })
-  }
-
-  return (
-    <>
-      <PanelList
-        id="opportunities"
-        search={f.query}
-        onSearch={(query) => filter({ ...f, query })}
-        searchLabel="Search open pools"
-        filters={<PoolFilterControls f={f} setF={filter} pools={pools} stages={["sandbox", "cleared", "uncleared"]} productLines />}
-        activeFilters={poolFiltersOn(f)}
-        onExport={exportCsv}
-        exportDisabled={!shown.length}
-        cta={
-          <Button onClick={() => open()} disabled={!canCommit || !anyOpen} title={!canCommit ? "Committing capital comes with Mynt's next update" : !anyOpen ? "No pool is taking commitments right now" : undefined} data-cta="commit">
-            Commit capital
-          </Button>
-        }
-        areaRef={fit.ref}
-        {...pagerOf(paged, shown.length)}
-      >
-        <Table>
-          <TableHeader className="sticky top-0 bg-card">
-            <TableRow>
-              <TableHead>Pool</TableHead>
-              <TableHead className={WIDE_COL}>Product line</TableHead>
-              <TableHead className={MID_COL}>State</TableHead>
-              <TableHead className={WIDE_COL}>Status</TableHead>
-              <TableHead className={WIDE_COL}>Health</TableHead>
-              <TableHead className={WIDE_COL}>Minimum reserve</TableHead>
-              <TableHead className={MID_COL}>Notice</TableHead>
-              <TableHead className={WIDE_COL}>Commitment limits</TableHead>
-              <TableHead className="text-right">Action</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {paged.shown.length ? (
-              paged.shown.map((p) => {
-                const blocked = !canCommit ? "Committing capital comes with Mynt's next update" : poolCommitBlock(p, position(p.id))
-                return (
-                  <TableRow key={p.id} data-pool={p.id}>
-                    <TableCell>
-                      <OneLine className="font-medium" text={p.name} />
-                      <OneLine className="text-xs text-muted-foreground" text={p.productName ?? p.productId} />
-                    </TableCell>
-                    <TableCell className={WIDE_COL}>{p.productLine ?? "—"}</TableCell>
-                    <TableCell className={MID_COL}>
-                      <StageBadge stage={stageOf(p)} />
-                    </TableCell>
-                    <TableCell className={WIDE_COL}>
-                      <OneLine text={statusText(p)} />
-                    </TableCell>
-                    <TableCell className={WIDE_COL} data-health>
-                      <OneLine text={healthText(p.health)} />
-                      <OneLine className="text-xs text-muted-foreground" text={p.health?.coverageBps !== null && p.health?.coverageBps !== undefined ? `Coverage ${percentOfBps(p.health.coverageBps)}` : ""} />
-                    </TableCell>
-                    <TableCell className={WIDE_COL}>
-                      <OneLine text={reserveText(p)} />
-                    </TableCell>
-                    <TableCell className={MID_COL}>{noticeText(p.noticePeriodDays)}</TableCell>
-                    <TableCell className={`${WIDE_COL} tabular-nums`}>{limitsText(p)}</TableCell>
-                    <TableCell className="text-right">
-                      <Button size="sm" variant="outline" disabled={Boolean(blocked)} title={blocked ?? undefined} onClick={() => open(p.id)} data-commit={p.id}>
-                        Commit capital
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            ) : (
-              <EmptyRow cols={9}>{pools.length ? "No pools match these filters." : "No pools are open to commitments yet."}</EmptyRow>
-            )}
-          </TableBody>
-        </Table>
-      </PanelList>
-      <FormSheet open={form?.kind === "commit" && pools.length > 0} onClose={() => setForm(null)} title="Commit capital" id="commit">
-        {done ? <FormDone message={done} /> : form?.kind === "commit" && pools.length ? <CommitForm key={form.poolId ?? "any"} pools={pools} positions={positions} poolId={form.poolId} canCommit={canCommit} actions={actions} onDone={setDone} /> : null}
-      </FormSheet>
-    </>
   )
 }
 
@@ -936,14 +820,13 @@ function MyPositions({ positions: all, withdrawals, pools, canWithdraw, actions,
 
 // ---- the page ----
 
-// One of Earn's table tabs in the right-hand panel: Opportunities, My positions or My pools. Each
+// One of Earn's table tabs in the right-hand panel: My positions or My pools. Each
 // is one toolbar row and one table filling the panel (components/list-layout.tsx PanelList).
-export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "opportunities" | "my-positions" | "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
+export function EarnTable({ tab, data, actions, initialForm = null }: { tab: "my-positions" | "my-pools"; data: LiquidityData; actions: LiquidityActions; initialForm?: OpenForm }) {
   const [form, setForm] = useState<OpenForm>(initialForm)
   const b = data.builder
   const lp = data.provider
   if (tab === "my-pools" && b) return <BuilderPools pools={b.pools} proposable={b.proposable} withdrawalsShown={b.withdrawalsShown} actions={actions} form={form} setForm={setForm} />
-  if (tab === "opportunities" && lp) return <OpenPools pools={lp.pools} positions={lp.positions} canCommit={lp.canCommit} actions={actions} form={form} setForm={setForm} />
   if (tab === "my-positions" && lp) return <MyPositions positions={lp.positions} withdrawals={lp.withdrawals} pools={lp.pools} canWithdraw={lp.canWithdraw} actions={actions} form={form} setForm={setForm} />
   return <div className="h-full" data-tab-panel={tab} />
 }

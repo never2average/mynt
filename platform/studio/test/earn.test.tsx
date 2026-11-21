@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarView } from "@/components/app-sidebar";
+import { PoolsTab } from "@/components/earn-assistant";
 import { CommitForm, commitOutcome, EarnTable, positionFigures, ProposeForm, requestRows, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -16,6 +17,7 @@ import {
   fromWithdrawals,
   healthFor,
   pageOf,
+  poolsShowAllFromQuery,
   parseUsd,
   proposalFrom,
   STAGE_LABELS,
@@ -72,34 +74,40 @@ const data = (over: Partial<LiquidityData> & { access: LiquidityData["access"] }
   provider: over.access.liquidityProvider ? { pools: [CLEARED, UNCLEARED, SANDBOX], positions: [POSITION], withdrawals: [], canCommit: true, canWithdraw: true } : undefined,
   ...over,
 });
-// One of Earn's table tabs (the right-hand panel's Opportunities, My positions or My pools).
-const view = (d: LiquidityData, tab?: "opportunities" | "my-positions" | "my-pools", form: Parameters<typeof EarnTable>[0]["initialForm"] = null) =>
-  renderToStaticMarkup(<EarnTable data={d} actions={noActions} tab={tab ?? (d.access.liquidityProvider ? "opportunities" : "my-pools")} initialForm={form} />);
+// One of Earn's tabs: Pools (cards, every pool open to the user, with Commit capital; it took in
+// Opportunities), or the table tabs My positions and My pools.
+const view = (d: LiquidityData, tab?: "pools" | "my-positions" | "my-pools", form: Parameters<typeof EarnTable>[0]["initialForm"] = null) => {
+  const t = tab ?? (d.access.liquidityProvider ? "pools" : "my-pools");
+  return renderToStaticMarkup(t === "pools" ? <PoolsTab data={d} poolIds={null} actions={noActions} initialForm={form} /> : <EarnTable data={d} actions={noActions} tab={t} initialForm={form} />);
+};
 
 describe("Earn by role", () => {
-  it("everyone with a liquidity role gets Pools; builders (developer or innovator) My pools; liquidity providers Opportunities, My positions and Drafts", () => {
+  it("everyone with a liquidity role gets Pools; builders (developer or innovator) My pools; liquidity providers My positions and My strategies", () => {
     expect(accessFrom(["developer", "consumer", "innovator"])).toEqual({ builder: true, liquidityProvider: false });
     expect(accessFrom(["liquidity_provider"])).toEqual({ builder: false, liquidityProvider: true });
     expect(tabsFor(accessFrom(["innovator"]))).toEqual(["pools", "my-pools"]);
-    expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["pools", "opportunities", "my-positions", "drafts"]);
-    expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["pools", "opportunities", "my-positions", "my-pools", "drafts"]);
+    expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["pools", "my-positions", "my-strategies"]);
+    expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["pools", "my-positions", "my-pools", "my-strategies"]);
     expect(tabsFor(accessFrom(["consumer"]))).toEqual([]);
     expect(view(data({ access: { builder: false, liquidityProvider: true } }), "my-positions")).toContain('data-tab-panel="my-positions"');
   });
 
-  it("maps ?tab= (and /liquidity's and the old Assistant's tabs) to the right-hand tab", () => {
-    expect(["pools", "opportunities", "open-pools", "my-positions", "my-pools", "drafts", "assistant", "nope", undefined].map(earnTabFromQuery)).toEqual([
+  it("maps ?tab= (and /liquidity's, the old Opportunities', Drafts' and Assistant's tabs) to the right-hand tab", () => {
+    expect(["pools", "opportunities", "open-pools", "my-positions", "my-pools", "drafts", "my-strategies", "assistant", "nope", undefined].map(earnTabFromQuery)).toEqual([
       "pools",
-      "opportunities",
-      "opportunities",
+      "pools",
+      "pools",
       "my-positions",
       "my-pools",
-      "drafts",
+      "my-strategies",
+      "my-strategies",
       "pools",
       "pools",
       "pools",
     ]);
-    expect(["opportunities", "drafts", "pools", "assistant", undefined].map(tabOpensPanel)).toEqual([true, true, false, false, false]);
+    // The old Opportunities is Pools showing all pools, opened at once.
+    expect(["opportunities", "open-pools", "pools", "drafts", undefined].map(poolsShowAllFromQuery)).toEqual([true, true, false, false, false]);
+    expect(["opportunities", "drafts", "my-strategies", "pools", "assistant", undefined].map(tabOpensPanel)).toEqual([true, true, true, false, false, false]);
   });
 
   it("the header's wallet control links to /earn by role (test/wallet-control.test.tsx renders it)", () => {
@@ -148,9 +156,11 @@ describe("a pool's state", () => {
     expect([PROPOSED, SANDBOX, UNCLEARED, CLEARED].map(stageOf)).toEqual(["awaiting_approval", "sandbox", "uncleared", "cleared"]);
     expect(STAGE_LABELS.uncleared).toBe("Sandbox only — not yet cleared for real commitments");
     const html = view(data({ access: { builder: false, liquidityProvider: true } }));
-    expect(html).toMatch(/data-stage="cleared"[^>]*>Cleared for real commitments</);
-    expect(html).toMatch(/data-stage="uncleared"[^>]*>Sandbox only — not yet cleared for real commitments</);
-    expect(html).toMatch(/data-stage="sandbox"[^>]*>Sandbox — test money only</);
+    // A dot and its words (it was an outlined badge).
+    expect(html).toMatch(/data-stage="cleared"[^>]*data-tone="green"><span aria-hidden="true"[^>]*><\/span>Cleared for real commitments</);
+    expect(html).toMatch(/data-stage="uncleared"[^>]*data-tone="amber"><span aria-hidden="true"[^>]*><\/span>Sandbox only — not yet cleared for real commitments</);
+    expect(html).toMatch(/data-stage="sandbox"[^>]*data-tone="blue"><span aria-hidden="true"[^>]*><\/span>Sandbox — test money only</);
+    expect(html).not.toContain('data-slot="badge"');
   });
 
   it("the builder sees each pool's state, rails, terms, health and queue, and the sponsor-approval requirement", () => {
@@ -296,29 +306,36 @@ describe("the tables' layout (the dashboard's)", () => {
   const order = (html: string, marks: string[]) => marks.map((m) => html.indexOf(m));
   const inOrder = (at: number[]) => at.every((i) => i >= 0) && at.every((i, n) => n === 0 || at[n - 1] < i);
 
-  it("each table tab has one toolbar row: search, filter buttons, Export CSV, then its CTA; no native select filters", () => {
+  it("each tab has one toolbar row: search, filter buttons, Export CSV, then its CTA; no native select filters", () => {
     const lp = data({ access: { builder: false, liquidityProvider: true } });
-    const opp = view(lp, "opportunities");
-    expect(inOrder(order(opp, ['aria-label="Search open pools"', 'data-filter="Product line"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="commit"']))).toBe(true);
+    const opp = view(lp, "pools");
+    expect(inOrder(order(opp, ['aria-label="Search pools"', 'data-filter="Product line"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="commit"']))).toBe(true);
     expect(opp).not.toContain("<select");
+    expect(opp).toContain("data-list-layout");
+    expect(opp).not.toContain('data-slot="card"');
     const pos = view(lp, "my-positions");
     expect(inOrder(order(pos, ['aria-label="Search positions"', 'data-filter="Money"', "data-export", 'data-cta="withdraw"']))).toBe(true);
     const pools = view(data({ access: { builder: true, liquidityProvider: false } }), "my-pools");
     expect(inOrder(order(pools, ['aria-label="Search pools"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="propose"']))).toBe(true);
     expect(pools).not.toContain('data-filter="Product line"');
-    for (const html of [opp, pos, pools]) {
+    for (const html of [pos, pools]) {
       expect(html).toContain("data-list-layout");
       expect(html).toContain("sticky top-0 bg-card");
       expect(html).not.toContain('data-slot="card"');
     }
   });
 
-  it("pages 25 rows at a time with the list pager", () => {
-    const d = data({ access: { builder: false, liquidityProvider: true } });
-    d.provider!.pools = Array.from({ length: 30 }, (_, i) => row({ id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`, name: `Pool ${i}` }));
-    const html = view(d, "opportunities");
-    expect([...html.matchAll(/<tr[^>]*data-pool="/g)]).toHaveLength(25);
-    expect(html).toContain("30 rows · Page 1 of 2");
+  it("pages with the list pager: 25 rows of a table, and six cards before the panel is measured", () => {
+    const d = data({ access: { builder: true, liquidityProvider: true } });
+    const many = Array.from({ length: 30 }, (_, i) => row({ id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`, name: `Pool ${i}` }));
+    d.builder!.pools = many;
+    const table = view(d, "my-pools");
+    expect([...table.matchAll(/<tr[^>]*data-pool="/g)]).toHaveLength(25);
+    expect(table).toContain("30 rows · Page 1 of 2");
+    d.provider!.pools = many;
+    const cards = view(d, "pools");
+    expect([...cards.matchAll(/data-pool-card="/g)]).toHaveLength(6);
+    expect(cards).toContain("30 pools · Page 1 of 5");
   });
 
   it("My positions is one table: no key figures or sections; each position's amounts are its columns", () => {
@@ -356,7 +373,7 @@ describe("reading Mynt's replies", () => {
 });
 
 describe("/liquidity", () => {
-  it("redirects to Earn on the matching tab (Open pools is Opportunities)", async () => {
+  it("redirects to Earn on the matching tab (Open pools is Pools showing all pools, through the old Opportunities link)", async () => {
     const { default: LiquidityPage } = await import("@/app/(studio)/liquidity/page");
     const to = async (tab?: string) => {
       try {

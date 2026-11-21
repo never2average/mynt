@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import bs58 from "bs58";
 import type { Wallet } from "@wallet-standard/base";
-import { DraftsTab, PoolsTab } from "@/components/earn-assistant";
+import { PoolsTab, StrategiesTab } from "@/components/earn-assistant";
 import { EarnTable, type LiquidityActions } from "@/components/earn-view";
 import { EARN_DISCLOSURE, EARN_DISCLOSURE_DETAILS, EarnDisclosure, EarnWalletProvider, OnChainAction, WalletPicker, type EarnWalletState, type PrepareInput, type TreasuryActions } from "@/components/earn-wallet";
 import { depositFor, earnContext, validateDraft, type Draft } from "@/lib/earn";
@@ -146,12 +146,12 @@ const rails: LiquidityActions = {
 const depositDraft: Draft = { kind: "commit", id: "d1", poolId: POOL, poolName: "On-chain float", amountCents: 50_000, state: null, sandbox: true, onChain: true, wallet: SOL };
 const withdrawDraft: Draft = { kind: "withdraw", id: "w1", poolId: POOL, poolName: "On-chain float", amountCents: 20_000, sandbox: true, onChain: true, wallet: SOL, deposit: DEP1 };
 
-// Drafts is one table; a draft is reviewed and confirmed in the sheet its row's Review opens.
+// My strategies is one card per draft; a draft is reviewed and confirmed in the sheet its card's Review opens.
 const review = () => fireEvent.click(document.querySelector("[data-review]")!);
 const renderDrafts = (s: EarnWalletState, drafts: Draft[] = [depositDraft]) => {
   const r = render(
     <EarnWalletProvider value={s}>
-      <DraftsTab data={data} drafts={drafts} actions={rails} />
+      <StrategiesTab data={data} drafts={drafts} actions={rails} />
     </EarnWalletProvider>,
   );
   review();
@@ -288,9 +288,9 @@ describe("the assistant's drafts with a wallet", () => {
 describe("the on-chain deposit", () => {
   it("shows the pool's treasury on devnet", () => {
     render(<PoolsTab data={data} poolIds={null} />);
-    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
-    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-devnet]`)).toBeTruthy();
-    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
+    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
+    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-devnet]`)).toBeTruthy();
+    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
     cleanup();
     const verified = fromPools([{ ...base, id: POOL, name: "Verified", treasury: { ...TREASURY, verified_build: true } }]).map((p) => ({ ...p, productLine: null, queueLength: null, health: null }));
     render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: verified } }} poolIds={null} />);
@@ -396,7 +396,7 @@ describe("the on-chain deposit", () => {
     const mainnet = fromPools([{ ...base, id: POOL, name: "Elsewhere", treasury: { ...TREASURY, cluster: "mainnet-beta" } }]).map((p) => ({ ...p, productLine: null, queueLength: null, health: null }));
     render(
       <EarnWalletProvider value={state()}>
-        <DraftsTab data={{ ...data, provider: { ...data.provider!, pools: mainnet } }} drafts={[depositDraft]} actions={rails} />
+        <StrategiesTab data={{ ...data, provider: { ...data.provider!, pools: mainnet } }} drafts={[depositDraft]} actions={rails} />
       </EarnWalletProvider>,
     );
     review();
@@ -617,7 +617,7 @@ describe("a pool whose approvers changed", () => {
     const s = state();
     render(
       <EarnWalletProvider value={s}>
-        <DraftsTab data={flaggedData} drafts={[depositDraft]} actions={rails} />
+        <StrategiesTab data={flaggedData} drafts={[depositDraft]} actions={rails} />
       </EarnWalletProvider>,
     );
     review();
