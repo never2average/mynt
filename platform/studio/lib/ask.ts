@@ -102,6 +102,11 @@ export function historyFrom(messages: UiMessage[]): MessageParam[] | null {
 }
 
 export type AskEvent =
+  // The model's reasoning, as the API summarizes it, streamed before the answer it leads to. Shown
+  // to the user only; never logged or stored.
+  | { type: "reasoning-start" }
+  | { type: "reasoning"; delta: string }
+  | { type: "reasoning-end" }
   | { type: "text-start" }
   | { type: "text"; delta: string }
   | { type: "text-end" }
@@ -148,7 +153,9 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
       {
         model: deps.model,
         max_tokens: MAX_OUTPUT_TOKENS,
-        thinking: { type: "adaptive" },
+        // Adaptive thinking, summarized: current models leave thinking text empty unless asked
+        // ("omitted" is their default), and the summary is what the chat shows as Reasoning.
+        thinking: { type: "adaptive", display: "summarized" },
         output_config: { effort: "low" },
         system,
         tools: deps.tools,
@@ -156,8 +163,28 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
       },
       { signal: deps.signal },
     );
+    // One reasoning part per thinking block: opened by its first delta, closed when the block
+    // ends (or when the answer's text starts, or the step ends, whichever comes first).
+    let reasoning = false;
+    const endReasoning = () => {
+      if (!reasoning) return;
+      reasoning = false;
+      deps.emit({ type: "reasoning-end" });
+    };
+    stream.on("thinking", (delta) => {
+      if (!delta) return;
+      if (!reasoning) {
+        deps.emit({ type: "reasoning-start" });
+        reasoning = true;
+      }
+      deps.emit({ type: "reasoning", delta });
+    });
+    stream.on("contentBlock", (block) => {
+      if (block.type === "thinking") endReasoning();
+    });
     let open = false;
     stream.on("text", (delta) => {
+      endReasoning();
       if (!open) {
         deps.emit({ type: "text-start" });
         open = true;
@@ -165,6 +192,7 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
       deps.emit({ type: "text", delta });
     });
     const message = await stream.finalMessage();
+    endReasoning();
     if (open) deps.emit({ type: "text-end" });
 
     if (message.stop_reason === "refusal") {
@@ -176,6 +204,8 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
       emitText(deps, "The answer was cut short. Please try again.");
       return;
     }
+    // The whole turn goes back, thinking blocks and their signatures included: the API requires
+    // them unchanged when continuing after tool calls.
     messages.push({ role: "assistant", content: message.content });
     if (message.stop_reason === "pause_turn") continue;
     if (calls.length === 0) return;

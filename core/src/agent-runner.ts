@@ -65,7 +65,7 @@ mkdirSync(cfg.cwd, { recursive: true });
 const env = { ...process.env, ...auth.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
 for (const k of ["ANTHROPIC_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"]) delete env[k];
 // --include-partial-messages: the model's output as it's generated (stream_event lines), so Mynt can show the
-// agent's words as it writes them. Only their text is kept (see compact below).
+// agent's words (and thinking) as it writes them. Only their text is kept (see compact below).
 const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
   "--dangerously-skip-permissions", "--max-budget-usd", String(cfg.budgetUsd)];
 if (cfg.model) args.push("--model", cfg.model);
@@ -149,15 +149,17 @@ const maybeEnd = () => {
 };
 
 // Of the partial-message events, only what Mynt shows is written to agent.jsonl, cut down to the fields it reads: a
-// message starting (its id), a text block starting, and each piece of text. The rest (tool inputs as they're
-// written, thinking, usage) is dropped: each whole block follows on its own line anyway.
+// message starting (its id), a text or thinking block starting, and each piece of its text. The rest (tool inputs as
+// they're written, thinking signatures, usage) is dropped: each whole block follows on its own line anyway.
 const compact = (m) => {
   const e = m.event || {};
   const keep = { type: "stream_event", parent_tool_use_id: m.parent_tool_use_id ?? null };
   if (typeof m.api_message_id === "string") keep.api_message_id = m.api_message_id;
   if (e.type === "message_start") return { ...keep, event: { type: e.type, message: { id: e.message && e.message.id } } };
-  if (e.type === "content_block_start" && e.content_block && e.content_block.type === "text") return { ...keep, event: { type: e.type, index: e.index, content_block: { type: "text" } } };
+  const block = e.content_block && e.content_block.type;
+  if (e.type === "content_block_start" && (block === "text" || block === "thinking")) return { ...keep, event: { type: e.type, index: e.index, content_block: { type: block } } };
   if (e.type === "content_block_delta" && e.delta && e.delta.type === "text_delta") return { ...keep, event: { type: e.type, index: e.index, delta: { type: "text_delta", text: e.delta.text } } };
+  if (e.type === "content_block_delta" && e.delta && e.delta.type === "thinking_delta") return { ...keep, event: { type: e.type, index: e.index, delta: { type: "thinking_delta", thinking: e.delta.thinking } } };
   return null;
 };
 const log = (line) => appendFileSync(join(dir, "agent.jsonl"), line + "\n");

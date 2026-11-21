@@ -37,6 +37,8 @@ export type Capabilities = {
   sessionBuilds: boolean;
   /** get_build_activity takes text_deltas: the agent's words as it writes them. */
   textDeltas?: boolean;
+  /** get_build_activity takes reasoning: the agent's thinking, scrubbed by Mynt as its words are. */
+  reasoning?: boolean;
 };
 
 export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[]): Capabilities {
@@ -44,7 +46,7 @@ export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[
   const props = isObj(start?.inputSchema) && isObj(start.inputSchema.properties) ? start.inputSchema.properties : {};
   const activity = tools.find((t) => t.name === "get_build_activity");
   const activityProps = isObj(activity?.inputSchema) && isObj(activity.inputSchema.properties) ? activity.inputSchema.properties : {};
-  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}) };
+  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}) };
 }
 
 export type ChatAction =
@@ -220,12 +222,15 @@ export class ActivityFollower {
   /** Entries were trimmed before they could be shown. */
   missed = false;
 
-  /** With `textDeltas`, it follows the agent's words as it writes them (where Mynt offers them). */
-  constructor(private readonly opts: { textDeltas?: boolean } = {}) {}
+  /**
+   * With `textDeltas`, it follows the agent's words as it writes them, and with `reasoning` its
+   * thinking (each where Mynt offers it).
+   */
+  constructor(private readonly opts: { textDeltas?: boolean; reasoning?: boolean } = {}) {}
 
   /** Arguments for the next get_build_activity call. */
-  next(buildId: string): { build_id: string; limit: number; after?: number; text_deltas?: true } {
-    const deltas = this.opts.textDeltas ? { text_deltas: true as const } : {};
+  next(buildId: string): { build_id: string; limit: number; after?: number; text_deltas?: true; reasoning?: true } {
+    const deltas = { ...(this.opts.textDeltas ? { text_deltas: true as const } : {}), ...(this.opts.reasoning ? { reasoning: true as const } : {}) };
     return this.cursor === null ? { build_id: buildId, limit: 200, ...deltas } : { build_id: buildId, limit: 200, after: this.cursor, ...deltas };
   }
 
@@ -259,8 +264,16 @@ export class ActivityFollower {
 export type ChatPart =
   | { kind: "text"; text: string; stream?: string }
   | { kind: "tool"; toolName: string; input: Obj };
-/** A chat part, or the next words of a message the agent is writing. */
-export type LivePart = ChatPart | { kind: "delta"; text: string; stream: string };
+/**
+ * A chat part, the next words of a message the agent is writing, or its reasoning: the next words
+ * of a thinking block (`reasoning-delta`), or a whole one (`reasoning`, tied by `stream` when its
+ * words were streamed).
+ */
+export type LivePart =
+  | ChatPart
+  | { kind: "delta"; text: string; stream: string }
+  | { kind: "reasoning-delta"; text: string; stream: string }
+  | { kind: "reasoning"; text: string; stream?: string };
 
 const FIELD = /"(command|file_path|path|pattern|notebook_path|url|description)"\s*:\s*"((?:[^"\\]|\\.)*)/g;
 
@@ -312,9 +325,14 @@ export function toolCard(name: string, input: Obj): { toolName: string; input: O
   }
 }
 
-/** Activity items as chat parts, with the words of messages as they're written. */
+/** Activity items as chat parts, with the words of messages (and of the agent's thinking) as they're written. */
 export function activityToLiveParts(items: ActivityItem[]): LivePart[] {
-  return items.flatMap((i): LivePart[] => (i.type === "text_delta" ? (i.stream && i.summary ? [{ kind: "delta", text: i.summary, stream: i.stream }] : []) : activityToParts([i])));
+  return items.flatMap((i): LivePart[] => {
+    if (i.type === "text_delta") return i.stream && i.summary ? [{ kind: "delta", text: i.summary, stream: i.stream }] : [];
+    if (i.type === "thinking_delta") return i.stream && i.summary ? [{ kind: "reasoning-delta", text: i.summary, stream: i.stream }] : [];
+    if (i.type === "thinking") return i.summary.trim() ? [{ kind: "reasoning", text: i.summary, ...(i.stream ? { stream: i.stream } : {}) }] : [];
+    return activityToParts([i]);
+  });
 }
 
 /** Activity items as chat parts. A finished turn, and a message's words as they were written, draw nothing. */
@@ -329,17 +347,22 @@ export function activityToParts(items: ActivityItem[]): ChatPart[] {
   });
 }
 
-export type TextChunk = { type: "text-start"; id: string } | { type: "text-delta"; id: string; delta: string } | { type: "text-end"; id: string };
+type PartKind = "text" | "reasoning";
+export type TextChunk =
+  | { type: `${PartKind}-start`; id: string }
+  | { type: `${PartKind}-delta`; id: string; delta: string }
+  | { type: `${PartKind}-end`; id: string };
 
 /**
  * The agent's messages as AI SDK text parts while it writes them: a message's words go into one
  * open part (text-start once, a text-delta per piece) that its whole message closes (text-end)
  * rather than printing it again. A message that wasn't streamed is a part of its own. Anything
  * else drawn in between (a tool card, a phase line) closes the open part first; more words for
- * that message then open a new one.
+ * that message then open a new one. The agent's thinking is drawn the same way as reasoning
+ * parts (reasoning-start, reasoning-delta, reasoning-end), one per thinking block.
  */
 export class LiveText {
-  private open: { id: string; stream: string } | null = null;
+  private open: { id: string; stream: string; kind: PartKind } | null = null;
   private shown = new Set<string>();
   private n = 0;
 
@@ -348,19 +371,21 @@ export class LiveText {
     private readonly newId: () => string = () => `live-${this.n++}`,
   ) {}
 
-  /** Draws a text part from activityToParts; false for anything else (the caller closes, then draws it). */
+  /** Draws a text or reasoning part from activityToLiveParts; false for anything else (the caller closes, then draws it). */
   text(part: LivePart): boolean {
-    if (part.kind === "delta") {
-      if (this.open?.stream !== part.stream) {
+    if (part.kind === "delta" || part.kind === "reasoning-delta") {
+      const kind: PartKind = part.kind === "delta" ? "text" : "reasoning";
+      if (this.open?.stream !== part.stream || this.open.kind !== kind) {
         this.close();
-        this.open = { id: this.newId(), stream: part.stream };
+        this.open = { id: this.newId(), stream: part.stream, kind };
         this.shown.add(part.stream);
-        this.write({ type: "text-start", id: this.open.id });
+        this.write({ type: `${kind}-start`, id: this.open.id });
       }
-      this.write({ type: "text-delta", id: this.open.id, delta: part.text });
+      this.write({ type: `${kind}-delta`, id: this.open.id, delta: part.text });
       return true;
     }
-    if (part.kind !== "text") return false;
+    if (part.kind !== "text" && part.kind !== "reasoning") return false;
+    const kind: PartKind = part.kind;
     if (part.stream && this.shown.has(part.stream)) {
       // Its words were shown as they were written: the message is whole, so its part ends.
       if (this.open?.stream === part.stream) this.close();
@@ -368,20 +393,20 @@ export class LiveText {
     }
     this.close();
     const id = this.newId();
-    this.write({ type: "text-start", id });
-    this.write({ type: "text-delta", id, delta: part.text });
-    this.write({ type: "text-end", id });
+    this.write({ type: `${kind}-start`, id });
+    this.write({ type: `${kind}-delta`, id, delta: part.text });
+    this.write({ type: `${kind}-end`, id });
     return true;
   }
 
-  /** Whether a message is being written into an open part. */
+  /** Whether a message (or thinking) is being written into an open part. */
   get streaming(): boolean {
     return this.open !== null;
   }
 
   close() {
     if (!this.open) return;
-    this.write({ type: "text-end", id: this.open.id });
+    this.write({ type: `${this.open.kind}-end`, id: this.open.id });
     this.open = null;
   }
 }

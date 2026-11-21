@@ -173,7 +173,7 @@ function ReasoningContent({
     <CollapsibleContent
       data-slot="reasoning-content"
       className={cn(
-        "aui-reasoning-content relative overflow-hidden text-muted-foreground text-sm outline-none",
+        "aui-reasoning-content relative overflow-hidden text-muted-foreground text-xs outline-none",
         "group/collapsible-content ease-out",
         "data-[state=closed]:animate-collapsible-up",
         "data-[state=open]:animate-collapsible-down",
@@ -230,8 +230,17 @@ const ReasoningGroupImpl: ReasoningGroupComponent = ({
     return lastIndex >= startIndex && lastIndex <= endIndex;
   });
 
+  // Open while the reasoning streams, collapsed once the answer starts (or it's an earlier
+  // message's); the user can open or close it any time in between.
+  const [open, setOpen] = useState(isReasoningStreaming);
+  const [wasStreaming, setWasStreaming] = useState(isReasoningStreaming);
+  if (wasStreaming !== isReasoningStreaming) {
+    setWasStreaming(isReasoningStreaming);
+    setOpen(isReasoningStreaming);
+  }
+
   return (
-    <ReasoningRoot defaultOpen={isReasoningStreaming}>
+    <ReasoningRoot open={open} onOpenChange={setOpen}>
       <ReasoningTrigger active={isReasoningStreaming} />
       <ReasoningContent aria-busy={isReasoningStreaming}>
         <ReasoningText>{children}</ReasoningText>

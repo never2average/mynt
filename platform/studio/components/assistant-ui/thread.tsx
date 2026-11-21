@@ -19,6 +19,7 @@ import {
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import {
   groupConsecutiveToolCalls,
+  REASONING_GROUP,
   ToolCallGroup,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -49,7 +50,7 @@ import {
   PencilIcon,
   SquareIcon,
 } from "lucide-react";
-import { createContext, useContext, useMemo, useRef, type FC, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, type FC, type PropsWithChildren, type ReactNode } from "react";
 
 // How an answer's text is drawn: MarkdownText (no clickable links) unless the thread names its own.
 const TextRenderer = createContext<FC>(MarkdownText);
@@ -224,6 +225,18 @@ const MessageError: FC = () => {
   );
 };
 
+// A run of reasoning parts is one collapsible Reasoning block above what follows; tool calls group as before.
+const PartGroup: FC<PropsWithChildren<{ groupKey: string | undefined; indices: number[] }>> = ({ groupKey, indices, children }) =>
+  groupKey === REASONING_GROUP ? (
+    <ReasoningGroup startIndex={indices[0]} endIndex={indices[indices.length - 1]}>
+      {children}
+    </ReasoningGroup>
+  ) : (
+    <ToolCallGroup groupKey={groupKey} indices={indices}>
+      {children}
+    </ToolCallGroup>
+  );
+
 const AssistantMessage: FC = () => {
   const Text = useContext(TextRenderer);
   return (
@@ -237,7 +250,7 @@ const AssistantMessage: FC = () => {
           components={{
             Text,
             Reasoning,
-            Group: ToolCallGroup,
+            Group: PartGroup,
             tools: {
               by_name: {
                 bashTool: BashToolCard,

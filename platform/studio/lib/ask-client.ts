@@ -30,3 +30,19 @@ export const askFetch: typeof fetch = async (input, init) => {
   const text = askErrorText(await res.text().catch(() => ""));
   return new Response(text, { status: res.status, headers: { "content-type": "text/plain; charset=utf-8" } });
 };
+
+type SendOptions = { id: string; messages: { parts?: { type: string }[] }[]; body?: object; trigger?: unknown; messageId?: unknown };
+
+/**
+ * The chat transport's request body as the AI SDK would send it, less the reasoning shown in
+ * earlier answers: the server reads only their text, so the reasoning would only fill the request.
+ */
+export const withoutReasoning = (o: SendOptions) => ({
+  body: {
+    ...o.body,
+    id: o.id,
+    messages: o.messages.map((m) => (m.parts ? { ...m, parts: m.parts.filter((p) => p.type !== "reasoning") } : m)),
+    trigger: o.trigger,
+    messageId: o.messageId,
+  },
+});

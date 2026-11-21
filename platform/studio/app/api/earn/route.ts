@@ -155,6 +155,7 @@ export async function POST(req: Request) {
         }
         const tools = await listMyntTools(mynt);
         let textId = 0;
+        let reasoningId = 0;
         await runAsk(history, {
           llm: createLlm(),
           model: askModel(),
@@ -174,7 +175,11 @@ export async function POST(req: Request) {
             }
           },
           emit: (ev) => {
-            if (ev.type === "text-start") writer.write({ type: "text-start", id: `t${++textId}` });
+            // Reasoning is shown, never logged or kept.
+            if (ev.type === "reasoning-start") writer.write({ type: "reasoning-start", id: `r${++reasoningId}` });
+            else if (ev.type === "reasoning") writer.write({ type: "reasoning-delta", id: `r${reasoningId}`, delta: ev.delta });
+            else if (ev.type === "reasoning-end") writer.write({ type: "reasoning-end", id: `r${reasoningId}` });
+            else if (ev.type === "text-start") writer.write({ type: "text-start", id: `t${++textId}` });
             else if (ev.type === "text") writer.write({ type: "text-delta", id: `t${textId}`, delta: ev.delta });
             else if (ev.type === "text-end") writer.write({ type: "text-end", id: `t${textId}` });
             else if (ev.type === "tool") {

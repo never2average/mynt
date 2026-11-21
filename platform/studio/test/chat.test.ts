@@ -303,3 +303,35 @@ describe("the agent's words as it writes them", () => {
     expect(live.streaming).toBe(false);
   });
 });
+
+describe("the agent's reasoning", () => {
+  const t = (seq: number, summary: string, stream = "m:0") => ({ type: "thinking_delta", summary, stream, seq });
+
+  it("is asked for only where Mynt's get_build_activity takes reasoning", () => {
+    expect(capabilitiesFrom([{ name: "get_build_activity", inputSchema: { properties: { build_id: {}, text_deltas: {}, reasoning: {} } } }]).reasoning).toBe(true);
+    expect(capabilitiesFrom([{ name: "get_build_activity", inputSchema: { properties: { build_id: {}, text_deltas: {} } } }]).reasoning).toBeUndefined();
+    expect(new ActivityFollower({ textDeltas: true, reasoning: true }).next("b")).toEqual({ build_id: "b", limit: 200, text_deltas: true, reasoning: true });
+  });
+
+  it("is drawn as one reasoning part per thinking block, closed by its whole entry, and left out of a past build's conversation", () => {
+    const items = [t(1, "Plan "), t(2, "it."), { type: "thinking", summary: "Plan it.", stream: "m:0", seq: 3 }, { type: "text_delta", summary: "Done.", stream: "m:1", seq: 4 }, { type: "thinking", summary: "Alone", seq: 5 }];
+    expect(activityToParts(items)).toEqual([]);
+    const out: TextChunk[] = [];
+    let n = 0;
+    const live = new LiveText((c) => out.push(c), () => `p${n++}`);
+    for (const part of activityToLiveParts(items)) live.text(part);
+    live.close();
+    expect(out).toEqual([
+      { type: "reasoning-start", id: "p0" },
+      { type: "reasoning-delta", id: "p0", delta: "Plan " },
+      { type: "reasoning-delta", id: "p0", delta: "it." },
+      { type: "reasoning-end", id: "p0" },
+      { type: "text-start", id: "p1" },
+      { type: "text-delta", id: "p1", delta: "Done." },
+      { type: "text-end", id: "p1" },
+      { type: "reasoning-start", id: "p2" },
+      { type: "reasoning-delta", id: "p2", delta: "Alone" },
+      { type: "reasoning-end", id: "p2" },
+    ]);
+  });
+});

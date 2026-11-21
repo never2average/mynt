@@ -307,6 +307,51 @@ describe("/api/chat streaming the agent's words", () => {
     expect(ids.size).toBe(1);
   });
 
+  it("asks for the agent's reasoning where Mynt offers it, and draws each thinking block as one reasoning part before its words", async () => {
+    fake.tools = [
+      { name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {} } } },
+      { name: "get_build_activity", inputSchema: { type: "object", properties: { build_id: {}, limit: {}, after: {}, text_deltas: {}, reasoning: {} } } },
+    ];
+    const think = (seq: number, summary: string) => ({ type: "thinking_delta", summary, stream: "msg_1:0", seq });
+    fake.activity = [
+      { status: "coding", activity: [think(2, "a goal screen. "), think(1, "They want ")], cursor: 2, first_seq: 1 },
+      {
+        status: "coding",
+        activity: [
+          think(3, "Start there."),
+          { type: "thinking", summary: "They want a goal screen. Start there.", stream: "msg_1:0", seq: 4 },
+          delta(5, "On it.", "msg_1:1"),
+          { type: "message", summary: "On it.", stream: "msg_1:1", seq: 6 },
+          { type: "thinking", summary: "Not streamed thought", seq: 7 },
+          { type: "turn_finished", summary: "success", seq: 8 },
+        ],
+        cursor: 8,
+        first_seq: 1,
+      },
+    ];
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    expect(fake.calls.filter((c) => c.name === "get_build_activity").map((c) => c.args)).toEqual([
+      { build_id: "new-build", limit: 200, text_deltas: true, reasoning: true },
+      { build_id: "new-build", limit: 200, after: 2, text_deltas: true, reasoning: true },
+    ]);
+    const shown = out.filter((c) => /^(reasoning|text)-/.test(String(c.type))).map((c) => [c.type, c.delta ?? ""]);
+    expect(shown).toEqual([
+      ["reasoning-start", ""],
+      ["reasoning-delta", "They want "],
+      ["reasoning-delta", "a goal screen. "],
+      ["reasoning-delta", "Start there."],
+      ["reasoning-end", ""],
+      ["text-start", ""],
+      ["text-delta", "On it."],
+      ["text-end", ""],
+      ["reasoning-start", ""],
+      ["reasoning-delta", "Not streamed thought"],
+      ["reasoning-end", ""],
+    ]);
+    // One part per thinking block: the streamed block's pieces share an id.
+    expect(new Set(out.filter((c) => c.type === "reasoning-delta").slice(0, 3).map((c) => c.id)).size).toBe(1);
+  });
+
   it("streams in real time: the first words reach the browser before the agent has written the last", async () => {
     withDeltas();
     const pieces = ["I'll add ", "a savings ", "goal screen ", "with a progress ring."];

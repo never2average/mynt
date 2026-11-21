@@ -261,7 +261,7 @@ async function converse(
     return;
   }
 
-  const follower = new ActivityFollower({ textDeltas: capabilities.textDeltas });
+  const follower = new ActivityFollower({ textDeltas: capabilities.textDeltas, reasoning: capabilities.reasoning });
   let buildId: string;
   let skipTurnEnds = 0;
   let steered = false;

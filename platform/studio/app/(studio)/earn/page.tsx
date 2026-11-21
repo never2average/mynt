@@ -11,7 +11,7 @@
 // list's owner (a hash of the user) keys the past conversations kept in this browser.
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { askFetch } from "@/lib/ask-client";
+import { askFetch, withoutReasoning } from "@/lib/ask-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EarnWorkspace, type EarnStatus } from "@/components/earn-assistant";
 import type { ActionResult, LiquidityActions } from "@/components/earn-view";
@@ -90,7 +90,7 @@ export default function EarnPage() {
   // The transport reads the chosen wallet when each message is sent, so it stays one transport.
   const chosenRef = useRef<EarnWallet | null>(null);
   chosenRef.current = chosen;
-  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/earn", fetch: askFetch, body: () => ({ wallet: chosenRef.current ? { address: chosenRef.current.address } : null }) }), []);
+  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/earn", fetch: askFetch, prepareSendMessagesRequest: withoutReasoning, body: () => ({ wallet: chosenRef.current ? { address: chosenRef.current.address } : null }) }), []);
   const chat = useChat<UIMessage>({ id: "studio-earn", transport });
 
   useEffect(() => {

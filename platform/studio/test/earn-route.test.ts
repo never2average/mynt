@@ -37,7 +37,7 @@ const SPONSOR = "22222222-2222-4222-8222-222222222222";
 const SPONSORSHIPS = [{ product_id: "their-product", component_key: "lending", status: "approved", provider_entity_id: SPONSOR, product: { name: "Their card" }, provider: { name: "Sponsor Bank" } }];
 const PROPOSAL = { product_id: "their-product", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 1250, min_reserve_floor_cents: 50_000, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 };
 
-type Step ={ text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> } };
+type Step ={ thinking?: string[]; text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> } };
 const fake = {
   session: undefined as Session | undefined,
   steps: [] as Step[],
@@ -88,19 +88,27 @@ vi.mock("@/lib/llm", () => ({
     stream: (params: { tools: { name: string }[]; system: { text: string }[]; messages: unknown[] }) => {
       fake.requests.push({ tools: params.tools, system: params.system, messages: structuredClone(params.messages) });
       const step = fake.steps.shift() ?? { text: "Done." };
-      const listeners: ((d: string) => void)[] = [];
+      // The SDK's stream events by name: "text" deltas, "thinking" deltas, and "contentBlock" as each block ends.
+      const on = new Map<string, ((v: never) => void)[]>();
+      const emit = (name: string, v: unknown) => on.get(name)?.forEach((cb) => cb(v as never));
       return {
-        on: (_e: string, cb: (d: string) => void) => listeners.push(cb),
+        on: (e: string, cb: (v: never) => void) => void on.set(e, [...(on.get(e) ?? []), cb]),
         finalMessage: async () => {
+          // A step that thinks first streams its thinking, then ends that block, before any text.
+          if (step.thinking) {
+            for (const t of step.thinking) emit("thinking", t);
+            emit("contentBlock", { type: "thinking", thinking: step.thinking.join(""), signature: "sig-1" });
+          }
           // A step given in pieces is written a piece at a time, `gapMs` apart, as the model streams.
           if (step.pieces)
             for (const p of step.pieces) {
               await sleep(step.gapMs ?? 0);
               fake.producedAt.push(performance.now());
-              for (const l of listeners) l(p);
+              emit("text", p);
             }
-          else if (step.text) for (const l of listeners) l(step.text);
+          else if (step.text) emit("text", step.text);
           const content: unknown[] = [];
+          if (step.thinking) content.push({ type: "thinking", thinking: step.thinking.join(""), signature: "sig-1" });
           if (step.text) content.push({ type: "text", text: step.text });
           if (step.tool) content.push({ type: "tool_use", id: `call-${fake.requests.length}`, name: step.tool.name, input: step.tool.input });
           return { content, stop_reason: step.tool ? "tool_use" : "end_turn" };
@@ -149,6 +157,20 @@ describe("/api/earn", () => {
     console.info(`earn: first delta at +${(deltas[0].at - fake.producedAt[0]).toFixed(1)} ms after the model wrote it; ${(lastWritten - deltas[0].at).toFixed(1)} ms before the last piece was written`);
     expect(deltas[0].at).toBeLessThan(lastWritten);
     for (let i = 0; i < pieces.length - 1; i++) expect(deltas[i].at).toBeLessThan(fake.producedAt[i + 1]);
+  });
+
+  it("streams the model's reasoning as reasoning parts before the answer's text", async () => {
+    fake.steps = [{ thinking: ["Short notice ", "means Pool 1."], text: "Pool 1." }];
+    const out = await chunks(await ask("Which pools have a short notice period?"));
+    expect(out.filter((c) => /^(reasoning|text)-/.test(String(c.type))).map((c) => [c.type, c.id, c.delta ?? null])).toEqual([
+      ["reasoning-start", "r1", null],
+      ["reasoning-delta", "r1", "Short notice "],
+      ["reasoning-delta", "r1", "means Pool 1."],
+      ["reasoning-end", "r1", null],
+      ["text-start", "t1", null],
+      ["text-delta", "t1", "Pool 1."],
+      ["text-end", "t1", null],
+    ]);
   });
 
   it("offers the model Earn's reads and its panel tools only: no write tool, and none of Mynt's other tools", async () => {
