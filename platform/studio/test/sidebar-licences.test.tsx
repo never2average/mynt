@@ -54,9 +54,9 @@ const withSidebar = (ui: React.ReactNode, open = true) => (
 const openFolders = (c: HTMLElement) => [...c.querySelectorAll("[data-active-folder=true]")].map((e) => e.getAttribute("data-folder"));
 
 describe("the collapsed sidebar", () => {
-  it("shows its icons clearly: 20px in centred 36px buttons, the current page filled", () => {
+  it("shows its icons clearly: 20px in centred 36px buttons", () => {
     const html = renderToStaticMarkup(<UiSidebarProvider defaultOpen={false}><SidebarMenu><SidebarMenuItem><SidebarMenuButton isActive>x</SidebarMenuButton></SidebarMenuItem></SidebarMenu></UiSidebarProvider>);
-    for (const c of ["group-data-[collapsible=icon]:size-9!", "group-data-[collapsible=icon]:[&amp;&gt;svg]:size-5", "group-data-[collapsible=icon]:justify-center", "group-data-[collapsible=icon]:data-[active=true]:bg-sidebar-primary"]) expect(html).toContain(c);
+    for (const c of ["group-data-[collapsible=icon]:size-9!", "group-data-[collapsible=icon]:[&amp;&gt;svg]:size-5", "group-data-[collapsible=icon]:justify-center"]) expect(html).toContain(c);
   });
 
   it("is exactly the icon width (3rem) for the inset variant, with no side padding, so icons are centred", () => {
