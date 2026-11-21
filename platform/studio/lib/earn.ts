@@ -31,7 +31,7 @@ export const PANEL_TOOLS = ["show_pools", "draft_commitment", "draft_withdrawal"
 export const PANEL_TOOL_DEFS: ToolDef[] = [
   {
     name: "show_pools",
-    description: "Show these pools (ids from list_pools) as cards in the panel beside the chat, in this order, when they match what the user asked for. Pass an empty list to show every pool open to them.",
+    description: "Show these pools (ids from list_pools) in the table in the panel beside the chat, in this order, when they match what the user asked for. Pass an empty list to show every pool open to them.",
     input_schema: { type: "object", properties: { pool_ids: { type: "array", items: { type: "string" }, maxItems: 20 } }, required: ["pool_ids"] },
   },
   {
