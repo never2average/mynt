@@ -7,9 +7,10 @@
 //   settling in, queued for withdrawal, paid out: Not measured, with why, when Mynt couldn't tell),
 //   terms, latest verified health and withdrawal queue; "Propose pool" on a sponsored component of
 //   their firm's product.
-// (Pools, every pool open to the user with "Commit capital", and My strategies are cards, in
-// components/earn-assistant.tsx.) Also here: the forms (commit, withdraw, propose), and what a
-// liquidity provider holds in a pool (holdingIn), which Pools' cards show, with the card's Details
+// (Pools, every pool open to the user with "Commit capital", is a table too, and My strategies are
+// cards, in components/earn-assistant.tsx.) Every column shows at every width; a table wider than
+// the panel scrolls sideways. Also here: the forms (commit, withdraw, propose), and what a
+// liquidity provider holds in a pool (holdingIn), which Pools' rows show, with the row's Details
 // sheet (PositionDetailsSheet: amounts, deposits and withdrawal requests, on rails and on chain).
 // Each form opens in a sheet from its labelled button. Nothing here moves money: Mynt records a
 // request, and the pool's sponsor moves the money on its approved rail. Server-renderable for the tests.
@@ -19,7 +20,7 @@ import { newIdempotencyKey } from "@/lib/idempotency"
 
 import type { Facet } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL, WIDEST_COL } from "@/components/list-layout"
+import { COL, PanelList, useFitRows, usePaged } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -267,8 +268,6 @@ export function ProposeForm({ options, actions, onDone, initial, idempotencyKey,
   )
 }
 
-// My pools' capital columns: principal from a 32rem panel, the queue from 42rem, the rest from 64rem.
-const CAPITAL_COL: Record<CapitalFigure, string> = { principal: MID_COL, queued: WIDE_COL, settledIn: WIDEST_COL, pendingIn: WIDEST_COL, paidOut: WIDEST_COL }
 // In Export CSV, a figure Mynt didn't measure says so and why.
 const capitalText = (c: CapitalCell) => (c.why && c.text === "Not measured" ? `Not measured (${c.why})` : c.text)
 
@@ -324,55 +323,55 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
         <Table>
           <TableHeader className="sticky top-0 bg-card">
             <TableRow>
-              <TableHead>Pool</TableHead>
-              <TableHead className={MID_COL}>State</TableHead>
-              <TableHead className={WIDE_COL}>Status</TableHead>
-              <TableHead className={WIDE_COL}>Rails</TableHead>
+              <TableHead className={COL.name}>Pool</TableHead>
+              <TableHead className={COL.short}>State</TableHead>
+              <TableHead className={COL.text}>Status</TableHead>
+              <TableHead className={COL.wide}>Rails</TableHead>
               {CAPITAL_COLUMNS.map((c) => (
-                <TableHead key={c.key} className={`${CAPITAL_COL[c.key]} text-right`}>
+                <TableHead key={c.key} className={COL.money}>
                   {c.label}
                 </TableHead>
               ))}
-              <TableHead className={WIDE_COL}>Minimum reserve</TableHead>
-              <TableHead className={WIDE_COL}>Notice</TableHead>
-              <TableHead className={WIDE_COL}>Commitment limits</TableHead>
-              <TableHead className={WIDE_COL}>Latest health</TableHead>
-              <TableHead className="text-right">Withdrawal queue</TableHead>
+              <TableHead className={COL.wide}>Minimum reserve</TableHead>
+              <TableHead className={COL.short}>Notice</TableHead>
+              <TableHead className={COL.wide}>Commitment limits</TableHead>
+              <TableHead className={COL.text}>Latest health</TableHead>
+              <TableHead className={COL.money}>Withdrawal queue</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {paged.shown.length ? (
               paged.shown.map((p) => (
                 <TableRow key={p.id} data-pool={p.id}>
-                  <TableCell>
+                  <TableCell className={COL.name}>
                     <OneLine className="font-medium" text={p.name} />
                     <OneLine className="text-xs text-muted-foreground" text={`${p.productName ?? p.productId}${p.componentKey ? ` · ${p.componentKey}` : ""}`} />
                   </TableCell>
-                  <TableCell className={MID_COL}>
+                  <TableCell className={COL.short}>
                     <StageStatus stage={stageOf(p)} />
                   </TableCell>
-                  <TableCell className={WIDE_COL}>
+                  <TableCell className={COL.text}>
                     <OneLine text={statusText(p)} />
                   </TableCell>
-                  <TableCell className={WIDE_COL}>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
+                  <TableCell className={COL.wide}>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
                   {CAPITAL_COLUMNS.map((c) => {
                     const cell = capitalCell(p, c.key)
                     return (
-                      <TableCell key={c.key} className={`${CAPITAL_COL[c.key]} text-right tabular-nums`} data-capital={c.key} title={cell.why ?? undefined}>
-                        <OneLine text={cell.text} />
+                      <TableCell key={c.key} className={COL.money} data-capital={c.key} title={cell.why ?? undefined}>
+                        <OneLine className="ml-auto" text={cell.text} />
                       </TableCell>
                     )
                   })}
-                  <TableCell className={WIDE_COL}>
+                  <TableCell className={COL.wide}>
                     <OneLine text={reserveText(p)} />
                   </TableCell>
-                  <TableCell className={WIDE_COL}>{noticeText(p.noticePeriodDays)}</TableCell>
-                  <TableCell className={`${WIDE_COL} tabular-nums`}>{limitsText(p)}</TableCell>
-                  <TableCell className={WIDE_COL} data-health>
+                  <TableCell className={COL.short}>{noticeText(p.noticePeriodDays)}</TableCell>
+                  <TableCell className={`${COL.wide} tabular-nums`}>{limitsText(p)}</TableCell>
+                  <TableCell className={COL.text} data-health>
                     <OneLine text={healthText(p.health)} />
                     <OneLine className="text-xs text-muted-foreground" text={p.health?.latestVerifiedEnd && !p.health.verified ? `Last verified to ${dateOf(p.health.latestVerifiedEnd)}` : ""} />
                   </TableCell>
-                  <TableCell className="text-right tabular-nums" data-queue>
+                  <TableCell className={COL.money} data-queue>
                     {queue(p)}
                   </TableCell>
                 </TableRow>

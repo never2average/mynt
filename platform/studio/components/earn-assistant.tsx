@@ -3,7 +3,7 @@
 // Earn (/earn): the investing assistant in the studio's chat workspace, the same shell as an app's
 // builder (components/chat-workspace-shell.tsx), with different tabs on the right. The chat starts
 // as the big centred prompt ("What do you want to earn?") with example chips; after the first
-// message the right panel opens beside it with Pools (every pool open to the user as cards,
+// message the right panel opens beside it with Pools (every pool open to the user as a table,
 // showing the ones the conversation matched first, with Commit capital for liquidity providers and,
 // on the pools they're invested in, their position with Withdraw and Details), My pools (builders)
 // and My strategies (liquidity providers: the commitments and
@@ -28,13 +28,14 @@ import { ChatSearchDialog } from "@/components/chat-search"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { ViewSwitch } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { CARD_GRID, PanelList, useFitCards, usePaged } from "@/components/list-layout"
+import { CARD_GRID, COL, PanelList, useFitCards, useFitRows, usePaged } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, OnChainPositionSheet, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
 import {
   CommitForm,
   commitOutcome,
   EarnTable,
+  EmptyRow,
   FormDone,
   FormSheet,
   holdingFigures,
@@ -54,6 +55,7 @@ import {
   type OpenForm,
 } from "@/components/earn-view"
 import { Button } from "@/components/ui/button"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
@@ -177,8 +179,6 @@ export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
 
 // Every line of a card is one line (cut short, the whole of it in its tooltip), so all cards of a
 // tab are one height and the cards per page that fit the panel stay right.
-const POOL_CARD_PX = 140 // name, details, state, terms, reserve and health: before the first card is measured
-const POOL_CARD_LP_PX = 200 // the same, then your position and the card's buttons
 const STRATEGY_CARD_PX = 124
 
 function EmptyCards({ children }: { children: React.ReactNode }) {
@@ -189,128 +189,168 @@ function EmptyCards({ children }: { children: React.ReactNode }) {
   )
 }
 
-// One pool as a card: its name; product, money and treasury; its state; its terms; its reserve
-// and latest health; then, for liquidity providers, what they hold in it (settled, queued and
-// paid, and any withdrawal requests still waiting) and its buttons: Details and Withdraw where they
-// hold a position, and Commit capital.
-export function PoolCard({
+const ALL_STAGES: PoolStage[] = ["awaiting_approval", "sandbox", "uncleared", "cleared"]
+const VIEW_LABELS: Record<PoolsView, string> = { matched: "Matched", all: "All", invested: "Invested" }
+
+// Pools' columns: every one shows at every width, each with a min width for what it holds (a table
+// wider than the panel scrolls sideways). Liquidity providers also get their position's columns,
+// and, when they can act, the row's buttons.
+export function poolColumns(provider: boolean, withActions: boolean): { label: string; className: string }[] {
+  return [
+    { label: "Pool", className: COL.name },
+    { label: "State", className: COL.text },
+    { label: "Money", className: COL.short },
+    { label: "Lock-in", className: COL.short },
+    { label: "Notice", className: COL.short },
+    { label: "Limits", className: `${COL.wide} tabular-nums` },
+    { label: "Reserve", className: COL.wide },
+    { label: "Health", className: COL.text },
+    ...(provider
+      ? [
+          { label: "Your position", className: COL.money },
+          { label: "Queued", className: COL.money },
+          { label: "Paid", className: COL.money },
+          { label: "Waiting requests", className: COL.wide },
+        ]
+      : []),
+    ...(withActions ? [{ label: "Actions", className: COL.actions }] : []),
+  ]
+}
+
+// One pool as a table row: its name with product and line under it; its state and status; sandbox
+// or real money (and its on-chain treasury); its terms; its reserve and latest health; then, for
+// liquidity providers, what they hold in it (settled, queued and paid, and any withdrawal requests
+// still waiting) and its buttons: Details and Withdraw where they hold a position, and Commit capital.
+function PoolTableRow({
   pool,
   holding,
-  provider = false,
+  provider,
+  actionsColumn,
   commit,
   withdraw,
   onDetails,
 }: {
   pool: PoolRow
-  holding?: Holding | null
-  provider?: boolean // a liquidity provider's card: the position line shows, "—" without one
+  holding: Holding | null
+  provider: boolean // a liquidity provider's row: the position columns show, "—" without one
+  actionsColumn: boolean // the table has its Actions column (empty on a row with no button)
   commit?: { blocked: string | null; onClick: () => void }
   withdraw?: { blocked: string | null; onClick: () => void }
   onDetails?: () => void
 }) {
   const product = `${pool.productName ?? pool.productId}${pool.productLine ? ` · ${pool.productLine}` : ""}`
-  const terms = `Lock-in ${lockInText(pool.lockInDays)} · Notice ${noticeText(pool.noticePeriodDays)} · ${limitsText(pool)}`
-  const coverage = pool.health?.coverageBps !== null && pool.health?.coverageBps !== undefined ? ` · Coverage ${percentOfBps(pool.health.coverageBps)}` : ""
-  const health = `Minimum reserve ${reserveText(pool)} · Health ${healthText(pool.health)}${coverage}`
+  const coverage = pool.health?.coverageBps !== null && pool.health?.coverageBps !== undefined ? `Coverage ${percentOfBps(pool.health.coverageBps)}` : ""
   const f = holding ? holdingFigures(holding) : null
-  const waiting = waitingText(holding ?? null)
-  const position = f ? `Your position ${f.held} · Queued ${f.queued} · Paid ${f.paid}${waiting ? ` · ${waiting}` : ""}` : "Your position —"
+  const waiting = waitingText(holding)
+  const line = "block max-w-56 truncate"
+  const sub = `${line} text-xs text-muted-foreground`
   return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-lg border p-3" data-card data-pool-card={pool.id} data-invested={holding ? "true" : undefined}>
-      <div className="truncate font-medium" title={pool.name} data-pool-name>
-        {pool.name}
-      </div>
-      <div className="flex h-5 min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-        <span className="min-w-0 truncate" title={product} data-product>
+    <TableRow data-pool-row={pool.id} data-invested={holding ? "true" : undefined}>
+      <TableCell className={COL.name}>
+        <span className={`${line} font-medium`} title={pool.name} data-pool-name>
+          {pool.name}
+        </span>
+        <span className={sub} title={product} data-product>
           {product}
         </span>
-        <span aria-hidden>·</span>
+      </TableCell>
+      <TableCell className={COL.text}>
+        <StageStatus stage={stageOf(pool)} />
+        <span className={sub} title={statusText(pool)} data-status>
+          {statusText(pool)}
+        </span>
+      </TableCell>
+      <TableCell className={COL.short}>
         <Money sandbox={pool.sandbox} />
-        {pool.treasury && (
-          <>
-            <span aria-hidden>·</span>
+        {pool.treasury ? (
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <span className="shrink-0" data-treasury={pool.treasury.cluster}>
               {onDevnet(pool.treasury) ? "On-chain treasury" : "On-chain treasury, not on devnet"}
             </span>
-          </>
-        )}
-        {onDevnet(pool.treasury) && <DevnetBadge />}
-        {pool.treasury?.verifiedBuild === false && <UnverifiedBuildBadge />}
-        {pool.treasury?.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
-      </div>
-      <div className="flex h-5 min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden text-xs">
-        <StageStatus stage={stageOf(pool)} />
-        <span className="min-w-0 truncate text-muted-foreground" title={statusText(pool)} data-status>
-          · {statusText(pool)}
-        </span>
-      </div>
-      <div className="truncate text-sm" title={terms} data-terms>
-        Lock-in <span data-lock-in>{lockInText(pool.lockInDays)}</span> · Notice <span data-notice>{noticeText(pool.noticePeriodDays)}</span> · <span className="tabular-nums" data-limits>{limitsText(pool)}</span>
-      </div>
-      <div className="truncate text-xs text-muted-foreground" title={health} data-health>
-        {health}
-      </div>
-      {provider && (
-        <div className="truncate text-xs text-muted-foreground" title={position} data-position-line>
-          Your position{" "}
-          <span className="font-medium text-foreground tabular-nums" data-your-position>
-            {f ? f.held : "—"}
+            {onDevnet(pool.treasury) && <DevnetBadge />}
+            {pool.treasury.verifiedBuild === false && <UnverifiedBuildBadge />}
+            {pool.treasury.attestersFlag && <DepositsPausedBadge reason={pool.treasury.attestersFlag} />}
           </span>
-          {f && (
-            <>
-              {" "}
-              · Queued{" "}
-              <span className="tabular-nums" data-your-queued>
-                {f.queued}
-              </span>{" "}
-              · Paid{" "}
-              <span className="tabular-nums" data-your-paid>
-                {f.paid}
-              </span>
-            </>
-          )}
-          {waiting && (
-            <>
-              {" · "}
-              <span className="text-amber-600 dark:text-amber-300" data-waiting-requests>
+        ) : null}
+      </TableCell>
+      <TableCell className={COL.short}>
+        <span data-lock-in>{lockInText(pool.lockInDays)}</span>
+      </TableCell>
+      <TableCell className={COL.short}>
+        <span data-notice>{noticeText(pool.noticePeriodDays)}</span>
+      </TableCell>
+      <TableCell className={`${COL.wide} tabular-nums`}>
+        <span data-limits>{limitsText(pool)}</span>
+      </TableCell>
+      <TableCell className={COL.wide}>
+        <span className={line} title={reserveText(pool)} data-reserve>
+          {reserveText(pool)}
+        </span>
+      </TableCell>
+      <TableCell className={COL.text}>
+        <span className={line} title={healthText(pool.health)} data-health>
+          {healthText(pool.health)}
+        </span>
+        {coverage && (
+          <span className={sub} data-coverage>
+            {coverage}
+          </span>
+        )}
+      </TableCell>
+      {provider && (
+        <>
+          <TableCell className={`${COL.money} font-medium`}>
+            <span data-your-position>{f ? f.held : "—"}</span>
+          </TableCell>
+          <TableCell className={COL.money}>
+            <span data-your-queued>{f ? f.queued : "—"}</span>
+          </TableCell>
+          <TableCell className={COL.money}>
+            <span data-your-paid>{f ? f.paid : "—"}</span>
+          </TableCell>
+          <TableCell className={COL.wide}>
+            {waiting ? (
+              <span className={`${line} text-amber-600 dark:text-amber-300`} title={waiting} data-waiting-requests>
                 {waiting}
               </span>
-            </>
-          )}
-        </div>
+            ) : (
+              <span className="text-muted-foreground">{holding ? "None" : "—"}</span>
+            )}
+          </TableCell>
+        </>
       )}
-      {(commit || (holding && (withdraw || onDetails))) && (
-        <div className="flex items-center justify-end gap-2 pt-1" data-card-actions>
-          {holding && onDetails && (
-            <Button size="sm" variant="outline" className="shrink-0" onClick={onDetails} data-card-details={pool.id}>
-              Details
-            </Button>
-          )}
-          {holding && withdraw && (
-            <Button size="sm" variant="outline" className="shrink-0" disabled={Boolean(withdraw.blocked)} title={withdraw.blocked ?? undefined} onClick={withdraw.onClick} data-card-withdraw={pool.id}>
-              Withdraw
-            </Button>
-          )}
-          {commit && (
-            <Button size="sm" variant="outline" className="shrink-0" disabled={Boolean(commit.blocked)} title={commit.blocked ?? undefined} onClick={commit.onClick} data-commit={pool.id}>
-              Commit capital
-            </Button>
-          )}
-        </div>
+      {actionsColumn && (
+        <TableCell className={COL.actions}>
+          <div className="flex items-center justify-end gap-2" data-row-actions>
+            {holding && onDetails && (
+              <Button size="sm" variant="outline" onClick={onDetails} data-row-details={pool.id}>
+                Details
+              </Button>
+            )}
+            {holding && withdraw && (
+              <Button size="sm" variant="outline" disabled={Boolean(withdraw.blocked)} title={withdraw.blocked ?? undefined} onClick={withdraw.onClick} data-row-withdraw={pool.id}>
+                Withdraw
+              </Button>
+            )}
+            {commit && (
+              <Button size="sm" variant="outline" disabled={Boolean(commit.blocked)} title={commit.blocked ?? undefined} onClick={commit.onClick} data-commit={pool.id}>
+                Commit capital
+              </Button>
+            )}
+          </div>
+        </TableCell>
       )}
-    </div>
+    </TableRow>
   )
 }
 
-const ALL_STAGES: PoolStage[] = ["awaiting_approval", "sandbox", "uncleared", "cleared"]
-const VIEW_LABELS: Record<PoolsView, string> = { matched: "Matched", all: "All", invested: "Invested" }
-
-// Pools: every pool open to the user, as cards. The toolbar's view switch picks which: Matched (the
-// pools the assistant matched, shown first once it has; only then), All, and Invested (liquidity
-// providers: the pools they hold a position in; always offered to them, empty until they hold one).
-// A liquidity provider's card shows what they hold there, with Withdraw (the withdrawal form, or an
-// on-chain position's deposits) and Details (its amounts, deposits and withdrawal requests), and
-// Commit capital (also the toolbar's CTA). A new match from the assistant shows Matched again.
+// Pools: every pool open to the user, as a table. The toolbar's view switch picks which: Matched
+// (the pools the assistant matched, shown first once it has; only then), All, and Invested
+// (liquidity providers: the pools they hold a position in; always offered to them, empty until they
+// hold one). A liquidity provider's row shows what they hold there, with Withdraw (the withdrawal
+// form, or an on-chain position's deposits) and Details (its amounts, deposits and withdrawal
+// requests), and Commit capital (also the toolbar's CTA). A new match from the assistant shows
+// Matched again.
 export function PoolsTab({
   data,
   poolIds,
@@ -348,8 +388,11 @@ export function PoolsTab({
   const [details, setDetails] = useState<string | null>(null)
   const base = view === "matched" && matchedIds ? matchedIds.map((id) => pools.find((p) => p.id === id)).filter((p): p is PoolRow => Boolean(p)) : view === "invested" ? pools.filter((p) => holdingOf(p.id)) : pools
   const shown = filterPools(base, f)
-  const fit = useFitCards(lp ? POOL_CARD_LP_PX : POOL_CARD_PX)
+  const fit = useFitRows()
   const paged = usePaged(shown, fit.size)
+  // The Actions column, for a liquidity provider who can commit or withdraw, or has a position's Details to open.
+  const actionsColumn = Boolean(lp && (actions || paged.shown.some((p) => holdingOf(p.id))))
+  const columns = poolColumns(Boolean(lp), actionsColumn)
   const filter = (n: PoolFilters) => {
     setF(n)
     paged.setPage(1)
@@ -365,7 +408,7 @@ export function PoolsTab({
     setDone(null)
     setForm({ kind: "commit", poolId })
   }
-  // Withdraw on a card: the withdrawal form for a position on rails; for one on chain only, its
+  // Withdraw on a row: the withdrawal form for a position on rails; for one on chain only, its
   // deposits (each with its own Withdraw).
   const withdrawOf = (h: Holding): { blocked: string | null; onClick: () => void } =>
     h.rails
@@ -396,7 +439,6 @@ export function PoolsTab({
     <div className="h-full" data-earn-pools-tab>
       <PanelList
         id="pools"
-        cards
         noun={["pool", "pools"]}
         search={f.query}
         onSearch={(query) => filter({ ...f, query })}
@@ -428,26 +470,38 @@ export function PoolsTab({
         areaRef={fit.ref}
         {...pagerOf(paged, shown.length)}
       >
-        {paged.shown.length ? (
-          <div className={CARD_GRID} data-card-grid>
-            {paged.shown.map((p) => {
-              const h = holdingOf(p.id)
-              return (
-                <PoolCard
-                  key={p.id}
-                  pool={p}
-                  provider={Boolean(lp)}
-                  holding={h}
-                  commit={lp && actions ? { blocked: commitBlock(p), onClick: () => openCommit(p.id) } : undefined}
-                  withdraw={h && actions ? withdrawOf(h) : undefined}
-                  onDetails={h ? () => setDetails(p.id) : undefined}
-                />
-              )
-            })}
-          </div>
-        ) : (
-          <EmptyCards>{view === "invested" && !base.length ? "No positions yet. Commit capital to an open pool to start one." : base.length ? "No pools match these filters." : "No pools to show yet."}</EmptyCards>
-        )}
+        <Table>
+          <TableHeader className="sticky top-0 bg-card">
+            <TableRow>
+              {columns.map((c) => (
+                <TableHead key={c.label} className={c.className}>
+                  {c.label}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {paged.shown.length ? (
+              paged.shown.map((p) => {
+                const h = holdingOf(p.id)
+                return (
+                  <PoolTableRow
+                    key={p.id}
+                    pool={p}
+                    provider={Boolean(lp)}
+                    actionsColumn={actionsColumn}
+                    holding={h}
+                    commit={lp && actions ? { blocked: commitBlock(p), onClick: () => openCommit(p.id) } : undefined}
+                    withdraw={h && actions ? withdrawOf(h) : undefined}
+                    onDetails={h ? () => setDetails(p.id) : undefined}
+                  />
+                )
+              })
+            ) : (
+              <EmptyRow cols={columns.length}>{view === "invested" && !base.length ? "No positions yet. Commit capital to an open pool to start one." : base.length ? "No pools match these filters." : "No pools to show yet."}</EmptyRow>
+            )}
+          </TableBody>
+        </Table>
       </PanelList>
       {lp && actions && (
         <FormSheet open={form?.kind === "commit" && lp.pools.length > 0} onClose={() => setForm(null)} title="Commit capital" id="commit">
