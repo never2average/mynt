@@ -32,31 +32,47 @@ export const hasLiquidity = (a: LiquidityAccess | null | undefined) => Boolean(a
 export const canUseLiquidity = (roles: readonly string[]) => hasLiquidity(accessFrom(roles));
 
 // Earn's right-hand panel tabs (/earn?tab=...), beside its assistant: Pools (every pool open to
-// the user, showing the ones the conversation matched first), then the detailed tables by role,
-// then My strategies, what the assistant drafted (commitments and withdrawals for liquidity
-// providers, pool proposals for builders).
-export type LiquidityTab = "my-positions" | "my-pools";
+// the user, showing the ones the conversation matched first; what a liquidity provider holds in a
+// pool is on its card), My pools (builders), then My strategies, what the assistant drafted
+// (commitments and withdrawals for liquidity providers, pool proposals for builders).
+export type LiquidityTab = "my-pools";
 export type EarnTab = "pools" | LiquidityTab | "my-strategies";
-export const TAB_LABELS: Record<EarnTab, string> = { pools: "Pools", "my-positions": "My positions", "my-pools": "My pools", "my-strategies": "My strategies" };
+export const TAB_LABELS: Record<EarnTab, string> = { pools: "Pools", "my-pools": "My pools", "my-strategies": "My strategies" };
 export function tabsFor(a: LiquidityAccess): EarnTab[] {
   if (!hasLiquidity(a)) return [];
-  return ["pools", ...(a.liquidityProvider ? (["my-positions"] as const) : []), ...(a.builder ? (["my-pools"] as const) : []), "my-strategies"];
+  return ["pools", ...(a.builder ? (["my-pools"] as const) : []), "my-strategies"];
 }
 // ?tab= on /earn, and /liquidity's old tabs: the panel tab it names. Opportunities (and
-// /liquidity's Open pools) were merged into Pools; Drafts is My strategies. The old "assistant"
-// (and anything unknown) is Pools.
-const ALL_POOLS_TABS = ["opportunities", "open-pools"];
+// /liquidity's Open pools) and My positions were merged into Pools; Drafts is My strategies. The
+// old "assistant" (and anything unknown) is Pools.
 export function earnTabFromQuery(tab: unknown): EarnTab {
-  if (tab === "my-positions" || tab === "my-pools" || tab === "my-strategies") return tab;
+  if (tab === "my-pools" || tab === "my-strategies") return tab;
   if (tab === "drafts") return "my-strategies";
   return "pools";
 }
+// Pools' views: the pools the assistant matched, every pool open to the user, or (liquidity
+// providers) the pools they hold a position in.
+export type PoolsView = "matched" | "all" | "invested";
+const ALL_POOLS_TABS = ["opportunities", "open-pools"];
+const INVESTED_TABS = ["my-positions", "positions", "invested"];
+// The Pools view an old link asks for: Opportunities shows all pools, My positions the pools
+// invested in; null when it names none.
+export function poolsViewFromQuery(tab: unknown): PoolsView | null {
+  if (typeof tab !== "string") return null;
+  if (ALL_POOLS_TABS.includes(tab)) return "all";
+  if (INVESTED_TABS.includes(tab)) return "invested";
+  return null;
+}
 // A link to the old Opportunities lands on Pools showing all pools, not only the matched ones.
-export const poolsShowAllFromQuery = (tab: unknown) => typeof tab === "string" && ALL_POOLS_TABS.includes(tab);
-// /liquidity's tabs as the /earn?tab= to redirect to (Open pools keeps showing all pools).
-export const earnTabFromLiquidity = (tab: unknown): string => (poolsShowAllFromQuery(tab) ? "opportunities" : earnTabFromQuery(tab));
-// A link that names a table, all pools or My strategies opens the panel straight away, before any message.
-export const tabOpensPanel = (tab: unknown) => earnTabFromQuery(tab) !== "pools" || poolsShowAllFromQuery(tab);
+export const poolsShowAllFromQuery = (tab: unknown) => poolsViewFromQuery(tab) === "all";
+// /liquidity's tabs as the /earn?tab= to redirect to (Open pools keeps showing all pools, My
+// positions the pools invested in).
+export const earnTabFromLiquidity = (tab: unknown): string => {
+  const v = poolsViewFromQuery(tab);
+  return v === "all" ? "opportunities" : v === "invested" ? "my-positions" : earnTabFromQuery(tab);
+};
+// A link that names a table, a Pools view or My strategies opens the panel straight away, before any message.
+export const tabOpensPanel = (tab: unknown) => earnTabFromQuery(tab) !== "pools" || poolsViewFromQuery(tab) !== null;
 // The header wallet control's links, by role.
 export function walletLinksFor(a: LiquidityAccess | null | undefined): { label: string; href: string }[] {
   if (!a) return [];
@@ -578,16 +594,19 @@ export function reviveLiquidity<T extends LiquidityData | null>(d: T): T {
   return { ...d, provider: { ...d.provider, positions: d.provider.positions.map((p) => ({ ...p, chain: p.chain ? reviveOnChainPosition(p.chain) : null })) } };
 }
 
-export type PoolFilters = { query: string; productLine: string; stage: "" | PoolStage; money: "" | "sandbox" | "real" };
-export const NO_POOL_FILTERS: PoolFilters = { query: "", productLine: "", stage: "", money: "" };
+// A pool list's filters: the search, then any number of choices per facet. A pool shows when it
+// has one of each facet's choices (any within a facet, all facets with choices).
+export type PoolMoney = "sandbox" | "real";
+export type PoolFilters = { query: string; productLine: string[]; stage: PoolStage[]; money: PoolMoney[] };
+export const NO_POOL_FILTERS: PoolFilters = { query: "", productLine: [], stage: [], money: [] };
 export function filterPools<T extends Pool>(pools: T[], f: PoolFilters): T[] {
   const q = f.query.trim().toLowerCase();
   return pools.filter(
     (p) =>
       (!q || [p.name, p.productName, p.productId, p.productLine, p.componentKey].some((v) => v?.toLowerCase().includes(q))) &&
-      (!f.productLine || p.productLine === f.productLine) &&
-      (!f.stage || stageOf(p) === f.stage) &&
-      (!f.money || (f.money === "sandbox") === p.sandbox),
+      (!f.productLine.length || (typeof p.productLine === "string" && f.productLine.includes(p.productLine))) &&
+      (!f.stage.length || f.stage.includes(stageOf(p))) &&
+      (!f.money.length || f.money.includes(p.sandbox ? "sandbox" : "real")),
   );
 }
 

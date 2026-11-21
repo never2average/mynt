@@ -3,12 +3,12 @@
 // The studio's list layout, for the Workspace page's tabs: a full-width search, then labelled
 // actions and the tab's call to action on the same row, then a full-height table paged 25 rows
 // at a time. Labelled buttons only, never icon-only ones.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react"
-import { ChevronLeft, ChevronRight, Download, Search, SlidersHorizontal } from "lucide-react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { ChevronLeft, ChevronRight, Download, Search } from "lucide-react"
 
+import { FiltersPopover, type Facet } from "@/components/filter-controls"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 export const PAGE_SIZE = 25
 
@@ -144,18 +144,20 @@ export function ListLayout({
 /**
  * A list for a narrow, resizable panel (Earn's right-hand tabs): ONE toolbar row that never wraps,
  * then one table filling the rest of the panel's height, then the pager pinned at the bottom.
- * The row is the search (it gives up width first), the filters and Export CSV, then the tab's
- * call to action, last and never shrunk. The panel is a container (`@container/list`): while it
- * is narrower than 48rem, the filters and Export CSV fold into one labelled "Filters" menu, so the
- * row follows the panel's width, not the window's.
+ * The row is the search (it gives up width first), the tab's view switch (ViewSwitch), ONE
+ * "Filters" button (its facets as chips in one popover, components/filter-controls.tsx
+ * FiltersPopover), Export CSV, then the tab's call to action, last and never shrunk. The panel is
+ * a container (`@container/list`): while it is narrower than 48rem, Export CSV moves into the
+ * Filters popover, beside Clear all, so the row follows the panel's width, not the window's.
  */
 export function PanelList({
   id,
   search,
   onSearch,
   searchLabel,
-  filters,
-  activeFilters = 0,
+  view,
+  facets,
+  onClearFilters,
   onExport,
   exportDisabled,
   cta,
@@ -175,8 +177,9 @@ export function PanelList({
   search: string
   onSearch: (q: string) => void
   searchLabel: string
-  filters?: React.ReactNode
-  activeFilters?: number
+  view?: React.ReactNode // the tab's view switch (ViewSwitch), right after the search
+  facets?: Facet[] // the tab's filters, as chips in the one Filters popover
+  onClearFilters?: () => void // its Clear all
   onExport?: () => void
   exportDisabled?: boolean
   cta?: React.ReactNode
@@ -186,14 +189,18 @@ export function PanelList({
   total: number
   onPage: (page: number) => void
 }) {
-  const exportButton = (wide: boolean) =>
-    onExport ? (
-      <Button variant="outline" size="sm" className={wide ? "h-9" : "h-9 w-full justify-start"} onClick={onExport} disabled={exportDisabled} data-export>
-        <Download />
-        Export CSV
-      </Button>
-    ) : null
-  const folds = Boolean(filters || onExport)
+  const exportButton = onExport ? (
+    <Button variant="outline" size="sm" className="h-9" onClick={onExport} disabled={exportDisabled} data-export>
+      <Download />
+      Export CSV
+    </Button>
+  ) : null
+  // Export CSV is in the row while the panel is 48rem or wider; narrower, the row hides it and the
+  // Filters popover shows it (checked as the popover opens: the popover isn't in the panel, so the
+  // panel's container query can't reach it).
+  const inlineExport = useRef<HTMLDivElement>(null)
+  const [exportFolded, setExportFolded] = useState(true)
+  const hasFacets = Boolean(facets?.length)
   return (
     <div className="@container/list flex h-full min-h-0 flex-1 flex-col gap-3 p-4" data-list-layout data-tab-panel={id}>
       <div className="flex flex-nowrap items-center gap-2" data-toolbar>
@@ -201,31 +208,19 @@ export function PanelList({
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={search} onChange={(e) => onSearch(e.target.value)} placeholder={searchLabel} aria-label={searchLabel} className="pl-8" />
         </div>
-        {filters && (
-          <div className="hidden shrink-0 flex-nowrap items-center gap-2 @3xl/list:flex" data-filters-inline>
-            {filters}
+        {view && (
+          <div className="flex shrink-0 items-center" data-toolbar-view>
+            {view}
+          </div>
+        )}
+        {hasFacets && (
+          <div className="shrink-0" data-filters-folded onPointerDownCapture={() => setExportFolded(!inlineExport.current?.offsetWidth)} onKeyDownCapture={() => setExportFolded(!inlineExport.current?.offsetWidth)}>
+            <FiltersPopover facets={facets!} onClear={() => onClearFilters?.()} footer={exportFolded ? exportButton : null} />
           </div>
         )}
         {onExport && (
-          <div className="hidden shrink-0 @3xl/list:block" data-export-inline>
-            {exportButton(true)}
-          </div>
-        )}
-        {folds && (
-          <div className="shrink-0 @3xl/list:hidden" data-filters-folded>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button variant="outline" size="sm" className="h-9" aria-label={activeFilters ? `Filters: ${activeFilters} on` : "Filters"} data-filters-menu-button data-active={activeFilters ? "true" : undefined}>
-                  <SlidersHorizontal className="text-muted-foreground" />
-                  Filters
-                  {activeFilters > 0 && <span className="font-normal text-muted-foreground tabular-nums">· {activeFilters}</span>}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent align="end" className="flex w-60 flex-col items-stretch gap-2 p-2 [&_[data-filter]]:w-full [&_[data-filter]]:justify-between" data-filters-menu>
-                {filters}
-                {onExport && <div className={filters ? "border-t pt-2" : undefined}>{exportButton(false)}</div>}
-              </PopoverContent>
-            </Popover>
+          <div ref={inlineExport} className={hasFacets ? "hidden shrink-0 @3xl/list:block" : "shrink-0"} data-export-inline>
+            {exportButton}
           </div>
         )}
         {cta && (

@@ -8,7 +8,7 @@ import { EarnWorkspace, PoolsTab, StrategiesTab, type EarnStatus } from "@/compo
 import { EarnTable, type LiquidityActions } from "@/components/earn-view";
 import { HISTORY_KEY, listThreads, MAX_THREADS, saveThread, threadTitle } from "@/lib/earn-history";
 import { panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn";
-import { fromPools, fromPositions, type LiquidityData } from "@/lib/liquidity";
+import { fromPools, fromPositions, fromWithdrawals, type LiquidityData } from "@/lib/liquidity";
 
 // Earn in the shared chat workspace: the centred prompt, the right-hand tabs by role and ?tab=,
 // the My strategies badge, drafts that need the user's click, and past conversations.
@@ -118,31 +118,36 @@ describe("Earn in the chat workspace", () => {
     expect(document.querySelector('[data-role="Liquidity provider"]')).toBeNull();
   });
 
-  it("has the right-hand tabs for the user's roles", () => {
-    render(<Earn data={lpData} initialTab="my-positions" />);
-    expect(tabIds()).toEqual(["pools", "my-positions", "my-strategies"]);
+  it("has the right-hand tabs for the user's roles: Pools, My pools (builders), My strategies; no My positions", () => {
+    render(<Earn data={lpData} initialTab="my-strategies" />);
+    expect(tabIds()).toEqual(["pools", "my-strategies"]);
     cleanup();
     render(<Earn data={builderData} initialTab="my-pools" />);
     expect(tabIds()).toEqual(["pools", "my-pools", "my-strategies"]);
     cleanup();
     render(<Earn data={{ ...lpData, access: { builder: true, liquidityProvider: true }, builder: builderData.builder }} initialTab="my-pools" />);
-    expect(tabIds()).toEqual(["pools", "my-positions", "my-pools", "my-strategies"]);
-    expect([...document.querySelectorAll("[data-panel-tab]")].map((b) => b.textContent)).toEqual(["Pools", "My positions", "My pools", "My strategies"]);
+    expect(tabIds()).toEqual(["pools", "my-pools", "my-strategies"]);
+    expect([...document.querySelectorAll("[data-panel-tab]")].map((b) => b.textContent)).toEqual(["Pools", "My pools", "My strategies"]);
   });
 
   it("?tab= picks the right-hand tab: a table opens the panel at once; old and unknown tabs are Pools", () => {
-    render(<Earn data={lpData} initialTab="my-positions" />);
-    expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
-    expect(selected()).toBe("my-positions");
-    expect(document.querySelector('[data-panel-content="my-positions"]')?.hasAttribute("hidden")).toBe(false);
-    cleanup();
+    // The old My positions (and its aliases) is Pools, opened, on Invested: only the pools the user holds.
+    for (const old of ["my-positions", "positions"]) {
+      render(<Earn data={lpData} initialTab={old} />);
+      expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
+      expect(selected()).toBe("pools");
+      expect(document.querySelector('[data-panel-tab="my-positions"]')).toBeNull();
+      expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("Invested");
+      expect([...document.querySelectorAll("[data-pool-card]")].map((c) => c.getAttribute("data-pool-card"))).toEqual([POOL]);
+      cleanup();
+    }
     // The old Opportunities (and /liquidity's Open pools) is Pools, opened, showing all pools.
     for (const old of ["opportunities", "open-pools"]) {
       render(<Earn data={lpData} initialTab={old} messages={[{ id: "a", role: "assistant", parts: [{ type: "data-earn-pools", data: { pool_ids: [UNCLEARED] } } as never] }]} />);
       expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
       expect(selected()).toBe("pools");
       expect(document.querySelector('[data-panel-tab="opportunities"]')).toBeNull();
-      expect(document.querySelector('[data-filter="Show"]')!.getAttribute("aria-label")).toBe("Show: All pools");
+      expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("All");
       expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
       cleanup();
     }
@@ -155,8 +160,14 @@ describe("Earn in the chat workspace", () => {
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("false");
     cleanup();
     // A tab the user doesn't have: Pools, panel closed.
-    render(<Earn data={builderData} initialTab="my-positions" />);
+    render(<Earn data={lpData} initialTab="my-pools" />);
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("false");
+    cleanup();
+    // A builder following an old My positions link: Pools, on All (Invested is only for liquidity providers).
+    render(<Earn data={{ ...builderData, builder: { ...builderData.builder!, pools } }} initialTab="my-positions" />);
+    expect(selected()).toBe("pools");
+    expect(document.querySelector("[data-view-switch]")).toBeNull();
+    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
   });
 
   it("counts drafts on the My strategies tab, and a draft is sent only by the user's click, once, even after looking at another tab", async () => {
@@ -210,7 +221,7 @@ describe("the Pools and My strategies tabs", () => {
     // Cards (flat, one per pool, none nested), the matched pools shown by the Show filter.
     expect(document.querySelectorAll("table")).toHaveLength(0);
     expect(document.querySelector("[data-slot='card']")).toBeNull();
-    expect(document.querySelector('[data-filter="Show"]')!.getAttribute("aria-label")).toBe("Show: Matched");
+    expect(document.querySelector('[data-view-switch] [aria-checked="true"]')!.textContent).toBe("Matched");
     expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(1);
     const card = document.querySelector(`[data-pool-card="${UNCLEARED}"]`)!;
     expect(card.className.split(" ")).toEqual(expect.arrayContaining(["rounded-lg", "border", "p-3"]));
@@ -225,18 +236,17 @@ describe("the Pools and My strategies tabs", () => {
     expect(document.querySelector('[data-toolbar] [data-cta="commit"]')).toBeTruthy();
     expect((card.querySelector(`[data-commit="${UNCLEARED}"]`) as HTMLButtonElement).disabled).toBe(true);
     expect(document.querySelector("[data-earn-positions], [data-view-all]")).toBeNull();
-    // Show · All pools lists every pool open to the user.
-    fireEvent.keyDown(document.querySelector('[data-filter="Show"]')!, { key: "Enter" });
-    await act(async () => undefined);
-    await act(async () => void fireEvent.click(document.querySelector('[data-filter-option="all"]')!));
+    // All lists every pool open to the user.
+    await act(async () => void fireEvent.click(document.querySelector('[data-view-switch] [data-view-option="all"]')!));
     expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
     expect(document.querySelector(`[data-pool-card="${POOL}"] [data-your-position]`)!.textContent).toBe("$5,000.00");
     expect((document.querySelector(`[data-commit="${POOL}"]`) as HTMLButtonElement).disabled).toBe(false);
     expect(document.querySelector("[data-pager]")!.textContent).toContain("2 pools · Page 1 of 1");
     cleanup();
+    // Without matched pools there's no Matched view.
     render(<PoolsTab data={lpData} poolIds={null} actions={actions().a} />);
     expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
-    expect(document.querySelector('[data-filter="Show"]')).toBeNull();
+    expect([...document.querySelectorAll("[data-view-switch] [data-view-option]")].map((o) => o.getAttribute("data-view-option"))).toEqual(["all", "invested"]);
     cleanup();
     // A builder sees the pools, without Commit capital.
     render(<PoolsTab data={{ ...builderData, builder: { ...builderData.builder!, pools } }} poolIds={null} actions={actions().a} />);
@@ -282,6 +292,87 @@ describe("the Pools and My strategies tabs", () => {
   });
 });
 
+describe("a liquidity provider's position, on its pool's card (My positions folded into Pools)", () => {
+  const withRequests: LiquidityData = {
+    ...lpData,
+    provider: {
+      ...lpData.provider!,
+      withdrawals: fromWithdrawals([
+        { id: "w-1", seq: 3, pool_id: POOL, pool_name: "Card float", amount_cents: 100_000, status: "queued", eligible_at: "2027-02-12T00:00:00Z", settled_cents: 0, waiting_reason: "Waiting out the notice period", sandbox: false },
+        { id: "w-2", seq: 4, pool_id: POOL, pool_name: "Card float", amount_cents: 50_000, status: "parked", eligible_at: null, settled_cents: 0, waiting_reason: "Below the minimum reserve", sandbox: false },
+      ]),
+    },
+  };
+
+  it("a card with a position shows it, its waiting requests, and labelled Details and Withdraw; one without has neither", () => {
+    render(<PoolsTab data={withRequests} poolIds={null} actions={actions().a} />);
+    const card = document.querySelector(`[data-pool-card="${POOL}"]`)!;
+    expect(card.getAttribute("data-invested")).toBe("true");
+    expect(card.querySelector("[data-your-position]")!.textContent).toBe("$5,000.00");
+    expect(card.querySelector("[data-waiting-requests]")!.textContent).toBe("2 withdrawal requests: 1 queued, 1 parked");
+    expect(card.querySelector(`[data-card-details="${POOL}"]`)!.textContent).toBe("Details");
+    expect(card.querySelector(`[data-card-withdraw="${POOL}"]`)!.textContent).toBe("Withdraw");
+    const other = document.querySelector(`[data-pool-card="${UNCLEARED}"]`)!;
+    expect(other.querySelector("[data-your-position]")!.textContent).toBe("—");
+    expect(other.querySelector("[data-card-details], [data-card-withdraw], [data-waiting-requests]")).toBeNull();
+  });
+
+  it("Withdraw opens the withdrawal form for that pool; Details opens a sheet with the position's amounts and its withdrawal requests", async () => {
+    const { a, calls } = actions();
+    render(<PoolsTab data={withRequests} poolIds={null} actions={a} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-card-withdraw="${POOL}"]`)!));
+    const form = document.querySelector('[data-sheet="withdraw"] [data-form="withdraw"]')!;
+    expect((form.querySelector('select[aria-label="Pool"]') as HTMLSelectElement).value).toBe(POOL);
+    expect(calls).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-card-details="${POOL}"]`)!));
+    const sheet = document.querySelector('[data-sheet="position-details"]')!;
+    expect(sheet.querySelector('[data-slot="sheet-title"]')?.textContent ?? sheet.textContent).toContain("Card float");
+    const rails = sheet.querySelector(`[data-rails-position="${POOL}"]`)!;
+    expect([...rails.querySelectorAll("[data-rails-figures] [data-figure]")].map((f) => f.getAttribute("data-figure"))).toEqual(["committed", "settled", "queued", "paid", "available", "state"]);
+    expect(rails.querySelector("[data-settled]")!.textContent).toBe("$5,000.00");
+    expect(rails.querySelector("[data-available]")!.textContent).toBe("$2,000.00");
+    expect([...rails.querySelectorAll("[data-rails-requests] [data-withdrawal]")].map((r) => r.getAttribute("data-withdrawal"))).toEqual(["w-1", "w-2"]);
+    expect(rails.querySelector('[data-withdrawal="w-2"] [data-status]')!.textContent).toBe("parked");
+  });
+
+  it("Invested lists only the pools the user holds a position in, and Export CSV has their position and queue", async () => {
+    let csv = "";
+    const blob = globalThis.Blob;
+    globalThis.Blob = class extends blob {
+      constructor(parts: BlobPart[], opts?: BlobPropertyBag) {
+        super(parts, opts);
+        csv = parts.map(String).join("");
+      }
+    } as typeof Blob;
+    URL.createObjectURL ??= () => "blob:x";
+    URL.revokeObjectURL ??= () => undefined;
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = () => undefined; // jsdom can't download
+    try {
+      render(<PoolsTab data={withRequests} poolIds={null} actions={actions().a} />);
+      expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(2);
+      await act(async () => void fireEvent.click(document.querySelector('[data-view-switch] [data-view-option="invested"]')!));
+      expect([...document.querySelectorAll("[data-pool-card]")].map((c) => c.getAttribute("data-pool-card"))).toEqual([POOL]);
+      expect(document.querySelector("[data-pager]")!.textContent).toContain("1 pool · Page 1 of 1");
+      await act(async () => void fireEvent.click(document.querySelector("[data-filters-menu-button]")!));
+      await act(async () => void fireEvent.click(document.querySelector("[data-filters-menu] [data-export]")!));
+      const [head, row] = csv.trim().split(/\r?\n/);
+      expect(head).toContain("Your position (settled),Queued,Paid,Available,Withdrawal requests waiting");
+      expect(row).toContain("Card float");
+      expect(row).toContain("2 withdrawal requests: 1 queued, 1 parked");
+    } finally {
+      globalThis.Blob = blob;
+      HTMLAnchorElement.prototype.click = click;
+    }
+    cleanup();
+    // Not invested anywhere: Invested says so.
+    render(<PoolsTab data={{ ...lpData, provider: { ...lpData.provider!, positions: [] } }} poolIds={null} actions={actions().a} initialView="invested" />);
+    expect(document.querySelectorAll("[data-pool-card]")).toHaveLength(0);
+    expect(document.querySelector("[data-empty-cards]")!.textContent).toContain("No positions yet");
+  });
+});
+
 describe("the table tabs' forms", () => {
   it("open in a sheet from their labelled CTA or row button, not inline in the tab", async () => {
     render(<PoolsTab data={lpData} poolIds={null} actions={actions().a} />);
@@ -292,8 +383,8 @@ describe("the table tabs' forms", () => {
     expect(sheet.textContent).toContain("Mynt never holds your funds");
     expect((sheet.querySelector('select[aria-label="Pool"]') as HTMLSelectElement).value).toBe(POOL);
     cleanup();
-    render(<EarnTable tab="my-positions" data={lpData} actions={actions().a} />);
-    await act(async () => void fireEvent.click(document.querySelector('[data-cta="withdraw"]')!));
+    render(<PoolsTab data={lpData} poolIds={null} actions={actions().a} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-card-withdraw="${POOL}"]`)!));
     expect(document.querySelector('[data-sheet="withdraw"] [data-form="withdraw"] [data-withdraw-terms]')).toBeTruthy();
     cleanup();
     const proposable = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "s1", sponsorName: "Harbor Bank" }];
@@ -310,7 +401,7 @@ describe("no outlined badges around long content", () => {
     for (const view of [
       <PoolsTab key="p" data={d} poolIds={null} actions={actions().a} />,
       <StrategiesTab key="s" data={d} drafts={[draft(), draft({ id: "d4", kind: "withdraw", amountCents: 100 } as Partial<Draft>)]} actions={actions().a} />,
-      <EarnTable key="m" tab="my-positions" data={d} actions={actions().a} />,
+      <PoolsTab key="i" data={d} poolIds={null} actions={actions().a} initialView="invested" />,
       <EarnTable key="b" tab="my-pools" data={d} actions={actions().a} />,
     ]) {
       render(view);
