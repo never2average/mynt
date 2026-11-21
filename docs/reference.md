@@ -1217,7 +1217,7 @@ Liquidity providers are firms or funds that put capital into a product's pools a
 
 | Tool | Who | What |
 |---|---|---|
-| `create_pool` | Builder | Proposes a pool on its firm's sponsored component. |
+| `create_pool` | Builder | Proposes a pool on its firm's sponsored component. An optional `idempotency_key` (8 to 200 characters, like `commit_to_pool`'s) makes a retry safe: the same key with the same arguments from the same person returns the pool made the first time (`replay: true`) rather than a second one; the same key with different arguments is refused (`idempotency_conflict`). Keys are each caller's own, so another person's same key is a separate proposal. Without a key, every call proposes a new pool. |
 | `approve_pool` | Licence provider | Approves a pool it sponsors and names its approved rails. |
 | `set_pool_offering_cleared` | Admin | Records who cleared a pool's offering and the legal basis; the gate on real commitments. |
 | `report_pool_movement` | Licence provider | What became of a movement of a pool it sponsors. |

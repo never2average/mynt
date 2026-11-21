@@ -488,7 +488,8 @@ describe("past conversations", () => {
     const submit = screen.getByRole("button", { name: "Propose pool" });
     await act(async () => void fireEvent.click(submit));
     await act(async () => void fireEvent.click(submit));
-    expect(proposed).toEqual([terms]);
+    expect(proposed).toEqual([{ ...terms, idempotency_key: expect.stringMatching(/^[A-Za-z0-9_-]{8,200}$/) }]);
+    const sentKey = (proposed[0] as { idempotency_key: string }).idempotency_key;
     await act(async () => answer({ ok: true, reply: null }));
     expect(document.querySelector("[data-form-done]")!.textContent).toContain('Pool "Card float" proposed.');
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
@@ -498,7 +499,7 @@ describe("past conversations", () => {
     // The thread keeps it sent: restored, it can't be proposed again.
     await act(async () => new Promise((r) => setTimeout(r, 20)));
     const kept = listThreads("u1")[0];
-    expect(kept.outcomes.p1).toEqual({ key: null, sent: expect.stringContaining('Pool "Card float" proposed.') });
+    expect(kept.outcomes.p1).toEqual({ key: sentKey, sent: expect.stringContaining('Pool "Card float" proposed.') });
     cleanup();
     render(<Earn data={data} acts={acts} owner="u1" />);
     await act(async () => void fireEvent.click(historyButton()));
@@ -508,6 +509,75 @@ describe("past conversations", () => {
     fireEvent.click(document.querySelector('[data-review="p1"]')!);
     expect(screen.queryByRole("button", { name: "Propose pool" })).toBeNull();
     expect(proposed).toHaveLength(1);
+  });
+
+  it("a proposal retried after a network error goes with the same idempotency key; only Mynt's refusal lets go of it", async () => {
+    window.localStorage.clear();
+    const options = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: "Sponsor Bank" }];
+    const data: LiquidityData = { ...builderData, builder: { ...builderData.builder!, proposable: options } };
+    const terms = { product_id: "card-credit", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 2000, min_reserve_floor_cents: 0, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 };
+    const proposal = { kind: "proposal", id: "p3", poolName: "Card float", productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: options[0].sponsorId, sponsorName: "Sponsor Bank", sandbox: true, terms } as Draft;
+    const proposed: { idempotency_key?: string }[] = [];
+    const answers: ({ error: string; refused?: boolean } | { ok: true; reply: unknown })[] = [{ error: "Couldn't reach Mynt. Please try again." }, { error: "Mynt refused it.", refused: true }, { ok: true, reply: null }];
+    const acts: LiquidityActions = { ...actions().a, propose: async (input) => (proposed.push(input), answers.shift()!) };
+    render(<Earn data={data} messages={withDraft(proposal)} acts={acts} initialTab="my-strategies" owner="u1" />);
+    fireEvent.click(document.querySelector('[data-review="p3"]')!);
+    const submit = () => act(async () => void fireEvent.click(screen.getByRole("button", { name: "Propose pool" })));
+    await submit();
+    expect(document.body.textContent).toContain("Couldn't reach Mynt.");
+    await submit();
+    expect(proposed).toHaveLength(2);
+    expect(proposed[0].idempotency_key).toMatch(/^[A-Za-z0-9_-]{8,200}$/);
+    expect(proposed[1].idempotency_key).toBe(proposed[0].idempotency_key);
+    // Mynt refused that one, so the key is free: the next try is a new proposal.
+    await submit();
+    expect(proposed).toHaveLength(3);
+    expect(proposed[2].idempotency_key).not.toBe(proposed[0].idempotency_key);
+  });
+
+  it("a restored proposal that wasn't confirmed as sent keeps its idempotency key", async () => {
+    window.localStorage.clear();
+    const options = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: "Sponsor Bank" }];
+    const data: LiquidityData = { ...builderData, builder: { ...builderData.builder!, proposable: options } };
+    const terms = { product_id: "card-credit", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 2000, min_reserve_floor_cents: 0, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 };
+    const proposal = { kind: "proposal", id: "p4", poolName: "Card float", productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: options[0].sponsorId, sponsorName: "Sponsor Bank", sandbox: true, terms } as Draft;
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify({ u1: [{ id: "tp", title: "draft it", updatedAt: "2026-11-20T10:00:00Z", messages: withDraft(proposal), outcomes: { p4: { key: "key-kept-proposal", sent: null } } }] }));
+    const proposed: { idempotency_key?: string }[] = [];
+    const acts: LiquidityActions = { ...actions().a, propose: async (input) => (proposed.push(input), { ok: true, reply: null }) };
+    render(<Earn data={data} acts={acts} owner="u1" />);
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Past conversations" })));
+    await act(async () => void fireEvent.click(document.querySelector('[data-thread="tp"]')!));
+    fireEvent.click(document.querySelector('[data-panel-tab="my-strategies"]')!);
+    fireEvent.click(document.querySelector('[data-review="p4"]')!);
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Propose pool" })));
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0].idempotency_key).toBe("key-kept-proposal");
+  });
+
+  it("My pools' Propose pool: one key per open form, the same on a retry, a new one when the terms change or the form opens again", async () => {
+    const proposable = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "s1", sponsorName: "Harbor Bank" }];
+    const proposed: { idempotency_key?: string; name?: string }[] = [];
+    const acts: LiquidityActions = { ...actions().a, propose: async (input) => (proposed.push(input), { error: "Couldn't reach Mynt. Please try again." }) };
+    render(<EarnTable tab="my-pools" data={{ ...builderData, builder: { ...builderData.builder!, proposable } }} actions={acts} />);
+    const open = () => act(async () => void fireEvent.click(document.querySelector('[data-cta="propose"]')!));
+    const submit = () => act(async () => void fireEvent.click(screen.getByRole("button", { name: "Propose pool" })));
+    const rename = (name: string) => act(async () => void fireEvent.change(document.querySelector('[data-sheet="propose"] [aria-label="Pool name"]')!, { target: { value: name } }));
+    await open();
+    await rename("Card float");
+    await submit();
+    await submit();
+    expect(proposed.map((p) => p.name)).toEqual(["Card float", "Card float"]);
+    expect(proposed[0].idempotency_key).toMatch(/^[A-Za-z0-9_-]{8,200}$/);
+    expect(proposed[1].idempotency_key).toBe(proposed[0].idempotency_key);
+    await rename("Card float two");
+    await submit();
+    expect(proposed[2].idempotency_key).not.toBe(proposed[0].idempotency_key);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    await open();
+    await rename("Card float");
+    await submit();
+    expect(new Set(proposed.map((p) => p.idempotency_key)).size).toBe(3);
   });
 
   it("a proposal whose component lost its sponsorship can't be sent", () => {

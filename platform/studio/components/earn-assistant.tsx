@@ -508,13 +508,17 @@ export const proposalTermsText = (t: ProposalDraft["terms"]) =>
   `Reserve ${percentOfBps(t.min_reserve_bps)}, at least ${usd(t.min_reserve_floor_cents)} · Notice ${noticeText(t.notice_period_days)} · ${usd(t.min_commitment_cents)} – ${usd(t.max_commitment_cents)} per firm`
 
 // A pool proposal from the assistant, as its sheet shows it: the Propose pool form, prefilled from
-// the draft. create_pool takes no idempotency key, so it's sent at most once from here: the outcome
-// (kept with the thread) and a guard against a second click both stop a second send.
-export function ProposalPanel({ draft, options, actions, outcome, onOutcome }: { draft: ProposalDraft; options: Sponsored[] | null; actions: LiquidityActions; outcome?: DraftOutcome; onOutcome?: (o: DraftOutcome) => void }) {
+// the draft. It's sent with the draft's idempotency key, kept in its outcome (and saved with the
+// thread), so a retry after a network error, or after coming back to the thread, is the pool Mynt
+// may already have made, never a second one. Only a refusal from Mynt lets go of the key.
+export function ProposalPanel({ draft, options, actions, outcome, onOutcome, newKey = newIdempotencyKey }: { draft: ProposalDraft; options: Sponsored[] | null; actions: LiquidityActions; outcome?: DraftOutcome; onOutcome?: (o: DraftOutcome) => void; newKey?: () => string }) {
   const [local, setLocal] = useState<DraftOutcome>(NOT_SENT)
   const o = outcome ?? local
   const set = onOutcome ?? setLocal
   const sending = useRef(false)
+  // The key it will be sent with, until one is kept in its outcome.
+  const [fresh, setFresh] = useState(newKey)
+  const key = o.key ?? fresh
   const block = proposalBlock(draft, options)
   if (o.state.kind === "done") return <FormDone message={o.state.message} />
   if (block || !options)
@@ -529,18 +533,20 @@ export function ProposalPanel({ draft, options, actions, outcome, onOutcome }: {
     propose: async (input) => {
       if (sending.current || o.state.kind === "busy") return { error: "This proposal is already being sent." }
       sending.current = true
-      set({ state: { kind: "busy" }, key: null })
-      const r = await actions.propose(input)
+      const sent = input.idempotency_key ?? key
+      set({ state: { kind: "busy" }, key: sent })
+      const r = await actions.propose({ ...input, idempotency_key: sent })
       if ("error" in r) {
         sending.current = false
-        set({ state: { kind: "error", message: r.error }, key: null })
+        if (r.refused) setFresh(newKey())
+        set({ state: { kind: "error", message: r.error }, key: r.refused ? null : sent })
       }
       return r
     },
   }
   return (
     <div data-draft="proposal">
-      <ProposeForm options={options} actions={once} initial={{ option, ...proposalFields(draft.terms) }} onDone={(message) => set({ state: { kind: "done", message }, key: null })} />
+      <ProposeForm options={options} actions={once} idempotencyKey={key} initial={{ option, ...proposalFields(draft.terms) }} onDone={(message) => set({ state: { kind: "done", message }, key })} />
     </div>
   )
 }
