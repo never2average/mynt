@@ -463,11 +463,13 @@ describe("past conversations", () => {
     const sent: string[] = [];
     render(<Earn data={lpData} sent={sent} owner="u1" />);
     const button = historyButton();
-    // In the chat's top-right corner, with Show tabs beside it while the panel isn't open.
+    // In the chat's top-right corner, with a button per tab beside it while the panel isn't open
+    // (a liquidity provider's: Pools and My strategies), each opening the panel on that tab.
     const corner = button.closest("[data-chat-corner]")!;
     expect(corner.className.split(" ")).toEqual(expect.arrayContaining(["absolute", "top-3", "right-3"]));
     expect(button.closest("[data-chat-side]")).toBeTruthy();
-    expect(corner.querySelector("[data-expand-panel]")!.getAttribute("aria-label")).toBe("Show tabs");
+    expect([...corner.querySelectorAll("[data-expand-panel]")].map((b) => b.getAttribute("aria-label"))).toEqual(["Open Pools", "Open My strategies"]);
+    expect(corner.querySelector('[aria-label="Show tabs"]')).toBeNull();
     // Ask a question: once the answer settles, the thread is saved under this user.
     await act(async () => void fireEvent.click(document.querySelector('[data-chip="$50k, 90-day lock-in, US credit"]')!));
     await act(async () => new Promise((r) => setTimeout(r, 50)));

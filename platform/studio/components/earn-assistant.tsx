@@ -18,7 +18,7 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
 import type { UIMessage } from "ai"
-import { History, Loader2 } from "lucide-react"
+import { History, Layers, Loader2, Target, Wallet } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
@@ -59,7 +59,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
-import { listThreads, newThreadId, OPEN_THREAD, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
+import { listThreads, newThreadId, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
 import { shortAddress } from "@/lib/linked-accounts"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import { toCsv } from "@/lib/compliance"
@@ -147,6 +147,9 @@ export function PastConversations({ history }: { history: EarnHistory }) {
     </>
   )
 }
+
+// Each tab's icon: shown beside Past conversations while the panel is collapsed (ChatWorkspaceShell).
+const TAB_ICONS: Record<EarnTab, typeof Layers> = { pools: Layers, "my-pools": Wallet, "my-strategies": Target }
 
 // The chat side: the assistant, or, without a model, the same centred prompt that can't be used.
 // (Past conversations floats at the chat's top right, beside Show tabs: ChatWorkspaceShell's chatCorner.)
@@ -982,19 +985,6 @@ export function EarnWorkspace({
     if (t) switchTo(t.id, t.messages, t.outcomes)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyOwner, initialThread])
-  // Picked from the sidebar's Search chats while already on Earn.
-  const switchRef = useRef(switchTo)
-  switchRef.current = switchTo
-  useEffect(() => {
-    const open = (e: Event) => {
-      const id = (e as CustomEvent<string | null>).detail
-      if (!id) return switchRef.current(newThreadId(), [], {})
-      const t = listThreads(historyOwner).find((x) => x.id === id)
-      if (t) switchRef.current(t.id, t.messages, t.outcomes)
-    }
-    window.addEventListener(OPEN_THREAD, open)
-    return () => window.removeEventListener(OPEN_THREAD, open)
-  }, [historyOwner])
   const history: EarnHistory | null = historyOwner
     ? {
         threads,
@@ -1035,7 +1025,7 @@ export function EarnWorkspace({
       chatCorner={status === "enabled" && history ? <PastConversations history={history} /> : null}
       onOpenPanel={() => setOpened(true)}
       showPanel={opened || chat.messages.length > 0}
-      tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t) }))}
+      tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t), icon: TAB_ICONS[t] }))}
       tab={tab}
       onTab={(id) => {
         choose(id)
