@@ -28,7 +28,7 @@ describe("chat workspace: divider and collapsible panel", () => {
     expect(document.querySelector("[data-panel-side]")!.className).toContain("border-l");
   });
 
-  it("collapses the panel to a rail and opens it again", async () => {
+  it("collapses the panel away and opens it again", async () => {
     render(<Shell />);
     expect(document.querySelector("[data-panel-tabs]")).not.toBeNull();
     await act(async () => void fireEvent.click(document.querySelector("[data-collapse-panel]")!));
@@ -44,7 +44,34 @@ describe("chat workspace: divider and collapsible panel", () => {
     window.localStorage.setItem("mynt.chat-panel.collapsed", "1");
     render(<Shell />);
     await act(async () => {});
-    expect(document.querySelector("[data-panel-rail]")).not.toBeNull();
+    // (Was a slim rail; collapsed now takes no room, and Show tabs floats in the chat's corner.)
+    expect(document.querySelector("[data-panel-side]")!.getAttribute("data-panel-collapsed")).toBe("true");
+    expect(document.querySelector("[data-chat-corner] [data-expand-panel]")).not.toBeNull();
+  });
+
+  it("puts Show tabs beside what the page floats at the chat's top right, collapsed or not open yet", async () => {
+    // Collapsed: the panel takes no room and Show tabs sits right of the page's own button.
+    window.localStorage.setItem("mynt.chat-panel.collapsed", "1");
+    const { rerender } = render(<ChatWorkspaceShell chat={<div />} chatCorner={<button data-history-button>h</button>} showPanel tabs={tabs} tab="pools" onTab={() => {}} isMobile={false} />);
+    await act(async () => {});
+    const corner = document.querySelector("[data-chat-corner]")!;
+    expect(corner.className.split(" ")).toEqual(expect.arrayContaining(["absolute", "top-3", "right-3", "flex"]));
+    expect(corner.closest("[data-chat-side]")).toBeTruthy();
+    expect([...corner.querySelectorAll("button")].map((b) => (b.hasAttribute("data-history-button") ? "history" : b.getAttribute("aria-label")))).toEqual(["history", "Show tabs"]);
+    expect(document.querySelector("[data-panel-side]")!.className).not.toContain("border-l");
+    // Not open yet: Show tabs asks the page to open it.
+    window.localStorage.clear();
+    let opened = 0;
+    rerender(<ChatWorkspaceShell chat={<div />} chatCorner={<button data-history-button>h</button>} showPanel={false} onOpenPanel={() => opened++} tabs={tabs} tab="pools" onTab={() => {}} isMobile={false} />);
+    await act(async () => {});
+    await act(async () => void fireEvent.click(document.querySelector("[data-chat-corner] [data-expand-panel]")!));
+    expect(opened).toBe(1);
+    // Open (and not collapsed): only the page's own button.
+    cleanup();
+    render(<ChatWorkspaceShell chat={<div />} chatCorner={<button data-history-button>h</button>} showPanel onOpenPanel={() => opened++} tabs={tabs} tab="pools" onTab={() => {}} isMobile={false} />);
+    await act(async () => {});
+    expect(document.querySelector("[data-expand-panel]")).toBeNull();
+    expect(document.querySelector("[data-chat-corner] [data-history-button]")).not.toBeNull();
   });
 
   it("centres the chat while the tabs panel is closed or collapsed, and moves it left once the panel is open", async () => {

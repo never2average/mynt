@@ -80,6 +80,7 @@ function useEarnWallets(): [EarnWallets | null, () => void] {
 export default function EarnPage() {
   const [state, setState] = useState<Loaded<LiquidityData>>({ kind: "loading" });
   const [tab, setTab] = useState<string | null>(null);
+  const [thread, setThread] = useState<string | null>(null); // ?thread=: a chat picked in the sidebar's Search chats
   const [tick, setTick] = useState(0);
   const [status, setStatus] = useState<EarnStatus>("loading");
   const [wallets, reloadWallets] = useEarnWallets();
@@ -105,7 +106,9 @@ export default function EarnPage() {
       if (res?.status === 401) return window.location.assign("/api/auth/login?next=/earn");
       const body = (await res?.json().catch(() => null)) as (LiquidityData & { message?: string }) | null;
       if (!live) return;
-      setTab(new URLSearchParams(window.location.search).get("tab"));
+      const q = new URLSearchParams(window.location.search);
+      setTab(q.get("tab"));
+      setThread(q.get("thread"));
       if (!res?.ok || !body) return setState({ kind: "error", message: body?.message ?? "Couldn't reach Mynt. Please try again." });
       setState(body.supported === false ? { kind: "unsupported" } : { kind: "ready", data: reviveLiquidity(body) });
     })();
@@ -155,7 +158,7 @@ export default function EarnPage() {
   if (state.kind === "ready")
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <EarnWorkspace chat={chat} status={status} data={state.data} actions={actions} initialTab={tab} wallet={wallet} historyOwner={wallets?.owner ?? null} />
+        <EarnWorkspace chat={chat} status={status} data={state.data} actions={actions} initialTab={tab} wallet={wallet} historyOwner={wallets?.owner ?? null} initialThread={thread} />
       </div>
     );
   return (

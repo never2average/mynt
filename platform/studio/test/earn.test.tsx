@@ -120,6 +120,44 @@ describe("Earn by role", () => {
     expect(walletLinksFor(null)).toEqual([]);
   });
 
+  it("the sidebar has Search chats (an icon with a tooltip when collapsed) and, open, the five most recent chats", () => {
+    const at = (i: number) => `2026-11-${String(10 + i).padStart(2, "0")}T10:00:00Z`;
+    const threads = Array.from({ length: 7 }, (_, i) => ({ id: `t${i}`, title: `Question ${i}`, updatedAt: at(i), messages: [], outcomes: {} }));
+    const sidebar = (open: boolean, chats: { threads: typeof threads; onPick: () => void; onNew: () => void } | null) =>
+      renderToStaticMarkup(
+        <TooltipProvider>
+          <SidebarProvider defaultOpen={open}>
+            <SidebarView
+              workspaces={[{ id: "w1", name: "Acme", role: "owner" }]}
+              selected={{ id: "w1", name: "Acme", role: "owner" }}
+              supported
+              groups={groupByStage([])}
+              account={{ name: null, email: null }}
+              pathname="/"
+              onSelectWorkspace={() => undefined}
+              onCreateWorkspace={async () => null}
+              liquidity
+              chats={chats}
+            />
+          </SidebarProvider>
+        </TooltipProvider>,
+      );
+    const chats = { threads, onPick: () => undefined, onNew: () => undefined };
+    for (const open of [true, false]) {
+      const html = sidebar(open, chats);
+      // In both states: Search chats, first above the pages, with its label (shown as a tooltip when collapsed).
+      expect(html).toMatch(/data-search-chats[^>]*>[\s\S]*?Search chats/);
+      expect(html.indexOf("data-search-chats")).toBeLessThan(html.indexOf('href="/"'));
+      // Recent chats: five, newest as given; hidden while collapsed.
+      expect((html.match(/data-recent-chat=/g) ?? []).length).toBe(5);
+      expect(html.match(/<[^>]*data-recent-chats[^>]*>/)![0]).toContain("group-data-[collapsible=icon]:hidden");
+    }
+    // No chats to search without Earn or a known user.
+    const none = sidebar(true, null);
+    expect(none).not.toContain("data-search-chats");
+    expect(none).not.toContain("data-recent-chats");
+  });
+
   it("the sidebar lists Earn (in place of Liquidity) after Settings only for builders and liquidity providers", () => {
     const sidebar = (liquidity: boolean) =>
       renderToStaticMarkup(
