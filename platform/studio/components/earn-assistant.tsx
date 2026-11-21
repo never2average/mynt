@@ -6,8 +6,9 @@
 // message the right panel opens beside it with Pools (every pool open to the user as cards,
 // showing the ones the conversation matched first, with Commit capital for liquidity providers),
 // My positions, My pools (builders) and My strategies (liquidity providers: the commitments and
-// withdrawals the assistant drafted, as cards, each confirmed only by the user's own click, which
-// calls the same routes as the tables; the assistant can't send anything itself). The chat bar has
+// withdrawals the assistant drafted for liquidity providers, and the pool proposals it drafted for
+// builders, as cards, each confirmed only by the user's own click, which calls the same routes as
+// the tables and My pools' Propose pool; the assistant can't send anything itself). The chat bar has
 // the wallet picker, and a draft for a pool with an on-chain treasury is a devnet deposit or
 // withdrawal the user signs in their own wallet (components/earn-wallet.tsx). The chat's top right
 // has Past conversations: this user's earlier Earn threads in this browser (lib/earn-history.ts),
@@ -29,11 +30,11 @@ import { downloadCsv } from "@/components/licences-view"
 import { CARD_GRID, PanelList, useFitCards, usePaged } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { DevnetBadge, EarnDisclosure, EarnWalletProvider, DepositsPausedBadge, OnChainAction, UnverifiedBuildBadge, WalletPicker, type EarnWalletState } from "@/components/earn-wallet"
-import { CommitForm, commitOutcome, EarnTable, FormDone, FormSheet, Money, newIdempotencyKey, pagerOf, PoolFilterControls, poolFiltersOn, StageStatus, withdrawalOutcome, type LiquidityActions, type OpenForm } from "@/components/earn-view"
+import { CommitForm, commitOutcome, EarnTable, FormDone, FormSheet, Money, newIdempotencyKey, pagerOf, PoolFilterControls, poolFiltersOn, ProposeForm, StageStatus, withdrawalOutcome, type LiquidityActions, type OpenForm } from "@/components/earn-view"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { depositFor, panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn"
+import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
 import { listThreads, newThreadId, OPEN_THREAD, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
 import { shortAddress } from "@/lib/linked-accounts"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
@@ -65,6 +66,7 @@ import {
   type PoolRow,
   type PoolStage,
   type Position,
+  type Sponsored,
 } from "@/lib/liquidity"
 
 export type EarnStatus = "loading" | "enabled" | "disabled"
@@ -347,7 +349,7 @@ export function PoolsTab({ data, poolIds, actions, showAll = false, initialForm 
 }
 
 // A draft checked against the pool and position as the page has them now (Mynt checks it all again).
-export function draftCheck(draft: Draft, pool: PoolRow | null, position: Position | null, canCommit: boolean, canWithdraw: boolean) {
+export function draftCheck(draft: MoneyDraft, pool: PoolRow | null, position: Position | null, canCommit: boolean, canWithdraw: boolean) {
   const commit = draft.kind === "commit"
   // On-chain: the pool's treasury (a deposit) or the position's source (a withdrawal), as the page
   // reads them now, not as the draft says.
@@ -396,7 +398,7 @@ export function DraftPanel({
   outcome,
   onOutcome,
 }: {
-  draft: Draft
+  draft: MoneyDraft
   pool: PoolRow | null
   position: Position | null
   actions: LiquidityActions
@@ -494,10 +496,60 @@ export function DraftPanel({
   )
 }
 
+// Why a drafted pool proposal can't be sent now, or null (Mynt checks it all again).
+export function proposalBlock(draft: ProposalDraft, options: Sponsored[] | null): string | null {
+  if (options === null) return "Proposing pools comes with Mynt's next update."
+  if (!proposalOptions(options, draft.productId, draft.componentKey, draft.sponsorId).length) return "This component has no approved sponsorship any more, so it can't have a pool."
+  return null
+}
+
+// A proposal's terms, as plain text.
+export const proposalTermsText = (t: ProposalDraft["terms"]) =>
+  `Reserve ${percentOfBps(t.min_reserve_bps)}, at least ${usd(t.min_reserve_floor_cents)} · Notice ${noticeText(t.notice_period_days)} · ${usd(t.min_commitment_cents)} – ${usd(t.max_commitment_cents)} per firm`
+
+// A pool proposal from the assistant, as its sheet shows it: the Propose pool form, prefilled from
+// the draft. create_pool takes no idempotency key, so it's sent at most once from here: the outcome
+// (kept with the thread) and a guard against a second click both stop a second send.
+export function ProposalPanel({ draft, options, actions, outcome, onOutcome }: { draft: ProposalDraft; options: Sponsored[] | null; actions: LiquidityActions; outcome?: DraftOutcome; onOutcome?: (o: DraftOutcome) => void }) {
+  const [local, setLocal] = useState<DraftOutcome>(NOT_SENT)
+  const o = outcome ?? local
+  const set = onOutcome ?? setLocal
+  const sending = useRef(false)
+  const block = proposalBlock(draft, options)
+  if (o.state.kind === "done") return <FormDone message={o.state.message} />
+  if (block || !options)
+    return (
+      <p className="text-sm text-amber-600 dark:text-amber-300" data-refusal>
+        {block}
+      </p>
+    )
+  const option = options.indexOf(proposalOptions(options, draft.productId, draft.componentKey, draft.sponsorId)[0])
+  const once: LiquidityActions = {
+    ...actions,
+    propose: async (input) => {
+      if (sending.current || o.state.kind === "busy") return { error: "This proposal is already being sent." }
+      sending.current = true
+      set({ state: { kind: "busy" }, key: null })
+      const r = await actions.propose(input)
+      if ("error" in r) {
+        sending.current = false
+        set({ state: { kind: "error", message: r.error }, key: null })
+      }
+      return r
+    },
+  }
+  return (
+    <div data-draft="proposal">
+      <ProposeForm options={options} actions={once} initial={{ option, ...proposalFields(draft.terms) }} onDone={(message) => set({ state: { kind: "done", message }, key: null })} />
+    </div>
+  )
+}
+
 const KIND_OPTIONS = [
   { value: "commit", label: "Commitment" },
   { value: "withdraw", label: "Withdrawal" },
 ]
+const PROPOSAL_OPTION = { value: "proposal", label: "Pool proposal" }
 
 // Draft outcomes as a thread keeps them (lib/earn-history.ts), and back: the key a draft was (or
 // will be) sent with, and what Mynt answered once it was sent.
@@ -506,8 +558,8 @@ export const savedOutcomes = (all: Record<string, DraftOutcome>): Record<string,
 export const restoredOutcomes = (all: Record<string, SavedOutcome>): Record<string, DraftOutcome> =>
   Object.fromEntries(Object.entries(all).map(([id, o]) => [id, { key: o.key, state: o.sent !== null ? { kind: "done", message: o.sent } : { kind: "idle" } } as DraftOutcome]))
 
-// My strategies: what the assistant drafted for the user (commitments and withdrawals), one card
-// each, reviewed and confirmed (or not) in a sheet from its card's Review. The outcomes are the
+// My strategies: what the assistant drafted for the user (commitments and withdrawals, or pool
+// proposals for a builder), one card each, reviewed and confirmed (or not) in a sheet from its card's Review. The outcomes are the
 // workspace's when it passes them (so a thread keeps them), else this tab's own.
 export function StrategiesTab({
   data,
@@ -532,28 +584,36 @@ export function StrategiesTab({
   const [open, setOpen] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [kind, setKind] = useState("")
-  const poolOf = (d: Draft) => pools.find((p) => p.id === d.poolId) ?? null
-  const positionOf = (d: Draft) => positions.find((p) => p.poolId === d.poolId && (d.kind === "withdraw" && d.onChain ? p.onChain && p.wallet === d.wallet : !p.onChain)) ?? null
+  const proposable = data.builder?.proposable ?? null
+  const poolOf = (d: MoneyDraft) => pools.find((p) => p.id === d.poolId) ?? null
+  const positionOf = (d: MoneyDraft) => positions.find((p) => p.poolId === d.poolId && (d.kind === "withdraw" && d.onChain ? p.onChain && p.wallet === d.wallet : !p.onChain)) ?? null
   const statusOf = (d: Draft): { text: string; tone: DotTone } => {
     const o = outcomes[d.id] ?? NOT_SENT
-    if (o.state.kind === "done") return { text: "Sent", tone: "green" }
+    if (o.state.kind === "done") return { text: d.kind === "proposal" ? "Proposed" : "Sent", tone: "green" }
     if (o.state.kind === "busy") return { text: "Sending…", tone: "gray" }
     if (o.state.kind === "error") return { text: o.state.message, tone: "red" }
+    if (d.kind === "proposal") {
+      const block = proposalBlock(d, proposable)
+      return block ? { text: block, tone: "amber" } : { text: "Ready to confirm", tone: "blue" }
+    }
     const c = draftCheck(d, poolOf(d), positionOf(d), canCommit, canWithdraw)
     if (c.onChain) return c.onChainBlock ? { text: c.onChainBlock, tone: "amber" } : { text: "Ready to sign in your wallet", tone: "blue" }
     return c.refusal ? { text: c.refusal, tone: "amber" } : { text: "Ready to confirm", tone: "blue" }
   }
   const q = query.trim().toLowerCase()
-  const shown = drafts.filter((d) => (!q || d.poolName.toLowerCase().includes(q)) && (!kind || d.kind === kind))
+  const shown = drafts.filter((d) => (!q || d.poolName.toLowerCase().includes(q) || (d.kind === "proposal" && d.productName.toLowerCase().includes(q))) && (!kind || d.kind === kind))
   const fit = useFitCards(STRATEGY_CARD_PX)
   const paged = usePaged(shown, fit.size)
-  const kindText = (d: Draft) => (d.kind === "commit" ? "Commitment" : "Withdrawal request")
+  const kindText = (d: Draft) => (d.kind === "commit" ? "Commitment" : d.kind === "proposal" ? "Pool proposal" : "Withdrawal request")
   const termsOf = (d: Draft) => {
+    if (d.kind === "proposal") return proposalTermsText(d.terms)
     const pool = poolOf(d)
     return pool ? `Lock-in ${lockInText(pool.lockInDays)} · Notice ${noticeText(pool.noticePeriodDays)}` : "Terms not available"
   }
-  const exportCsv = () => downloadCsv("my-strategies.csv", toCsv(["Strategy", "Pool", "Amount", "Terms", "Status"], shown.map((d) => [kindText(d), d.poolName, usd(d.amountCents), termsOf(d), statusOf(d).text])))
+  const exportCsv = () => downloadCsv("my-strategies.csv", toCsv(["Strategy", "Pool", "Amount", "Terms", "Status"], shown.map((d) => [kindText(d), d.poolName, d.kind === "proposal" ? "" : usd(d.amountCents), termsOf(d), statusOf(d).text])))
   const current = drafts.find((d) => d.id === open) ?? null
+  const kindOptions = [...(data.access.liquidityProvider ? KIND_OPTIONS : []), ...(data.access.builder ? [PROPOSAL_OPTION] : [])]
+  const asked = [data.access.liquidityProvider && "a commitment or a withdrawal", data.access.builder && "a pool proposal"].filter(Boolean).join(", or ")
 
   return (
     <div className="h-full" data-earn-strategies-tab>
@@ -575,7 +635,7 @@ export function StrategiesTab({
               setKind(v)
               paged.setPage(1)
             }}
-            options={KIND_OPTIONS}
+            options={kindOptions}
           />
         }
         activeFilters={kind ? 1 : 0}
@@ -594,11 +654,21 @@ export function StrategiesTab({
                     <span className="min-w-0 truncate font-medium" data-draft-title>
                       {kindText(d)}
                     </span>
-                    <span className="shrink-0 font-semibold tabular-nums" data-draft-amount>
-                      {usd(d.amountCents)}
-                    </span>
+                    {d.kind !== "proposal" && (
+                      <span className="shrink-0 font-semibold tabular-nums" data-draft-amount>
+                        {usd(d.amountCents)}
+                      </span>
+                    )}
                   </div>
                   <div className="flex h-5 min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
+                    {d.kind === "proposal" && (
+                      <>
+                        <span className="min-w-0 truncate" title={d.productName} data-draft-product>
+                          {d.productName}
+                        </span>
+                        <span aria-hidden>·</span>
+                      </>
+                    )}
                     <span className="min-w-0 truncate" title={d.poolName} data-draft-pool>
                       {d.poolName}
                     </span>
@@ -608,7 +678,7 @@ export function StrategiesTab({
                         <Money sandbox />
                       </>
                     )}
-                    {(d.onChain || (d.kind === "commit" && poolOf(d)?.treasury)) && <DevnetBadge />}
+                    {d.kind !== "proposal" && (d.onChain || (d.kind === "commit" && poolOf(d)?.treasury)) && <DevnetBadge />}
                   </div>
                   <div className="truncate text-sm" title={termsOf(d)} data-draft-terms>
                     {termsOf(d)}
@@ -624,16 +694,19 @@ export function StrategiesTab({
             })}
           </div>
         ) : (
-          <EmptyCards>{drafts.length ? "No strategies match these filters." : "No strategies yet. Ask the assistant to draft a commitment or a withdrawal; you confirm each one yourself."}</EmptyCards>
+          <EmptyCards>{drafts.length ? "No strategies match these filters." : `No strategies yet. Ask the assistant to draft ${asked}; you confirm each one yourself.`}</EmptyCards>
         )}
       </PanelList>
       <Sheet open={current !== null} onOpenChange={(o) => !o && setOpen(null)}>
         <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg" aria-describedby={undefined} data-sheet="draft">
           <SheetHeader>
-            <SheetTitle>{current?.kind === "withdraw" ? "Review withdrawal" : "Review commitment"}</SheetTitle>
+            <SheetTitle>{current?.kind === "withdraw" ? "Review withdrawal" : current?.kind === "proposal" ? "Review pool proposal" : "Review commitment"}</SheetTitle>
           </SheetHeader>
           <div className="px-4 pb-4">
-            {current && (
+            {current?.kind === "proposal" && (
+              <ProposalPanel key={current.id} draft={current} options={proposable} actions={actions} outcome={outcomes[current.id] ?? NOT_SENT} onOutcome={(o) => setOutcome(current.id, o)} />
+            )}
+            {current && current.kind !== "proposal" && (
               <DraftPanel
                 key={current.id}
                 draft={current}

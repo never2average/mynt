@@ -5,7 +5,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ChatBody, readCapped, STREAM_HEADERS, TOO_LARGE } from "@/lib/ai-route";
 import { historyFrom, runAsk, type LocalTool } from "@/lib/ask";
 import { z } from "zod";
-import { EARN_SYSTEM_PROMPT, earnContext, earnToolDefs, isEarnTool, PANEL_TOOL_DEFS, shownPools, validateDraft, type ChosenWallet } from "@/lib/earn";
+import { EARN_SYSTEM_PROMPT, earnContext, earnToolDefs, isEarnTool, panelToolDefs, PROPOSAL_TOOL, shownPools, validateDraft, validateProposal, type ChosenWallet } from "@/lib/earn";
 import { EVM_ADDRESS, SOLANA_ADDRESS } from "@/lib/wallets";
 import { linkedWallet } from "@/lib/wallets-server";
 import { loadLiquidity, sessionAccess, sessionCanUseLiquidity } from "@/lib/liquidity-server";
@@ -41,7 +41,8 @@ export async function GET() {
 // Earn's assistant: explains pools' terms and matches them to what the user asks, streamed as AI
 // SDK UI message parts. It reads only Earn's tools (lib/earn.ts) as the signed-in user. Its panel
 // tools draw pools and drafts beside the chat (data-earn-pools, data-earn-draft parts) and never
-// write: committing or withdrawing is only ever the user's own click, through app/api/liquidity.
+// write: committing, withdrawing or proposing a pool (builders only) is only ever the user's own
+// click, through app/api/liquidity.
 // What's asked and answered is never logged.
 export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
@@ -113,7 +114,7 @@ export async function POST(req: Request) {
       const visible = () => (loaded ??= load());
       const load = async () => {
         const data: LiquidityData = await loadLiquidity(mynt, access);
-        return { pools: [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])], lpPools: data.provider?.pools ?? [], positions: data.provider?.positions ?? [], canCommit: data.provider?.canCommit ?? false, canWithdraw: data.provider?.canWithdraw ?? false };
+        return { pools: [...(data.provider?.pools ?? []), ...(data.builder?.pools ?? [])], lpPools: data.provider?.pools ?? [], positions: data.provider?.positions ?? [], canCommit: data.provider?.canCommit ?? false, canWithdraw: data.provider?.canWithdraw ?? false, proposable: data.builder?.proposable ?? null };
       };
       const data = (name: string, value: unknown) => writer.write({ type: `data-${name}` as `data-${string}`, data: value });
       const draft =
@@ -136,6 +137,14 @@ export async function POST(req: Request) {
         draft_commitment: draft("commit"),
         draft_withdrawal: draft("withdraw"),
       };
+      // Builders only: a liquidity provider is never offered the tool, nor answered if it asks anyway.
+      if (access.builder)
+        local[PROPOSAL_TOOL] = async (input) => {
+          const out = validateProposal(input, (await visible()).proposable, randomUUID());
+          if ("error" in out) return { content: `Draft refused: ${out.error}`, isError: true };
+          data("earn-draft", out.draft);
+          return { content: "The draft proposal is shown in My strategies as a card. Nothing has been proposed: only the user's own click on it does that." };
+        };
       try {
         if (walletAsked) {
           const w = await linkedWallet(mynt, session, walletAsked).catch((err) => {
@@ -149,7 +158,7 @@ export async function POST(req: Request) {
         await runAsk(history, {
           llm: createLlm(),
           model: askModel(),
-          tools: [...earnToolDefs(tools), ...PANEL_TOOL_DEFS],
+          tools: [...earnToolDefs(tools), ...panelToolDefs(access)],
           workspaceId: null,
           system: EARN_SYSTEM_PROMPT,
           context: earnContext(access, chosen),
