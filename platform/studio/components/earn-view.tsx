@@ -7,14 +7,16 @@
 //   settling in, queued for withdrawal, paid out: Not measured, with why, when Mynt couldn't tell),
 //   terms, latest verified health and withdrawal queue; "Propose pool" on a sponsored component of
 //   their firm's product.
-// (Pools, every pool open to the user with "Commit capital", is a table too, and My strategies are
-// cards, in components/earn-assistant.tsx.) Every column shows at every width; a table wider than
+//   Its Approval column shows each pool's approval steps (components/approval.tsx).
+// (Pools, every pool open to the user with "Commit capital", and My strategies are tables too, in
+// components/earn-assistant.tsx.) Every column shows at every width; a table wider than
 // the panel scrolls sideways. Also here: the forms (commit, withdraw, propose), and what a
 // liquidity provider holds in a pool (holdingIn), which Pools' rows show, with the row's Details
 // sheet (PositionDetailsSheet: amounts, deposits and withdrawal requests, on rails and on chain).
 // Each form opens in a sheet from its labelled button. Nothing here moves money: Mynt records a
 // request, and the pool's sponsor moves the money on its approved rail. Server-renderable for the tests.
 import { useMemo, useState } from "react"
+import { ApprovalSteps, type Step } from "@/components/approval"
 import { OnChainHolding, type OpenDeposit } from "@/components/earn-wallet"
 import { newIdempotencyKey } from "@/lib/idempotency"
 
@@ -171,11 +173,35 @@ export const pagerOf = (paged: { page: number; pages: number; setPage: (p: numbe
 // The form's fields as given (an assistant's draft proposal prefills them; My pools starts empty).
 export type ProposeFields = { option: number; name: string; sandbox: boolean; reservePercent: string; reserveFloor: string; noticeDays: string; minCommit: string; maxCommit: string }
 
+// What proposing a pool does, in one line.
+export const proposeConsequence = (sponsor: string) =>
+  `The pool starts paused: ${sponsor} must approve it and name the money rails before it takes any commitment, and real-money commitments also wait for a Mynt admin to clear it.`
+
 // Every proposal goes with an idempotency key, so sending it again (a double click, a retry after
 // a network error) is the pool Mynt already made, never a second one. A key given by the caller (an
 // assistant's draft keeps its own with the thread) is used as it is; otherwise the form makes one
 // when it opens, and a new one when the terms change or Mynt refuses them.
-export function ProposeForm({ options, actions, onDone, initial, idempotencyKey, newKey = newIdempotencyKey }: { options: Sponsored[]; actions: LiquidityActions; onDone: (message: string) => void; initial?: ProposeFields; idempotencyKey?: string; newKey?: () => string }) {
+export function ProposeForm({
+  options,
+  actions,
+  onDone,
+  initial,
+  idempotencyKey,
+  newKey = newIdempotencyKey,
+  submitLabel = "Propose pool",
+  beside,
+  consequence = true,
+}: {
+  options: Sponsored[]
+  actions: LiquidityActions
+  onDone: (message: string) => void
+  initial?: ProposeFields
+  idempotencyKey?: string
+  newKey?: () => string
+  submitLabel?: string // an approval sheet's "Approve"
+  beside?: React.ReactNode // beside the submit button (an approval sheet's Decline)
+  consequence?: boolean // the line saying what proposing does (an approval sheet says it in its summary)
+}) {
   const [option, setOptionRaw] = useState(initial?.option ?? 0)
   const [name, setNameRaw] = useState(initial?.name ?? "")
   const [sandbox, setSandboxRaw] = useState(initial?.sandbox ?? true)
@@ -199,9 +225,11 @@ export function ProposeForm({ options, actions, onDone, initial, idempotencyKey,
 
   return (
     <div className="flex flex-col gap-4" data-form="propose">
-      <p className="text-sm text-muted-foreground" data-consequence>
-        The pool starts paused: {sponsor} must approve it and name the money rails before it takes any commitment, and real-money commitments also wait for a Mynt admin to clear it.
-      </p>
+      {consequence && (
+        <p className="text-sm text-muted-foreground" data-consequence>
+          {proposeConsequence(sponsor)}
+        </p>
+      )}
       <form
         className="grid gap-3 sm:grid-cols-2"
         onSubmit={(e) => {
@@ -257,15 +285,37 @@ export function ProposeForm({ options, actions, onDone, initial, idempotencyKey,
           <Input value={maxCommit} onChange={(e) => setMaxCommit(e.target.value)} inputMode="decimal" aria-label="Largest position" />
         </label>
         <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
-          <Button type="submit" disabled={busy || "error" in input}>
-            Propose pool
+          <Button type="submit" disabled={busy || "error" in input} data-submit="propose">
+            {submitLabel}
           </Button>
+          {beside}
           {"error" in input ? <span className="text-sm text-muted-foreground">{input.error}</span> : null}
         </div>
         {error && <Alert>{error}</Alert>}
       </form>
     </div>
   )
+}
+
+// A pool's road to taking commitments, as Mynt records it (core/src/liquidity-tools.ts): proposed
+// (paused, awaiting approval), approved by its sponsoring licence provider (approved_at, with its
+// rails), cleared by a Mynt admin for real money (offering_cleared; a sandbox pool skips it), then
+// open. The first step not done is the current one.
+export const POOL_APPROVAL_STEPS = ["Proposed", "Sponsor approved", "Admin approved", "Open"] as const
+export function poolApprovalSteps(p: PoolRow): Step[] {
+  const done = [true, Boolean(p.approvedAt), p.sandbox || p.offeringCleared, p.status === "open" || (p.status === "closed" && Boolean(p.approvedAt))]
+  const at = done.findIndex((d, i) => !d && !(i === 2 && p.sandbox))
+  return POOL_APPROVAL_STEPS.map((label, i): Step => {
+    if (i === 2 && p.sandbox) return { label, state: "skipped", title: "not needed for a sandbox pool" }
+    if (done[i]) return { label, state: "done" }
+    if (i === at) return { label, state: "current", title: i === 1 ? "waiting for the sponsoring licence provider to approve it and name its rails" : i === 2 ? "waiting for a Mynt admin to clear it for real money" : statusText(p) }
+    return { label, state: "todo" }
+  })
+}
+const approvalText = (p: PoolRow) => {
+  const s = poolApprovalSteps(p)
+  const at = s.find((x) => x.state === "current")
+  return at ? `${at.label}: ${at.title ?? "current step"}` : "Open"
 }
 
 // In Export CSV, a figure Mynt didn't measure says so and why.
@@ -287,8 +337,8 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
     downloadCsv(
       "my-pools.csv",
       toCsv(
-        ["Pool", "Product", "Component", "State", "Status", "Rails", ...CAPITAL_COLUMNS.map((c) => c.label), "Minimum reserve", "Notice", "Commitment limits", "Latest health", "Withdrawal queue"],
-        shown.map((p) => [p.name, p.productName ?? p.productId, p.componentKey, STAGE_LABELS[stageOf(p)], statusText(p), railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet", ...CAPITAL_COLUMNS.map((c) => capitalText(capitalCell(p, c.key))), reserveText(p), noticeText(p.noticePeriodDays), limitsText(p), healthText(p.health), queue(p)]),
+        ["Pool", "Product", "Component", "State", "Approval", "Status", "Rails", ...CAPITAL_COLUMNS.map((c) => c.label), "Minimum reserve", "Notice", "Commitment limits", "Latest health", "Withdrawal queue"],
+        shown.map((p) => [p.name, p.productName ?? p.productId, p.componentKey, STAGE_LABELS[stageOf(p)], approvalText(p), statusText(p), railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet", ...CAPITAL_COLUMNS.map((c) => capitalText(capitalCell(p, c.key))), reserveText(p), noticeText(p.noticePeriodDays), limitsText(p), healthText(p.health), queue(p)]),
       ),
     )
 
@@ -325,6 +375,7 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
             <TableRow>
               <TableHead className={COL.name}>Pool</TableHead>
               <TableHead className={COL.short}>State</TableHead>
+              <TableHead className={COL.wide}>Approval</TableHead>
               <TableHead className={COL.text}>Status</TableHead>
               <TableHead className={COL.wide}>Rails</TableHead>
               {CAPITAL_COLUMNS.map((c) => (
@@ -349,6 +400,9 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
                   </TableCell>
                   <TableCell className={COL.short}>
                     <StageStatus stage={stageOf(p)} />
+                  </TableCell>
+                  <TableCell className={COL.wide} data-approval>
+                    <ApprovalSteps steps={poolApprovalSteps(p)} compact />
                   </TableCell>
                   <TableCell className={COL.text}>
                     <OneLine text={statusText(p)} />
@@ -377,7 +431,7 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
                 </TableRow>
               ))
             ) : (
-              <EmptyRow cols={9 + CAPITAL_COLUMNS.length}>{pools.length ? "No pools match these filters." : "No pools yet. Propose one on a sponsored component of your product."}</EmptyRow>
+              <EmptyRow cols={10 + CAPITAL_COLUMNS.length}>{pools.length ? "No pools match these filters." : "No pools yet. Propose one on a sponsored component of your product."}</EmptyRow>
             )}
           </TableBody>
         </Table>
