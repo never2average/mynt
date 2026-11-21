@@ -57,16 +57,22 @@ const prepared = (over: Partial<Prepared["summary"]> = {}): Prepared => ({
   summary: { pool: "On-chain float", amount: "500 USDC", lockInSeconds: 30 * 86_400, noticeSeconds: 7 * 86_400, reviewWindowSeconds: 86_400, wallet: SOL, verifiedBuild: false, ...over },
 });
 
-// A browser wallet, as the Wallet Standard registers one, connected to `account`.
-function fakeWallet(account: string, chains = ["solana:devnet"]) {
-  const connect = vi.fn(async () => ({ accounts: [{ address: account, publicKey: new Uint8Array(32), chains, features: ["solana:signAndSendTransaction"] }] }));
+// A browser wallet, as the Wallet Standard registers one, connected to `account` when asked (or
+// already, with `connected`): like a real wallet, its `accounts` list the account once connected.
+function fakeWallet(account: string, chains = ["solana:devnet"], opts: { name?: string; connected?: boolean } = {}) {
+  const acct = { address: account, publicKey: new Uint8Array(32), chains, features: ["solana:signAndSendTransaction"] };
+  const accounts: (typeof acct)[] = opts.connected ? [acct] : [];
+  const connect = vi.fn(async () => {
+    if (!accounts.length) accounts.push(acct);
+    return { accounts: [acct] };
+  });
   const signAndSendTransaction = vi.fn(async (..._inputs: { transaction: Uint8Array; chain: string; account: { address: string } }[]) => [{ signature: SIG_BYTES }]);
   const wallet = {
     version: "1.0.0",
-    name: "Test Wallet",
-    icon: "data:image/svg+xml;base64,PHN2Zy8+",
+    name: opts.name ?? "Test Wallet",
+    icon: `data:image/svg+xml;base64,${btoa(`<svg>${opts.name ?? "t"}</svg>`)}`,
     chains,
-    accounts: [],
+    accounts,
     features: {
       "standard:connect": { version: "1.0.0", connect },
       "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: [0], signAndSendTransaction },
@@ -196,15 +202,16 @@ describe("the wallet picker", () => {
     expect((document.querySelector('[data-wallet-picker="unsupported"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("lists the wallets with short address, network and devnet balances, the chosen one checked, and Link wallet", async () => {
+  it("lists the wallets with short address and devnet balances, the network named once, the chosen one checked, and Link wallet", async () => {
     const chosen: string[] = [];
     picker(state({ choose: (a) => void chosen.push(a) }));
     expect(document.querySelector('[data-wallet-picker="wallets"]')!.textContent).toContain("7EcDhS…FLtV");
     expect(document.querySelector('[data-wallet-picker="wallets"]')!.textContent).toContain("Devnet");
     const menu = await open();
     const sol = menu.querySelector(`[data-wallet-option="${SOL}"]`)!;
-    expect(sol.textContent).toContain("Solana");
-    expect(sol.querySelector("[data-wallet-balances]")!.textContent).toBe("2,500 USDC · 1.5 SOL · devnet");
+    expect(menu.querySelector("[data-wallet-network]")!.textContent).toBe("Solana");
+    expect(sol.textContent).not.toContain("Solana");
+    expect(sol.querySelector("[data-wallet-balances]")!.textContent).toBe("2,500 USDC · 1.5 SOL");
     expect(sol.getAttribute("aria-checked")).toBe("true");
     expect(menu.querySelector(`[data-wallet-option="${EVM}"]`)!.textContent).toContain("EVM");
     expect(menu.querySelector("[data-wallet-link]")!.getAttribute("href")).toBe(MANAGE);
@@ -216,8 +223,69 @@ describe("the wallet picker", () => {
     const l = list({ balancesSupported: false, wallets: [{ address: SOL, chain: "solana", network: "Solana", balances: null }] });
     picker(state({ list: l, chosen: l.wallets[0] }));
     const menu = await open();
-    expect(menu.querySelector("[data-wallet-balances]")!.textContent).toBe("Balances unavailable");
-    expect(menu.textContent).toContain("Live balances come with Mynt's next update.");
+    expect(menu.querySelector("[data-wallet-balances]")!.textContent).toBe("Not measured");
+    expect(menu.querySelector("[data-wallet-balances]")!.textContent).not.toMatch(/\b0\b/);
+    expect(menu.textContent).not.toContain("next update");
+  });
+
+  it("names the wallet app (its own name and icon, as the Wallet Standard reports it) once it has connected the address", async () => {
+    const { wallet } = fakeWallet(SOL, ["solana:devnet"], { name: "Phantom", connected: true });
+    picker(state({ browserWallets: () => [wallet] }));
+    await act(async () => undefined);
+    const trigger = document.querySelector('[data-wallet-picker="wallets"]')!;
+    expect(trigger.querySelector('[data-wallet-app="Phantom"]')).not.toBeNull();
+    expect(trigger.querySelector('img[data-wallet-app-icon="Phantom"]')!.getAttribute("src")).toBe(wallet.icon);
+    expect(trigger.querySelector("svg.lucide-wallet")).toBeNull();
+    expect(trigger.textContent).toContain("7EcDhS…FLtV");
+    const menu = await open();
+    const sol = menu.querySelector(`[data-wallet-option="${SOL}"]`)!;
+    expect(sol.querySelector('[data-wallet-app="Phantom"]')).not.toBeNull();
+    // The EVM wallet has no known app: its short address only, with a plain wallet icon.
+    const evm = menu.querySelector(`[data-wallet-option="${EVM}"]`)!;
+    expect(evm.querySelector("[data-wallet-app]")).toBeNull();
+    expect(evm.querySelector("svg.lucide-wallet")).not.toBeNull();
+    // Every wallet is named, so there's nothing to connect.
+    expect(menu.querySelector("[data-connect-wallet]")).toBeNull();
+  });
+
+  it("says Solana and Devnet once each, with no chain icons and no outlined badges", async () => {
+    const l = list({ wallets: [list().wallets[0], { address: SOL2, chain: "solana", network: "Solana", balances: null }] });
+    picker(state({ list: l, chosen: l.wallets[0] }));
+    const menu = await open();
+    const surface = document.body.textContent!;
+    expect(surface.match(/Solana/g)).toHaveLength(1);
+    expect(surface.match(/devnet/gi)).toHaveLength(1);
+    expect(document.querySelectorAll("[data-brand-icon], [data-network-mark]")).toHaveLength(0);
+    expect(document.querySelectorAll('[data-slot="badge"]')).toHaveLength(0);
+    expect(menu.querySelectorAll("[data-wallet-option] .border, [data-wallet-option] [class*='rounded-lg']")).toHaveLength(0);
+  });
+
+  it("Connect wallet lists the detected wallets by their own names and icons, and connecting names the wallet", async () => {
+    const phantom = fakeWallet(SOL, ["solana:devnet"], { name: "Phantom" });
+    const solflare = fakeWallet(SOL2, ["solana:devnet"], { name: "Solflare" });
+    picker(state({ browserWallets: () => [phantom.wallet, solflare.wallet] }));
+    await act(async () => undefined);
+    const menu = await open();
+    const connect = menu.querySelector("[data-connect-wallet]")!;
+    expect(connect.textContent).toBe("Connect wallet");
+    await click(connect);
+    const chooser = document.querySelector("[data-wallet-chooser]")!;
+    expect([...chooser.querySelectorAll("[data-detected-wallet]")].map((e) => e.textContent)).toEqual(["Phantom", "Solflare"]);
+    expect(chooser.querySelector('[data-detected-wallet="Phantom"] img')!.getAttribute("src")).toBe(phantom.wallet.icon);
+    expect(chooser.textContent).not.toMatch(/install|download/i);
+    await click(chooser.querySelector('[data-detected-wallet="Phantom"]')!);
+    expect(phantom.connect).toHaveBeenCalledTimes(1);
+    expect(phantom.signAndSendTransaction).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-wallet-picker="wallets"] [data-wallet-app="Phantom"]')).not.toBeNull();
+  });
+
+  it("with no wallet detected, Connect wallet says so plainly", async () => {
+    picker(state({ browserWallets: () => [] }));
+    const menu = await open();
+    await click(menu.querySelector("[data-connect-wallet]")!);
+    const none = document.querySelector("[data-no-wallet-detected]")!;
+    expect(none.textContent).toBe("No wallet found in this browser.");
+    expect(document.querySelector("[data-wallet-chooser] a")).toBeNull();
   });
 });
 
@@ -305,7 +373,7 @@ describe("the on-chain deposit", () => {
     expect(s.prepares).toHaveLength(0);
     expect(connect).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Commit capital" })).toBeNull();
-    const prepare = screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" });
+    const prepare = screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" });
     await click(prepare);
     expect(s.prepares).toEqual([{ kind: "deposit", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 500_000_000, idempotency_key: expect.stringMatching(/^[A-Za-z0-9_-]{8,200}$/) }]);
     // Mynt's summary, not the assistant's words; still nothing signed.
@@ -313,6 +381,12 @@ describe("the on-chain deposit", () => {
     expect(document.querySelector("[data-summary-wallet]")!.textContent).toBe(SOL);
     expect(document.querySelector("[data-prepared]")!.textContent).toContain("30 days");
     expect(signAndSendTransaction).not.toHaveBeenCalled();
+    // The draft says Devnet once (beside its wallet), and the sign button carries the wallet's own icon.
+    const draft = document.querySelector("[data-draft]")!;
+    expect(draft.querySelectorAll("[data-devnet]")).toHaveLength(1);
+    expect(draft.textContent!.match(/devnet/gi)).toHaveLength(1);
+    expect(draft.textContent).not.toContain("Solana");
+    expect(screen.getByRole("button", { name: "Sign in Test Wallet" }).querySelector("img")!.getAttribute("src")).toBe(wallet.icon);
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
     expect(connect).toHaveBeenCalledTimes(1);
@@ -321,7 +395,7 @@ describe("the on-chain deposit", () => {
     expect(input.chain).toBe("solana:devnet");
     expect(input.account.address).toBe(SOL);
     expect(btoa(String.fromCharCode(...input.transaction))).toBe(TX); // untouched
-    expect(document.querySelector("[data-tx=confirmed]")!.textContent).toContain("Confirmed on devnet");
+    expect(document.querySelector("[data-tx=confirmed]")!.textContent).toContain("Confirmed.");
     expect(document.querySelector(`[data-signature="${SIG}"]`)).toBeTruthy();
     // Positions read again at each wait (this Mynt never shows it here), then "catching up".
     expect(s.settled).toBe(3);
@@ -332,7 +406,7 @@ describe("the on-chain deposit", () => {
   it("refuses when the browser wallet isn't the chosen linked wallet, before signing", async () => {
     const { wallet, signAndSendTransaction } = fakeWallet(SOL2);
     renderDrafts(state({ browserWallets: () => [wallet] }));
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" }));
+    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     expect(signAndSendTransaction).not.toHaveBeenCalled();
     const err = document.querySelector("[data-on-chain-error]")!.textContent!;
@@ -345,14 +419,14 @@ describe("the on-chain deposit", () => {
     const s = state({ browserWallets: () => [wallet] });
     s.treasury.prepare = async () => ({ prepared: prepared({ wallet: SOL2 }) });
     renderDrafts(s);
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" }));
+    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     expect(signAndSendTransaction).not.toHaveBeenCalled();
     expect(document.querySelector("[data-on-chain-error]")!.textContent).toContain("different wallet");
     cleanup();
     renderDrafts(state({ browserWallets: () => [] }));
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" }));
-    expect(document.querySelector("[data-no-browser-wallet]")).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
+    expect(document.querySelector("[data-no-browser-wallet]")!.textContent).toBe("No wallet found in this browser.");
   });
 
   it("shows a failed transaction with its signature", async () => {
@@ -360,7 +434,7 @@ describe("the on-chain deposit", () => {
     const s = state({ browserWallets: () => [wallet] });
     s.treasury.status = async () => ({ status: "failed", stage: "failed", error: "Lock-in longer than you agreed to" });
     renderDrafts(s);
-    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV · devnet" }));
+    await click(screen.getByRole("button", { name: "Deposit from 7EcDhS…FLtV" }));
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
     expect(document.querySelector("[data-tx=failed]")!.textContent).toContain("Lock-in longer than you agreed to");
@@ -372,7 +446,7 @@ describe("the on-chain deposit", () => {
     const s = state({ browserWallets: () => [wallet] });
     renderDrafts(s, [withdrawDraft]);
     expect(screen.queryByRole("button", { name: "Request withdrawal" })).toBeNull();
-    await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV · devnet" }));
+    await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV" }));
     expect(s.prepares[0]).toMatchObject({ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 200_000_000, deposit: DEP1 });
     await click(screen.getByRole("button", { name: "Sign in Test Wallet" }));
     await settle();
@@ -586,7 +660,7 @@ describe("an on-chain position, from its pool's card on Pools", () => {
     fireEvent.change(input, { target: { value: "0.5" } });
     expect(form.textContent).toContain("smallest withdrawal request is 1 USDC");
     fireEvent.change(input, { target: { value: "150.25" } });
-    await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV · devnet" }));
+    await click(screen.getByRole("button", { name: "Withdraw to 7EcDhS…FLtV" }));
     expect(s.prepares).toEqual([{ kind: "withdrawal", pool_id: POOL, wallet: SOL, amount_usdc_base_units: 150_250_000, deposit: DEP1, idempotency_key: expect.any(String) }]);
     expect(railCalls).toHaveLength(0);
   });
