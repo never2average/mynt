@@ -79,7 +79,7 @@ const data = (over: Partial<LiquidityData> & { access: LiquidityData["access"] }
   provider: over.access.liquidityProvider ? { pools: [CLEARED, UNCLEARED, SANDBOX], positions: [POSITION], withdrawals: [], canCommit: true, canWithdraw: true } : undefined,
   ...over,
 });
-// One of Earn's tabs: Pools (cards, every pool open to the user, with Commit capital; it took in
+// One of Earn's tabs: Pools (a table, every pool open to the user, with Commit capital; it took in
 // Opportunities and My positions), or the table tab My pools.
 const view = (d: LiquidityData, tab?: "pools" | "my-pools", form: Parameters<typeof EarnTable>[0]["initialForm"] = null, initialView: PoolsView | null = null) => {
   const t = tab ?? (d.access.liquidityProvider ? "pools" : "my-pools");
@@ -129,10 +129,8 @@ describe("Earn by role", () => {
     expect(walletLinksFor(null)).toEqual([]);
   });
 
-  it("the sidebar has Search chats (an icon with a tooltip when collapsed) and, open, the five most recent chats", () => {
-    const at = (i: number) => `2026-11-${String(10 + i).padStart(2, "0")}T10:00:00Z`;
-    const threads = Array.from({ length: 7 }, (_, i) => ({ id: `t${i}`, title: `Question ${i}`, updatedAt: at(i), messages: [], outcomes: {} }));
-    const sidebar = (open: boolean, chats: { threads: typeof threads; onPick: () => void; onNew: () => void } | null) =>
+  it("Search chats lives in Earn only: the sidebar has no chat search or recent chats, open or collapsed", () => {
+    const sidebar = (open: boolean) =>
       renderToStaticMarkup(
         <TooltipProvider>
           <SidebarProvider defaultOpen={open}>
@@ -146,25 +144,17 @@ describe("Earn by role", () => {
               onSelectWorkspace={() => undefined}
               onCreateWorkspace={async () => null}
               liquidity
-              chats={chats}
             />
           </SidebarProvider>
         </TooltipProvider>,
       );
-    const chats = { threads, onPick: () => undefined, onNew: () => undefined };
     for (const open of [true, false]) {
-      const html = sidebar(open, chats);
-      // In both states: Search chats, first above the pages, with its label (shown as a tooltip when collapsed).
-      expect(html).toMatch(/data-search-chats[^>]*>[\s\S]*?Search chats/);
-      expect(html.indexOf("data-search-chats")).toBeLessThan(html.indexOf('href="/"'));
-      // Recent chats: five, newest as given; hidden while collapsed.
-      expect((html.match(/data-recent-chat=/g) ?? []).length).toBe(5);
-      expect(html.match(/<[^>]*data-recent-chats[^>]*>/)![0]).toContain("group-data-[collapsible=icon]:hidden");
+      const html = sidebar(open);
+      expect(html).not.toContain("Search chats");
+      expect(html).not.toContain("data-search-chats");
+      expect(html).not.toContain("data-recent-chats");
+      expect(html).toContain('href="/earn"');
     }
-    // No chats to search without Earn or a known user.
-    const none = sidebar(true, null);
-    expect(none).not.toContain("data-search-chats");
-    expect(none).not.toContain("data-recent-chats");
   });
 
   it("the sidebar lists Earn (in place of Liquidity) after Settings only for builders and liquidity providers", () => {
@@ -275,10 +265,9 @@ describe("a pool's state", () => {
     // A Mynt that doesn't report totals: Not measured, saying so.
     expect(cell(older.id, "principal")).toMatch(/title="This Mynt doesn&#x27;t report pool totals yet"[^>]*>.*Not measured/);
     expect(cell(older.id, "principal")).not.toContain("$0.00");
-    // Hidden by panel width like the other columns: principal first, then the queue, then the rest.
-    expect(html).toMatch(/class="[^"]*hidden @lg\/list:table-cell[^"]*"[^>]*>Principal</);
-    expect(html).toMatch(/class="[^"]*hidden @2xl\/list:table-cell[^"]*"[^>]*>Queued for withdrawal</);
-    expect(html).toMatch(/class="[^"]*hidden @5xl\/list:table-cell[^"]*"[^>]*>Paid out</);
+    // Shown at every panel width like the other columns (none hidden), right-aligned with a money column's min width.
+    for (const label of ["Principal", "Queued for withdrawal", "Paid out"]) expect(html).toMatch(new RegExp(`class="[^"]*min-w-32 text-right tabular-nums[^"]*"[^>]*>${label}<`));
+    expect(html).not.toMatch(/hidden @\w+\/list:table-cell/);
     // A liquidity provider's view of a pool: the totals aren't theirs, and say why.
     const theirs = fromPools([poolRow({ capital: null, capital_not_shown: "Only the pool's builder, its sponsor or an admin sees its totals" })])[0];
     expect(theirs.capital).toBeNull();
@@ -370,7 +359,7 @@ describe("withdrawals", () => {
       { id: "w-3", seq: 1, pool_id: CLEARED.id, pool_name: "Card float", amount_cents: 50_000, status: "paid", eligible_at: null, settled_cents: 50_000, waiting_reason: null, sandbox: false },
     ]);
     const html = view(d, "pools", null, "invested");
-    const card = html.slice(html.indexOf(`data-pool-card="${CLEARED.id}"`));
+    const card = html.slice(html.indexOf(`data-pool-row="${CLEARED.id}"`));
     expect(card).toMatch(/data-your-position="true">\$4,000\.00</);
     expect(card).toMatch(/data-your-queued="true">\$1,000\.00</);
     expect(card).toMatch(/data-your-paid="true">\$1,000\.00</);
@@ -428,7 +417,7 @@ describe("the tables' layout (the dashboard's)", () => {
     expect(names({ money: ["real", "sandbox"] })).toHaveLength(4);
   });
 
-  it("pages with the list pager: 25 rows of a table, and six cards before the panel is measured", () => {
+  it("pages with the list pager: 25 rows of each table before the panel is measured", () => {
     const d = data({ access: { builder: true, liquidityProvider: true } });
     const many = Array.from({ length: 30 }, (_, i) => row({ id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`, name: `Pool ${i}` }));
     d.builder!.pools = many;
@@ -436,16 +425,16 @@ describe("the tables' layout (the dashboard's)", () => {
     expect([...table.matchAll(/<tr[^>]*data-pool="/g)]).toHaveLength(25);
     expect(table).toContain("30 rows · Page 1 of 2");
     d.provider!.pools = many;
-    const cards = view(d, "pools");
-    expect([...cards.matchAll(/data-pool-card="/g)]).toHaveLength(6);
-    expect(cards).toContain("30 pools · Page 1 of 5");
+    const poolsTable = view(d, "pools");
+    expect([...poolsTable.matchAll(/<tr[^>]*data-pool-row="/g)]).toHaveLength(25);
+    expect(poolsTable).toContain("30 pools · Page 1 of 2");
   });
 
-  it("a position's amounts are on its pool's card: no key figures, sections or tables; an amount Mynt didn't give is Not measured", () => {
+  it("a position's amounts are on its pool's row: no key figures, sections or second table; an amount Mynt didn't give is Not measured", () => {
     const html = view(data({ access: { builder: false, liquidityProvider: true } }), "pools");
     expect(html).not.toContain("data-kpi");
     expect(html).not.toContain("<h2");
-    expect(html).not.toContain("<table");
+    expect([...html.matchAll(/<table/g)]).toHaveLength(1);
     expect(positionFigures(POSITION)).toEqual({ committed: 550_000, settled: 400_000, queued: 100_000, paid: 100_000, available: 300_000 });
     // An on-chain deposit Mynt gave no amount for: Not measured on the card, never 0.
     const unmeasured = fromPositions([{ source: "on-chain", pool_id: CLEARED.id, name: "Chain", product_id: "p", wallet: "W", deposits: [{ deposit: "D1" }], requests: [] }]);

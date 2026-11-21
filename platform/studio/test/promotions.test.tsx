@@ -279,11 +279,12 @@ describe("the Settings page (once Workspace)", () => {
     expect(tabOf(["general"][0])).toBe("members");
   });
 
-  it("Apps: key figures by stage, then search, Stage, Export CSV and New app last; stage as a status dot in words", () => {
+  it("Apps: key figures by stage, then search, one Filters button (Stage), Export CSV and New app last; stage as a status dot in words", () => {
     const html = renderToStaticMarkup(<WorkspaceView tab="apps" onTab={noop} info={info} members={membersData} apps={appsRows} memberActions={actions} />);
     const figure = (key: string) => new RegExp(`data-kpi="${key}"[\\s\\S]*?data-measured="true">(\\d+)<`).exec(html)?.[1];
     expect([figure("apps"), figure("production"), figure("staging"), figure("ideas")]).toEqual(["2", "1", "0", "1"]);
-    const toolbar = ['aria-label="Search apps by name, stage or owner"', 'data-filter="Stage"', ">Export CSV<", 'href="/new"'].map((s) => html.indexOf(s));
+    const toolbar = ['aria-label="Search apps by name, stage or owner"', "data-filters-menu-button", ">Export CSV<", 'href="/new"'].map((s) => html.indexOf(s));
+    expect(html).not.toContain('data-filter="Stage"');
     expect(toolbar.every((i) => i > 0)).toBe(true);
     expect([...toolbar].sort((a, b) => a - b)).toEqual(toolbar);
     const row = /data-app-row="a1"[\s\S]*?<\/tr>/.exec(html)![0];

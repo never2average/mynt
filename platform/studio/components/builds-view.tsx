@@ -2,7 +2,7 @@
 
 // The Builds page (/builds): every coding-agent build across the user's apps, newest first, in
 // the dashboard's design. Key figures first (counted from the builds loaded; "Not measured" when
-// they couldn't be loaded), then one toolbar row (search, App, Status, Date range, Export CSV and
+// they couldn't be loaded), then one toolbar row (search, one Filters popover with App and Status, Date range, Export CSV and
 // New app last) and a full-height table paged 25 rows at a time. Status is a dot and words.
 // Server-renderable for the tests.
 import Link from "next/link"
@@ -11,7 +11,7 @@ import { Download, Plus } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
-import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
+import { anyOf, DateRangeFilter, FiltersPopover, picksOf, type Facet, type Picks } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { StatusDot } from "@/components/promotion-view"
@@ -55,13 +55,13 @@ const dayOf = (iso: string) => {
 }
 const whenOf = (iso: string) => (iso && !Number.isNaN(Date.parse(iso)) ? new Date(iso).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "")
 
-export type BuildFilters = { query: string; appId: string; status: string; from: string; to: string }
-export const NO_BUILD_FILTERS: BuildFilters = { query: "", appId: "", status: "", from: "", to: "" }
+// App and Status take any number of picks (a build matches any of them); one value still works.
+export type BuildFilters = { query: string; appId: Picks; status: Picks; from: string; to: string }
+export const NO_BUILD_FILTERS: BuildFilters = { query: "", appId: [], status: [], from: "", to: "" }
 
 export function filterBuilds(rows: BuildRow[], f: BuildFilters): BuildRow[] {
   return rows.filter((r) => {
-    if (f.appId && r.appId !== f.appId) return false
-    if (f.status && r.status !== f.status) return false
+    if (!anyOf(f.appId, r.appId) || !anyOf(f.status, r.status)) return false
     if (f.from || f.to) {
       const d = dayOf(r.updatedAt)
       if (!d || (f.from && d < f.from) || (f.to && d > f.to)) return false
@@ -98,6 +98,10 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
     setF({ ...f, ...patch })
     setPage(1)
   }
+  const facets: Facet[] = [
+    { id: "app", label: "App", options: apps.map(([value, label]) => ({ value, label })), selected: picksOf(f.appId), onChange: (appId) => set({ appId }) },
+    { id: "status", label: "Status", options: statuses.map((s) => ({ value: s, label: s.replace(/_/g, " ") })), selected: picksOf(f.status), onChange: (status) => set({ status }) },
+  ]
 
   if (rows === null && !error) return <LoadingBuilds />
 
@@ -126,8 +130,7 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
         searchLabel="Search builds"
         actions={
           <>
-            <FilterSelect label="App" value={f.appId} onChange={(appId) => set({ appId })} options={apps.map(([value, label]) => ({ value, label }))} />
-            <FilterSelect label="Status" value={f.status} onChange={(status) => set({ status })} options={statuses.map((s) => ({ value: s, label: s.replace(/_/g, " ") }))} />
+            <FiltersPopover facets={facets} onClear={() => set({ appId: [], status: [] })} />
             <DateRangeFilter label="Date range" from={f.from} to={f.to} onChange={(from, to) => set({ from, to })} />
             <Button variant="outline" onClick={exportCsv} disabled={!shown.length} data-export>
               <Download />

@@ -70,7 +70,6 @@ export function saveThread(owner: string | null, thread: EarnThreadRecord, s: St
   for (;;) {
     try {
       s.setItem(HISTORY_KEY, JSON.stringify({ ...all, [owner]: mine }));
-      announceThreads();
       return mine;
     } catch {
       if (mine.length <= 1) return listThreads(owner, s);
@@ -86,20 +85,6 @@ export const threadDate = (iso: string) => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 };
-
-// Told to the sidebar's chat search whenever this browser's threads change.
-export const THREADS_CHANGED = "mynt:earn-threads-changed";
-export function announceThreads() {
-  try {
-    if (typeof window !== "undefined") window.dispatchEvent(new Event(THREADS_CHANGED));
-  } catch {
-    // nothing listens outside a browser
-  }
-}
-
-// The sidebar's Search chats, already on Earn: open this thread (detail: its id; null for a new one)
-// without reloading the page.
-export const OPEN_THREAD = "mynt:earn-open-thread";
 
 // A thread's words, on one line: what the chat search looks through.
 export function threadText(t: EarnThreadRecord): string {

@@ -7,7 +7,7 @@
 // audit trail as it is and the other tabs say they aren't available yet.
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { AuditsView, AuditTabs, NO_AUDIT_FILTERS, ObligationsView, type AuditFilters, type Option } from "@/components/audits-view";
+import { auditFiltersOn, auditQuery, AuditsView, AuditTabs, NO_AUDIT_FILTERS, ObligationsView, type AuditFilters, type Option } from "@/components/audits-view";
 import { NotReady } from "@/components/not-available";
 import { useWorkspace } from "@/components/workspace-context";
 import { auditClassOf, type AuditClass, type AuditRow, type AuditRowPage, type Obligation } from "@/lib/audit-classes";
@@ -19,11 +19,11 @@ const pickPage = (body: Record<string, unknown>) => (body.page ? ({ ...(body.pag
 const pickObligations = (body: Record<string, unknown>) => body.obligations as Obligation[] | undefined;
 
 function ClassTab({ auditClass, members, apps, initialAction }: { auditClass: Exclude<AuditClass, "obligations">; members: Option[]; apps: Option[]; initialAction: string }) {
-  const [filters, setFilters] = useState<AuditFilters>({ ...NO_AUDIT_FILTERS, action: initialAction });
+  const [filters, setFilters] = useState<AuditFilters>({ ...NO_AUDIT_FILTERS, action: initialAction ? [initialAction] : [] });
   // The cursors of the pages before this one, so Previous goes back without Mynt keeping state.
   const [cursors, setCursors] = useState<string[]>([]);
   const cursor = cursors[cursors.length - 1] ?? "";
-  const query = useMemo(() => `/api/audit?${new URLSearchParams(Object.entries({ class: auditClass, ...filters, cursor }).filter(([, v]) => v))}`, [auditClass, filters, cursor]);
+  const query = useMemo(() => auditQuery(auditClass, filters, cursor), [auditClass, filters, cursor]);
   const { state } = useComplianceData(query, pickPage);
 
   const [seen, setSeen] = useState<AuditRow[]>([]);
@@ -42,7 +42,7 @@ function ClassTab({ auditClass, members, apps, initialAction }: { auditClass: Ex
     setCursors([]);
   }, []);
 
-  const filtering = cursors.length + Object.values(filters).filter(Boolean).length > 0;
+  const filtering = cursors.length > 0 || auditFiltersOn(filters);
   if (!(state.kind === "ready" || (state.kind === "loading" && filtering)))
     return <NotReady state={state as Exclude<typeof state, { kind: "ready" }>} what={auditClass === "workspace" ? "The audit trail" : "This tab"} />;
   return (

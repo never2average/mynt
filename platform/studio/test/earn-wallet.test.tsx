@@ -356,9 +356,9 @@ describe("the assistant's drafts with a wallet", () => {
 describe("the on-chain deposit", () => {
   it("shows the pool's treasury on devnet", () => {
     render(<PoolsTab data={data} poolIds={null} />);
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-devnet]`)).toBeTruthy();
-    expect(document.querySelector(`[data-pool-card="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-treasury="devnet"]`)!.textContent).toBe("On-chain treasury");
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-devnet]`)).toBeTruthy();
+    expect(document.querySelector(`[data-pool-row="${POOL}"] [data-unverified-build]`)!.textContent).toBe("Unverified build");
     cleanup();
     const verified = fromPools([{ ...base, id: POOL, name: "Verified", treasury: { ...TREASURY, verified_build: true } }]).map((p) => ({ ...p, productLine: null, queueLength: null, health: null }));
     render(<PoolsTab data={{ ...data, provider: { ...data.provider!, pools: verified } }} poolIds={null} />);
@@ -600,10 +600,10 @@ describe("an on-chain position, from its pool's card on Pools", () => {
       </EarnWalletProvider>,
     );
     // The pool's card shows the position; its deposits open in a sheet from the card's Withdraw.
-    const card = document.querySelector(`[data-pool-card="${POOL}"]`)!;
+    const card = document.querySelector(`[data-pool-row="${POOL}"]`)!;
     expect(card.querySelector("[data-devnet]")).toBeTruthy();
     expect(card.getAttribute("data-invested")).toBe("true");
-    await click(card.querySelector(`[data-card-withdraw="${POOL}"]`)!);
+    await click(card.querySelector(`[data-row-withdraw="${POOL}"]`)!);
     expect(document.querySelector('[data-sheet="on-chain-deposits"]')).toBeTruthy();
     const section = document.querySelector("[data-on-chain-positions]")!;
     expect(section.querySelector("[data-devnet]")).toBeTruthy();
@@ -632,7 +632,7 @@ describe("an on-chain position, from its pool's card on Pools", () => {
         <PoolsTab data={data} poolIds={null} actions={rails} />
       </EarnWalletProvider>,
     );
-    await click(document.querySelector(`[data-card-details="${POOL}"]`)!);
+    await click(document.querySelector(`[data-row-details="${POOL}"]`)!);
     const sheet = document.querySelector('[data-sheet="position-details"]')!;
     expect(sheet.querySelector(`[data-chain-position="${POOL}|${SOL}"] [data-deposit="${DEP1}"]`)).toBeTruthy();
     expect(sheet.querySelector("[data-on-chain-requests] [data-on-chain-request]")).toBeTruthy();
@@ -649,7 +649,7 @@ describe("an on-chain position, from its pool's card on Pools", () => {
         <PoolsTab data={data} poolIds={null} actions={rails} />
       </EarnWalletProvider>,
     );
-    await click(document.querySelector(`[data-card-withdraw="${POOL}"]`)!);
+    await click(document.querySelector(`[data-row-withdraw="${POOL}"]`)!);
     await click(document.querySelector(`[data-withdraw-deposit="${DEP1}"]`)!);
     // It opens in a sheet, not inline under the deposit.
     const form = document.querySelector(`[data-sheet="on-chain-withdraw"] [data-withdraw-form="${DEP1}"]`)!;

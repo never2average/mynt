@@ -5,6 +5,7 @@
 // activity tab shows the audit trail as it is, and the others say they aren't available yet.
 // Pure, for the routes, the page and the tests.
 import type { AuditEvent } from "./compliance";
+import { anyOf, type Picks } from "./facets";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -159,16 +160,15 @@ export function fromObligations(raw: unknown): Obligation[] {
   });
 }
 
-export type ObligationFilters = { query: string; partner: string; regulator: string; status: string; product: string };
-export const NO_OBLIGATION_FILTERS: ObligationFilters = { query: "", partner: "", regulator: "", status: "", product: "" };
+// Partner, regulator, status and product take any number of picks (an obligation matches any of a
+// filter's picks, and every filter that has one); one value still works.
+export type ObligationFilters = { query: string; partner: Picks; regulator: Picks; status: Picks; product: Picks };
+export const NO_OBLIGATION_FILTERS: ObligationFilters = { query: "", partner: [], regulator: [], status: [], product: [] };
 
 export function filterObligations(list: Obligation[], f: ObligationFilters): Obligation[] {
   const words = f.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return list.filter((o) => {
-    if (f.partner && o.partnerId !== f.partner) return false;
-    if (f.regulator && o.regulator !== f.regulator) return false;
-    if (f.status && o.status !== f.status) return false;
-    if (f.product && !o.products.includes(f.product)) return false;
+    if (!anyOf(f.partner, o.partnerId) || !anyOf(f.regulator, o.regulator) || !anyOf(f.status, o.status) || !anyOf(f.product, o.products)) return false;
     const text = [o.title, o.partner, o.regulator, o.licenceType, o.obligationId, o.evidence, o.reason, ...o.products].filter(Boolean).join(" ").toLowerCase();
     return words.every((w) => text.includes(w));
   });
