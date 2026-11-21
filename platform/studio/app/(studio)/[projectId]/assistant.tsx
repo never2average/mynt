@@ -10,6 +10,8 @@ import { type UIMessage } from "ai";
 import { Thread } from "@/components/assistant-ui/thread";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ReactNode } from "react";
+import { APP_TABS, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
+import type { SlashCommand } from "@/lib/slash-commands";
 
 type ThreadState = {
   isEmpty: boolean;
@@ -19,6 +21,28 @@ type ThreadState = {
 type BuildData = { buildId: string; started: boolean };
 
 const EMPTY_MESSAGES: UIMessage[] = [];
+
+const TAB_DESCRIPTIONS: Record<AppTab, string> = {
+  preview: "Show the app's live preview",
+  pnl: "Open the app's P&L",
+  licences: "Open the licences behind the app",
+  security: "Open the app's security checks",
+  sdk: "Open the app's SDK",
+  activity: "Open the app's activity",
+};
+
+// The builder chat's slash commands: open a panel tab (the workspace shell listens for
+// "adorable:panel-tab"), or start a message to the coding agent. There's no /new: a message with no
+// build selected may still steer the app's running build, so the chat can't promise a fresh one.
+export const builderCommands = (projectId: string): SlashCommand[] => [
+  ...APP_TABS.map((tab) => ({
+    name: tab,
+    description: TAB_DESCRIPTIONS[tab],
+    run: () => window.dispatchEvent(new CustomEvent(PANEL_TAB_EVENT, { detail: { projectId, tab } })),
+  })),
+  { name: "fix", description: "Ask the coding agent to fix something", template: "Fix " },
+  { name: "add", description: "Ask the coding agent to add a feature", template: "Add " },
+];
 
 // Mynt Studio: Adorable's chat panel, talking to Mynt's coding agent. Adorable's /api/chat ran
 // its own model; the studio's sends each message to Mynt, which steers the app's running build
@@ -117,6 +141,7 @@ function ProjectAssistant({
   });
 
   const runtime = useAISDKRuntime(chat);
+  const commands = useMemo(() => builderCommands(projectId), [projectId]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -124,7 +149,7 @@ function ProjectAssistant({
         projectId={projectId}
         onThreadStateChange={onThreadStateChange}
       />
-      <Thread welcome={welcome} />
+      <Thread welcome={welcome} commands={commands} />
     </AssistantRuntimeProvider>
   );
 }

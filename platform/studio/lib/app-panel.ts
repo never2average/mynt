@@ -15,6 +15,9 @@ export const APP_TABS = ["preview", "pnl", "licences", "security", "sdk", "activ
 export type AppTab = (typeof APP_TABS)[number];
 export const APP_TAB_LABELS: Record<AppTab, string> = { preview: "Preview", pnl: "P&L", licences: "Licences", security: "Security", sdk: "SDK", activity: "Activity" };
 export type InfoTab = Exclude<AppTab, "preview">;
+// The builder chat's slash commands ask the workspace shell to show a tab: detail { projectId, tab }.
+export const PANEL_TAB_EVENT = "adorable:panel-tab";
+export const isAppTab = (v: unknown): v is AppTab => typeof v === "string" && (APP_TABS as readonly string[]).includes(v);
 export const isInfoTab = (v: unknown): v is InfoTab => typeof v === "string" && v !== "preview" && (APP_TABS as readonly string[]).includes(v);
 
 // What a tab shows when Mynt can't answer it yet: said so, never an empty table or zeros.

@@ -60,6 +60,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
 import { listThreads, newThreadId, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
+import type { SlashCommand } from "@/lib/slash-commands"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import { toCsv } from "@/lib/compliance"
 import {
@@ -84,6 +85,7 @@ import {
   usd,
   withdrawalRefusal,
   type EarnTab,
+  type LiquidityAccess,
   type LiquidityData,
   type PoolFilters,
   type PoolRow,
@@ -105,7 +107,7 @@ const WELCOME_TITLE = "What do you want to earn?"
 // AI SDK runtime has no renderer for data parts and would throw on one).
 export const withoutDataParts = (messages: UIMessage[]): UIMessage[] => messages.map((m) => (m.parts.some((p) => p.type.startsWith("data-")) ? { ...m, parts: m.parts.filter((p) => !p.type.startsWith("data-")) } : m))
 
-function EarnThread({ chat }: { chat: Chat }) {
+function EarnThread({ chat, commands, roles }: { chat: Chat; commands?: readonly SlashCommand[]; roles?: readonly string[] }) {
   const messages = useMemo(() => withoutDataParts(chat.messages), [chat.messages])
   const threadChat = useMemo(() => ({ ...chat, messages }), [chat, messages])
   const runtime = useAISDKRuntime(threadChat)
@@ -117,6 +119,8 @@ function EarnThread({ chat }: { chat: Chat }) {
         welcome={<ChatWelcome title={WELCOME_TITLE} chips={PROMPT_EXAMPLES} />}
         note={<EarnDisclosure />}
         toolbar={<WalletPicker />}
+        commands={commands}
+        roles={roles}
       />
     </AssistantRuntimeProvider>
   )
@@ -128,8 +132,10 @@ export type EarnHistory = { threads: EarnThreadRecord[]; current: string; onPick
 // The round button floating at the chat's top right (icon only, named by its tooltip and label),
 // and the centred pop-up it opens (about two thirds of the screen): New conversation, then this user's threads,
 // newest first.
-export function PastConversations({ history }: { history: EarnHistory }) {
-  const [open, setOpen] = useState(false)
+export function PastConversations({ history, open: shown, onOpenChange }: { history: EarnHistory; open?: boolean; onOpenChange?: (open: boolean) => void }) {
+  const [own, setOwn] = useState(false)
+  const open = shown ?? own
+  const setOpen = onOpenChange ?? setOwn
   return (
     <>
       <span className="flex" data-earn-history>
@@ -152,11 +158,11 @@ const TAB_ICONS: Record<EarnTab, typeof Layers> = { pools: Layers, "my-pools": W
 
 // The chat side: the assistant, or, without a model, the same centred prompt that can't be used.
 // (Past conversations floats at the chat's top right, beside Show tabs: ChatWorkspaceShell's chatCorner.)
-export function EarnChat({ chat, status }: { chat: Chat; status: EarnStatus }) {
+export function EarnChat({ chat, status, commands, roles }: { chat: Chat; status: EarnStatus; commands?: readonly SlashCommand[]; roles?: readonly string[] }) {
   if (status === "enabled")
     return (
       <div className="relative h-full" data-earn-chat>
-        <EarnThread chat={chat} />
+        <EarnThread chat={chat} commands={commands} roles={roles} />
       </div>
     )
   return (
@@ -912,6 +918,22 @@ export function StrategiesTab({
 
 const outcomesSig = (messages: UIMessage[], outcomes: Record<string, SavedOutcome>) => JSON.stringify([messages, outcomes])
 
+// The chat's slash commands, and the roles they're shown to (the menu hides the others).
+export const earnRoles = (a: LiquidityAccess): string[] => [...(a.builder ? ["builder"] : []), ...(a.liquidityProvider ? ["liquidity-provider"] : [])]
+export function earnCommands(go: { tab: (t: EarnTab, view?: PoolsView) => void; history?: () => void; newChat: () => void }): SlashCommand[] {
+  return [
+    { name: "pools", description: "Open the Pools tab", run: () => go.tab("pools") },
+    { name: "invested", description: "Show the pools you're invested in", run: () => go.tab("pools", "invested"), roles: ["liquidity-provider"] },
+    { name: "my-pools", description: "Open My pools", run: () => go.tab("my-pools"), roles: ["builder"] },
+    { name: "strategies", description: "Open My strategies", run: () => go.tab("my-strategies") },
+    ...(go.history ? [{ name: "history", description: "Open Past conversations", run: go.history }] : []),
+    { name: "new", description: "Start a new conversation", run: go.newChat },
+    { name: "commit", description: "Draft a commitment to a pool", template: "Commit $ to ", roles: ["liquidity-provider"] },
+    { name: "withdraw", description: "Draft a withdrawal from a pool", template: "Withdraw $ from ", roles: ["liquidity-provider"] },
+    { name: "propose", description: "Draft a pool proposal", template: "Draft a pool proposal for ", roles: ["builder"] },
+  ]
+}
+
 export function EarnWorkspace({
   chat,
   status,
@@ -937,7 +959,10 @@ export function EarnWorkspace({
   const wanted = earnTabFromQuery(initialTab)
   const [tab, setTab] = useState<EarnTab>(available.includes(wanted) ? wanted : "pools")
   const [opened, setOpened] = useState(tabOpensPanel(initialTab) && available.includes(wanted))
-  const [poolsView] = useState(() => poolsViewFromQuery(initialTab))
+  const [poolsView, setPoolsView] = useState(() => poolsViewFromQuery(initialTab))
+  // A command picking Pools' view shows Pools afresh on it.
+  const [poolsKey, setPoolsKey] = useState(0)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const { poolIds, drafts } = panelFrom(chat.messages as never)
 
   // What became of each draft, kept here (not in the tab) so a thread keeps it too.
@@ -1000,6 +1025,18 @@ export function EarnWorkspace({
     setTab(t)
     if (typeof window !== "undefined") window.history.replaceState(window.history.state, "", `/earn?tab=${t}`)
   }
+  const commands = earnCommands({
+    tab: (t, view) => {
+      if (view) {
+        setPoolsView(view)
+        setPoolsKey((k) => k + 1)
+      }
+      choose(t)
+      setOpened(true)
+    },
+    history: status === "enabled" && history ? () => setHistoryOpen(true) : undefined,
+    newChat: () => switchTo(newThreadId(), [], {}),
+  })
 
   if (!available.length)
     return (
@@ -1010,7 +1047,7 @@ export function EarnWorkspace({
 
   const content = (t: EarnTab) =>
     t === "pools" ? (
-      <PoolsTab data={data} poolIds={poolIds} actions={actions} initialView={poolsView} />
+      <PoolsTab key={poolsKey} data={data} poolIds={poolIds} actions={actions} initialView={poolsView} />
     ) : t === "my-strategies" ? (
       <StrategiesTab data={data} drafts={drafts} actions={actions} outcomes={outcomes} onOutcome={(id, o) => setOutcomes((all) => ({ ...all, [id]: o }))} />
     ) : (
@@ -1019,8 +1056,8 @@ export function EarnWorkspace({
 
   const shell = (
     <ChatWorkspaceShell
-      chat={<EarnChat chat={chat} status={status} />}
-      chatCorner={status === "enabled" && history ? <PastConversations history={history} /> : null}
+      chat={<EarnChat chat={chat} status={status} commands={commands} roles={earnRoles(data.access)} />}
+      chatCorner={status === "enabled" && history ? <PastConversations history={history} open={historyOpen} onOpenChange={setHistoryOpen} /> : null}
       onOpenPanel={() => setOpened(true)}
       showPanel={opened || chat.messages.length > 0}
       tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t), icon: TAB_ICONS[t] }))}
