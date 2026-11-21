@@ -383,7 +383,12 @@ describe("past conversations", () => {
     expect(listThreads("u2").map((t) => t.id)).toEqual(["theirs"]);
     // The list: newest first, the open one marked, each with its date.
     await act(async () => void fireEvent.click(historyButton()));
-    const sheet = document.querySelector('[data-sheet="history"]')!;
+    // A centred pop-up about two thirds of the screen, not a sheet sliding in from the side.
+    const sheet = document.querySelector('[data-dialog="history"]')!;
+    expect(sheet.getAttribute("role")).toBe("dialog");
+    expect(sheet.className).toContain("sm:w-[65vw]");
+    expect(sheet.className).toContain("h-[65vh]");
+    expect(document.querySelector('[data-sheet="history"]')).toBeNull();
     expect([...sheet.querySelectorAll("[data-thread-title]")].map((t) => t.textContent)).toEqual(["$50k, 90-day lock-in, US credit", "Older question"]);
     expect(sheet.querySelector(`[data-thread="${saved[0].id}"]`)!.getAttribute("aria-current")).toBe("true");
     expect(sheet.querySelector("[data-thread-date]")!.textContent).not.toBe("");
@@ -394,7 +399,7 @@ describe("past conversations", () => {
     expect(listThreads("u1")).toHaveLength(2);
     // Picking the older thread restores its messages, to carry on from.
     await act(async () => void fireEvent.click(historyButton()));
-    await act(async () => void fireEvent.click(document.querySelector('[data-sheet="history"] [data-thread="old"]')!));
+    await act(async () => void fireEvent.click(document.querySelector('[data-dialog="history"] [data-thread="old"]')!));
     expect(document.body.textContent).toContain("About Older question.");
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
     // Restoring alone doesn't move it up the list.
