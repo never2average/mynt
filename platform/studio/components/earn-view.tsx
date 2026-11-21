@@ -4,8 +4,10 @@
 // by role, each ONE toolbar row (search, filters, Export CSV, the tab's CTA; the filters and Export
 // fold into a Filters menu when the panel is narrow) and ONE table filling the panel, paged 25 rows
 // at a time (components/list-layout.tsx PanelList):
-// - My pools (builders): their products' pools, each one's state, terms, latest verified
-//   health and withdrawal queue; "Propose pool" on a sponsored component of their firm's product.
+// - My pools (builders): their products' pools, each one's state, capital (principal, settled in,
+//   settling in, queued for withdrawal, paid out: Not measured, with why, when Mynt couldn't tell),
+//   terms, latest verified health and withdrawal queue; "Propose pool" on a sponsored component of
+//   their firm's product.
 // (Pools, every pool open to the user with "Commit capital", and My strategies are cards, in
 // components/earn-assistant.tsx.)
 // - My positions (liquidity providers): committed, settled, queued, paid and available per
@@ -19,7 +21,7 @@ import { newIdempotencyKey } from "@/lib/idempotency"
 
 import { FilterSelect } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL } from "@/components/list-layout"
+import { MID_COL, PanelList, useFitRows, usePaged, WIDE_COL, WIDEST_COL } from "@/components/list-layout"
 import { StatusDot, type DotTone } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -30,8 +32,12 @@ import { portfolioOf } from "@/lib/investor"
 import { shortAddress } from "@/lib/linked-accounts"
 import { usdcText } from "@/lib/wallets"
 import {
+  CAPITAL_COLUMNS,
+  capitalCell,
   commitRefusal,
   filterPools,
+  type CapitalCell,
+  type CapitalFigure,
   healthText,
   limitsText,
   NO_POOL_FILTERS,
@@ -250,6 +256,11 @@ export function ProposeForm({ options, actions, onDone, initial }: { options: Sp
   )
 }
 
+// My pools' capital columns: principal from a 32rem panel, the queue from 42rem, the rest from 64rem.
+const CAPITAL_COL: Record<CapitalFigure, string> = { principal: MID_COL, queued: WIDE_COL, settledIn: WIDEST_COL, pendingIn: WIDEST_COL, paidOut: WIDEST_COL }
+// In Export CSV, a figure Mynt didn't measure says so and why.
+const capitalText = (c: CapitalCell) => (c.why && c.text === "Not measured" ? `Not measured (${c.why})` : c.text)
+
 function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setForm }: { pools: PoolRow[]; proposable: Sponsored[] | null; withdrawalsShown: boolean; actions: LiquidityActions; form: OpenForm; setForm: (f: OpenForm) => void }) {
   const [f, setF] = useState<PoolFilters>(NO_POOL_FILTERS)
   const [done, setDone] = useState<string | null>(null)
@@ -266,8 +277,8 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
     downloadCsv(
       "my-pools.csv",
       toCsv(
-        ["Pool", "Product", "Component", "State", "Status", "Rails", "Minimum reserve", "Notice", "Commitment limits", "Latest health", "Withdrawal queue"],
-        shown.map((p) => [p.name, p.productName ?? p.productId, p.componentKey, STAGE_LABELS[stageOf(p)], statusText(p), railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet", reserveText(p), noticeText(p.noticePeriodDays), limitsText(p), healthText(p.health), queue(p)]),
+        ["Pool", "Product", "Component", "State", "Status", "Rails", ...CAPITAL_COLUMNS.map((c) => c.label), "Minimum reserve", "Notice", "Commitment limits", "Latest health", "Withdrawal queue"],
+        shown.map((p) => [p.name, p.productName ?? p.productId, p.componentKey, STAGE_LABELS[stageOf(p)], statusText(p), railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet", ...CAPITAL_COLUMNS.map((c) => capitalText(capitalCell(p, c.key))), reserveText(p), noticeText(p.noticePeriodDays), limitsText(p), healthText(p.health), queue(p)]),
       ),
     )
 
@@ -306,6 +317,11 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
               <TableHead className={MID_COL}>State</TableHead>
               <TableHead className={WIDE_COL}>Status</TableHead>
               <TableHead className={WIDE_COL}>Rails</TableHead>
+              {CAPITAL_COLUMNS.map((c) => (
+                <TableHead key={c.key} className={`${CAPITAL_COL[c.key]} text-right`}>
+                  {c.label}
+                </TableHead>
+              ))}
               <TableHead className={WIDE_COL}>Minimum reserve</TableHead>
               <TableHead className={WIDE_COL}>Notice</TableHead>
               <TableHead className={WIDE_COL}>Commitment limits</TableHead>
@@ -328,6 +344,14 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
                     <OneLine text={statusText(p)} />
                   </TableCell>
                   <TableCell className={WIDE_COL}>{railsApproved(p) ? "Deposit and withdrawal rails approved" : "None yet"}</TableCell>
+                  {CAPITAL_COLUMNS.map((c) => {
+                    const cell = capitalCell(p, c.key)
+                    return (
+                      <TableCell key={c.key} className={`${CAPITAL_COL[c.key]} text-right tabular-nums`} data-capital={c.key} title={cell.why ?? undefined}>
+                        <OneLine text={cell.text} />
+                      </TableCell>
+                    )
+                  })}
                   <TableCell className={WIDE_COL}>
                     <OneLine text={reserveText(p)} />
                   </TableCell>
@@ -343,7 +367,7 @@ function BuilderPools({ pools, proposable, withdrawalsShown, actions, form, setF
                 </TableRow>
               ))
             ) : (
-              <EmptyRow cols={9}>{pools.length ? "No pools match these filters." : "No pools yet. Propose one on a sponsored component of your product."}</EmptyRow>
+              <EmptyRow cols={9 + CAPITAL_COLUMNS.length}>{pools.length ? "No pools match these filters." : "No pools yet. Propose one on a sponsored component of your product."}</EmptyRow>
             )}
           </TableBody>
         </Table>

@@ -7,7 +7,7 @@ import { US_STATES } from "./money-rails.js";
 import type { ProductHealthService } from "./product-health.js";
 import { effectiveRoles, type Store, type User } from "./store.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
-import type { TreasuryService } from "./treasury.js";
+import { units, type TreasuryService } from "./treasury.js";
 import { treasuryStanding } from "./treasury-tools.js";
 
 // The tools of liquidity pools. See liquidity.ts for what a pool is and why money only ever moves on an approved rail.
@@ -38,6 +38,73 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
     if (!treasury) return rows;
     const views = await treasury.views(rows.map((r) => (r.id ?? r.pool_id)!));
     return rows.map((r) => (views.has((r.id ?? r.pool_id)!) ? { ...r, treasury: views.get((r.id ?? r.pool_id)!) } : r));
+  };
+  // How much capital each pool holds, as totals over every firm and wallet in it: only for pools the caller may see
+  // the whole of (`shown`: its product's builder, its sponsor or an admin); any other pool carries capital: null with
+  // why, never another firm's figures. Rails figures come from the movement ledger (pool_positions, settled only, and
+  // the open queue), in cents; an on-chain treasury's from its pool account (total_principal) and what the indexer
+  // read, in USDC base units. Anything that can't be measured is null with its reason in not_measured, never 0.
+  const withCapital = async <R extends { id: string; treasury?: ReturnType<TreasuryService["view"]> }>(rows: R[], shown: Set<string>) => {
+    const ids = rows.map((r) => r.id).filter((id) => shown.has(id));
+    const rails = new Map<string, Record<string, number>>();
+    if (ids.length) {
+      const { rows: sums } = await store.db.query(
+        `SELECT pool_id, COALESCE(sum(contributed_cents), 0)::bigint AS settled_in, COALESCE(sum(withdrawn_cents), 0)::bigint AS paid_out,
+           COALESCE(sum(pending_in_cents), 0)::bigint AS pending_in, COALESCE(sum(pending_out_cents), 0)::bigint AS pending_out,
+           COALESCE(sum(unresolved_in_cents + unresolved_out_cents), 0)::bigint AS unresolved,
+           count(*) FILTER (WHERE contributed_cents - withdrawn_cents > 0)::int AS firms
+         FROM ${T}.pool_positions WHERE pool_id = ANY($1::uuid[]) GROUP BY pool_id`,
+        [ids],
+      );
+      const { rows: queues } = await store.db.query(
+        `SELECT w.pool_id, COALESCE(sum(w.amount_cents - COALESCE((SELECT sum(m.amount_cents) FROM ${T}.pool_movement_states m WHERE m.withdrawal_id = w.id AND m.ledger_state <> 'released'), 0)), 0)::bigint AS queued
+         FROM ${T}.pool_withdrawals w WHERE w.pool_id = ANY($1::uuid[]) AND w.status IN ('queued', 'parked') GROUP BY w.pool_id`,
+        [ids],
+      );
+      for (const id of ids) {
+        const s = sums.find((x) => x.pool_id === id);
+        const n = (k: string) => Number(s?.[k] ?? 0);
+        rails.set(id, {
+          principal_cents: n("settled_in") - n("paid_out"),
+          settled_in_cents: n("settled_in"),
+          pending_in_cents: n("pending_in"),
+          queued_withdrawal_cents: Number(queues.find((x) => x.pool_id === id)?.queued ?? 0),
+          pending_out_cents: n("pending_out"),
+          paid_out_cents: n("paid_out"),
+          unresolved_cents: n("unresolved"),
+          firms_with_balance: n("firms"),
+        });
+      }
+    }
+    const indexed = treasury && ids.length ? await treasury.indexedTotals(ids) : null;
+    const notIndexed = "The indexer hasn't read this treasury's history yet";
+    return rows.map((r) => {
+      if (!shown.has(r.id)) return { ...r, capital: null, capital_not_shown: "Only the pool's builder, its sponsor or an admin sees its totals" };
+      const t = r.treasury;
+      let onChain: Record<string, unknown> | null = null;
+      if (t) {
+        const ix = indexed?.get(r.id);
+        const caughtUp = Boolean(ix && ix.indexed_at !== null);
+        const terms = t.on_chain_terms;
+        const notMeasured: Record<string, string> = {};
+        if (!terms) notMeasured.principal = `The pool account couldn't be read${t.on_chain_error ? `: ${t.on_chain_error}` : ""}`;
+        if (!caughtUp) for (const k of ["deposited", "indexed_principal", "queued", "paid_out"]) notMeasured[k] = notIndexed;
+        const u = (v: bigint | null | undefined) => (v == null ? null : units(v));
+        onChain = {
+          unit: "usdc_base_units",
+          cluster: t.cluster,
+          principal: terms ? terms.total_principal : null, // the pool account's total_principal, read at principal_as_of
+          principal_as_of: terms ? terms.as_of : null,
+          deposited: caughtUp ? u(ix!.deposited) : null,
+          indexed_principal: caughtUp ? u(ix!.principal) : null,
+          queued: caughtUp ? u(ix!.queued) : null,
+          paid_out: caughtUp ? u(ix!.paid) : null,
+          indexed_at: ix?.indexed_at ?? null,
+          not_measured: notMeasured,
+        };
+      }
+      return { ...r, capital: { rails: rails.get(r.id) ?? null, on_chain: onChain } };
+    });
   };
   const now = () => (health ? health.clock() : new Date());
   const healthAgeMs = () => liquidityConfigFromEnv(process.env, health?.config.intervalMs ?? 3_600_000).maxHealthAgeMs;
@@ -436,9 +503,10 @@ export function registerLiquidityTools(server: McpServer, store: Store, user: Us
         const firm = await myFirm();
         const committed = firm ? await committedPools(firm) : new Set<string>();
         const owned = roles.builder && firm ? new Set((await productsAnsweredBy(store, await me())).filter((p) => p.entity_id === firm).map((p) => p.product.id)) : new Set<string>();
-        const pools = rows.map(toPool).filter((p) => roles.admin || (roles.builder && owned.has(p.product_id)) || (roles.licenceProvider && p.sponsor_entity_id === firm) || (roles.liquidityProvider && canSee(p, committed)));
+        const ownsPool = (p: Pool) => roles.admin || (roles.builder && owned.has(p.product_id)) || (roles.licenceProvider && p.sponsor_entity_id === firm);
+        const pools = rows.map(toPool).filter((p) => ownsPool(p) || (roles.liquidityProvider && canSee(p, committed)));
         await audit("list_pools", product_id ?? "all", { returned: pools.length });
-        return json(await withTreasury(pools));
+        return json(await withCapital(await withTreasury(pools), new Set(pools.filter(ownsPool).map((p) => p.id))));
       },
     );
 

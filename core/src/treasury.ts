@@ -638,6 +638,41 @@ export class TreasuryService {
     return out;
   }
 
+  // What the indexer has read into each registered pool, summed over every wallet (totals only, for the pool's
+  // builder, sponsor or an admin): USDC base units. Null for a pool the indexer hasn't caught up on yet, since
+  // its tables would undercount. Pools with no treasury aren't in the map.
+  async indexedTotals(poolIds: string[]) {
+    const out = new Map<string, { cluster: Cluster; indexed_at: string | null; deposited: bigint | null; principal: bigint | null; queued: bigint | null; paid: bigint | null }>();
+    if (!poolIds.length) return out;
+    const { rows } = await this.db.query(`SELECT pool_id, cluster, pool_address, indexed_at FROM ${T}.treasury_pools WHERE pool_id = ANY($1::uuid[])`, [poolIds]);
+    if (!rows.length) return out;
+    const addresses = rows.map((r) => r.pool_address as string);
+    const { rows: ds } = await this.db.query(
+      `SELECT pool_address, COALESCE(sum(amount) FILTER (WHERE NOT rejected), 0)::text AS deposited, COALESCE(sum(remaining) FILTER (WHERE NOT rejected), 0)::text AS principal
+       FROM ${T}.treasury_deposits WHERE pool_address = ANY($1::text[]) GROUP BY pool_address`,
+      [addresses],
+    );
+    const { rows: rs } = await this.db.query(
+      `SELECT pool_address, COALESCE(sum(paid), 0)::text AS paid, COALESCE(sum(remaining) FILTER (WHERE status IN ('open', 'parked')), 0)::text AS queued
+       FROM ${T}.treasury_requests WHERE pool_address = ANY($1::text[]) GROUP BY pool_address`,
+      [addresses],
+    );
+    for (const r of rows as Row[]) {
+      const indexed = r.indexed_at != null;
+      const d = ds.find((x) => x.pool_address === r.pool_address);
+      const q = rs.find((x) => x.pool_address === r.pool_address);
+      out.set(r.pool_id as string, {
+        cluster: r.cluster as Cluster,
+        indexed_at: indexed ? new Date(r.indexed_at as string).toISOString() : null,
+        deposited: indexed ? big(d?.deposited) : null,
+        principal: indexed ? big(d?.principal) : null,
+        queued: indexed ? big(q?.queued) : null,
+        paid: indexed ? big(q?.paid) : null,
+      });
+    }
+    return out;
+  }
+
   // ---- what a liquidity provider prepares ----
 
   private linked(s: Standing, wallet: string) {
