@@ -2,15 +2,18 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarView } from "@/components/app-sidebar";
 import { PoolsTab } from "@/components/earn-assistant";
-import { CommitForm, commitOutcome, EarnTable, positionFigures, ProposeForm, requestRows, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
+import { CommitForm, commitOutcome, EarnTable, poolFacets, positionFigures, ProposeForm, requestRows, WithdrawForm, withdrawalOutcome, type LiquidityActions } from "@/components/earn-view";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   accessFrom,
   commitRefusal,
+  earnTabFromLiquidity,
   earnTabFromQuery,
+  filterPools,
   fromPools,
   fromPoolsWithHealth,
+  NO_POOL_FILTERS,
   fromPositions,
   fromProductHealth,
   fromSponsorships,
@@ -18,6 +21,7 @@ import {
   healthFor,
   pageOf,
   poolsShowAllFromQuery,
+  poolsViewFromQuery,
   parseUsd,
   proposalFrom,
   STAGE_LABELS,
@@ -29,6 +33,7 @@ import {
   withdrawalRefusal,
   type LiquidityData,
   type PoolRow,
+  type PoolsView,
 } from "@/lib/liquidity";
 import { pageTitle } from "@/lib/studio-search";
 import { groupByStage } from "@/lib/workspaces";
@@ -75,29 +80,29 @@ const data = (over: Partial<LiquidityData> & { access: LiquidityData["access"] }
   ...over,
 });
 // One of Earn's tabs: Pools (cards, every pool open to the user, with Commit capital; it took in
-// Opportunities), or the table tabs My positions and My pools.
-const view = (d: LiquidityData, tab?: "pools" | "my-positions" | "my-pools", form: Parameters<typeof EarnTable>[0]["initialForm"] = null) => {
+// Opportunities and My positions), or the table tab My pools.
+const view = (d: LiquidityData, tab?: "pools" | "my-pools", form: Parameters<typeof EarnTable>[0]["initialForm"] = null, initialView: PoolsView | null = null) => {
   const t = tab ?? (d.access.liquidityProvider ? "pools" : "my-pools");
-  return renderToStaticMarkup(t === "pools" ? <PoolsTab data={d} poolIds={null} actions={noActions} initialForm={form} /> : <EarnTable data={d} actions={noActions} tab={t} initialForm={form} />);
+  return renderToStaticMarkup(t === "pools" ? <PoolsTab data={d} poolIds={null} actions={noActions} initialForm={form} initialView={initialView} /> : <EarnTable data={d} actions={noActions} tab={t} initialForm={form} />);
 };
 
 describe("Earn by role", () => {
-  it("everyone with a liquidity role gets Pools and My strategies; builders (developer or innovator) My pools; liquidity providers My positions", () => {
+  it("everyone with a liquidity role gets Pools and My strategies; builders (developer or innovator) My pools; three tabs at most", () => {
     expect(accessFrom(["developer", "consumer", "innovator"])).toEqual({ builder: true, liquidityProvider: false });
     expect(accessFrom(["liquidity_provider"])).toEqual({ builder: false, liquidityProvider: true });
     expect(tabsFor(accessFrom(["innovator"]))).toEqual(["pools", "my-pools", "my-strategies"]);
-    expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["pools", "my-positions", "my-strategies"]);
-    expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["pools", "my-positions", "my-pools", "my-strategies"]);
+    expect(tabsFor(accessFrom(["liquidity_provider"]))).toEqual(["pools", "my-strategies"]);
+    expect(tabsFor(accessFrom(["developer", "liquidity_provider"]))).toEqual(["pools", "my-pools", "my-strategies"]);
     expect(tabsFor(accessFrom(["consumer"]))).toEqual([]);
-    expect(view(data({ access: { builder: false, liquidityProvider: true } }), "my-positions")).toContain('data-tab-panel="my-positions"');
+    expect(view(data({ access: { builder: false, liquidityProvider: true } }), "pools")).toContain('data-tab-panel="pools"');
   });
 
-  it("maps ?tab= (and /liquidity's, the old Opportunities', Drafts' and Assistant's tabs) to the right-hand tab", () => {
+  it("maps ?tab= (and /liquidity's, the old Opportunities', My positions', Drafts' and Assistant's tabs) to the right-hand tab", () => {
     expect(["pools", "opportunities", "open-pools", "my-positions", "my-pools", "drafts", "my-strategies", "assistant", "nope", undefined].map(earnTabFromQuery)).toEqual([
       "pools",
       "pools",
       "pools",
-      "my-positions",
+      "pools",
       "my-pools",
       "my-strategies",
       "my-strategies",
@@ -108,6 +113,10 @@ describe("Earn by role", () => {
     // The old Opportunities is Pools showing all pools, opened at once.
     expect(["opportunities", "open-pools", "pools", "drafts", undefined].map(poolsShowAllFromQuery)).toEqual([true, true, false, false, false]);
     expect(["opportunities", "drafts", "my-strategies", "pools", "assistant", undefined].map(tabOpensPanel)).toEqual([true, true, true, false, false, false]);
+    // The old My positions (and its aliases) is Pools' Invested view, opened at once.
+    expect(["my-positions", "positions", "invested", "opportunities", "open-pools", "pools", "my-pools", undefined].map(poolsViewFromQuery)).toEqual(["invested", "invested", "invested", "all", "all", null, null, null]);
+    expect(tabOpensPanel("my-positions")).toBe(true);
+    expect(earnTabFromLiquidity("my-positions")).toBe("my-positions");
   });
 
   it("the header's wallet control links to /earn by role (test/wallet-control.test.tsx renders it)", () => {
@@ -352,15 +361,22 @@ describe("committing capital", () => {
 });
 
 describe("withdrawals", () => {
-  it("shows committed, settled, queued and paid per position, and the firm's queue", () => {
+  it("shows settled, queued and paid on the pool's card, and its waiting withdrawal requests", () => {
     expect(POSITION).toMatchObject({ committedCents: 550_000, settledCents: 400_000, queuedCents: 100_000, paidCents: 100_000, availableCents: 300_000, state: "us-ny" });
     const d = data({ access: { builder: false, liquidityProvider: true } });
-    d.provider!.withdrawals = fromWithdrawals([{ id: "w-1", seq: 3, pool_id: CLEARED.id, pool_name: "Card float", amount_cents: 100_000, status: "queued", eligible_at: "2026-12-14T00:00:00Z", settled_cents: 0, waiting_reason: "Waiting out the notice period until 2026-12-14T00:00:00.000Z", sandbox: false }]);
-    const html = view(d, "my-positions");
-    for (const amount of ["$5,500.00", "$4,000.00", "$1,000.00", "$3,000.00"]) expect(html).toContain(amount);
-    // The queue is the same table's Show · Withdrawal requests (it was a section under the table).
-    expect(html).toMatch(/data-filter="Show"[^>]*>Show<span[^>]*>· Positions/);
-    expect(requestRows(d.provider!.withdrawals, d.provider!.positions)).toEqual([
+    d.provider!.withdrawals = fromWithdrawals([
+      { id: "w-1", seq: 3, pool_id: CLEARED.id, pool_name: "Card float", amount_cents: 100_000, status: "queued", eligible_at: "2026-12-14T00:00:00Z", settled_cents: 0, waiting_reason: "Waiting out the notice period until 2026-12-14T00:00:00.000Z", sandbox: false },
+      { id: "w-2", seq: 4, pool_id: CLEARED.id, pool_name: "Card float", amount_cents: 50_000, status: "parked", eligible_at: null, settled_cents: 0, waiting_reason: "Below reserve", sandbox: false },
+      { id: "w-3", seq: 1, pool_id: CLEARED.id, pool_name: "Card float", amount_cents: 50_000, status: "paid", eligible_at: null, settled_cents: 50_000, waiting_reason: null, sandbox: false },
+    ]);
+    const html = view(d, "pools", null, "invested");
+    const card = html.slice(html.indexOf(`data-pool-card="${CLEARED.id}"`));
+    expect(card).toMatch(/data-your-position="true">\$4,000\.00</);
+    expect(card).toMatch(/data-your-queued="true">\$1,000\.00</);
+    expect(card).toMatch(/data-your-paid="true">\$1,000\.00</);
+    // Pending and parked requests show on the card (a paid one doesn't wait any more).
+    expect(card).toMatch(/data-waiting-requests="true">2 withdrawal requests: 1 queued, 1 parked</);
+    expect(requestRows([d.provider!.withdrawals[0]], d.provider!.positions)).toEqual([
       { key: "w-1", pool: "Card float", sandbox: false, onChain: false, wallet: null, place: "#3", asked: "$1,000.00", paid: "$0.00", status: "queued", payableFrom: "2026-12-14", why: "Waiting out the notice period until 2026-12-14T00:00:00.000Z" },
     ]);
   });
@@ -383,23 +399,33 @@ describe("the tables' layout (the dashboard's)", () => {
   const order = (html: string, marks: string[]) => marks.map((m) => html.indexOf(m));
   const inOrder = (at: number[]) => at.every((i) => i >= 0) && at.every((i, n) => n === 0 || at[n - 1] < i);
 
-  it("each tab has one toolbar row: search, filter buttons, Export CSV, then its CTA; no native select filters", () => {
+  it("each tab has one toolbar row: search, the view switch, one Filters button, Export CSV, then its CTA; no native select filters", () => {
     const lp = data({ access: { builder: false, liquidityProvider: true } });
     const opp = view(lp, "pools");
-    expect(inOrder(order(opp, ['aria-label="Search pools"', 'data-filter="Product line"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="commit"']))).toBe(true);
+    expect(inOrder(order(opp, ['aria-label="Search pools"', "data-view-switch", "data-filters-menu-button", "data-export", 'data-cta="commit"']))).toBe(true);
     expect(opp).not.toContain("<select");
+    expect(opp).not.toContain("data-filter=");
     expect(opp).toContain("data-list-layout");
     expect(opp).not.toContain('data-slot="card"');
-    const pos = view(lp, "my-positions");
-    expect(inOrder(order(pos, ['aria-label="Search positions"', 'data-filter="Money"', "data-export", 'data-cta="withdraw"']))).toBe(true);
     const pools = view(data({ access: { builder: true, liquidityProvider: false } }), "my-pools");
-    expect(inOrder(order(pools, ['aria-label="Search pools"', 'data-filter="State"', 'data-filter="Money"', "data-export", 'data-cta="propose"']))).toBe(true);
-    expect(pools).not.toContain('data-filter="Product line"');
-    for (const html of [pos, pools]) {
-      expect(html).toContain("data-list-layout");
-      expect(html).toContain("sticky top-0 bg-card");
-      expect(html).not.toContain('data-slot="card"');
-    }
+    expect(inOrder(order(pools, ['aria-label="Search pools"', "data-filters-menu-button", "data-export", 'data-cta="propose"']))).toBe(true);
+    expect(pools).not.toContain("data-view-switch");
+    expect(pools).toContain("data-list-layout");
+    expect(pools).toContain("sticky top-0 bg-card");
+    expect(pools).not.toContain('data-slot="card"');
+    // Pools' facets are Product line, State and Money; My pools' leave out Product line.
+    const set = () => undefined;
+    expect(poolFacets(NO_POOL_FILTERS, set, [CLEARED], ["cleared"], true).map((f) => f.label)).toEqual(["Product line", "State", "Money"]);
+    expect(poolFacets(NO_POOL_FILTERS, set, [CLEARED], ["cleared"], false).map((f) => f.label)).toEqual(["State", "Money"]);
+  });
+
+  it("filters pools by any of a facet's choices, and by every facet with one picked", () => {
+    const all = [CLEARED, UNCLEARED, SANDBOX, PROPOSED];
+    const names = (f: Partial<typeof NO_POOL_FILTERS>) => filterPools(all, { ...NO_POOL_FILTERS, ...f }).map((p) => p.name);
+    expect(names({})).toEqual(["Card float", "Uncleared", "Test pool", "New pool"]);
+    expect(names({ stage: ["cleared", "sandbox"] })).toEqual(["Card float", "Test pool"]);
+    expect(names({ stage: ["cleared", "sandbox"], money: ["real"] })).toEqual(["Card float"]);
+    expect(names({ money: ["real", "sandbox"] })).toHaveLength(4);
   });
 
   it("pages with the list pager: 25 rows of a table, and six cards before the panel is measured", () => {
@@ -415,20 +441,19 @@ describe("the tables' layout (the dashboard's)", () => {
     expect(cards).toContain("30 pools · Page 1 of 5");
   });
 
-  it("My positions is one table: no key figures or sections; each position's amounts are its columns", () => {
-    const html = view(data({ access: { builder: false, liquidityProvider: true } }), "my-positions");
+  it("a position's amounts are on its pool's card: no key figures, sections or tables; an amount Mynt didn't give is Not measured", () => {
+    const html = view(data({ access: { builder: false, liquidityProvider: true } }), "pools");
     expect(html).not.toContain("data-kpi");
     expect(html).not.toContain("<h2");
-    expect([...html.matchAll(/<table/g)]).toHaveLength(1);
+    expect(html).not.toContain("<table");
     expect(positionFigures(POSITION)).toEqual({ committed: 550_000, settled: 400_000, queued: 100_000, paid: 100_000, available: 300_000 });
-    // An on-chain deposit Mynt gave no amount for: Not measured in its row, never 0.
+    // An on-chain deposit Mynt gave no amount for: Not measured on the card, never 0.
     const unmeasured = fromPositions([{ source: "on-chain", pool_id: CLEARED.id, name: "Chain", product_id: "p", wallet: "W", deposits: [{ deposit: "D1" }], requests: [] }]);
     expect(positionFigures(unmeasured[0])).toMatchObject({ committed: null, settled: null });
     const d = data({ access: { builder: false, liquidityProvider: true } });
     d.provider!.positions = unmeasured;
-    const chain = view(d, "my-positions");
-    expect(chain).toMatch(/data-committed="true">Not measured</);
-    expect(chain).toMatch(/data-settled="true">Not measured</);
+    const chain = view(d, "pools");
+    expect(chain).toMatch(/data-your-position="true">Not measured</);
   });
 });
 

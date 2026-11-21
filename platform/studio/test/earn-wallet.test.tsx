@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import bs58 from "bs58";
 import type { Wallet } from "@wallet-standard/base";
 import { PoolsTab, StrategiesTab } from "@/components/earn-assistant";
-import { EarnTable, type LiquidityActions } from "@/components/earn-view";
+import type { LiquidityActions } from "@/components/earn-view";
 import { EARN_DISCLOSURE, EARN_DISCLOSURE_DETAILS, EarnDisclosure, EarnWalletProvider, OnChainAction, WalletPicker, type EarnWalletState, type PrepareInput, type TreasuryActions } from "@/components/earn-wallet";
 import { depositFor, earnContext, validateDraft, type Draft } from "@/lib/earn";
 import { fromPools, fromPositions, type LiquidityData } from "@/lib/liquidity";
@@ -518,17 +518,19 @@ describe("a prepared transaction older than its blockhash", () => {
   });
 });
 
-describe("My positions on-chain", () => {
-  it("lists each deposit with amount, remaining, queued, unlock date and standing, and the requests", async () => {
+describe("an on-chain position, from its pool's card on Pools", () => {
+  it("Withdraw lists each deposit with amount, remaining, queued, unlock date and standing, and the requests", async () => {
     render(
       <EarnWalletProvider value={state()}>
-        <EarnTable tab="my-positions" data={data} actions={rails} />
+        <PoolsTab data={data} poolIds={null} actions={rails} />
       </EarnWalletProvider>,
     );
-    // One row per wallet in the positions table; its deposits open in a sheet from the row.
-    const row = document.querySelector(`[data-on-chain-row="${POOL}|${SOL}"]`)!;
-    expect(row.querySelector("[data-devnet]")).toBeTruthy();
-    await click(row.querySelector("[data-open-deposits]")!);
+    // The pool's card shows the position; its deposits open in a sheet from the card's Withdraw.
+    const card = document.querySelector(`[data-pool-card="${POOL}"]`)!;
+    expect(card.querySelector("[data-devnet]")).toBeTruthy();
+    expect(card.getAttribute("data-invested")).toBe("true");
+    await click(card.querySelector(`[data-card-withdraw="${POOL}"]`)!);
+    expect(document.querySelector('[data-sheet="on-chain-deposits"]')).toBeTruthy();
     const section = document.querySelector("[data-on-chain-positions]")!;
     expect(section.querySelector("[data-devnet]")).toBeTruthy();
     expect(section.querySelector("[data-unverified-build]")).toBeTruthy();
@@ -546,18 +548,34 @@ describe("My positions on-chain", () => {
     expect(request.querySelector("[data-status]")!.textContent).toBe("open");
     // The wallet's totals are figures, not a sentence.
     expect([...section.querySelectorAll("[data-wallet-figures] [data-figure]")].map((f) => f.getAttribute("data-figure"))).toEqual(["held", "queued", "available"]);
-    // Not in the rails table.
-    expect(document.querySelector(`[data-position="${POOL}"]`)).toBeNull();
+    // No rails position here.
+    expect(document.querySelector("[data-rails-position]")).toBeNull();
+  });
+
+  it("Details shows the wallet's deposits and requests too", async () => {
+    render(
+      <EarnWalletProvider value={state()}>
+        <PoolsTab data={data} poolIds={null} actions={rails} />
+      </EarnWalletProvider>,
+    );
+    await click(document.querySelector(`[data-card-details="${POOL}"]`)!);
+    const sheet = document.querySelector('[data-sheet="position-details"]')!;
+    expect(sheet.querySelector(`[data-chain-position="${POOL}|${SOL}"] [data-deposit="${DEP1}"]`)).toBeTruthy();
+    expect(sheet.querySelector("[data-on-chain-requests] [data-on-chain-request]")).toBeTruthy();
+    expect(sheet.querySelector("[data-rails-position]")).toBeNull();
+    // A deposit's Withdraw turns the sheet into that deposit's withdrawal.
+    await click(sheet.querySelector(`[data-withdraw-deposit="${DEP1}"]`)!);
+    expect(document.querySelector(`[data-sheet="on-chain-withdraw"] [data-withdraw-form="${DEP1}"]`)).toBeTruthy();
   });
 
   it("Withdraw on a deposit prepares a withdrawal from that deposit, for what's available by default", async () => {
     const s = state({ browserWallets: () => [fakeWallet(SOL).wallet] });
     render(
       <EarnWalletProvider value={s}>
-        <EarnTable tab="my-positions" data={data} actions={rails} />
+        <PoolsTab data={data} poolIds={null} actions={rails} />
       </EarnWalletProvider>,
     );
-    await click(document.querySelector("[data-open-deposits]")!);
+    await click(document.querySelector(`[data-card-withdraw="${POOL}"]`)!);
     await click(document.querySelector(`[data-withdraw-deposit="${DEP1}"]`)!);
     // It opens in a sheet, not inline under the deposit.
     const form = document.querySelector(`[data-sheet="on-chain-withdraw"] [data-withdraw-form="${DEP1}"]`)!;
