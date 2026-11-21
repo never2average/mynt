@@ -198,6 +198,12 @@ describe("the investor view", () => {
     );
     expect(html).not.toContain('data-slot="card"');
     for (const s of ["portfolio", "capital-in", "paid-out", "financial-activity"]) expect(html).toContain(`data-section="${s}"`);
+    // Capital in and Paid out are two panels, side by side on wide screens.
+    const pair = html.match(/<div[^>]*data-chart-pair[^>]*>/)![0];
+    expect(pair).toContain("@4xl/main:grid-cols-2");
+    expect(html.indexOf('data-row="money"')).toBeGreaterThan(-1);
+    expect(html.indexOf('data-row="paid-out"')).toBeGreaterThan(html.indexOf('data-row="money"'));
+    expect(html.indexOf('data-row="money"')).toBeGreaterThan(html.indexOf("data-chart-pair"));
     // Gone, as on the builder view: allocation, unlocks, pool health, positions, coming up, wallets, the combined chart.
     for (const s of ["allocation", "unlocks", "pool-health", "positions", "coming-up", "wallets", "pnl-chart"]) expect(html).not.toContain(`data-section="${s}"`);
     // In order: key figures, the toolbar, Capital in, Paid out below it, then activity.
