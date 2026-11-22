@@ -38,6 +38,8 @@ export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
 export type Capabilities = {
   /** start_build takes mode "session" and continue_from, and finish_build exists (session builds). */
   sessionBuilds: boolean;
+  /** start_build takes kind (an app kind from list_app_kinds). */
+  appKinds?: boolean;
   /** get_build_activity takes text_deltas: the agent's words as it writes them. */
   textDeltas?: boolean;
   /** get_build_activity takes reasoning: the agent's thinking, scrubbed by Mynt as its words are. */
@@ -49,7 +51,7 @@ export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[
   const props = isObj(start?.inputSchema) && isObj(start.inputSchema.properties) ? start.inputSchema.properties : {};
   const activity = tools.find((t) => t.name === "get_build_activity");
   const activityProps = isObj(activity?.inputSchema) && isObj(activity.inputSchema.properties) ? activity.inputSchema.properties : {};
-  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}) };
+  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}), ...("kind" in props && tools.some((t) => t.name === "list_app_kinds") ? { appKinds: true } : {}) };
 }
 
 export type ChatAction =

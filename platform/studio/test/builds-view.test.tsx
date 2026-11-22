@@ -124,3 +124,112 @@ describe("the Builds page", () => {
     expect(page).not.toMatch(/Loading builds/);
   });
 });
+
+const { metricsFrom, costOfCap, totalTime, durationText, phaseElapsed } = await import("@/lib/build-metrics");
+const { BuildMeter } = await import("@/components/build-meter");
+const { buildAveragesOf } = await import("@/lib/dashboard");
+const { buildAverageKpis } = await import("@/lib/dashboard-visual");
+const { KpiRow } = await import("@/components/charts");
+
+describe("each build's cost and time", () => {
+  // As get_build / list_builds report them.
+  const finished = metricsFrom({
+    cost_cents: 310,
+    cap_cents: 2000,
+    durations_seconds: { queued: 5, coding: 600, verify: 120, total: 725 },
+    timing: { queued_at: "2026-11-12T10:00:00Z", started_at: "2026-11-12T10:00:05Z", coding_started_at: "2026-11-12T10:00:30Z", verify_started_at: "2026-11-12T10:10:30Z", finished_at: "2026-11-12T10:12:05Z" },
+    measured_at: "2026-11-12T11:00:00Z",
+    not_measured: {},
+  });
+  const running = metricsFrom({
+    cost_cents: 125,
+    cap_cents: 1000,
+    durations_seconds: { queued: 5, coding: 60, verify: null, total: 90 },
+    timing: { queued_at: "2026-11-12T10:00:00Z", started_at: "2026-11-12T10:00:05Z", coding_started_at: "2026-11-12T10:00:30Z", verify_started_at: null, finished_at: null },
+    measured_at: "2026-11-12T10:01:30Z",
+    not_measured: { "durations_seconds.verify": "Verification hasn't started" },
+  });
+  const unmeasured = metricsFrom({
+    cost_cents: null,
+    cap_cents: 1000,
+    durations_seconds: { total: null },
+    not_measured: { cost_cents: "Mynt didn't measure this build's cost before it ended", "durations_seconds.total": "Not recorded for this build" },
+  });
+
+  it("shows cost of cap and total time; a running build's time counts on from Mynt's measurement", () => {
+    expect(costOfCap(finished).text).toBe("$3.10 of $20.00");
+    expect(totalTime(finished, "succeeded", Date.parse("2026-11-20T00:00:00Z")).text).toBe("12m 05s");
+    const at = Date.parse("2026-11-12T10:01:30Z");
+    expect(totalTime(running, "coding", at).text).toBe("1m 30s");
+    expect(totalTime(running, "coding", at + 45_000).text).toBe("2m 15s");
+    expect(phaseElapsed(running, "coding", at + 45_000)).toBe(105);
+    expect(durationText(3725)).toBe("1h 02m");
+  });
+
+  it("never shows an unmeasured figure as 0: Not measured, with Mynt's reason as its tooltip", () => {
+    expect(costOfCap(unmeasured)).toEqual({ text: "Not measured", measured: false, reason: "Mynt didn't measure this build's cost before it ended" });
+    expect(totalTime(null, "succeeded").measured).toBe(false); // an older Mynt that doesn't report them
+    const withMetrics = [{ ...rows[0], metrics: finished }, { ...rows[1], metrics: unmeasured }, { ...rows[2], metrics: running }, rows[3]];
+    const html = renderToStaticMarkup(<BuildsView rows={withMetrics} />);
+    expect(html).toMatch(/<th[^>]*>Cost<\/th><th[^>]*>Time<\/th>/);
+    expect(html).toMatch(/data-build="b1"[\s\S]*?data-field="cost">\$3\.10 of \$20\.00<[\s\S]*?data-field="time">12m 05s</);
+    expect(html).toMatch(/data-build="b2"[\s\S]*?data-field="cost" data-not-measured="Mynt didn&#x27;t measure this build&#x27;s cost before it ended"[^>]*>Not measured</);
+    expect(html).toMatch(/data-build="b3"[\s\S]*?data-live="true"/);
+    expect(/data-build="b2"[\s\S]*?<\/tr>/.exec(html)![0]).not.toMatch(/\$0\.00|>0s</);
+  });
+
+  it("exports Cost and Time in the CSV", async () => {
+    const blobs: Blob[] = [];
+    const created = vi.spyOn(URL, "createObjectURL").mockImplementation((b) => {
+      blobs.push(b as Blob);
+      return "blob:x";
+    });
+    URL.revokeObjectURL ??= () => undefined;
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const { container: c } = render(<BuildsView rows={[{ ...rows[0], metrics: finished }, { ...rows[1], metrics: unmeasured }]} />);
+    await act(async () => (c.querySelector("[data-export]") as HTMLButtonElement).click());
+    created.mockRestore();
+    clicked.mockRestore();
+    const read = (b: Blob) =>
+      new Promise<string>((done) => {
+        const r = new FileReader();
+        r.onload = () => done(String(r.result));
+        r.readAsText(b);
+      });
+    const csv = (await Promise.all(blobs.map(read))).join("");
+    expect(csv).toMatch(/Build,App,Status,Cost,Time,Updated/);
+    expect(csv).toContain("$3.10 of $20.00,12m 05s");
+    expect(csv).toContain("Not measured,Not measured");
+  });
+
+  it("the builder's line: phase, elapsed in it and cost of cap", () => {
+    const html = renderToStaticMarkup(<BuildMeter build={{ id: "b3", status: "coding", metrics: running }} />);
+    expect(html).toMatch(/data-field="phase">Coding<[\s\S]*?data-field="elapsed">\d+[hm] \d+[sm]<[\s\S]*?data-field="cost">\$1\.25 of \$10\.00</);
+    const none = renderToStaticMarkup(<BuildMeter build={{ id: "b4", status: "failed", metrics: unmeasured }} />);
+    expect(none).toMatch(/data-field="elapsed" data-not-measured="Not recorded for this build"/);
+    expect(none).not.toContain("$0.00");
+  });
+
+  it("the dashboard averages this month's finished, measured builds; Not measured when there are none", () => {
+    const now = new Date("2026-11-20T12:00:00Z");
+    const avg = buildAveragesOf(
+      {
+        builds: [
+          { status: "succeeded", created_at: "2026-11-12T10:00:00Z", cost_cents: 300, durations_seconds: { total: 600 } },
+          { status: "failed", created_at: "2026-11-13T10:00:00Z", cost_cents: 100, durations_seconds: { total: null } },
+          { status: "failed", created_at: "2026-11-14T10:00:00Z", cost_cents: null, durations_seconds: { total: 200 } },
+          { status: "coding", created_at: "2026-11-15T10:00:00Z", cost_cents: 900, durations_seconds: { total: 50 } },
+          { status: "succeeded", created_at: "2026-10-01T10:00:00Z", cost_cents: 5000, durations_seconds: { total: 9000 } },
+        ],
+      },
+      now,
+    );
+    expect(avg).toEqual({ costCents: 200, seconds: 400, costCount: 2, timeCount: 2 });
+    const kpis = buildAverageKpis(avg);
+    expect(kpis.map((k) => [k.label, k.value])).toEqual([["Average build cost", 200], ["Average build time", 400]]);
+    expect(renderToStaticMarkup(<KpiRow kpis={kpis} />)).toMatch(/\$2\.00[\s\S]*?6m 40s/);
+    const none = buildAverageKpis(buildAveragesOf({ builds: [] }, now));
+    expect(none.map((k) => k.value)).toEqual([null, null]);
+    expect(renderToStaticMarkup(<KpiRow kpis={none} />).match(/data-measured="false"[^>]*>Not measured</g)).toHaveLength(2);
+  });
+});

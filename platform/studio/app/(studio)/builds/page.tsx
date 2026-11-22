@@ -17,7 +17,7 @@ export default function BuildsPage() {
       const data = (await res?.json().catch(() => null)) as { projects?: ProjectItem[] } | null;
       if (!res?.ok || !data) setError("Your builds couldn't be loaded. Try again in a moment.");
       const all = (data?.projects ?? []).flatMap((p) =>
-        p.conversations.map((c) => ({ appId: p.id, appName: p.name, id: c.id, title: c.title, status: c.status, updatedAt: c.updatedAt })),
+        p.conversations.map((c) => ({ appId: p.id, appName: p.name, id: c.id, title: c.title, status: c.status, updatedAt: c.updatedAt, metrics: c.metrics ?? null })),
       );
       setRows(all.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
     })();
