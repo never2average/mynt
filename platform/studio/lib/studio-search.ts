@@ -14,7 +14,7 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/settings", label: "Settings", keywords: "workspace members team invite invitations people roles apps repositories general rename" },
   { href: "/earn", label: "Earn", keywords: "liquidity pools opportunities capital commit withdraw positions invest wallet" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
-  { href: "/new", label: "New app", keywords: "create build start" },
+  { href: "/new", label: "Build", keywords: "new app create build start financial product" },
   { href: "/connect", label: "Connect your agent", keywords: "mcp agent claude cursor vscode chatgpt connect plug docs documentation help guide" },
 ];
 

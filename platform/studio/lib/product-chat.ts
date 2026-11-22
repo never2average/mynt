@@ -19,7 +19,7 @@ type ToolDef = Anthropic.Beta.Messages.BetaTool;
 // ---- routing: Build app or Create product ----
 
 export type NewAppMode = "build" | "product";
-export const MODE_LABELS: Record<NewAppMode, string> = { build: "Build app", product: "Create product" };
+export const MODE_LABELS: Record<NewAppMode, string> = { build: "App", product: "Financial product" };
 
 // "/create-product" typed with a description after it (the menu's own /create-product, with nothing
 // after it, switches mode instead): the description, else null.
@@ -76,7 +76,7 @@ export const DRAFT_PRODUCT_DEF: ToolDef = {
   },
 };
 
-export const PRODUCT_CHAT_SYSTEM_PROMPT = `You are the product assistant on New app in Mynt Studio, where licensed firms and developers define financial products and build finance apps on them. The user wants to define a new financial product for their firm. You help them work out its definition and put it in a draft for them to review.
+export const PRODUCT_CHAT_SYSTEM_PROMPT = `You are the product assistant on the Build page in Mynt Studio, where licensed firms and developers define financial products and build finance apps on them. The user wants to define a new financial product for their firm. You help them work out its definition and put it in a draft for them to review.
 
 How to help:
 - A product needs: a name, a product line, a category (one listed for that line), a region and one of its regulators, what the firm does with it (issuance, sale of another issuer's product, or repackaging of others' products, naming the published products it builds on), its risk level, liquidity, typical horizon and return type, a short description, and, optionally, key features.
