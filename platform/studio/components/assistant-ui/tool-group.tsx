@@ -46,6 +46,8 @@ export const groupConsecutiveToolCalls: GroupingFunction = (parts) => {
     "commitTool",
     "checkAppTool",
     "devServerLogsTool",
+    // New app's draft card (components/product-chat.tsx): shown in the chat, never folded away.
+    "draft_product",
   ]);
 
   for (let i = 0; i < parts.length; i++) {

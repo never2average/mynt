@@ -16,13 +16,13 @@ import { ConnectAgentButton, DocsButton } from "@/components/connect-agent"
 import { ThemeSwitcher } from "@/components/theme-switcher"
 import { WalletControl } from "@/components/wallet-control"
 
-/** New app, everywhere: the /new flow. `compact`: an icon button with a tooltip-style title. */
+/** Build, everywhere: the /new flow (an app or a financial product). `compact`: an icon button with a tooltip-style title. */
 export function NewAppButton({ compact = false }: { compact?: boolean }) {
   return (
     <Button asChild size={compact ? "icon" : "sm"} className={compact ? "size-8" : undefined}>
-      <Link href="/new" aria-label={compact ? "New app" : undefined} title={compact ? "New app" : undefined} data-new-app>
+      <Link href="/new" aria-label={compact ? "Build" : undefined} title={compact ? "Build" : undefined} data-new-app>
         <Plus />
-        {!compact && "New app"}
+        {!compact && "Build"}
       </Link>
     </Button>
   )

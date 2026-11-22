@@ -104,7 +104,7 @@ describe("sidebar", () => {
   it("has no Builds or New app item", () => {
     const html = sidebar();
     expect(html).not.toMatch(/>\s*Builds\s*</);
-    expect(html).not.toMatch(/>\s*New app\s*</);
+    expect(html).not.toMatch(/>\s*Build\s*</);
     expect(html).not.toContain('href="/builds"');
     expect(html).not.toContain('href="/new"');
   });
