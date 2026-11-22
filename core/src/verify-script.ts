@@ -3,29 +3,84 @@
 
 export const VERIFY_DIR = "/home/user/mynt-verify";
 export const VERIFY_APP = "/home/user/app";
+// The auditor's own copy of the source: a fresh extraction of the verified archive, made read-only, that nothing
+// else in the verification touches (Mynt's checks run in VERIFY_APP, where installs and builds rewrite files).
+export const VERIFY_AUDIT_SRC = "/home/user/audit-src";
 const GITLEAKS_VERSION = "8.21.2";
 const SYFT_VERSION = "1.18.1";
 const NJSSCAN_VERSION = "1.0.1";
 const BANDIT_VERSION = "1.9.4";
 
 export const VERIFY_SCRIPT = String.raw`#!/usr/bin/env bash
-# Mynt build verification. Usage: verify.sh <source-url> <sha256>   |   verify.sh --rehash
+# Mynt build verification. Usage: verify.sh <source-url> <sha256>  |  verify.sh --audit-copy <sha256>  |  verify.sh --rehash
+# The paths can be moved for Mynt's own tests of this script; in a verification sandbox nothing sets them.
+V=$MYNT_VERIFY_DIR; [ -n "$V" ] || V=${VERIFY_DIR}
+APP=$MYNT_VERIFY_APP; [ -n "$APP" ] || APP=${VERIFY_APP}
+AUDIT=$MYNT_VERIFY_AUDIT_SRC; [ -n "$AUDIT" ] || AUDIT=${VERIFY_AUDIT_SRC}
 set -uo pipefail
-V=${VERIFY_DIR}
-APP=${VERIFY_APP}
 mkdir -p "$V/bin"
 
-# The audit must leave the source untouched. Snapshot each file of the verified source archive (a missing
-# file's error is recorded too) once Mynt's own checks have finished, since installs, builds and formatters may
-# rewrite a lockfile or a config; then again after the audit. A difference blocks the build and names the files.
-# Git's own folder isn't source: any git command, even a read-only status, rewrites its index.
-tree_sums() { # out-prefix
-  (cd "$APP" && tar -tzf "$V/app.tgz" | grep -v -e '/$' -e '^\(\./\)\?\.git/' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum 2>&1) > "$1.sums"
-  sha256sum < "$1.sums" | cut -d' ' -f1 > "$1.sha"
+# The audit must leave the source untouched. The auditor reads its own copy of the verified archive, extracted
+# fresh once Mynt's checks have finished and made read-only, so nothing it runs incidentally (git status, a
+# scanner's cache) writes into the source, and nothing Mynt's checks did (installs, builds) is in it. Each file of
+# that copy is hashed before the audit and again after it: a file changed, added or deleted blocks the build and is
+# named. Two kinds of folder aren't source, at any depth, and are left out of both: Git's own (.git: any git
+# command, even a read-only status, may rewrite its index) and node_modules (never packaged into a build's source).
+tree_sums() { # dir out-prefix
+  python3 - "$1" "$2.sums" <<'PY'
+import hashlib, os, sys
+root, out = sys.argv[1], sys.argv[2]
+rows = []
+for d, dirs, files in os.walk(root):
+    links = [x for x in dirs if os.path.islink(os.path.join(d, x))]
+    dirs[:] = [x for x in dirs if x not in links and x not in (".git", "node_modules")]
+    for f in files + links:
+        p = os.path.join(d, f)
+        rel = os.path.relpath(p, root).replace("\n", "?")
+        try:
+            if os.path.islink(p):
+                rows.append((rel, "link:" + os.readlink(p)))
+                continue
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            rows.append((rel, h.hexdigest()))
+        except OSError as e:
+            rows.append((rel, "unreadable:" + type(e).__name__))
+with open(out, "w") as fh:
+    for rel, digest in sorted(rows):
+        fh.write(digest + "  " + rel + "\n")
+PY
+  sha256sum < "$2.sums" | cut -d' ' -f1 > "$2.sha"
 }
+if [ "$#" -gt 0 ] && [ "$1" = "--audit-copy" ]; then
+  [ "$(sha256sum "$V/app.tgz" | cut -d' ' -f1)" = "$2" ] || { echo "source checksum mismatch" >&2; exit 2; }
+  chmod -R u+w "$AUDIT" 2>/dev/null; rm -rf "$AUDIT"; mkdir -p "$AUDIT"
+  tar -xzf "$V/app.tgz" -C "$AUDIT" || { echo "could not unpack the source" >&2; exit 2; }
+  tree_sums "$AUDIT" "$V/before"
+  # Read-only, except Git's own folders, so the git commands the auditor runs work as they would anywhere.
+  chmod -R a-w "$AUDIT" && find "$AUDIT" -name .git -prune -exec chmod -R u+w {} + 2>/dev/null
+  echo "audit-copy $(cat "$V/before.sha")"
+  exit 0
+fi
 if [ "$#" -gt 0 ] && [ "$1" = "--rehash" ]; then
-  tree_sums "$V/after"
-  diff "$V/before.sums" "$V/after.sums" | grep '^[<>]' | sed -E 's/^[<>] //; s/^[0-9a-f]{64}  //; s/^sha256sum: (.*): No such file or directory$/\1 (deleted)/' | LC_ALL=C sort -u | head -20 > "$V/changed.txt"
+  tree_sums "$AUDIT" "$V/after"
+  python3 - "$V/before.sums" "$V/after.sums" "$V/changed.txt" <<'PY'
+import sys
+def load(p):
+    rows = {}
+    for line in open(p):
+        digest, _, rel = line.rstrip("\n").partition("  ")
+        rows[rel] = digest
+    return rows
+before, after = load(sys.argv[1]), load(sys.argv[2])
+changed = [r for r in sorted(before) if r in after and before[r] != after[r]]
+changed += [r + " (deleted)" for r in sorted(before) if r not in after]
+changed += [r + " (added)" for r in sorted(after) if r not in before]
+open(sys.argv[3], "w").write("".join("./" + c + "\n" for c in changed[:20]))
+PY
+  echo "rehash $(cat "$V/after.sha")"
   exit 0
 fi
 
@@ -59,7 +114,6 @@ check() {
   python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "status": sys.argv[2], "detail": sys.argv[3][-1500:]}))' "$1" "$2" "$3" >> "$CHECKS"
 }
 finish() {
-  [ -f "$V/unpacked" ] && tree_sums "$V/before"
   python3 - "$CHECKS" "$V/report.json" <<'PY'
 import json, sys
 checks = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
@@ -82,7 +136,6 @@ GOT=$(sha256sum "$V/app.tgz" | cut -d' ' -f1)
 [ "$GOT" = "$WANT" ] || { check source fail "source checksum mismatch ($GOT)"; exit 0; }
 mkdir -p "$APP" && tar -xzf "$V/app.tgz" -C "$APP"
 check source pass "sha256 $GOT"
-touch "$V/unpacked"
 cd "$APP"
 has_script() { [ -f package.json ] && node -e "process.exit((require('./package.json').scripts||{})['$1'] ? 0 : 1)" 2>/dev/null; }
 
