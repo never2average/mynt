@@ -170,7 +170,7 @@ describe("Create product (POST /api/products)", () => {
     const res = await productsRoute.POST(req("/api/products", "POST", NEW));
     expect(res.status).toBe(201);
     expect(called("create_product")).toEqual([{ name: "create_product", args: NEW }]);
-    expect((await res.json()).product).toEqual({ id: "green-savings", name: "Green Savings", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", mine: true, lastTestPassed: null });
+    expect((await res.json()).product).toEqual({ id: "green-savings", name: "Green Savings", productLine: "account_operations", category: "deposits", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", mine: true, lastTestPassed: null });
     const sale = { ...NEW, id: "dollar-resale", action: "sale", underlying_product_ids: ["dollar-account"] };
     expect((await productsRoute.POST(req("/api/products", "POST", sale))).status).toBe(201);
     expect(called("create_product")[1].args).toEqual(sale);

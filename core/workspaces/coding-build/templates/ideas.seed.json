@@ -2,180 +2,180 @@
   "$schema": "../../../schemas/app-idea-seed.schema.json",
   "ideas": [
     {
-      "id": "milestone-escrow",
-      "kind": "dollar-account",
-      "problem": "Freelancers wait weeks to get paid for finished milestones",
-      "pitch": "The client funds the gig up front; each milestone's dollars go to the freelancer once the client approves it.",
-      "goal": "A milestone escrow app for freelance gigs. A client opens a held dollar account for a gig, adds the agreed amount from their own bank account and splits it into named milestones. The freelancer marks a milestone done; when the client approves it, that milestone's dollars are withdrawn to the freelancer's bank account through the provider's hosted flow. Both sides see each milestone's amount, status and fee before anything moves, and every document the product requires before they agree.",
-      "product_lines": [
-        "custody_settlement"
-      ],
+      "id": "emergency-fund",
+      "kind": "savings-goals",
+      "problem": "Families have nothing set aside when the car or the boiler breaks",
+      "pitch": "An emergency fund goal in a money market account, filled by a weekly amount the family picks.",
+      "goal": "An emergency fund app on a money market account. A family opens the account, sets one goal (an amount and a date) for unexpected bills, and picks a weekly amount to add from their bank account through the provider's hosted flow. The home screen shows the goal's progress and the account's balance. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each transfer, and every document the product requires before the family agrees. The app shows information, not advice.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Money Market Account"],
       "sort": 10
     },
     {
-      "id": "cool-off-cash",
-      "kind": "dollar-account",
-      "problem": "People pull money out on impulse and regret it the next day",
-      "pitch": "A dollar account where every withdrawal waits 24 hours and can be called off before it starts.",
-      "goal": "A cool-off cash app. Customers open a dollar account, add dollars from their own bank account and set a waiting period (24 hours by default). A withdrawal request sits in a countdown on the home screen, where the customer can call it off; only when the countdown ends does the app start the provider's hosted withdrawal flow. Show the balance, the pending request, the amount and the fee before each transfer, and every document the product requires before the customer agrees.",
-      "product_lines": [
-        "custody_settlement"
-      ],
+      "id": "rent-cushion",
+      "kind": "savings-goals",
+      "problem": "Renters scramble to find the full rent when it falls due",
+      "pitch": "Puts a little aside each payday toward next month's rent, with the progress shown.",
+      "goal": "A rent cushion app on a money market account. A renter opens the account, enters their rent and its due date, and the app sets a goal for next month's rent split across their paydays. Each payday the renter adds that amount from their bank account through the provider's hosted flow, and sees how close the goal is. Show the account's terms, interest rate and fees as the product's offer states them, the amount before each transfer, and every required document before the renter agrees.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Money Market Account"],
       "sort": 20
     },
     {
-      "id": "tax-set-aside",
-      "kind": "dollar-account",
-      "problem": "Freelancers come up short when quarterly taxes are due",
-      "pitch": "Moves a slice of every client payment into a separate dollar account, ready for the quarterly due date.",
-      "goal": "A tax set-aside app for US freelancers. Customers open a dollar account and choose the share of each client payment they want to put aside. When they log a payment they received, the app suggests the set-aside amount and adds it from their bank account through the provider's hosted flow. The home screen shows the total set aside this quarter and the next quarterly due date, and withdrawing sends it back to their bank account. Show the amount and fee before each transfer and every document the product requires before the customer agrees. The app gives no tax advice.",
-      "product_lines": [
-        "custody_settlement"
-      ],
+      "id": "gift-season",
+      "kind": "savings-goals",
+      "problem": "Parents overspend in December because nothing was put aside",
+      "pitch": "A savings goal for each person on the gift list, filled a little each month.",
+      "goal": "A gift season app on a money market account. A parent opens the account and adds a goal for each person on their gift list with a target amount, all due in December. The app suggests an even monthly amount per goal from the target and the months left, which the parent can change, and the parent adds money from their bank account through the provider's hosted flow. Show each goal's progress, the account's terms, interest rate and fees as the product's offer states them, and every required document before the parent agrees.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Money Market Account"],
       "sort": 30
     },
     {
-      "id": "roommate-bills-pot",
-      "kind": "dollar-account",
-      "problem": "Roommates chase each other for their share of rent and bills",
-      "pitch": "One shared dollar account for the apartment: each roommate adds their share, and everyone sees who has paid.",
-      "goal": "A roommate bills app. One roommate opens a dollar account for the apartment and invites the others. Each month the app lists rent and shared bills with each roommate's share; each roommate adds their share from their own bank account through the provider's hosted flow, and the board shows who has paid. The account holder withdraws to their bank account to pay the landlord. Show the amount and fee before each transfer, and every document the product requires before anyone agrees.",
-      "product_lines": [
-        "custody_settlement"
-      ],
+      "id": "shared-home-goal",
+      "kind": "savings-goals",
+      "problem": "Couples saving for a first home can't see their joint progress",
+      "pitch": "One shared goal both partners add to from their own accounts, with the combined progress shown.",
+      "goal": "A shared home goal app on a money market account. Each partner opens their own account, and one invites the other to a shared goal with a target amount and a date. Each partner adds money from their own bank account through the provider's hosted flow, and both see the goal's combined progress and each person's additions; neither can move the other's money. Show the account's terms, interest rate and fees as the product's offer states them, and every required document before each partner agrees.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Money Market Account"],
       "sort": 40
     },
     {
-      "id": "trip-kitty",
-      "kind": "money-transfers",
-      "problem": "Friends on a trip lose track of who owes whom",
-      "pitch": "Log who paid for what; the app works out who owes whom and settles up by bank transfer.",
-      "goal": "A group trip app that splits costs and settles up. One traveller creates a trip and invites friends. Anyone logs an expense with who paid and who it was for; the app keeps a running tally of who owes whom. At the end, each person settles their balance by bank transfer through the provider's hosted flow, seeing the amount, the fee and when it arrives before they confirm, and the trip shows each transfer's status until everyone is square.",
-      "product_lines": [
-        "payments"
-      ],
-      "sort": 50
+      "id": "cd-ladder-planner",
+      "kind": "certificates-of-deposit",
+      "problem": "Savers lose track of when each of their CDs matures",
+      "pitch": "A CD ladder planner that lays out each CD's term and the date it matures, soonest first.",
+      "goal": "A CD ladder planner. A customer splits an amount they choose across several CDs with different terms from the product's offer, sees the plan as a timeline of maturity dates, and opens each CD through the provider's hosted flow. The home screen lists every CD with its amount, term, rate and maturity date, soonest first. Show the terms, rates, minimums, early withdrawal penalty and every required document exactly as the product states them before the customer agrees. The app shows information, not advice.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Certificate of Deposit"],
+      "sort": 10
     },
     {
-      "id": "creator-tip-jar",
-      "kind": "money-transfers",
-      "problem": "Fans have no simple way to send a creator a few dollars",
-      "pitch": "A tip page fans pay by bank transfer, with one payout to the creator every week.",
-      "goal": "A tip jar app for creators. A creator signs up and gets a tip page with their name and a short note. Fans choose an amount and send it by bank transfer through the provider's hosted flow, seeing the fee before they confirm. The creator sees every tip and its status, and once a week the collected tips are sent to their bank account, with the amount, the fee and the arrival date shown first.",
-      "product_lines": [
-        "payments"
-      ],
-      "sort": 60
+      "id": "cd-maturity-reminder",
+      "kind": "certificates-of-deposit",
+      "problem": "CD holders miss the window to decide what happens at maturity",
+      "pitch": "Reminds the customer ahead of each maturity date and shows the options the product's terms give.",
+      "goal": "A CD maturity reminder app. A customer opens CDs through the provider's hosted flow, and the app follows each one's maturity date from the product's lifecycle events. Ahead of each date it reminds the customer and shows the choices the product's terms offer at maturity, and what happens if they choose nothing, in the product's own words. The customer's choice goes through the provider's hosted flow. Show every required document before the customer agrees.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Certificate of Deposit"],
+      "sort": 20
     },
     {
-      "id": "shift-end-payouts",
-      "kind": "money-transfers",
-      "problem": "Small crews wait days after a shift to get their share",
-      "pitch": "The crew lead pays each worker their share by bank transfer as the shift ends.",
-      "goal": "A shift payouts app for small crews (cleaning, moving, catering). The crew lead signs up, adds the crew and, at the end of a shift, enters the hours or share for each worker. The app shows each payout's amount, fee and arrival time, then the crew lead confirms the transfers through the provider's hosted flow. Workers see their payout's status until it settles, and the lead sees a history of every shift.",
-      "product_lines": [
-        "payments"
-      ],
-      "sort": 70
+      "id": "cd-early-exit-check",
+      "kind": "certificates-of-deposit",
+      "problem": "People open a CD without knowing the cost of taking money out early",
+      "pitch": "Shows the early withdrawal penalty in plain words, from the product's terms, before anyone commits.",
+      "goal": "A CD early exit check app. Before a customer opens a CD, the app shows the term, the rate and the early withdrawal penalty from the product's offer, worked through on the amount the customer entered, using only the formula the product's terms state. The customer then opens the CD through the provider's hosted flow, or chooses a shorter term. Show every required document verbatim before the customer agrees. The app shows information, not advice.",
+      "product_lines": ["account_operations"],
+      "categories": ["deposits"],
+      "product_names": ["Certificate of Deposit"],
+      "sort": 30
     },
     {
-      "id": "closing-day-wire",
-      "kind": "money-transfers",
-      "problem": "Homebuyers fear wiring closing funds to a fraudster",
-      "pitch": "A guided closing wire: confirm the title company's details twice, see the cut-off, then follow it in.",
-      "goal": "A closing-day wire app for homebuyers. The buyer signs up, enters the closing date and the amount, and adds the title company's wire details. Before the wire, the app asks them to confirm those details a second time against what the title company gave them by phone, and shows the fee, the day's cut-off time and when it should arrive. The wire goes through the provider's hosted flow, and the app follows its status until it settles, with a clear warning about wire fraud on every step.",
-      "product_lines": [
-        "payments"
-      ],
-      "sort": 80
+      "id": "idle-cash-nudge",
+      "kind": "cash-reserve",
+      "problem": "Spare cash piles up well above what the month's bills need",
+      "pitch": "Nudges the customer when the account holds more than the buffer they set, with a move to a money market fund.",
+      "goal": "An idle cash nudge app. A customer opens a money market account and a money market fund, and sets the buffer they want to keep in the account. When the account's balance stays above that buffer, the app shows the amount above it and offers to move it to the fund, or back, through the provider's hosted flow. Show both products' terms, fees, limits and documents exactly as each states them before each move, and say that a money market fund is not a deposit account. The app shows information, not advice.",
+      "product_lines": ["account_operations", "wealth"],
+      "categories": ["deposits", "mutual_funds"],
+      "product_names": ["Money Market Account", "Money Market Fund"],
+      "sort": 10
     },
     {
-      "id": "skipped-it-jar",
-      "kind": "savings-goals",
-      "problem": "Money saved by skipping a coffee never actually gets saved",
-      "pitch": "Tap \"I skipped it\" when you pass on a coffee or takeout, and its price goes toward your rainy-day goal.",
-      "goal": "A rainy-day savings app built around skipped purchases. Customers open a dollar balance and one rainy-day goal with a target. On the home screen they tap a quick button for something they skipped (a coffee, a takeout order, a ride) or type its price; the skips add up, and one tap moves the total from their bank account toward the goal through the provider's hosted flow. Show the goal's progress, the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
-      "product_lines": [
-        "custody_settlement"
-      ],
-      "sort": 90
+      "id": "freelancer-tax-pot",
+      "kind": "cash-reserve",
+      "problem": "Freelancers with uneven income can't tell spare cash from tax money",
+      "pitch": "Splits each payment between a spending buffer and a reserve set aside for taxes, by rules the freelancer sets.",
+      "goal": "A freelancer tax pot app. A freelancer opens a money market account for spending and a money market fund for cash set aside for taxes. When they record a payment received, the app splits it by a share they set and moves the set-aside part to the fund through the provider's hosted flow. The home screen shows both balances and what has been set aside this year. Show both products' terms, fees and documents as each states them before each move. The app shows information, not advice.",
+      "product_lines": ["account_operations", "wealth"],
+      "categories": ["deposits", "mutual_funds"],
+      "product_names": ["Money Market Account", "Money Market Fund"],
+      "sort": 20
     },
     {
-      "id": "family-goal-board",
-      "kind": "savings-goals",
-      "problem": "Teens saving for a first car have no shared plan with parents",
-      "pitch": "Parent and teen set goals together; the teen proposes top-ups and the parent approves each one.",
-      "goal": "A family savings app. A parent opens the dollar balance and creates goals with their teen, such as a first car or a school trip, each with a target and a date. The teen proposes a top-up from the family's list of chores or birthday money; the parent approves it and adds the dollars from their own bank account through the provider's hosted flow. Both see each goal's progress. The parent is the only account holder. Show the amount and any fee before each transfer, and every document the product requires before the parent agrees.",
-      "product_lines": [
-        "custody_settlement"
-      ],
-      "sort": 100
+      "id": "cash-side-by-side",
+      "kind": "cash-reserve",
+      "problem": "People can't tell a money market fund from a deposit account",
+      "pitch": "Puts both products' terms, fees and access to cash side by side, in each product's own words.",
+      "goal": "A side-by-side cash app. A customer sees a money market account and a money market fund on one screen: each one's terms, fees, limits, how quickly cash can come back, and what each product's documents say about how it is protected, in each product's own words, with the documents shown verbatim. They can open either one through its product's journey. The app shows information, not advice.",
+      "product_lines": ["account_operations", "wealth"],
+      "categories": ["deposits", "mutual_funds"],
+      "product_names": ["Money Market Account", "Money Market Fund"],
+      "sort": 30
     },
     {
-      "id": "rent-ready-streak",
-      "kind": "savings-goals",
-      "problem": "Renters scramble to find the full rent when it falls due",
-      "pitch": "Puts aside a slice of next month's rent every week, with a streak counter to keep you on track.",
-      "goal": "A rent-ready savings app. Customers open a dollar balance and a rent goal with the rent amount and its due date; the app works out the weekly amount to be ready in time. Each week they add that amount from their bank account through the provider's hosted flow, and a streak counter shows how many weeks in a row they've been on track. Show the goal's progress, the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
-      "product_lines": [
-        "custody_settlement"
-      ],
-      "sort": 110
+      "id": "ira-catch-up",
+      "kind": "retirement-account",
+      "problem": "Savers over 50 don't know they may be able to put more in an IRA",
+      "pitch": "Shows this year's contributions next to the IRA's limit, including any catch-up amount its terms list.",
+      "goal": "An IRA catch-up app. A customer opens an IRA through the product's journey and enters their birth year, saved to Mynt's vault after consent. The account screen shows this year's contributions next to the yearly limit and any catch-up amount the product's terms list for the customer's age, and the customer contributes from their bank account through the provider's hosted flow. Show the terms, fees and every required document exactly as the product states them before the customer agrees. The app shows information, not advice.",
+      "product_lines": ["wealth"],
+      "categories": ["retirement"],
+      "product_names": ["Individual Retirement Account"],
+      "sort": 10
     },
     {
-      "id": "payday-envelopes",
-      "kind": "savings-goals",
-      "problem": "Paychecks are gone before rent and groceries are covered",
-      "pitch": "On payday, splits one deposit across named envelopes (rent, groceries, fun) by the percentages you set.",
-      "goal": "A payday envelopes app. Customers open a dollar balance and create envelopes, each a goal with a name and a share of their pay (rent 40%, groceries 20%, fun 10%, and so on). On payday they enter the amount and the app shows how it splits; each envelope's share is added from their bank account through the provider's hosted flow. The home screen shows every envelope's balance and progress. Show the amounts and any fee before each transfer, and every document the product requires before the customer agrees.",
-      "product_lines": [
-        "custody_settlement"
-      ],
-      "sort": 120
+      "id": "ira-deadline-reminder",
+      "kind": "retirement-account",
+      "problem": "Savers miss the deadline to contribute for the past tax year",
+      "pitch": "Reminds the customer before the contribution deadline in the IRA's terms, with the room left shown.",
+      "goal": "An IRA deadline reminder app. A customer opens an IRA and sets reminders. Ahead of the contribution deadline the product's terms state for a tax year, the app reminds them and shows how much of that year's limit is left, from the contributions the product reports. The customer contributes from their bank account through the provider's hosted flow, choosing which tax year the contribution is for when the product's terms allow it. Show every required document before the customer agrees. The app shows information, not advice.",
+      "product_lines": ["wealth"],
+      "categories": ["retirement"],
+      "product_names": ["Individual Retirement Account"],
+      "sort": 20
     },
     {
-      "id": "contractor-payday",
-      "kind": "stablecoin-account",
-      "problem": "Small studios lose hours paying contractors one by one",
-      "pitch": "A dollar balance settled in USDC that pays every US contractor, in dollars, on payday.",
-      "goal": "A contractor payroll app for small US studios. The studio's owner signs up, adds dollars from the studio's bank account to a dollar balance settled in USDC by the licensed provider, and lists its contractors with each one's rate. On payday the app shows every payout's amount and fee in dollars; the owner accepts, and each payout is cashed out to the contractor's bank account through the provider's hosted flow. Every screen shows dollars only, never crypto, and each payout's status shows until it settles.",
-      "product_lines": [
-        "exchange"
-      ],
-      "sort": 130
+      "id": "plan-sign-up-nudge",
+      "kind": "retirement-account",
+      "problem": "New hires put off joining the 401(k) plan and then forget about it",
+      "pitch": "Walks a new hire through joining the plan and reminds them to set their contribution.",
+      "goal": "A 401(k) sign-up nudge app. A new hire joins the plan through the product's journey, with its consents and required documents shown verbatim, and picks the share of pay to contribute within the plan's terms. If they stop partway, the app reminds them on a schedule they choose. The account screen shows this year's contributions next to the yearly limit the plan's terms state. The app shows information, not advice.",
+      "product_lines": ["wealth"],
+      "categories": ["retirement"],
+      "product_names": ["401(k)"],
+      "sort": 30
     },
     {
-      "id": "nonprofit-reserve",
-      "kind": "stablecoin-account",
-      "problem": "Nonprofit treasurers can move money without a second sign-off",
-      "pitch": "Operating dollars in a USDC-settled balance, with two board members approving each cash-out.",
-      "goal": "A reserve app for a small US nonprofit. The treasurer signs up, adds dollars from the nonprofit's bank account to a dollar balance settled in USDC by the licensed provider, and names the board members who approve spending. A cash-out request needs two approvals before the app starts the provider's hosted cash-out flow to the nonprofit's bank account. Every screen shows dollars only, never crypto; the board sees the balance, each request with its approvals, and the amount and fee before anyone accepts.",
-      "product_lines": [
-        "exchange"
-      ],
-      "sort": 140
+      "id": "rising-prices-planner",
+      "kind": "treasury-securities",
+      "problem": "Savers worry rising prices will eat into a goal that is years away",
+      "pitch": "Plans a goal with TIPS and explains how the product adjusts principal for inflation, in its own words.",
+      "goal": "A rising prices planner on Treasury Inflation-Protected Securities. A customer names a goal and its date, picks TIPS terms from the product's offer that mature near that date, and buys through the provider's hosted flow. Each holding shows its amount, term, maturity date and the principal adjustments the product reports so far. Explain how the adjustment works exactly as the product's terms describe it, never say what a holding will be worth, and show every required document before the customer agrees. The app shows information, not advice.",
+      "product_lines": ["credit"],
+      "categories": ["bonds"],
+      "product_names": ["Treasury Inflation-Protected"],
+      "sort": 10
     },
     {
-      "id": "driver-cash-out",
-      "kind": "stablecoin-account",
-      "problem": "Rideshare drivers wait days to cash out what they made",
-      "pitch": "A dollar balance drivers cash out to their bank any day of the week, seeing the fee first.",
-      "goal": "A cash-out app for rideshare and delivery drivers. A driver signs up, adds dollars from their bank account to a dollar balance settled in USDC by the licensed provider, and cashes out to their bank account any day, including weekends. The home screen shows the balance and recent activity in dollars only, never crypto, and the amount, the fee and the expected arrival before the driver accepts each cash-out.",
-      "product_lines": [
-        "exchange"
-      ],
-      "sort": 150
+      "id": "tips-calendar",
+      "kind": "treasury-securities",
+      "problem": "Holders lose track of maturity dates and interest payment days",
+      "pitch": "A calendar of each holding's maturity date and interest payment dates, from what the product reports.",
+      "goal": "A TIPS calendar app. A customer buys Treasury Inflation-Protected Securities through the provider's hosted flow, and the app lays out every holding's interest payment dates and maturity date on a calendar, from the product's terms and lifecycle events, with a reminder ahead of each maturity. Each payment shows the amount the product reports once it is paid, never an estimate. Show the terms, fees and every required document before the customer agrees.",
+      "product_lines": ["credit"],
+      "categories": ["bonds"],
+      "product_names": ["Treasury Inflation-Protected"],
+      "sort": 20
     },
     {
-      "id": "club-dues",
-      "kind": "stablecoin-account",
-      "problem": "Club organizers juggle members' dues in their own bank accounts",
-      "pitch": "One dollar balance for a club's dues, where every member sees each dollar in and out.",
-      "goal": "A dues app for small clubs (a running club, a book club, a community garden). The club's organiser signs up and opens a dollar balance settled in USDC by the licensed provider; members add their dues in dollars from their bank accounts, and the organiser cashes out to the club's bank account to pay for shared costs. Every member sees the balance and each payment in and out, in dollars only, never crypto, with the amount and the fee shown before each one is accepted.",
-      "product_lines": [
-        "exchange"
-      ],
-      "sort": 160
+      "id": "tips-explainer",
+      "kind": "treasury-securities",
+      "problem": "First-time buyers don't understand how TIPS principal adjustments work",
+      "pitch": "Explains the principal adjustment on the customer's own holdings, in the product's words.",
+      "goal": "A TIPS explainer app. Before buying, a customer reads how Treasury Inflation-Protected Securities adjust principal and pay interest, in the product's own words from its terms and documents, shown verbatim. After buying through the provider's hosted flow, each holding shows the adjustments the product has reported, next to the explanation. The app never says what a holding will be worth. The app shows information, not advice.",
+      "product_lines": ["credit"],
+      "categories": ["bonds"],
+      "product_names": ["Treasury Inflation-Protected"],
+      "sort": 30
     }
   ]
 }

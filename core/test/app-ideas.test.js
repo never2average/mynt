@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { APP_IDEAS_SEED_PATH, appIdeaErrors, createAppIdea, listAppIdeas, seedAppIdeas, seedIdeas, updateAppIdea } from "../dist/app-ideas.js";
+import { APP_IDEAS_SEED_PATH, appIdeaErrors, createAppIdea, ideaLines, listAppIdeas, PROMISE_WORDS, seedAppIdeas, seedIdeas, updateAppIdea } from "../dist/app-ideas.js";
 import { appKinds } from "../dist/app-kinds.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
@@ -48,29 +48,104 @@ test("the shipped ideas validate, cover every kind, and each is labelled by a pl
   assert.equal(new Set(ideas.map((i) => i.id)).size, ideas.length);
 });
 
-test("an idea is refused for a missing kind, someone else's lines, lines Mynt can't build on in the US, and promises it can't keep", () => {
-  const good = seedIdeas().find((i) => i.id === "trip-kitty");
-  const stable = seedIdeas().find((i) => i.id === "driver-cash-out");
-  const errs = (patch, base = good) => appIdeaErrors({ ...base, ...patch }).join("; ");
+// The products published for US developers today, by line and category: every shipped idea builds on some of them.
+const LIVE = [
+  { name: "Certificate of Deposit (CD)", line: "account_operations", category: "deposits" },
+  { name: "Money Market Account", line: "account_operations", category: "deposits" },
+  { name: "401(k) Plan", line: "wealth", category: "retirement" },
+  { name: "Individual Retirement Account (IRA)", line: "wealth", category: "retirement" },
+  { name: "Money Market Fund", line: "wealth", category: "mutual_funds" },
+  { name: "Treasury Inflation-Protected Securities (TIPS)", line: "credit", category: "bonds" },
+];
+
+test("the kinds and ideas build on the lines that have live products, and every idea names some of them", () => {
+  assert.deepEqual(ideaLines(), ["account_operations", "credit", "wealth"]);
+  for (const i of seedIdeas()) {
+    const matching = LIVE.filter(
+      (p) =>
+        i.product_lines.includes(p.line) &&
+        (!i.categories.length || i.categories.includes(p.category)) &&
+        (!i.product_names.length || i.product_names.some((n) => p.name.toLowerCase().includes(n.toLowerCase()))),
+    );
+    assert.ok(matching.length, `${i.id}: names a live product`);
+    for (const n of i.product_names) assert.ok(matching.some((p) => p.name.toLowerCase().includes(n.toLowerCase())), `${i.id}: '${n}' is a live product's name`);
+  }
+});
+
+test("facts about the products are fine; promises, projections and advice are not", () => {
+  for (const ok of [
+    "Shows the account's interest rate as the product states it",
+    "Reminds the customer before each CD matures",
+    "A retirement account with a yearly contribution limit",
+    "Moves cash to a money market fund",
+    "Explains how the product adjusts principal for inflation",
+    "The app shows information, not advice.",
+  ])
+    assert.doesNotMatch(ok, PROMISE_WORDS, ok);
+  for (const bad of [
+    "Guaranteed growth for your savings",
+    "Earn 5% on idle cash",
+    "Get 4.5 % a year",
+    "Returns of up to five times",
+    "A fund that beats inflation",
+    "Savings that outpace inflation",
+    "Protects your savings from inflation",
+    "Inflation-proof savings",
+    "Risk-free savings",
+    "High yield savings",
+    "Expert advice on your retirement",
+    "Advisors pick a fund for you",
+    "We recommend the best fund for you",
+    "Your projected balance at retirement",
+  ])
+    assert.match(bad, PROMISE_WORDS, bad);
+});
+
+test("an idea is refused for a missing kind, someone else's lines or categories, lines no kind builds on, and promises, projections or advice", () => {
+  const good = seedIdeas().find((i) => i.id === "emergency-fund");
+  const errs = (patch, base = good, kinds) => appIdeaErrors({ ...base, ...patch }, kinds).join("; ");
   assert.equal(errs({}), "");
   assert.match(errs({ kind: "nope" }), /no app kind 'nope'/);
-  assert.match(errs({ product_lines: ["custody_settlement"] }), /'custody_settlement' isn't one of the money-transfers kind's product lines/);
-  assert.match(errs({ product_lines: ["credit"] }), /'credit' isn't a product line Mynt can build on in the US/);
+  assert.match(errs({ product_lines: ["wealth"] }), /'wealth' isn't one of the savings-goals kind's product lines/);
+  // A line is allowed only when some kind declares it.
+  assert.match(errs({ product_lines: ["insurance"] }), /'insurance' isn't a product line any app kind builds on \(account_operations, credit, wealth\)/);
+  assert.match(errs({ product_lines: ["payments"] }), /'payments' isn't a product line any app kind builds on/);
   assert.match(errs({ product_lines: [] }), /at least one product line/);
-  assert.match(errs({ product_lines: ["payments", "payments"] }), /listed twice/);
-  assert.match(errs({ id: "Trip Kitty" }), /the id is/);
+  assert.match(errs({ product_lines: ["account_operations", "account_operations"] }), /listed twice/);
+  assert.match(errs({ categories: ["retirement"] }), /'retirement' isn't one of the savings-goals kind's categories \(deposits\)/);
+  assert.match(errs({ categories: ["Deposits"] }), /isn't a category id/);
+  assert.match(errs({ categories: ["deposits", "deposits"] }), /a category is listed twice/);
+  assert.match(errs({ product_names: ["x"] }), /a product name is 2 to 60 characters/);
+  assert.match(errs({ product_names: ["Guaranteed Savings"] }), /the product name says 'Guaranteed'/);
+  assert.match(errs({ id: "Emergency Fund" }), /the id is/);
   assert.match(errs({ pitch: "x".repeat(121) }), /the pitch is 10 to 120 characters/);
   assert.match(errs({ problem: "x".repeat(81) }), /the problem is 10 to 80 characters/);
   assert.match(errs({ problem: "Two lines\nof problem" }), /the problem is one line/);
   assert.match(errs({ goal: "Too short." }), /the goal is 40 to 1200 characters/);
-  assert.match(errs({ problem: "Friends want to earn interest on the kitty" }), /the problem says 'earn'/);
-  assert.match(errs({ pitch: "Guaranteed to settle up every friend fast." }), /the pitch says 'Guaranteed'/);
-  assert.match(errs({ pitch: "Lets sellers collect from their friends." }), /'sellers'/);
-  assert.match(errs({ pitch: "Pay back friends with your debit card today." }), /'card'/);
-  assert.match(errs({ goal: `${good.goal} Friends can borrow from the kitty.` }), /the goal says 'borrow'/);
-  assert.match(errs({ goal: `${good.goal} Settle at kitty.example.com.` }), /web address/);
-  assert.match(errs({ goal: `${good.goal} It calls mintTokens first.` }), /names mintTokens, which isn't one of the money-transfers kind's SDK calls/);
-  assert.match(errs({ goal: stable.goal.replace("dollars only, never crypto", "dollars") }, stable), /dollars only, never crypto/);
+  // Factual words about the products are fine.
+  assert.equal(errs({ pitch: "Shows the interest rate and the date each CD matures, from the terms." }), "");
+  assert.equal(errs({ problem: "Savers don't know their retirement fund's yearly limit" }), "");
+  // Promises, projections and advice are not.
+  assert.match(errs({ problem: "Families want to earn interest on a rainy-day pot" }), /the problem says 'earn'/);
+  assert.match(errs({ pitch: "Earn 5% on every dollar you set aside." }), /the pitch says 'Earn'/);
+  assert.match(errs({ pitch: "Guaranteed to keep your rainy-day pot growing." }), /the pitch says 'Guaranteed'/);
+  assert.match(errs({ pitch: "Savings that beat inflation every single year." }), /the pitch says 'beat inflation'/);
+  assert.match(errs({ pitch: "A risk-free place for your rainy-day cash." }), /'risk-free'/);
+  assert.match(errs({ pitch: "Returns of up to twice a savings account." }), /'Returns'/);
+  assert.match(errs({ goal: `${good.goal} It gives advice on where to keep cash.` }), /the goal says 'advice'/);
+  assert.equal(errs({ goal: `${good.goal} The app shows information, not advice.` }), "");
+  // What no kind builds on, and what a finance app mustn't call the people it serves.
+  assert.match(errs({ pitch: "Lets sellers collect from their buyers." }), /'sellers'/);
+  assert.match(errs({ pitch: "Tops up the pot from your debit card today." }), /'card'/);
+  assert.match(errs({ goal: `${good.goal} Families can borrow from the fund.` }), /the goal says 'borrow'/);
+  assert.match(errs({ goal: `${good.goal} Families can invest the fund in stocks.` }), /the goal says 'invest'/);
+  assert.match(errs({ goal: `${good.goal} Settle at fund.example.com.` }), /web address/);
+  assert.match(errs({ goal: `${good.goal} It calls mintTokens first.` }), /names mintTokens, which isn't one of the savings-goals kind's SDK calls/);
+  // A stablecoin-settled kind (none ships today) still needs its goal to say it shows dollars only.
+  const stableKind = { ...appKinds().find((k) => k.id === "savings-goals"), id: "usdc-balance", product_lines: ["exchange"], categories: undefined };
+  const stable = { ...good, id: "usdc-pot", kind: "usdc-balance", product_lines: ["exchange"], categories: [] };
+  assert.match(errs({}, stable, [stableKind]), /dollars only, never crypto/);
+  assert.equal(errs({ goal: `${good.goal} Every screen shows dollars only, never crypto.` }, stable, [stableKind]), "");
 });
 
 test("ideas are in Postgres: not seeded on startup, added by seed_app_ideas without overwriting edits, kept by admins only", async () => {
@@ -99,46 +174,54 @@ test("ideas are in Postgres: not seeded on startup, added by seed_app_ideas with
   // Developers see active ideas, optionally by kind, in each kind's order, with the fields they need only.
   const all = (await call(dev, "list_app_ideas")).body.ideas;
   assert.equal(all.length, 16);
-  assert.deepEqual(Object.keys(all[0]).sort(), ["goal", "id", "kind", "pitch", "problem", "product_lines"]);
-  const transfers = (await call(dev, "list_app_ideas", { kind: "money-transfers" })).body.ideas;
-  assert.deepEqual(transfers.map((i) => i.id), ["trip-kitty", "creator-tip-jar", "shift-end-payouts", "closing-day-wire"]);
-  assert.equal(transfers[0].problem, "Friends on a trip lose track of who owes whom");
+  assert.deepEqual(Object.keys(all[0]).sort(), ["categories", "goal", "id", "kind", "pitch", "problem", "product_lines", "product_names"]);
+  const goals = (await call(dev, "list_app_ideas", { kind: "savings-goals" })).body.ideas;
+  assert.deepEqual(goals.map((i) => i.id), ["emergency-fund", "rent-cushion", "gift-season", "shared-home-goal"]);
+  assert.equal(goals[0].problem, "Families have nothing set aside when the car or the boiler breaks");
+  assert.deepEqual(goals[0].categories, ["deposits"]);
+  assert.deepEqual(goals[0].product_names, ["Money Market Account"]);
 
   // An admin edits one and retires another; seeding again leaves both as they are.
-  const edited = await call(admin, "update_app_idea", { id: "trip-kitty", problem: "Friends sharing a trip can't tell who still owes what" });
+  const edited = await call(admin, "update_app_idea", { id: "emergency-fund", problem: "Families can't cover a surprise repair bill from savings" });
   assert.equal(edited.error, false, JSON.stringify(edited.body));
-  assert.equal(edited.body.idea.problem, "Friends sharing a trip can't tell who still owes what");
-  assert.equal(edited.body.idea.pitch, SEED.ideas.find((i) => i.id === "trip-kitty").pitch, "fields left out stay");
-  assert.equal((await call(admin, "retire_app_idea", { id: "club-dues" })).body.idea.status, "retired");
+  assert.equal(edited.body.idea.problem, "Families can't cover a surprise repair bill from savings");
+  assert.equal(edited.body.idea.pitch, SEED.ideas.find((i) => i.id === "emergency-fund").pitch, "fields left out stay");
+  assert.deepEqual(edited.body.idea.categories, ["deposits"], "categories left out stay");
+  assert.equal((await call(admin, "retire_app_idea", { id: "tips-calendar" })).body.idea.status, "retired");
   assert.deepEqual((await call(admin, "seed_app_ideas")).body.inserted, []);
-  assert.equal((await call(dev, "list_app_ideas", { kind: "money-transfers" })).body.ideas[0].problem, "Friends sharing a trip can't tell who still owes what");
-  assert.ok(!(await call(dev, "list_app_ideas")).body.ideas.some((i) => i.id === "club-dues"), "retired ideas aren't offered");
-  assert.ok(!(await call(dev, "list_app_ideas", { include_retired: true })).body.ideas.some((i) => i.id === "club-dues"), "only admins see retired ones");
+  assert.equal((await call(dev, "list_app_ideas", { kind: "savings-goals" })).body.ideas[0].problem, "Families can't cover a surprise repair bill from savings");
+  assert.ok(!(await call(dev, "list_app_ideas")).body.ideas.some((i) => i.id === "tips-calendar"), "retired ideas aren't offered");
+  assert.ok(!(await call(dev, "list_app_ideas", { include_retired: true })).body.ideas.some((i) => i.id === "tips-calendar"), "only admins see retired ones");
   // Admins may see retired ones, and bring one back.
   const withRetired = (await call(admin, "list_app_ideas", { include_retired: true })).body.ideas;
-  assert.equal(withRetired.find((i) => i.id === "club-dues").status, "retired");
-  assert.equal((await call(admin, "update_app_idea", { id: "club-dues", status: "active" })).body.idea.status, "active");
+  assert.equal(withRetired.find((i) => i.id === "tips-calendar").status, "retired");
+  assert.equal((await call(admin, "update_app_idea", { id: "tips-calendar", status: "active" })).body.idea.status, "active");
 
   // Create: checked, unique.
   const fresh = {
-    id: "babysitter-pay",
-    kind: "money-transfers",
-    problem: "Parents scramble for cash to pay the babysitter at night",
-    pitch: "Pays the sitter by bank transfer before they leave, with the fee shown first.",
-    goal: "A babysitter pay app. A parent adds a sitter, enters the hours at the end of the night and pays them by bank transfer through the provider's hosted flow, seeing the amount, the fee and when it arrives before they confirm.",
-    product_lines: ["payments"],
+    id: "school-trip-pot",
+    kind: "savings-goals",
+    problem: "Parents face one big bill for the school trip in spring",
+    pitch: "A goal for the trip's cost, filled a little each week from the parent's bank account.",
+    goal: "A school trip pot app on a money market account. A parent sets a goal for the trip's cost and its date and adds a weekly amount from their bank account through the provider's hosted flow, seeing the goal's progress and the account's terms as the product's offer states them.",
+    product_lines: ["account_operations"],
+    categories: ["deposits"],
+    product_names: ["Money Market Account"],
     sort: 5,
   };
   const created = await call(admin, "create_app_idea", fresh);
   assert.equal(created.error, false, JSON.stringify(created.body));
   assert.equal(created.body.idea.created_by, adminUser.id);
-  assert.equal((await call(dev, "list_app_ideas", { kind: "money-transfers" })).body.ideas[0].id, "babysitter-pay", "sort orders a kind's ideas");
-  assert.match((await call(admin, "create_app_idea", fresh)).body.error, /already an idea 'babysitter-pay'/);
-  const bad = await call(admin, "create_app_idea", { ...fresh, id: "sitter-advance", pitch: "Advances the sitter a loan until payday arrives." });
+  assert.deepEqual(created.body.idea.product_names, ["Money Market Account"]);
+  assert.equal((await call(dev, "list_app_ideas", { kind: "savings-goals" })).body.ideas[0].id, "school-trip-pot", "sort orders a kind's ideas");
+  assert.match((await call(admin, "create_app_idea", fresh)).body.error, /already an idea 'school-trip-pot'/);
+  const bad = await call(admin, "create_app_idea", { ...fresh, id: "trip-advance", pitch: "Advances the parent a loan until payday arrives." });
   assert.equal(bad.error, true);
   assert.match(bad.body.error, /the pitch says 'loan'/);
+  const promise = await call(admin, "create_app_idea", { ...fresh, id: "trip-promise", pitch: "Guaranteed to cover the whole trip by spring." });
+  assert.match(promise.body.error, /the pitch says 'Guaranteed', which promises/);
   // Moving an idea to a kind whose lines it doesn't share is refused; the row stays as it was.
-  assert.match((await call(admin, "update_app_idea", { id: "babysitter-pay", kind: "savings-goals" })).body.error, /'payments' isn't one of the savings-goals kind's product lines/);
+  assert.match((await call(admin, "update_app_idea", { id: "school-trip-pot", kind: "treasury-securities" })).body.error, /'account_operations' isn't one of the treasury-securities kind's product lines/);
   assert.equal((await call(admin, "update_app_idea", { id: "nope", problem: "Nobody has this problem at all" })).body.error, "No idea 'nope'; list_app_ideas lists them");
   assert.match((await call(admin, "retire_app_idea", { id: "nope" })).body.error, /No idea 'nope'/);
 
@@ -151,10 +234,10 @@ test("the store functions: seeding is idempotent and leaves edited rows alone", 
   const store = await openStore();
   const ideas = seedIdeas();
   assert.equal((await seedAppIdeas(store.db, null, ideas)).inserted.length, 16);
-  await updateAppIdea(store.db, "cool-off-cash", { pitch: "Every withdrawal waits a day and can be called off in the meantime." });
+  await updateAppIdea(store.db, "cd-ladder-planner", { pitch: "Lays out each CD's maturity date on one timeline." });
   const { inserted, kept } = await seedAppIdeas(store.db, null, ideas);
   assert.deepEqual(inserted, []);
   assert.equal(kept.length, 16);
-  assert.equal((await listAppIdeas(store.db, { kind: "dollar-account" })).find((i) => i.id === "cool-off-cash").pitch, "Every withdrawal waits a day and can be called off in the meantime.");
+  assert.equal((await listAppIdeas(store.db, { kind: "certificates-of-deposit" })).find((i) => i.id === "cd-ladder-planner").pitch, "Lays out each CD's maturity date on one timeline.");
   await assert.rejects(createAppIdea(store.db, { ...ideas[0] }, null), /already an idea/);
 });

@@ -29,14 +29,24 @@ test("every app kind validates against its schema and names real product lines",
     assert.ok(k.goal_template.length >= 40, k.id);
   }
   assert.equal(appKind("savings-goals").title, "Savings goals");
+  // The kinds ship on the lines and categories with live published products: deposits (a CD, a money market
+  // account), retirement accounts and a money market fund, and Treasury Inflation-Protected Securities.
+  assert.deepEqual(kinds.map((k) => k.id).sort(), ["cash-reserve", "certificates-of-deposit", "retirement-account", "savings-goals", "treasury-securities"]);
+  assert.deepEqual(Object.fromEntries(kinds.map((k) => [k.id, [k.product_lines, k.categories]])), {
+    "cash-reserve": [["account_operations", "wealth"], ["deposits", "mutual_funds"]],
+    "certificates-of-deposit": [["account_operations"], ["deposits"]],
+    "retirement-account": [["wealth"], ["retirement"]],
+    "savings-goals": [["account_operations"], ["deposits"]],
+    "treasury-securities": [["credit"], ["bonds"]],
+  });
   assert.equal(appKind("nope"), null);
   assert.throws(() => requireAppKind("nope"), /No app kind 'nope'; list_app_kinds lists them \(.*savings-goals/);
 });
 
 test("a kind file carries no app ideas: they're rows in Postgres (app-ideas.ts, test/app-ideas.test.js)", () => {
-  const good = JSON.parse(readFileSync(join(APP_KINDS_DIR, "money-transfers.json"), "utf8"));
+  const good = JSON.parse(readFileSync(join(APP_KINDS_DIR, "certificates-of-deposit.json"), "utf8"));
   assert.ok(!("examples" in good));
-  assert.ok(appKindErrors("money-transfers.json", { ...good, examples: [] }).length, "the schema refuses an examples list");
+  assert.ok(appKindErrors("certificates-of-deposit.json", { ...good, examples: [] }).length, "the schema refuses an examples list");
 });
 
 test("a kind's own checks: its id is its file's name, its lines are product lines, one journey at most", () => {
@@ -48,6 +58,9 @@ test("a kind's own checks: its id is its file's name, its lines are product line
   assert.match(appKindErrors("savings-goals.json", twoJourneys).join(), /more than one journey screen/);
   assert.match(appKindErrors("savings-goals.json", { ...good, screens: [good.screens[0], good.screens[0]] }).join(), /screen 'goals' twice/);
   assert.ok(appKindErrors("savings-goals.json", { ...good, extra: 1 }).length, "the schema refuses unknown fields");
+  assert.ok(appKindErrors("savings-goals.json", { ...good, categories: ["Deposits"] }).length, "a category is an id");
+  const { categories: _, ...noCategories } = good;
+  assert.deepEqual(appKindErrors("savings-goals.json", noCategories), [], "categories are optional");
   assert.ok(appKindErrors("savings-goals.json", { ...good, screens: [{ ...good.screens[0], id: "index" }, good.screens[1]] }).length, "no screen named index");
 });
 
@@ -101,8 +114,8 @@ test("scaffold_app.py --kind lays down each kind's screens on the starter, and r
     }
     // No mobile, no web: only what's there gets screens.
     const lean = join(root, "lean");
-    execFileSync("python3", [SCAFFOLD, lean, "--sdk", sdkDir, "--kind", "money-transfers", "--no-mobile"]);
-    assert.ok(!existsSync(join(lean, "mobile")) && existsSync(join(lean, "web/src/screens/transfers.tsx")));
+    execFileSync("python3", [SCAFFOLD, lean, "--sdk", sdkDir, "--kind", "certificates-of-deposit", "--no-mobile"]);
+    assert.ok(!existsSync(join(lean, "mobile")) && existsSync(join(lean, "web/src/screens/certificates.tsx")));
     const bad = spawnSync("python3", [SCAFFOLD, join(root, "bad"), "--sdk", sdkDir, "--kind", "nope"], { encoding: "utf8" });
     assert.notEqual(bad.status, 0);
     assert.match(bad.stderr, /no app kind 'nope' \(templates\/kinds has .*savings-goals/);

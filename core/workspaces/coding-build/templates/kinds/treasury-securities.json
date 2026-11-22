@@ -1,0 +1,31 @@
+{
+  "$schema": "../../../../schemas/app-kind.schema.json",
+  "id": "treasury-securities",
+  "title": "Treasury securities",
+  "description": "Buy Treasury Inflation-Protected Securities and see each holding's terms and maturity date.",
+  "product_lines": ["credit"],
+  "categories": ["bonds"],
+  "goal_template": "A Treasury securities app on Treasury Inflation-Protected Securities (TIPS). Customers buy TIPS from their bank account through the provider's hosted flow and see each holding with its amount, term, maturity date and the inflation adjustments the product reports. Explain how the product's principal adjustment works exactly as its terms describe it, show the terms, fees and every required document before the customer agrees, and never say what a holding will be worth. The app shows information, not advice.",
+  "screens": [
+    { "id": "holdings", "title": "Holdings", "purpose": "Each holding with its amount, term, maturity date and the adjustments the product reports, from the lifecycle events api/ receives." },
+    { "id": "open", "title": "Open an account", "purpose": "Opening the account: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "buy", "title": "Buy", "purpose": "Choose an amount and a term from the offer, see the terms, fees and documents verbatim, then confirm in the provider's hosted flow." },
+    { "id": "how-it-works", "title": "How it works", "purpose": "How the product's principal adjustment and interest payments work, in the product's own words from its terms and documents." }
+  ],
+  "flows": [
+    {
+      "id": "buy",
+      "title": "Buy TIPS",
+      "steps": [
+        "read the offer (offers) for the terms available, minimums and fees",
+        "show the amount, the term and each required document verbatim (documentShown) before the customer confirms",
+        "start the provider's hosted purchase flow (startAction) and send the customer to its redirect_url",
+        "api/ records the holding from Mynt's webhook (verifyWebhook)"
+      ]
+    }
+  ],
+  "sdk_calls": {
+    "server": ["createClientSession", "getContract", "verifyWebhook"],
+    "browser": ["offers", "createJourneyRunner", "documentShown", "giveConsent", "startAction"]
+  }
+}

@@ -7,6 +7,7 @@
 // starts its first build with the message as the goal (and the template's kind), then opens the app.
 // The first build runs on Mynt's own cap (there is no cap control here). Until it can send, the reason
 // is the disabled Send's tooltip, never a line under the composer.
+// An idea's chip picks its products (lib/new-app.ts picksForKind); one with no published product isn't a chip.
 // Each product shows the flags of the countries it's offered in. Create product (the picker's last item
 // and the Products tab's button) opens one sheet; the new product is listed as Draft, with Test and
 // Publish on its row, and can't be picked until it's published.
@@ -41,7 +42,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { chipIdeas, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
+import { chipIdeas, CHIPS_MAX, ideaProducts, kindAsIdea, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
 import { flagsFor, isPickable, NOT_PUBLISHED, runProductAction, STATUS_LABEL, type ProductAction, type StudioProduct } from "@/lib/products"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { cn } from "@/lib/utils"
@@ -219,8 +220,21 @@ const TEMPLATE_COLUMNS = [
   { label: "", className: COL.actions },
 ]
 
-// Every kind's app ideas, grouped by kind: a heading row where each kind's ideas start on the page.
-export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse: (k: AppKind, idea: AppIdea) => void }) {
+export const NO_PRODUCT_YET = "No product yet"
+
+// Every kind's app ideas, grouped by kind: a heading row where each kind's ideas start on the page. Once the
+// products are known, an idea with no published product to build on says so, with Create product beside Use.
+export function TemplatesTab({
+  kinds,
+  onUse,
+  products = null,
+  onCreate,
+}: {
+  kinds: AppKind[] | null
+  onUse: (k: AppKind, idea: AppIdea) => void
+  products?: NewAppProduct[] | null
+  onCreate?: () => void
+}) {
   const [query, setQuery] = useState("")
   const shown = kindIdeas(kinds ?? []).filter(({ kind, idea }) => matches(query, idea.problem, idea.pitch, kind.title, ...idea.productLines.map(lineLabel)))
   const fit = useFitRows()
@@ -266,7 +280,14 @@ export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse:
                   </TableRow>
                 )}
                 <TableRow data-template-row={idea.id} data-template-kind={kind.id}>
-                  <TableCell className={`${COL.name} font-medium`}>{idea.problem}</TableCell>
+                  <TableCell className={`${COL.name} font-medium`}>
+                    {idea.problem}
+                    {products !== null && !ideaProducts(idea, products).length && (
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground" data-no-product>
+                        {NO_PRODUCT_YET}
+                      </span>
+                    )}
+                  </TableCell>
                   <TableCell className={COL.wide}>
                     <span className="block max-w-80 truncate" title={idea.pitch}>
                       {idea.pitch}
@@ -283,9 +304,16 @@ export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse:
                     </span>
                   </TableCell>
                   <TableCell className={COL.actions}>
-                    <Button size="sm" variant="outline" onClick={() => onUse(kind, idea)} data-use-template={idea.id}>
-                      Use
-                    </Button>
+                    <span className="flex justify-end gap-2">
+                      {products !== null && !ideaProducts(idea, products).length && onCreate && (
+                        <Button size="sm" variant="outline" onClick={onCreate} data-template-create={idea.id}>
+                          Create product
+                        </Button>
+                      )}
+                      <Button size="sm" variant="outline" onClick={() => onUse(kind, idea)} data-use-template={idea.id}>
+                        Use
+                      </Button>
+                    </span>
                   </TableCell>
                 </TableRow>
               </Fragment>
@@ -651,14 +679,18 @@ export function NewAppWorkspace({
     setTab(t)
     setOpened(true)
   }
-  // An idea (or a kind's own goal): its goal in the composer to edit, its kind, its product lines filtered
-  // and one product of each picked.
+  // An idea (or a kind's own goal): its goal in the composer to edit, its kind, its product lines filtered, and
+  // its products picked in place of what was picked (the published ones in its categories and names, or one of
+  // each line). One with nothing to pick leaves the picks as they were.
   const applyIdea = (k: AppKind, idea?: AppIdea) => {
-    const lines = idea?.productLines ?? k.productLines
+    const target = idea ?? kindAsIdea(k)
     setKind(k.id)
-    runtime.thread.composer.setText(idea?.goal ?? k.goalTemplate)
-    setLines(lines)
-    if (products) setPicked((p) => picksForKind({ productLines: lines }, products.filter(isPickable), p))
+    runtime.thread.composer.setText(target.goal)
+    setLines(target.productLines)
+    if (products) {
+      const next = picksForKind(target, products.filter(isPickable), [])
+      if (next.length) setPicked(next)
+    }
     setError(null)
   }
   const applyKind = (k: AppKind) => applyIdea(k)
@@ -743,12 +775,13 @@ export function NewAppWorkspace({
   // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
   const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
   // A few ideas under the welcome, each labelled by its problem, picked once per page load (a Mynt with no
-  // ideas yet shows the kinds).
+  // ideas yet shows the kinds). Once the products are known, only ones with a published product to pick.
   const [seed] = useState(() => Math.random())
   const chipList = useMemo<{ kind: AppKind; idea: AppIdea | null }[]>(() => {
-    const ideas = chipIdeas(kinds ?? [], seed)
-    return ideas.length ? ideas : (kinds ?? []).map((kind) => ({ kind, idea: null }))
-  }, [kinds, seed])
+    const all = kinds ?? []
+    if (all.some((k) => k.ideas.length)) return chipIdeas(all, seed, CHIPS_MAX, products)
+    return all.filter((k) => products === null || ideaProducts(kindAsIdea(k), products).length).map((kind) => ({ kind, idea: null }))
+  }, [kinds, seed, products])
   const chips = chipList.length ? (
     <div className="mt-6 flex flex-wrap justify-center gap-2 px-4" data-chips>
       {chipList.map(({ kind, idea }) => (
@@ -769,7 +802,7 @@ export function NewAppWorkspace({
 
   const content = (t: NewAppTab) =>
     t === "templates" ? (
-      <TemplatesTab kinds={kinds} onUse={applyIdea} />
+      <TemplatesTab kinds={kinds} onUse={applyIdea} products={products} onCreate={openSheet} />
     ) : (
       <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onAction={onAction} focus={focus} />
     )
