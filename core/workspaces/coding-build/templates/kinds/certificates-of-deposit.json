@@ -1,0 +1,40 @@
+{
+  "$schema": "../../../../schemas/app-kind.schema.json",
+  "id": "certificates-of-deposit",
+  "title": "Certificates of deposit",
+  "description": "Open certificates of deposit and see each one's term, amount and maturity date.",
+  "product_lines": ["account_operations"],
+  "categories": ["deposits"],
+  "goal_template": "A certificates of deposit app. Customers open a CD from their bank account, choosing a term from the product's offer, and see every CD they hold with its amount, term, rate and maturity date. Show the terms, the rate, any early withdrawal penalty and every required document exactly as the product states them before the customer agrees, and say what happens when a CD matures. The app shows information, not advice.",
+  "screens": [
+    { "id": "certificates", "title": "Certificates", "purpose": "Every CD the customer holds with its amount, term, rate and maturity date, soonest maturity first, from the lifecycle events api/ receives." },
+    { "id": "open", "title": "Open a CD", "purpose": "Opening the account: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "new-cd", "title": "New CD", "purpose": "Choose a term and an amount from the offer, see the rate, the early withdrawal penalty and the documents verbatim, then fund it in the provider's hosted flow." },
+    { "id": "maturity", "title": "At maturity", "purpose": "What the product does when a CD matures, as its terms state, and the choices it offers the customer before that date." }
+  ],
+  "flows": [
+    {
+      "id": "open-cd",
+      "title": "Open a CD",
+      "steps": [
+        "read the offer (offers) for the terms, rates, minimums and early withdrawal penalty",
+        "show the chosen term, amount and penalty, and each required document verbatim (documentShown), before the customer confirms",
+        "start the provider's hosted funding flow (startAction) and send the customer to its redirect_url",
+        "api/ records the new CD and its maturity date from Mynt's webhook (verifyWebhook)"
+      ]
+    },
+    {
+      "id": "maturity-notice",
+      "title": "Before a CD matures",
+      "steps": [
+        "api/ notes each CD's maturity date from the lifecycle events",
+        "ahead of it, show the customer the product's maturity options as its terms state them",
+        "start the provider's hosted flow (startAction) for the option the customer picks"
+      ]
+    }
+  ],
+  "sdk_calls": {
+    "server": ["createClientSession", "getContract", "verifyWebhook", "trackEvent"],
+    "browser": ["offers", "createJourneyRunner", "documentShown", "giveConsent", "startAction"]
+  }
+}

@@ -53,6 +53,8 @@ export type StudioProduct = {
   id: string;
   name: string;
   productLine: string;
+  // Its category within the line (deposits, retirement, ...), when Mynt gives one: New app's ideas pick by it.
+  category?: string;
   by: string;
   accessMode: string;
   // Where it's offered, as Mynt gives it: its region (a country code, or "global"), and the states or
@@ -83,6 +85,7 @@ export function productsFrom(buildable: unknown, mine: unknown = []): StudioProd
     id: str(p.id),
     name: str(p.name) || str(p.id),
     productLine: str(p.product_line),
+    ...(str(p.category) ? { category: str(p.category) } : {}),
     by: str(p.by),
     accessMode: str(p.access_mode),
     jurisdictions: jurisdictionsOf(p),
@@ -95,6 +98,7 @@ export function productsFrom(buildable: unknown, mine: unknown = []): StudioProd
       id: str(p.id),
       name: str(p.name) || str(p.id),
       productLine: str(p.product_line),
+      ...(str(p.category) ? { category: str(p.category) } : {}),
       by: "You",
       accessMode: "",
       jurisdictions: jurisdictionsOf(p),

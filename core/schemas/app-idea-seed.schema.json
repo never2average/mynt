@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "App idea seed",
-  "description": "The app ideas Mynt ships (workspaces/coding-build/templates/ideas.seed.json). They live in Postgres (financial_products.app_ideas) once an admin runs seed_app_ideas, which adds the missing ones and never overwrites a row already there. src/app-ideas.ts checks what this schema can't say: the kind exists, the lines are the kind's and ones Mynt builds on in the US, and the text promises nothing Mynt can't build.",
+  "description": "The app ideas Mynt ships (workspaces/coding-build/templates/ideas.seed.json). They live in Postgres (financial_products.app_ideas) once an admin runs seed_app_ideas, which adds the missing ones and never overwrites a row already there. src/app-ideas.ts checks what this schema can't say: the kind exists, the lines (and categories) are the kind's, and the text promises, projects and advises nothing.",
   "type": "object",
   "additionalProperties": false,
   "required": ["ideas"],
@@ -20,7 +20,9 @@
           "problem": { "type": "string", "minLength": 10, "maxLength": 80, "description": "The label: who has the problem and what it is, in plain words" },
           "pitch": { "type": "string", "minLength": 10, "maxLength": 120, "description": "One line: what the app does about the problem" },
           "goal": { "type": "string", "minLength": 40, "maxLength": 1200, "description": "The goal the build starts from, which the developer edits" },
-          "product_lines": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["payments", "custody_settlement", "exchange"] } },
+          "product_lines": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z_]+$" }, "description": "Some or all of the kind's product lines" },
+          "categories": { "type": "array", "uniqueItems": true, "maxItems": 8, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,39}$" }, "description": "Optional: the product categories in those lines the idea is for (within the kind's own, if it lists some); the studio picks the published products in them" },
+          "product_names": { "type": "array", "uniqueItems": true, "maxItems": 8, "items": { "type": "string", "minLength": 2, "maxLength": 60 }, "description": "Optional: words from the names of the products it's for (Money Market Account), when a category is still too wide; the studio picks the published products whose names contain one" },
           "sort": { "type": "integer", "minimum": 0, "description": "Order within the kind, lowest first" }
         }
       }
