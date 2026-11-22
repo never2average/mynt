@@ -29,7 +29,8 @@ import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { CreateProductSheet } from "@/components/create-product-sheet"
 import { RecentThreads } from "@/components/recent-threads"
-import { announceThreads, listProductChats, mergeThreads, newThreadId, productChatRecord, saveProductChat, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord, type StudioThread } from "@/lib/threads"
+import { ChatSaver, listChats, loadChat, migrateLocalChats, newThreadId, sessionIdFor } from "@/lib/chat-sessions"
+import { announceThreads, mergeThreads, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord, type StudioThread } from "@/lib/threads"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
 import { ModeToggle, ProductChat, type DraftCards } from "@/components/product-chat"
@@ -508,8 +509,8 @@ export function NewAppWorkspace({
   fetcher?: typeof fetch
   // Create product mode's chat (app/api/product-chat unless given).
   transport?: ChatTransport<UIMessage>
-  // Recent's threads (lib/threads.ts): the user's apps, their own products, and the key their product
-  // chats are kept under in this browser (none kept without it).
+  // Recent's threads (lib/threads.ts): the user's apps, their own products, and the user's key (their
+  // product chats are kept on Mynt once it's known; older ones in this browser under it move there).
   apps?: AppThreadSource[] | null
   myProducts?: MyProduct[] | null
   historyOwner?: string | null
@@ -667,26 +668,50 @@ export function NewAppWorkspace({
   const drafting = productChat.status === "submitted" || productChat.status === "streaming"
 
   // ---- threads: Recent, View all, and reopening a product chat ----
-  // This product chat is kept (per user, in this browser) from its first message, and again whenever
-  // it settles or a draft of it is created.
+  // This product chat is kept on Mynt for the user (lib/chat-sessions.ts) from its first message, and
+  // again whenever a reply settles or a draft of it is created. A save that fails is tried again; the
+  // open chat is never lost for it.
   const [threadId, setThreadId] = useState(newThreadId)
   const [chats, setChats] = useState<ProductChatRecord[]>([])
-  useEffect(() => setChats(listProductChats(historyOwner)), [historyOwner])
-  const savedSig = useRef("")
-  const sigOf = (id: string, messages: UIMessage[], created: Record<string, string>) => {
-    const last = messages[messages.length - 1]
-    return `${id}:${messages.length}:${last?.id ?? ""}:${JSON.stringify(last?.parts ?? []).length}:${JSON.stringify(created)}`
-  }
+  // The fetcher as of the last render, behind one function that never changes (the saver lives as long as the page).
+  const fetchRef = useRef(fetcher)
+  fetchRef.current = fetcher
+  const threadFetch = useCallback<typeof fetch>((...a) => fetchRef.current(...a), [])
+  const reloadChats = useCallback(async () => {
+    const list = await listChats("product", { fetcher: threadFetch })
+    if (list) setChats(list)
+  }, [threadFetch])
+  const saver = useMemo(() => new ChatSaver("product", { fetcher: threadFetch, onSaved: () => void reloadChats().then(() => announceThreads()) }), [threadFetch, reloadChats])
+  useEffect(() => () => saver.dispose(), [saver])
+  // Once the user is known: chats an older studio kept in this browser go to Mynt, then the list is read.
+  useEffect(() => {
+    if (!historyOwner) return
+    let live = true
+    void (async () => {
+      const moved = await migrateLocalChats("product", historyOwner, { fetcher: threadFetch })
+      if (!live) return
+      await reloadChats()
+      if (moved) announceThreads()
+    })()
+    return () => {
+      live = false
+    }
+  }, [historyOwner, threadFetch, reloadChats])
+  const savedFirst = useRef("")
   useEffect(() => {
     if (!historyOwner || !productChat.messages.length) return
-    const first = !savedSig.current.startsWith(`${threadId}:`)
+    const first = savedFirst.current !== threadId
+    // While a reply streams, only the first message is saved (at once); the reply once it settles.
     if (drafting && !first) return
-    const sig = sigOf(threadId, productChat.messages, createdDrafts)
-    if (sig === savedSig.current) return
-    savedSig.current = sig
-    setChats(saveProductChat(historyOwner, productChatRecord(threadId, productChat.messages, createdDrafts)))
-    announceThreads()
-  }, [historyOwner, drafting, productChat.messages, createdDrafts, threadId])
+    savedFirst.current = threadId
+    const messages = drafting ? productChat.messages.filter((m, i, all) => !(i === all.length - 1 && m.role === "assistant")) : productChat.messages
+    const created = Object.entries(createdDrafts)
+    saver.save(
+      threadId,
+      { messages, outcomes: Object.fromEntries(created.map(([d, p]) => [d, { product_id: p }])), metadata: created.length ? { product_ids: created.map(([, p]) => p) } : undefined },
+      { now: first },
+    )
+  }, [historyOwner, drafting, productChat.messages, createdDrafts, threadId, saver])
   // Products created or published here, until the page's list says so.
   const [localMine, setLocalMine] = useState<MyProduct[]>([])
   const noteMine = (p: MyProduct) => {
@@ -698,14 +723,23 @@ export function NewAppWorkspace({
     return mergeThreads(apps, chats, mine)
   }, [apps, chats, myProducts, localMine])
   const [focus, setFocus] = useState<string | null>(null)
-  const restoreChat = (id: string): boolean => {
-    const rec = listProductChats(historyOwner).find((c) => c.id === id) ?? chats.find((c) => c.id === id)
+  // Reopens one of the user's product chats, read back from Mynt with the drafts it created (so none
+  // is created twice). What it holds is already saved, so reopening it saves nothing.
+  const restoreChat = async (link: string): Promise<boolean> => {
+    const id = sessionIdFor(link)
+    if (id === threadId && productChat.messages.length) {
+      setMode("product")
+      return true
+    }
+    const rec = await loadChat(id, threadFetch)
     if (!rec) return false
     if (drafting) void productChat.stop()
-    savedSig.current = sigOf(rec.id, rec.messages, rec.created)
+    const created = Object.fromEntries(Object.entries(rec.outcomes).filter(([, o]) => typeof o.product_id === "string").map(([d, o]) => [d, o.product_id as string]))
+    saver.adopt(rec.id, rec)
+    savedFirst.current = rec.id
     productChat.setMessages(rec.messages)
     setThreadId(rec.id)
-    setCreatedDrafts(rec.created)
+    setCreatedDrafts(created)
     setError(null)
     setMode("product")
     return true
@@ -720,7 +754,7 @@ export function NewAppWorkspace({
     if (t.source === "app") {
       if (onOpenApp) onOpenApp(t.href)
       else if (typeof window !== "undefined") window.location.assign(t.href)
-    } else if (t.source === "chat") restoreChat(t.id)
+    } else if (t.source === "chat") void restoreChat(t.id)
     else focusProduct(t.id)
   }
   // From the address (?thread=, ?product=) or the sidebar: once what it needs has loaded.
@@ -730,7 +764,7 @@ export function NewAppWorkspace({
     if (openRequest.thread) {
       if (!historyOwner) return
       appliedOpen.current = openRequest.n
-      restoreChat(openRequest.thread)
+      void restoreChat(openRequest.thread)
     } else if (openRequest.product) {
       if (!products) return
       appliedOpen.current = openRequest.n

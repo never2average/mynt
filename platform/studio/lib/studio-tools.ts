@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ChatKindSchema, SessionEvent, SessionId, SessionMetadata } from "./chat-sessions";
 import { isCalendarDate } from "./compliance";
 import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
@@ -228,6 +229,13 @@ export const STUDIO_TOOLS = {
   prepare_treasury_deposit: z.object({ pool_id: uuid, wallet: solanaAddress, amount_usdc_base_units: baseUnits, max_lock_in_seconds: seconds }).strict(),
   prepare_treasury_withdrawal: z.object({ pool_id: uuid, wallet: solanaAddress, deposit: solanaAddress, amount_usdc_base_units: baseUnits, max_notice_seconds: seconds }).strict(),
   get_treasury_tx_status: z.object({ signature: z.string().regex(SIGNATURE) }).strict(),
+  // The user's own chats (Build page's product chats, Earn's), kept on Mynt as sessions of events
+  // (lib/chat-sessions.ts): only their own, through app/api/threads.
+  create_chat_session: z.object({ id: SessionId, kind: ChatKindSchema, title: z.string().max(200).optional(), metadata: SessionMetadata.optional() }).strict(),
+  append_chat_events: z.object({ id: SessionId, events: z.array(SessionEvent).min(1).max(100) }).strict(),
+  list_chat_sessions: z.object({ kind: ChatKindSchema.optional(), query: z.string().max(200).optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
+  get_chat_session: z.object({ id: SessionId, after_seq: z.number().int().min(0).optional() }).strict(),
+  delete_chat_session: z.object({ id: SessionId }).strict(),
 } as const;
 
 export type StudioTool = keyof typeof STUDIO_TOOLS;

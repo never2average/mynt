@@ -33,7 +33,8 @@ import {
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
-import { listProductChats, mergeThreads, myProductsFrom, THREADS_UPDATED, type StudioThread, type ThreadsUpdatedDetail } from "@/lib/threads"
+import { listChats, type ThreadSummary } from "@/lib/chat-sessions"
+import { mergeThreads, myProductsFrom, THREADS_UPDATED, type StudioThread, type ThreadsUpdatedDetail } from "@/lib/threads"
 import { groupByStage, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
@@ -141,24 +142,27 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     return () => window.removeEventListener("adorable:projects-updated", again)
   }, [loadApps])
 
-  // The Financial products group: the user's own products (from Mynt) and their product chats (kept in
-  // this browser under the key the route gives), read again when either changes.
+  // The Financial products group: the user's own products and their product chats (both from Mynt),
+  // read again when either changes.
   const [productThreads, setProductThreads] = useState<StudioThread[] | null>(null)
   useEffect(() => {
     if (!developer) return
     let live = true
-    let owner: string | null = null
+    let chats: ThreadSummary[] = []
     let mine: ReturnType<typeof myProductsFrom> = []
-    const show = () => live && setProductThreads(mergeThreads([], listProductChats(owner), mine))
+    const show = () => live && setProductThreads(mergeThreads([], chats, mine))
+    const loadChats = async () => {
+      const list = await listChats("product")
+      if (list) chats = list
+    }
     const load = async () => {
-      const res = await fetch("/api/products?mine=1", { cache: "no-store" }).catch(() => null)
-      const data = res?.ok ? ((await res.json().catch(() => null)) as { mine?: unknown; owner?: unknown } | null) : null
+      const [res] = await Promise.all([fetch("/api/products?mine=1", { cache: "no-store" }).catch(() => null), loadChats()])
+      const data = res?.ok ? ((await res.json().catch(() => null)) as { mine?: unknown } | null) : null
       mine = myProductsFrom(data?.mine)
-      owner = typeof data?.owner === "string" && data.owner ? data.owner : null
       show()
     }
     void load()
-    const again = (e: Event) => ((e as CustomEvent<ThreadsUpdatedDetail>).detail?.products ? void load() : show())
+    const again = (e: Event) => ((e as CustomEvent<ThreadsUpdatedDetail>).detail?.products ? void load() : void loadChats().then(show))
     window.addEventListener(THREADS_UPDATED, again)
     return () => {
       live = false
