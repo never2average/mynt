@@ -13,8 +13,9 @@ export const dynamic = "force-dynamic";
 // (list_my_products) come after, as drafts: shown, but not pickable until published. A Mynt that
 // doesn't list the user's own products still lists what they can build on.
 // `mine` is every product of the user's own (drafts and published, with when each last changed) and
-// `owner` the hashed key their product chats are kept under in the browser (lib/threads.ts), for the
-// Build page's Recent and the sidebar's Financial products; ?mine=1 returns only those.
+// `owner` the hashed key an older studio kept their product chats under in the browser (moved to Mynt
+// on load, lib/chat-sessions.ts), for the Build page's Recent and the sidebar's Financial products;
+// ?mine=1 returns only those.
 export async function GET(req: NextRequest) {
   const query = req.nextUrl.searchParams.get("query")?.trim().slice(0, 200) || undefined;
   const onlyMine = req.nextUrl.searchParams.get("mine") === "1";

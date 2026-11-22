@@ -12,14 +12,14 @@
 // Propose pool, or declined; the assistant can't send anything itself). The chat bar has
 // the wallet picker, and a draft for a pool with an on-chain treasury is a devnet deposit or
 // withdrawal the user signs in their own wallet (components/earn-wallet.tsx). The chat's top right
-// has Past conversations: this user's earlier Earn threads in this browser (lib/earn-history.ts),
+// has Past conversations: this user's earlier Earn threads, kept on Mynt (lib/earn-history.ts),
 // to pick one up again, or start a new one.
 import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import { useAISDKRuntime } from "@assistant-ui/react-ai-sdk"
 import type { UseChatHelpers } from "@ai-sdk/react"
 import type { UIMessage } from "ai"
 import { History, Layers, Loader2, Target, Wallet } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { AskAiMarkdownText } from "@/components/ask-ai-markdown"
 import { Thread } from "@/components/assistant-ui/thread"
@@ -63,7 +63,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
-import { listThreads, newThreadId, saveThread, threadTitle, type EarnThreadRecord, type SavedOutcome } from "@/lib/earn-history"
+import { ChatSaver, listChats, loadChat, migrateLocalChats, sessionIdFor } from "@/lib/chat-sessions"
+import { newThreadId, savedOutcomesFrom, type EarnThreadRecord, type SavedOutcome, type ThreadMatch } from "@/lib/earn-history"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
 import { toCsv } from "@/lib/compliance"
@@ -132,7 +133,7 @@ function EarnThread({ chat, commands, roles }: { chat: Chat; commands?: readonly
 }
 
 // Past conversations, as the chat's history button and its sheet use them.
-export type EarnHistory = { threads: EarnThreadRecord[]; current: string; onPick: (id: string) => void; onNew: () => void }
+export type EarnHistory = { threads: EarnThreadRecord[]; current: string; onPick: (id: string) => void; onNew: () => void; search?: (query: string) => Promise<ThreadMatch[] | null> }
 
 // The round button floating at the chat's top right (icon only, named by its tooltip and label),
 // and the centred pop-up it opens (about two thirds of the screen): New conversation, then this user's threads,
@@ -153,7 +154,7 @@ export function PastConversations({ history, open: shown, onOpenChange }: { hist
           <TooltipContent side="bottom">Past conversations</TooltipContent>
         </Tooltip>
       </span>
-      <ChatSearchDialog open={open} onOpenChange={setOpen} threads={history.threads} current={history.current} onPick={history.onPick} onNew={history.onNew} />
+      <ChatSearchDialog open={open} onOpenChange={setOpen} threads={history.threads} current={history.current} onPick={history.onPick} onNew={history.onNew} search={history.search} />
     </>
   )
 }
@@ -871,7 +872,7 @@ const KIND_OPTIONS = [
 ]
 const PROPOSAL_OPTION = { value: "proposal", label: "Pool proposal" }
 
-// Draft outcomes as a thread keeps them (lib/earn-history.ts), and back: the key a draft was (or
+// Draft outcomes as a thread keeps them (lib/earn-history.ts, saved as outcome events), and back: the key a draft was (or
 // will be) sent with, what Mynt answered once it was sent, and whether the user declined it.
 export const savedOutcomes = (all: Record<string, DraftOutcome>): Record<string, SavedOutcome> =>
   Object.fromEntries(Object.entries(all).map(([id, o]) => [id, { key: o.key, sent: o.state.kind === "done" ? o.state.message : null, ...(o.state.kind === "declined" ? { declined: true as const } : {}) }]))
@@ -1114,7 +1115,11 @@ export function StrategiesTab({
 
 // ---- the page ----
 
-const outcomesSig = (messages: UIMessage[], outcomes: Record<string, SavedOutcome>) => JSON.stringify([messages, outcomes])
+// The chat search's words: Mynt looks through the user's Earn chats (titles and what was said).
+const searchEarnChats = async (query: string): Promise<ThreadMatch[] | null> => {
+  const list = await listChats("earn", { query })
+  return list && list.map((t) => ({ thread: t, snippet: t.snippet ?? null }))
+}
 
 // The chat's slash commands, and the roles they're shown to (the menu hides the others).
 export const earnRoles = (a: LiquidityAccess): string[] => [...(a.builder ? ["builder"] : []), ...(a.liquidityProvider ? ["liquidity-provider"] : [])]
@@ -1150,7 +1155,7 @@ export function EarnWorkspace({
   actions: LiquidityActions
   initialTab?: string | null
   isMobile?: boolean
-  historyOwner?: string | null // whose past conversations these are (a hash of the user); none kept without one
+  historyOwner?: string | null // the signed-in user (a hash): none kept without one; older chats in this browser under it move to Mynt
   initialThread?: string | null // ?thread=: a chat picked in the sidebar's Search chats, opened once known
 }) {
   const available = tabsFor(data.access)
@@ -1173,48 +1178,72 @@ export function EarnWorkspace({
     if (drafts.length > seenDrafts && available.includes("my-strategies")) setTab("my-strategies")
   }
 
-  // Past conversations: this thread is saved (per user, in this browser) whenever it settles, and
-  // one picked from the list replaces the chat's messages, so the user carries on where they left it.
+  // Past conversations: this thread is kept on Mynt for the user (lib/chat-sessions.ts) from its
+  // first question, again whenever a reply settles and whenever a draft's outcome changes (its key
+  // before it's sent, then sent or declined). A save that fails is tried again; the open chat is never
+  // lost for it. One picked from the list is read back and replaces the chat's messages, so the user
+  // carries on where they left it.
   const [threadId, setThreadId] = useState(newThreadId)
   const [threads, setThreads] = useState<EarnThreadRecord[]>([])
-  const savedSig = useRef("")
-  useEffect(() => setThreads(listThreads(historyOwner)), [historyOwner])
-  const busy = chat.status === "streaming" || chat.status === "submitted"
+  const reloadThreads = useCallback(async () => {
+    const list = await listChats("earn")
+    if (list) setThreads(list)
+  }, [])
+  const saver = useMemo(() => new ChatSaver("earn", { onSaved: () => void reloadThreads() }), [reloadThreads])
+  useEffect(() => () => saver.dispose(), [saver])
+  // Once the user is known: chats an older studio kept in this browser go to Mynt, then the list is read.
   useEffect(() => {
-    if (!historyOwner || busy || !chat.messages.length) return
-    const kept = savedOutcomes(outcomes)
-    const sig = outcomesSig(chat.messages, kept)
-    if (sig === savedSig.current) return
-    savedSig.current = sig
-    setThreads(saveThread(historyOwner, { id: threadId, title: threadTitle(chat.messages), updatedAt: new Date().toISOString(), messages: chat.messages, outcomes: kept }))
-  }, [historyOwner, busy, chat.messages, outcomes, threadId])
+    if (!historyOwner) return
+    let live = true
+    void migrateLocalChats("earn", historyOwner).then(() => {
+      if (live) void reloadThreads()
+    })
+    return () => {
+      live = false
+    }
+  }, [historyOwner, reloadThreads])
+  const busy = chat.status === "streaming" || chat.status === "submitted"
+  const savedFirst = useRef("")
+  useEffect(() => {
+    if (!historyOwner || !chat.messages.length) return
+    const first = savedFirst.current !== threadId
+    // While a reply streams, only the first question is saved (at once); the reply once it settles.
+    if (busy && !first) return
+    savedFirst.current = threadId
+    const messages = busy ? chat.messages.filter((m, i, all) => !(i === all.length - 1 && m.role === "assistant")) : chat.messages
+    saver.save(threadId, { messages, outcomes: savedOutcomes(outcomes) }, { now: first })
+  }, [historyOwner, busy, chat.messages, outcomes, threadId, saver])
   const switchTo = (id: string, messages: UIMessage[], kept: Record<string, SavedOutcome>) => {
     if (busy) void chat.stop()
-    savedSig.current = messages.length ? outcomesSig(messages, kept) : ""
+    savedFirst.current = messages.length ? id : ""
     chat.setMessages(messages)
     setThreadId(id)
     setOutcomes(restoredOutcomes(kept))
     setSeenDrafts(panelFrom(messages as never).drafts.length)
   }
-  // A chat picked from the sidebar's Search chats arrives as ?thread=; it's opened once, when this
-  // user's threads are known.
+  const openThread = async (link: string) => {
+    const id = sessionIdFor(link)
+    if (id === threadId) return
+    const t = await loadChat(id)
+    if (!t) return
+    saver.adopt(t.id, t)
+    switchTo(t.id, t.messages, savedOutcomesFrom(t.outcomes))
+  }
+  // A chat picked from the sidebar's Search chats arrives as ?thread=; it's opened once, when the user is known.
   const openedInitial = useRef(false)
   useEffect(() => {
     if (openedInitial.current || !historyOwner || !initialThread) return
     openedInitial.current = true
-    const t = listThreads(historyOwner).find((x) => x.id === initialThread)
-    if (t) switchTo(t.id, t.messages, t.outcomes)
+    void openThread(initialThread)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyOwner, initialThread])
   const history: EarnHistory | null = historyOwner
     ? {
         threads,
         current: threadId,
-        onPick: (id) => {
-          const t = listThreads(historyOwner).find((x) => x.id === id)
-          if (t && t.id !== threadId) switchTo(t.id, t.messages, t.outcomes)
-        },
+        onPick: (id) => void openThread(id),
         onNew: () => switchTo(newThreadId(), [], {}),
+        search: searchEarnChats,
       }
     : null
 

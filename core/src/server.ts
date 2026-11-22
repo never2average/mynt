@@ -16,6 +16,7 @@ import { registerCodingAgentAdminTools, registerCodingAgentTools } from "./build
 import { registerAppKindTools } from "./app-kinds.js";
 import { registerAppIdeaAdminTools, registerAppIdeaTools } from "./app-ideas.js";
 import { registerProductIdeaAdminTools, registerProductIdeaTools } from "./product-ideas.js";
+import { registerChatSessionTools } from "./chat-sessions.js";
 import { registerRepoAccessNoticeTools, registerRepoApprovalAdminTools } from "./repo-approvals.js";
 import { registerBdAdminTools, registerBdAgentTools, registerConnectTools } from "./bd.js";
 import { feasibilityCheck, registerDeskTools, type DeskService } from "./desk.js";
@@ -123,6 +124,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   // Anyone signed in may have been invited to a workspace (as a developer or a user), and answers it themselves.
   if (user) registerInvitationTools(server, store, user, ctx.clerkAdmin ?? null);
   if (user && ctx.identity) registerLinkedAccountsTools(server, user, ctx.identity);
+  // Their own studio chats (product chats, Earn chats), kept on Mynt as sessions of events; only they read them (chat-sessions.ts).
+  if (user) registerChatSessionTools(server, store, user);
   if (has("developer")) {
     registerDeveloperTools(server, store, user!);
     // Leaving a workspace cuts access at once: builds stop, VM logins to its hosting are revoked (workspaces.ts offboard).

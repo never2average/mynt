@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useChat } from "@ai-sdk/react";
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { EarnWorkspace, PoolsTab, StrategiesTab, type DraftOutcome, type EarnStatus } from "@/components/earn-assistant";
 import { EarnTable, type LiquidityActions } from "@/components/earn-view";
-import { HISTORY_KEY, listThreads, MAX_THREADS, saveThread, threadTitle } from "@/lib/earn-history";
+import { eventsFor, LEGACY_KEYS, NOT_SYNCED, replay, saveTiming, sessionIdFor, syncedFrom, threadTitle } from "@/lib/chat-sessions";
+import { fakeThreads, uuid } from "./threads-fake";
 import { panelFrom, PROMPT_EXAMPLES, type Draft } from "@/lib/earn";
 import { fromPools, fromPositions, fromWithdrawals, type LiquidityData } from "@/lib/liquidity";
 
@@ -417,52 +418,57 @@ describe("no outlined badges around long content", () => {
 });
 
 describe("past conversations", () => {
-  const store = () => {
-    const m = new Map<string, string>();
-    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
-  };
+  // Mynt's chat sessions behind /api/threads (test/threads-fake.ts), as the page's fetch.
+  let server = fakeThreads();
+  beforeEach(() => {
+    window.localStorage.clear();
+    saveTiming.delayMs = 5;
+    server = fakeThreads();
+    vi.stubGlobal("fetch", server.fetcher);
+  });
+  afterEach(() => vi.unstubAllGlobals());
   const msgs = (q: string): UIMessage[] => [
     { id: `u-${q}`, role: "user", parts: [{ type: "text", text: q }] },
     { id: `a-${q}`, role: "assistant", parts: [{ type: "text", text: `About ${q}.` }] },
   ];
   const thread = (id: string, q: string, at: string) => ({ id, title: threadTitle(msgs(q)), updatedAt: at, messages: msgs(q), outcomes: {} });
   const historyButton = () => screen.getByRole("button", { name: "Past conversations" });
+  const settle = (ms = 30) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
+  const OLD = uuid("01");
+  const TB = uuid("02");
 
-  it("saves threads per user, newest first, at most MAX_THREADS, titled by the first question; blocked storage keeps none", () => {
-    const s = store();
-    saveThread("u1", thread("a", "First question", "2026-11-20T10:00:00Z"), s);
-    saveThread("u1", thread("b", "Second question", "2026-11-21T10:00:00Z"), s);
-    saveThread("u2", thread("c", "Someone else's", "2026-11-21T11:00:00Z"), s);
-    expect(listThreads("u1", s).map((t) => [t.id, t.title])).toEqual([
-      ["b", "Second question"],
-      ["a", "First question"],
-    ]);
-    expect(listThreads("u2", s).map((t) => t.id)).toEqual(["c"]);
-    expect(listThreads(null, s)).toEqual([]);
-    // Saving a thread again replaces it and moves it to the top.
-    saveThread("u1", { ...thread("a", "First question", "2026-11-21T12:00:00Z"), messages: [...msgs("First question"), ...msgs("More")] }, s);
-    expect(listThreads("u1", s).map((t) => [t.id, t.messages.length])).toEqual([
-      ["a", 4],
-      ["b", 2],
-    ]);
-    for (let i = 0; i < MAX_THREADS + 5; i++) saveThread("u1", thread(`t${i}`, `Q${i}`, `2026-12-01T00:00:${String(i).padStart(2, "0")}Z`), s);
-    expect(listThreads("u1", s)).toHaveLength(MAX_THREADS);
-    expect(listThreads("u1", s)[0].id).toBe(`t${MAX_THREADS + 4}`);
-    const blocked = {
-      getItem: () => null,
-      setItem: () => {
-        throw new Error("blocked");
-      },
-    };
-    expect(saveThread("u1", thread("x", "Q", "2026-11-21T00:00:00Z"), blocked)).toEqual([]);
+  it("a thread is a log of events: each message and outcome appended once, the latest copy winning on replay", () => {
+    const m = msgs("First question");
+    const first = eventsFor({ messages: m.slice(0, 1), outcomes: {} }, NOT_SYNCED);
+    expect(first.title).toBe("First question");
+    expect(first.events.map((e) => [e.type, e.role])).toEqual([["message", "user"]]);
+    // What's already there isn't sent again; a reply and a draft's key are.
+    const next = eventsFor({ messages: m, outcomes: { d1: { key: "k-1", sent: null } } }, first.next);
+    expect(next.events.map((e) => e.type)).toEqual(["message", "outcome"]);
+    expect(eventsFor({ messages: m, outcomes: { d1: { key: "k-1", sent: null } } }, next.next).events).toEqual([]);
+    // Sent: a new outcome event; the replay has the latest.
+    const sent = eventsFor({ messages: m, outcomes: { d1: { key: "k-1", sent: "Done." } } }, next.next);
+    expect(sent.events.map((e) => e.type)).toEqual(["outcome"]);
+    const log = [...first.events, ...next.events, ...sent.events].map((e, i) => ({ seq: i + 1, type: e.type, role: e.role, payload: e.payload }));
+    expect(replay(log)).toEqual({ messages: m, outcomes: { d1: { key: "k-1", sent: "Done." } } });
+    // A message changed later (a reply that finished streaming) is appended again under its id and replaces the first copy.
+    const longer = { ...m[1], parts: [{ type: "text" as const, text: "About First question, in full." }] };
+    const changed = eventsFor({ messages: [m[0], longer], outcomes: {} }, syncedFrom({ messages: m, outcomes: {}, title: "First question", metadata: {} }));
+    expect(changed.events.map((e) => e.type)).toEqual(["message"]);
+    expect(replay([...log, { seq: 9, type: "message", role: "assistant", payload: changed.events[0].payload }]).messages).toEqual([m[0], longer]);
+    // Each event's client id comes from what it holds, so a retried save is skipped by Mynt.
+    expect(eventsFor({ messages: m, outcomes: {} }, NOT_SYNCED).events.map((e) => e.client_id)).toEqual(eventsFor({ messages: m, outcomes: {} }, NOT_SYNCED).events.map((e) => e.client_id));
     expect(threadTitle([])).toBe("Untitled conversation");
+    expect(sessionIdFor("t-old")).toBe(sessionIdFor("t-old"));
+    expect(sessionIdFor("t-old")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(sessionIdFor(OLD)).toBe(OLD);
   });
 
   it("a floating Past conversations button at the chat's top right lists this user's threads; the chat is saved once it settles; New conversation starts afresh; a thread picked is restored to continue", async () => {
-    window.localStorage.clear();
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify({ u1: [thread("old", "Older question", "2026-11-20T10:00:00Z")], u2: [thread("theirs", "Not yours", "2026-11-21T10:00:00Z")] }));
+    server.seed("earn", thread(OLD, "Older question", "2026-11-20T10:00:00Z"));
     const sent: string[] = [];
     render(<Earn data={lpData} sent={sent} owner="u1" />);
+    await settle();
     const button = historyButton();
     // In the chat's top-right corner, with a button per tab beside it while the panel isn't open
     // (a liquidity provider's: Pools and My strategies), each opening the panel on that tab.
@@ -471,13 +477,12 @@ describe("past conversations", () => {
     expect(button.closest("[data-chat-side]")).toBeTruthy();
     expect([...corner.querySelectorAll("[data-expand-panel]")].map((b) => b.getAttribute("aria-label"))).toEqual(["Open Pools", "Open My strategies"]);
     expect(corner.querySelector('[aria-label="Show tabs"]')).toBeNull();
-    // Ask a question: once the answer settles, the thread is saved under this user.
+    // Ask a question: it's saved on Mynt at once, and the answer once it settles.
     await act(async () => void fireEvent.click(document.querySelector('[data-chip="$50k, 90-day lock-in, US credit"]')!));
-    await act(async () => new Promise((r) => setTimeout(r, 50)));
-    const saved = listThreads("u1");
+    await settle(100);
+    const saved = server.list("earn");
     expect(saved.map((t) => t.title)).toEqual(["$50k, 90-day lock-in, US credit", "Older question"]);
     expect(saved[0].messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-    expect(listThreads("u2").map((t) => t.id)).toEqual(["theirs"]);
     // The list: newest first, the open one marked, each with its date.
     await act(async () => void fireEvent.click(historyButton()));
     // A centred pop-up about two thirds of the screen, not a sheet sliding in from the side.
@@ -493,31 +498,38 @@ describe("past conversations", () => {
     await act(async () => void fireEvent.click(sheet.querySelector("[data-new-conversation]")!));
     expect(screen.getByRole("heading", { name: "What do you want to earn?" })).toBeTruthy();
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("false");
-    expect(listThreads("u1")).toHaveLength(2);
-    // Picking the older thread restores its messages, to carry on from.
+    expect(server.list("earn")).toHaveLength(2);
+    // Picking the older thread reads it back from Mynt, to carry on from.
+    const posts = server.posts.length;
     await act(async () => void fireEvent.click(historyButton()));
-    await act(async () => void fireEvent.click(document.querySelector('[data-dialog="history"] [data-thread="old"]')!));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-dialog="history"] [data-thread="${OLD}"]`)!));
+    await settle();
     expect(document.body.textContent).toContain("About Older question.");
     expect(document.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
-    // Restoring alone doesn't move it up the list.
-    expect(listThreads("u1").map((t) => t.id)[1]).toBe("old");
+    // Restoring alone saves nothing and doesn't move it up the list.
+    await settle();
+    expect(server.posts).toHaveLength(posts);
+    expect(server.list("earn").map((t) => t.id)[1]).toBe(OLD);
   });
 
   it("Past conversations is a chat search: a search box over the recent chats, narrowed as the user types, with the matching words", async () => {
-    window.localStorage.clear();
-    window.localStorage.setItem(
-      HISTORY_KEY,
-      JSON.stringify({ u1: [thread("old", "Older question", "2026-11-20T10:00:00Z"), thread("tb", "Treasury bills ladder", "2026-11-21T10:00:00Z")] }),
-    );
+    server.seed("earn", thread(OLD, "Older question", "2026-11-20T10:00:00Z"));
+    server.seed("earn", thread(TB, "Treasury bills ladder", "2026-11-21T10:00:00Z"));
     render(<Earn data={lpData} owner="u1" />);
+    await settle();
     await act(async () => void fireEvent.click(historyButton()));
     const dialog = document.querySelector('[data-dialog="history"]')!;
     const box = dialog.querySelector("[data-chat-search]") as HTMLInputElement;
     expect(box.getAttribute("placeholder")).toBe("Search chats");
     expect(dialog.querySelector("[data-list-heading]")!.textContent).toBe("Recent");
     expect([...dialog.querySelectorAll("[data-thread-title]")].map((t) => t.textContent)).toEqual(["Treasury bills ladder", "Older question"]);
-    // Typing narrows the list to matches (title or words, any case), each with the words around the match.
+    // Typing narrows the list to matches: titles at once, then Mynt's answer for the words in the
+    // chats too (any case), each with the words around the match.
+    await act(async () => void fireEvent.change(box, { target: { value: "OLDER" } }));
+    expect([...dialog.querySelectorAll("[data-thread-title]")].map((t) => t.textContent)).toEqual(["Older question"]);
     await act(async () => void fireEvent.change(box, { target: { value: "about OLDER" } }));
+    expect(dialog.querySelector("[data-thread-title]")).toBeNull();
+    await settle(300);
     expect([...dialog.querySelectorAll("[data-thread-title]")].map((t) => t.textContent)).toEqual(["Older question"]);
     expect(dialog.querySelector("[data-list-heading]")!.textContent).toBe("1 chat");
     expect(dialog.querySelector("[data-thread-snippet]")!.textContent).toContain("About Older question.");
@@ -527,17 +539,22 @@ describe("past conversations", () => {
     await act(async () => void fireEvent.change(box, { target: { value: "treasury" } }));
     await act(async () => void fireEvent.keyDown(box, { key: "ArrowDown" }));
     await act(async () => void fireEvent.keyDown(box, { key: "Enter" }));
+    await settle();
     expect(document.body.textContent).toContain("About Treasury bills ladder.");
   });
 
-  it("a restored draft keeps its idempotency key, and one already sent stays sent", async () => {
-    window.localStorage.clear();
+  it("a restored draft keeps its idempotency key, and one already sent stays sent, also when an older studio kept the thread in this browser", async () => {
     const withDrafts = [...withDraft(draft()), { id: "a2", role: "assistant", parts: [{ type: "data-earn-draft", data: draft({ id: "d9", amountCents: 200_000 }) } as never] }] as UIMessage[];
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify({ u1: [{ id: "th", title: "draft it", updatedAt: "2026-11-20T10:00:00Z", messages: withDrafts, outcomes: { d1: { key: "key-sent-1", sent: "Deposit requested (movement m1, requested)." }, d9: { key: "key-kept-9", sent: null } } }] }));
+    window.localStorage.setItem(LEGACY_KEYS.earn, JSON.stringify({ u1: [{ id: "th", title: "draft it", updatedAt: "2026-11-20T10:00:00Z", messages: withDrafts, outcomes: { d1: { key: "key-sent-1", sent: "Deposit requested (movement m1, requested)." }, d9: { key: "key-kept-9", sent: null } } }] }));
     const { a, calls } = actions();
     render(<Earn data={lpData} acts={a} owner="u1" />);
+    await settle(60);
+    // Moved to Mynt, and gone from the browser.
+    expect(window.localStorage.getItem(LEGACY_KEYS.earn)).toBeNull();
+    expect(server.list("earn")[0].outcomes).toEqual({ d1: { key: "key-sent-1", sent: "Deposit requested (movement m1, requested)." }, d9: { key: "key-kept-9", sent: null } });
     await act(async () => void fireEvent.click(historyButton()));
-    await act(async () => void fireEvent.click(document.querySelector('[data-thread="th"]')!));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-thread="${sessionIdFor("th")}"]`)!));
+    await settle();
     fireEvent.click(document.querySelector('[data-panel-tab="my-strategies"]')!);
     expect(document.querySelector('[data-draft-row="d1"] [data-draft-status]')!.textContent).toBe("Sent");
     fireEvent.click(document.querySelector('[data-review="d1"]')!);
@@ -550,7 +567,6 @@ describe("past conversations", () => {
   });
 
   it("a builder's pool proposal: a card, Review opens Propose pool prefilled, confirm proposes once, and a restored thread keeps it sent", async () => {
-    window.localStorage.clear();
     const options = [
       { productId: "other", productName: "Other product", componentKey: "deposits", sponsorId: "66666666-6666-4666-8666-666666666666", sponsorName: "Other Bank" },
       { productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: "Sponsor Bank" },
@@ -591,13 +607,15 @@ describe("past conversations", () => {
     fireEvent.click(document.querySelector('[data-review="p1"]')!);
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     // The thread keeps it sent: restored, it can't be proposed again.
-    await act(async () => new Promise((r) => setTimeout(r, 20)));
-    const kept = listThreads("u1")[0];
-    expect(kept.outcomes.p1).toEqual({ key: sentKey, sent: expect.stringContaining('Pool "Card float" proposed.') });
+    await vi.waitFor(() => expect(server.list("earn")[0]?.outcomes.p1).toEqual({ key: sentKey, sent: expect.stringContaining('Pool "Card float" proposed.') }));
+    const kept = server.list("earn")[0];
     cleanup();
     render(<Earn data={data} acts={acts} owner="u1" />);
+    await settle();
     await act(async () => void fireEvent.click(historyButton()));
+    await vi.waitFor(() => expect(document.querySelector(`[data-thread="${kept.id}"]`)).not.toBeNull());
     await act(async () => void fireEvent.click(document.querySelector(`[data-thread="${kept.id}"]`)!));
+    await vi.waitFor(() => expect(document.querySelector('[data-draft-row="p1"]')).not.toBeNull());
     fireEvent.click(document.querySelector('[data-panel-tab="my-strategies"]')!);
     expect(document.querySelector('[data-draft-row="p1"] [data-draft-status]')!.textContent).toBe("Proposed");
     fireEvent.click(document.querySelector('[data-review="p1"]')!);
@@ -606,7 +624,6 @@ describe("past conversations", () => {
   });
 
   it("a proposal retried after a network error goes with the same idempotency key; only Mynt's refusal lets go of it", async () => {
-    window.localStorage.clear();
     const options = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: "Sponsor Bank" }];
     const data: LiquidityData = { ...builderData, builder: { ...builderData.builder!, proposable: options } };
     const terms = { product_id: "card-credit", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 2000, min_reserve_floor_cents: 0, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 };
@@ -630,17 +647,19 @@ describe("past conversations", () => {
   });
 
   it("a restored proposal that wasn't confirmed as sent keeps its idempotency key", async () => {
-    window.localStorage.clear();
     const options = [{ productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: "22222222-2222-4222-8222-222222222222", sponsorName: "Sponsor Bank" }];
     const data: LiquidityData = { ...builderData, builder: { ...builderData.builder!, proposable: options } };
     const terms = { product_id: "card-credit", component_key: "lending", name: "Card float", sandbox: true, min_reserve_bps: 2000, min_reserve_floor_cents: 0, notice_period_days: 30, min_commitment_cents: 100_000, max_commitment_cents: 10_000_000 };
     const proposal = { kind: "proposal", id: "p4", poolName: "Card float", productId: "card-credit", productName: "Card credit", componentKey: "lending", sponsorId: options[0].sponsorId, sponsorName: "Sponsor Bank", sandbox: true, terms } as Draft;
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify({ u1: [{ id: "tp", title: "draft it", updatedAt: "2026-11-20T10:00:00Z", messages: withDraft(proposal), outcomes: { p4: { key: "key-kept-proposal", sent: null } } }] }));
+    server.seed("earn", { id: uuid("0a"), title: "draft it", updatedAt: "2026-11-20T10:00:00Z", messages: withDraft(proposal), outcomes: { p4: { key: "key-kept-proposal", sent: null } } });
     const proposed: { idempotency_key?: string }[] = [];
     const acts: LiquidityActions = { ...actions().a, propose: async (input) => (proposed.push(input), { ok: true, reply: null }) };
     render(<Earn data={data} acts={acts} owner="u1" />);
+    await settle();
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Past conversations" })));
-    await act(async () => void fireEvent.click(document.querySelector('[data-thread="tp"]')!));
+    await vi.waitFor(() => expect(document.querySelector(`[data-thread="${uuid("0a")}"]`)).not.toBeNull());
+    await act(async () => void fireEvent.click(document.querySelector(`[data-thread="${uuid("0a")}"]`)!));
+    await vi.waitFor(() => expect(document.querySelector('[data-draft-row="p4"]')).not.toBeNull());
     fireEvent.click(document.querySelector('[data-panel-tab="my-strategies"]')!);
     fireEvent.click(document.querySelector('[data-review="p4"]')!);
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Approve" })));
@@ -747,6 +766,9 @@ describe("approval: My strategies' statuses, Decline and the approval sheet; My 
 
   it("Decline marks a draft declined: never sent, kept in the table as Declined, and still so in a restored thread", async () => {
     window.localStorage.clear();
+    saveTiming.delayMs = 5;
+    const server = fakeThreads();
+    vi.stubGlobal("fetch", server.fetcher);
     const { a, calls } = actions();
     const two = [...withDraft(draft()), { id: "a2", role: "assistant", parts: [{ type: "data-earn-draft", data: draft({ id: "d2", amountCents: 200_000 }) } as never] }] as UIMessage[];
     render(<Earn data={lpData} messages={two} acts={a} initialTab="my-strategies" owner="u1" />);
@@ -772,18 +794,21 @@ describe("approval: My strategies' statuses, Decline and the approval sheet; My 
     expect(document.querySelector('[data-draft-row="d2"] [data-draft-status]')!.textContent).toBe("Declined");
     expect(calls).toHaveLength(0);
     // The thread keeps it declined.
-    await act(async () => new Promise((r) => setTimeout(r, 20)));
-    const kept = listThreads("u1")[0];
+    await act(async () => new Promise((r) => setTimeout(r, 60)));
+    const kept = server.list("earn")[0];
     expect(kept.outcomes.d1).toEqual({ key: null, sent: null, declined: true });
     cleanup();
     render(<Earn data={lpData} acts={a} owner="u1" />);
+    await act(async () => new Promise((r) => setTimeout(r, 30)));
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Past conversations" })));
     await act(async () => void fireEvent.click(document.querySelector(`[data-thread="${kept.id}"]`)!));
+    await act(async () => new Promise((r) => setTimeout(r, 30)));
     fireEvent.click(document.querySelector('[data-panel-tab="my-strategies"]')!);
     expect(document.querySelector('[data-draft-row="d1"] [data-draft-status]')!.textContent).toBe("Declined");
     fireEvent.click(document.querySelector('[data-review="d1"]')!);
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Approve" })));
     expect(calls).toHaveLength(0);
+    vi.unstubAllGlobals();
   });
 
   it("a pool proposal's approval sheet: steps and summary, then the prefilled form with Approve and Decline", () => {

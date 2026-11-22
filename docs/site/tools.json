@@ -46,7 +46,7 @@
       "id": "workspaces",
       "title": "Workspaces",
       "summary": "Workspaces, their members and invitations, stages and promotion, and what needs attention.",
-      "tools": 26
+      "tools": 31
     },
     {
       "id": "growth",
@@ -95,7 +95,7 @@
     {
       "role": "consumer",
       "summary": "uses financial products: enrols, sees offers, asks for products that don't exist yet.",
-      "tools": 33,
+      "tools": 38,
       "get_started": [
         {
           "tool": "whoami",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 217,
+      "tools": 222,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 217,
+      "tools": 222,
       "get_started": [
         {
           "tool": "create_entity",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 33,
+      "tools": 38,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 70,
+      "tools": 75,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -230,7 +230,7 @@
     {
       "role": "liquidity_provider",
       "summary": "a firm or fund, added by an admin, that puts capital into products' pools and takes it out, watching each product's health to decide where capital goes. Mynt never holds its funds. A peer of builders.",
-      "tools": 37,
+      "tools": 42,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 341,
+      "tools": 346,
       "get_started": [
         {
           "tool": "define_region",
@@ -1091,6 +1091,108 @@
         },
         "required": [
           "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "append_chat_events",
+      "title": "Add to a chat session",
+      "description": "Signed-in user: add events to the end of one of your chat sessions, in order: messages (one UI message each; a message appended again under its id replaces the earlier copy when the session is replayed), draft outcomes, a new title. Events are never changed or removed one by one. An event with a client_id the session already has is skipped, so a retried append never adds anything twice. Limits: 100 events per call, 128 KB per event, 1 MB and 5000 events per session.",
+      "area": "workspaces",
+      "roles": [
+        "consumer",
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "liquidity_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "The session's id (a UUID the caller picks when it creates the session)"
+          },
+          "events": {
+            "minItems": 1,
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "message",
+                    "part",
+                    "draft",
+                    "outcome",
+                    "title",
+                    "metadata"
+                  ],
+                  "description": "message: one UI message as the studio has it (its id, role and parts); outcome: what became of a draft; title: { title }; metadata: references merged into the session's metadata; part, draft: kind-specific state"
+                },
+                "role": {
+                  "description": "A message's role",
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "user",
+                        "assistant",
+                        "system"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "client_id": {
+                  "description": "The caller's own id for this event: an append retried with it is never added twice",
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9:_.-]{1,200}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "payload": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "The event itself, as JSON (at most 128 KB)"
+                }
+              },
+              "required": [
+                "type",
+                "payload"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "expect_seq": {
+            "description": "Refuse unless the session still ends at this event number",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "events"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -2697,6 +2799,97 @@
           "product_ids",
           "channels",
           "variants"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "create_chat_session",
+      "title": "Start a chat session",
+      "description": "Signed-in user: keep one of your studio chats on Mynt (a financial-product chat, an Earn chat), under an id you pick. Creating it again with the same id answers the one you have. Only you can read it. You keep at most 200 of each kind: a new one past that deletes your oldest of that kind.",
+      "area": "workspaces",
+      "roles": [
+        "consumer",
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "liquidity_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "The session's id (a UUID the caller picks when it creates the session)"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "product",
+              "earn",
+              "app"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "workspace_id": {
+            "description": "The workspace the chat was had in, if any (you must be a member)",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "metadata": {
+            "description": "Small references only: a product id, pool ids",
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "maxLength": 60
+            },
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                },
+                {
+                  "maxItems": 50,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "kind"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -6028,6 +6221,38 @@
       }
     },
     {
+      "name": "delete_chat_session",
+      "title": "Delete a chat session",
+      "description": "Signed-in user: delete one of your chat sessions and every event in it, for good.",
+      "area": "workspaces",
+      "roles": [
+        "consumer",
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "liquidity_provider",
+        "admin"
+      ],
+      "access": "destructive",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "The session's id (a UUID the caller picks when it creates the session)"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "delete_covenant",
       "title": "Delete a covenant",
       "description": "Licence provider: remove a rule. A rule that's holding the product paused has to be released first; one with an open breach needs a reason, recorded with the breach. Breaches already recorded stay.",
@@ -6743,6 +6968,50 @@
         },
         "required": [
           "campaign_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_chat_session",
+      "title": "Read a chat session",
+      "description": "Signed-in user: one of your chat sessions with its events in order (replay them to get the chat back); after_seq gives only the newer ones. format 'jsonl' gives the session as JSONL instead: its own line, then one line per event.",
+      "area": "workspaces",
+      "roles": [
+        "consumer",
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "liquidity_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "The session's id (a UUID the caller picks when it creates the session)"
+          },
+          "after_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "jsonl"
+            ]
+          }
+        },
+        "required": [
+          "id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -8281,6 +8550,46 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_chat_sessions",
+      "title": "Your chat sessions",
+      "description": "Signed-in user: your own chat sessions, newest first, without their events: id, kind, title, metadata, last event number and when each changed. With a query, only those whose title or messages hold every word of it, each with the words around the match.",
+      "area": "workspaces",
+      "roles": [
+        "consumer",
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "liquidity_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "product",
+              "earn",
+              "app"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
