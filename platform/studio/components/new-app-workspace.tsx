@@ -5,11 +5,14 @@
 // kinds) and Products (what the app builds on). The composer's Products picker and the Products tab
 // share one selection. Sending the message is Build it: it creates the app on the picked products and
 // starts its first build with the message as the goal (and the template's kind), then opens the app.
+// Beside the Products picker, "Cap $" is the first build's spending cap: it starts at Mynt's usual cap
+// or what's left of this month's build budget, whichever is less; with too little left, it can't send.
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
 import { Check, ChevronDown, LayoutTemplate, Package } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { Thread } from "@/components/assistant-ui/thread"
+import { CapField, useCapChoice } from "@/components/build-controls"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
@@ -320,14 +323,18 @@ export function NewAppWorkspace({
   const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
   // What's typed, for the composer's reason it can't send yet.
   const [text, setText] = useState("")
-  const blocked = sendBlockedReason(picked, text)
+  // The first build's cap (lib/build-cap.ts): too little left this month blocks sending, beside the other reasons.
+  const capChoice = useCapChoice(null)
+  const [cap, setCap] = useState<number | null>(null)
+  const capUsd = capChoice && !capChoice.blocked ? (cap ?? capChoice.startUsd) : null
+  const blocked = sendBlockedReason(picked, text) ?? capChoice?.blocked ?? null
 
   // One request at a time: a second send while one runs is ignored.
   const inFlight = useRef(false)
   const onNew = async (m: AppendMessage) => {
     const prompt = m.content.map((p) => (p.type === "text" ? p.text : "")).join("\n")
     if (inFlight.current) return
-    const request = { prompt, product_ids: picked, ...(kind ? { kind } : {}) }
+    const request = { prompt, product_ids: picked, ...(kind ? { kind } : {}), ...(capUsd !== null ? { cap_usd: capUsd } : {}) }
     // The same rules the server applies (lib/new-app.ts); what's typed comes back to fix.
     const parsed = NewAppRequest.safeParse(request)
     if (!parsed.success) {
@@ -407,7 +414,12 @@ export function NewAppWorkspace({
             <Thread
               welcome={<ChatWelcome title={WELCOME_TITLE}>{chips}</ChatWelcome>}
               placeholder="Describe the app: who it's for and what they can do…"
-              toolbar={<ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} />}
+              toolbar={
+                <>
+                  <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} />
+                  {capChoice && capUsd !== null && <CapField choice={capChoice} value={capUsd} onChange={setCap} />}
+                </>
+              }
               commands={commands}
               sendBlocked={busy ? null : blocked}
               note={

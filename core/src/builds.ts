@@ -64,6 +64,8 @@ export const SESSION_TTL_MARGIN_S = 30 * 60;
 // of one finish turn, not a measured figure.
 export const SESSION_CAP_SHARE = 0.7;
 export const SESSION_FINISH_RESERVE_USD = 2;
+// Below this much left of a month's build budget (the developer's or the workspace's), no build starts.
+export const MIN_BUILD_BUDGET_USD = 0.5;
 export const sessionCapThreshold = (cap: number) => Math.max(0, Math.min(SESSION_CAP_SHARE * cap, cap - SESSION_FINISH_RESERVE_USD));
 const sessionIdleMs = (v: string | undefined) => {
   const n = Number(v);
@@ -656,6 +658,24 @@ export class BuildService {
     return rows.map(toBuild);
   }
 
+  // What a new build's cap may be, for a caller that lets the developer pick one (the studio): the default cap, what's
+  // left of the developer's month and (for an app in a workspace with its own budget) the workspace's, the smallest
+  // budget start accepts, and the cap a session build must be above. start() still checks all of it.
+  async budget(developerId: string, appId?: string | null) {
+    const monthLeft = Math.max(0, this.config.monthlyCapUsd - (await this.monthSpend(developerId)));
+    const wsCap = this.config.workspaceMonthlyCapUsd ?? null;
+    const workspace = appId && wsCap ? (await this.store.getApp(appId))?.workspace_id : null;
+    const wsLeft = workspace && wsCap ? Math.max(0, wsCap - (await this.workspaceMonthSpend(workspace))) : null;
+    const cents = (n: number) => Math.floor(n * 100) / 100;
+    return {
+      default_cap_usd: this.config.capUsd,
+      month_left_usd: cents(monthLeft),
+      workspace_left_usd: wsLeft === null ? null : cents(wsLeft),
+      min_cap_usd: MIN_BUILD_BUDGET_USD,
+      session_cap_above_usd: SESSION_FINISH_RESERVE_USD,
+    };
+  }
+
   // This month's spend on the workspace's apps' builds, counting a build still running at its whole cap (what it may
   // yet spend), so concurrent builds can't overrun the workspace's budget.
   async workspaceMonthSpend(workspaceId: string) {
@@ -1009,7 +1029,7 @@ export class BuildService {
     // A build reserves its whole cap, so say which limit it hit: the month is used up, or this cap is more than
     // what's left (and how much a smaller cap may be).
     const left = Math.max(0, this.config.monthlyCapUsd - spent);
-    if (left < 0.5) throw new Error(`Monthly build budget used up (US$${spent.toFixed(2)} of US$${this.config.monthlyCapUsd} spent this month)`);
+    if (left < MIN_BUILD_BUDGET_USD) throw new Error(`Monthly build budget used up (US$${spent.toFixed(2)} of US$${this.config.monthlyCapUsd} spent this month)`);
     if (cap > left)
       throw new Error(
         `This build's cap (US$${cap}) is more than this month's remaining build budget (US$${left.toFixed(2)} of US$${this.config.monthlyCapUsd}); start it with cap_usd of at most ${Math.floor(left * 100) / 100}`,
@@ -1020,7 +1040,7 @@ export class BuildService {
     if (workspace && wsCap) {
       const wsSpent = await this.workspaceMonthSpend(workspace);
       const wsLeft = Math.max(0, wsCap - wsSpent);
-      if (wsLeft < 0.5) throw new Error(`The workspace's monthly build budget is used up (US$${wsSpent.toFixed(2)} of US$${wsCap} spent this month)`);
+      if (wsLeft < MIN_BUILD_BUDGET_USD) throw new Error(`The workspace's monthly build budget is used up (US$${wsSpent.toFixed(2)} of US$${wsCap} spent this month)`);
       if (cap > wsLeft)
         throw new Error(
           `This build's cap (US$${cap}) is more than the workspace's remaining build budget this month (US$${wsLeft.toFixed(2)} of US$${wsCap}); start it with cap_usd of at most ${Math.floor(wsLeft * 100) / 100}`,
@@ -2642,7 +2662,7 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     {
       title: "My builds",
       description:
-        "Developer: the coding-agent builds of your workspaces' apps (whoever started them) and your own builds for no app, newest first, with status, cost and links; plus this month's spend against your budget.",
+        "Developer: the coding-agent builds of your workspaces' apps (whoever started them) and your own builds for no app, newest first, with status, cost and links; plus this month's spend against your budget, and what a new build's cap may be (`budget`: the default cap, what's left of your month and, with app_id, of the app's workspace, the smallest budget a build starts with, and the cap a session build must be above).",
       inputSchema: { status: z.enum(BUILD_STATUSES).optional(), app_id: z.string().optional().describe("Only this app's builds") },
       annotations: { readOnlyHint: true },
     },
@@ -2650,6 +2670,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
+        // The workspace's budget only for an app the developer works on.
+        budget: await builds.budget(user.id, app_id && (await memberApp(store, user, app_id)) ? app_id : null),
         builds: await (async () => {
           const list = await builds.listVisible(user.id, status, app_id);
           const phases = await builds.phaseStarts(list.map((b) => b.id));

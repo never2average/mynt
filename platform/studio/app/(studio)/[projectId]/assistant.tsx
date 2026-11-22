@@ -8,9 +8,11 @@ import {
 import { useChat } from "@ai-sdk/react";
 import { type UIMessage } from "ai";
 import { Thread } from "@/components/assistant-ui/thread";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { CapField, HeldMessage, ShipButton, useCapChoice } from "@/components/build-controls";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { APP_TABS, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
+import { canShip, FINISHED, startsNewBuild, type BuildState } from "@/lib/chat";
 import type { SlashCommand } from "@/lib/slash-commands";
 
 type ThreadState = {
@@ -18,15 +20,40 @@ type ThreadState = {
   isRunning: boolean;
 };
 
-type BuildData = { buildId: string; started: boolean };
-type FollowData = { buildId: string; after: number | null };
+type BuildData = { buildId: string; started: boolean; session?: boolean };
+type FollowData = { buildId: string; after: number | null; shipping?: boolean };
+/** A message sent while the app's build was shipping or being verified: sent once that ends. */
+export type HeldData = { buildId: string; text: string; after: number | null };
+
+// The slash menu's /ship (and the Ship button) ask the builder chat to ship its session build.
+export const SHIP_EVENT = "mynt:ship-build";
 
 // Where the chat follows a build on from (GET /api/chat): the build, and the activity cursor it
-// has shown up to.
-export function followUrl(projectId: string, buildId: string, after: number | null): string {
+// has shown up to. `shipping`: Ship was just pressed, so the reply first says what that does.
+export function followUrl(projectId: string, buildId: string, after: number | null, shipping = false): string {
   const q = new URLSearchParams({ projectId, buildId });
   if (after !== null) q.set("after", String(after));
+  if (shipping) q.set("shipping", "1");
   return `/api/chat?${q.toString()}`;
+}
+
+// A held message is kept per app in this browser, so a reload doesn't lose it.
+export const heldKey = (projectId: string) => `mynt:held-message:${projectId}`;
+export function readHeld(projectId: string): HeldData | null {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(heldKey(projectId)) ?? "null") as Partial<HeldData> | null;
+    return v && typeof v.buildId === "string" && typeof v.text === "string" && v.text ? { buildId: v.buildId, text: v.text, after: typeof v.after === "number" ? v.after : null } : null;
+  } catch {
+    return null;
+  }
+}
+function writeHeld(projectId: string, held: HeldData | null) {
+  try {
+    if (held) window.localStorage.setItem(heldKey(projectId), JSON.stringify(held));
+    else window.localStorage.removeItem(heldKey(projectId));
+  } catch {
+    // Storage blocked: the message is still held for as long as the page is open.
+  }
 }
 
 const EMPTY_MESSAGES: UIMessage[] = [];
@@ -41,14 +68,20 @@ const TAB_DESCRIPTIONS: Record<AppTab, string> = {
 };
 
 // The builder chat's slash commands: open a panel tab (the workspace shell listens for
-// "adorable:panel-tab"), or start a message to the coding agent. There's no /new: a message with no
-// build selected may still steer the app's running build, so the chat can't promise a fresh one.
+// "adorable:panel-tab"), ship the session build, or start a message to the coding agent. There's
+// no /new: a message with no build selected may still steer the app's running build, so the chat
+// can't promise a fresh one.
 export const builderCommands = (projectId: string): SlashCommand[] => [
   ...APP_TABS.map((tab) => ({
     name: tab,
     description: TAB_DESCRIPTIONS[tab],
     run: () => window.dispatchEvent(new CustomEvent(PANEL_TAB_EVENT, { detail: { projectId, tab } })),
   })),
+  {
+    name: "ship",
+    description: "Ship the build: the agent wraps up, then Mynt verifies and ships it",
+    run: () => window.dispatchEvent(new CustomEvent(SHIP_EVENT, { detail: { projectId } })),
+  },
   { name: "fix", description: "Ask the coding agent to fix something", template: "Fix " },
   { name: "add", description: "Ask the coding agent to add a feature", template: "Add " },
 ];
@@ -59,6 +92,7 @@ export const builderCommands = (projectId: string): SlashCommand[] => [
 export const Assistant = ({
   initialMessages,
   follow = null,
+  build = null,
   selectedProjectId,
   selectedConversationId = null,
   onThreadStateChange,
@@ -67,6 +101,8 @@ export const Assistant = ({
   initialMessages?: UIMessage[];
   /** The build is still going: follow it live from this cursor as the page opens. */
   follow?: { after: number } | null;
+  /** The conversation's build as the page loaded it (its status, session, shipping). */
+  build?: BuildState | null;
   selectedProjectId: string;
   selectedConversationId?: string | null;
   onThreadStateChange?: (next: ThreadState) => void;
@@ -79,6 +115,7 @@ export const Assistant = ({
       conversationId={selectedConversationId}
       initialMessages={initialMessages ?? EMPTY_MESSAGES}
       follow={follow}
+      initialBuild={build}
       onThreadStateChange={onThreadStateChange}
       welcome={welcome}
     />
@@ -90,6 +127,7 @@ function ProjectAssistant({
   conversationId,
   initialMessages,
   follow,
+  initialBuild,
   onThreadStateChange,
   welcome,
 }: {
@@ -97,6 +135,7 @@ function ProjectAssistant({
   conversationId: string | null;
   initialMessages: UIMessage[];
   follow: { after: number } | null;
+  initialBuild: BuildState | null;
   onThreadStateChange?: (next: ThreadState) => void;
   welcome?: ReactNode;
 }) {
@@ -106,6 +145,25 @@ function ProjectAssistant({
   // on (a watch ends after a few minutes, or when the agent hands over to Mynt's verification).
   const followRef = useRef<FollowData | null>(conversationId && follow ? { buildId: conversationId, after: follow.after } : null);
   const followOnRef = useRef(false);
+  // What the composer shows: Ship while a session is open, a cap for the next build, a held message.
+  const [build, setBuild] = useState<BuildState | null>(initialBuild);
+  const cursorRef = useRef<number | null>(follow?.after ?? null);
+  const [held, setHeldState] = useState<HeldData | null>(null);
+  const heldRef = useRef<HeldData | null>(null);
+  const setHeld = useCallback(
+    (h: HeldData | null) => {
+      heldRef.current = h;
+      setHeldState(h);
+      writeHeld(projectId, h);
+    },
+    [projectId],
+  );
+  // Builds Mynt has said are over (a follow answered 204): a message held for one is sent.
+  const [ended, setEnded] = useState<Set<string>>(() => new Set());
+  const [shipNote, setShipNote] = useState<string | null>(null);
+  const [shipping, setShipping] = useState(false);
+  const [cap, setCap] = useState<number | null>(null);
+  const capRef = useRef<number | null>(null);
 
   const dispatchProjectsUpdated = useCallback(() => {
     window.dispatchEvent(
@@ -122,9 +180,26 @@ function ProjectAssistant({
         followOnRef.current = true;
         return;
       }
+      if (part.type === "data-state") {
+        const s = part.data as Partial<BuildState & { after: number | null }> | undefined;
+        if (typeof s?.buildId !== "string" || typeof s.status !== "string") return;
+        const next = { buildId: s.buildId, status: s.status, session: s.session === true, finishing: s.finishing === true };
+        // Ship pressed here is known before Mynt's state says so.
+        setBuild((prev) => ({ ...next, finishing: next.finishing || (prev?.buildId === next.buildId && prev.finishing && !FINISHED.has(next.status)) }));
+        if (typeof s.after === "number") cursorRef.current = s.after;
+        return;
+      }
+      if (part.type === "data-hold") {
+        const h = part.data as Partial<HeldData> | undefined;
+        if (typeof h?.buildId !== "string" || typeof h.text !== "string") return;
+        setHeld({ buildId: h.buildId, text: h.text, after: typeof h.after === "number" ? h.after : null });
+        return;
+      }
       if (part.type !== "data-build") return;
       const data = part.data as BuildData | undefined;
-      if (!data?.buildId || data.buildId === activeBuildIdRef.current) return;
+      if (!data?.buildId) return;
+      if (data.started) setBuild({ buildId: data.buildId, status: "queued", session: data.session === true, finishing: false });
+      if (data.buildId === activeBuildIdRef.current) return;
       activeBuildIdRef.current = data.buildId;
       // Show this build's address and preview without reloading the chat.
       window.history.replaceState(
@@ -139,7 +214,7 @@ function ProjectAssistant({
       );
       dispatchProjectsUpdated();
     },
-    [projectId, dispatchProjectsUpdated],
+    [projectId, dispatchProjectsUpdated, setHeld],
   );
 
   const transport = useMemo(
@@ -152,12 +227,23 @@ function ProjectAssistant({
             messages: options.messages.slice(-1),
             projectId,
             conversationId: activeBuildIdRef.current,
+            // Used only if the message starts a build.
+            ...(capRef.current !== null ? { capUsd: capRef.current } : {}),
           },
         }),
         // Following a build on: no message, just what the agent and Mynt do next.
         prepareReconnectToStreamRequest: async ({ headers, credentials }) => {
           const f = followRef.current;
-          return { api: f ? followUrl(projectId, f.buildId, f.after) : followUrl(projectId, activeBuildIdRef.current ?? "", null), headers, credentials };
+          return { api: f ? followUrl(projectId, f.buildId, f.after, f.shipping) : followUrl(projectId, activeBuildIdRef.current ?? "", null), headers, credentials };
+        },
+        // A follow answered 204: that build is over (a message held for it can go now).
+        fetch: async (input, init) => {
+          const res = await fetch(input, init);
+          if ((init?.method ?? "GET") === "GET" && res.status === 204) {
+            const id = new URL(String(input), window.location.origin).searchParams.get("buildId");
+            if (id) setEnded((prev) => new Set(prev).add(id));
+          }
+          return res;
         },
       }),
     [projectId],
@@ -184,16 +270,93 @@ function ProjectAssistant({
   });
   chatRef.current = chat;
 
-  // A build that's still going is followed as soon as its page opens.
+  // A build that's still going is followed as soon as its page opens; so is the build a held
+  // message waits for (after a reload), from where the message was held.
   const followed = useRef(false);
   useEffect(() => {
-    if (followed.current || !followRef.current) return;
+    if (followed.current) return;
     followed.current = true;
-    void chat.resumeStream();
-  }, [chat]);
+    const kept = readHeld(projectId);
+    if (kept) {
+      heldRef.current = kept;
+      setHeldState(kept);
+      if (!followRef.current || followRef.current.buildId !== kept.buildId) followRef.current = { buildId: kept.buildId, after: kept.after };
+    }
+    if (followRef.current) void chat.resumeStream();
+  }, [chat, projectId]);
+
+  // Verification has ended (shipped or not): the held message goes, as the next request.
+  const idle = chat.status === "ready" || chat.status === "error";
+  useEffect(() => {
+    const h = heldRef.current;
+    if (!h || !idle) return;
+    const over = ended.has(h.buildId) || (build?.buildId === h.buildId && FINISHED.has(build.status));
+    if (!over) return;
+    setHeld(null);
+    void chat.sendMessage({ text: h.text });
+  }, [idle, ended, build, chat, setHeld, held]);
+
+  // Ship (the button, or /ship): finish_build through the studio. It never interrupts the agent's
+  // current request, so it's offered whenever the session is open. The chat then follows the
+  // build to its end, starting with what shipping does.
+  const ship = useCallback(async () => {
+    const b = build;
+    if (!b || !canShip(b) || shipping) {
+      if (!b || !canShip(b)) setShipNote("There's no build waiting for your next message to ship.");
+      return;
+    }
+    setShipping(true);
+    setShipNote(null);
+    try {
+      const res = await fetch(`/api/builds/${encodeURIComponent(b.buildId)}/finish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+      const data = (await res.json().catch(() => null)) as { message?: string } | null;
+      if (!res.ok) {
+        setShipNote(data?.message ?? "Couldn't ship the build. Please try again.");
+        return;
+      }
+      setBuild({ ...b, finishing: true });
+      followRef.current = { buildId: b.buildId, after: cursorRef.current, shipping: true };
+      if (chat.status === "ready" || chat.status === "error") void chat.resumeStream();
+      else followOnRef.current = true; // the reply under way ends, then the chat follows on
+    } catch {
+      setShipNote("Couldn't reach the studio. Check your connection.");
+    } finally {
+      setShipping(false);
+    }
+  }, [build, shipping, projectId, chat]);
+  useEffect(() => {
+    const onShip = (e: Event) => {
+      if ((e as CustomEvent<{ projectId?: string }>).detail?.projectId === projectId) void ship();
+    };
+    window.addEventListener(SHIP_EVENT, onShip);
+    return () => window.removeEventListener(SHIP_EVENT, onShip);
+  }, [ship, projectId]);
+
+  // The cap for a message that starts a build: read when one would, and again after each build ends.
+  const newBuild = startsNewBuild(build) && !held;
+  const choice = useCapChoice(projectId, `${newBuild}:${build?.status ?? ""}`, newBuild);
+  const capChoiceShown = newBuild ? choice : null;
+  useEffect(() => {
+    const next = capChoiceShown && !capChoiceShown.blocked ? (cap === null ? capChoiceShown.startUsd : Math.min(Math.max(cap, capChoiceShown.minUsd), capChoiceShown.maxUsd)) : null;
+    capRef.current = next;
+    if (next !== cap) setCap(next);
+  }, [capChoiceShown, cap]);
 
   const runtime = useAISDKRuntime(chat);
   const commands = useMemo(() => builderCommands(projectId), [projectId]);
+
+  const toolbar = (
+    <>
+      {canShip(build) && <ShipButton onShip={() => void ship()} busy={shipping} />}
+      {capChoiceShown && cap !== null && <CapField choice={capChoiceShown} value={cap} onChange={(v) => setCap(v)} />}
+    </>
+  );
+  // Too little budget left is the Thread's sendBlocked (shown under the composer); the note is the rest.
+  const note = held ? <HeldMessage text={held.text} onRemove={() => setHeld(null)} /> : shipNote;
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -201,7 +364,7 @@ function ProjectAssistant({
         projectId={projectId}
         onThreadStateChange={onThreadStateChange}
       />
-      <Thread welcome={welcome} commands={commands} />
+      <Thread welcome={welcome} commands={commands} toolbar={toolbar} note={note} sendBlocked={capChoiceShown?.blocked ?? null} />
     </AssistantRuntimeProvider>
   );
 }
