@@ -183,8 +183,8 @@ export function ProductPicker({
 // ---- the tabs ----
 
 const TEMPLATE_COLUMNS = [
-  { label: "Idea", className: COL.name },
-  { label: "Pitch", className: COL.wide },
+  { label: "Problem", className: COL.name },
+  { label: "What the app does", className: COL.wide },
   { label: "Kind", className: COL.text },
   { label: "Product lines", className: COL.text },
   { label: "", className: COL.actions },
@@ -193,7 +193,7 @@ const TEMPLATE_COLUMNS = [
 // Every kind's app ideas, grouped by kind: a heading row where each kind's ideas start on the page.
 export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse: (k: AppKind, idea: AppIdea) => void }) {
   const [query, setQuery] = useState("")
-  const shown = kindIdeas(kinds ?? []).filter(({ kind, idea }) => matches(query, idea.title, idea.pitch, kind.title, ...idea.productLines.map(lineLabel)))
+  const shown = kindIdeas(kinds ?? []).filter(({ kind, idea }) => matches(query, idea.problem, idea.pitch, kind.title, ...idea.productLines.map(lineLabel)))
   const fit = useFitRows()
   const paged = usePaged(shown, fit.size)
   return (
@@ -237,7 +237,7 @@ export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse:
                   </TableRow>
                 )}
                 <TableRow data-template-row={idea.id} data-template-kind={kind.id}>
-                  <TableCell className={`${COL.name} font-medium`}>{idea.title}</TableCell>
+                  <TableCell className={`${COL.name} font-medium`}>{idea.problem}</TableCell>
                   <TableCell className={COL.wide}>
                     <span className="block max-w-80 truncate" title={idea.pitch}>
                       {idea.pitch}
@@ -535,7 +535,8 @@ export function NewAppWorkspace({
   }
   const applyKind = (k: AppKind) => applyIdea(k)
   const commands = newAppCommands({ tab: open, applyKind, createProduct }, kinds ?? [])
-  // A few ideas under the welcome, picked once per page load (a Mynt whose kinds carry no ideas shows the kinds).
+  // A few ideas under the welcome, each labelled by its problem, picked once per page load (a Mynt with no
+  // ideas yet shows the kinds).
   const [seed] = useState(() => Math.random())
   const chipList = useMemo<{ kind: AppKind; idea: AppIdea | null }[]>(() => {
     const ideas = chipIdeas(kinds ?? [], seed)
@@ -553,7 +554,7 @@ export function NewAppWorkspace({
           data-chip-kind={kind.id}
           title={idea?.pitch ?? kind.description}
         >
-          {idea?.title ?? kind.title}
+          {idea?.problem ?? kind.title}
         </button>
       ))}
     </div>

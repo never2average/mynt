@@ -5,36 +5,6 @@
   "description": "Move US dollars in from a bank account and back out by bank transfer or wire.",
   "product_lines": ["payments"],
   "goal_template": "A money transfers app. Customers sign up, move US dollars in from their own bank account and back out to it by bank transfer or wire, see the amount, the fee and when it arrives before they confirm, and follow each transfer's status until it settles.",
-  "examples": [
-    {
-      "id": "trip-kitty",
-      "title": "Trip kitty",
-      "pitch": "Friends on a trip log who paid for what; the app works out who owes whom and settles up by bank transfer.",
-      "goal": "A group trip app that splits costs and settles up. One traveller creates a trip and invites friends. Anyone logs an expense with who paid and who it was for; the app keeps a running tally of who owes whom. At the end, each person settles their balance by bank transfer through the provider's hosted flow, seeing the amount, the fee and when it arrives before they confirm, and the trip shows each transfer's status until everyone is square.",
-      "product_lines": ["payments"]
-    },
-    {
-      "id": "creator-tip-jar",
-      "title": "Creator tip jar",
-      "pitch": "A tip page for creators: fans send a few dollars by bank transfer, and the creator gets one payout every week.",
-      "goal": "A tip jar app for creators. A creator signs up and gets a tip page with their name and a short note. Fans choose an amount and send it by bank transfer through the provider's hosted flow, seeing the fee before they confirm. The creator sees every tip and its status, and once a week the collected tips are sent to their bank account, with the amount, the fee and the arrival date shown first.",
-      "product_lines": ["payments"]
-    },
-    {
-      "id": "shift-end-payouts",
-      "title": "Shift-end payouts",
-      "pitch": "A crew lead for cleaning, moving or catering pays each worker their share by bank transfer as the shift ends.",
-      "goal": "A shift payouts app for small crews (cleaning, moving, catering). The crew lead signs up, adds the crew and, at the end of a shift, enters the hours or share for each worker. The app shows each payout's amount, fee and arrival time, then the crew lead confirms the transfers through the provider's hosted flow. Workers see their payout's status until it settles, and the lead sees a history of every shift.",
-      "product_lines": ["payments"]
-    },
-    {
-      "id": "closing-day-wire",
-      "title": "Closing-day wire",
-      "pitch": "A guided wire for a home's closing funds: confirm the title company's details twice, see the cut-off, then follow it in.",
-      "goal": "A closing-day wire app for homebuyers. The buyer signs up, enters the closing date and the amount, and adds the title company's wire details. Before the wire, the app asks them to confirm those details a second time against what the title company gave them by phone, and shows the fee, the day's cut-off time and when it should arrive. The wire goes through the provider's hosted flow, and the app follows its status until it settles, with a clear warning about wire fraud on every step.",
-      "product_lines": ["payments"]
-    }
-  ],
   "screens": [
     { "id": "transfers", "title": "Transfers", "purpose": "Every transfer with its amount, fee and status, from the lifecycle events api/ receives on Mynt's webhook." },
     { "id": "sign-up", "title": "Sign up", "purpose": "Onboarding: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },

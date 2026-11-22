@@ -26,35 +26,46 @@ export function sendBlockedReason(productIds: readonly string[], text = ""): str
 }
 
 // Mynt's app kinds (list_app_kinds): starting points for common finance apps, offered on New app's
-// Templates tab and as slash commands. Each kind carries specific app ideas (its examples), which New app
-// offers as chips under the welcome and as the Templates tab's rows.
-export type AppIdea = { id: string; title: string; pitch: string; goal: string; productLines: string[] };
-export type AppKind = { id: string; title: string; description: string; productLines: string[]; goalTemplate: string; examples: AppIdea[] };
+// Templates tab and as slash commands. The specific app ideas on them come from Mynt's database
+// (list_app_ideas): each is labelled by the problem it solves, with a one-line pitch saying what the app does
+// about it. New app offers them as chips under the welcome and as the Templates tab's rows.
+export type AppIdea = { id: string; problem: string; pitch: string; goal: string; productLines: string[] };
+export type AppKind = { id: string; title: string; description: string; productLines: string[]; goalTemplate: string; ideas: AppIdea[] };
 type Obj = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((l): l is string => typeof l === "string") : []);
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
 
-// A kind's ideas, from Mynt's shape (product_lines) or the studio's (productLines). An idea without its own
-// lines builds on the kind's; one naming a line the kind doesn't have is dropped.
+// Ideas, from Mynt's shape (product_lines) or the studio's (productLines). An idea without its own lines builds on
+// its kind's; one naming a line the kind doesn't have is dropped.
 function ideasFrom(list: unknown, kindLines: readonly string[]): AppIdea[] {
   if (!Array.isArray(list)) return [];
   return list
-    .filter((e): e is Obj => isObj(e) && appKindId.safeParse(e.id).success && str(e.title).length > 0 && str(e.goal).length > 0)
+    .filter((e): e is Obj => isObj(e) && appKindId.safeParse(e.id).success && str(e.problem).length > 0 && str(e.goal).length > 0)
     .map((e) => {
       const own = strings(e.product_lines ?? e.productLines);
-      return { id: str(e.id), title: str(e.title), pitch: str(e.pitch), goal: str(e.goal), productLines: own.length ? own : [...kindLines] };
+      return { id: str(e.id), problem: str(e.problem), pitch: str(e.pitch), goal: str(e.goal), productLines: own.length ? own : [...kindLines] };
     })
     .filter((e) => e.productLines.every((l) => kindLines.includes(l)));
 }
 
-export function appKindsFrom(reply: unknown): AppKind[] {
-  const list = isObj(reply) && Array.isArray(reply.kinds) ? (reply.kinds as unknown[]) : [];
+// The route's answer from Mynt's two replies: list_app_kinds, and list_app_ideas (null when this Mynt hasn't the
+// tool), each idea under the kind it names, in Mynt's order.
+export function appKindsFrom(kindsReply: unknown, ideasReply: unknown = null): AppKind[] {
+  const list = isObj(kindsReply) && Array.isArray(kindsReply.kinds) ? (kindsReply.kinds as unknown[]) : [];
+  const ideas = isObj(ideasReply) && Array.isArray(ideasReply.ideas) ? (ideasReply.ideas as unknown[]).filter(isObj) : [];
   return list
     .filter((k): k is Obj => isObj(k) && appKindId.safeParse(k.id).success && typeof k.goal_template === "string")
     .map((k) => {
       const productLines = strings(k.product_lines);
-      return { id: str(k.id), title: str(k.title) || str(k.id), description: str(k.description), productLines, goalTemplate: str(k.goal_template), examples: ideasFrom(k.examples, productLines) };
+      return {
+        id: str(k.id),
+        title: str(k.title) || str(k.id),
+        description: str(k.description),
+        productLines,
+        goalTemplate: str(k.goal_template),
+        ideas: ideasFrom(ideas.filter((i) => i.kind === k.id), productLines),
+      };
     });
 }
 
@@ -65,16 +76,16 @@ export function kindsFromRoute(data: unknown): AppKind[] {
     .filter((k): k is Obj => isObj(k) && appKindId.safeParse(k.id).success && typeof k.title === "string" && typeof k.goalTemplate === "string" && Array.isArray(k.productLines))
     .map((k) => {
       const productLines = strings(k.productLines);
-      return { id: str(k.id), title: str(k.title), description: str(k.description), productLines, goalTemplate: str(k.goalTemplate), examples: ideasFrom(k.examples, productLines) };
+      return { id: str(k.id), title: str(k.title), description: str(k.description), productLines, goalTemplate: str(k.goalTemplate), ideas: ideasFrom(k.ideas, productLines) };
     });
 }
 
 // Every idea with the kind it builds on, grouped by kind in the kinds' order. A kind without ideas is one
-// idea itself (its title, description and goal), so it can still be used.
+// idea itself (its title as the label, its description and goal), so it can still be used.
 export type KindIdea = { kind: AppKind; idea: AppIdea };
 export function kindIdeas(kinds: readonly AppKind[]): KindIdea[] {
   return kinds.flatMap((kind) =>
-    (kind.examples.length ? kind.examples : [{ id: kind.id, title: kind.title, pitch: kind.description, goal: kind.goalTemplate, productLines: kind.productLines }]).map((idea) => ({ kind, idea })),
+    (kind.ideas.length ? kind.ideas : [{ id: kind.id, problem: kind.title, pitch: kind.description, goal: kind.goalTemplate, productLines: kind.productLines }]).map((idea) => ({ kind, idea })),
   );
 }
 
@@ -93,9 +104,9 @@ export function chipIdeas(kinds: readonly AppKind[], seed: number, max = CHIPS_M
     }
     return out;
   };
-  const withIdeas = kinds.filter((k) => k.examples.length);
+  const withIdeas = kinds.filter((k) => k.ideas.length);
   if (!withIdeas.length) return [];
-  const firsts = shuffle(withIdeas).map((kind) => ({ kind, idea: shuffle(kind.examples)[0] }));
+  const firsts = shuffle(withIdeas).map((kind) => ({ kind, idea: shuffle(kind.ideas)[0] }));
   const taken = new Set(firsts.map((f) => f.idea.id));
   const rest = shuffle(kindIdeas(withIdeas).filter((x) => !taken.has(x.idea.id)));
   return [...firsts, ...rest].slice(0, max);
