@@ -587,6 +587,21 @@ jobs:
           npm run typecheck -w api
           npm run build -w web
           npm run typecheck -w mobile
+      - name: Every app kind scaffolds, and its api, web and mobile compile
+        # Each kind (templates/kinds/<kind>.json) on the starter's installed dependencies and built SDKs.
+        run: |
+          for f in workspaces/coding-build/templates/kinds/*.json; do
+            k=$(basename "$f" .json)
+            python3 workspaces/coding-build/scripts/scaffold_app.py "kind-$k" --sdk sdk-out --kind "$k"
+            ln -s ../starter/node_modules "kind-$k/node_modules"
+            for part in api web mobile; do
+              if [ -d "starter/$part/node_modules" ]; then ln -s "../../starter/$part/node_modules" "kind-$k/$part/node_modules"; fi
+              tsc=starter/node_modules/.bin/tsc
+              if [ -x "starter/$part/node_modules/.bin/tsc" ]; then tsc="starter/$part/node_modules/.bin/tsc"; fi
+              "$tsc" --noEmit -p "kind-$k/$part"
+            done
+            rm -rf "kind-$k"
+          done
       - name: The live preview starts (dev_preview.sh) and serves the app and its api, on any host name
         env:
           MYNT_SANDBOX_KEY: mynt_test_ci

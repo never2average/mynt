@@ -7,7 +7,9 @@ You are the lead engineer building a developer's financial app on Mynt, with a t
 - `build`: the build id, the repository to push to (if any) and the branch;
 - `goal`: what to build;
 - `app`: the developer's app definition;
-- `products`: the products it uses, with their build terms.
+- `products`: the products it uses, with their build terms;
+- `kind` (may be null): the kind of app it starts from. When it's set, read `templates/kinds/<kind>.json` (its
+  screens, flows and SDK calls are what to build first) and scaffold with `--kind <kind>`.
 
 `job/sdk/` holds the Mynt SDKs generated for exactly these products, in every language: the TypeScript server
 client (`typescript/src/index.ts`) and browser client (`typescript/src/browser.ts`), React Native, Kotlin,
@@ -116,7 +118,7 @@ The developer works with you one request at a time, as in a chat, and you keep y
      point; build on it. If that branch isn't there, stop and say so in `job/result.json`'s `notes`.
    - If `build.managed_repository` is true, the repository is the one Mynt keeps for this app. The first time, it
      holds only a README: scaffold into the clone (`scaffold_app.py` accepts it) and commit on `build.branch`.
-   - Otherwise start from `templates/mynt-app/` in `~/workspace/app` (`python3 scripts/scaffold_app.py ~/workspace/app`, then the `scaffold` skill).
+   - Otherwise start from `templates/mynt-app/` in `~/workspace/app` (`python3 scripts/scaffold_app.py ~/workspace/app`, adding `--kind <kind>` when `kind` is set, then the `scaffold` skill).
    - `architect` plans; the engineers build their parts with tests; `compliance-reviewer` reviews until clean.
    - **Live preview.** Once your `npm install` has finished (and the SDK is built), Mynt starts the app's dev
      servers itself with `scripts/dev_preview.sh`: `npm run dev` in `web/` (Vite on port 5173, with hot reload) and

@@ -35,6 +35,8 @@ const solanaAddress = z.string().regex(SOLANA_ADDRESS);
 const devnet = z.literal(CLUSTER);
 const baseUnits = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const seconds = z.number().int().min(0).max(10 * 365 * 86_400);
+// An app kind's id, as Mynt's kind files name them (core/schemas/app-kind.schema.json).
+export const appKindId = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/);
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -44,6 +46,8 @@ export const STUDIO_TOOLS = {
     .object({ product_line: z.string().max(80).optional(), query: z.string().max(200).optional(), access_mode: z.string().max(40).optional() })
     .strict(),
   get_product: z.object({ id }).strict(),
+  // New app's Templates: starting points for common finance apps.
+  list_app_kinds: z.object({}).strict(),
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
   // New app: a draft app on the products picked, then a build for it.
@@ -139,6 +143,8 @@ export const STUDIO_TOOLS = {
       repository: repository.optional(),
       mode: z.literal("session").optional(),
       continue_from: id.optional(),
+      // New app: the app kind it starts from (list_app_kinds), checked by Mynt.
+      kind: appKindId.optional(),
     })
     .strict(),
   steer_build: z.object({ build_id: id, message: z.string().trim().min(3).max(4000) }).strict(),

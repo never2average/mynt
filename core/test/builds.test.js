@@ -805,6 +805,35 @@ test("activityLines: complete lines only, a line being skipped is dropped to its
   assert.deepEqual(activityLines(b(""), true, 100), { consumed: 0, lines: [] });
 });
 
+test("start_build kind: listed by list_app_kinds, checked, stored with the build and given to the agent", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const kinds = (await call(dev, "list_app_kinds")).data.kinds;
+  const goals = kinds.find((k) => k.id === "savings-goals");
+  assert.ok(goals && goals.title === "Savings goals" && goals.product_lines.length && goals.goal_template && goals.screens.length);
+  const refused = await call(dev, "start_build", { goal: "Build a savings page please", kind: "lemonade" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /No app kind 'lemonade'; list_app_kinds lists them/);
+  assert.deepEqual((await call(dev, "list_builds", {})).data.builds, [], "nothing was queued");
+
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const started = (await call(dev, "start_build", { goal: goals.goal_template, app_id: app.id, kind: "savings-goals" })).data;
+  assert.equal(started.kind, "savings-goals");
+  assert.equal((await call(dev, "get_build", { build_id: started.id })).data.kind, "savings-goals");
+  assert.equal((await builds.get(started.id)).kind, "savings-goals");
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick();
+  const files = sandboxes.sandboxes.get(sbx).files;
+  assert.equal(JSON.parse(files.get(`${BUILD}/job/build.json`)).kind, "savings-goals");
+  assert.ok(files.get(`${BUILD}/templates/kinds/savings-goals.json`), "the kind's file is in the agent's workspace");
+
+  // Without one, the build has none.
+  const plain = (await call(dev, "start_build", { goal: "Build something unrelated please" })).data;
+  assert.equal(plain.kind, null);
+});
+
 test("list_builds filters by app", async () => {
   const { as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));

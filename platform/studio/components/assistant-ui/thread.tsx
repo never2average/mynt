@@ -57,7 +57,8 @@ const TextRenderer = createContext<FC>(MarkdownText);
 
 // `toolbar` sits in the composer, left of Send (Earn's wallet picker, like a model picker).
 // `commands`: the chat's slash commands (lib/slash-commands.ts), those for `roles` only; typing "/"
-// or the composer's "/" button lists them.
+// or the composer's "/" button lists them. `sendBlocked`: why the composer can't send yet (New app's
+// products not picked): Send is disabled, Enter doesn't send, and the reason shows under the composer.
 export const Thread: FC<{
   welcome?: ReactNode;
   disabledNote?: string;
@@ -67,8 +68,10 @@ export const Thread: FC<{
   toolbar?: ReactNode;
   commands?: readonly SlashCommand[];
   roles?: readonly string[];
+  sendBlocked?: string | null;
 }> = ({
   welcome,
+  sendBlocked,
   toolbar,
   commands,
   roles,
@@ -102,10 +105,10 @@ export const Thread: FC<{
 
         <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mx-auto group-data-[chat-align=left]/chat:ml-0 mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background ${note ? "pb-2 md:pb-3" : "pb-4 md:pb-6"}`}>
           <ThreadScrollToBottom />
-          <Composer placeholder={placeholder} toolbar={toolbar} commands={commands} roles={roles} />
-          {disabledNote && (
-            <p className="aui-composer-disabled-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground">
-              {disabledNote}
+          <Composer placeholder={placeholder} toolbar={toolbar} commands={commands} roles={roles} sendBlocked={sendBlocked} />
+          {(disabledNote || sendBlocked) && (
+            <p className="aui-composer-disabled-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground" data-send-blocked={sendBlocked ? "" : undefined}>
+              {sendBlocked || disabledNote}
             </p>
           )}
           {note && <div className="aui-composer-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground" data-composer-note>{note}</div>}
@@ -131,11 +134,12 @@ const ThreadScrollToBottom: FC = () => {
 };
 const NO_COMMANDS: readonly SlashCommand[] = [];
 
-const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: readonly SlashCommand[]; roles?: readonly string[] }> = ({
+const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: readonly SlashCommand[]; roles?: readonly string[]; sendBlocked?: string | null }> = ({
   placeholder = "Tell the coding agent what to build or change...",
   toolbar,
   commands = NO_COMMANDS,
   roles,
+  sendBlocked,
 }) => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const shown = useMemo(() => visibleCommands(commands, roles), [commands, roles]);
@@ -160,16 +164,20 @@ const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: reado
             className="aui-composer-input mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
             rows={1}
             aria-label="Message input"
-            onKeyDown={menu.onKeyDown}
+            onKeyDown={(e) => {
+              menu.onKeyDown(e);
+              // Blocked: Enter doesn't send (Shift+Enter still starts a new line).
+              if (sendBlocked && e.key === "Enter" && !e.shiftKey) e.preventDefault();
+            }}
           />
-          <ComposerAction toolbar={toolbar} commandsButton={commandsButton} />
+          <ComposerAction toolbar={toolbar} commandsButton={commandsButton} sendBlocked={sendBlocked} />
         </ComposerPrimitive.AttachmentDropzone>
       </SlashCommandPopover>
     </ComposerPrimitive.Root>
   );
 };
 
-const ComposerAction: FC<{ toolbar?: ReactNode; commandsButton?: ReactNode }> = ({ toolbar, commandsButton }) => {
+const ComposerAction: FC<{ toolbar?: ReactNode; commandsButton?: ReactNode; sendBlocked?: string | null }> = ({ toolbar, commandsButton, sendBlocked }) => {
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
       {/* Mynt's coding agent takes text; attachments aren't sent. */}
@@ -182,7 +190,13 @@ const ComposerAction: FC<{ toolbar?: ReactNode; commandsButton?: ReactNode }> = 
         <span />
       )}
 
-      <AssistantIf condition={({ thread }) => !thread.isRunning}>
+      <AssistantIf condition={({ thread }) => !thread.isRunning && Boolean(sendBlocked)}>
+        <Button type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message" title={sendBlocked ?? undefined} disabled data-send-blocked>
+          <ArrowUpIcon className="aui-composer-send-icon size-4" />
+        </Button>
+      </AssistantIf>
+
+      <AssistantIf condition={({ thread }) => !thread.isRunning && !sendBlocked}>
         <ComposerPrimitive.Send asChild>
           <TooltipIconButton
             tooltip="Send message"
