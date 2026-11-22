@@ -7,6 +7,7 @@ import Link from "next/link"
 import { Plus, Search } from "lucide-react"
 
 import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
+import { TOOLBAR_ROW, TOOLBAR_SEARCH } from "@/components/list-layout"
 import { Input } from "@/components/ui/input"
 
 import { NeedsAttention, Panel, RecentActivity, type StageApp, type StagesData } from "@/components/dashboard-panels"
@@ -100,8 +101,8 @@ export function DashboardView({
 function ChartToolbar({ filter, onFilter, apps }: { filter: ChartFilter; onFilter?: (f: ChartFilter) => void; apps: StageApp[] }) {
   const set = (patch: Partial<ChartFilter>) => onFilter?.({ ...filter, ...patch })
   return (
-    <div className="flex flex-wrap items-center gap-2" data-toolbar data-chart-filters>
-      <div className="relative min-w-64 flex-1">
+    <div className={TOOLBAR_ROW} data-toolbar data-chart-filters>
+      <div className={TOOLBAR_SEARCH}>
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input value={filter.query} onChange={(e) => set({ query: e.target.value, appId: "all" })} placeholder="Search apps by name" className="pl-8" aria-label="Search apps" />
       </div>

@@ -160,14 +160,15 @@ export function CoverageMap({
       {region === "us" ? <CoverageLegend states={states} /> : <WorldLegend us={us} />}
       {region === "us" ? (
         <div
-          className="relative"
+          className="relative min-h-0 flex-1"
+          data-map-area
           onMouseMove={(e) => {
             if (!hover) return
             const box = e.currentTarget.getBoundingClientRect()
             setHover({ ...hover, x: e.clientX - box.left, y: e.clientY - box.top })
           }}
         >
-          <ComposableMap projection="geoAlbersUsa" width={975} height={610} className="h-auto max-h-[70vh] w-full" aria-label="Map of US states by coverage">
+          <ComposableMap projection="geoAlbersUsa" width={975} height={610} className="h-full max-h-[70vh] w-full" aria-label="Map of US states by coverage">
             <Geographies geography={geography}>
               {({ geographies }) =>
                 geographies.map((geo) => {
@@ -231,14 +232,15 @@ export function CoverageMap({
         </div>
       ) : (
         <div
-          className="relative"
+          className="relative min-h-0 flex-1"
+          data-map-area
           onMouseMove={(e) => {
             if (!countryHover) return
             const box = e.currentTarget.getBoundingClientRect()
             setCountryHover({ ...countryHover, x: e.clientX - box.left, y: e.clientY - box.top })
           }}
         >
-          <ComposableMap projection="geoEqualEarth" width={975} height={480} className="h-auto max-h-[70vh] w-full" aria-label="World map: the US by coverage, every other country not available">
+          <ComposableMap projection="geoEqualEarth" width={975} height={480} className="h-full max-h-[70vh] w-full" aria-label="World map: the US by coverage, every other country not available">
             <Geographies geography={world}>
               {({ geographies }) =>
                 geographies.map((geo) => {

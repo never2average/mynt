@@ -16,7 +16,7 @@ import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
 import { FilterSelect, FiltersPopover, picksOf, type Facet } from "@/components/filter-controls"
 import { CoverageMap, MAP_REGIONS, REGION_LABELS, type MapRegion } from "@/components/coverage-view"
-import { ListPager, usePaged } from "@/components/list-layout"
+import { ListPager, TOOLBAR_ROW, TOOLBAR_SEARCH, usePaged } from "@/components/list-layout"
 import { NotReady } from "@/components/not-available"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -74,7 +74,7 @@ export function ExpiryBadge({ licence, now }: { licence: Licence; now: number })
     )
   if (e === "expiring")
     return (
-      <Badge variant="outline" className="border-amber-500/60 text-amber-300" data-expiry="expiring">
+      <Badge variant="outline" className="border-amber-500/60 text-amber-700 dark:text-amber-300" data-expiry="expiring">
         <AlertTriangle />
         Expires soon
       </Badge>
@@ -211,8 +211,8 @@ export function LicencesView({
         <KpiRow kpis={licenceKpis(licences, now)} />
       </Panel>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2" data-toolbar>
-        <div className="relative min-w-64 flex-1">
+      <div className={TOOLBAR_ROW} data-toolbar>
+        <div className={TOOLBAR_SEARCH}>
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={f.query} onChange={(e) => set({ query: e.target.value })} placeholder="Search partner, type, regulator, number or state" className="pl-8" aria-label="Search licences" />
         </div>
@@ -234,7 +234,7 @@ export function LicencesView({
       </div>
       {view === "map" ? (
         coverage.kind === "ready" ? (
-          <Panel id="coverage-map" className="min-h-0 flex-1 [&>*]:min-h-0">
+          <Panel id="coverage-map" className="min-h-0 flex-1 grid-rows-[minmax(0,1fr)] [&>*]:min-h-0">
             <CoverageMap coverage={coverage.data} region={region} onRegion={onRegion} highlight={highlight} />
           </Panel>
         ) : (

@@ -13,6 +13,7 @@ import { ChevronRight, Search } from "lucide-react"
 
 import { NeedsAttention, Panel, Section } from "@/components/dashboard-panels"
 import { DateRangeFilter, FilterSelect } from "@/components/filter-controls"
+import { TOOLBAR_ROW, TOOLBAR_SEARCH } from "@/components/list-layout"
 import { PnlChart } from "@/components/pnl"
 import { KpiRow } from "@/components/charts"
 import { dateRange, trimSeries, type Kpi } from "@/lib/dashboard-visual"
@@ -91,8 +92,8 @@ function PortfolioKpis({ positions, flows }: { positions: NonNullable<LiquidityD
 function InvestorToolbar({ filter, onFilter, pools }: { filter: InvestorFilter; onFilter: (f: InvestorFilter) => void; pools: { id: string; name: string }[] }) {
   const set = (patch: Partial<InvestorFilter>) => onFilter({ ...filter, ...patch })
   return (
-    <div className="flex flex-wrap items-center gap-2" data-toolbar data-chart-filters>
-      <div className="relative min-w-64 flex-1">
+    <div className={TOOLBAR_ROW} data-toolbar data-chart-filters>
+      <div className={TOOLBAR_SEARCH}>
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input value={filter.query} onChange={(e) => set({ query: e.target.value, poolId: "all" })} placeholder="Search pools by name" className="pl-8" aria-label="Search pools" />
       </div>
