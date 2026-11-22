@@ -7,12 +7,19 @@
 // starts its first build with the message as the goal (and the template's kind), then opens the app.
 // The first build runs on Mynt's own cap (there is no cap control here). Until it can send, the reason
 // is the disabled Send's tooltip, never a line under the composer.
-// Each product shows the flags of the countries it's offered in. Create product (the picker's last item,
-// the Products tab's button and /create-product) opens one sheet; the new product is listed as Draft,
-// with Test and Publish on its row, and can't be picked until it's published.
+// Each product shows the flags of the countries it's offered in. Create product (the picker's last item
+// and the Products tab's button) opens one sheet; the new product is listed as Draft, with Test and
+// Publish on its row, and can't be picked until it's published.
+// The composer's toggle switches between Build app and Create product (so does /create-product, and
+// "/create-product <description>" sent from Build app goes there with its description). In Create
+// product the chat drafts a product with the assistant (components/product-chat.tsx, lib/product-chat.ts);
+// its draft card opens the same sheet, filled in. A Build app message that clearly asks for a product
+// only offers the switch: what's sent in Build app is always a build.
+import { useChat } from "@ai-sdk/react"
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
+import { DefaultChatTransport, type ChatTransport, type UIMessage } from "ai"
 import { Check, ChevronDown, LayoutTemplate, Package, Plus } from "lucide-react"
-import { Fragment, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
@@ -20,6 +27,9 @@ import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { CreateProductSheet } from "@/components/create-product-sheet"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
+import { ModeToggle, ProductChat, type DraftCards } from "@/components/product-chat"
+import { askFetch, withoutReasoning } from "@/lib/ask-client"
+import { asksForProduct, PRODUCT_WELCOME_TITLE, productCommandText, SWITCH_SUGGESTION, type NewAppMode, type ProductDraft } from "@/lib/product-chat"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -71,14 +81,28 @@ export function pickerLabel(picked: readonly string[], products: readonly NewApp
   return `Products · ${picked.length}`
 }
 
+// Build app's commands. /create-product switches to Create product (typed with a description after it
+// and sent, it sends that description there).
 export function newAppCommands(go: { tab: (t: NewAppTab) => void; applyKind: (k: AppKind) => void; createProduct?: () => void }, kinds: readonly AppKind[]): SlashCommand[] {
   return [
     { name: "templates", description: "Open Templates", run: () => go.tab("templates") },
     { name: "products", description: "Open Products", run: () => go.tab("products") },
-    ...(go.createProduct ? [{ name: "create-product", description: "Create a product", run: go.createProduct }] : []),
+    ...(go.createProduct ? [{ name: "create-product", description: "Create a product: describe it in the chat", run: go.createProduct }] : []),
     ...kinds.map((k) => ({ name: k.id, description: `Start from ${k.title}`, run: () => go.applyKind(k) })),
   ]
 }
+
+// Create product's commands: back to Build app, and the tabs.
+export function productModeCommands(go: { tab: (t: NewAppTab) => void; buildApp: () => void }): SlashCommand[] {
+  return [
+    { name: "build-app", description: "Build an app instead", run: go.buildApp },
+    { name: "templates", description: "Open Templates", run: () => go.tab("templates") },
+    { name: "products", description: "Open Products", run: () => go.tab("products") },
+  ]
+}
+
+const productTransport = () => new DefaultChatTransport<UIMessage>({ api: "/api/product-chat", fetch: askFetch, prepareSendMessagesRequest: withoutReasoning })
+export const AI_OFF = "AI is not configured on this studio. Use Create product in the Products tab instead."
 
 const pickedCount = (n: number) => (n ? `${n} picked` : "Pick at least one")
 
@@ -450,6 +474,7 @@ export function NewAppWorkspace({
   onProductsChange,
   isMobile,
   fetcher = (...a) => fetch(...a),
+  transport,
 }: {
   products: NewAppProduct[] | null
   kinds: AppKind[] | null
@@ -459,10 +484,56 @@ export function NewAppWorkspace({
   onProductsChange?: (change: (products: NewAppProduct[]) => NewAppProduct[]) => void
   isMobile?: boolean
   fetcher?: typeof fetch
+  // Create product mode's chat (app/api/product-chat unless given).
+  transport?: ChatTransport<UIMessage>
 }) {
+  // ---- Create product: the sheet, and the chat that drafts for it ----
   const [creating, setCreating] = useState(false)
-  const createProduct = () => setCreating(true)
-  const onCreated = (p: NewAppProduct) => onProductsChange?.((list) => [...list.filter((x) => x.id !== p.id), p])
+  // The chat's draft the sheet is open on (null: the plain form).
+  const [sheetDraft, setSheetDraft] = useState<ProductDraft | null>(null)
+  // Drafts already created, by draft id: their cards can't be sent again.
+  const [createdDrafts, setCreatedDrafts] = useState<Record<string, string>>({})
+  const openSheet = () => {
+    setSheetDraft(null)
+    setCreating(true)
+  }
+  const onCreated = (p: NewAppProduct) => {
+    onProductsChange?.((list) => [...list.filter((x) => x.id !== p.id), p])
+    if (sheetDraft) {
+      const id = sheetDraft.id
+      setCreatedDrafts((c) => ({ ...c, [id]: p.id }))
+      setSheetDraft(null)
+      // The new Draft, with its Test and Publish, in view.
+      setTab("products")
+      setOpened(true)
+    }
+  }
+  const cards: DraftCards = {
+    created: createdDrafts,
+    review: (d) => {
+      if (createdDrafts[d.id]) return
+      setSheetDraft(d)
+      setCreating(true)
+    },
+  }
+  const [chatTransport] = useState(() => transport ?? productTransport())
+  const productChat = useChat<UIMessage>({ id: "studio-new-product", transport: chatTransport })
+  const [mode, setMode] = useState<NewAppMode>("build")
+  const [ai, setAi] = useState<"loading" | "enabled" | "disabled">("loading")
+  const aiChecked = useRef(false)
+  useEffect(() => {
+    if (mode !== "product" || aiChecked.current) return
+    aiChecked.current = true
+    void (async () => {
+      const res = await fetcher("/api/product-chat", { cache: "no-store" }).catch(() => null)
+      const data = res?.ok ? ((await res.json().catch(() => null)) as { enabled?: unknown } | null) : null
+      setAi(data?.enabled === true ? "enabled" : "disabled")
+    })()
+  }, [mode, fetcher])
+  // What's typed in Create product's composer, and what Build app's carries over to it.
+  const productText = useRef("")
+  const onProductText = useCallback((t: string) => void (productText.current = t), [])
+  const [carry, setCarry] = useState<{ text: string; n: number } | null>(null)
   const onAction = async (id: string, action: ProductAction): Promise<RowNote> => {
     const result = await runProductAction(id, action, fetcher)
     if (!result.ok) return { text: result.message, failed: true }
@@ -482,13 +553,34 @@ export function NewAppWorkspace({
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : products?.some((x) => x.id === id && isPickable(x)) ? [...p, id] : p))
   // What's typed, for the composer's reason it can't send yet.
   const [text, setText] = useState("")
-  const blocked = sendBlockedReason(picked, text)
+  // "/create-product <description>" goes to Create product, so it isn't held back by Build app's rules.
+  const blocked = productCommandText(text) !== null ? null : sendBlockedReason(picked, text)
+
+  // Switching mode carries what's typed to the other composer; `send` is sent there at once.
+  const switchMode = (next: NewAppMode, opts: { text?: string; send?: string } = {}) => {
+    if (next === mode && opts.send === undefined) return
+    setError(null)
+    if (next === "product") {
+      const typed = opts.text ?? runtime.thread.composer.getState().text
+      runtime.thread.composer.setText("")
+      setMode("product")
+      setCarry((c) => ({ text: opts.send ? "" : typed, n: (c?.n ?? 0) + 1 }))
+      if (opts.send) void productChat.sendMessage({ text: opts.send })
+    } else {
+      const typed = opts.text ?? productText.current
+      setMode("build")
+      runtime.thread.composer.setText(typed)
+    }
+  }
 
   // One request at a time: a second send while one runs is ignored.
   const inFlight = useRef(false)
   const onNew = async (m: AppendMessage) => {
     const prompt = m.content.map((p) => (p.type === "text" ? p.text : "")).join("\n")
     if (inFlight.current) return
+    // "/create-product <description>": drafting, never a build.
+    const described = productCommandText(prompt)
+    if (described !== null) return switchMode("product", described ? { send: described } : { text: "" })
     const request = { prompt, product_ids: picked, ...(kind ? { kind } : {}) }
     // The same rules the server applies (lib/new-app.ts); what's typed comes back to fix.
     const parsed = NewAppRequest.safeParse(request)
@@ -534,7 +626,12 @@ export function NewAppWorkspace({
     setError(null)
   }
   const applyKind = (k: AppKind) => applyIdea(k)
-  const commands = newAppCommands({ tab: open, applyKind, createProduct }, kinds ?? [])
+  const commands = newAppCommands({ tab: open, applyKind, createProduct: () => switchMode("product", { text: "" }) }, kinds ?? [])
+  const productCommands = productModeCommands({ tab: open, buildApp: () => switchMode("build", { text: "" }) })
+  const drafting = productChat.status === "submitted" || productChat.status === "streaming"
+  const modeToggle = <ModeToggle mode={mode} onMode={(m) => switchMode(m)} />
+  // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
+  const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
   // A few ideas under the welcome, picked once per page load (a Mynt whose kinds carry no ideas shows the kinds).
   const [seed] = useState(() => Math.random())
   const chipList = useMemo<{ kind: AppKind; idea: AppIdea | null }[]>(() => {
@@ -563,43 +660,82 @@ export function NewAppWorkspace({
     t === "templates" ? (
       <TemplatesTab kinds={kinds} onUse={applyIdea} />
     ) : (
-      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={createProduct} onAction={onAction} />
+      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onAction={onAction} />
     )
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ChatWorkspaceShell
         chat={
-          <div className="relative h-full" data-new-app-chat>
-            <Thread
-              welcome={<ChatWelcome title={WELCOME_TITLE}>{chips}</ChatWelcome>}
-              placeholder="Describe the app: who it's for and what they can do…"
-              toolbar={
-                <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} onCreate={createProduct} />
-              }
-              commands={commands}
-              sendBlocked={busy ? null : blocked}
-              sendBlockedNote={false}
-              note={
-                error ? (
-                  <span role="alert" className="text-destructive" data-new-app-error>
-                    {error}
-                  </span>
-                ) : busy ? (
-                  <span role="status">Creating the app and starting its first build…</span>
-                ) : null
-              }
-            />
+          <div className="relative h-full" data-new-app-chat data-mode={mode}>
+            {mode === "build" ? (
+              <Thread
+                welcome={<ChatWelcome title={WELCOME_TITLE}>{chips}</ChatWelcome>}
+                placeholder="Describe the app: who it's for and what they can do…"
+                toolbar={
+                  <>
+                    {modeToggle}
+                    <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} onCreate={openSheet} />
+                  </>
+                }
+                commands={commands}
+                sendBlocked={busy ? null : blocked}
+                sendBlockedNote={false}
+                note={
+                  error ? (
+                    <span role="alert" className="text-destructive" data-new-app-error>
+                      {error}
+                    </span>
+                  ) : busy ? (
+                    <span role="status">Creating the app and starting its first build…</span>
+                  ) : suggestProduct ? (
+                    <span className="inline-flex flex-wrap items-center justify-center gap-2" data-suggest-product>
+                      {SWITCH_SUGGESTION}
+                      <Button type="button" size="sm" variant="outline" className="h-7" onClick={() => switchMode("product")} data-switch-to-product>
+                        Create product instead
+                      </Button>
+                    </span>
+                  ) : null
+                }
+              />
+            ) : (
+              <ProductChat
+                chat={productChat}
+                cards={cards}
+                welcome={<ChatWelcome title={PRODUCT_WELCOME_TITLE} />}
+                toolbar={modeToggle}
+                commands={productCommands}
+                sendBlocked={ai === "enabled" || drafting ? null : ai === "loading" ? "Checking the assistant…" : AI_OFF}
+                note={
+                  ai === "disabled" ? (
+                    <span role="status" data-product-ai-off>
+                      {AI_OFF}
+                    </span>
+                  ) : (
+                    <span data-product-note>Drafts only: nothing is created until you confirm it in the Create product form.</span>
+                  )
+                }
+                seed={carry}
+                onText={onProductText}
+              />
+            )}
           </div>
         }
         onOpenPanel={() => setOpened(true)}
-        showPanel={opened || messages.length > 0}
+        showPanel={opened || messages.length > 0 || productChat.messages.length > 0}
         tabs={(["templates", "products"] as const).map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "products" ? picked.length || undefined : undefined, content: content(t), icon: TAB_ICONS[t] }))}
         tab={tab}
         onTab={(id) => open(id as NewAppTab)}
         isMobile={isMobile}
       />
-      <CreateProductSheet open={creating} onOpenChange={setCreating} products={products} onCreated={onCreated} fetcher={fetcher} />
+      <CreateProductSheet
+        open={creating}
+        onOpenChange={setCreating}
+        products={products}
+        onCreated={onCreated}
+        fetcher={fetcher}
+        initial={sheetDraft ? { key: sheetDraft.id, request: sheetDraft.request } : null}
+      />
     </AssistantRuntimeProvider>
   )
 }

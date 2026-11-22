@@ -110,12 +110,13 @@ export type AskEvent =
   | { type: "text-start" }
   | { type: "text"; delta: string }
   | { type: "text-end" }
-  | { type: "tool"; id: string; name: string; input: unknown; ok: boolean }
+  | { type: "tool"; id: string; name: string; input: unknown; ok: boolean; output?: unknown }
   // Something for the page to draw beside the answer (Earn's pools and drafts), never a write.
   | { type: "data"; name: string; data: unknown };
 
-// A tool the studio answers itself, without Mynt (Earn's panel tools): what goes back to the model.
-export type LocalTool = (input: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }>;
+// A tool the studio answers itself, without Mynt (Earn's panel tools): what goes back to the model,
+// and, optionally, what the page is shown as the call's result (New app's draft_product: the draft).
+export type LocalTool = (input: Record<string, unknown>) => Promise<{ content: string; isError?: boolean; output?: unknown }>;
 
 export type AskDeps = {
   llm: Llm;
@@ -250,7 +251,7 @@ async function runTool(call: ToolUse, deps: AskDeps): Promise<ToolResult> {
   const local = deps.local && Object.prototype.hasOwnProperty.call(deps.local, call.name) ? deps.local[call.name] : undefined;
   if (local) {
     const out = await local(input);
-    deps.emit({ type: "tool", id: call.id, name: call.name, input, ok: !out.isError });
+    deps.emit({ type: "tool", id: call.id, name: call.name, input, ok: !out.isError, ...(out.output !== undefined ? { output: out.output } : {}) });
     return { type: "tool_result", tool_use_id: call.id, content: out.content.slice(0, MAX_TOOL_RESULT), ...(out.isError ? { is_error: true } : {}) };
   }
   const allowed = deps.allowTool ?? isAskTool;

@@ -37,6 +37,7 @@ import {
   ErrorPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -54,6 +55,8 @@ import { createContext, useContext, useMemo, useRef, type FC, type PropsWithChil
 
 // How an answer's text is drawn: MarkdownText (no clickable links) unless the thread names its own.
 const TextRenderer = createContext<FC>(MarkdownText);
+// A chat's own cards for some of its tools' calls, by tool name (New app's draft_product card).
+const ToolCards = createContext<Record<string, ToolCallMessagePartComponent>>({});
 
 // `toolbar` sits in the composer, left of Send (Earn's wallet picker, like a model picker).
 // `commands`: the chat's slash commands (lib/slash-commands.ts), those for `roles` only; typing "/"
@@ -71,6 +74,7 @@ export const Thread: FC<{
   roles?: readonly string[];
   sendBlocked?: string | null;
   sendBlockedNote?: boolean;
+  toolCards?: Record<string, ToolCallMessagePartComponent>;
 }> = ({
   welcome,
   sendBlocked,
@@ -82,9 +86,11 @@ export const Thread: FC<{
   note,
   placeholder,
   Text = MarkdownText,
+  toolCards = NO_CARDS,
 }) => {
   return (
     <TextRenderer.Provider value={Text}>
+    <ToolCards.Provider value={toolCards}>
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
       style={{
@@ -118,6 +124,7 @@ export const Thread: FC<{
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+    </ToolCards.Provider>
     </TextRenderer.Provider>
   );
 };
@@ -136,6 +143,7 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 const NO_COMMANDS: readonly SlashCommand[] = [];
+const NO_CARDS: Record<string, ToolCallMessagePartComponent> = {};
 
 const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: readonly SlashCommand[]; roles?: readonly string[]; sendBlocked?: string | null }> = ({
   placeholder = "Tell the coding agent what to build or change...",
@@ -259,6 +267,7 @@ const PartGroup: FC<PropsWithChildren<{ groupKey: string | undefined; indices: n
 
 const AssistantMessage: FC = () => {
   const Text = useContext(TextRenderer);
+  const cards = useContext(ToolCards);
   return (
     <MessagePrimitive.Root
       className="aui-assistant-message-root relative mx-auto group-data-[chat-align=left]/chat:ml-0 w-full max-w-(--thread-max-width) animate-in py-3 duration-150 fade-in slide-in-from-bottom-1"
@@ -286,6 +295,7 @@ const AssistantMessage: FC = () => {
                 commitTool: CommitToolCard,
                 checkAppTool: CheckAppToolCard,
                 devServerLogsTool: DevServerLogsToolCard,
+                ...cards,
               },
               Fallback: ToolFallback,
             },
