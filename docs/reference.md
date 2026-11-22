@@ -247,6 +247,24 @@ Builds measured before the parts were kept keep their total; their parts are `nu
 
 **Continuing a build.** `start_build` with `continue_from: <build_id>` starts from the branch an earlier finished build of yours pushed, on the same app and repository. Mynt must have confirmed that push: the build has a verified commit, or Mynt opened its pull request. If it shipped, it starts at its verified commit. Use it after a session ends, or to change a shipped app.
 
+**App kinds.** A new app can start from a working base for its kind instead of a blank prompt. `list_app_kinds` lists them, and `start_build` takes one as `kind`. Each kind is a JSON file in the coding agent's workspace, `core/workspaces/coding-build/templates/kinds/<kind>.json`, checked against `core/schemas/app-kind.schema.json`. It holds:
+- a title and a one-line description;
+- the product lines it builds on;
+- a goal to start from and edit;
+- the screens and flows to build first;
+- the SDK calls it relies on.
+
+Mynt refuses a kind that isn't there, stores the kind with the build (`kind` on `get_build`) and puts it in the agent's build spec. The agent reads that file and scaffolds with `scripts/scaffold_app.py --kind <kind>`. This lays the kind's screens over the starter app as placeholders that compile: `web/src/screens/` with a shell that switches between them, and `mobile/app/<screen>.tsx` for Expo. The kind's journey screen is the starter's journey runner. A copy of the kind is kept as `mynt-kind.json`. The kinds cover the product lines that Mynt's US regulatory model has product types for:
+
+| Kind | Product lines |
+|---|---|
+| `dollar-account` (Dollar account) | `custody_settlement` |
+| `savings-goals` (Savings goals) | `custody_settlement` |
+| `money-transfers` (Money transfers) | `payments` |
+| `stablecoin-account` (Stablecoin-settled account) | `exchange` |
+
+The studio's New app page lists them on its Templates tab. Using one fills the prompt with its goal and picks a product from each of its lines. CI scaffolds every kind and compiles its api, web and mobile.
+
 **Spend** is capped per build (`BUILD_CAP_USD`, default 10) and per developer per month (`BUILD_MONTHLY_CAP_USD`, default 100). A workspace can have its own monthly budget too, shared by everyone building its apps (`BUILD_WORKSPACE_MONTHLY_CAP_USD`, unset by default: no workspace budget); a build must fit both. Mynt reads the sandbox's machine and model cost as it runs, and stops a build that passes its cap.
 
 **Repositories.** Developers install the Mynt GitHub App on a repository and run `connect_repository`. Each build gets an installation token limited to that one repository, with contents and pull-request write access for an hour. No long-lived credential enters the sandbox.

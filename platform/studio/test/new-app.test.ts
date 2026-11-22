@@ -96,6 +96,18 @@ describe("/api/apps", () => {
     expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: prompt, app_id: "app-1", mode: "session" });
   });
 
+  it("starts the build from the template's kind where Mynt takes one, and from the prompt alone where it doesn't", async () => {
+    fake.tools = [{ name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {}, kind: {} } } }, { name: "list_app_kinds" }];
+    await post({ prompt, product_ids: ["p1"], kind: "savings-goals" });
+    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: prompt, app_id: "app-1", kind: "savings-goals" });
+    fake.calls = [];
+    claimed.clear();
+    fake.tools = [{ name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {} } } }];
+    await post({ prompt, product_ids: ["p1"], kind: "savings-goals" });
+    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: prompt, app_id: "app-1" });
+    expect((await post({ prompt, product_ids: ["p1"], kind: "Not A Kind!" })).status).toBe(400);
+  });
+
   it("still opens the app when its first build couldn't start, saying why", async () => {
     fake.startFails = true;
     const res = await post({ prompt, product_ids: ["p1"] });

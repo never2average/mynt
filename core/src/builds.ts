@@ -26,6 +26,7 @@ import { canSeeBuild, memberApp } from "./workspaces.js";
 import { checkRepoOwnership, type OwnershipCheck } from "./repo-ownership.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
+import { requireAppKind } from "./app-kinds.js";
 export { isQuotaExhausted, isTransient, QUOTA_MESSAGE, QUOTA_PATTERN } from "./transient.js";
 
 // Coding-agent builds: a developer asks Mynt to build or ship one of their experiences; Mynt runs a coding
@@ -146,6 +147,7 @@ export interface Build {
   developer_id: string;
   app_id: string | null;
   goal: string;
+  kind: string | null; // the app kind it starts from (app-kinds.ts), if any
   repository: string | null;
   status: BuildStatus;
   phase_message: string | null;
@@ -276,6 +278,8 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_branch text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_commit text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS activity_offset bigint NOT NULL DEFAULT 0;
+  -- The app kind the build starts from (workspaces/coding-build/templates/kinds/<kind>.json), if any.
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS kind text;
   -- The parts of cost_usd as last measured (coding agents' model spend, sandboxes' machine time) and Mynt's audit
   -- spend (outside the cap); null for builds measured before these were kept.
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS agent_cost_usd numeric;
@@ -352,6 +356,7 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   solana_env: (r.solana_env as Build["solana_env"]) ?? null,
   solana_toolchain: (r.solana_toolchain as ToolchainRecord | null) ?? null,
   activity_offset: Number(r.activity_offset ?? 0),
+  kind: (r.kind as string | null) ?? null,
 });
 
 // What builds need of Mynt's Solana programs (src/solana/): the addresses reserved for an app, so the agent
@@ -910,8 +915,9 @@ export class BuildService {
 
   async start(
     developer: User,
-    opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number; solana?: boolean; mode?: "once" | "session"; continue_from?: string },
+    opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number; solana?: boolean; mode?: "once" | "session"; continue_from?: string; kind?: string },
   ) {
+    if (opts.kind) requireAppKind(opts.kind);
     // Continuing an earlier build: the agents start from the branch it pushed, on the same app and repository.
     let base: Build | null = null;
     if (opts.continue_from) {
@@ -980,9 +986,9 @@ export class BuildService {
     const solana = opts.solana ?? (!!opts.app_id && !!this.solana && (await this.solana.programsForApp(opts.app_id)).length > 0);
     const mode = opts.mode ?? "once";
     await this.db.query(
-      `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd, solana, mode, continued_from, base_branch, base_commit)
-       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11)`,
-      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana, mode, base?.id ?? null, base?.branch ?? null, base?.commit_sha ?? null],
+      `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd, solana, mode, continued_from, base_branch, base_commit, kind)
+       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11, $12)`,
+      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana, mode, base?.id ?? null, base?.branch ?? null, base?.commit_sha ?? null, opts.kind ?? null],
     );
     const what = mode === "session" ? "Session build" : "Build";
     await this.event(id, "queued", `${what} queued with a US$${cap} cap${base ? `, continuing from ${base.branch}` : ""}`, base ? { continued_from: base.id } : {});
@@ -1980,6 +1986,8 @@ export class BuildService {
         base: b.base_branch ? { branch: b.base_branch, commit_sha: b.base_commit, build_id: b.continued_from } : null,
       },
       goal: b.goal,
+      // The app kind to start from: CLAUDE.md has the agent read templates/kinds/<kind>.json and scaffold with --kind.
+      kind: b.kind,
       app: app ?? null,
       products,
       mynt_api: this.config.publicUrl ? `${this.config.publicUrl}/v1` : null,
@@ -2079,6 +2087,7 @@ export function developerBuild(b: Build) {
     id: b.id,
     app_id: b.app_id,
     goal: b.goal,
+    kind: b.kind,
     repository: b.repository,
     branch: b.branch,
     status: b.status,
@@ -2386,22 +2395,23 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
             "once (default): the agent builds and ships in one go. session: it does your first request, then stays open for your next ones (steer_build), keeping its context, until you call finish_build or it has been idle 15 minutes; then it ships and Mynt verifies it as usual. Idle time counts against the cap",
           ),
         continue_from: z.string().optional().describe("An earlier build of yours whose pushed branch this one starts from (same app and repository)"),
+        kind: z.string().optional().describe("An app kind to start from (list_app_kinds): the agent scaffolds the starter app with that kind's screens"),
       },
     },
-    async ({ goal, app_id, repository, cap_usd, solana, mode, continue_from }) => {
+    async ({ goal, app_id, repository, cap_usd, solana, mode, continue_from, kind }) => {
       if (!builds.enabled) return fail("Coding-agent builds aren't enabled on this Mynt yet");
       if (app_id) {
         if (!(await ownApp(app_id))) return fail(`No app of yours with id '${app_id}'`);
       }
       try {
-        const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana, mode, continue_from });
+        const b = await builds.start(user, { goal, app_id, repository, cap_usd, solana, mode, continue_from, kind });
         // Removed from the app's workspace while this was starting: the build is stopped at once (offboarding
         // removes the membership before it stops builds, so one of the two always sees the other).
         if (b.app_id && !(await memberApp(store, user, b.app_id))) {
           await builds.stop(b, "Its developer left the app's workspace").catch(() => undefined);
           return fail(`No app of yours with id '${b.app_id}'`);
         }
-        await store.audit(user.id, "start_build", b.id, { app_id: b.app_id, repository: b.repository, cap_usd: b.cap_usd, mode, continue_from: continue_from ?? null });
+        await store.audit(user.id, "start_build", b.id, { app_id: b.app_id, repository: b.repository, cap_usd: b.cap_usd, mode, continue_from: continue_from ?? null, kind: b.kind });
         return json({ ...developerBuild(b), track_with: "get_build", ...(mode === "session" ? { next: "steer_build with each request; finish_build to ship" } : {}) });
       } catch (e) {
         return fail((e as Error).message);
