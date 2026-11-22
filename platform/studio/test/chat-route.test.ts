@@ -162,7 +162,7 @@ describe("/api/chat", () => {
     const out = await chunks(res);
     expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: "Build a savings goal screen", app_id: "app1" });
     expect(fake.calls.some((c) => c.name === "steer_build")).toBe(false);
-    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "new-build", started: true } }));
+    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "new-build", started: true, session: false } }));
     expect(out).toContainEqual(expect.objectContaining({ type: "text-delta", delta: "On it" }));
     expect(out).toContainEqual(expect.objectContaining({ type: "tool-input-available", toolName: "bashTool", input: { command: "npm test" } }));
     expect(fake.saved).toBe(1); // once, before the long watch; not again at its end (the sign-in didn't change)
@@ -235,7 +235,7 @@ describe("/api/chat", () => {
     fake.activity = [{ status: "failed", activity: [] }];
     const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
     expect(fake.calls.some((c) => c.name === "start_build")).toBe(false);
-    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "q", started: false } }));
+    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "q", started: false, session: false } }));
   });
 
   it("acts once on a message sent twice", async () => {
@@ -481,7 +481,7 @@ describe("/api/chat start races", () => {
     expect(startLocks()).toHaveLength(0); // released once A's start was done
     const out = await chunks(await b);
     expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
-    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "new-build", started: false } }));
+    expect(out).toContainEqual(expect.objectContaining({ type: "data-build", data: { buildId: "new-build", started: false, session: false } }));
     expect(startLocks()).toHaveLength(0);
   });
 
@@ -533,7 +533,7 @@ describe("/api/chat: what comes after the agent's answer", () => {
     fake.tools = sessionTools;
     fake.activity = [{ status: "coding", phase_message: "Waiting for your next message", activity: [{ type: "turn_finished", summary: "success", seq: 5 }, { type: "message", summary: "Done", seq: 4 }], cursor: 5, first_seq: 1 }];
     const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
-    expect(texts(out).at(-1)).toMatch(/waiting for your next message\. After 15 minutes without one, it ships the work/);
+    expect(texts(out).at(-1)).toMatch(/waiting for your next message\. When you.re done, press Ship \(or type \/ship\).*With no message for 15 minutes, it ships on its own/);
     expect(out.some((c) => c.type === "data-follow")).toBe(false);
   });
 
@@ -598,4 +598,80 @@ describe("GET /api/chat: following a build on", () => {
     expect((await follow("projectId=app1&buildId=b1")).status).toBe(401);
     expect(fake.calls.some((c) => c.name === "get_build_activity")).toBe(false);
   });
+
+  it("after Ship, says what shipping does and follows the shipping session to its end, not to its turn's end", async () => {
+    fake.build = { id: "b1", app_id: "app1", status: "coding", mode: "session", finish_requested_at: "2026-11-22T10:00:00Z" };
+    fake.activity = [
+      { status: "pushing", activity: [{ type: "turn_finished", summary: "success", seq: 4 }], cursor: 4, first_seq: 1 },
+      () => {
+        fake.build = { id: "b1", app_id: "app1", status: "succeeded" };
+        return { status: "succeeded", phase_message: "Verified", activity: [], cursor: 4, first_seq: 1 };
+      },
+    ];
+    const out = await chunks(await follow("projectId=app1&buildId=b1&after=3&shipping=1"));
+    const said = out.filter((c) => c.type === "text-delta").map((c) => c.delta as string);
+    expect(said[0]).toMatch(/^_Shipping: the agent wraps up its current request/);
+    expect(said.at(-1)).toMatch(/^\*\*Shipped\.\*\*/);
+    // The page hears how the build's status moves (Ship goes, the cap comes back).
+    expect(out.filter((c) => c.type === "data-state").map((c) => (c.data as { status: string }).status)).toEqual(["pushing", "succeeded", "succeeded"]);
+    expect(out.find((c) => c.type === "data-state")?.data).toEqual({ buildId: "b1", status: "pushing", after: 4, session: true, finishing: true });
+  }, 15_000);
+});
+
+describe("/api/chat: Ship, the cap, and messages held during verification", () => {
+  const sessionTools = [
+    { name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {}, mode: {}, continue_from: {} } } },
+    { name: "finish_build" },
+  ];
+
+  it("starts a build with the cap the developer picked", async () => {
+    fake.activity = [{ status: "queued", activity: [], cursor: 0, first_seq: null }, { status: "failed", activity: [], cursor: 0, first_seq: null }];
+    await chunks(await post({ projectId: "app1", capUsd: 6.5, messages: [userMessage("Build a savings goal screen")] }));
+    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: "Build a savings goal screen", app_id: "app1", cap_usd: 6.5 });
+    // A cap that isn't a whole number of cents, or isn't positive, is refused before anything starts.
+    expect((await post({ projectId: "app1", capUsd: -1, messages: [userMessage("Build a savings goal screen")] })).status).toBe(400);
+  }, 15_000);
+
+  it("holds a message sent while the app's build is verified: nothing is sent or started, the page keeps it, and the chat follows verification", async () => {
+    fake.tools = sessionTools;
+    fake.builds = [{ id: "v", app_id: "app1", status: "verifying", mode: "session", finish_requested_at: "2026-11-22T10:00:00Z", updated_at: "2026-11-22" }];
+    fake.build = { id: "v", app_id: "app1", status: "failed", error: "Not production-ready: tests" };
+    fake.activity = [
+      { status: "verifying", activity: [{ type: "turn_finished", summary: "success", seq: 12 }], cursor: 12, first_seq: 1 },
+      { status: "verifying", phase_message: "Running Mynt's checks", activity: [], cursor: 12, first_seq: 1 },
+      { status: "failed", phase_message: "Not production-ready: tests", activity: [], cursor: 12, first_seq: 1 },
+    ];
+    const out = await chunks(await post({ projectId: "app1", conversationId: "v", messages: [userMessage("Add a statements page")] }));
+    expect(fake.calls.some((c) => ["start_build", "steer_build", "finish_build"].includes(c.name))).toBe(false);
+    const said = out.filter((c) => c.type === "text-delta").map((c) => c.delta as string);
+    expect(said[0]).toBe("Queued — sent when verification finishes.");
+    expect(out.find((c) => c.type === "data-hold")?.data).toEqual({ buildId: "v", text: "Add a statements page", after: 12 });
+    // Followed to verification's end, from where the message was held; the page then sends it.
+    expect(fake.calls.filter((c) => c.name === "get_build_activity")[1].args).toMatchObject({ after: 12 });
+    expect(said).toContain("_failed: Not production-ready: tests_");
+    expect(out.filter((c) => c.type === "data-state").at(-1)?.data).toMatchObject({ buildId: "v", status: "failed" });
+  }, 15_000);
+
+  it("holds a message for a session that's shipping, too", async () => {
+    fake.tools = sessionTools;
+    fake.builds = [{ id: "live", app_id: "app1", status: "pushing", mode: "session", finish_requested_at: "2026-11-22T10:00:00Z", updated_at: "2026-11-22" }];
+    fake.activity = [{ status: "pushing", activity: [], cursor: 3, first_seq: 1 }, { status: "stopped", activity: [], cursor: 3, first_seq: 1 }];
+    const out = await chunks(await post({ projectId: "app1", conversationId: "live", messages: [userMessage("Make it green")] }));
+    expect(fake.calls.some((c) => c.name === "steer_build")).toBe(false);
+    expect(out.find((c) => c.type === "data-hold")?.data).toMatchObject({ buildId: "live", text: "Make it green" });
+  }, 15_000);
+
+  it("a session's answer while Ship was pressed meanwhile: no waiting note, the page follows it on", async () => {
+    fake.tools = sessionTools;
+    fake.builds = [{ id: "live", app_id: "app1", status: "coding", mode: "session", updated_at: "2026-11-22" }];
+    fake.build = { id: "live", app_id: "app1", status: "coding", mode: "session", finish_requested_at: "2026-11-22T10:00:00Z" };
+    fake.activity = [
+      { status: "coding", activity: [{ type: "tool_use", summary: 'Bash {"command":"npm test"}', seq: 7 }], cursor: 7, first_seq: 1 },
+      { status: "coding", activity: [{ type: "turn_finished", summary: "interrupted", seq: 8 }, { type: "message", summary: "Done", seq: 9 }, { type: "turn_finished", summary: "success", seq: 10 }], cursor: 10, first_seq: 1 },
+    ];
+    const out = await chunks(await post({ projectId: "app1", conversationId: "live", messages: [userMessage("Make it green")] }));
+    const said = out.filter((c) => c.type === "text-delta").map((c) => c.delta as string);
+    expect(said.join("\n")).not.toMatch(/waiting for your next message/);
+    expect(out).toContainEqual(expect.objectContaining({ type: "data-follow", data: { buildId: "live", after: 10 } }));
+  }, 15_000);
 });

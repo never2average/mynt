@@ -18,12 +18,13 @@ export default async function ConversationPage({
   params: Promise<{ projectId: string; conversationId: string }>;
 }) {
   const { projectId, conversationId } = await params;
-  const { messages: initialMessages, follow } = await loadConversation(projectId, conversationId);
+  const { messages: initialMessages, follow, build } = await loadConversation(projectId, conversationId);
 
   return (
     <Assistant
       initialMessages={initialMessages}
       follow={follow}
+      build={build}
       selectedProjectId={projectId}
       selectedConversationId={conversationId}
       welcome={<ProjectWelcome />}

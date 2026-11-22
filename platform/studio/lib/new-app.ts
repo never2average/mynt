@@ -1,3 +1,4 @@
+import { buildCap } from "./studio-tools";
 import { z } from "zod";
 
 // New app: what the user typed ("What do you want to build?") and the products they picked
@@ -8,6 +9,8 @@ export const NewAppRequest = z
   .object({
     prompt: z.string().trim().min(10, "Say a little more about what to build (at least 10 characters).").max(4000),
     product_ids: z.array(z.string().trim().min(1).max(200)).min(1, "Pick at least one product to build on.").max(20),
+    // The cap the developer picked (Cap $ beside Build it); Mynt's usual cap without one. Mynt checks it again.
+    cap_usd: buildCap.optional(),
   })
   .strict();
 export type NewAppRequest = z.infer<typeof NewAppRequest>;

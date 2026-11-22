@@ -12,6 +12,7 @@ import { Panel, Section } from "@/components/dashboard-panels";
 import { FilterSelect } from "@/components/filter-controls";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CapField, useCapChoice } from "@/components/build-controls";
 import { submitNewApp } from "@/lib/new-app";
 import { cn } from "@/lib/utils";
 
@@ -28,6 +29,10 @@ export default function NewAppPage() {
   const [picked, setPicked] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The first build's cap: up to the usual cap, or what's left of this month's budget.
+  const capChoice = useCapChoice(null);
+  const [cap, setCap] = useState<number | null>(null);
+  const capUsd = capChoice && !capChoice.blocked ? (cap ?? capChoice.startUsd) : null;
 
   // The products the user may build on, searched as they type.
   useEffect(() => {
@@ -59,7 +64,7 @@ export default function NewAppPage() {
     inFlight.current = true;
     setBusy(true);
     setError(null);
-    const failed = await submitNewApp({ prompt, product_ids: picked }, { fetch, navigate: (path) => router.push(path) });
+    const failed = await submitNewApp({ prompt, product_ids: picked, ...(capUsd !== null ? { cap_usd: capUsd } : {}) }, { fetch, navigate: (path) => router.push(path) });
     if (failed) {
       setError(failed);
       setBusy(false);
@@ -147,8 +152,14 @@ export default function NewAppPage() {
             {error}
           </p>
         )}
-        <div className="flex justify-end">
-          <Button type="submit" disabled={busy || prompt.trim().length < 10 || picked.length === 0}>
+        {capChoice?.blocked && (
+          <p className="text-sm text-muted-foreground" data-cap-blocked>
+            {capChoice.blocked}
+          </p>
+        )}
+        <div className="flex items-center justify-end gap-2">
+          {capChoice && capUsd !== null && <CapField choice={capChoice} value={capUsd} onChange={setCap} />}
+          <Button type="submit" disabled={busy || prompt.trim().length < 10 || picked.length === 0 || !!capChoice?.blocked}>
             {busy ? <Loader2 className="animate-spin" /> : <ArrowUp />}
             Build it
           </Button>

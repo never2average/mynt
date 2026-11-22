@@ -9,13 +9,15 @@ import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 //
 // Writing tools join the list with the screens that use them. The chat starts and steers
 // builds, New app creates apps, the dashboard's Connect repository connects repositories and the app's stage
-// control promotes; shipping (finish_build), stopping, sandbox commands and hosting changes
+// control promotes, and the builder chat's Ship ships (finish_build); stopping, sandbox commands and hosting changes
 // come later.
 
 const id = z.string().trim().min(1).max(200);
 // A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
 const service = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/).optional();
 const workspaceId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
+// A build's spending cap in dollars, to the cent.
+export const buildCap = z.number().positive().max(10_000).refine((n) => Math.round(n * 100) === n * 100, "whole cents");
 const workspaceName = z.string().trim().min(1).max(80);
 // Roles given from the studio; ownership isn't handed over here.
 const memberRole = z.enum(["admin", "member"]);
@@ -139,9 +141,13 @@ export const STUDIO_TOOLS = {
       repository: repository.optional(),
       mode: z.literal("session").optional(),
       continue_from: id.optional(),
+      // The cap the developer picked (lib/build-cap.ts), within what Mynt said is left; Mynt checks it again.
+      cap_usd: buildCap.optional(),
     })
     .strict(),
   steer_build: z.object({ build_id: id, message: z.string().trim().min(3).max(4000) }).strict(),
+  // The builder chat's Ship (and /ship): ends the session build; the agent ships it and Mynt verifies it.
+  finish_build: z.object({ build_id: id }).strict(),
   // sandbox (reading only)
   sandbox_files: z.object({ build_id: id, path: z.string().max(1000).optional() }).strict(),
   sandbox_diff: z.object({ build_id: id }).strict(),

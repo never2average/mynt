@@ -96,6 +96,12 @@ describe("/api/apps", () => {
     expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: prompt, app_id: "app-1", mode: "session" });
   });
 
+  it("starts the first build with the cap the developer picked", async () => {
+    await post({ prompt, product_ids: ["p1"], cap_usd: 4.25 });
+    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: prompt, app_id: "app-1", cap_usd: 4.25 });
+    expect((await post({ prompt, product_ids: ["p1"], cap_usd: 0 })).status).toBe(400);
+  });
+
   it("still opens the app when its first build couldn't start, saying why", async () => {
     fake.startFails = true;
     const res = await post({ prompt, product_ids: ["p1"] });

@@ -56,6 +56,7 @@ import { createContext, useContext, useMemo, useRef, type FC, type PropsWithChil
 const TextRenderer = createContext<FC>(MarkdownText);
 
 // `toolbar` sits in the composer, left of Send (Earn's wallet picker, like a model picker).
+// `inputDisabled`: nothing can be typed or sent (the reason goes in `note`).
 // `commands`: the chat's slash commands (lib/slash-commands.ts), those for `roles` only; typing "/"
 // or the composer's "/" button lists them.
 export const Thread: FC<{
@@ -65,11 +66,13 @@ export const Thread: FC<{
   placeholder?: string;
   Text?: FC;
   toolbar?: ReactNode;
+  inputDisabled?: boolean;
   commands?: readonly SlashCommand[];
   roles?: readonly string[];
 }> = ({
   welcome,
   toolbar,
+  inputDisabled,
   commands,
   roles,
   disabledNote,
@@ -102,7 +105,7 @@ export const Thread: FC<{
 
         <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mx-auto group-data-[chat-align=left]/chat:ml-0 mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background ${note ? "pb-2 md:pb-3" : "pb-4 md:pb-6"}`}>
           <ThreadScrollToBottom />
-          <Composer placeholder={placeholder} toolbar={toolbar} commands={commands} roles={roles} />
+          <Composer placeholder={placeholder} toolbar={toolbar} commands={commands} roles={roles} disabled={inputDisabled} />
           {disabledNote && (
             <p className="aui-composer-disabled-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground">
               {disabledNote}
@@ -131,11 +134,12 @@ const ThreadScrollToBottom: FC = () => {
 };
 const NO_COMMANDS: readonly SlashCommand[] = [];
 
-const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: readonly SlashCommand[]; roles?: readonly string[] }> = ({
+const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: readonly SlashCommand[]; roles?: readonly string[]; disabled?: boolean }> = ({
   placeholder = "Tell the coding agent what to build or change...",
   toolbar,
   commands = NO_COMMANDS,
   roles,
+  disabled,
 }) => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const shown = useMemo(() => visibleCommands(commands, roles), [commands, roles]);
@@ -160,6 +164,7 @@ const Composer: FC<{ placeholder?: string; toolbar?: ReactNode; commands?: reado
             className="aui-composer-input mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
             rows={1}
             aria-label="Message input"
+            disabled={disabled}
             onKeyDown={menu.onKeyDown}
           />
           <ComposerAction toolbar={toolbar} commandsButton={commandsButton} />
