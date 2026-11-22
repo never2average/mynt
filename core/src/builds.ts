@@ -169,6 +169,11 @@ export interface Build {
   readiness: unknown;
   cost_usd: number;
   cap_usd: number;
+  // What cost_usd is made of, recorded with it (null until Mynt first measured it): the coding agents' model spend
+  // and the build's sandboxes' machine time. Mynt's audit is Mynt's own spend, outside the cap.
+  agent_cost_usd: number | null;
+  sandbox_cost_usd: number | null;
+  audit_cost_usd: number | null;
   error: string | null;
   // A sandbox reopened on the build's branch after the build ended, for the developer to keep working in.
   box_sandbox_id: string | null;
@@ -271,6 +276,11 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_branch text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS base_commit text;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS activity_offset bigint NOT NULL DEFAULT 0;
+  -- The parts of cost_usd as last measured (coding agents' model spend, sandboxes' machine time) and Mynt's audit
+  -- spend (outside the cap); null for builds measured before these were kept.
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS agent_cost_usd numeric;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS sandbox_cost_usd numeric;
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_cost_usd numeric;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -315,11 +325,15 @@ ${APP_REPOSITORIES_DDL}
 `;
 
 const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
+const numOrNull = (v: unknown) => (v == null ? null : Number(v));
 type Row = Record<string, unknown>;
 const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Build => ({
   ...(r as unknown as Build),
   cost_usd: Number(r.cost_usd ?? 0),
   cap_usd: Number(r.cap_usd),
+  agent_cost_usd: numOrNull(r.agent_cost_usd),
+  sandbox_cost_usd: numOrNull(r.sandbox_cost_usd),
+  audit_cost_usd: numOrNull(r.audit_cost_usd),
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
   finished_at: iso(r.finished_at),
@@ -646,6 +660,22 @@ export class BuildService {
       )
     ).rows as Row[];
     return rows.map(toBuild);
+  }
+
+  // When each build first reached provisioning, coding and verifying, from its timeline (build_events): what its
+  // durations are measured from.
+  async phaseStarts(ids: string[]): Promise<Map<string, PhaseStarts>> {
+    const out = new Map<string, PhaseStarts>();
+    if (!ids.length) return out;
+    const rows = (
+      await this.db.query(
+        `SELECT build_id::text AS build_id, phase, min(at) AS at FROM financial_products.build_events
+         WHERE build_id = ANY($1::uuid[]) AND phase = ANY($2) GROUP BY build_id, phase`,
+        [ids, ["provisioning", "coding", "verifying"]],
+      )
+    ).rows as Row[];
+    for (const r of rows) out.set(r.build_id as string, { ...out.get(r.build_id as string), [r.phase as string]: iso(r.at) });
+    return out;
   }
 
   async events(buildId: string) {
@@ -1466,8 +1496,11 @@ export class BuildService {
     const agent = await this.agentState(b.sandbox_id!, b.prompt_id!);
     // The model spend is the larger of what the agent reports and what the proxy metered (which also sees any
     // nested runs the agent started).
-    const cost = (await sandboxes.costDollars(b.sandbox_id!)) + Math.max(agent.cost, await this.metered(b.id));
-    if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
+    const sandboxUsd = await sandboxes.costDollars(b.sandbox_id!);
+    const agentUsd = Math.max(agent.cost, await this.metered(b.id));
+    const cost = sandboxUsd + agentUsd;
+    if (cost !== b.cost_usd || agentUsd !== b.agent_cost_usd || sandboxUsd !== b.sandbox_cost_usd)
+      await this.update(b.id, { cost_usd: cost, agent_cost_usd: agentUsd, sandbox_cost_usd: sandboxUsd });
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");
       return;
@@ -1564,9 +1597,15 @@ export class BuildService {
     // Both sandboxes' machine time, plus what the coding agent spent on the model. Mynt's audit is on Mynt.
     const coder = parseJson<AgentState>(await sandboxes.readFile(b.sandbox_id!, `${AGENT_DIR}/state.json`));
     const auditor = b.verify_step === "audit" ? await this.agentState(vid, b.verify_prompt_id!) : null;
-    const cost =
-      (await sandboxes.costDollars(b.sandbox_id!)) + (await sandboxes.costDollars(vid)) + Math.max(coder?.cost_usd ?? 0, await this.metered(b.id));
-    if (cost !== b.cost_usd) await this.update(b.id, { cost_usd: cost });
+    const sandboxUsd = (await sandboxes.costDollars(b.sandbox_id!)) + (await sandboxes.costDollars(vid));
+    const agentUsd = Math.max(coder?.cost_usd ?? 0, await this.metered(b.id));
+    const cost = sandboxUsd + agentUsd;
+    // The audit's own spend, for the record only: the larger of what its runner reports and what the proxy metered.
+    const auditUsd = auditor ? Math.max(auditor.cost, this.meter ? await this.meter.spent(`audit:${b.id}`) : 0) : null;
+    const parts: Partial<Build> = {};
+    if (cost !== b.cost_usd || agentUsd !== b.agent_cost_usd || sandboxUsd !== b.sandbox_cost_usd) Object.assign(parts, { cost_usd: cost, agent_cost_usd: agentUsd, sandbox_cost_usd: sandboxUsd });
+    if (auditUsd !== null && auditUsd !== b.audit_cost_usd) parts.audit_cost_usd = auditUsd;
+    await this.update(b.id, parts);
     if (cost > b.cap_usd) {
       await this.stop({ ...b, cost_usd: cost }, `Stopped at US$${cost.toFixed(2)}: over the US$${b.cap_usd} cap`, "over_budget");
       return;
@@ -2066,6 +2105,68 @@ export function developerBuild(b: Build) {
   };
 }
 
+// ---- what a build cost and how long it took, measured ----
+
+export type PhaseStarts = { provisioning?: string | null; coding?: string | null; verifying?: string | null };
+
+const cents = (usd: number) => Math.round(usd * 100);
+const seconds = (from: string | null | undefined, to: number | null) => {
+  const f = from ? Date.parse(from) : NaN;
+  return to === null || Number.isNaN(f) || Number.isNaN(to) ? null : Math.max(0, Math.round((to - f) / 1000));
+};
+
+// A build's cost (cents, against its cap) and durations (seconds), from what Mynt recorded: cost_usd and its parts,
+// the build's timestamps and its timeline's first provisioning, coding and verifying entries. A figure Mynt didn't
+// measure is null, with the reason in not_measured; never 0. A running build's durations count to `now`.
+export function buildMeasures(b: Build, phases: PhaseStarts, now = Date.now()) {
+  const why: Record<string, string> = {};
+  const ended = TERMINAL.includes(b.status);
+  const nothingRan = !b.sandbox_id;
+  const partsKept = b.agent_cost_usd !== null && b.sandbox_cost_usd !== null;
+
+  // Cost against the cap: measured once Mynt has read it while the agent works; a build that never got a sandbox
+  // spent nothing.
+  let cost: number | null = null;
+  if (partsKept || nothingRan || b.cost_usd > 0) cost = cents(b.cost_usd);
+  else why.cost_cents = ended ? "Mynt didn't measure this build's cost before it ended" : "Measured once the coding agent starts";
+  const part = (key: "coding_agents" | "sandboxes", usd: number | null) => {
+    if (partsKept) return cents(usd!);
+    if (nothingRan) return 0;
+    why[`cost_parts_cents.${key}`] = cost !== null ? "Recorded before Mynt kept the parts of a build's cost" : why.cost_cents;
+    return null;
+  };
+  let audit: number | null = null;
+  if (b.audit_started_at && b.audit_cost_usd !== null) audit = cents(b.audit_cost_usd);
+  else why.audit_cost_cents = b.audit_started_at ? "Not recorded for this build's audit" : ended ? "No agent audit ran for this build" : "No agent audit has started";
+
+  // Durations: queued (until Mynt asked for the sandbox), coding (until verification started, or the build ended),
+  // verifying (until it ended) and in all.
+  const end = ended ? (b.finished_at ? Date.parse(b.finished_at) : null) : now;
+  const started = b.sandbox_started_at ?? phases.provisioning ?? null;
+  const queued = seconds(b.created_at, started ? Date.parse(started) : b.status === "queued" || (ended && nothingRan) ? end : null);
+  if (queued === null) why["durations_seconds.queued"] = "Not recorded for this build";
+  const verifyAt = phases.verifying ?? null;
+  const coding = phases.coding ? seconds(phases.coding, verifyAt ? Date.parse(verifyAt) : end) : null;
+  if (coding === null)
+    why["durations_seconds.coding"] = phases.coding ? "Not recorded for this build" : ended ? "The build ended before the coding agent started" : "The coding agent hasn't started";
+  const verify = verifyAt ? seconds(verifyAt, end) : null;
+  if (verify === null) why["durations_seconds.verify"] = verifyAt ? "Not recorded for this build" : ended ? "The build ended before Mynt verified it" : "Verification hasn't started";
+  const total = seconds(b.created_at, end);
+  if (total === null) why["durations_seconds.total"] = "Not recorded for this build";
+
+  return {
+    cost_cents: cost,
+    cap_cents: cents(b.cap_usd),
+    cost_parts_cents: { coding_agents: part("coding_agents", b.agent_cost_usd), sandboxes: part("sandboxes", b.sandbox_cost_usd) },
+    // Mynt's own audit, paid by Mynt: not part of cost_cents or the cap.
+    audit_cost_cents: audit,
+    timing: { queued_at: b.created_at, started_at: started, coding_started_at: phases.coding ?? null, verify_started_at: verifyAt, finished_at: ended ? b.finished_at : null },
+    durations_seconds: { queued, coding, verify, total },
+    measured_at: new Date(now).toISOString(),
+    not_measured: why,
+  };
+}
+
 export function registerCodingAgentTools(server: McpServer, store: Store, user: User, builds: BuildService, identity: LinkedAccountsService | null = null) {
   // A build of an app in one of the developer's workspaces, or their own build for no app (workspaces.ts).
   const own = async (id: string) => {
@@ -2321,7 +2422,11 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
       json({
         month_spend_usd: await builds.monthSpend(user.id),
         monthly_cap_usd: builds.config.monthlyCapUsd,
-        builds: (await builds.listVisible(user.id, status, app_id)).map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140) })),
+        builds: await (async () => {
+          const list = await builds.listVisible(user.id, status, app_id);
+          const phases = await builds.phaseStarts(list.map((b) => b.id));
+          return list.map((b) => ({ ...developerBuild(b), goal: b.goal.slice(0, 140), ...buildMeasures(b, phases.get(b.id) ?? {}) }));
+        })(),
       }),
   );
 
@@ -2337,7 +2442,8 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
     async ({ build_id }) => {
       const b = await own(build_id);
       if (!b) return fail(`No build of yours with id '${build_id}'`);
-      return json({ ...developerBuild(b), timeline: await builds.events(b.id) });
+      const phases = (await builds.phaseStarts([b.id])).get(b.id) ?? {};
+      return json({ ...developerBuild(b), ...buildMeasures(b, phases), timeline: await builds.events(b.id) });
     },
   );
 
