@@ -125,7 +125,7 @@ describe("the Builds page", () => {
   });
 });
 
-const { metricsFrom, costOfCap, totalTime, durationText, phaseElapsed } = await import("@/lib/build-metrics");
+const { metricsFrom, buildCost, totalTime, durationText, phaseElapsed } = await import("@/lib/build-metrics");
 const { BuildMeter } = await import("@/components/build-meter");
 const { buildAveragesOf } = await import("@/lib/dashboard");
 const { buildAverageKpis } = await import("@/lib/dashboard-visual");
@@ -156,8 +156,8 @@ describe("each build's cost and time", () => {
     not_measured: { cost_cents: "Mynt didn't measure this build's cost before it ended", "durations_seconds.total": "Not recorded for this build" },
   });
 
-  it("shows cost of cap and total time; a running build's time counts on from Mynt's measurement", () => {
-    expect(costOfCap(finished).text).toBe("$3.10 of $20.00");
+  it("shows the measured cost (never a cap) and total time; a running build's time counts on from Mynt's measurement", () => {
+    expect(buildCost(finished).text).toBe("$3.10");
     expect(totalTime(finished, "succeeded", Date.parse("2026-11-20T00:00:00Z")).text).toBe("12m 05s");
     const at = Date.parse("2026-11-12T10:01:30Z");
     expect(totalTime(running, "coding", at).text).toBe("1m 30s");
@@ -167,18 +167,19 @@ describe("each build's cost and time", () => {
   });
 
   it("never shows an unmeasured figure as 0: Not measured, with Mynt's reason as its tooltip", () => {
-    expect(costOfCap(unmeasured)).toEqual({ text: "Not measured", measured: false, reason: "Mynt didn't measure this build's cost before it ended" });
+    expect(buildCost(unmeasured)).toEqual({ text: "Not measured", measured: false, reason: "Mynt didn't measure this build's cost before it ended" });
     expect(totalTime(null, "succeeded").measured).toBe(false); // an older Mynt that doesn't report them
     const withMetrics = [{ ...rows[0], metrics: finished }, { ...rows[1], metrics: unmeasured }, { ...rows[2], metrics: running }, rows[3]];
     const html = renderToStaticMarkup(<BuildsView rows={withMetrics} />);
     expect(html).toMatch(/<th[^>]*>Cost<\/th><th[^>]*>Time<\/th>/);
-    expect(html).toMatch(/data-build="b1"[\s\S]*?data-field="cost">\$3\.10 of \$20\.00<[\s\S]*?data-field="time">12m 05s</);
+    expect(html).toMatch(/data-build="b1"[\s\S]*?data-field="cost">\$3\.10<[\s\S]*?data-field="time">12m 05s</);
+    expect(html).not.toMatch(/ of \$/);
     expect(html).toMatch(/data-build="b2"[\s\S]*?data-field="cost" data-not-measured="Mynt didn&#x27;t measure this build&#x27;s cost before it ended"[^>]*>Not measured</);
     expect(html).toMatch(/data-build="b3"[\s\S]*?data-live="true"/);
     expect(/data-build="b2"[\s\S]*?<\/tr>/.exec(html)![0]).not.toMatch(/\$0\.00|>0s</);
   });
 
-  it("exports Cost and Time in the CSV", async () => {
+  it("exports Cost (measured only, no cap) and Time in the CSV", async () => {
     const blobs: Blob[] = [];
     const created = vi.spyOn(URL, "createObjectURL").mockImplementation((b) => {
       blobs.push(b as Blob);
@@ -198,13 +199,15 @@ describe("each build's cost and time", () => {
       });
     const csv = (await Promise.all(blobs.map(read))).join("");
     expect(csv).toMatch(/Build,App,Status,Cost,Time,Updated/);
-    expect(csv).toContain("$3.10 of $20.00,12m 05s");
+    expect(csv).toContain(",$3.10,12m 05s");
+    expect(csv).not.toContain("$20.00");
     expect(csv).toContain("Not measured,Not measured");
   });
 
-  it("the builder's line: phase, elapsed in it and cost of cap", () => {
+  it("the builder's line: phase, elapsed in it and cost so far (no cap)", () => {
     const html = renderToStaticMarkup(<BuildMeter build={{ id: "b3", status: "coding", metrics: running }} />);
-    expect(html).toMatch(/data-field="phase">Coding<[\s\S]*?data-field="elapsed">\d+[hm] \d+[sm]<[\s\S]*?data-field="cost">\$1\.25 of \$10\.00</);
+    expect(html).toMatch(/data-field="phase">Coding<[\s\S]*?data-field="elapsed">\d+[hm] \d+[sm]<[\s\S]*?data-field="cost">\$1\.25</);
+    expect(html).not.toContain("$10.00");
     const none = renderToStaticMarkup(<BuildMeter build={{ id: "b4", status: "failed", metrics: unmeasured }} />);
     expect(none).toMatch(/data-field="elapsed" data-not-measured="Not recorded for this build"/);
     expect(none).not.toContain("$0.00");

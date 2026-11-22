@@ -612,24 +612,22 @@ describe("GET /api/chat: following a build on", () => {
     const said = out.filter((c) => c.type === "text-delta").map((c) => c.delta as string);
     expect(said[0]).toMatch(/^_Shipping: the agent wraps up its current request/);
     expect(said.at(-1)).toMatch(/^\*\*Shipped\.\*\*/);
-    // The page hears how the build's status moves (Ship goes, the cap comes back).
+    // The page hears how the build's status moves (Ship goes).
     expect(out.filter((c) => c.type === "data-state").map((c) => (c.data as { status: string }).status)).toEqual(["pushing", "succeeded", "succeeded"]);
     expect(out.find((c) => c.type === "data-state")?.data).toEqual({ buildId: "b1", status: "pushing", after: 4, session: true, finishing: true });
   }, 15_000);
 });
 
-describe("/api/chat: Ship, the cap, and messages held during verification", () => {
+describe("/api/chat: Ship, no cap, and messages held during verification", () => {
   const sessionTools = [
     { name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {}, mode: {}, continue_from: {} } } },
     { name: "finish_build" },
   ];
 
-  it("starts a build with the cap the developer picked", async () => {
+  it("starts a build without a cap (Mynt applies its own); a capUsd from the page is ignored", async () => {
     fake.activity = [{ status: "queued", activity: [], cursor: 0, first_seq: null }, { status: "failed", activity: [], cursor: 0, first_seq: null }];
     await chunks(await post({ projectId: "app1", capUsd: 6.5, messages: [userMessage("Build a savings goal screen")] }));
-    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: "Build a savings goal screen", app_id: "app1", cap_usd: 6.5 });
-    // A cap that isn't a whole number of cents, or isn't positive, is refused before anything starts.
-    expect((await post({ projectId: "app1", capUsd: -1, messages: [userMessage("Build a savings goal screen")] })).status).toBe(400);
+    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: "Build a savings goal screen", app_id: "app1" });
   }, 15_000);
 
   it("holds a message sent while the app's build is verified: nothing is sent or started, the page keeps it, and the chat follows verification", async () => {

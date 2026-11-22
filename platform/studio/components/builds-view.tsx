@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Measured, useNow } from "@/components/build-meter"
-import { costOfCap, totalTime, type BuildMetrics } from "@/lib/build-metrics"
+import { buildCost, totalTime, type BuildMetrics } from "@/lib/build-metrics"
 import { STARTING, STEERABLE } from "@/lib/chat"
 import { toCsv } from "@/lib/compliance"
 import type { Kpi } from "@/lib/dashboard-visual"
@@ -113,7 +113,7 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
       "builds.csv",
       toCsv(
         ["Build", "App", "Status", "Cost", "Time", "Updated"],
-        shown.map((r) => [r.title, r.appName, r.status, costOfCap(r.metrics).text, totalTime(r.metrics, r.status).text, r.updatedAt]),
+        shown.map((r) => [r.title, r.appName, r.status, buildCost(r.metrics).text, totalTime(r.metrics, r.status).text, r.updatedAt]),
       ),
     )
 
@@ -179,7 +179,7 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
                     <BuildStatus status={r.status} />
                   </TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">
-                    <Measured shown={costOfCap(r.metrics)} field="cost" />
+                    <Measured shown={buildCost(r.metrics)} field="cost" />
                   </TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums" data-live={isRunning(r.status) || undefined}>
                     <Measured shown={totalTime(r.metrics, r.status, now)} field="time" />

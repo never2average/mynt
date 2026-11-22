@@ -50,10 +50,8 @@ describe("STUDIO_TOOLS", () => {
     });
     expect(parseStudioCall("start_build", { goal: "short", app_id: "a1" })).toHaveProperty("error");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker" })).toHaveProperty("error"); // an app is required
-    // The cap the developer picked goes through (Mynt checks it against the budget); nothing absurd does.
-    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: 500 })).toHaveProperty("tool");
-    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: 20_000 })).toHaveProperty("error");
-    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: -1 })).toHaveProperty("error");
+    // No cap is ever sent from the studio: Mynt applies its own to every build.
+    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: 5 })).toHaveProperty("error");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", mode: "batch" })).toHaveProperty("error");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", mode: "session", continue_from: "b0" })).toHaveProperty("tool");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", repository: "not a repo" })).toHaveProperty("error");

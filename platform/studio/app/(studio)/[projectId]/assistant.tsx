@@ -8,7 +8,7 @@ import {
 import { useChat } from "@ai-sdk/react";
 import { type UIMessage } from "ai";
 import { Thread } from "@/components/assistant-ui/thread";
-import { CapField, HeldMessage, ShipButton, useCapChoice } from "@/components/build-controls";
+import { HeldMessage, ShipButton } from "@/components/build-controls";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { APP_TABS, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
@@ -145,7 +145,7 @@ function ProjectAssistant({
   // on (a watch ends after a few minutes, or when the agent hands over to Mynt's verification).
   const followRef = useRef<FollowData | null>(conversationId && follow ? { buildId: conversationId, after: follow.after } : null);
   const followOnRef = useRef(false);
-  // What the composer shows: Ship while a session is open, a cap for the next build, a held message.
+  // What the composer shows: Ship while a session is open, a held message.
   const [build, setBuild] = useState<BuildState | null>(initialBuild);
   const cursorRef = useRef<number | null>(follow?.after ?? null);
   const [held, setHeldState] = useState<HeldData | null>(null);
@@ -162,8 +162,6 @@ function ProjectAssistant({
   const [ended, setEnded] = useState<Set<string>>(() => new Set());
   const [shipNote, setShipNote] = useState<string | null>(null);
   const [shipping, setShipping] = useState(false);
-  const [cap, setCap] = useState<number | null>(null);
-  const capRef = useRef<number | null>(null);
 
   const dispatchProjectsUpdated = useCallback(() => {
     window.dispatchEvent(
@@ -227,8 +225,6 @@ function ProjectAssistant({
             messages: options.messages.slice(-1),
             projectId,
             conversationId: activeBuildIdRef.current,
-            // Used only if the message starts a build.
-            ...(capRef.current !== null ? { capUsd: capRef.current } : {}),
           },
         }),
         // Following a build on: no message, just what the agent and Mynt do next.
@@ -336,26 +332,14 @@ function ProjectAssistant({
     return () => window.removeEventListener(SHIP_EVENT, onShip);
   }, [ship, projectId]);
 
-  // The cap for a message that starts a build: read when one would, and again after each build ends.
-  const newBuild = startsNewBuild(build) && !held;
-  const choice = useCapChoice(projectId, `${newBuild}:${build?.status ?? ""}`, newBuild);
-  const capChoiceShown = newBuild ? choice : null;
-  useEffect(() => {
-    const next = capChoiceShown && !capChoiceShown.blocked ? (cap === null ? capChoiceShown.startUsd : Math.min(Math.max(cap, capChoiceShown.minUsd), capChoiceShown.maxUsd)) : null;
-    capRef.current = next;
-    if (next !== cap) setCap(next);
-  }, [capChoiceShown, cap]);
-
   const runtime = useAISDKRuntime(chat);
   const commands = useMemo(() => builderCommands(projectId), [projectId]);
 
   const toolbar = (
     <>
       {canShip(build) && <ShipButton onShip={() => void ship()} busy={shipping} />}
-      {capChoiceShown && cap !== null && <CapField choice={capChoiceShown} value={cap} onChange={(v) => setCap(v)} />}
     </>
   );
-  // Too little budget left is the Thread's sendBlocked (shown under the composer); the note is the rest.
   const note = held ? <HeldMessage text={held.text} onRemove={() => setHeld(null)} /> : shipNote;
 
   return (
@@ -364,7 +348,7 @@ function ProjectAssistant({
         projectId={projectId}
         onThreadStateChange={onThreadStateChange}
       />
-      <Thread welcome={welcome} commands={commands} toolbar={toolbar} note={note} sendBlocked={capChoiceShown?.blocked ?? null} />
+      <Thread welcome={welcome} commands={commands} toolbar={toolbar} note={note} />
     </AssistantRuntimeProvider>
   );
 }

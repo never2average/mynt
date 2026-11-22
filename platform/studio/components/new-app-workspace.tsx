@@ -5,16 +5,19 @@
 // kinds) and Products (what the app builds on). The composer's Products picker and the Products tab
 // share one selection. Sending the message is Build it: it creates the app on the picked products and
 // starts its first build with the message as the goal (and the template's kind), then opens the app.
-// Beside the Products picker, "Cap $" is the first build's spending cap: it starts at Mynt's usual cap
-// or what's left of this month's build budget, whichever is less; with too little left, it can't send.
+// The first build runs on Mynt's own cap (there is no cap control here). Until it can send, the reason
+// is the disabled Send's tooltip, never a line under the composer.
+// Each product shows the flags of the countries it's offered in. Create product (the picker's last item,
+// the Products tab's button and /create-product) opens one sheet; the new product is listed as Draft,
+// with Test and Publish on its row, and can't be picked until it's published.
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
-import { Check, ChevronDown, LayoutTemplate, Package } from "lucide-react"
+import { Check, ChevronDown, LayoutTemplate, Package, Plus } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { Thread } from "@/components/assistant-ui/thread"
-import { CapField, useCapChoice } from "@/components/build-controls"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
+import { CreateProductSheet } from "@/components/create-product-sheet"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
 import { Badge } from "@/components/ui/badge"
@@ -24,10 +27,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { NewAppRequest, picksForKind, sendBlockedReason, type AppKind } from "@/lib/new-app"
+import { flagsFor, isPickable, NOT_PUBLISHED, runProductAction, STATUS_LABEL, type ProductAction, type StudioProduct } from "@/lib/products"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { cn } from "@/lib/utils"
 
-export type NewAppProduct = { id: string; name: string; productLine: string; by: string; accessMode: string }
+export type NewAppProduct = StudioProduct
 export type NewAppTab = "templates" | "products"
 
 export const WELCOME_TITLE = "What do you want to build?"
@@ -35,17 +39,43 @@ const TAB_LABELS: Record<NewAppTab, string> = { templates: "Templates", products
 const TAB_ICONS: Record<NewAppTab, typeof Package> = { templates: LayoutTemplate, products: Package }
 export const lineLabel = (line: string) => line.replace(/_/g, " ")
 
-// What the composer's Products button says: the one product's name, how many, or that none are picked yet.
+// A product's flags: one per country it's offered in, before its name (none for global or unknown).
+export const flagText = (p: Pick<NewAppProduct, "jurisdictions"> | undefined) =>
+  flagsFor(p?.jurisdictions ?? [])
+    .map((f) => f.emoji)
+    .join(" ")
+
+export function Flags({ product }: { product: Pick<NewAppProduct, "jurisdictions"> }) {
+  const flags = flagsFor(product.jurisdictions ?? [])
+  if (!flags.length) return null
+  return (
+    <span className="inline-flex shrink-0 gap-0.5" data-flags>
+      {flags.map((f) => (
+        <span key={f.code} role="img" aria-label={f.name} title={f.name} data-flag={f.code}>
+          {f.emoji}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+// What the composer's Products button says: the one product's name (after its flags), how many, or that none are picked yet.
 export function pickerLabel(picked: readonly string[], products: readonly NewAppProduct[] | null): string {
   if (!picked.length) return "Pick products"
-  if (picked.length === 1) return products?.find((p) => p.id === picked[0])?.name ?? "Products · 1"
+  if (picked.length === 1) {
+    const one = products?.find((p) => p.id === picked[0])
+    if (!one) return "Products · 1"
+    const flags = flagText(one)
+    return flags ? `${flags} ${one.name}` : one.name
+  }
   return `Products · ${picked.length}`
 }
 
-export function newAppCommands(go: { tab: (t: NewAppTab) => void; applyKind: (k: AppKind) => void }, kinds: readonly AppKind[]): SlashCommand[] {
+export function newAppCommands(go: { tab: (t: NewAppTab) => void; applyKind: (k: AppKind) => void; createProduct?: () => void }, kinds: readonly AppKind[]): SlashCommand[] {
   return [
     { name: "templates", description: "Open Templates", run: () => go.tab("templates") },
     { name: "products", description: "Open Products", run: () => go.tab("products") },
+    ...(go.createProduct ? [{ name: "create-product", description: "Create a product", run: go.createProduct }] : []),
     ...kinds.map((k) => ({ name: k.id, description: `Start from ${k.title}`, run: () => go.applyKind(k) })),
   ]
 }
@@ -54,12 +84,25 @@ const pickedCount = (n: number) => (n ? `${n} picked` : "Pick at least one")
 
 // ---- the composer's Products picker ----
 
-export function ProductPicker({ products, picked, onToggle, onClear }: { products: NewAppProduct[] | null; picked: string[]; onToggle: (id: string) => void; onClear: () => void }) {
+export function ProductPicker({
+  products,
+  picked,
+  onToggle,
+  onClear,
+  onCreate,
+}: {
+  products: NewAppProduct[] | null
+  picked: string[]
+  onToggle: (id: string) => void
+  onClear: () => void
+  onCreate?: () => void
+}) {
   const [query, setQuery] = useState("")
+  const [open, setOpen] = useState(false)
   const shown = (products ?? []).filter((p) => matches(query, p.name, p.by, lineLabel(p.productLine)))
   const lines = [...new Set(shown.map((p) => p.productLine))].sort()
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button type="button" size="sm" variant="ghost" className="h-8 max-w-56 gap-1.5" aria-label={`Products: ${pickerLabel(picked, products)}`} data-product-picker>
           <Package />
@@ -84,6 +127,7 @@ export function ProductPicker({ products, picked, onToggle, onClear }: { product
                   .filter((p) => p.productLine === line)
                   .map((p) => {
                     const on = picked.includes(p.id)
+                    const pickable = isPickable(p)
                     return (
                       <button
                         key={p.id}
@@ -91,11 +135,15 @@ export function ProductPicker({ products, picked, onToggle, onClear }: { product
                         role="checkbox"
                         aria-checked={on}
                         onClick={() => onToggle(p.id)}
-                        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                        disabled={!pickable}
+                        title={pickable ? undefined : NOT_PUBLISHED}
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                         data-picker-option={p.id}
                       >
                         <span className={cn("flex size-4 shrink-0 items-center justify-center rounded border", on && "border-primary bg-primary text-primary-foreground")}>{on && <Check className="size-3" />}</span>
+                        <Flags product={p} />
                         <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                        {!pickable && p.status && <span className="shrink-0 text-xs text-muted-foreground">{STATUS_LABEL[p.status]}</span>}
                       </button>
                     )
                   })}
@@ -111,6 +159,22 @@ export function ProductPicker({ products, picked, onToggle, onClear }: { product
             Clear
           </Button>
         </div>
+        {onCreate && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-8 justify-start"
+            onClick={() => {
+              setOpen(false)
+              onCreate()
+            }}
+            data-picker-create
+          >
+            <Plus />
+            Create product
+          </Button>
+        )}
       </PopoverContent>
     </Popover>
   )
@@ -199,7 +263,11 @@ const PRODUCT_COLUMNS = [
   { label: "Product", className: COL.name },
   { label: "By", className: COL.text },
   { label: "Product line", className: COL.text },
+  { label: "", className: COL.actions },
 ]
+
+// A draft's Test or Publish: what Mynt said, shown on its row.
+export type RowNote = { text: string; failed: boolean }
 
 export function ProductsTab({
   products,
@@ -207,13 +275,27 @@ export function ProductsTab({
   onToggle,
   lines,
   onLines,
+  onCreate,
+  onAction,
 }: {
   products: NewAppProduct[] | null
   picked: string[]
   onToggle: (id: string) => void
   lines: string[]
   onLines: (lines: string[]) => void
+  onCreate?: () => void
+  // Test or Publish one of the user's drafts: what to show on its row.
+  onAction?: (id: string, action: ProductAction) => Promise<RowNote>
 }) {
+  const [notes, setNotes] = useState<Record<string, RowNote>>({})
+  const [running, setRunning] = useState<string | null>(null)
+  const act = async (id: string, action: ProductAction) => {
+    if (!onAction || running) return
+    setRunning(`${id}:${action}`)
+    const note = await onAction(id, action)
+    setRunning(null)
+    setNotes((n) => ({ ...n, [id]: note }))
+  }
   const [query, setQuery] = useState("")
   const options = useMemo(
     () => [...new Set((products ?? []).map((p) => p.productLine).filter(Boolean))].sort().map((l) => ({ value: l, label: lineLabel(l) })),
@@ -249,8 +331,16 @@ export function ProductsTab({
         paged.setPage(1)
       }}
       cta={
-        <span className="text-sm text-muted-foreground tabular-nums" data-picked-count>
-          {pickedCount(picked.length)}
+        <span className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground tabular-nums" data-picked-count>
+            {pickedCount(picked.length)}
+          </span>
+          {onCreate && (
+            <Button size="sm" className="h-9" onClick={onCreate} data-create-product>
+              <Plus />
+              Create product
+            </Button>
+          )}
         </span>
       }
       areaRef={fit.ref}
@@ -260,7 +350,7 @@ export function ProductsTab({
         <TableHeader className="sticky top-0 bg-card">
           <TableRow>
             {PRODUCT_COLUMNS.map((c) => (
-              <TableHead key={c.label || "pick"} className={c.className}>
+              <TableHead key={c.label || (c.className === COL.actions ? "actions" : "pick")} className={c.className}>
                 {c.label}
               </TableHead>
             ))}
@@ -278,14 +368,55 @@ export function ProductsTab({
           ) : paged.shown.length ? (
             paged.shown.map((p) => {
               const on = picked.includes(p.id)
+              const pickable = isPickable(p)
+              const note = notes[p.id]
               return (
                 <TableRow key={p.id} data-product-row={p.id} data-state={on ? "selected" : undefined}>
                   <TableCell className="w-px">
-                    <input type="checkbox" className="size-4 accent-primary" checked={on} onChange={() => onToggle(p.id)} aria-label={`Pick ${p.name}`} data-pick={p.id} />
+                    <span className="inline-flex" title={pickable ? undefined : NOT_PUBLISHED}>
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-primary disabled:cursor-not-allowed"
+                        checked={on}
+                        onChange={() => onToggle(p.id)}
+                        disabled={!pickable}
+                        title={pickable ? undefined : NOT_PUBLISHED}
+                        aria-label={`Pick ${p.name}`}
+                        aria-description={pickable ? undefined : NOT_PUBLISHED}
+                        data-pick={p.id}
+                      />
+                    </span>
                   </TableCell>
-                  <TableCell className={`${COL.name} font-medium`}>{p.name}</TableCell>
+                  <TableCell className={`${COL.name} font-medium`}>
+                    <span className="flex items-center gap-1.5">
+                      <Flags product={p} />
+                      <span className="truncate">{p.name}</span>
+                      {!pickable && p.status && (
+                        <span className="shrink-0 text-xs font-normal text-muted-foreground" data-product-status>
+                          {STATUS_LABEL[p.status]}
+                        </span>
+                      )}
+                    </span>
+                    {note && (
+                      <span role={note.failed ? "alert" : "status"} className={cn("mt-1 block max-w-96 text-xs font-normal whitespace-normal", note.failed ? "text-destructive" : "text-muted-foreground")} data-product-note>
+                        {note.text}
+                      </span>
+                    )}
+                  </TableCell>
                   <TableCell className={COL.text}>{p.by || "—"}</TableCell>
                   <TableCell className={COL.text}>{p.productLine ? <Badge variant="outline">{lineLabel(p.productLine)}</Badge> : "—"}</TableCell>
+                  <TableCell className={COL.actions}>
+                    {p.mine && !pickable && onAction && (
+                      <span className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" disabled={running !== null} onClick={() => void act(p.id, "test")} data-product-test={p.id}>
+                          {running === `${p.id}:test` ? "Testing…" : "Test"}
+                        </Button>
+                        <Button size="sm" variant="outline" disabled={running !== null} onClick={() => void act(p.id, "publish")} data-product-publish={p.id}>
+                          {running === `${p.id}:publish` ? "Publishing…" : "Publish"}
+                        </Button>
+                      </span>
+                    )}
+                  </TableCell>
                 </TableRow>
               )
             })
@@ -304,14 +435,28 @@ export function NewAppWorkspace({
   products,
   kinds,
   onBuild,
+  onProductsChange,
   isMobile,
+  fetcher = (...a) => fetch(...a),
 }: {
   products: NewAppProduct[] | null
   kinds: AppKind[] | null
   // Creates the app and starts its build; returns an error to show, or null once it's on its way.
   onBuild: (request: NewAppRequest) => Promise<string | null>
+  // A product created or published here: the page's list, changed.
+  onProductsChange?: (change: (products: NewAppProduct[]) => NewAppProduct[]) => void
   isMobile?: boolean
+  fetcher?: typeof fetch
 }) {
+  const [creating, setCreating] = useState(false)
+  const createProduct = () => setCreating(true)
+  const onCreated = (p: NewAppProduct) => onProductsChange?.((list) => [...list.filter((x) => x.id !== p.id), p])
+  const onAction = async (id: string, action: ProductAction): Promise<RowNote> => {
+    const result = await runProductAction(id, action, fetcher)
+    if (!result.ok) return { text: result.message, failed: true }
+    if (action === "publish") onProductsChange?.((list) => list.map((p) => (p.id === id ? { ...p, status: "published" as const } : p)))
+    return { text: result.data.message ?? (action === "publish" ? "Published." : "Tested."), failed: action === "test" && result.data.passed === false }
+  }
   const [picked, setPicked] = useState<string[]>([])
   const [lines, setLines] = useState<string[]>([])
   const [kind, setKind] = useState<string | null>(null)
@@ -320,21 +465,19 @@ export function NewAppWorkspace({
   const [messages, setMessages] = useState<ThreadMessageLike[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+  // Only published products can be picked (a draft's checkbox is disabled; this holds whatever calls it).
+  const toggle = (id: string) =>
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : products?.some((x) => x.id === id && isPickable(x)) ? [...p, id] : p))
   // What's typed, for the composer's reason it can't send yet.
   const [text, setText] = useState("")
-  // The first build's cap (lib/build-cap.ts): too little left this month blocks sending, beside the other reasons.
-  const capChoice = useCapChoice(null)
-  const [cap, setCap] = useState<number | null>(null)
-  const capUsd = capChoice && !capChoice.blocked ? (cap ?? capChoice.startUsd) : null
-  const blocked = sendBlockedReason(picked, text) ?? capChoice?.blocked ?? null
+  const blocked = sendBlockedReason(picked, text)
 
   // One request at a time: a second send while one runs is ignored.
   const inFlight = useRef(false)
   const onNew = async (m: AppendMessage) => {
     const prompt = m.content.map((p) => (p.type === "text" ? p.text : "")).join("\n")
     if (inFlight.current) return
-    const request = { prompt, product_ids: picked, ...(kind ? { kind } : {}), ...(capUsd !== null ? { cap_usd: capUsd } : {}) }
+    const request = { prompt, product_ids: picked, ...(kind ? { kind } : {}) }
     // The same rules the server applies (lib/new-app.ts); what's typed comes back to fix.
     const parsed = NewAppRequest.safeParse(request)
     if (!parsed.success) {
@@ -373,10 +516,10 @@ export function NewAppWorkspace({
     setKind(k.id)
     runtime.thread.composer.setText(k.goalTemplate)
     setLines(k.productLines)
-    if (products) setPicked((p) => picksForKind(k, products, p))
+    if (products) setPicked((p) => picksForKind(k, products.filter(isPickable), p))
     setError(null)
   }
-  const commands = newAppCommands({ tab: open, applyKind }, kinds ?? [])
+  const commands = newAppCommands({ tab: open, applyKind, createProduct }, kinds ?? [])
   const chips = (kinds ?? []).length ? (
     <div className="mt-6 flex flex-wrap justify-center gap-2 px-4" data-chips>
       {(kinds ?? []).map((k) => (
@@ -403,7 +546,7 @@ export function NewAppWorkspace({
         }}
       />
     ) : (
-      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} />
+      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={createProduct} onAction={onAction} />
     )
 
   return (
@@ -415,13 +558,11 @@ export function NewAppWorkspace({
               welcome={<ChatWelcome title={WELCOME_TITLE}>{chips}</ChatWelcome>}
               placeholder="Describe the app: who it's for and what they can do…"
               toolbar={
-                <>
-                  <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} />
-                  {capChoice && capUsd !== null && <CapField choice={capChoice} value={capUsd} onChange={setCap} />}
-                </>
+                <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} onCreate={createProduct} />
               }
               commands={commands}
               sendBlocked={busy ? null : blocked}
+              sendBlockedNote={false}
               note={
                 error ? (
                   <span role="alert" className="text-destructive" data-new-app-error>
@@ -441,6 +582,7 @@ export function NewAppWorkspace({
         onTab={(id) => open(id as NewAppTab)}
         isMobile={isMobile}
       />
+      <CreateProductSheet open={creating} onOpenChange={setCreating} products={products} onCreated={onCreated} fetcher={fetcher} />
     </AssistantRuntimeProvider>
   )
 }
