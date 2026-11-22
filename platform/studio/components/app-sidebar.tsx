@@ -5,11 +5,11 @@
 // members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
 // foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
-// New app is in every page's header; Builds isn't in the sidebar (/builds still works).
+// Docs (/docs) sits at the foot of the pages, for everyone. New app is in every page's header; Builds isn't in the sidebar (/builds still works).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
+import { BookOpen, Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -44,6 +44,8 @@ const PAGES = [
 ] as const
 // Only for builders and liquidity providers, after Settings.
 const EARN_PAGE = { href: "/earn", label: "Earn", icon: Coins } as const
+// Mynt's docs and tool reference (/docs, public), for everyone, below the apps.
+const DOCS_PAGE = { href: "/docs", label: "Docs", icon: BookOpen } as const
 
 export type SidebarViewProps = {
   workspaces: Workspace[]
@@ -94,6 +96,18 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
           </SidebarMenu>
         </SidebarGroup>
         {developer && <NavFolders groups={groups} activeAppId={appId} />}
+        <SidebarGroup className="mt-auto" data-sidebar-docs>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton asChild tooltip={DOCS_PAGE.label}>
+                <a href={DOCS_PAGE.href} data-docs-link-sidebar>
+                  <DOCS_PAGE.icon />
+                  <span>{DOCS_PAGE.label}</span>
+                </a>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={account} />

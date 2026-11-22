@@ -125,7 +125,7 @@ Behind it is a whole coding team. An **architect** plans. **Server**, **web** an
 
 Mynt is an [MCP](https://modelcontextprotocol.io) server; clients show it as `mynt`. Any MCP client can use it, so you're never tied to one tool. Claude Code is the reference client. `platform/chat` (mynt-chat) is a sample of your own: a mobile-friendly chat for customers, and a developer console for builds, sandboxes and hosting. `platform/studio` is Mynt Studio, where developers sign in with their Mynt account and see their apps and each build's live preview (built on the open-source Adorable; chatting with the coding agent from it comes next).
 
-**For AI assistants:** every Mynt server answers `GET /llms.txt` (also at `/.well-known/llms.txt`) with a short guide in the [llms.txt](https://llmstxt.org) format: what Mynt is, its MCP endpoint, how to sign in, the roles and the first tools each one should call. `GET /llms-full.txt` lists every tool each role gets, with its inputs, generated from the server's live tool registry, plus the runtime API and the vendor contract.
+**For AI assistants:** every Mynt server answers `GET /llms.txt` (also at `/.well-known/llms.txt`) with a short guide in the [llms.txt](https://llmstxt.org) format: what Mynt is, its MCP endpoint, how to sign in, the roles and the first tools each one should call. `GET /llms-full.txt` lists every tool each role gets, with its inputs, generated from the server's live tool registry, plus the runtime API and the vendor contract. People read the same reference in Mynt Studio's docs at `/docs` (public, no sign-in): every tool by area with its roles, inputs and an example call, generated from that registry too, beside guides drawn from these docs.
 
 ## Ground rules Mynt enforces for you
 

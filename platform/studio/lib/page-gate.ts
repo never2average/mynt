@@ -5,6 +5,9 @@
 // back to sign-in, or a failure would loop and signing out would sign straight back in).
 export const OPEN_PAGES = new Set(["/signin-error", "/signed-out"]);
 
+// Mynt's docs (/docs and every page under it, app/docs): public, for anyone deciding whether to build on Mynt.
+export const isDocsPath = (pathname: string) => pathname === "/docs" || pathname.startsWith("/docs/");
+
 // The brand files Next serves from app/ (icon.tsx, apple-icon.tsx, opengraph-image.tsx,
 // manifest.ts), which the signed-out pages, browsers and link previews fetch without a sign-in.
 // Next may add a "-<hash>" or an extension to the generated ones.
@@ -17,6 +20,7 @@ export function pageNeedsSignIn(pathname: string): boolean {
   if (pathname.startsWith("/api/") || pathname === "/api") return false;
   if (pathname.startsWith("/_next/") || pathname === "/favicon.ico") return false;
   if (isBrandAsset(pathname)) return false;
+  if (isDocsPath(pathname)) return false;
   return !OPEN_PAGES.has(pathname);
 }
 

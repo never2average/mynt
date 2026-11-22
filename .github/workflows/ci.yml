@@ -38,7 +38,7 @@ jobs:
           echo "$files"
           shared='^(\.github/|package\.json$|package-lock\.json$)'
           if grep -qE "^(core/|deploy/|docs/)|$shared" <<< "$files"; then echo "core=true" >> "$GITHUB_OUTPUT"; else echo "core=false" >> "$GITHUB_OUTPUT"; fi
-          if grep -qE "^platform/|$shared" <<< "$files"; then echo "platform=true" >> "$GITHUB_OUTPUT"; else echo "platform=false" >> "$GITHUB_OUTPUT"; fi
+          if grep -qE "^(platform/|docs/site/)|$shared" <<< "$files"; then echo "platform=true" >> "$GITHUB_OUTPUT"; else echo "platform=false" >> "$GITHUB_OUTPUT"; fi
   test:
     needs: changes
     if: needs.changes.outputs.core == 'true'
