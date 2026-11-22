@@ -3,7 +3,7 @@ import { DM_Sans, Geist_Mono, Space_Grotesk } from "next/font/google";
 import { headers } from "next/headers";
 import { ThemeProvider } from "@/components/theme-switcher";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { BRAND, SITE_DESCRIPTION, SITE_NAME, TITLE_TEMPLATE } from "@/lib/brand";
+import { BRAND, SITE_DESCRIPTION, SITE_NAME, TITLE_TEMPLATE, SHORT_NAME } from "@/lib/brand";
 import { appUrl } from "@/lib/config";
 import "./globals.css";
 
@@ -33,7 +33,7 @@ export const dynamic = "force-dynamic";
 export async function generateMetadata(): Promise<Metadata> {
   return {
     metadataBase: appUrl(),
-    title: { default: SITE_NAME, template: TITLE_TEMPLATE },
+    title: { default: SHORT_NAME, template: TITLE_TEMPLATE },
     description: SITE_DESCRIPTION,
     applicationName: SITE_NAME,
     openGraph: { siteName: SITE_NAME, title: SITE_NAME, description: SITE_DESCRIPTION, type: "website" },
