@@ -20,7 +20,7 @@ const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_p
 const DEVELOPER_TOOLS = [
   "create_app", "list_my_apps", "preview_app", "publish_app", "update_app",
   // building on innovators' products
-  "check_experience", "get_developer_contract", "get_product_sdk", "list_buildable_products", "list_my_requests", "request_product_access",
+  "check_experience", "get_developer_contract", "get_product_sdk", "list_app_ideas", "list_buildable_products", "list_my_requests", "request_product_access",
   // GTM engineering
   "create_campaign", "create_segment", "end_campaign", "get_campaign_metrics", "launch_campaign",
   "lint_campaign", "list_my_campaigns", "list_my_segments", "pause_campaign", "update_campaign",
