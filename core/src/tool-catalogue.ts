@@ -63,6 +63,7 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerWorkspaceTools: "workspaces",
   registerInvitationTools: "workspaces",
   registerLinkedAccountsTools: "workspaces",
+  registerChatSessionTools: "workspaces",
   registerPromotionTools: "workspaces",
   registerPromotionAdminTools: "workspaces",
   registerAttentionTools: "workspaces",
