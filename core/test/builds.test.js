@@ -12,6 +12,7 @@ import { Store } from "../dist/store.js";
 import { CATALOG } from "./helpers.js";
 
 const SHA = "a".repeat(64);
+const TREE = "b".repeat(64);
 const COMMIT = "c".repeat(40);
 const V = "/home/user/mynt-verify";
 const A = "/home/user/mynt-agent";
@@ -66,9 +67,20 @@ function fakeSandboxHost() {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("tar --exclude")) return { exitCode: 0, stdout: `${SHA}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
+      // The auditor's read-only copy of the source, and Mynt's hash of it before and after the audit.
+      if (command.includes("verify.sh --audit-copy")) return { exitCode: 0, stdout: `audit-copy ${TREE}\n`, stderr: "" };
       if (command.includes("verify.sh --rehash")) {
-        s.files.set(`${V}/after.sha`, host.tamperDuringAudit ? "changed\n" : s.files.get(`${V}/before.sha`));
         s.files.set(`${V}/changed.txt`, host.tamperDuringAudit ? "./api/index.ts\n" : "");
+        return { exitCode: 0, stdout: `rehash ${host.tamperDuringAudit ? "e".repeat(64) : TREE}\n`, stderr: "" };
+      }
+      // Mynt ending an auditor that ran out of time or budget.
+      if (command.includes("[r]unner.mjs")) {
+        s.agentRunning = false;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      const rm = command.match(/^rm -f (.+)$/);
+      if (rm) {
+        for (const path of rm[1].split(" ")) s.files.delete(path);
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.includes("verify.sh")) return { processId: 7, exitCode: null, stdout: "", stderr: "" };
@@ -208,7 +220,7 @@ const passingChecks = [
   { name: "sbom", status: "pass" },
   { name: "disclosures", status: "pass" },
 ];
-const cleanAudit = { counts: { critical: 0, high: 0, medium: 2, low: 5 }, findings: [], summary: "No blocking findings" };
+const cleanAudit = { complete: true, workflows_run: ["execute-scr", "probe-cicd-env"], skipped: [], counts: { critical: 0, high: 0, medium: 2, low: 5 }, findings: [], summary: "No blocking findings" };
 const agentReport = { maxwell: { counts: { critical: 0, high: 0 } }, readiness: [], preview: { port: 8080 }, push: { branch: "mynt/build-x" } };
 
 // Drives one build from start through the agent's work into verification, then lets `verification`
@@ -290,12 +302,16 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   assert.match(verifier.commands.find((c) => c.detached).command, new RegExp(`verify\\.sh 'https://files\\.example/${sbx}/home/user/mynt-out/app\\.tgz\\?sig=x' ${SHA}`));
   assert.match(verifier.files.get(`${AUDIT}/CLAUDE.md`), /Do not modify anything inside `app_dir`/);
   assert.deepEqual(JSON.parse(verifier.files.get(`${AUDIT}/job/audit.json`)), {
-    app_dir: "/home/user/app",
+    // The auditor reads its own read-only copy of the verified source, not the folder Mynt's checks ran in.
+    app_dir: "/home/user/audit-src",
     maxwell_repo: "https://github.com/OnFinance/Maxwell",
     output: `${V}/maxwell.json`,
     workflows: ["execute-scr", "probe-cicd-env"],
     minutes: 20,
+    attempt: 1,
+    attempts: 2,
   });
+  assert.ok(verifier.commands.some((c) => c.command === `bash ${V}/verify.sh --audit-copy ${SHA}`), "the copy is made from the hash-checked archive");
   assert.equal(sandboxes.agentConfig(vid).cwd, AUDIT);
   // Mynt's audit runs on its own model and budget, not the developer's: the coding agent's runs on the deployment's.
   assert.equal(sandboxes.agentConfig(vid).model, "claude-sonnet-5-5");
@@ -318,9 +334,13 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
 });
 
 for (const [label, opts, status, pattern] of [
-  ["the agent's own report can't hide findings: Mynt's audit decides", { agent: { ...agentReport, maxwell: { counts: { high: 0 } } }, verification: { maxwell: { counts: { critical: 0, high: 2 } } } }, "blocked", /Security gate: 2/],
-  ["no independent audit, no ship", { verification: { maxwell: null } }, "blocked", /No independent Maxwell audit result \(the auditor finished without writing its report\)/],
-  ["an audit that didn't finish doesn't count", { verification: { auditStatus: "error_max_budget_usd" } }, "blocked", /No independent Maxwell audit result \(auditor: error_max_budget_usd/],
+  ["the agent's own report can't hide findings: Mynt's audit decides", { agent: { ...agentReport, maxwell: { counts: { high: 0 } } }, verification: { maxwell: { ...cleanAudit, counts: { critical: 0, high: 2 }, findings: [{ severity: "high", title: "SQL injection", file: "api/db.ts", workflow: "execute-scr" }] } } }, "blocked", /^Security gate: 2 critical\/high Maxwell finding\(s\) \(high: SQL injection in api\/db\.ts; …\)$/],
+  [
+    "an audit that ran out of its budget doesn't count, even with a partial report",
+    { verification: { maxwell: { ...cleanAudit, complete: false, workflows_run: ["execute-scr"] }, auditStatus: "error_max_budget_usd" } },
+    "blocked",
+    /^Mynt's audit didn't finish: the auditor used up its US\$5 budget \(Mynt's, not this build's cap\); its report so far covers execute-scr; a build can't ship without a complete audit$/,
+  ],
   ["a failing check from Mynt's script fails the build", { verification: { checks: [...passingChecks, { name: "secrets_scan", status: "fail", detail: "1 secret(s)" }] } }, "failed", /secrets_scan/],
 ]) {
   test(label, async () => {
@@ -355,7 +375,7 @@ test("a build that doesn't ship revokes its Mynt sandbox key", async () => {
   const ctx = await setup();
   const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
   const app = (await ctx.call(dev, "create_app", { name: "Saver", description: "S", audience: "S", product_ids: ["fixed-deposit"] })).data;
-  const { started } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please", app_id: app.id }, verification: { maxwell: { counts: { critical: 1 } } } });
+  const { started } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please", app_id: app.id }, verification: { maxwell: { ...cleanAudit, counts: { critical: 1 } } } });
   const b = await ctx.builds.get(started.id);
   assert.equal(b.status, "blocked");
   assert.equal((await ctx.store.getApiKey(b.sandbox_key_id)).status, "revoked");
@@ -2289,13 +2309,94 @@ test("Mynt's audit has its own token, budget and model, isn't charged to the dev
   await builds.tick();
   assert.equal((await builds.get(started.id)).cost_usd, before);
 
-  // Still running past its time limit: Mynt stops waiting, and the build doesn't ship without its report.
-  await pg.query("UPDATE financial_products.build_runs SET audit_started_at = now() - interval '25 minutes' WHERE id = $1", [started.id]);
+  // Nor are the sandboxes' machine hours while it runs: far past the build's cap here, and the build carries on.
+  sandboxes.sandboxes.get(vid).cost = 40;
   await builds.tick();
-  const b = await builds.get(started.id);
+  let b = await builds.get(started.id);
+  assert.equal(b.status, "verifying", b.error ?? "");
+  assert.equal(b.cost_usd, before, "the cap counts machine time only up to the audit's start");
+  assert.equal(b.audit_cost_usd, 44, "the audit's own record: US$4 of model, US$40 of machine time");
+
+  // Still running past its time limit, with a partial report: Mynt ends it, says so plainly, doesn't try again
+  // (the time is spent), and the build doesn't ship.
+  sandboxes.write(vid, `${V}/maxwell.json`, { ...cleanAudit, complete: false, workflows_run: ["execute-scr"], skipped: [{ workflow: "probe-cicd-env", reason: "not run yet" }] });
+  await pg.query("UPDATE financial_products.build_runs SET audit_state = jsonb_set(audit_state, '{started_at}', to_jsonb((now() - interval '25 minutes')::text)) WHERE id = $1", [started.id]);
+  await builds.tick();
+  b = await builds.get(started.id);
   assert.equal(b.status, "blocked");
-  assert.match(b.error, /No independent Maxwell audit result \(auditor: timed out after 20 min/);
+  assert.equal(b.error, "Mynt's audit didn't finish: the auditor ran out of time (20 min); its report so far covers execute-scr; a build can't ship without a complete audit");
+  assert.match(b.next_step, /BUILD_AUDIT_MINUTES/);
+  assert.ok(sandboxes.sandboxes.get(vid).commands.some((c) => c.command.includes("[r]unner.mjs")), "the auditor is ended before the source is re-hashed");
+  assert.equal(sandboxes.sandboxes.get(vid).commands.filter((c) => c.command.includes("runner.mjs ")).length, 1, "no second attempt");
+  const got = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(got.next_step, b.next_step, "get_build says what to do");
   assert.equal(await builds.agentRun(auditToken), null, "the audit token dies with the build");
+});
+
+test("an auditor that ends without its report gets one more attempt, with what's left of the audit's budget", async () => {
+  const ctx = await setup();
+  const { builds, sandboxes, call } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  // The first attempt ends its turn (a clean "success") without writing a report: the run is retried once.
+  const { started, vid, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" }, verification: { maxwell: null } });
+  assert.equal(build.status, "verifying");
+  assert.match(build.phase_message, /^Mynt's audit ended without a complete report \(the auditor ended its turn without writing its report\); running it once more \(attempt 2 of 2, up to 20 min\)$/);
+  const job = JSON.parse(sandboxes.sandboxes.get(vid).files.get(`${AUDIT}/job/audit.json`));
+  assert.deepEqual([job.attempt, job.attempts], [2, 2]);
+  assert.equal(sandboxes.agentConfig(vid).budgetUsd, 5, "nothing metered yet, so the whole budget is left");
+  assert.equal((await builds.get(started.id)).audit_state.attempt, 2);
+
+  // The second ends the same way: blocked, plainly, with what to do.
+  sandboxes.finishAgent(vid, "success");
+  await builds.tick();
+  const b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.status, "blocked");
+  assert.equal(b.error, "Mynt's audit didn't finish: the auditor ended its turn without writing its report, on both attempts; a build can't ship without a complete audit");
+  assert.match(b.next_step, /continue_from/);
+
+  // A second attempt that writes its complete report ships.
+  const ctx2 = await setup();
+  const dev2 = await ctx2.connect(await ctx2.as("Dev", ["developer"]));
+  const r = await runBuild(ctx2, { dev: dev2, startArgs: { goal: "Build a savings page please" }, verification: { maxwell: null, auditStatus: "error_during_execution" } });
+  assert.equal(r.build.status, "verifying");
+  assert.match(r.build.phase_message, /stopped without writing its report \(error_during_execution, exit 0\)/);
+  ctx2.sandboxes.write(r.vid, `${V}/maxwell.json`, cleanAudit);
+  ctx2.sandboxes.finishAgent(r.vid, "success");
+  await ctx2.builds.tick();
+  assert.equal((await ctx2.builds.get(r.started.id)).status, "succeeded");
+});
+
+test("a report that isn't complete never counts as a pass", async () => {
+  for (const [maxwell, pattern] of [
+    [{ counts: { critical: 0, high: 0 }, summary: "clean" }, /^Mynt's audit is incomplete: execute-scr, probe-cicd-env not run, on both attempts; a build can't ship/],
+    [{ ...cleanAudit, complete: false }, /^Mynt's audit is incomplete: not marked complete, on both attempts;/],
+    [
+      { ...cleanAudit, workflows_run: ["execute-scr"], skipped: [{ workflow: "probe-cicd-env", reason: "asks for a CI login" }] },
+      /^Mynt's audit is incomplete: probe-cicd-env not run; skipped: probe-cicd-env: asks for a CI login, on both attempts;/,
+    ],
+  ]) {
+    const ctx = await setup();
+    const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+    const r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" }, verification: { maxwell } });
+    assert.equal(r.build.status, "verifying", "tried once more");
+    ctx.sandboxes.write(r.vid, `${V}/maxwell.json`, maxwell);
+    ctx.sandboxes.finishAgent(r.vid, "success");
+    await ctx.builds.tick();
+    const b = await ctx.builds.get(r.started.id);
+    assert.equal(b.status, "blocked");
+    assert.match(b.error, pattern);
+    assert.match(b.next_step, /BUILD_AUDIT_WORKFLOWS/);
+  }
+});
+
+test("an audit that changed the source isn't tried again", async () => {
+  const ctx = await setup();
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  ctx.sandboxes.tamperDuringAudit = true;
+  const r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" }, verification: { maxwell: null } });
+  assert.equal(r.build.status, "blocked");
+  assert.match(r.build.error, /^The source changed during the audit: \.\/api\/index\.ts; the result can't be trusted$/);
+  assert.match(r.build.next_step, /read-only copy/);
 });
 
 test("by default a build ships on Mynt's own checks, with no agent audit; a failing static scan stops it", async () => {

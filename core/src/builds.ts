@@ -17,7 +17,7 @@ import { isManagedRepository, refuseManagedRepository, type GitRepoHost } from "
 import { APPROVED, PENDING, REJECTED, approvalColumns, connectionApproval, reapprovalOnConflict, requireApproved } from "./repo-approvals.js";
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
-import { VERIFY_APP, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
+import { VERIFY_APP, VERIFY_AUDIT_SRC, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
 import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolchainRecord, type ToolchainRecord } from "./solana/toolchain.js";
 import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
@@ -158,6 +158,8 @@ export interface Build {
   verify_process_id: number | null;
   verify_prompt_id: string | null; // the auditor's runner process in the verify sandbox
   audit_started_at: string | null;
+  // Mynt's record of the audit in progress (see AuditState); null before it starts.
+  audit_state: AuditState | null;
   source_sha256: string | null;
   source_url: string | null; // signed, short-lived; never shown to users
   agent_report: unknown; // the coding agent's own report: advisory only
@@ -177,6 +179,8 @@ export interface Build {
   sandbox_cost_usd: number | null;
   audit_cost_usd: number | null;
   error: string | null;
+  // What to do about an ended build that didn't ship, in words the developer (or an admin) can act on.
+  next_step: string | null;
   // A sandbox reopened on the build's branch after the build ended, for the developer to keep working in.
   box_sandbox_id: string | null;
   box_until: string | null;
@@ -285,6 +289,11 @@ const TABLES = `
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS agent_cost_usd numeric;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS sandbox_cost_usd numeric;
   ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_cost_usd numeric;
+  -- Mynt's record of the audit in progress: its attempt, when it started, the hash of the auditor's copy of the
+  -- source, and the sandboxes' machine cost when it started (the cap counts machine time only up to then).
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS audit_state jsonb;
+  -- What to do about an ended build that didn't ship (shown with its error).
+  ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS next_step text;
   CREATE TABLE IF NOT EXISTS financial_products.build_events (
     id uuid PRIMARY KEY,
     build_id uuid NOT NULL REFERENCES financial_products.build_runs(id),
@@ -352,6 +361,8 @@ const toBuild = ({ agent_token_hash: _, audit_token_hash: __, ...r }: Row): Buil
   base_branch: (r.base_branch as string | null) ?? null,
   base_commit: (r.base_commit as string | null) ?? null,
   audit_started_at: iso(r.audit_started_at),
+  audit_state: (r.audit_state as AuditState | null) ?? null,
+  next_step: (r.next_step as string | null) ?? null,
   solana: !!r.solana,
   solana_env: (r.solana_env as Build["solana_env"]) ?? null,
   solana_toolchain: (r.solana_toolchain as ToolchainRecord | null) ?? null,
@@ -405,7 +416,12 @@ const DEV_PREVIEW = `${workspaceCwd("coding-build")}/scripts/dev_preview.sh`;
 export const LIVE_PREVIEW_PORT = 5173;
 export const LIVE_PREVIEW_BACKOFF = 6;
 // What a failed audit left behind, kept on the build before its sandbox is deleted.
-type AuditRun = { result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
+type AuditRun = { attempt: number; result: string | null; exit_code: number | null; error: string | null; summary: string | null; log: string | null; report_written: boolean };
+// Mynt's own record of the audit in progress, kept on the build: which attempt this is (a second one runs only when
+// the first ended without a complete report for no reason of time or budget), when it started, the hash Mynt took of
+// the auditor's read-only copy of the source before it started, and the sandboxes' machine cost then.
+export type AuditState = { attempt: number; started_at: string; tree_sha256: string; sandbox_base_usd: number; model_usd_before: number };
+export const AUDIT_ATTEMPTS = 2;
 
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 // The agent's activity log is read up to ACTIVITY_CHUNK bytes at a time, a few chunks a tick (more once the agent has
@@ -527,10 +543,44 @@ export class BuildService {
   }
 
   // Mynt's auditor: its own token (the coding agent's is retired), budget and model.
-  private async startAuditor(b: Build, sandbox: string, o: { prompt: string; workspace: string; jobFiles: Record<string, string> }) {
+  // Its whole budget is BUILD_AUDIT_CAP_USD across its attempts: the proxy meters them under one key and refuses calls
+  // once it's spent, and a second attempt's runner gets only what's left.
+  private async startAuditor(b: Build, sandbox: string, o: { prompt: string; workspace: string; jobFiles: Record<string, string>; budgetUsd: number }) {
     const token = `mynt_agent_${randomBytes(24).toString("base64url")}`;
     await this.db.query("UPDATE financial_products.build_runs SET agent_token_hash = NULL, audit_token_hash = $2, audit_started_at = now() WHERE id = $1", [b.id, hashToken(token)]);
-    return launchAgent(this.sandboxes!, this.config, sandbox, { ...o, budgetUsd: this.config.audit.capUsd, model: this.config.audit.model, token });
+    return launchAgent(this.sandboxes!, this.config, sandbox, { ...o, model: this.config.audit.model, token });
+  }
+
+  // What Mynt's audit has spent on the model so far, over all its attempts: the larger of what the proxy metered
+  // and what the runners reported (the current one's, plus what earlier attempts had spent when they ended).
+  private async auditModelUsd(b: Build, runnerUsd: number) {
+    const before = b.audit_state?.model_usd_before ?? 0;
+    return Math.max(before + runnerUsd, this.meter ? await this.meter.spent(`audit:${b.id}`) : 0);
+  }
+
+  // The auditor in the verification sandbox, with its job file (attempt 2 is told why it's running again).
+  private async launchAudit(b: Build, vid: string, attempt: number, budgetUsd: number) {
+    const { audit } = this.config;
+    return this.startAuditor(b, vid, {
+      prompt: "Audit the application described in job/audit.json, following CLAUDE.md and its skills.",
+      workspace: "build-audit",
+      budgetUsd,
+      jobFiles: {
+        "job/audit.json": JSON.stringify(
+          {
+            app_dir: VERIFY_AUDIT_SRC,
+            maxwell_repo: this.config.maxwellRepo,
+            output: `${VERIFY_DIR}/maxwell.json`,
+            workflows: audit.workflows,
+            minutes: audit.minutes,
+            attempt,
+            attempts: AUDIT_ATTEMPTS,
+          },
+          null,
+          2,
+        ),
+      },
+    });
   }
 
   private async metered(id: string) {
@@ -715,7 +765,7 @@ export class BuildService {
     if (keys.length === 0) return true;
     const sets = keys.map((k, i) => `${k} = $${i + 2}`);
     const values = keys.map((k) =>
-      k === "maxwell" || k === "readiness" || k === "agent_report" || k === "solana_check" || k === "solana_env" || k === "solana_toolchain" ? JSON.stringify(fields[k]) : fields[k],
+      k === "maxwell" || k === "readiness" || k === "agent_report" || k === "audit_state" || k === "solana_check" || k === "solana_env" || k === "solana_toolchain" ? JSON.stringify(fields[k]) : fields[k],
     );
     const terminal = fields.status && TERMINAL.includes(fields.status);
     const reviving = fields.status && !terminal;
@@ -1610,14 +1660,20 @@ export class BuildService {
   private async verify(b: Build) {
     const sandboxes = this.sandboxes!;
     const vid = b.verify_sandbox_id!;
-    // Both sandboxes' machine time, plus what the coding agent spent on the model. Mynt's audit is on Mynt.
+    // Both sandboxes' machine time, plus what the coding agent spent on the model. Mynt's audit is on Mynt: its model
+    // spend (its own meter key and budget) and, from the moment it starts, the sandboxes' machine time, which the
+    // cap counts only up to then. So nothing the audit spends can push a build over its cap.
     const coder = parseJson<AgentState>(await sandboxes.readFile(b.sandbox_id!, `${AGENT_DIR}/state.json`));
-    const auditor = b.verify_step === "audit" ? await this.agentState(vid, b.verify_prompt_id!) : null;
-    const sandboxUsd = (await sandboxes.costDollars(b.sandbox_id!)) + (await sandboxes.costDollars(vid));
+    const auditing = b.verify_step === "audit" && b.audit_state !== null;
+    const auditor = auditing ? await this.agentState(vid, b.verify_prompt_id!) : null;
+    const machineUsd = (await sandboxes.costDollars(b.sandbox_id!)) + (await sandboxes.costDollars(vid));
+    const sandboxUsd = auditing ? Math.min(machineUsd, b.audit_state!.sandbox_base_usd) : machineUsd;
     const agentUsd = Math.max(coder?.cost_usd ?? 0, await this.metered(b.id));
     const cost = sandboxUsd + agentUsd;
-    // The audit's own spend, for the record only: the larger of what its runner reports and what the proxy metered.
-    const auditUsd = auditor ? Math.max(auditor.cost, this.meter ? await this.meter.spent(`audit:${b.id}`) : 0) : null;
+    // The audit's own spend, for the record only (not the cap): its model spend over all its attempts, and the
+    // sandboxes' machine time while it ran.
+    const auditModelUsd = auditor ? await this.auditModelUsd(b, auditor.cost) : null;
+    const auditUsd = auditModelUsd === null ? null : auditModelUsd + Math.max(0, machineUsd - b.audit_state!.sandbox_base_usd);
     const parts: Partial<Build> = {};
     if (cost !== b.cost_usd || agentUsd !== b.agent_cost_usd || sandboxUsd !== b.sandbox_cost_usd) Object.assign(parts, { cost_usd: cost, agent_cost_usd: agentUsd, sandbox_cost_usd: sandboxUsd });
     if (auditUsd !== null && auditUsd !== b.audit_cost_usd) parts.audit_cost_usd = auditUsd;
@@ -1707,21 +1763,17 @@ export class BuildService {
         const report = parseJson<{ checks: Check[] }>(await sandboxes.readFile(vid, `${VERIFY_DIR}/report.json`));
         await sandboxes.stop(vid).catch(() => {});
         await this.verifyStep(b.id, "Checks finished; deciding on Mynt's checks (no agent audit configured)");
-        await this.decide(b, { report, maxwell: null, unchanged: true, auditFinished: false, auditRequired: false });
+        await this.decide(b, { report, maxwell: null, unchanged: true, auditRequired: false });
         return;
       }
-      const processId = await this.startAuditor(b, vid, {
-        prompt: "Audit the application described in job/audit.json, following CLAUDE.md and its skills.",
-        workspace: "build-audit",
-        jobFiles: {
-          "job/audit.json": JSON.stringify(
-            { app_dir: VERIFY_APP, maxwell_repo: this.config.maxwellRepo, output: `${VERIFY_DIR}/maxwell.json`, workflows: audit.workflows, minutes: audit.minutes },
-            null,
-            2,
-          ),
-        },
-      });
-      await this.update(b.id, { verify_step: "audit", verify_prompt_id: processId });
+      // The auditor gets its own copy of the verified source, extracted afresh and read-only, and Mynt keeps the
+      // copy's hash itself: what the auditor reads is exactly what ships, and anything it changes in it is caught.
+      const copy = await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --audit-copy ${b.source_sha256}`, { timeoutSeconds: 300 });
+      const tree = copy.stdout.match(/^audit-copy ([0-9a-f]{64})$/m)?.[1];
+      if (copy.exitCode !== 0 || !tree) throw new Error(`Couldn't prepare the auditor's copy of the source: ${(copy.stderr || copy.stdout).slice(0, 300)}`);
+      const audit_state: AuditState = { attempt: 1, started_at: new Date().toISOString(), tree_sha256: tree, sandbox_base_usd: machineUsd, model_usd_before: 0 };
+      const processId = await this.launchAudit(b, vid, 1, audit.capUsd);
+      await this.update(b.id, { verify_step: "audit", verify_prompt_id: processId, audit_state });
       await this.verifyStep(b.id, `Checks finished; independent Maxwell audit started (${audit.workflows.join(", ")}; up to ${audit.minutes} min)`, {
         model: audit.model,
         cap_usd: audit.capUsd,
@@ -1730,36 +1782,65 @@ export class BuildService {
     }
 
     if (b.verify_step === "audit") {
-      const started = b.audit_started_at ? Date.parse(b.audit_started_at) : Date.now();
-      const timedOut = auditor!.running && Date.now() - started > this.config.audit.minutes * 60_000;
-      if (auditor!.running && !timedOut) return;
-      await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 });
-      const [report, maxwell, before, after, changed] = await Promise.all([
+      const cfg = this.config.audit;
+      const st = b.audit_state;
+      if (!st || !auditor) {
+        // Started by an earlier version of Mynt, without the record this one checks the source against.
+        const report = parseJson<{ checks: Check[] }>(await sandboxes.readFile(vid, `${VERIFY_DIR}/report.json`));
+        await sandboxes.stop(vid).catch(() => {});
+        const reason = "Mynt's audit didn't finish: it was started by an earlier version of Mynt, so its result can't be checked; a build can't ship without a complete audit";
+        return this.decide(b, { report, maxwell: null, unchanged: true, auditProblem: { kind: "no_report", detail: "started by an earlier version of Mynt", reason, next_step: AUDIT_NEXT.no_report, retry: false } });
+      }
+      const timedOut = auditor.running && Date.now() - Date.parse(st.started_at) > cfg.minutes * 60_000;
+      const spent = auditModelUsd!;
+      const outOfBudget = spent >= cfg.capUsd || auditor.state?.last_subtype === "error_max_budget_usd";
+      if (auditor.running && !timedOut && !outOfBudget) return;
+      // Out of time or budget: the auditor is ended before Mynt reads its report and re-hashes the source.
+      if (auditor.running) await sandboxes.exec(vid, AUDITOR_KILL, { timeoutSeconds: 30 }).catch(() => undefined);
+      const rehash = await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 }).catch(() => null);
+      const after = rehash?.stdout.match(/^rehash ([0-9a-f]{64})$/m)?.[1];
+      const [report, maxwell, changedText] = await Promise.all([
         sandboxes.readFile(vid, `${VERIFY_DIR}/report.json`).then((t) => parseJson<{ checks: Check[] }>(t)),
-        sandboxes.readFile(vid, `${VERIFY_DIR}/maxwell.json`).then((t) => parseJson<NonNullable<AgentResult["maxwell"]>>(t)),
-        sandboxes.readFile(vid, `${VERIFY_DIR}/before.sha`),
-        sandboxes.readFile(vid, `${VERIFY_DIR}/after.sha`),
+        sandboxes.readFile(vid, `${VERIFY_DIR}/maxwell.json`).then((t) => parseJson<MaxwellReport>(t)),
         sandboxes.readFile(vid, `${VERIFY_DIR}/changed.txt`).catch(() => null),
       ]);
+      const unchanged = !!after && after === st.tree_sha256;
+      const changed = after ? (changedText ?? "").split("\n").map((l) => l.trim()).filter(Boolean) : ["(Mynt couldn't re-hash the auditor's copy of the source)"];
+      const problem = auditOutcome({ report: maxwell, workflows: cfg.workflows, timedOut, outOfBudget, minutes: cfg.minutes, capUsd: cfg.capUsd, spentUsd: spent, attempt: st.attempt, runner: auditor.state });
       // The sandbox goes next, and with it the only record of a failed audit: keep the agent's own account.
-      let audit: AuditRun | undefined;
-      if (!auditor!.ok || !maxwell) {
+      let run: AuditRun | undefined;
+      if (problem) {
         const log = await sandboxes
           .exec(vid, `tail -c 1500 ${AGENT_DIR}/runner.log 2>/dev/null; echo; tail -n 3 ${AGENT_DIR}/agent.jsonl 2>/dev/null | cut -c1-600`, { timeoutSeconds: 30 })
           .then((r) => r.stdout ?? "")
           .catch(() => "");
-        const st = auditor!.state;
-        audit = { result: timedOut ? `timed out after ${this.config.audit.minutes} min` : (st?.last_subtype ?? null), exit_code: st?.exit_code ?? null, error: st?.error ?? null, summary: st?.summary?.slice(0, 1500) ?? null, log: log.slice(-3000) || null, report_written: !!maxwell };
+        const s = auditor.state;
+        run = {
+          attempt: st.attempt,
+          result: timedOut ? `timed out after ${cfg.minutes} min` : outOfBudget ? `out of its US$${cfg.capUsd} budget` : (s?.last_subtype ?? null),
+          exit_code: s?.exit_code ?? null,
+          error: s?.error ?? null,
+          summary: s?.summary?.slice(0, 1500) ?? null,
+          log: log.slice(-3000) || null,
+          report_written: !!maxwell,
+        };
+      }
+      // Ended without a complete report for no reason of time or budget (it stopped early, or its run broke off):
+      // once more, with what's left of its budget. The source must be untouched to try again.
+      if (problem?.retry && unchanged) {
+        await sandboxes.exec(vid, `rm -f ${VERIFY_DIR}/maxwell.json ${AGENT_DIR}/state.json`, { timeoutSeconds: 30 });
+        const next: AuditState = { ...st, attempt: st.attempt + 1, started_at: new Date().toISOString(), model_usd_before: spent };
+        const processId = await this.launchAudit(b, vid, next.attempt, cfg.capUsd - spent);
+        await this.update(b.id, { verify_prompt_id: processId, audit_state: next });
+        await this.verifyStep(
+          b.id,
+          `Mynt's audit ended without a complete report (${problem.detail}); running it once more (attempt ${next.attempt} of ${AUDIT_ATTEMPTS}, up to ${cfg.minutes} min)`,
+          { audit: run },
+        );
+        return;
       }
       await sandboxes.stop(vid).catch(() => {});
-      await this.decide(b, {
-        report,
-        maxwell,
-        unchanged: !!before && before.trim() === after?.trim(),
-        changed: (changed ?? "").split("\n").map((l) => l.trim()).filter(Boolean),
-        auditFinished: !timedOut && auditor!.ok,
-        audit,
-      });
+      await this.decide(b, { report, maxwell, unchanged, changed, auditProblem: problem ? { ...problem, run } : null });
     }
   }
 
@@ -1891,31 +1972,38 @@ export class BuildService {
   // findings, every check passing, and a pushed branch identical to the verified source.
   private async decide(
     b: Build,
-    v: { report: { checks: Check[] } | null; maxwell: AgentResult["maxwell"] | null; unchanged: boolean; changed?: string[]; auditFinished: boolean; audit?: AuditRun; auditRequired?: boolean },
+    v: {
+      report: { checks: Check[] } | null;
+      maxwell: MaxwellReport | null;
+      unchanged: boolean;
+      changed?: string[];
+      // Why the audit doesn't count (null: it's complete); unused when no audit is configured (auditRequired false).
+      auditProblem?: (AuditProblem & { run?: AuditRun }) | null;
+      auditRequired?: boolean;
+    },
   ) {
     const sandboxes = this.sandboxes!;
     const counts = v.maxwell?.counts ?? {};
     const serious = (counts.critical ?? 0) + (counts.high ?? 0);
     const checks = this.withSolanaBuild(b, v.report?.checks ?? []);
     await this.update(b.id, { maxwell: v.maxwell ?? null, readiness: checks });
-    const end = async (status: BuildStatus, error: string, data: unknown = {}) => {
+    const end = async (status: BuildStatus, error: string, data: unknown = {}, next_step: string | null = null) => {
       await this.retireKey(b);
-      await this.update(b.id, { status, error });
+      await this.update(b.id, { status, error, next_step });
       await this.event(b.id, status, error, data);
     };
-    if (!v.report) return end("failed", "Verification didn't produce a report");
+    if (!v.report) return end("failed", "Verification didn't produce a report", {}, "Start a new build with continue_from this build to verify it again; Mynt's own checks didn't report, which isn't about your code.");
     if (!v.unchanged) {
       const files = v.changed?.length ? `: ${v.changed.slice(0, 5).join(", ")}${v.changed.length > 5 ? ", …" : ""}` : "";
-      return end("blocked", `The source changed during the audit${files}; the result can't be trusted`, { changed: v.changed ?? [] });
+      return end("blocked", `The source changed during the audit${files}; the result can't be trusted`, { changed: v.changed ?? [] }, AUDIT_NEXT.changed);
     }
-    if (v.auditRequired !== false && (!v.auditFinished || !v.maxwell)) {
-      const a = v.audit;
-      const why = !a ? "" : !a.report_written && a.result === "success" ? " (the auditor finished without writing its report)" : ` (auditor: ${[a.result ?? "no result", a.exit_code != null ? `exit ${a.exit_code}` : "", a.error ?? ""].filter(Boolean).join(", ")})`;
-      return end("blocked", `No independent Maxwell audit result${why}; a build can't ship without one`, { audit: a ?? null });
+    if (v.auditRequired !== false) {
+      const p = v.auditProblem ?? (v.maxwell ? null : { kind: "no_report" as const, detail: "no report", reason: "Mynt's audit didn't finish: no report; a build can't ship without a complete audit", next_step: AUDIT_NEXT.no_report, retry: false });
+      if (p) return end("blocked", p.reason, { audit: v.auditProblem?.run ?? null, audit_problem: p.kind }, p.next_step);
     }
-    if (serious > 0) return end("blocked", `Security gate: ${serious} critical/high Maxwell finding(s)`, counts);
+    if (serious > 0) return end("blocked", securityGateMessage(v.maxwell!), counts, AUDIT_NEXT.findings);
     const failed = checks.filter((c) => c.status === "fail");
-    if (failed.length) return end("failed", notReadyMessage(failed), failed);
+    if (failed.length) return end("failed", notReadyMessage(failed), failed, "Fix what the failed checks found, then start a new build with continue_from this build; Mynt runs every check again.");
 
     let commit: string | null = null;
     let pr: string | null = null;
@@ -2102,6 +2190,113 @@ export function notReadyMessage(failed: Pick<Check, "name" | "detail">[]) {
   return `Not production-ready: ${failed.map(one).join("; ")}`;
 }
 
+// ---- Mynt's audit: its report, and why one doesn't count ----
+
+// The report the auditor writes (workspaces/build-audit/CLAUDE.md): it writes it as it goes, with `complete` true
+// only in its last write, once every workflow it was given has run and its findings are in.
+export type MaxwellReport = NonNullable<AgentResult["maxwell"]> & {
+  complete?: boolean;
+  workflows_run?: unknown[];
+  skipped?: unknown[];
+};
+
+export type AuditProblem = {
+  kind: "time" | "budget" | "no_report" | "incomplete";
+  detail: string; // what happened, briefly (for the timeline)
+  reason: string; // the build's error
+  next_step: string; // what to do about it
+  retry: boolean; // worth a second attempt: not a matter of time or budget
+};
+
+// What to do, by what stopped the build. The audit's time and budget are Mynt's settings, not the build's cap.
+export const AUDIT_NEXT = {
+  time:
+    "Nothing in your code needs changing for this: start a new build with continue_from this build to verify it again. If audits keep running out of time, Mynt's admins can raise BUILD_AUDIT_MINUTES or run fewer workflows (BUILD_AUDIT_WORKFLOWS).",
+  budget:
+    "Nothing in your code needs changing for this, and it didn't come out of your cap: start a new build with continue_from this build to verify it again. If audits keep running out of budget, Mynt's admins can raise BUILD_AUDIT_CAP_USD or run fewer workflows (BUILD_AUDIT_WORKFLOWS).",
+  no_report:
+    "Nothing in your code needs changing for this: start a new build with continue_from this build to verify it again. If it happens again, Mynt's admins can read the auditor's own account on this build's timeline.",
+  incomplete:
+    "Start a new build with continue_from this build to verify it again. If the same workflows are skipped again, Mynt's admins can make them runnable in the verification sandbox or leave them out of BUILD_AUDIT_WORKFLOWS.",
+  changed:
+    "The auditor reads a read-only copy of your source, so something in the verification sandbox wrote to it: start a new build with continue_from this build to verify it again. If the same files change again, tell Mynt's admins; they're named on this build's timeline.",
+  findings: "Fix these findings in your app, then start a new build with continue_from this build; Mynt audits it again.",
+} as const;
+
+// Ends the auditor (its runner and the Claude Code it drives) when it's out of time or budget. The bracket keeps
+// pkill's pattern from matching the shell that runs it.
+export const AUDITOR_KILL = `pkill -KILL -f '${AGENT_DIR}/[r]unner.mjs'; pkill -KILL -f '[.]mynt-claude/node_modules'; true`;
+
+const asWorkflow = (s: unknown) => (typeof s === "string" ? s : s && typeof s === "object" && typeof (s as { workflow?: unknown }).workflow === "string" ? (s as { workflow: string }).workflow : null);
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// Why an audit's report doesn't count, or null when it does: it exists, says it's complete, has counts, and ran
+// every workflow it was given. A missing or partial report never counts as a pass, however the auditor ended.
+export function auditOutcome(o: {
+  report: MaxwellReport | null;
+  workflows: string[];
+  timedOut: boolean;
+  outOfBudget: boolean;
+  minutes: number;
+  capUsd: number;
+  spentUsd: number;
+  attempt: number;
+  runner: { last_subtype: string | null; exit_code: number | null; error: string | null } | null;
+}): AuditProblem | null {
+  const r = o.report;
+  const ran = new Set((Array.isArray(r?.workflows_run) ? r!.workflows_run : []).map(asWorkflow).filter(Boolean));
+  const missing = o.workflows.filter((w) => !ran.has(w));
+  const counts = r?.counts && typeof r.counts === "object" && !Array.isArray(r.counts);
+  if (r && r.complete === true && counts && missing.length === 0) return null;
+  const skipped = (Array.isArray(r?.skipped) ? r!.skipped : [])
+    .map((s) => (typeof s === "string" ? s : s && typeof s === "object" ? [asWorkflow(s), (s as { reason?: unknown }).reason].filter((x) => typeof x === "string" && x).join(": ") : ""))
+    .filter(Boolean)
+    .map((s) => clip(redact(String(s).replace(/\s+/g, " ").trim()), 160));
+  const covered = !r ? "" : ran.size ? `; its report so far covers ${[...ran].join(", ")}` : "; its report so far covers no workflow";
+  const tail = "; a build can't ship without a complete audit";
+  const again = o.attempt > 1 ? ` (on attempt ${o.attempt} of ${AUDIT_ATTEMPTS})` : "";
+  if (o.timedOut) {
+    const detail = `the auditor ran out of time (${o.minutes} min)${again}`;
+    return { kind: "time", detail, reason: `Mynt's audit didn't finish: ${detail}${covered}${tail}`, next_step: AUDIT_NEXT.time, retry: false };
+  }
+  if (o.outOfBudget) {
+    const detail = `the auditor used up its US$${o.capUsd} budget (Mynt's, not this build's cap)${again}`;
+    return { kind: "budget", detail, reason: `Mynt's audit didn't finish: ${detail}${covered}${tail}`, next_step: AUDIT_NEXT.budget, retry: false };
+  }
+  // Worth another attempt only with enough of the audit's budget left for one.
+  const retry = o.attempt < AUDIT_ATTEMPTS && o.capUsd - o.spentUsd >= 0.5;
+  const twice = o.attempt > 1 ? `, on ${o.attempt === 2 ? "both" : `all ${o.attempt}`} attempts` : "";
+  if (!r) {
+    const s = o.runner;
+    const how =
+      !s || (s.last_subtype === null && s.exit_code === null)
+        ? "the auditor's run broke off without a result or a report"
+        : s.last_subtype === "success"
+          ? "the auditor ended its turn without writing its report"
+          : `the auditor stopped without writing its report (${[s.last_subtype ?? "no result", s.exit_code != null ? `exit ${s.exit_code}` : "", s.error ? clip(redact(s.error), 160) : ""].filter(Boolean).join(", ")})`;
+    return { kind: "no_report", detail: how, reason: `Mynt's audit didn't finish: ${how}${twice}${tail}`, next_step: AUDIT_NEXT.no_report, retry };
+  }
+  const parts = [
+    missing.length ? `${missing.join(", ")} not run` : "",
+    skipped.length ? `skipped: ${skipped.join("; ")}` : "",
+    !counts ? "no counts" : "",
+    r.complete !== true && !missing.length && counts ? "not marked complete" : "",
+  ].filter(Boolean);
+  const detail = `its report is incomplete (${parts.join("; ")})`;
+  return { kind: "incomplete", detail, reason: `Mynt's audit is incomplete: ${parts.join("; ")}${twice}${tail}`, next_step: AUDIT_NEXT.incomplete, retry };
+}
+
+// A security block names what Maxwell found (a few findings, scrubbed), so the developer knows what to fix.
+export function securityGateMessage(m: MaxwellReport) {
+  const counts = m.counts ?? {};
+  const serious = (counts.critical ?? 0) + (counts.high ?? 0);
+  const found = (Array.isArray(m.findings) ? m.findings : [])
+    .filter((f): f is Record<string, unknown> => !!f && typeof f === "object" && /^(critical|high)$/i.test(String((f as { severity?: unknown }).severity ?? "")))
+    .slice(0, 3)
+    .map((f) => clip(redact(`${String(f.severity).toLowerCase()}: ${String(f.title ?? "untitled")}${f.file ? ` in ${String(f.file)}` : ""}`.replace(/\s+/g, " ")), 160));
+  return `Security gate: ${serious} critical/high Maxwell finding(s)${found.length ? ` (${found.join("; ")}${serious > found.length ? "; …" : ""})` : ""}`;
+}
+
 export function developerBuild(b: Build) {
   return {
     id: b.id,
@@ -2123,6 +2318,8 @@ export function developerBuild(b: Build) {
     cost_usd: b.cost_usd,
     cap_usd: b.cap_usd,
     error: b.error,
+    // With an error: what to do about it (why Mynt's audit didn't count, a security finding, a failed check).
+    next_step: b.next_step ?? null,
     sandbox_open_until: b.box_sandbox_id && b.box_until ? b.box_until : null,
     mode: b.mode,
     ...(b.mode === "session" ? { finish_requested_at: b.finish_requested_at } : {}),
