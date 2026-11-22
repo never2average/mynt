@@ -653,6 +653,13 @@ export class BuildService {
     return rows.map((r) => ({ at: iso(r.at), phase: r.phase, message: r.message, data: r.data }));
   }
 
+  // A step of Mynt's verification: on the timeline, and as the build's phase while it is still verifying, so whoever
+  // follows the build sees each step (the checks, the audit and its time limit) rather than one line for its whole run.
+  private async verifyStep(buildId: string, message: string, data: unknown = {}) {
+    await this.db.query("UPDATE financial_products.build_runs SET phase_message = $2, updated_at = now() WHERE id = $1 AND status = 'verifying'", [buildId, message]);
+    await this.event(buildId, "verifying", message, data);
+  }
+
   private async event(buildId: string, phase: string, message: string, data: unknown = {}) {
     await this.db.query("INSERT INTO financial_products.build_events (id, build_id, phase, message, data) VALUES ($1, $2, $3, $4, $5)", [
       randomUUID(),
@@ -666,6 +673,9 @@ export class BuildService {
   // Whether it applied. A build that ended (stopped, say, while this tick was provisioning it) is never moved back to
   // a running status: a non-terminal status only replaces a non-terminal one.
   private async update(id: string, fields: Partial<Build>): Promise<boolean> {
+    // A build that ends says why where its phase is shown (the studio's chat and panel read phase_message), not
+    // only in `error`: otherwise a failed build still reads "Verifying in a clean sandbox".
+    if (fields.status && TERMINAL.includes(fields.status) && fields.error && fields.phase_message === undefined) fields = { ...fields, phase_message: fields.error };
     const keys = Object.keys(fields) as (keyof Build)[];
     if (keys.length === 0) return true;
     const sets = keys.map((k, i) => `${k} = $${i + 2}`);
@@ -1555,7 +1565,7 @@ export class BuildService {
       agent_report: report ?? null,
       phase_message: "Verifying in a clean sandbox",
     });
-    await this.event(b.id, "verifying", "Source packaged; independent verification started", { source_sha256: sha, verify_sandbox_id: v.id });
+    await this.verifyStep(b.id, "Source packaged; independent verification started", { source_sha256: sha, verify_sandbox_id: v.id });
   }
 
   private async verify(b: Build) {
@@ -1598,10 +1608,10 @@ export class BuildService {
           await sandboxes.stop(vid).catch(() => undefined);
           const fresh = await sandboxes.createSandbox({ name: `mynt-verify-${b.id}-plain`, type: this.config.sandboxType, ttlSeconds: 2 * 3600, labels: { mynt_build: b.id, mynt_role: "verify" }, env: {} });
           await this.update(b.id, { verify_sandbox_id: fresh.id, solana_env: { ...b.solana_env, verify: undefined } });
-          await this.event(b.id, "verifying", "The pre-built Solana environment couldn't be checked or wiped; verifying in a plain sandbox instead", { ...data, verify_sandbox_id: fresh.id });
+          await this.verifyStep(b.id, "The pre-built Solana environment couldn't be checked or wiped; verifying in a plain sandbox instead", { ...data, verify_sandbox_id: fresh.id });
           return;
         }
-        await this.event(b.id, "verifying", ok ? "The pre-built Solana environment matched Mynt's record" : "The pre-built Solana environment didn't match Mynt's record; installing the toolchain afresh", data);
+        await this.verifyStep(b.id, ok ? "The pre-built Solana environment matched Mynt's record" : "The pre-built Solana environment didn't match Mynt's record; installing the toolchain afresh", data);
         if (!ok) base = undefined;
       }
       // The toolchain this verification builds and tests with, kept with the programs it builds.
@@ -1619,7 +1629,7 @@ export class BuildService {
       }
       const run = await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --solana-build ${b.source_sha256}`, { detached: true });
       await this.update(b.id, { verify_step: "solana_build", verify_process_id: run.processId ?? null, solana: true });
-      await this.event(b.id, "verifying", "Building the Solana programs verifiably, in a container, before the checks");
+      await this.verifyStep(b.id, "Building the Solana programs verifiably, in a container, before the checks");
       return;
     }
 
@@ -1651,7 +1661,7 @@ export class BuildService {
         // No agent audit: the source can't change after Mynt's checks, so decide on their report alone.
         const report = parseJson<{ checks: Check[] }>(await sandboxes.readFile(vid, `${VERIFY_DIR}/report.json`));
         await sandboxes.stop(vid).catch(() => {});
-        await this.event(b.id, "verifying", "Checks finished; deciding on Mynt's checks (no agent audit configured)");
+        await this.verifyStep(b.id, "Checks finished; deciding on Mynt's checks (no agent audit configured)");
         await this.decide(b, { report, maxwell: null, unchanged: true, auditFinished: false, auditRequired: false });
         return;
       }
@@ -1667,7 +1677,7 @@ export class BuildService {
         },
       });
       await this.update(b.id, { verify_step: "audit", verify_prompt_id: processId });
-      await this.event(b.id, "verifying", `Checks finished; independent Maxwell audit started (${audit.workflows.join(", ")}; up to ${audit.minutes} min)`, {
+      await this.verifyStep(b.id, `Checks finished; independent Maxwell audit started (${audit.workflows.join(", ")}; up to ${audit.minutes} min)`, {
         model: audit.model,
         cap_usd: audit.capUsd,
       });
@@ -1719,7 +1729,7 @@ export class BuildService {
   private async startChecks(b: Build, vid: string, message: string) {
     const run = await this.sandboxes!.exec(vid, `bash ${VERIFY_DIR}/verify.sh '${b.source_url}' ${b.source_sha256}`, { detached: true });
     await this.update(b.id, { verify_step: "checks", verify_process_id: run.processId ?? null });
-    await this.event(b.id, "verifying", message);
+    await this.verifyStep(b.id, message);
   }
 
   // solana_build is Mynt's own record, taken when the build phase ended; a row of that name in the checks' report
@@ -1806,7 +1816,7 @@ export class BuildService {
     const kept = await this.solana.recordArtifacts(b.id, artifacts);
     if (refused.length) await record({ name: "solana_build", status: "fail", detail: `not a regular ELF program file of the size its build reported: ${refused.join(", ")}` });
     else if (kept.length < listed.length) await record({ name: "solana_build", status: "fail", detail: "a program Mynt read back didn't match the hash its build reported" });
-    await this.event(b.id, "verifying", `Mynt built ${kept.length} Solana program(s) for deploys: ${kept.join(", ") || "none matched their hash"}`, {
+    await this.verifyStep(b.id, `Mynt built ${kept.length} Solana program(s) for deploys: ${kept.join(", ") || "none matched their hash"}`, {
       programs: listed.map((p) => ({ name: p.name, sha256: p.sha256, declared_id: p.declared_id, cargo_lock_sha256: p.cargo_lock_sha256 ?? null })),
     });
   }
@@ -1860,7 +1870,7 @@ export class BuildService {
     }
     if (serious > 0) return end("blocked", `Security gate: ${serious} critical/high Maxwell finding(s)`, counts);
     const failed = checks.filter((c) => c.status === "fail");
-    if (failed.length) return end("failed", `Not production-ready: ${failed.map((c) => c.name).join(", ")}`, failed);
+    if (failed.length) return end("failed", notReadyMessage(failed), failed);
 
     let commit: string | null = null;
     let pr: string | null = null;
@@ -2035,6 +2045,16 @@ const fail = (error: string) => ({ ...json({ error }), isError: true });
 // A build as developers see it: what they need to follow and use it, never Mynt's internals (sandbox and
 // process ids, the app's sandbox key id, verification steps) nor the signed source link or the agent's own
 // report. sandbox_open_until says until when a sandbox reopened on the build's branch stays up.
+// Why a build isn't production-ready, in words a developer can act on: each failed check with the start of its
+// detail (what the check found, written by Mynt's verifier), scrubbed as everything shown is.
+export function notReadyMessage(failed: Pick<Check, "name" | "detail">[]) {
+  const one = (c: Pick<Check, "name" | "detail">) => {
+    const detail = redact((c.detail ?? "").replace(/\s+/g, " ").trim());
+    return detail ? `${c.name} (${detail.length > 200 ? `${detail.slice(0, 199)}…` : detail})` : c.name;
+  };
+  return `Not production-ready: ${failed.map(one).join("; ")}`;
+}
+
 export function developerBuild(b: Build) {
   return {
     id: b.id,
@@ -2045,8 +2065,9 @@ export function developerBuild(b: Build) {
     status: b.status,
     phase_message: b.phase_message,
     preview_url: b.preview_url,
-    // Only while the agents code: Mynt stops the dev servers when coding ends (after shipping, preview_url).
-    live_preview_url: b.status === "coding" ? (b.live_preview_url ?? null) : null,
+    // While the agent runs: its dev servers keep serving through its own review, checks and push, and Mynt stops
+    // them only when the agent is done and verification starts (after shipping, preview_url).
+    live_preview_url: AGENT_PHASES.includes(b.status) ? (b.live_preview_url ?? null) : null,
     pr_url: b.pr_url,
     commit_sha: b.commit_sha,
     readiness: b.readiness,

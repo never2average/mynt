@@ -15,6 +15,7 @@ const fake = {
   listDelays: [] as number[], // per list_builds call: answer with the builds as they were, this much later
   startDelayMs: 0,
   refreshOnConnect: false, // connecting refreshes the session's tokens
+  build: null as Record<string, unknown> | null, // what get_build answers (null: no such build)
 };
 
 vi.mock("@/lib/session", () => ({
@@ -91,6 +92,8 @@ vi.mock("@/lib/mynt-client", () => {
           return reply({ id: "new-build", status: "queued" });
         case "steer_build":
           return reply({ build_id: args.build_id, steered: true });
+        case "get_build":
+          return fake.build ? reply(fake.build) : { isError: true, text: JSON.stringify({ error: `No build of yours with id '${args.build_id}'` }) };
         case "get_build_activity":
           {
             // An entry may be a function: the activity as it is when Mynt is asked.
@@ -106,7 +109,11 @@ vi.mock("@/lib/mynt-client", () => {
   };
 });
 
-const { POST, WATCH_MS, maxDuration, START_LOCK_SECONDS } = await import("@/app/api/chat/route");
+const { GET, POST, WATCH_MS, maxDuration, START_LOCK_SECONDS } = await import("@/app/api/chat/route");
+
+function follow(query: string, origin: string | null = null) {
+  return GET(new Request(`http://localhost:3000/api/chat?${query}`, { headers: origin ? { origin } : {} }));
+}
 
 function post(body: unknown, origin = "http://localhost:3000") {
   return POST(new Request("http://localhost:3000/api/chat", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }));
@@ -135,6 +142,7 @@ beforeEach(() => {
   fake.listDelays = [];
   fake.startDelayMs = 0;
   fake.refreshOnConnect = false;
+  fake.build = null;
   claimed.clear();
   expiry.clear();
   clock.now = 0;
@@ -510,5 +518,84 @@ describe("/api/chat start races", () => {
     const again = await chunks(await post({ projectId: "app1", messages: [userMessage("Add a statements page")] }));
     expect(again.find((c) => c.type === "text-delta")?.delta).toMatch(/just sent that/);
     expect(fake.calls.filter((c) => c.name === "start_build")).toHaveLength(1);
+  });
+});
+
+describe("/api/chat: what comes after the agent's answer", () => {
+  const sessionTools = [
+    { name: "start_build", inputSchema: { type: "object", properties: { goal: {}, app_id: {}, mode: {}, continue_from: {} } } },
+    { name: "finish_build" },
+    { name: "get_build_activity", inputSchema: { type: "object", properties: { build_id: {}, text_deltas: {}, reasoning: {} } } },
+  ];
+  const texts = (out: Record<string, unknown>[]) => out.filter((c) => c.type === "text-delta").map((c) => c.delta as string);
+
+  it("a session's agent has answered: the chat says it's waiting, and how the work ships", async () => {
+    fake.tools = sessionTools;
+    fake.activity = [{ status: "coding", phase_message: "Waiting for your next message", activity: [{ type: "turn_finished", summary: "success", seq: 5 }, { type: "message", summary: "Done", seq: 4 }], cursor: 5, first_seq: 1 }];
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    expect(texts(out).at(-1)).toMatch(/waiting for your next message\. After 15 minutes without one, it ships the work/);
+    expect(out.some((c) => c.type === "data-follow")).toBe(false);
+  });
+
+  it("a one-off build's agent has handed over, or the watch ran out of time: the page is told to follow it on", async () => {
+    fake.activity = [{ status: "pushing", activity: [{ type: "turn_finished", summary: "success", seq: 9 }, { type: "message", summary: "Pushed", seq: 8 }], cursor: 9, first_seq: 1 }];
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    expect(out).toContainEqual(expect.objectContaining({ type: "data-follow", data: { buildId: "new-build", after: 9 } }));
+    expect(texts(out).join("\n")).not.toMatch(/open it again/);
+  });
+
+  it("a build that finishes while it's watched ends the reply with how it ended", async () => {
+    fake.build = { id: "new-build", app_id: "app1", status: "failed", error: "Not production-ready: secrets_scan (1 secret(s): generic-api-key in api/.env.example)" };
+    fake.activity = [{ status: "failed", phase_message: fake.build.error, activity: [], cursor: 0, first_seq: null }];
+    const out = await chunks(await post({ projectId: "app1", messages: [userMessage("Build a savings goal screen")] }));
+    const said = texts(out);
+    expect(said).toContain("_failed: Not production-ready: secrets_scan (1 secret(s): generic-api-key in api/.env.example)_");
+    expect(said.at(-1)).toMatch(/^\*\*This build didn't ship\*\*: Not production-ready: secrets_scan .*Your next message starts a new build/);
+    expect(out.some((c) => c.type === "data-follow")).toBe(false);
+  });
+});
+
+describe("GET /api/chat: following a build on", () => {
+  it("follows a running build from the cursor the page has shown, to the end of the agent's turn in a session", async () => {
+    fake.tools = [{ name: "get_build_activity", inputSchema: { type: "object", properties: { build_id: {}, text_deltas: {} } } }];
+    fake.build = { id: "b1", app_id: "app1", status: "coding", mode: "session" };
+    fake.activity = [
+      { status: "coding", activity: [{ type: "text_delta", summary: "Adding the ", stream: "m:0", seq: 13 }], cursor: 13, first_seq: 1 },
+      { status: "coding", activity: [{ type: "message", summary: "Adding the chart", stream: "m:0", seq: 14 }, { type: "turn_finished", summary: "success", seq: 15 }], cursor: 15, first_seq: 1 },
+    ];
+    const res = await follow("projectId=app1&buildId=b1&after=12");
+    expect(res.status).toBe(200);
+    const out = await chunks(res);
+    expect(fake.calls.filter((c) => c.name === "get_build_activity")[0].args).toEqual({ build_id: "b1", limit: 200, after: 12, text_deltas: true });
+    expect(out.filter((c) => c.type === "text-delta").map((c) => c.delta)).toContain("Adding the ");
+    expect(out.filter((c) => c.type === "text-delta").at(-1)?.delta).toMatch(/waiting for your next message/);
+    expect(fake.calls.some((c) => ["start_build", "steer_build"].includes(c.name))).toBe(false);
+  });
+
+  it("follows a build being verified until it finishes, then says how it ended", async () => {
+    fake.build = { id: "b1", app_id: "app1", status: "verifying", mode: "session" };
+    fake.activity = [
+      { status: "verifying", phase_message: "Running Mynt's checks", activity: [{ type: "turn_finished", summary: "success", seq: 30 }], cursor: 30, first_seq: 1 },
+      () => {
+        fake.build = { id: "b1", app_id: "app1", status: "succeeded", pr_url: "https://github.com/acme/app/pull/3" };
+        return { status: "succeeded", phase_message: "Verified", activity: [], cursor: 30, first_seq: 1 };
+      },
+    ];
+    const out = await chunks(await follow("projectId=app1&buildId=b1&after=29"));
+    const said = out.filter((c) => c.type === "text-delta").map((c) => c.delta as string);
+    expect(said).toEqual(["_verifying: Running Mynt's checks_", "_succeeded: Verified_", expect.stringMatching(/^\*\*Shipped\.\*\* .*pull\/3/)]);
+  }, 15_000);
+
+  it("has nothing to follow for a finished build, and refuses another app's or a missing one", async () => {
+    fake.build = { id: "b1", app_id: "app1", status: "succeeded" };
+    expect((await follow("projectId=app1&buildId=b1&after=3")).status).toBe(204);
+    expect((await follow("projectId=other&buildId=b1")).status).toBe(404);
+    fake.build = null;
+    expect((await follow("projectId=app1&buildId=b1")).status).toBe(404);
+    expect((await follow("projectId=app1&buildId=b1&after=-1")).status).toBe(400);
+    expect((await follow("projectId=app1&buildId=b1", "https://evil.example")).status).toBe(403);
+    fake.session = undefined;
+    expect((await follow("projectId=app1&buildId=b1")).status).toBe(401);
+    expect(fake.calls.some((c) => c.name === "get_build_activity")).toBe(false);
   });
 });
