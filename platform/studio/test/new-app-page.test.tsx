@@ -1,18 +1,28 @@
 // @vitest-environment jsdom
-// The /new page in the dashboard's layout: its page frame, the prompt, the products as a panel with a
-// toolbar search and a Product line filter, and Build it as the one primary button.
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+// The /new page on Earn's chat workspace: the centred "What do you want to build?" with the composer and the
+// templates as chips; the tabs on the right (Templates, Products) with their icons beside the chat corner
+// while the panel is closed; the composer's Products picker sharing the selection with the Products tab; and
+// sending as Build it, blocked until a product is picked.
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => undefined }) }));
+const pushed: string[] = [];
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: (p: string) => void pushed.push(p) }) }));
 
 const { default: NewAppPage } = await import("@/app/(studio)/new/page");
+const { newAppCommands, pickerLabel } = await import("@/components/new-app-workspace");
 
 const PRODUCTS = [
-  { id: "p1", name: "High-yield savings", productLine: "deposits", by: "Lead Bank", accessMode: "open" },
-  { id: "p2", name: "Charge card", productLine: "card_issuing", by: "Lead Bank", accessMode: "open" },
+  { id: "p1", name: "Dollar account", productLine: "custody_settlement", by: "Lead Trust", accessMode: "open" },
+  { id: "p2", name: "Bank transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
+  { id: "p3", name: "Wire transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
+];
+const KINDS = [
+  { id: "money-transfers", title: "Money transfers", description: "Move US dollars in and out by bank transfer or wire.", productLines: ["payments"], goalTemplate: "A money transfers app. Customers move dollars in and out." },
+  { id: "savings-goals", title: "Savings goals", description: "Set savings goals and put dollars aside toward each.", productLines: ["custody_settlement"], goalTemplate: "A savings goals app. Customers set goals and add money." },
 ];
 
+let posted: unknown[] = [];
 beforeAll(() => {
   window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false })) as unknown as typeof window.matchMedia;
   globalThis.ResizeObserver ??= class {
@@ -20,9 +30,21 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver;
+  Element.prototype.scrollTo ??= function () {};
+  Element.prototype.scrollIntoView ??= function () {};
 });
 beforeEach(() => {
-  vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 }));
+  posted = [];
+  pushed.length = 0;
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+    if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
+    if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: KINDS }), { status: 200 });
+    if (url === "/api/apps") {
+      posted.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ appId: "app-1", buildId: "build-1" }), { status: 201 });
+    }
+    return new Response("{}", { status: 404 });
+  });
 });
 afterEach(() => {
   cleanup();
@@ -32,72 +54,174 @@ afterEach(() => {
 const loaded = async () => {
   render(<NewAppPage />);
   await act(async () => {
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 20));
   });
 };
+const input = () => screen.getByLabelText("Message input") as HTMLTextAreaElement;
+const openTab = async (label: string) => act(async () => void fireEvent.click(screen.getByRole("button", { name: `Open ${label}` })));
+const pickedCount = () => document.querySelector('[data-panel-content="products"] [data-picked-count]')!.textContent;
+const tabCheckbox = (id: string) => document.querySelector(`[data-pick="${id}"]`) as HTMLInputElement;
+const openPicker = async () => act(async () => void fireEvent.click(document.querySelector("[data-product-picker]")!));
 
 describe("the New app page", () => {
-  it("uses the dashboard's page frame, full width, with no heading repeating the header", async () => {
+  it("is Earn's chat workspace: the centred welcome with the templates as chips, and the tabs' icons beside the chat", async () => {
     await loaded();
-    const frame = document.querySelector("[data-new-app-page]")!;
-    for (const c of ["flex", "flex-col", "gap-4", "p-4", "lg:gap-5", "lg:p-6"]) expect(frame.className.split(" "), c).toContain(c);
-    expect(frame.className).not.toMatch(/max-w-|mx-auto/);
-    expect(document.querySelector("h1")).toBeNull();
-    expect(screen.queryByRole("heading", { name: "What do you want to build?" })).toBeNull();
-    const prompt = screen.getByLabelText("What do you want to build?") as HTMLTextAreaElement;
-    expect(prompt.placeholder).toMatch(/^What do you want to build\?/);
+    expect(document.querySelector("[data-new-app-page] [data-chat-workspace]")).not.toBeNull();
+    expect(screen.getByRole("heading", { level: 1, name: "What do you want to build?" })).toBeTruthy();
+    expect([...document.querySelectorAll("[data-chat-welcome] [data-chips] [data-chip]")].map((c) => c.textContent)).toEqual(["Money transfers", "Savings goals"]);
+    // Closed until a tab is picked or a message is sent; its tabs wait as icons in the chat's corner.
+    expect(document.querySelector("[data-chat-workspace]")!.getAttribute("data-panel-open")).toBe("false");
+    expect(screen.getByRole("button", { name: "Open Templates" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open Products" })).toBeTruthy();
+    await openTab("Templates");
+    expect(document.querySelector("[data-chat-workspace]")!.getAttribute("data-panel-open")).toBe("true");
+    expect([...document.querySelectorAll("[data-panel-tab]")].map((t) => t.textContent)).toEqual(["Templates", "Products"]);
   });
 
-  it("shows the products in a panel with its section heading and the count as plain text, no card", async () => {
+  it("lists the templates as a table; Use fills the composer with its goal and picks a product of its line", async () => {
     await loaded();
-    const panel = document.querySelector('[data-panel][data-row="products"]')!;
-    expect(panel).not.toBeNull();
-    expect(document.querySelector('[data-slot^="card"]')).toBeNull();
-    const heading = screen.getByRole("heading", { name: "Products it builds on" });
-    expect(heading.className).toBe("text-sm font-semibold");
-    expect(panel.querySelector("[data-picked-count]")!.textContent).toBe("Pick at least one");
-    fireEvent.click(screen.getByRole("button", { name: /High-yield savings/ }));
-    expect(panel.querySelector("[data-picked-count]")!.textContent).toBe("1 picked");
+    await openTab("Templates");
+    const panel = document.querySelector('[data-panel-content="templates"]')!;
+    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["Kind", "Description", "Product lines", ""]);
+    const row = panel.querySelector('[data-template-row="money-transfers"]')!;
+    expect(row.textContent).toContain("Move US dollars in and out");
+    expect(row.textContent).toContain("payments");
+    await act(async () => void fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use" })));
+    expect(input().value).toBe(KINDS[0].goalTemplate);
+    expect(pickedCount()).toBe("1 picked");
+    expect(tabCheckbox("p2").checked).toBe(true);
+    // The Products tab is filtered to the template's line.
+    await act(async () => void fireEvent.click(document.querySelector('[data-panel-tab="products"]')!));
+    const rows = [...document.querySelectorAll('[data-panel-content="products"] [data-product-row]')].map((r) => r.getAttribute("data-product-row"));
+    expect(rows).toEqual(["p2", "p3"]);
   });
 
-  it("searches from the toolbar's search, with a Product line filter beside it", async () => {
+  it("a chip under the welcome does what Use does", async () => {
     await loaded();
-    const search = screen.getByLabelText("Search products");
-    expect(search.className).toContain("pl-8");
-    expect(search.parentElement!.className).toMatch(/relative min-w-64 flex-1/);
-    expect(search.parentElement!.querySelector("svg")!.getAttribute("class")).toContain("left-2.5");
-    const filter = document.querySelector('[data-filter="Product line"]')!;
-    expect(filter.closest("[data-toolbar]")).toBe(search.closest("[data-toolbar]"));
-    expect(document.querySelector("select")).toBeNull();
+    await act(async () => void fireEvent.click(document.querySelector('[data-chips] [data-chip="savings-goals"]')!));
+    expect(input().value).toBe(KINDS[1].goalTemplate);
+    expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Dollar account");
   });
 
-  it("filters by product line and keeps what was picked", async () => {
+  it("the Products tab: a checkbox column, search, the Product line filter and the picked count", async () => {
     await loaded();
-    fireEvent.click(screen.getByRole("button", { name: /Charge card/ }));
-    fireEvent.keyDown(document.querySelector('[data-filter="Product line"]')!, { key: "Enter" });
+    await openTab("Products");
+    const panel = document.querySelector('[data-panel-content="products"]')!;
+    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["", "Product", "By", "Product line"]);
+    expect(pickedCount()).toBe("Pick at least one");
+    fireEvent.click(tabCheckbox("p1"));
+    expect(pickedCount()).toBe("1 picked");
+    fireEvent.change(within(panel as HTMLElement).getByLabelText("Search products"), { target: { value: "wire" } });
+    expect([...panel.querySelectorAll("[data-product-row]")].map((r) => r.getAttribute("data-product-row"))).toEqual(["p3"]);
+    fireEvent.change(within(panel as HTMLElement).getByLabelText("Search products"), { target: { value: "" } });
+    await act(async () => void fireEvent.click(panel.querySelector("[data-filters-menu-button]")!));
+    const menu = document.querySelector("[data-filters-menu]")!;
+    expect(menu.querySelector("[data-facet-heading]")!.textContent).toBe("Product line");
+    await act(async () => void fireEvent.click(menu.querySelector('[data-chip="payments"]')!));
+    expect([...panel.querySelectorAll("[data-product-row]")].map((r) => r.getAttribute("data-product-row"))).toEqual(["p2", "p3"]);
+    expect(pickedCount()).toBe("1 picked"); // picks survive filtering
+  });
+
+  it("the composer's Products picker: in the toolbar, grouped by line, and the same selection as the Products tab", async () => {
+    await loaded();
+    const picker = document.querySelector("[data-composer-toolbar] [data-product-picker]")!;
+    expect(picker).not.toBeNull();
+    expect(picker.textContent).toBe("Pick products");
+    await openPicker();
+    const menu = document.querySelector("[data-product-picker-menu]")!;
+    expect([...menu.querySelectorAll("[data-picker-line] > p")].map((h) => h.textContent)).toEqual(["custody settlement", "payments"]);
+    expect(menu.querySelector("[data-picker-count]")!.textContent).toBe("Pick at least one");
+    fireEvent.click(menu.querySelector('[data-picker-option="p2"]')!);
+    expect(menu.querySelector('[data-picker-option="p2"]')!.getAttribute("aria-checked")).toBe("true");
+    expect(menu.querySelector("[data-picker-count]")!.textContent).toBe("1 picked");
+    expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Bank transfers");
+    // Picked there, picked in the tab; picked in the tab, shown by the picker.
+    await openTab("Products");
+    expect(tabCheckbox("p2").checked).toBe(true);
+    fireEvent.click(tabCheckbox("p3"));
+    expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Products · 2");
+    expect(menu.querySelector('[data-picker-option="p3"]')!.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(menu.querySelector("[data-picker-clear]")!);
+    expect(pickedCount()).toBe("Pick at least one");
+    expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Pick products");
+  });
+
+  it("can't send until a product is picked, saying why; then sending creates the app with the template's kind and opens it", async () => {
+    await loaded();
+    fireEvent.change(input(), { target: { value: "A savings app with round-ups for students" } });
+    const send = () => screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+    expect(send().disabled).toBe(true);
+    expect(document.querySelector("p[data-send-blocked]")!.textContent).toBe("Pick at least one product to build on.");
+    // Enter doesn't send either.
+    fireEvent.keyDown(input(), { key: "Enter" });
     await act(async () => undefined);
-    const options = [...document.querySelectorAll("[data-filter-option]")].map((o) => o.textContent);
-    expect(options).toEqual(["card issuing", "deposits"]);
-    await act(async () => void fireEvent.click(document.querySelector('[data-filter-option="deposits"]')!));
-    expect(screen.queryByRole("button", { name: /Charge card/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /High-yield savings/ })).toBeTruthy();
-    expect(document.querySelector("[data-picked-count]")!.textContent).toBe("1 picked");
+    expect(posted).toEqual([]);
+
+    await act(async () => void fireEvent.click(document.querySelector('[data-chips] [data-chip="savings-goals"]')!));
+    expect(document.querySelector("p[data-send-blocked]")).toBeNull();
+    expect(send().disabled).toBe(false);
+    await act(async () => void fireEvent.click(send()));
+    await act(async () => new Promise((r) => setTimeout(r, 0)));
+    expect(posted).toEqual([{ prompt: KINDS[1].goalTemplate, product_ids: ["p1"], kind: "savings-goals" }]);
+    expect(pushed).toEqual(["/app-1/build-1"]);
   });
 
-  it("keeps Build it as the primary button, ready once there's a prompt and a product", async () => {
+  it("a prompt too short to build from can't be sent either, and says so", async () => {
     await loaded();
-    const build = screen.getByRole("button", { name: "Build it" }) as HTMLButtonElement;
-    expect(build.getAttribute("data-variant")).toBe("default");
-    expect(build.disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText("What do you want to build?"), { target: { value: "A savings app with round-ups" } });
-    fireEvent.click(screen.getByRole("button", { name: /High-yield savings/ }));
-    expect(build.disabled).toBe(false);
+    await openTab("Products");
+    fireEvent.click(tabCheckbox("p1"));
+    fireEvent.change(input(), { target: { value: "An app" } });
+    await act(async () => undefined);
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(document.querySelector("p[data-send-blocked]")!.textContent).toMatch(/at least 10 characters/);
+    fireEvent.keyDown(input(), { key: "Enter" });
+    await act(async () => undefined);
+    expect(posted).toEqual([]);
+    expect(input().value).toBe("An app");
   });
 
-  it("shows skeleton rows while the products load, not a Loading line", () => {
+  it("a build that couldn't start says why and gives the message back", async () => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
+      if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: KINDS }), { status: 200 });
+      return new Response(JSON.stringify({ message: "Pick at least one product to build on." }), { status: 400 });
+    });
+    await loaded();
+    await openTab("Products");
+    fireEvent.click(tabCheckbox("p1"));
+    fireEvent.change(input(), { target: { value: "A savings app with round-ups for students" } });
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    expect(screen.getByRole("alert").textContent).toBe("Pick at least one product to build on.");
+    expect(input().value).toBe("A savings app with round-ups for students");
+    expect(pushed).toEqual([]);
+  });
+
+  it("shows skeleton rows while the products load, not a Loading line", async () => {
     vi.stubGlobal("fetch", () => new Promise(() => undefined));
     render(<NewAppPage />);
+    await openTab("Products");
     expect(document.querySelectorAll("[data-product-list] [data-loading]").length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toMatch(/Loading/);
+  });
+});
+
+describe("New app's commands and picker label", () => {
+  it("has /templates, /products and one command per template", () => {
+    const tab = vi.fn();
+    const applyKind = vi.fn();
+    const commands = newAppCommands({ tab, applyKind }, KINDS);
+    expect(commands.map((c) => c.name)).toEqual(["templates", "products", "money-transfers", "savings-goals"]);
+    commands[1].run!();
+    expect(tab).toHaveBeenCalledWith("products");
+    commands[3].run!();
+    expect(applyKind).toHaveBeenCalledWith(KINDS[1]);
+    expect(commands[3].description).toBe("Start from Savings goals");
+  });
+
+  it("names the one product picked, counts several, and asks when there are none", () => {
+    expect(pickerLabel([], PRODUCTS)).toBe("Pick products");
+    expect(pickerLabel(["p2"], PRODUCTS)).toBe("Bank transfers");
+    expect(pickerLabel(["p2", "p3"], PRODUCTS)).toBe("Products · 2");
   });
 });

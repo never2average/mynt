@@ -10,9 +10,13 @@ import {
   capabilitiesFrom,
   chooseAction,
   consumeTurnEnds,
+  FINISHED,
   MAYBE_LOST_NOTE,
+  outcomeNote,
   planSteer,
+  SESSION_WAITING_NOTE,
   START_BUSY_NOTE,
+  STEERABLE,
 } from "@/lib/chat";
 import { STREAM_HEADERS } from "@/lib/ai-route";
 import { NotAllowedError } from "@/lib/mynt-client";
@@ -110,6 +114,63 @@ export async function POST(req: Request) {
   const { projectId, conversationId } = parsed.data;
   const message = lastUserMessage(parsed.data.messages);
 
+  const opened = await openMynt();
+  if (opened instanceof Response) return opened;
+  return streamReply(opened, (writer) =>
+    converse(writer, opened.mynt, opened.session, opened.saveIfChanged, { projectId, conversationId: conversationId ?? null, message, signal: req.signal, deadline }),
+  );
+}
+
+const FollowQuery = z.object({ projectId: id, buildId: id, after: z.coerce.number().int().min(0).optional() });
+
+// Following a build on, with no message: when its page opens while it's still going, and when a
+// reply's watch ran out of time or the agent handed over to Mynt's verification. Streams what the
+// agent and Mynt do from `after` (the activity cursor already shown), until the agent has answered
+// in a session that then waits for the developer, the build finishes, or the watch's deadline.
+// 204 when there's nothing to follow (the AI SDK's resumeStream then leaves the chat as it is).
+export async function GET(req: Request) {
+  const deadline = Date.now() + WATCH_MS;
+  if (!fromOwnOrigin(req)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  const params = new URL(req.url).searchParams;
+  const parsed = FollowQuery.safeParse({ projectId: params.get("projectId"), buildId: params.get("buildId"), after: params.get("after") ?? undefined });
+  if (!parsed.success) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const { projectId, buildId, after } = parsed.data;
+  const opened = await openMynt();
+  if (opened instanceof Response) return opened;
+  const { mynt, saveIfChanged } = opened;
+  let build: Record<string, unknown> | null;
+  try {
+    build = (await callStudioTool(mynt, "get_build", { build_id: buildId })) as Record<string, unknown> | null;
+  } catch (err) {
+    await mynt.close().catch(() => undefined);
+    await saveIfChanged();
+    if (err instanceof ToolRefusedError) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    console.error(logLine("following a build", err));
+    return NextResponse.json({ error: "unreachable" }, { status: 502 });
+  }
+  const status = typeof build?.status === "string" ? build.status : null;
+  if (build?.app_id !== projectId || !status || FINISHED.has(status)) {
+    await mynt.close().catch(() => undefined);
+    await saveIfChanged();
+    return new Response(null, { status: build?.app_id !== projectId ? 404 : 204 });
+  }
+  return streamReply(opened, async (writer) => {
+    const capabilities = capabilitiesFrom(await listMyntTools(mynt));
+    const follower = new ActivityFollower({ textDeltas: capabilities.textDeltas, reasoning: capabilities.reasoning, after });
+    // A session's agent at work is followed to the end of its turn: then it waits for the
+    // developer, who must be able to type. Anything else (a one-off build, Mynt's verification,
+    // a build still starting) is followed until it finishes.
+    const session = build.mode === "session" && STEERABLE.has(status);
+    await saveIfChanged(true);
+    const watched = await watch(writer, mynt, follower, buildId, session ? 0 : Number.POSITIVE_INFINITY, { signal: req.signal, deadline });
+    afterWatch(writer, follower, buildId, watched, session);
+  });
+}
+
+type Opened = { mynt: Client; session: Session; saveIfChanged: (force?: boolean) => Promise<void> };
+
+// The signed-in developer's connection to Mynt, or the response refusing the request.
+async function openMynt(): Promise<Opened | Response> {
   const session = await currentSession();
   if (!session?.tokens) return NextResponse.json({ error: "auth_required" }, { status: 401 });
   const saveIfChanged = sessionSaver(session);
@@ -134,11 +195,16 @@ export async function POST(req: Request) {
     await saveIfChanged();
     return NextResponse.json({ error: "not_developer" }, { status: 403 });
   }
+  return { mynt, session, saveIfChanged };
+}
 
+// The reply as AI SDK UI message parts. The connection is closed and the session saved on every
+// way out.
+function streamReply({ mynt, session, saveIfChanged }: Opened, run: (writer: UIMessageStreamWriter) => Promise<void>) {
   const stream = createUIMessageStream({
     execute: async ({ writer }) => {
       try {
-        await converse(writer, mynt, session, saveIfChanged, { projectId, conversationId: conversationId ?? null, message, signal: req.signal, deadline });
+        await run(writer);
       } catch (err) {
         if (isAuthError(err)) {
           session.tokens = undefined;
@@ -205,7 +271,10 @@ async function decide(
   capabilities: ReturnType<typeof capabilitiesFrom>,
 ) {
   const builds = buildSummaries(await callStudioTool(mynt, "list_builds", { app_id: opts.projectId }));
-  return chooseAction({ appId: opts.projectId, selectedBuildId: opts.conversationId, builds, text: opts.message.text, capabilities });
+  const action = chooseAction({ appId: opts.projectId, selectedBuildId: opts.conversationId, builds, text: opts.message.text, capabilities });
+  // Whether the build the action is about is a session (it waits for the developer's next message).
+  const target = "buildId" in action ? builds.find((b) => b.id === action.buildId) : undefined;
+  return Object.assign(action, { session: target?.mode === "session" });
 }
 
 async function converse(
@@ -220,6 +289,7 @@ async function converse(
   const who = session.userId ?? session.id;
 
   let startedId: string | null = null;
+  let isSession = action.session;
   if (action.kind === "start") {
     const claims = await claimMessage(who, opts.projectId, opts.message);
     if (!claims) {
@@ -247,6 +317,7 @@ async function converse(
         const started = (await callStudioTool(mynt, "start_build", again.args)) as { id?: unknown } | null;
         if (typeof started?.id !== "string") throw new Error("start_build returned no build id");
         startedId = started.id;
+        isSession = again.args.mode === "session";
       } catch (err) {
         await afterFailure(err, [...claims, unlock]);
         throw err;
@@ -301,12 +372,43 @@ async function converse(
   // Saved before the long watch (refreshed tokens, roles); at the end only if changed again.
   await saveIfChanged(true);
   const watched = await watch(writer, mynt, follower, buildId, skipTurnEnds, opts);
-  if (watched !== "answered" && steered && !capabilities.sessionBuilds) writeText(writer, MAYBE_LOST_NOTE);
-  else if (watched === "timeout") writeText(writer, "_Still working. The build carries on; open it again to see the rest._");
+  if (watched.how !== "answered" && steered && !capabilities.sessionBuilds) writeText(writer, MAYBE_LOST_NOTE);
+  afterWatch(writer, follower, buildId, watched, isSession);
 }
 
-// Follows the build until the agent has answered, the build finishes, the deadline, or the
-// browser goes away. The agent's words are written into the reply as they arrive (LiveText).
+type Watched = { how: "answered" | "finished" | "timeout" | "aborted"; status: string | null };
+
+// What follows a watch: a session's agent that has answered waits for the developer's next
+// message (and the chat says how to ship). Otherwise, while the build is still going (the watch
+// ran out of time, or a one-off build's agent handed over to Mynt's verification), the page is
+// told to follow it on from here (data-follow), so the chat keeps showing what happens.
+function afterWatch(writer: UIMessageStreamWriter, follower: ActivityFollower, buildId: string, watched: Watched, session: boolean) {
+  if (watched.how === "aborted" || watched.how === "finished" || (watched.status && FINISHED.has(watched.status))) return;
+  if (watched.how === "answered" && session) {
+    if (watched.status && STEERABLE.has(watched.status)) writeText(writer, SESSION_WAITING_NOTE);
+    return;
+  }
+  if (follower.position === null) {
+    if (watched.how === "timeout") writeText(writer, "_Still working. The build carries on; open it again to see the rest._");
+    return;
+  }
+  writer.write({ type: "data-follow", data: { buildId, after: follower.position }, transient: true });
+}
+
+// How a finished build ended (shipped, or why not) and what the developer's next message does.
+// Best effort: the phase line already said how it ended.
+async function writeOutcome(writer: UIMessageStreamWriter, mynt: Client, buildId: string) {
+  try {
+    const note = outcomeNote(await callStudioTool(mynt, "get_build", { build_id: buildId }));
+    if (note) writeText(writer, note);
+  } catch (err) {
+    console.error(logLine("reading how a build ended", err));
+  }
+}
+
+// Follows the build until the agent has answered (its `skip`+1th finished turn), the build
+// finishes (the chat then says how it ended), the deadline, or the browser goes away. The agent's
+// words are written into the reply as they arrive (LiveText).
 async function watch(
   writer: UIMessageStreamWriter,
   mynt: Client,
@@ -314,14 +416,16 @@ async function watch(
   buildId: string,
   skip: number,
   opts: { signal: AbortSignal; deadline: number },
-): Promise<"answered" | "finished" | "timeout" | "aborted"> {
+): Promise<Watched> {
   let phase: string | null = null;
+  let status: string | null = null;
   let toSkip = skip;
   let answered = false;
   const live = new LiveText((chunk) => writer.write(chunk), () => partId("t"));
   try {
     while (!opts.signal.aborted) {
       const r = follower.take(await callStudioTool(mynt, "get_build_activity", follower.next(buildId)));
+      status = r.status ?? status;
       if (follower.missed) {
         live.close();
         writeText(writer, "_Some of the agent's activity was too old to show._");
@@ -343,13 +447,19 @@ async function watch(
         live.close();
         writeText(writer, `_${r.status ? `${r.status}: ` : ""}${phase}_`);
       }
-      if (end.over) return answered ? "answered" : "finished";
+      if (end.over) {
+        if (status && FINISHED.has(status)) {
+          live.close();
+          await writeOutcome(writer, mynt, buildId);
+        }
+        return { how: answered ? "answered" : "finished", status };
+      }
       // Read again soon while the agent is active (it wrote something, or is mid-message).
       const wait = live.streaming || r.items.length > 0 ? ACTIVE_POLL_MS : POLL_MS;
-      if (Date.now() + wait > opts.deadline) return answered ? "answered" : "timeout";
+      if (Date.now() + wait > opts.deadline) return { how: answered ? "answered" : "timeout", status };
       await sleep(wait);
     }
-    return "aborted";
+    return { how: "aborted", status };
   } finally {
     live.close();
   }

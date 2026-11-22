@@ -69,6 +69,12 @@ for (const k of ["ANTHROPIC_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"]) delete 
 const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
   "--dangerously-skip-permissions", "--max-budget-usd", String(cfg.budgetUsd)];
 if (cfg.model) args.push("--model", cfg.model);
+// Summaries of the model's thinking rather than redacted blocks: where the API would otherwise return thinking with
+// its text omitted (the setting's default), the reasoning Mynt shows the developer is empty. showThinkingSummaries
+// is Claude Code's documented settings key for this; Mynt passes it as the run's own settings file.
+const settingsFile = join(dir, "settings.json");
+writeFileSync(settingsFile, JSON.stringify({ showThinkingSummaries: true }));
+args.push("--settings", settingsFile);
 // Mynt's MCP server, when the run gets one: the config holds the token, so it's private to this user.
 if (auth.mcp) {
   const mcpFile = join(dir, "mcp.json");

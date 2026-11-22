@@ -191,7 +191,7 @@ A developer can have Mynt **build and ship** one of their experiences. `start_bu
 - a running install is a process whose command line starts with `npm`, `pnpm` or `yarn` followed by `install`, `i`, `ci` or `add`.
 
 The script never installs anything itself, so it never races the agents. How the link works:
-- Once Vite answers with any HTTP response, Mynt serves port 5173 at a private link, `live_preview_url` on `get_build`, shown while the build is `coding`. On boat.dev the link forwards to the sandbox's 127.0.0.1 (`localhost: true`), as the editor's does.
+- Once Vite answers with any HTTP response, Mynt serves port 5173 at a private link, `live_preview_url` on `get_build`, shown while the agent runs (`coding` through `pushing`: the dev servers keep serving through its own review, checks and push). On boat.dev the link forwards to the sandbox's 127.0.0.1 (`localhost: true`), as the editor's does.
 - The link is a credential: it's never written to the timeline, and admins' listing leaves it out.
 - While waiting for the install, Mynt retries every tick. Once the preview is up, while its dev server is up but not answering yet, or while the app has no `web/` yet, it retries every 6th tick. A retry also restarts a dev server that died, behind the same link.
 - The script bounds its own waits by the clock (about 27 seconds at most, even when a server accepts connections but never answers), well under the 45 seconds Mynt gives it.
@@ -205,17 +205,33 @@ When coding ends, Mynt stops both dev servers before it packages the source, and
 3. **Independent audit.** A separate, audit-only Claude Code run executes the Maxwell static workflows. Mynt then re-hashes the source tree to prove the audit changed nothing.
 4. **Decision**, from Mynt's results only. The agent's own report is kept, as advice:
    - the source changed during the audit, no audit, or **critical or high** findings → `blocked`
-   - a failing check → `failed`
+   - a failing check → `failed`, its `error` naming each failed check with the start of what it found (`Not production-ready: secrets_scan (1 secret(s): …)`)
+
+   While it verifies, the build's `phase_message` is the step it's on (the checks, the audit and its time limit); once a build ends, `phase_message` is the reason it ended (as `error`), so whoever shows the phase shows why.
    - with a repository, the pushed branch must be exactly the verified source, or the build is `blocked`
 5. **Ship.** On success, Mynt exposes the token-gated **preview** and **opens the pull request itself**, through its GitHub App, with the verified results in the description. The agent never opens PRs.
 
 **Tracking.** Developers follow builds with `get_build` (phase, timeline, cost against the cap, Maxwell summary, readiness, links), see the agent's activity with `get_build_activity`, `steer_build` it, or `stop_build` it. `list_builds` shows this month's spend, optionally for one app (`app_id`). Admins see every build and total spend with `list_all_builds`.
 
+**Cost and time.** `get_build` and every build in `list_builds` also report what the build cost and how long it took, as measured; the older fields (`cost_usd`, `cap_usd`, `created_at`, `finished_at`) are unchanged. A figure Mynt didn't measure is `null`, never 0, with its reason in `not_measured` (keyed by the field's path, such as `"durations_seconds.coding"`).
+
+| Field | What it is | Measured from |
+|---|---|---|
+| `cost_cents` | Spend against the cap so far | `cost_usd`, which Mynt reads on every tick while the agent works and Mynt verifies. A build that never got a sandbox spent nothing (0). A build whose sandbox was up but whose cost was never read (one that ended while provisioning) is `null` |
+| `cap_cents` | The build's cap | `cap_usd` |
+| `cost_parts_cents.coding_agents` | The coding agents' model spend | The larger of what the runner reports and what Mynt's agent proxy metered for the build, recorded with each cost reading (`agent_cost_usd`) |
+| `cost_parts_cents.sandboxes` | Machine time of the build sandbox and the verification sandbox | The sandbox provider's own dollars (`sandbox_cost_usd`). Time a sandbox stays up after the build ends (its preview, a reopened sandbox) is metered as hosting usage, not here |
+| `audit_cost_cents` | Mynt's agent audit, paid by Mynt, outside the cap and not in `cost_cents` | The larger of the auditor's own report and the proxy's meter (`audit_cost_usd`); `null` when no agent audit ran |
+| `timing` | `queued_at`, `started_at` (Mynt asked for the sandbox), `coding_started_at`, `verify_started_at`, `finished_at` | The build's own timestamps and its timeline's first `provisioning`, `coding` and `verifying` entries |
+| `durations_seconds` | `queued` (to `started_at`), `coding` (to `verify_started_at`, or the end), `verify` (to the end), `total` | `timing`; a running build's count up to `measured_at` |
+
+Builds measured before the parts were kept keep their total; their parts are `null`. The columns `agent_cost_usd`, `sandbox_cost_usd` and `audit_cost_usd` are nullable and filled going forward.
+
 **Activity.** As a build runs, Mynt reads the agent's output from the sandbox on every tick and stores it, summarised, in `build_activity`: the agent's messages, the commands it runs and the files it edits, each with a `seq` and a time. The history stays after the sandbox stops, and each build keeps its latest 5,000 entries. `get_build_activity` without `after` returns the latest entries, newest first. To follow a build, pass the `cursor` from the last call as `after`: the result holds only newer entries, oldest first, and a new `cursor`, which stays the same while nothing new has arrived. `first_seq` is the oldest entry still kept: a follower whose cursor is below it has missed entries trimmed by the limit. Summaries are scrubbed of credentials (as `sandbox_run` output is) before they're cut to length, and control characters are dropped. Activity is the agent's own account, shown to the developer and never used to decide anything.
 
 **Following the agent's words.** The agent runs with `--include-partial-messages`, so Mynt also sees a message while it's being written. Pass `text_deltas: true` to `get_build_activity` to get those words too, as `text_delta` entries: each holds the next piece of one text block, oldest first, and carries a `stream` (the model's message id and the block's index). When the block is whole, its `message` entry follows with the same `stream`: a follower that showed the pieces closes that part rather than printing the message again; a `message` without a `stream` (it wasn't streamed) is shown on its own. Without `text_deltas` (the default) the result is what it always was: `text_delta` entries are left out, and `stream` is an extra field older callers can ignore. A follower (a call with `after`, or with `text_deltas`) gets the agent's log read there and then when the last read is over a second old, so polling about every 700 ms shows the agent's words within a second or two of their being written; reads stay at most one a second per build however often it's asked. The pieces are scrubbed as everything else is, but never one by one: each block's text is accumulated and scrubbed whole, and only its settled part (up to its last space or line break) goes out, so a token split across two pieces, or still being written, is held back until it's complete and can be recognised. If scrubbing more of the text would change what was already sent (a private key block, recognised once its content follows its BEGIN line), the block stops streaming and only its `message` is added. A block streams up to 16,000 characters; past that only its `message` is added.
 
-**Following the agent's reasoning.** Mynt also keeps the agent's thinking, as far as the model returns it to Claude Code (a thinking block with no text adds nothing; signatures are never kept). Pass `reasoning: true` to `get_build_activity` to get it: a `thinking` entry for each whole thinking block, and, with `text_deltas: true` as well, `thinking_delta` entries while it's written, tied to their `thinking` entry by `stream` exactly as `text_delta` entries are tied to their `message`. Thinking is scrubbed of secrets exactly as messages are (accumulated, scrubbed whole, only the settled part sent, and a block whose scrubbed text would change what was sent stops streaming). Without `reasoning` (the default) neither kind is returned, so existing callers (the sample chat, the SDKs) see what they always did. Mynt Studio's chat asks for it and shows it as a collapsible Reasoning block above the agent's words.
+**Following the agent's reasoning.** Mynt also keeps the agent's thinking, as far as the model returns it to Claude Code (a thinking block with no text adds nothing; signatures are never kept). Pass `reasoning: true` to `get_build_activity` to get it: a `thinking` entry for each whole thinking block, and, with `text_deltas: true` as well, `thinking_delta` entries while it's written, tied to their `thinking` entry by `stream` exactly as `text_delta` entries are tied to their `message`. Thinking is scrubbed of secrets exactly as messages are (accumulated, scrubbed whole, only the settled part sent, and a block whose scrubbed text would change what was sent stops streaming). Without `reasoning` (the default) neither kind is returned, so existing callers (the sample chat, the SDKs) see what they always did. Mynt Studio's chat asks for it and shows it as a collapsible Reasoning block above the agent's words. The runner passes Claude Code a settings file with `showThinkingSummaries: true`, Claude Code's documented setting for thinking summaries rather than redacted blocks. Its documentation describes it for interactive sessions and says nothing about `-p` runs, so whether a given model's thinking arrives with text in a headless run hasn't been confirmed on a live build.
 
 **Session builds.** `start_build` with `mode: "session"` works like a chat with the coding agent:
 - The agent does the first request (`goal`), reports `coding` "Waiting for your next message", and stays open, keeping its context.
@@ -232,6 +248,24 @@ When coding ends, Mynt stops both dev servers before it packages the source, and
 - Mynt runs the agent's runner with `MYNT_AGENT_HOLD=1` and `MYNT_AGENT_IDLE_MS`, and writes its inbox items whole (a temporary name, then a rename).
 
 **Continuing a build.** `start_build` with `continue_from: <build_id>` starts from the branch an earlier finished build of yours pushed, on the same app and repository. Mynt must have confirmed that push: the build has a verified commit, or Mynt opened its pull request. If it shipped, it starts at its verified commit. Use it after a session ends, or to change a shipped app.
+
+**App kinds.** A new app can start from a working base for its kind instead of a blank prompt. `list_app_kinds` lists them, and `start_build` takes one as `kind`. Each kind is a JSON file in the coding agent's workspace, `core/workspaces/coding-build/templates/kinds/<kind>.json`, checked against `core/schemas/app-kind.schema.json`. It holds:
+- a title and a one-line description;
+- the product lines it builds on;
+- a goal to start from and edit;
+- the screens and flows to build first;
+- the SDK calls it relies on.
+
+Mynt refuses a kind that isn't there, stores the kind with the build (`kind` on `get_build`) and puts it in the agent's build spec. The agent reads that file and scaffolds with `scripts/scaffold_app.py --kind <kind>`. This lays the kind's screens over the starter app as placeholders that compile: `web/src/screens/` with a shell that switches between them, and `mobile/app/<screen>.tsx` for Expo. The kind's journey screen is the starter's journey runner. A copy of the kind is kept as `mynt-kind.json`. The kinds cover the product lines that Mynt's US regulatory model has product types for:
+
+| Kind | Product lines |
+|---|---|
+| `dollar-account` (Dollar account) | `custody_settlement` |
+| `savings-goals` (Savings goals) | `custody_settlement` |
+| `money-transfers` (Money transfers) | `payments` |
+| `stablecoin-account` (Stablecoin-settled account) | `exchange` |
+
+The studio's New app page lists them on its Templates tab. Using one fills the prompt with its goal and picks a product from each of its lines. CI scaffolds every kind and compiles its api, web and mobile.
 
 **Spend** is capped per build (`BUILD_CAP_USD`, default 10) and per developer per month (`BUILD_MONTHLY_CAP_USD`, default 100). A workspace can have its own monthly budget too, shared by everyone building its apps (`BUILD_WORKSPACE_MONTHLY_CAP_USD`, unset by default: no workspace budget); a build must fit both. Mynt reads the sandbox's machine and model cost as it runs, and stops a build that passes its cap.
 

@@ -20,6 +20,8 @@ export type BuildSummary = {
   status: string;
   commit_sha: string | null;
   updated_at: string;
+  /** "once" or "session", where Mynt says. */
+  mode?: string;
 };
 
 export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
@@ -27,7 +29,8 @@ export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
   return builds.filter(isObj).flatMap((b) => {
     const id = str(b.id);
     if (!id) return [];
-    return [{ id, app_id: str(b.app_id) ?? null, status: str(b.status) ?? "unknown", commit_sha: str(b.commit_sha) ?? null, updated_at: str(b.updated_at) ?? str(b.created_at) ?? "" }];
+    const mode = str(b.mode);
+    return [{ id, app_id: str(b.app_id) ?? null, status: str(b.status) ?? "unknown", commit_sha: str(b.commit_sha) ?? null, updated_at: str(b.updated_at) ?? str(b.created_at) ?? "", ...(mode ? { mode } : {}) }];
   });
 }
 
@@ -35,6 +38,8 @@ export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
 export type Capabilities = {
   /** start_build takes mode "session" and continue_from, and finish_build exists (session builds). */
   sessionBuilds: boolean;
+  /** start_build takes kind (an app kind from list_app_kinds). */
+  appKinds?: boolean;
   /** get_build_activity takes text_deltas: the agent's words as it writes them. */
   textDeltas?: boolean;
   /** get_build_activity takes reasoning: the agent's thinking, scrubbed by Mynt as its words are. */
@@ -46,7 +51,7 @@ export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[
   const props = isObj(start?.inputSchema) && isObj(start.inputSchema.properties) ? start.inputSchema.properties : {};
   const activity = tools.find((t) => t.name === "get_build_activity");
   const activityProps = isObj(activity?.inputSchema) && isObj(activity.inputSchema.properties) ? activity.inputSchema.properties : {};
-  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}) };
+  return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}), ...("kind" in props && tools.some((t) => t.name === "list_app_kinds") ? { appKinds: true } : {}) };
 }
 
 export type ChatAction =
@@ -63,6 +68,9 @@ export const STARTING_NOTE = "A build of this app is still starting. Send your m
 export const START_BUSY_NOTE = "A build of this app is being started right now (from here or another window). Open the app again in a moment to follow it.";
 export const MAYBE_LOST_NOTE =
   "_Your message may not have reached the agent: it was finishing its turn as the message arrived. If nothing above answers it, send it again._";
+/** After a session's agent has answered: what happens next, since the studio has no ship button yet. */
+export const SESSION_WAITING_NOTE =
+  "_The agent is waiting for your next message. After 15 minutes without one, it ships the work: it reviews, checks and pushes it, then Mynt verifies it in a clean sandbox, and only that decides whether it ships._";
 export const FINISHING_NOTE =
   "The agent has finished its work on this build, and Mynt is checking and shipping it, so it can't take more instructions. Here's its progress; send your message again once it's done to start a new build.";
 
@@ -224,14 +232,22 @@ export class ActivityFollower {
 
   /**
    * With `textDeltas`, it follows the agent's words as it writes them, and with `reasoning` its
-   * thinking (each where Mynt offers it).
+   * thinking (each where Mynt offers it). With `after` (a cursor from an earlier read, such as
+   * the one the page's history was loaded with), it follows on from there.
    */
-  constructor(private readonly opts: { textDeltas?: boolean; reasoning?: boolean } = {}) {}
+  constructor(private readonly opts: { textDeltas?: boolean; reasoning?: boolean; after?: number } = {}) {
+    if (typeof opts.after === "number" && Number.isInteger(opts.after) && opts.after >= 0) this.cursor = opts.after;
+  }
 
   /** Arguments for the next get_build_activity call. */
   next(buildId: string): { build_id: string; limit: number; after?: number; text_deltas?: true; reasoning?: true } {
     const deltas = { ...(this.opts.textDeltas ? { text_deltas: true as const } : {}), ...(this.opts.reasoning ? { reasoning: true as const } : {}) };
     return this.cursor === null ? { build_id: buildId, limit: 200, ...deltas } : { build_id: buildId, limit: 200, after: this.cursor, ...deltas };
+  }
+
+  /** The cursor followed up to, to carry on from in another request; null before Mynt gave one. */
+  get position(): number | null {
+    return this.cursor;
   }
 
   /** Feeds one reply; returns the items not seen before. */
@@ -411,9 +427,50 @@ export class LiveText {
   }
 }
 
+/**
+ * Where the chat follows a build from when its page opens: the cursor its history was read up to,
+ * or null when there's nothing to follow (the build is over, or Mynt gives no cursor to follow on
+ * from without showing entries twice).
+ */
+export function followFrom(build: unknown, activityReply: unknown): { after: number } | null {
+  const status = isObj(build) ? str(build.status) : undefined;
+  if (!status || FINISHED.has(status)) return null;
+  const cursor = isObj(activityReply) && typeof activityReply.cursor === "number" ? activityReply.cursor : null;
+  return cursor === null ? null : { after: cursor };
+}
+
 /** The agent finished answering: a turn ended, or the build is done. */
 export function turnOver(items: ActivityItem[], status: string | null): boolean {
   return items.some((i) => i.type === "turn_finished") || (status !== null && FINISHED.has(status));
+}
+
+/* ------------------------------------------------------------------ */
+/*  How a build ended                                                 */
+/* ------------------------------------------------------------------ */
+
+const ENDED: Record<string, string> = {
+  blocked: "Mynt didn't ship this build",
+  failed: "This build didn't ship",
+  stopped: "This build was stopped",
+  over_budget: "This build was stopped at its spending cap",
+};
+
+/**
+ * What a finished build's end means, in the chat: that it shipped (with its pull request), or
+ * why it didn't (Mynt's reason, from get_build's `error`), and what the developer's next message
+ * does. Null while the build is still going.
+ */
+export function outcomeNote(build: unknown): string | null {
+  const b = isObj(build) ? build : {};
+  const status = str(b.status);
+  if (!status || !FINISHED.has(status)) return null;
+  if (status === "succeeded") {
+    const pr = str(b.pr_url);
+    const link = pr && /^https:\/\/[^\s<>()]+$/.test(pr) ? pr : null;
+    return `**Shipped.** Mynt verified this build in a clean sandbox${link ? ` and opened a pull request: ${link}` : ""}. Your next message starts a new build that carries on from it.`;
+  }
+  const why = (str(b.error) ?? "").trim().replace(/[.\s]+$/, "");
+  return `**${ENDED[status] ?? "This build ended"}**${why ? `: ${why}` : ""}. Your next message starts a new build. It carries on from this app's last shipped build, if there is one, not from this one: Mynt only builds on work it has verified.`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -451,6 +508,13 @@ export function buildToMessages(build: unknown, activityReply: unknown): History
     const last = out[out.length - 1];
     if (last && last.role === e.role) last.parts.push(...e.parts);
     else out.push({ id: `${id}-${out.length}`, role: e.role, parts: [...e.parts] });
+  }
+  // A finished build ends with how it ended: whether it shipped, or why not, and what's next.
+  const note = outcomeNote(b);
+  if (note) {
+    const last = out[out.length - 1];
+    if (last?.role === "assistant") last.parts.push({ kind: "text", text: note });
+    else out.push({ id: `${id}-${out.length}`, role: "assistant", parts: [{ kind: "text", text: note }] });
   }
   return out;
 }

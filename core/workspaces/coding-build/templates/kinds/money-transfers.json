@@ -1,0 +1,29 @@
+{
+  "$schema": "../../../../schemas/app-kind.schema.json",
+  "id": "money-transfers",
+  "title": "Money transfers",
+  "description": "Move US dollars in from a bank account and back out by bank transfer or wire.",
+  "product_lines": ["payments"],
+  "goal_template": "A money transfers app. Customers sign up, move US dollars in from their own bank account and back out to it by bank transfer or wire, see the amount, the fee and when it arrives before they confirm, and follow each transfer's status until it settles.",
+  "screens": [
+    { "id": "transfers", "title": "Transfers", "purpose": "Every transfer with its amount, fee and status, from the lifecycle events api/ receives on Mynt's webhook." },
+    { "id": "sign-up", "title": "Sign up", "purpose": "Onboarding: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "send", "title": "New transfer", "purpose": "Choose the direction and the amount, see the fee and the arrival time from the offer, then confirm in the provider's hosted flow." }
+  ],
+  "flows": [
+    {
+      "id": "new-transfer",
+      "title": "Make a transfer",
+      "steps": [
+        "read the offer (offers) for the fee, the limits and the arrival time",
+        "show the amount, the fee and the required documents verbatim (documentShown) before the customer confirms",
+        "start the provider's hosted transfer flow (startAction) and send the customer to its redirect_url",
+        "api/ follows the transfer's status from Mynt's webhook (verifyWebhook) until it settles or fails"
+      ]
+    }
+  ],
+  "sdk_calls": {
+    "server": ["createClientSession", "getContract", "verifyWebhook", "trackEvent"],
+    "browser": ["offers", "createJourneyRunner", "documentShown", "giveConsent", "startAction"]
+  }
+}

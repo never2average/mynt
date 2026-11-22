@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import { buildToMessages, type HistoryMessage } from "./chat";
+import { buildToMessages, followFrom, type HistoryMessage } from "./chat";
 import { connectMynt } from "./mynt-client";
 import { currentSession } from "./session";
 import { sessionStore } from "./session-store";
@@ -20,23 +20,25 @@ export function toUIMessages(history: HistoryMessage[]): UIMessage[] {
 
 // One of the user's builds of this app, as a conversation. Empty when it can't be read (not
 // signed in, not theirs, not this app's, or Mynt unreachable): the page then just shows the
-// project's welcome.
-export async function loadConversation(appId: string, buildId: string): Promise<UIMessage[]> {
+// project's welcome. A build that's still going comes with where to follow it from (`follow`):
+// the chat carries on showing what the agent and Mynt do from there, live.
+export async function loadConversation(appId: string, buildId: string): Promise<{ messages: UIMessage[]; follow: { after: number } | null }> {
+  const none = { messages: [], follow: null };
   const session = await currentSession();
-  if (!session?.tokens) return [];
+  if (!session?.tokens) return none;
   try {
     const mynt = await connectMynt(session);
     try {
       const build = (await callStudioTool(mynt, "get_build", { build_id: buildId })) as { app_id?: unknown } | null;
-      if (build?.app_id !== appId) return [];
+      if (build?.app_id !== appId) return none;
       const activity = await callStudioTool(mynt, "get_build_activity", { build_id: buildId, limit: 200 });
-      return toUIMessages(buildToMessages(build, activity));
+      return { messages: toUIMessages(buildToMessages(build, activity)), follow: followFrom(build, activity) };
     } finally {
       await mynt.close().catch(() => undefined);
     }
   } catch (err) {
     console.error(logLine("loading a conversation", err));
-    return [];
+    return none;
   } finally {
     await sessionStore()
       .save(session)

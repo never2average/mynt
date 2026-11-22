@@ -1,3 +1,4 @@
+import type { BuildMetrics } from "./build-metrics";
 import type { Stage } from "./workspaces";
 
 // A project is one of the user's Mynt apps (list_my_apps). Its "conversations" are the app's
@@ -17,6 +18,8 @@ export type ProjectConversationSummary = {
   previewUrl: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Its cost and time as Mynt measured them; null when this Mynt doesn't report them. */
+  metrics?: BuildMetrics | null;
 };
 
 export type ProjectItem = {

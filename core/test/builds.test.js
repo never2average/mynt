@@ -409,6 +409,84 @@ test("a used-up month says so", async () => {
   assert.match((await ctx.call(dev, "start_build", { goal: "Build a savings page please" })).data.error, /^Monthly build budget used up \(US\$0\.00 of US\$0\.25/);
 });
 
+test("build cost and time: get_build and list_builds report measured cents and seconds, null with a reason when unmeasured", async () => {
+  const ctx = await setup();
+  const { builds, sandboxes, call, pg } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  let b = (await call(dev, "get_build", { build_id: started.id })).data;
+  // Queued: nothing has run, so US$0 is measured; coding and verifying haven't started.
+  assert.equal(b.cost_cents, 0);
+  assert.equal(b.cap_cents, 1000);
+  assert.deepEqual(b.cost_parts_cents, { coding_agents: 0, sandboxes: 0 });
+  assert.equal(b.audit_cost_cents, null);
+  assert.equal(b.durations_seconds.coding, null);
+  assert.equal(b.not_measured["durations_seconds.coding"], "The coding agent hasn't started");
+  assert.equal(typeof b.durations_seconds.total, "number");
+
+  await builds.tick(); // sandbox requested
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.cost_cents, null, "a sandbox is up but its cost isn't read yet: not measured, never 0");
+  assert.equal(b.not_measured.cost_cents, "Measured once the coding agent starts");
+  await builds.tick(); // agent prompted
+  sandboxes.sandboxes.get(sbx).cost = 1.25;
+  sandboxes.sandboxes.get(sbx).agentRunning = true;
+  sandboxes.write(sbx, `${A}/state.json`, { cost_usd: 2, turns: 1, sent: 1, done: false });
+  await builds.tick();
+  b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.status, "coding");
+  assert.equal(b.cost_cents, 325);
+  assert.deepEqual(b.cost_parts_cents, { coding_agents: 200, sandboxes: 125 });
+  assert.ok(b.timing.coding_started_at && b.timing.started_at);
+  assert.equal(typeof b.durations_seconds.coding, "number");
+
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx, "success", 2);
+  await builds.tick(); // verifying
+  const vid = (await builds.get(started.id)).verify_sandbox_id;
+  sandboxes.ready(vid);
+  sandboxes.sandboxes.get(vid).cost = 0.5;
+  await builds.tick(); // checks
+  sandboxes.sandboxes.get(vid).checksRunning = false;
+  sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+  sandboxes.write(vid, `${V}/report.json`, { checks: passingChecks });
+  await builds.tick(); // auditor started
+  sandboxes.write(vid, `${A}/state.json`, { cost_usd: 4, turns: 1, sent: 1, last_subtype: "success", done: false });
+  await builds.tick();
+  assert.equal((await call(dev, "get_build", { build_id: started.id })).data.audit_cost_cents, 400, "Mynt's audit spend, outside the cap");
+  sandboxes.write(vid, `${V}/maxwell.json`, cleanAudit);
+  sandboxes.finishAgent(vid, "success", 4.5);
+  await builds.tick(); // decided
+  // Pushed back ten minutes, so the durations add up to something worth checking.
+  await pg.query("UPDATE financial_products.build_runs SET created_at = created_at - interval '10 minutes' WHERE id = $1", [started.id]);
+  b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.ok(["succeeded", "blocked"].includes(b.status), b.status);
+  assert.equal(b.cost_cents, 375);
+  assert.equal(b.cost_usd, 3.75, "the old field is unchanged");
+  assert.deepEqual(b.cost_parts_cents, { coding_agents: 200, sandboxes: 175 });
+  assert.equal(b.audit_cost_cents, 450);
+  assert.ok(b.timing.verify_started_at && b.timing.finished_at);
+  for (const k of ["queued", "coding", "verify", "total"]) assert.equal(typeof b.durations_seconds[k], "number", k);
+  assert.ok(b.durations_seconds.total >= 600 && b.durations_seconds.queued >= 600);
+  assert.deepEqual(b.not_measured, {});
+  const listed = (await call(dev, "list_builds", {})).data.builds[0];
+  assert.deepEqual([listed.cost_cents, listed.cap_cents, listed.durations_seconds], [375, 1000, b.durations_seconds]);
+
+  // A build measured before the parts were kept: its total stands, its parts are not measured. One that ended
+  // before its cost was read: not measured, never 0.
+  await pg.query("UPDATE financial_products.build_runs SET agent_cost_usd = NULL, sandbox_cost_usd = NULL WHERE id = $1", [started.id]);
+  b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.cost_cents, 375);
+  assert.deepEqual(b.cost_parts_cents, { coding_agents: null, sandboxes: null });
+  assert.match(b.not_measured["cost_parts_cents.sandboxes"], /before Mynt kept the parts/);
+  await pg.query("UPDATE financial_products.build_runs SET cost_usd = 0 WHERE id = $1", [started.id]);
+  b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.cost_cents, null);
+  assert.equal(b.not_measured.cost_cents, "Mynt didn't measure this build's cost before it ended");
+});
+
 test("developers track, steer and stop their own builds; admins see all", async () => {
   const { builds, sandboxes, as, connect, call } = await setup();
   const dev = await connect(await as("Dev", ["developer"]));
@@ -528,6 +606,84 @@ test("while the agents code, Mynt starts the app's dev server itself and serves 
   await call(dev, "stop_build", { build_id: started.id });
   b = await get();
   assert.equal(b.live_preview_url, null);
+});
+
+test("a live preview started while coding stays shown through the agent's review, checks and push, until verification", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick(); // agent started
+  sandboxes.sandboxes.get(sbx).devPreview = "started";
+  await builds.tick();
+  const link = `https://${sbx}-5173.preview.example?_token=t`;
+  const get = async () => (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal((await get()).live_preview_url, link);
+  // The dev servers keep running while the agent reviews, checks and pushes: the link is still shown.
+  for (const phase of ["auditing", "checking", "previewing", "pushing"]) {
+    sandboxes.write(sbx, `${BUILD}/job/status.json`, { phase, message: phase });
+    await builds.tick();
+    const b = await get();
+    assert.equal(b.status, phase);
+    assert.equal(b.live_preview_url, link, phase);
+    assert.equal((await call(dev, "list_builds", {})).data.builds[0].live_preview_url, link);
+  }
+  // Mynt stops them when the agent is done and verification starts: the link goes.
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
+  await builds.tick();
+  assert.equal((await get()).status, "verifying");
+  assert.equal((await get()).live_preview_url, null);
+});
+
+test("a build's phase says each verification step, and an ended build says why it ended there", async () => {
+  const ctx = await setup();
+  const { builds, sandboxes, call } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick();
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
+  await builds.tick();
+  const phase = async () => (await call(dev, "get_build_activity", { build_id: started.id })).data.phase_message;
+  assert.equal(await phase(), "Source packaged; independent verification started");
+  const vid = (await builds.get(started.id)).verify_sandbox_id;
+  sandboxes.ready(vid);
+  await builds.tick();
+  assert.match(await phase(), /^Running Mynt's checks: tests/);
+  sandboxes.sandboxes.get(vid).checksRunning = false;
+  sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+  const failing = [
+    ...passingChecks.filter((c) => c.name !== "secrets_scan"),
+    { name: "secrets_scan", status: "fail", detail: "1 secret(s): generic-api-key in api/.env.example" },
+    { name: "static_scan", status: "fail", detail: `high-severity: ${"x".repeat(400)}` },
+  ];
+  sandboxes.write(vid, `${V}/report.json`, { checks: failing });
+  await builds.tick();
+  assert.match(await phase(), /^Checks finished; independent Maxwell audit started \(.*up to \d+ min\)/);
+  sandboxes.write(vid, `${V}/maxwell.json`, cleanAudit);
+  sandboxes.finishAgent(vid, "success");
+  await builds.tick();
+  const b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.status, "failed");
+  // Which checks failed and what they found, cut short, as the error and as the phase.
+  assert.match(b.error, /^Not production-ready: secrets_scan \(1 secret\(s\): generic-api-key in api\/\.env\.example\); static_scan \(high-severity: x+…\)$/);
+  assert.ok(b.error.length < 500);
+  assert.equal(b.phase_message, b.error);
+  assert.equal(await phase(), b.error);
+
+  // Stopped, or over budget: the phase says so too.
+  const other = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
+  await builds.tick();
+  await call(dev, "stop_build", { build_id: other.id });
+  const stopped = (await call(dev, "get_build", { build_id: other.id })).data;
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.phase_message, stopped.error);
 });
 
 test("Mynt's live preview: the template's Vite config is behind the forwarder only when Mynt starts it", async () => {
@@ -803,6 +959,35 @@ test("activityLines: complete lines only, a line being skipped is dropped to its
   assert.deepEqual(activityLines(b('xxxx\n{"c":3}\n'), true, 100), { consumed: 12, lines: ['{"c":3}'] }, "the rest of a skipped line is dropped");
   assert.deepEqual(activityLines(b("xxxx"), true, 100), { consumed: 3, lines: [] }, "still inside the skipped line");
   assert.deepEqual(activityLines(b(""), true, 100), { consumed: 0, lines: [] });
+});
+
+test("start_build kind: listed by list_app_kinds, checked, stored with the build and given to the agent", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const kinds = (await call(dev, "list_app_kinds")).data.kinds;
+  const goals = kinds.find((k) => k.id === "savings-goals");
+  assert.ok(goals && goals.title === "Savings goals" && goals.product_lines.length && goals.goal_template && goals.screens.length);
+  const refused = await call(dev, "start_build", { goal: "Build a savings page please", kind: "lemonade" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /No app kind 'lemonade'; list_app_kinds lists them/);
+  assert.deepEqual((await call(dev, "list_builds", {})).data.builds, [], "nothing was queued");
+
+  const app = (await call(dev, "create_app", { name: "Saver", description: "Savings ideas", audience: "Savers", product_ids: ["fixed-deposit"] })).data;
+  const started = (await call(dev, "start_build", { goal: goals.goal_template, app_id: app.id, kind: "savings-goals" })).data;
+  assert.equal(started.kind, "savings-goals");
+  assert.equal((await call(dev, "get_build", { build_id: started.id })).data.kind, "savings-goals");
+  assert.equal((await builds.get(started.id)).kind, "savings-goals");
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick();
+  const files = sandboxes.sandboxes.get(sbx).files;
+  assert.equal(JSON.parse(files.get(`${BUILD}/job/build.json`)).kind, "savings-goals");
+  assert.ok(files.get(`${BUILD}/templates/kinds/savings-goals.json`), "the kind's file is in the agent's workspace");
+
+  // Without one, the build has none.
+  const plain = (await call(dev, "start_build", { goal: "Build something unrelated please" })).data;
+  assert.equal(plain.kind, null);
 });
 
 test("list_builds filters by app", async () => {
@@ -1574,7 +1759,11 @@ process.stdin.on("data", (d) => {
   // The agent's words (and thinking) as it writes them: asked for, and only their text kept, cut down to what Mynt
   // reads (no tool input as it's written, no thinking signature).
   assert.ok(ran.args.includes("--include-partial-messages"));
-  const events = readFileSync(join(dir, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((m) => m.type === "stream_event");
+  // Thinking summaries asked for, so the reasoning shown isn't empty where the API would redact it.
+  const settings = ran.args[ran.args.indexOf("--settings") + 1];
+  assert.equal(settings, join(dir, "settings.json"));
+  assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { showThinkingSummaries: true });
+  const events =readFileSync(join(dir, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((m) => m.type === "stream_event");
   assert.deepEqual(events, [
     { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "message_start", message: { id: "msg_1" } } },
     { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } },

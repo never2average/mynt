@@ -21,6 +21,7 @@ import {
   TabletIcon,
 } from "lucide-react";
 
+import { BuildMeter, type MeteredBuild } from "@/components/build-meter";
 import { StageControl } from "@/components/promotion-view";
 import { GithubControl } from "@/components/github-control";
 import { DeveloperOnly } from "@/components/studio-gates";
@@ -73,9 +74,11 @@ export type AppTopBarProps = {
   isMobile?: boolean;
   mobileView?: "chat" | "preview";
   onShowChat?: () => void;
+  /** The build in view (the one open, else the app's newest): its live phase, time and cost beside the stage. */
+  build?: MeteredBuild | null;
 };
 
-export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, previewUrl, iframeRef, device, onDevice, isMobile = false, mobileView = "chat", onShowChat }: AppTopBarProps) {
+export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, previewUrl, iframeRef, device, onDevice, isMobile = false, mobileView = "chat", onShowChat, build = null }: AppTopBarProps) {
   const showPreviewControls = Boolean(previewUrl) && (!isMobile || mobileView === "preview");
   return (
     <header className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background px-4 lg:px-6" data-app-top-bar>
@@ -105,6 +108,7 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
         )}
         {/* Promote / Move back: a screen with Mynt's checks, never a drag between folders. */}
         {appId && appName && stage && !(isMobile && mobileView === "preview") && <StageControl appId={appId} appName={appName} stage={stage} />}
+        {build && !isMobile && <BuildMeter build={build} className="hidden lg:flex" />}
       </div>
 
       {showPreviewControls && previewUrl ? (

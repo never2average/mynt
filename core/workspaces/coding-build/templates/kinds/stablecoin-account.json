@@ -1,0 +1,39 @@
+{
+  "$schema": "../../../../schemas/app-kind.schema.json",
+  "id": "stablecoin-account",
+  "title": "Stablecoin-settled account",
+  "description": "A dollar balance settled in USDC by the provider: add from a bank, hold, cash out.",
+  "product_lines": ["exchange"],
+  "goal_template": "A dollar balance app settled in USDC by the licensed provider. Customers add US dollars from their bank account, keep a dollar balance and cash it back out to their bank account. Every screen shows dollars only, never crypto. Show the amount and the fee before the customer accepts each one.",
+  "screens": [
+    { "id": "balance", "title": "Balance", "purpose": "The dollar balance and recent activity, in dollars only, from the lifecycle events api/ receives on Mynt's webhook." },
+    { "id": "sign-up", "title": "Sign up", "purpose": "Onboarding: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "add-money", "title": "Add money", "purpose": "Add dollars from the customer's bank account: the amount and fee shown first, then the provider's hosted flow." },
+    { "id": "cash-out", "title": "Cash out", "purpose": "Cash the balance out to the customer's bank account: the amount and fee shown first, then the provider's hosted flow." }
+  ],
+  "flows": [
+    {
+      "id": "add-money",
+      "title": "Add money",
+      "steps": [
+        "read the offer (offers) for the fee and the limits",
+        "show the amount and the fee in dollars before the customer accepts",
+        "start the provider's hosted flow (startAction); the provider settles it, the app never moves money itself",
+        "api/ records the outcome from Mynt's webhook (verifyWebhook)"
+      ]
+    },
+    {
+      "id": "cash-out",
+      "title": "Cash out",
+      "steps": [
+        "show the amount and the fee in dollars",
+        "start the provider's hosted cash-out flow (startAction)",
+        "show its status until the webhook says it settled"
+      ]
+    }
+  ],
+  "sdk_calls": {
+    "server": ["createClientSession", "getContract", "verifyWebhook"],
+    "browser": ["offers", "createJourneyRunner", "documentShown", "startAction"]
+  }
+}

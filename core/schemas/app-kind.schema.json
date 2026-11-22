@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "App kind",
+  "description": "A starting point for a common kind of finance app: what the studio offers on New app, what start_build accepts as kind, and what the coding agent reads (workspaces/coding-build/templates/kinds/<id>.json) and scaffolds (scripts/scaffold_app.py --kind <id>). Data only: the agent's instructions stay in the workspace's CLAUDE.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "description", "product_lines", "goal_template", "screens", "flows", "sdk_calls"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "The file's name without .json" },
+    "title": { "type": "string", "minLength": 2, "maxLength": 40 },
+    "description": { "type": "string", "minLength": 10, "maxLength": 120, "description": "One line, shown under the title" },
+    "product_lines": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z_]+$" },
+      "description": "The product lines (PRODUCT_LINES in src/catalog.ts) whose products the app builds on: the studio filters products to these and picks one of each"
+    },
+    "goal_template": { "type": "string", "minLength": 40, "maxLength": 1200, "description": "The goal the user starts from and edits" },
+    "screens": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "description": "The screens to build first. scaffold_app.py lays each down as a placeholder (web/src/screens/, and mobile/app/ for Expo)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "purpose"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,30}$", "not": { "enum": ["index", "app", "main", "shell", "screens"] } },
+          "title": { "type": "string", "minLength": 2, "maxLength": 40 },
+          "purpose": { "type": "string", "minLength": 10, "maxLength": 300 },
+          "journey": { "type": "boolean", "description": "This screen runs the product's journey with the starter's journey runner (web's App, mobile's index); at most one per kind" }
+        }
+      }
+    },
+    "flows": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The flows to build first, step by step",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "steps"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,40}$" },
+          "title": { "type": "string", "minLength": 2, "maxLength": 60 },
+          "steps": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 3, "maxLength": 300 } }
+        }
+      }
+    },
+    "sdk_calls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "browser"],
+      "description": "The generated SDK's calls the app relies on: server ones from mynt-sdk (api/ only, with the app key), browser ones from mynt-sdk/browser (web/ and mobile/, on a client session)",
+      "properties": {
+        "server": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z]+$" } },
+        "browser": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z]+$" } }
+      }
+    }
+  }
+}
