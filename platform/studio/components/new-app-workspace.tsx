@@ -15,6 +15,9 @@
 // product the chat drafts a product with the assistant (components/product-chat.tsx, lib/product-chat.ts);
 // its draft card opens the same sheet, filled in. A Build app message that clearly asks for a product
 // only offers the switch: what's sent in Build app is always a build.
+// Under the welcome, Recent lists the threads the user touched last (components/recent-threads.tsx,
+// lib/threads.ts): an app opens its page, a product chat comes back here in Create product with its
+// messages and drafts, a product opens the Products tab on it.
 import { useChat } from "@ai-sdk/react"
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
 import { DefaultChatTransport, type ChatTransport, type UIMessage } from "ai"
@@ -25,6 +28,8 @@ import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { CreateProductSheet } from "@/components/create-product-sheet"
+import { RecentThreads } from "@/components/recent-threads"
+import { announceThreads, listProductChats, mergeThreads, newThreadId, productChatRecord, saveProductChat, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord, type StudioThread } from "@/lib/threads"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
 import { ModeToggle, ProductChat, type DraftCards } from "@/components/product-chat"
@@ -313,6 +318,7 @@ export function ProductsTab({
   onLines,
   onCreate,
   onAction,
+  focus = null,
 }: {
   products: NewAppProduct[] | null
   picked: string[]
@@ -322,6 +328,8 @@ export function ProductsTab({
   onCreate?: () => void
   // Test or Publish one of the user's drafts: what to show on its row.
   onAction?: (id: string, action: ProductAction) => Promise<RowNote>
+  // A product opened from Recent or the sidebar: searched for and marked.
+  focus?: string | null
 }) {
   const [notes, setNotes] = useState<Record<string, RowNote>>({})
   const [running, setRunning] = useState<string | null>(null)
@@ -340,6 +348,15 @@ export function ProductsTab({
   const shown = (products ?? []).filter((p) => matches(query, p.name, p.by) && (!lines.length || lines.includes(p.productLine)))
   const fit = useFitRows()
   const paged = usePaged(shown, fit.size)
+  const focused = focus ? products?.find((p) => p.id === focus) : undefined
+  useEffect(() => {
+    if (!focused) return
+    setQuery(focused.name)
+    onLines([])
+    paged.setPage(1)
+    // Only when another product is opened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focused?.id])
   return (
     <PanelList
       id="products"
@@ -407,7 +424,7 @@ export function ProductsTab({
               const pickable = isPickable(p)
               const note = notes[p.id]
               return (
-                <TableRow key={p.id} data-product-row={p.id} data-state={on ? "selected" : undefined}>
+                <TableRow key={p.id} data-product-row={p.id} data-state={on ? "selected" : undefined} data-focused={p.id === focus ? "true" : undefined} className={cn(p.id === focus && "bg-muted/60")}>
                   <TableCell className="w-px">
                     <span className="inline-flex" title={pickable ? undefined : NOT_PUBLISHED}>
                       <input
@@ -475,6 +492,11 @@ export function NewAppWorkspace({
   isMobile,
   fetcher = (...a) => fetch(...a),
   transport,
+  apps = null,
+  myProducts = null,
+  historyOwner = null,
+  openRequest = null,
+  onOpenApp,
 }: {
   products: NewAppProduct[] | null
   kinds: AppKind[] | null
@@ -486,6 +508,15 @@ export function NewAppWorkspace({
   fetcher?: typeof fetch
   // Create product mode's chat (app/api/product-chat unless given).
   transport?: ChatTransport<UIMessage>
+  // Recent's threads (lib/threads.ts): the user's apps, their own products, and the key their product
+  // chats are kept under in this browser (none kept without it).
+  apps?: AppThreadSource[] | null
+  myProducts?: MyProduct[] | null
+  historyOwner?: string | null
+  // A product chat or product to open (from the address or the sidebar); n changes each time.
+  openRequest?: (OpenThreadDetail & { n: number }) | null
+  // Opens an app's page (its chat).
+  onOpenApp?: (href: string) => void
 }) {
   // ---- Create product: the sheet, and the chat that drafts for it ----
   const [creating, setCreating] = useState(false)
@@ -499,6 +530,7 @@ export function NewAppWorkspace({
   }
   const onCreated = (p: NewAppProduct) => {
     onProductsChange?.((list) => [...list.filter((x) => x.id !== p.id), p])
+    noteMine({ id: p.id, name: p.name, status: p.status ?? "draft", updatedAt: new Date().toISOString() })
     if (sheetDraft) {
       const id = sheetDraft.id
       setCreatedDrafts((c) => ({ ...c, [id]: p.id }))
@@ -537,7 +569,11 @@ export function NewAppWorkspace({
   const onAction = async (id: string, action: ProductAction): Promise<RowNote> => {
     const result = await runProductAction(id, action, fetcher)
     if (!result.ok) return { text: result.message, failed: true }
-    if (action === "publish") onProductsChange?.((list) => list.map((p) => (p.id === id ? { ...p, status: "published" as const } : p)))
+    if (action === "publish") {
+      onProductsChange?.((list) => list.map((p) => (p.id === id ? { ...p, status: "published" as const } : p)))
+      const p = products?.find((x) => x.id === id)
+      if (p) noteMine({ id, name: p.name, status: "published", updatedAt: new Date().toISOString() })
+    }
     return { text: result.data.message ?? (action === "publish" ? "Published." : "Tested."), failed: action === "test" && result.data.passed === false }
   }
   const [picked, setPicked] = useState<string[]>([])
@@ -629,6 +665,80 @@ export function NewAppWorkspace({
   const commands = newAppCommands({ tab: open, applyKind, createProduct: () => switchMode("product", { text: "" }) }, kinds ?? [])
   const productCommands = productModeCommands({ tab: open, buildApp: () => switchMode("build", { text: "" }) })
   const drafting = productChat.status === "submitted" || productChat.status === "streaming"
+
+  // ---- threads: Recent, View all, and reopening a product chat ----
+  // This product chat is kept (per user, in this browser) from its first message, and again whenever
+  // it settles or a draft of it is created.
+  const [threadId, setThreadId] = useState(newThreadId)
+  const [chats, setChats] = useState<ProductChatRecord[]>([])
+  useEffect(() => setChats(listProductChats(historyOwner)), [historyOwner])
+  const savedSig = useRef("")
+  const sigOf = (id: string, messages: UIMessage[], created: Record<string, string>) => {
+    const last = messages[messages.length - 1]
+    return `${id}:${messages.length}:${last?.id ?? ""}:${JSON.stringify(last?.parts ?? []).length}:${JSON.stringify(created)}`
+  }
+  useEffect(() => {
+    if (!historyOwner || !productChat.messages.length) return
+    const first = !savedSig.current.startsWith(`${threadId}:`)
+    if (drafting && !first) return
+    const sig = sigOf(threadId, productChat.messages, createdDrafts)
+    if (sig === savedSig.current) return
+    savedSig.current = sig
+    setChats(saveProductChat(historyOwner, productChatRecord(threadId, productChat.messages, createdDrafts)))
+    announceThreads()
+  }, [historyOwner, drafting, productChat.messages, createdDrafts, threadId])
+  // Products created or published here, until the page's list says so.
+  const [localMine, setLocalMine] = useState<MyProduct[]>([])
+  const noteMine = (p: MyProduct) => {
+    setLocalMine((l) => [...l.filter((x) => x.id !== p.id), p])
+    announceThreads({ products: true })
+  }
+  const threads = useMemo(() => {
+    const mine = [...(myProducts ?? []).filter((p) => !localMine.some((l) => l.id === p.id)), ...localMine]
+    return mergeThreads(apps, chats, mine)
+  }, [apps, chats, myProducts, localMine])
+  const [focus, setFocus] = useState<string | null>(null)
+  const restoreChat = (id: string): boolean => {
+    const rec = listProductChats(historyOwner).find((c) => c.id === id) ?? chats.find((c) => c.id === id)
+    if (!rec) return false
+    if (drafting) void productChat.stop()
+    savedSig.current = sigOf(rec.id, rec.messages, rec.created)
+    productChat.setMessages(rec.messages)
+    setThreadId(rec.id)
+    setCreatedDrafts(rec.created)
+    setError(null)
+    setMode("product")
+    return true
+  }
+  const focusProduct = (id: string) => {
+    setFocus(id)
+    setTab("products")
+    setOpened(true)
+    if (products?.some((p) => p.id === id && isPickable(p))) setPicked((p) => (p.includes(id) ? p : [...p, id]))
+  }
+  const openThread = (t: StudioThread) => {
+    if (t.source === "app") {
+      if (onOpenApp) onOpenApp(t.href)
+      else if (typeof window !== "undefined") window.location.assign(t.href)
+    } else if (t.source === "chat") restoreChat(t.id)
+    else focusProduct(t.id)
+  }
+  // From the address (?thread=, ?product=) or the sidebar: once what it needs has loaded.
+  const appliedOpen = useRef(0)
+  useEffect(() => {
+    if (!openRequest || appliedOpen.current === openRequest.n) return
+    if (openRequest.thread) {
+      if (!historyOwner) return
+      appliedOpen.current = openRequest.n
+      restoreChat(openRequest.thread)
+    } else if (openRequest.product) {
+      if (!products) return
+      appliedOpen.current = openRequest.n
+      focusProduct(openRequest.product)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest?.n, historyOwner, products])
+  const recent = <RecentThreads threads={threads} onOpen={openThread} />
   const modeToggle = <ModeToggle mode={mode} onMode={(m) => switchMode(m)} />
   // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
   const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
@@ -661,7 +771,7 @@ export function NewAppWorkspace({
     t === "templates" ? (
       <TemplatesTab kinds={kinds} onUse={applyIdea} />
     ) : (
-      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onAction={onAction} />
+      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onAction={onAction} focus={focus} />
     )
 
   return (
@@ -671,7 +781,12 @@ export function NewAppWorkspace({
           <div className="relative h-full" data-new-app-chat data-mode={mode}>
             {mode === "build" ? (
               <Thread
-                welcome={<ChatWelcome title={WELCOME_TITLE}>{chips}</ChatWelcome>}
+                welcome={
+                  <ChatWelcome title={WELCOME_TITLE}>
+                    {recent}
+                    {chips}
+                  </ChatWelcome>
+                }
                 placeholder="Describe the app: who it's for and what they can do…"
                 toolbar={
                   <>
@@ -703,7 +818,7 @@ export function NewAppWorkspace({
               <ProductChat
                 chat={productChat}
                 cards={cards}
-                welcome={<ChatWelcome title={PRODUCT_WELCOME_TITLE} />}
+                welcome={<ChatWelcome title={PRODUCT_WELCOME_TITLE}>{recent}</ChatWelcome>}
                 toolbar={modeToggle}
                 commands={productCommands}
                 sendBlocked={ai === "enabled" || drafting ? null : ai === "loading" ? "Checking the assistant…" : AI_OFF}

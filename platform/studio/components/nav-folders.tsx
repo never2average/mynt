@@ -9,7 +9,7 @@
 // sidebar to show its apps. Each app opens its workspace view.
 import Link from "next/link"
 import { useEffect, useState } from "react"
-import { ChevronRight, FlaskConical, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
+import { AppWindow, ChevronRight, FlaskConical, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
 
 import {
   Collapsible,
@@ -27,7 +27,11 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar"
+import { APP_STATUS, THREAD_KIND_LABELS } from "@/lib/threads"
 import { STAGE_LABELS, STAGES, type StagedApp, type Stage } from "@/lib/workspaces"
+
+// Every app says it's an app (the Financial products group's items say they're products).
+const APP_LABEL = THREAD_KIND_LABELS["app"]
 
 // Each folder its own icon, expanded and collapsed (where the icon is all that shows, with the
 // folder's name as its tooltip).
@@ -100,7 +104,7 @@ export function NavFolders({
               <SidebarMenuItem data-folder={stage} data-active-folder={open ? "true" : undefined}>
                 <CollapsibleTrigger asChild>
                   <SidebarMenuButton
-                    tooltip={STAGE_LABELS[stage]}
+                    tooltip={`Apps · ${STAGE_LABELS[stage]}`}
                     isActive={collapsed && open}
                     aria-pressed={open}
                     onClick={() => {
@@ -126,7 +130,8 @@ export function NavFolders({
                     {apps.map((app) => (
                       <SidebarMenuSubItem key={app.id}>
                         <SidebarMenuSubButton asChild isActive={app.id === activeAppId}>
-                          <Link href={`/${encodeURIComponent(app.id)}`}>
+                          <Link href={`/${encodeURIComponent(app.id)}`} aria-label={`${APP_LABEL}: ${app.name}`} title={`${APP_LABEL} · ${APP_STATUS[stage]}`} data-thread-item={`app:${app.id}`} data-kind="app">
+                            <AppWindow className="size-3.5" aria-hidden data-thread-icon="app" />
                             <span>{app.name}</span>
                           </Link>
                         </SidebarMenuSubButton>

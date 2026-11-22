@@ -74,6 +74,8 @@ export function toProjects(appsReply: unknown, buildsReply: unknown): ProjectIte
         ownerId: str(a.owner_id) || null,
         previewUrl: conversations.find((c) => c.previewUrl)?.previewUrl ?? null,
         conversations,
+        // When the app or its newest build last changed: its thread's last activity (lib/threads.ts).
+        lastActivityAt: [str(a.updated_at), conversations[0]?.updatedAt ?? ""].sort().pop() || null,
         updatedAt: str(a.updated_at),
       };
     })
