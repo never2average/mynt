@@ -2,7 +2,8 @@
 // The /new page on Earn's chat workspace: the centred "What do you want to build?" with the composer and a
 // few of the kinds' app ideas as chips; the tabs on the right (Templates, Products) with their icons beside the chat corner
 // while the panel is closed; the composer's Products picker sharing the selection with the Products tab; and
-// sending as Build it, blocked until a product is picked.
+// sending as Build it, blocked until a product is picked (the reason is the disabled Send's tooltip, never a
+// line under the composer).
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -164,7 +165,7 @@ describe("the New app page", () => {
     await loaded();
     await openTab("Products");
     const panel = document.querySelector('[data-panel-content="products"]')!;
-    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["", "Product", "By", "Product line"]);
+    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["", "Product", "By", "Product line", ""]);
     expect(pickedCount()).toBe("Pick at least one");
     fireEvent.click(tabCheckbox("p1"));
     expect(pickedCount()).toBe("1 picked");
@@ -203,12 +204,17 @@ describe("the New app page", () => {
     expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Pick products");
   });
 
-  it("can't send until a product is picked, saying why; then sending creates the app with the template's kind and opens it", async () => {
+  it("can't send until a product is picked, saying why as Send's tooltip only; then sending creates the app with the template's kind and opens it", async () => {
     await loaded();
     fireEvent.change(input(), { target: { value: "A savings app with round-ups for students" } });
     const send = () => screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
     expect(send().disabled).toBe(true);
-    expect(document.querySelector("p[data-send-blocked]")!.textContent).toBe("Pick at least one product to build on.");
+    expect(send().title).toBe("Pick at least one product to build on.");
+    expect(send().getAttribute("aria-description")).toBe("Pick at least one product to build on.");
+    // No line of text under the composer: the picker's "Pick products" is the cue.
+    expect(document.querySelector("p[data-send-blocked]")).toBeNull();
+    expect(document.querySelector("[data-new-app-chat]")!.textContent).not.toContain("Pick at least one product to build on.");
+    expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Pick products");
     // Enter doesn't send either.
     fireEvent.keyDown(input(), { key: "Enter" });
     await act(async () => undefined);
@@ -216,22 +222,24 @@ describe("the New app page", () => {
 
     const chip = chipOf("savings-goals");
     await act(async () => void fireEvent.click(chip));
-    expect(document.querySelector("p[data-send-blocked]")).toBeNull();
     expect(send().disabled).toBe(false);
+    expect(send().getAttribute("aria-description")).toBeNull();
     await act(async () => void fireEvent.click(send()));
     await act(async () => new Promise((r) => setTimeout(r, 0)));
     expect(posted).toEqual([{ prompt: ideaOf(chip.getAttribute("data-chip")!).goal, product_ids: ["p1"], kind: "savings-goals" }]);
     expect(pushed).toEqual(["/app-1/build-1"]);
   });
 
-  it("a prompt too short to build from can't be sent either, and says so", async () => {
+  it("a prompt too short to build from can't be sent either, and says so as Send's tooltip", async () => {
     await loaded();
     await openTab("Products");
     fireEvent.click(tabCheckbox("p1"));
     fireEvent.change(input(), { target: { value: "An app" } });
     await act(async () => undefined);
-    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(document.querySelector("p[data-send-blocked]")!.textContent).toMatch(/at least 10 characters/);
+    const send = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    expect(send.title).toMatch(/at least 10 characters/);
+    expect(document.querySelector("p[data-send-blocked]")).toBeNull();
     fireEvent.keyDown(input(), { key: "Enter" });
     await act(async () => undefined);
     expect(posted).toEqual([]);

@@ -2,11 +2,11 @@
 
 // A build's measured cost and time as the studio shows them: a figure, or "Not measured" with
 // Mynt's reason in a tooltip (never 0); and the builder's compact live line (phase · elapsed ·
-// cost of cap), which counts up each second on the figures the view already polls.
+// cost so far), which counts up each second on the figures the view already polls.
 import { useEffect, useState } from "react"
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { costOfCap, durationText, isRunningBuild, NOT_MEASURED, NOT_REPORTED, phaseElapsed, type BuildMetrics, type Shown } from "@/lib/build-metrics"
+import { buildCost, durationText, isRunningBuild, NOT_MEASURED, NOT_REPORTED, phaseElapsed, type BuildMetrics, type Shown } from "@/lib/build-metrics"
 import { cn } from "@/lib/utils"
 
 /** A measured figure, or "Not measured" with Mynt's reason in a tooltip. */
@@ -49,7 +49,7 @@ const phaseLabel = (status: string) => {
   return t ? t[0].toUpperCase() + t.slice(1) : "Unknown"
 }
 
-/** The builder's live line for one build: phase · elapsed in it · cost of cap. */
+/** The builder's live line for one build: phase · elapsed in it · cost so far. */
 export function BuildMeter({ build, className }: { build: MeteredBuild; className?: string }) {
   const running = isRunningBuild(build.status)
   const now = useNow(running)
@@ -62,7 +62,7 @@ export function BuildMeter({ build, className }: { build: MeteredBuild; classNam
       <span aria-hidden>·</span>
       <Measured shown={elapsed === null ? { text: NOT_MEASURED, measured: false, reason } : { text: durationText(elapsed), measured: true, reason: null }} field="elapsed" />
       <span aria-hidden>·</span>
-      <Measured shown={costOfCap(build.metrics)} field="cost" />
+      <Measured shown={buildCost(build.metrics)} field="cost" />
     </span>
   )
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { appKindId, buildCap } from "./studio-tools";
+import { appKindId } from "./studio-tools";
 
 // New app: what the user typed ("What do you want to build?") and the products they picked
 // become a draft Mynt app (create_app) and its first build (start_build). Pure, so the route,
@@ -11,8 +11,6 @@ export const NewAppRequest = z
     product_ids: z.array(z.string().trim().min(1).max(200)).min(1, "Pick at least one product to build on.").max(20),
     // The app kind it starts from (a template on New app), passed to start_build where Mynt takes one.
     kind: appKindId.optional(),
-    // The cap the developer picked (Cap $ beside Build it); Mynt's usual cap without one. Mynt checks it again.
-    cap_usd: buildCap.optional(),
   })
   .strict();
 export type NewAppRequest = z.infer<typeof NewAppRequest>;

@@ -108,10 +108,10 @@ describe("/api/apps", () => {
     expect((await post({ prompt, product_ids: ["p1"], kind: "Not A Kind!" })).status).toBe(400);
   });
 
-  it("starts the first build with the cap the developer picked", async () => {
-    await post({ prompt, product_ids: ["p1"], cap_usd: 4.25 });
-    expect(fake.calls.find((c) => c.name === "start_build")?.args).toEqual({ goal: prompt, app_id: "app-1", cap_usd: 4.25 });
-    expect((await post({ prompt, product_ids: ["p1"], cap_usd: 0 })).status).toBe(400);
+  it("starts the first build on Mynt's own cap: a cap_usd from the page is refused", async () => {
+    await post({ prompt, product_ids: ["p1"] });
+    expect(fake.calls.find((c) => c.name === "start_build")?.args).not.toHaveProperty("cap_usd");
+    expect((await post({ prompt, product_ids: ["p1"], cap_usd: 4.25 })).status).toBe(400);
   });
 
   it("still opens the app when its first build couldn't start, saying why", async () => {

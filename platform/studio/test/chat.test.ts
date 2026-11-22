@@ -67,10 +67,10 @@ describe("start or steer", () => {
     expect(buildSummaries({ builds: [{ id: "b", app_id: "app", status: "coding", mode: "session", finish_requested_at: "2026-11-22T10:00:00Z", updated_at: "x" }] })[0].finishing).toBe(true);
   });
 
-  it("starts a build with the cap the developer picked", () => {
-    expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [], text: "Build the onboarding flow", capabilities: plain, capUsd: 7.5 })).toEqual({
+  it("starts a build without a cap (Mynt applies its own)", () => {
+    expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [], text: "Build the onboarding flow", capabilities: plain })).toEqual({
       kind: "start",
-      args: { goal: "Build the onboarding flow", app_id: "app", cap_usd: 7.5 },
+      args: { goal: "Build the onboarding flow", app_id: "app" },
     });
   });
 

@@ -94,12 +94,17 @@ export function useSlashMenu(commands: readonly SlashCommand[], inputRef: RefObj
   return { open, items, active, setActive, choose, dismiss, openMenu, onKeyDown };
 }
 
+// Whether an event's target is in the composer the menu is anchored to.
+const insideAnchor = (t: EventTarget | null) => t instanceof Element && t.closest("[data-slash-anchor]") !== null;
+
 /** The popover, anchored to `children` (the composer's box) and opening above it. */
 export function SlashCommandPopover({ menu, children }: { menu: SlashMenu; children: ReactNode }) {
   const { open, items, active, setActive, choose, dismiss } = menu;
   return (
     <Popover open={open} onOpenChange={(o) => !o && dismiss()}>
-      <PopoverAnchor asChild>{children}</PopoverAnchor>
+      <PopoverAnchor asChild data-slash-anchor="">
+        {children}
+      </PopoverAnchor>
       <PopoverContent
         side="top"
         align="start"
@@ -107,6 +112,14 @@ export function SlashCommandPopover({ menu, children }: { menu: SlashMenu; child
         // Focus stays in the composer: the keys there move the selection.
         onOpenAutoFocus={(e) => e.preventDefault()}
         onCloseAutoFocus={(e) => e.preventDefault()}
+        // The composer is "outside" the popover, but typing in it, clicking it or its "/" button, or focus
+        // returning to it must keep the menu open (it closed the moment "/" was typed). Anywhere else closes it.
+        onInteractOutside={(e) => {
+          if (insideAnchor(e.target)) e.preventDefault();
+        }}
+        onFocusOutside={(e) => {
+          if (insideAnchor(e.target)) e.preventDefault();
+        }}
         onMouseDown={(e) => e.preventDefault()}
         className="w-(--radix-popover-trigger-width) max-w-(--thread-max-width) p-1"
         data-slash-menu
