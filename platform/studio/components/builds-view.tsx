@@ -18,11 +18,13 @@ import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Measured, useNow } from "@/components/build-meter"
+import { costOfCap, totalTime, type BuildMetrics } from "@/lib/build-metrics"
 import { STARTING, STEERABLE } from "@/lib/chat"
 import { toCsv } from "@/lib/compliance"
 import type { Kpi } from "@/lib/dashboard-visual"
 
-export type BuildRow = { appId: string; appName: string; id: string; title: string; status: string; updatedAt: string }
+export type BuildRow = { appId: string; appName: string; id: string; title: string; status: string; updatedAt: string; metrics?: BuildMetrics | null }
 
 const FAILED = new Set(["failed", "blocked", "over_budget"])
 const isRunning = (s: string) => STEERABLE.has(s) || STARTING.has(s)
@@ -94,6 +96,7 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
   const { page, pages, shown: onPage, setPage } = usePaged(shown)
   const apps = useMemo(() => [...new Map(all.map((r) => [r.appId, r.appName] as const))].sort((a, b) => a[1].localeCompare(b[1])), [all])
   const statuses = useMemo(() => [...new Set(all.map((r) => r.status))].sort(), [all])
+  const now = useNow(onPage.some((r) => isRunning(r.status)))
   const set = (patch: Partial<BuildFilters>) => {
     setF({ ...f, ...patch })
     setPage(1)
@@ -109,8 +112,8 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
     downloadCsv(
       "builds.csv",
       toCsv(
-        ["Build", "App", "Status", "Updated"],
-        shown.map((r) => [r.title, r.appName, r.status, r.updatedAt]),
+        ["Build", "App", "Status", "Cost", "Time", "Updated"],
+        shown.map((r) => [r.title, r.appName, r.status, costOfCap(r.metrics).text, totalTime(r.metrics, r.status).text, r.updatedAt]),
       ),
     )
 
@@ -157,6 +160,8 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
               <TableHead>Build</TableHead>
               <TableHead>App</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Cost</TableHead>
+              <TableHead>Time</TableHead>
               <TableHead>Updated</TableHead>
             </TableRow>
           </TableHeader>
@@ -173,12 +178,18 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
                   <TableCell>
                     <BuildStatus status={r.status} />
                   </TableCell>
+                  <TableCell className="whitespace-nowrap tabular-nums">
+                    <Measured shown={costOfCap(r.metrics)} field="cost" />
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap tabular-nums" data-live={isRunning(r.status) || undefined}>
+                    <Measured shown={totalTime(r.metrics, r.status, now)} field="time" />
+                  </TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums text-muted-foreground">{whenOf(r.updatedAt)}</TableCell>
                 </TableRow>
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={4} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
                   {all.length ? "No builds match these filters." : error ? "Builds couldn't be loaded." : "No builds yet. Start one with New app."}
                 </TableCell>
               </TableRow>

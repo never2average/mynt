@@ -236,6 +236,7 @@ export function ProjectWorkspaceShell({
                 isMobile={isMobile}
                 mobileView={mobileView}
                 onShowChat={() => setMobileView("chat")}
+                build={selectedBuild ?? selectedProject?.conversations[0] ?? null}
               />
             )
           }

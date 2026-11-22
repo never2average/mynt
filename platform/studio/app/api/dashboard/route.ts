@@ -20,7 +20,13 @@ export async function GET(req: NextRequest) {
     const scope = workspace ? { workspace_id: workspace } : {};
     if (tools.some((t) => t.name === "get_developer_dashboard")) {
       if (workspace && !support.dashboardByWorkspace) return json({ dashboard: null, unavailable: NOT_SCOPED });
-      return json({ dashboard: fromDashboardTool(await callStudioTool(mynt, "get_developer_dashboard", { days: 30, ...scope })) });
+      // The builds, for their average cost and time; none when this Mynt can't scope them to the workspace.
+      const buildScope = !workspace || support.buildsByWorkspace ? scope : null;
+      const [reply, buildList] = await Promise.all([
+        callStudioTool(mynt, "get_developer_dashboard", { days: 30, ...scope }),
+        buildScope ? callStudioTool(mynt, "list_builds", buildScope).catch(() => null) : Promise.resolve(null),
+      ]);
+      return json({ dashboard: fromDashboardTool(reply, buildList) });
     }
     if (workspace && !support.appsByWorkspace) return json({ dashboard: null, unavailable: NOT_SCOPED });
     const builds = workspace && support.buildsByWorkspace ? scope : {};
