@@ -2,14 +2,15 @@
 
 // Search chats: a centred pop-up (about two thirds of the screen) with a search box at the top and the
 // user's chats under it, newest first; typing narrows them to the ones whose title or words match, each
-// with the words around the match. Up/Down move, Enter opens. Used by the Earn chat's Past conversations
+// with the words around the match (titles at once; with `search`, Mynt's answer for the words in the chats
+// replaces that a moment later). Up/Down move, Enter opens. Used by the Earn chat's Past conversations
 // button and by the sidebar's Search chats (open or collapsed).
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Plus, Search } from "lucide-react"
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
-import { searchThreads, threadDate, type EarnThreadRecord } from "@/lib/earn-history"
+import { searchThreads, threadDate, type EarnThreadRecord, type ThreadMatch } from "@/lib/earn-history"
 
 export function ChatSearchDialog({
   open,
@@ -18,6 +19,7 @@ export function ChatSearchDialog({
   current = null,
   onPick,
   onNew,
+  search,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -25,10 +27,28 @@ export function ChatSearchDialog({
   current?: string | null
   onPick: (id: string) => void
   onNew: () => void
+  // Searches the chats' words too (null: couldn't just now, so the titles' matches stay).
+  search?: (query: string) => Promise<ThreadMatch[] | null>
 }) {
   const [query, setQuery] = useState("")
   const [active, setActive] = useState(0)
-  const matches = useMemo(() => searchThreads(threads, query), [threads, query])
+  const local = useMemo(() => searchThreads(threads, query), [threads, query])
+  const [found, setFound] = useState<{ query: string; matches: ThreadMatch[] } | null>(null)
+  useEffect(() => {
+    const q = query.trim()
+    if (!search || !q) return
+    let live = true
+    const timer = setTimeout(() => {
+      void search(q).then((m) => {
+        if (live && m) setFound({ query: q, matches: m })
+      })
+    }, 200)
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [search, query])
+  const matches = found && query.trim() && found.query === query.trim() ? found.matches : local
   // Row 0 is New conversation; the chats follow.
   const rows = matches.length + 1
   const close = (next: boolean) => {

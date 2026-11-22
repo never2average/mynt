@@ -16,7 +16,9 @@ import { CATALOG, inProduction, licensed } from "./helpers.js";
 const CATALOG_TOOLS = ["find_licenses", "get_product", "get_product_regime", "get_region", "get_regulator", "get_template", "list_apps", "list_categories", "list_legal_instruments", "list_product_categories", "list_products", "list_regions", "list_regulated_product_types", "list_template_defaults", "whoami"];
 // Anyone signed in may have been invited to a workspace, and answers it themselves.
 const INVITATION_TOOLS = ["accept_workspace_invite", "decline_workspace_invite", "list_my_invitations"];
-const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_product", "list_firm_notices", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment", ...INVITATION_TOOLS];
+// ...and keeps their own studio chats on Mynt (chat-sessions.ts).
+const CHAT_SESSION_TOOLS = ["append_chat_events", "create_chat_session", "delete_chat_session", "get_chat_session", "list_chat_sessions"];
+const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_product", "list_firm_notices", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment", ...INVITATION_TOOLS, ...CHAT_SESSION_TOOLS];
 const DEVELOPER_TOOLS = [
   "create_app", "list_my_apps", "preview_app", "publish_app", "update_app",
   // building on innovators' products
