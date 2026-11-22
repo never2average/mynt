@@ -608,6 +608,84 @@ test("while the agents code, Mynt starts the app's dev server itself and serves 
   assert.equal(b.live_preview_url, null);
 });
 
+test("a live preview started while coding stays shown through the agent's review, checks and push, until verification", async () => {
+  const { builds, sandboxes, as, connect, call } = await setup();
+  const dev = await connect(await as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick(); // agent started
+  sandboxes.sandboxes.get(sbx).devPreview = "started";
+  await builds.tick();
+  const link = `https://${sbx}-5173.preview.example?_token=t`;
+  const get = async () => (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal((await get()).live_preview_url, link);
+  // The dev servers keep running while the agent reviews, checks and pushes: the link is still shown.
+  for (const phase of ["auditing", "checking", "previewing", "pushing"]) {
+    sandboxes.write(sbx, `${BUILD}/job/status.json`, { phase, message: phase });
+    await builds.tick();
+    const b = await get();
+    assert.equal(b.status, phase);
+    assert.equal(b.live_preview_url, link, phase);
+    assert.equal((await call(dev, "list_builds", {})).data.builds[0].live_preview_url, link);
+  }
+  // Mynt stops them when the agent is done and verification starts: the link goes.
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
+  await builds.tick();
+  assert.equal((await get()).status, "verifying");
+  assert.equal((await get()).live_preview_url, null);
+});
+
+test("a build's phase says each verification step, and an ended build says why it ended there", async () => {
+  const ctx = await setup();
+  const { builds, sandboxes, call } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const started = (await call(dev, "start_build", { goal: "Build a savings page please" })).data;
+  await builds.tick();
+  const sbx = (await builds.get(started.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick();
+  sandboxes.write(sbx, `${BUILD}/job/result.json`, agentReport);
+  sandboxes.finishAgent(sbx);
+  await builds.tick();
+  const phase = async () => (await call(dev, "get_build_activity", { build_id: started.id })).data.phase_message;
+  assert.equal(await phase(), "Source packaged; independent verification started");
+  const vid = (await builds.get(started.id)).verify_sandbox_id;
+  sandboxes.ready(vid);
+  await builds.tick();
+  assert.match(await phase(), /^Running Mynt's checks: tests/);
+  sandboxes.sandboxes.get(vid).checksRunning = false;
+  sandboxes.write(vid, `${V}/before.sha`, "tree\n");
+  const failing = [
+    ...passingChecks.filter((c) => c.name !== "secrets_scan"),
+    { name: "secrets_scan", status: "fail", detail: "1 secret(s): generic-api-key in api/.env.example" },
+    { name: "static_scan", status: "fail", detail: `high-severity: ${"x".repeat(400)}` },
+  ];
+  sandboxes.write(vid, `${V}/report.json`, { checks: failing });
+  await builds.tick();
+  assert.match(await phase(), /^Checks finished; independent Maxwell audit started \(.*up to \d+ min\)/);
+  sandboxes.write(vid, `${V}/maxwell.json`, cleanAudit);
+  sandboxes.finishAgent(vid, "success");
+  await builds.tick();
+  const b = (await call(dev, "get_build", { build_id: started.id })).data;
+  assert.equal(b.status, "failed");
+  // Which checks failed and what they found, cut short, as the error and as the phase.
+  assert.match(b.error, /^Not production-ready: secrets_scan \(1 secret\(s\): generic-api-key in api\/\.env\.example\); static_scan \(high-severity: x+…\)$/);
+  assert.ok(b.error.length < 500);
+  assert.equal(b.phase_message, b.error);
+  assert.equal(await phase(), b.error);
+
+  // Stopped, or over budget: the phase says so too.
+  const other = (await call(dev, "start_build", { goal: "Build another savings page" })).data;
+  await builds.tick();
+  await call(dev, "stop_build", { build_id: other.id });
+  const stopped = (await call(dev, "get_build", { build_id: other.id })).data;
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.phase_message, stopped.error);
+});
+
 test("Mynt's live preview: the template's Vite config is behind the forwarder only when Mynt starts it", async () => {
   const files = workspaceFiles("coding-build");
   const vite = files["templates/mynt-app/web/vite.config.ts"];
@@ -1681,7 +1759,11 @@ process.stdin.on("data", (d) => {
   // The agent's words (and thinking) as it writes them: asked for, and only their text kept, cut down to what Mynt
   // reads (no tool input as it's written, no thinking signature).
   assert.ok(ran.args.includes("--include-partial-messages"));
-  const events = readFileSync(join(dir, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((m) => m.type === "stream_event");
+  // Thinking summaries asked for, so the reasoning shown isn't empty where the API would redact it.
+  const settings = ran.args[ran.args.indexOf("--settings") + 1];
+  assert.equal(settings, join(dir, "settings.json"));
+  assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { showThinkingSummaries: true });
+  const events =readFileSync(join(dir, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((m) => m.type === "stream_event");
   assert.deepEqual(events, [
     { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "message_start", message: { id: "msg_1" } } },
     { type: "stream_event", parent_tool_use_id: null, api_message_id: "msg_1", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } },

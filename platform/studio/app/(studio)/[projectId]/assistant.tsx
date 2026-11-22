@@ -19,6 +19,15 @@ type ThreadState = {
 };
 
 type BuildData = { buildId: string; started: boolean };
+type FollowData = { buildId: string; after: number | null };
+
+// Where the chat follows a build on from (GET /api/chat): the build, and the activity cursor it
+// has shown up to.
+export function followUrl(projectId: string, buildId: string, after: number | null): string {
+  const q = new URLSearchParams({ projectId, buildId });
+  if (after !== null) q.set("after", String(after));
+  return `/api/chat?${q.toString()}`;
+}
 
 const EMPTY_MESSAGES: UIMessage[] = [];
 
@@ -49,12 +58,15 @@ export const builderCommands = (projectId: string): SlashCommand[] => [
 // or starts one, and streams back what the agent does. Each build is one conversation.
 export const Assistant = ({
   initialMessages,
+  follow = null,
   selectedProjectId,
   selectedConversationId = null,
   onThreadStateChange,
   welcome,
 }: {
   initialMessages?: UIMessage[];
+  /** The build is still going: follow it live from this cursor as the page opens. */
+  follow?: { after: number } | null;
   selectedProjectId: string;
   selectedConversationId?: string | null;
   onThreadStateChange?: (next: ThreadState) => void;
@@ -66,6 +78,7 @@ export const Assistant = ({
       projectId={selectedProjectId}
       conversationId={selectedConversationId}
       initialMessages={initialMessages ?? EMPTY_MESSAGES}
+      follow={follow}
       onThreadStateChange={onThreadStateChange}
       welcome={welcome}
     />
@@ -76,17 +89,23 @@ function ProjectAssistant({
   projectId,
   conversationId,
   initialMessages,
+  follow,
   onThreadStateChange,
   welcome,
 }: {
   projectId: string;
   conversationId: string | null;
   initialMessages: UIMessage[];
+  follow: { after: number } | null;
   onThreadStateChange?: (next: ThreadState) => void;
   welcome?: ReactNode;
 }) {
   // The build this conversation is about; set by the first reply when a message starts one.
   const activeBuildIdRef = useRef<string | null>(conversationId);
+  // Where to follow the build on from, and whether the reply that just ended asked to be followed
+  // on (a watch ends after a few minutes, or when the agent hands over to Mynt's verification).
+  const followRef = useRef<FollowData | null>(conversationId && follow ? { buildId: conversationId, after: follow.after } : null);
+  const followOnRef = useRef(false);
 
   const dispatchProjectsUpdated = useCallback(() => {
     window.dispatchEvent(
@@ -96,6 +115,13 @@ function ProjectAssistant({
 
   const handleData = useCallback(
     (part: { type: string; data?: unknown }) => {
+      if (part.type === "data-follow") {
+        const f = part.data as Partial<FollowData> | undefined;
+        if (typeof f?.buildId !== "string") return;
+        followRef.current = { buildId: f.buildId, after: typeof f.after === "number" ? f.after : null };
+        followOnRef.current = true;
+        return;
+      }
       if (part.type !== "data-build") return;
       const data = part.data as BuildData | undefined;
       if (!data?.buildId || data.buildId === activeBuildIdRef.current) return;
@@ -128,8 +154,25 @@ function ProjectAssistant({
             conversationId: activeBuildIdRef.current,
           },
         }),
+        // Following a build on: no message, just what the agent and Mynt do next.
+        prepareReconnectToStreamRequest: async ({ headers, credentials }) => {
+          const f = followRef.current;
+          return { api: f ? followUrl(projectId, f.buildId, f.after) : followUrl(projectId, activeBuildIdRef.current ?? "", null), headers, credentials };
+        },
       }),
     [projectId],
+  );
+
+  const chatRef = useRef<{ resumeStream: () => Promise<void> } | null>(null);
+  const onFinish = useCallback(
+    ({ isAbort, isError }: { isAbort?: boolean; isError?: boolean }) => {
+      dispatchProjectsUpdated();
+      const again = followOnRef.current && !isAbort && !isError;
+      followOnRef.current = false;
+      // After the chat has settled, so the follow is a request of its own.
+      if (again) window.setTimeout(() => void chatRef.current?.resumeStream(), 0);
+    },
+    [dispatchProjectsUpdated],
   );
 
   const chat = useChat<UIMessage>({
@@ -137,8 +180,17 @@ function ProjectAssistant({
     transport,
     messages: initialMessages,
     onData: handleData,
-    onFinish: dispatchProjectsUpdated,
+    onFinish,
   });
+  chatRef.current = chat;
+
+  // A build that's still going is followed as soon as its page opens.
+  const followed = useRef(false);
+  useEffect(() => {
+    if (followed.current || !followRef.current) return;
+    followed.current = true;
+    void chat.resumeStream();
+  }, [chat]);
 
   const runtime = useAISDKRuntime(chat);
   const commands = useMemo(() => builderCommands(projectId), [projectId]);

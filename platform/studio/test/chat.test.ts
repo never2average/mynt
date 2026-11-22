@@ -7,6 +7,8 @@ import {
   type TextChunk,
   buildSummaries,
   buildToMessages,
+  followFrom,
+  outcomeNote,
   capabilitiesFrom,
   chooseAction,
   newSince,
@@ -260,6 +262,54 @@ describe("activity as messages", () => {
     const messages = buildToMessages({ id: "b", goal: "Build it please" }, { activity: [say("second"), say("first")] });
     expect(messages.map((m) => m.parts.map((p) => (p.kind === "text" ? p.text : "")))).toEqual([["Build it please"], ["first", "second"]]);
     expect(buildToMessages(null, null)).toEqual([]);
+  });
+});
+
+describe("how a build ended, and following one that's still going", () => {
+  it("says a shipped build shipped, with its pull request, and what the next message does", () => {
+    const note = outcomeNote({ status: "succeeded", pr_url: "https://github.com/acme/app/pull/7" });
+    expect(note).toMatch(/^\*\*Shipped\.\*\* Mynt verified this build in a clean sandbox and opened a pull request: https:\/\/github\.com\/acme\/app\/pull\/7\./);
+    expect(note).toMatch(/carries on from it/);
+    // Only an https link is shown.
+    expect(outcomeNote({ status: "succeeded", pr_url: "javascript:alert(1)" })).not.toMatch(/javascript/);
+  });
+
+  it("says why a build didn't ship, in Mynt's words, and that the next build starts from the last shipped one", () => {
+    const note = outcomeNote({ status: "failed", error: "Not production-ready: secrets_scan (1 secret(s): generic-api-key in api/.env.example)" });
+    expect(note).toBe(
+      "**This build didn't ship**: Not production-ready: secrets_scan (1 secret(s): generic-api-key in api/.env.example). Your next message starts a new build. It carries on from this app's last shipped build, if there is one, not from this one: Mynt only builds on work it has verified.",
+    );
+    expect(outcomeNote({ status: "over_budget", error: "Stopped at US$10.04: over the US$10 cap." })).toMatch(/^\*\*This build was stopped at its spending cap\*\*: Stopped at US\$10\.04: over the US\$10 cap\. Your next/);
+    expect(outcomeNote({ status: "blocked" })).toMatch(/^\*\*Mynt didn't ship this build\*\*\. Your next/);
+    for (const status of ["queued", "coding", "verifying", undefined]) expect(outcomeNote({ status })).toBeNull();
+  });
+
+  it("ends a finished build's history with how it ended", () => {
+    const messages = buildToMessages({ id: "b", goal: "Build it please", status: "blocked", error: "Security gate: 1 critical/high Maxwell finding(s)" }, { activity: [say("Done")] });
+    expect(messages.at(-1)?.role).toBe("assistant");
+    expect(messages.at(-1)?.parts.map((p) => (p.kind === "text" ? p.text : ""))).toEqual(["Done", expect.stringMatching(/^\*\*Mynt didn't ship this build\*\*: Security gate/)]);
+    // Nothing from the agent, just the goal: the note is a message of its own.
+    expect(buildToMessages({ id: "b", goal: "Build it please", status: "failed" }, { activity: [] }).map((m) => m.role)).toEqual(["user", "assistant"]);
+    // Still going: no note.
+    expect(buildToMessages({ id: "b", goal: "Build it please", status: "coding" }, { activity: [say("Working")] }).at(-1)?.parts).toHaveLength(1);
+  });
+
+  it("follows a build that's still going from the cursor its history was read up to", () => {
+    expect(followFrom({ status: "coding" }, { activity: [], cursor: 12 })).toEqual({ after: 12 });
+    expect(followFrom({ status: "verifying" }, { activity: [], cursor: 0 })).toEqual({ after: 0 });
+    expect(followFrom({ status: "succeeded" }, { activity: [], cursor: 12 })).toBeNull();
+    expect(followFrom({ status: "coding" }, { activity: [] })).toBeNull(); // no cursor: it couldn't follow on without repeats
+    expect(followFrom(null, null)).toBeNull();
+  });
+
+  it("a follower can start from a cursor, and says where it has got to", () => {
+    const f = new ActivityFollower({ after: 12 });
+    expect(f.position).toBe(12);
+    expect(f.next("b")).toEqual({ build_id: "b", limit: 200, after: 12 });
+    f.take({ status: "coding", activity: [{ type: "message", summary: "x", seq: 13 }], cursor: 13, first_seq: 1 });
+    expect(f.position).toBe(13);
+    expect(new ActivityFollower().position).toBeNull();
+    expect(new ActivityFollower({ after: -1 }).position).toBeNull();
   });
 });
 
