@@ -21,10 +21,10 @@ const { BRAND, SITE_DESCRIPTION, SITE_NAME } = await import("@/lib/brand");
 const { contrastRatio } = await import("@/lib/contrast");
 
 describe("metadata", () => {
-  it("titles every page '<page> · Mynt Studio', with Mynt's description and theme colours", async () => {
+  it("titles every page '<page> · Mynt', with Mynt's description and theme colours", async () => {
     const { generateMetadata, viewport } = await import("@/app/layout");
     const meta = await generateMetadata();
-    expect(meta.title).toEqual({ default: "Mynt Studio", template: "%s · Mynt Studio" });
+    expect(meta.title).toEqual({ default: "Mynt", template: "%s · Mynt" });
     expect(meta.description).toBe("Build compliant finance apps with Mynt's coding agent");
     expect(meta.applicationName).toBe(SITE_NAME);
     expect(meta.metadataBase).toBeInstanceOf(URL);
@@ -36,7 +36,7 @@ describe("metadata", () => {
 
   it("names each studio page in its tab title", async () => {
     const studio = await import("@/app/(studio)/layout");
-    expect(studio.metadata.title).toEqual({ default: "Dashboard · Mynt Studio", template: "%s · Mynt Studio" });
+    expect(studio.metadata.title).toEqual({ default: "Dashboard · Mynt", template: "%s · Mynt" });
     const titles: Record<string, unknown> = {
       Audits: (await import("@/app/(studio)/audits/layout")).metadata.title,
       Earn: (await import("@/app/(studio)/earn/layout")).metadata.title,

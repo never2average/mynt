@@ -14,4 +14,5 @@ export const SITE_NAME = "Mynt Studio";
 export const SHORT_NAME = "Mynt";
 export const SITE_DESCRIPTION = "Build compliant finance apps with Mynt's coding agent";
 export const TAGLINE = "Build compliant finance apps with an AI agent";
-export const TITLE_TEMPLATE = `%s · ${SITE_NAME}`;
+// Browser tab titles say "Mynt", not "Mynt Studio": "<page> · Mynt".
+export const TITLE_TEMPLATE = `%s · ${SHORT_NAME}`;
