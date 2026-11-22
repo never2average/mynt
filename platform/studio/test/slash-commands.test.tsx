@@ -269,6 +269,27 @@ describe("slash commands in Earn's composer", () => {
     expect(input().value).toBe("half a thought");
   });
 
+  it("stays open while the user types, clicks or focuses inside the composer; a click elsewhere closes it", async () => {
+    render(<Earn data={lpData} />);
+    await type("/");
+    expect(menu()).not.toBeNull();
+    // What a browser does after "/" is typed: focus and pointer events land in the composer, which is outside
+    // the popover itself. These closed the menu the moment it opened.
+    await act(async () => {
+      fireEvent.focusIn(input());
+      fireEvent.pointerDown(input());
+    });
+    expect(menu()).not.toBeNull();
+    // The "/" button sits in the composer too: pressing it keeps the suggestions up.
+    await act(async () => void fireEvent.pointerDown(screen.getByRole("button", { name: "Commands" })));
+    expect(menu()).not.toBeNull();
+    await type("/str");
+    expect(names()).toContain("strategies");
+    // Outside the composer, it closes.
+    await act(async () => void fireEvent.pointerDown(document.body));
+    expect(menu()).toBeNull();
+  });
+
   it("plain Enter still sends when the menu is closed", async () => {
     const sent: string[] = [];
     render(<Earn data={lpData} sent={sent} />);
