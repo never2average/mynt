@@ -1,0 +1,265 @@
+{
+  "$schema": "../../../schemas/product-idea-seed.schema.json",
+  "ideas": [
+    {
+      "id": "gig-worker-no-penalty-cd",
+      "label": "Gig workers with uneven pay avoid CDs in case they need the cash early",
+      "product_name": "6-Month No-Penalty CD",
+      "summary": "A 6-month certificate of deposit that can be closed early without an early withdrawal penalty after the first week.",
+      "product_line": "account_operations",
+      "category": "deposits",
+      "region": "US",
+      "key_features": [
+        "Fixed rate for a 6-month term, set by the firm at opening",
+        "Close it and take the whole balance any time after the first 7 days, with no early withdrawal penalty",
+        "Opening minimum and maximum set in the firm's terms",
+        "Reminder before maturity with the choice to renew or move the money out"
+      ],
+      "risk_level": "low",
+      "liquidity": "moderate",
+      "typical_horizon": "short",
+      "return_type": "fixed_interest",
+      "sort": 10
+    },
+    {
+      "id": "goal-locked-mma",
+      "label": "Savers dip into goal money because it sits next to spending cash",
+      "product_name": "Goal-Locked Money Market Sub-Accounts",
+      "summary": "A money market account split into named sub-accounts, each locked to a goal date the holder chooses.",
+      "product_line": "account_operations",
+      "category": "deposits",
+      "region": "US",
+      "key_features": [
+        "Up to ten named sub-accounts under one money market account",
+        "Each sub-account has a goal amount and a goal date the holder sets",
+        "Taking money out of a sub-account before its date needs a waiting period the holder chose at opening",
+        "One statement shows every sub-account's balance"
+      ],
+      "risk_level": "low",
+      "liquidity": "moderate",
+      "typical_horizon": "short_to_medium",
+      "return_type": "variable_interest",
+      "sort": 20
+    },
+    {
+      "id": "rate-reset-cd",
+      "label": "Savers hesitate to lock in one CD rate for two years",
+      "product_name": "24-Month CD with One Rate Reset",
+      "summary": "A 24-month certificate of deposit with one request during the term to move to the rate the firm then offers for new CDs of the same term.",
+      "product_line": "account_operations",
+      "category": "deposits",
+      "region": "US",
+      "key_features": [
+        "Fixed rate for a 24-month term",
+        "One reset request allowed during the term, to the rate the firm offers that day for new 24-month CDs",
+        "The rate after a reset may be higher or lower than the opening rate, and applies for the rest of the term",
+        "Early withdrawal penalty as stated in the firm's terms"
+      ],
+      "risk_level": "low",
+      "liquidity": "low",
+      "typical_horizon": "medium",
+      "return_type": "fixed_interest",
+      "sort": 30
+    },
+    {
+      "id": "nonprofit-dual-approval-mma",
+      "label": "Nonprofit boards want two signers on every move of reserve cash",
+      "product_name": "Nonprofit Reserve Money Market Account",
+      "summary": "A money market account for nonprofits where every withdrawal or transfer needs approval from two authorized signers.",
+      "product_line": "account_operations",
+      "category": "deposits",
+      "region": "US",
+      "key_features": [
+        "Two authorized signers must approve every withdrawal or transfer",
+        "Named reserve purposes (operating, capital, restricted) tracked within the account",
+        "Monthly board-ready statement with every approval and who gave it",
+        "Signers added or removed only with a board resolution on file"
+      ],
+      "risk_level": "low",
+      "liquidity": "high",
+      "typical_horizon": "short_to_medium",
+      "return_type": "variable_interest",
+      "sort": 40
+    },
+    {
+      "id": "semester-cd-series",
+      "label": "Parents need a set sum on each semester's tuition date",
+      "product_name": "Semester-Matched CD Series",
+      "summary": "A series of certificates of deposit opened together, each maturing a set number of days before a semester's tuition due date.",
+      "product_line": "account_operations",
+      "category": "deposits",
+      "region": "US",
+      "key_features": [
+        "One CD per semester, opened together in one application",
+        "Each CD's maturity date is set from the tuition due dates the parent enters",
+        "Each CD's fixed rate and term are shown before opening",
+        "At each maturity the money moves to the account the parent names"
+      ],
+      "risk_level": "low",
+      "liquidity": "low",
+      "typical_horizon": "medium",
+      "return_type": "fixed_interest",
+      "sort": 50
+    },
+    {
+      "id": "ira-catch-up-schedule",
+      "label": "Savers over 50 miss the higher IRA limit that may apply to them",
+      "product_name": "IRA with Catch-Up Contribution Schedule",
+      "summary": "An individual retirement account with a built-in contribution schedule that adds the catch-up amount from the year the holder turns 50.",
+      "product_line": "wealth",
+      "category": "retirement",
+      "region": "US",
+      "key_features": [
+        "Contribution schedule split across the holder's paydays up to the yearly limit in the account's terms",
+        "From the year the holder turns 50, the schedule includes the catch-up amount the terms allow",
+        "Reminders before the deadline to contribute for the past tax year",
+        "The holder can pause or change the schedule at any time"
+      ],
+      "risk_level": "moderate",
+      "liquidity": "low",
+      "typical_horizon": "long",
+      "return_type": "market_linked",
+      "sort": 10
+    },
+    {
+      "id": "starter-payday-ira",
+      "label": "First-job workers think an IRA needs a large opening amount",
+      "product_name": "Starter IRA with Payday Contributions",
+      "summary": "An individual retirement account with no opening minimum, funded by a small fixed amount from each paycheck.",
+      "product_line": "wealth",
+      "category": "retirement",
+      "region": "US",
+      "key_features": [
+        "No minimum opening amount",
+        "A fixed amount the holder picks moves in on each payday",
+        "Contributions this year shown next to the yearly limit in the account's terms",
+        "Holdings limited to the firm's listed fund menu"
+      ],
+      "risk_level": "moderate",
+      "liquidity": "low",
+      "typical_horizon": "long",
+      "return_type": "market_linked",
+      "sort": 20
+    },
+    {
+      "id": "small-employer-401k",
+      "label": "Small employers find running a 401(k) plan too heavy to start",
+      "product_name": "Small-Employer 401(k) with Payroll Sync",
+      "summary": "A 401(k) plan for employers with a few staff, where contributions come straight from each payroll run.",
+      "product_line": "wealth",
+      "category": "retirement",
+      "region": "US",
+      "key_features": [
+        "Contributions taken from each payroll run without manual uploads",
+        "Automatic enrollment at a default contribution the employer sets, which each employee can change or stop",
+        "Yearly contribution limits from the plan's terms tracked per employee",
+        "Plan documents and required notices generated for the employer to send"
+      ],
+      "risk_level": "moderate",
+      "liquidity": "low",
+      "typical_horizon": "long",
+      "return_type": "market_linked",
+      "sort": 30
+    },
+    {
+      "id": "plan-linked-emergency-savings",
+      "label": "Workers raid their 401(k) for small emergencies",
+      "product_name": "Plan-Linked Emergency Savings Account",
+      "summary": "An emergency savings account linked to an employer's 401(k) plan, funded from payroll up to a cap the plan's terms set.",
+      "product_line": "wealth",
+      "category": "retirement",
+      "region": "US",
+      "key_features": [
+        "Employee contributions from payroll up to the cap stated in the plan's terms",
+        "Withdrawals at least once a month, with the fee terms the plan states",
+        "Shown next to the employee's 401(k) balance on one statement",
+        "Balance above the cap goes to the employee's 401(k) as the plan's terms describe"
+      ],
+      "risk_level": "low",
+      "liquidity": "high",
+      "typical_horizon": "short",
+      "return_type": "variable_interest",
+      "sort": 40
+    },
+    {
+      "id": "business-cash-sweep-mmf",
+      "label": "Small businesses leave operating cash idle above the month's bills",
+      "product_name": "Business Cash Sweep to a Government Money Market Fund",
+      "summary": "A daily sweep of a business account's balance above a threshold into a government money market fund, and back when it falls below.",
+      "product_line": "wealth",
+      "category": "mutual_funds",
+      "region": "US",
+      "key_features": [
+        "The business sets the threshold to keep in its operating account",
+        "Balance above the threshold is swept into the fund each business day",
+        "Shares are sold and the cash swept back when the operating balance falls below the threshold",
+        "States plainly that a money market fund is not a deposit account and its value can change"
+      ],
+      "risk_level": "low",
+      "liquidity": "high",
+      "typical_horizon": "short",
+      "return_type": "market_linked",
+      "sort": 10
+    },
+    {
+      "id": "quarterly-tax-reserve-mmf",
+      "label": "Freelancers need quarterly tax money kept apart from spending money",
+      "product_name": "Quarterly Tax Reserve in a Money Market Fund",
+      "summary": "A money market fund holding with a separate balance for each estimated tax quarter and reminders before each due date.",
+      "product_line": "wealth",
+      "category": "mutual_funds",
+      "region": "US",
+      "key_features": [
+        "A separate balance for each estimated tax quarter",
+        "Reminders before each estimated tax due date",
+        "Shares sold and cash sent to a linked bank account on any business day",
+        "States plainly that a money market fund is not a deposit account"
+      ],
+      "risk_level": "low",
+      "liquidity": "high",
+      "typical_horizon": "short",
+      "return_type": "market_linked",
+      "sort": 20
+    },
+    {
+      "id": "tips-ladder-bundle",
+      "label": "Savers want TIPS maturing on a set schedule without buying each one",
+      "product_name": "TIPS Ladder Bundle",
+      "summary": "One purchase of Treasury Inflation-Protected Securities with staggered maturities, one rung maturing each year over a span the holder picks.",
+      "product_line": "credit",
+      "category": "bonds",
+      "region": "US",
+      "key_features": [
+        "One rung maturing each year over a span of 3 to 10 years the holder picks",
+        "Every rung's maturity date and interest payment dates shown before purchase",
+        "Principal adjusted for changes in the Consumer Price Index as the securities' terms state",
+        "Each rung's cash moves to a linked account at maturity"
+      ],
+      "risk_level": "low",
+      "liquidity": "low",
+      "typical_horizon": "medium_to_long",
+      "return_type": "inflation_linked",
+      "sort": 10
+    },
+    {
+      "id": "milestone-tips-gift",
+      "label": "Grandparents want a gift that reaches a grandchild at a milestone",
+      "product_name": "Milestone TIPS Gift",
+      "summary": "Treasury Inflation-Protected Securities bought for a named beneficiary, with the maturity chosen nearest a milestone date.",
+      "product_line": "credit",
+      "category": "bonds",
+      "region": "US",
+      "key_features": [
+        "Held for a named beneficiary, with the giver as custodian until the milestone",
+        "Maturity chosen from the available terms nearest the milestone date",
+        "A gift note and the holding's maturity date shared with the family",
+        "Principal adjustments shown as the securities' terms describe them"
+      ],
+      "risk_level": "low",
+      "liquidity": "low",
+      "typical_horizon": "long",
+      "return_type": "inflation_linked",
+      "sort": 20
+    }
+  ]
+}

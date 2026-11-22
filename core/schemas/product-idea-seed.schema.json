@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Financial product idea seed",
+  "description": "The financial product ideas Mynt ships (workspaces/coding-build/templates/product-ideas.seed.json): ideas for new products a licensed firm could define, offered in the Build page's Financial product mode. They live in Postgres (financial_products.product_ideas) once an admin runs seed_product_ideas, which adds the missing ones and never overwrites a row already there. src/product-ideas.ts checks what this schema can't say: the region, product line and category have products Mynt runs there, and the text promises, projects and advises nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ideas"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "ideas": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "product_name", "summary", "product_line", "category", "region", "key_features"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "Unique across product ideas" },
+          "label": { "type": "string", "minLength": 10, "maxLength": 80, "description": "Who needs the product and what for, in plain words" },
+          "product_name": { "type": "string", "minLength": 3, "maxLength": 60, "description": "A draft name for the product, which the firm edits" },
+          "summary": { "type": "string", "minLength": 20, "maxLength": 200, "description": "One line: what the product is" },
+          "product_line": { "type": "string", "pattern": "^[a-z_]+$" },
+          "category": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,39}$" },
+          "region": { "type": "string", "pattern": "^[A-Z]{2}$" },
+          "key_features": { "type": "array", "minItems": 2, "maxItems": 6, "uniqueItems": true, "items": { "type": "string", "minLength": 5, "maxLength": 160 } },
+          "risk_level": { "enum": ["low", "moderate", "high", "very_high", "not_applicable"] },
+          "liquidity": { "enum": ["high", "moderate", "low", "none", "not_applicable"] },
+          "typical_horizon": { "enum": ["short", "short_to_medium", "medium", "medium_to_long", "long"] },
+          "return_type": { "enum": ["fixed_interest", "variable_interest", "market_linked", "inflation_linked", "guaranteed_income", "guaranteed_plus_bonus", "protection", "cost_of_credit"] },
+          "sort": { "type": "integer", "minimum": 0, "description": "Order within the product line, lowest first" }
+        }
+      }
+    }
+  }
+}

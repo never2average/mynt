@@ -1,0 +1,280 @@
+{
+  "$schema": "../../../schemas/app-idea-seed.schema.json",
+  "ideas": [
+    {
+      "id": "two-key-household-fund",
+      "kind": "savings-goals",
+      "problem": "Two-adult households argue over when the emergency fund gets used",
+      "pitch": "A shared emergency fund where money comes out only when both adults approve the request.",
+      "goal": "A two-key household emergency fund on a money market account. Two adults in one household open the account together and set a target. Either can add money from their bank account through the provider's hosted flow at any time. To take money out, one adult writes what it's for and the amount, and the other gets a request to approve or decline; only an approved request starts the withdrawal through the provider's hosted flow. The home screen shows the balance, the target, and a log of every request with who asked, who approved and when. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before either adult agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Money Market Account"
+      ],
+      "sort": 1
+    },
+    {
+      "id": "yearly-bills-calendar",
+      "kind": "savings-goals",
+      "problem": "Families get caught out by bills that come once a year",
+      "pitch": "Lists each once-a-year bill with its due date and sets aside its share every month until then.",
+      "goal": "A yearly bills calendar on a money market account. A family lists the bills that come once a year (car registration, a club membership, school fees, a property tax instalment) with each one's amount and due date. The app works out a monthly amount per bill from the amount and the months left, which the family can change, and adds the total each month from their bank account through the provider's hosted flow. A calendar shows each bill's date and how much is set aside for it; when a bill falls due, the app offers to move its amount back to their bank account. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the family agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Money Market Account"
+      ],
+      "sort": 2
+    },
+    {
+      "id": "tax-refund-split",
+      "kind": "savings-goals",
+      "problem": "Tax refunds land in checking and are gone within a month",
+      "pitch": "When a refund arrives, splits it across named goals in a money market account in one step.",
+      "goal": "A tax refund split app on a money market account. Before the refund arrives, a customer names up to five goals (a trip, a repair, a cushion) and drags a slider to share the expected refund between them. When they record that the refund has landed in their bank account, the app shows the split and moves the total into the account through the provider's hosted flow, then tracks each goal's part of the balance. Each goal can be renamed, merged or moved back to the bank account later. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the customer agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Money Market Account"
+      ],
+      "sort": 3
+    },
+    {
+      "id": "moving-day-fund",
+      "kind": "savings-goals",
+      "problem": "Renters moving cities pay a deposit, movers and two rents at once",
+      "pitch": "A countdown to moving day that lists each cost and how much is set aside for it so far.",
+      "goal": "A moving day fund on a money market account. A renter enters their moving date and each cost they expect (the new place's deposit, the first month's rent, movers, the overlap with the old lease). The app shows a countdown to the date, the total, and a weekly amount to add from their bank account through the provider's hosted flow, which the renter can change. Each cost is ticked off when it is paid, and the app offers to move that amount back to the bank account. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the renter agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Money Market Account"
+      ],
+      "sort": 4
+    },
+    {
+      "id": "wedding-cd-ladder",
+      "kind": "certificates-of-deposit",
+      "problem": "Couples paying wedding vendors in stages need cash on each due date",
+      "pitch": "Builds a CD ladder where each rung matures just before a planned wedding payment.",
+      "goal": "A wedding fund CD ladder. A couple lists each planned wedding payment (the venue's deposit, the caterer, the photographer, the final balance) with its amount and due date. For each payment the app shows the CD terms from the product's offer that mature before that date, and the couple opens one CD per payment through the provider's hosted flow. A timeline shows every rung: its amount, rate, maturity date and the payment it is for, and reminds the couple a week before each matures. Show each CD's terms, rate, early withdrawal penalty and documents exactly as the product's offer states them before the couple agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Certificate of Deposit"
+      ],
+      "sort": 1
+    },
+    {
+      "id": "next-cd-vs-expense",
+      "kind": "certificates-of-deposit",
+      "problem": "CD holders roll over into a term that ends after a big bill is due",
+      "pitch": "Before a CD matures, compares the next term's end date to the customer's upcoming expenses.",
+      "goal": "A next CD check. A customer adds the CDs they hold and the large expenses they expect, each with a date. Two weeks before a CD matures, the app lists the terms from the product's offer and marks which ones end before the next expense and which end after it, with the early withdrawal penalty the terms state if they needed the money sooner. The customer picks a term, or chooses to move the money to their bank account, through the provider's hosted flow. Show the terms, rate, penalty and documents exactly as the product's offer states them before the customer agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Certificate of Deposit"
+      ],
+      "sort": 2
+    },
+    {
+      "id": "closing-date-cd",
+      "kind": "certificates-of-deposit",
+      "problem": "Home buyers months from closing keep the down payment in checking",
+      "pitch": "Shows only the CD terms that mature before the buyer's closing date, and counts down to it.",
+      "goal": "A closing date CD app. A home buyer enters their expected closing date and the down payment amount. The app filters the product's offer to the CD terms that mature before that date, shows each one's rate and maturity date side by side, and the buyer opens one through the provider's hosted flow. The home screen counts down to closing and to maturity, and if the closing date moves, shows what the terms say about taking the money out early. Show the terms, rate, early withdrawal penalty and documents exactly as the product's offer states them before the buyer agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Certificate of Deposit"
+      ],
+      "sort": 3
+    },
+    {
+      "id": "found-money-sweep",
+      "kind": "cash-reserve",
+      "problem": "Spare cash sits in checking because bills come out on scattered days",
+      "pitch": "Moves spare checking cash into a money market account, and back two days before each bill.",
+      "goal": "A found money sweep on a money market account. A customer lists their regular bills with amounts and dates and sets a floor to keep in their bank account. Each week the app shows the cash above the floor and the bills due before next week, and offers to move the spare amount into the account; two days before a bill, it offers to move that bill's amount back. Every move goes through the provider's hosted flow and needs the customer's tap. A monthly view shows what was moved each way. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the customer agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Money Market Account"
+      ],
+      "sort": 1
+    },
+    {
+      "id": "nonprofit-reserve-explainer",
+      "kind": "cash-reserve",
+      "problem": "Nonprofit treasurers must explain to the board where reserve cash sits",
+      "pitch": "A side-by-side of a money market fund and a money market account, ready to share with a board.",
+      "goal": "A reserve explainer for a nonprofit treasurer. The app shows a money market account and a money market fund side by side, each with its terms, fees, limits, how money comes out and how long it takes, exactly as each product states them, and says plainly that a money market fund is not a deposit account. The treasurer can add notes and export a one-page summary for the board. When the board decides, the treasurer opens either product and moves reserve cash through the provider's hosted flow, with every document each product requires shown before agreeing. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations",
+        "wealth"
+      ],
+      "categories": [
+        "deposits",
+        "mutual_funds"
+      ],
+      "product_names": [
+        "Money Market Account",
+        "Money Market Fund"
+      ],
+      "sort": 2
+    },
+    {
+      "id": "payroll-buffer",
+      "kind": "cash-reserve",
+      "problem": "Small employers keep months of payroll cash idle in checking",
+      "pitch": "Holds the payroll reserve in a money market account and moves each run's amount back in time.",
+      "goal": "A payroll buffer on a money market account. A small employer enters their pay dates and the usual amount of each payroll run, and how many runs to keep in reserve. The app keeps the reserve in the account and, three business days before each pay date, offers to move that run's amount to the business bank account through the provider's hosted flow. A calendar shows the coming pay dates, the reserve, and every move made. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the employer agrees. The app shows information, not advice.",
+      "product_lines": [
+        "account_operations"
+      ],
+      "categories": [
+        "deposits"
+      ],
+      "product_names": [
+        "Money Market Account"
+      ],
+      "sort": 3
+    },
+    {
+      "id": "onboarding-401k-step",
+      "kind": "retirement-account",
+      "problem": "New hires skip the 401(k) because sign-up is buried in onboarding",
+      "pitch": "A two-minute 401(k) sign-up step that sits inside a new job's onboarding checklist.",
+      "goal": "A 401(k) sign-up step for a new-job onboarding checklist. Next to the tax form and direct deposit tasks, the new hire sees one task: join the plan. It opens the product's journey, shows its consents and required documents verbatim, asks for the share of pay to contribute within the plan's terms and a beneficiary, and finishes in a few screens. If they skip it, the checklist keeps the task open and reminds them on the day they choose. The account screen shows contributions this year next to the yearly limit the plan's terms state. The app shows information, not advice.",
+      "product_lines": [
+        "wealth"
+      ],
+      "categories": [
+        "retirement"
+      ],
+      "product_names": [
+        "401(k)"
+      ],
+      "sort": 1
+    },
+    {
+      "id": "turning-50-catch-up",
+      "kind": "retirement-account",
+      "problem": "People turning 50 this year don't know a higher IRA limit may apply",
+      "pitch": "Shows the IRA limits that apply from the year a saver turns 50, and splits the rest by payday.",
+      "goal": "A turning-50 catch-up planner on an individual retirement account. A saver enters their birth year and how often they are paid. If they turn 50 this year or are older, the app shows the yearly limit and the catch-up amount exactly as the product's terms state them, what they have put in so far this year, and the room left. It splits the room left across their remaining paydays, which they can change, and each contribution goes through the provider's hosted flow. Show the account's terms, fees and every required document before the saver agrees. The app shows information, not advice.",
+      "product_lines": [
+        "wealth"
+      ],
+      "categories": [
+        "retirement"
+      ],
+      "product_names": [
+        "Individual Retirement Account"
+      ],
+      "sort": 2
+    },
+    {
+      "id": "old-plan-rollover",
+      "kind": "retirement-account",
+      "problem": "Job changers leave old 401(k) balances behind and lose track of them",
+      "pitch": "A step-by-step checklist to move an old workplace plan's balance into an IRA.",
+      "goal": "An old plan rollover checklist on an individual retirement account. A saver who left a job adds the old plan's name and what they know of its balance. The app walks them through opening the account through the product's journey, with its consents and documents shown verbatim, then lists the steps to ask the old plan to send the balance, with a place to note each step's date. When the balance arrives, the account screen shows it. Show the account's terms, fees and every required document exactly as the product states them before the saver agrees. The app shows information, not advice.",
+      "product_lines": [
+        "wealth"
+      ],
+      "categories": [
+        "retirement"
+      ],
+      "product_names": [
+        "Individual Retirement Account"
+      ],
+      "sort": 3
+    },
+    {
+      "id": "tuition-tips-calendar",
+      "kind": "treasury-securities",
+      "problem": "Parents need cash on each semester's tuition date, years from now",
+      "pitch": "Lines up TIPS maturity dates with each semester's tuition due date on one calendar.",
+      "goal": "A tuition calendar on Treasury Inflation-Protected Securities. A parent enters the first semester's start and the number of semesters, and the app lays out each tuition due date. For each date it shows the TIPS terms from the product's offer that mature before it, and the parent buys through the provider's hosted flow. One calendar shows every holding's maturity date, interest payment days and the semester it is for, with the principal adjustments the product reports so far. Never say what a holding will be worth, explain the adjustment exactly as the product's terms describe it, and show every required document before the parent agrees. The app shows information, not advice.",
+      "product_lines": [
+        "credit"
+      ],
+      "categories": [
+        "bonds"
+      ],
+      "product_names": [
+        "Treasury Inflation-Protected"
+      ],
+      "sort": 1
+    },
+    {
+      "id": "tips-yearly-ladder",
+      "kind": "treasury-securities",
+      "problem": "Retirees want cash arriving on known dates every year",
+      "pitch": "Builds a TIPS ladder with one rung maturing each year, and shows every payment date ahead.",
+      "goal": "A yearly TIPS ladder. A retiree picks the first year they want cash and how many years, and the app shows, for each year, the TIPS terms from the product's offer that mature in it. The retiree buys each rung through the provider's hosted flow. A list shows every rung's amount, maturity date and interest payment days, with the principal adjustments the product reports so far, and reminds them before each maturity. Never say what a holding will be worth, explain the adjustment exactly as the product's terms describe it, and show every required document before the retiree agrees. The app shows information, not advice.",
+      "product_lines": [
+        "credit"
+      ],
+      "categories": [
+        "bonds"
+      ],
+      "product_names": [
+        "Treasury Inflation-Protected"
+      ],
+      "sort": 2
+    },
+    {
+      "id": "grandchild-tips-gift",
+      "kind": "treasury-securities",
+      "problem": "Grandparents want a gift for a grandchild that arrives at 18",
+      "pitch": "Picks the TIPS term that matures nearest a grandchild's 18th birthday and keeps a gift note.",
+      "goal": "A milestone gift on Treasury Inflation-Protected Securities. A grandparent enters a grandchild's name and birthday, and the app shows the TIPS terms from the product's offer that mature nearest their 18th birthday. The grandparent buys through the provider's hosted flow and writes a note to go with the gift. The gift screen shows the holding's amount, maturity date, interest payment days and the principal adjustments the product reports so far, with a countdown to the birthday. Never say what the gift will be worth, explain the adjustment exactly as the product's terms describe it, and show every required document before the grandparent agrees. The app shows information, not advice.",
+      "product_lines": [
+        "credit"
+      ],
+      "categories": [
+        "bonds"
+      ],
+      "product_names": [
+        "Treasury Inflation-Protected"
+      ],
+      "sort": 3
+    }
+  ]
+}

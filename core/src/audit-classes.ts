@@ -324,6 +324,11 @@ const WORKSPACE = [
   "update_app_idea",
   "retire_app_idea",
   "seed_app_ideas",
+  // the Build page's financial product ideas (product-ideas.ts)
+  "create_product_idea",
+  "update_product_idea",
+  "retire_product_idea",
+  "seed_product_ideas",
 ] as const;
 
 export const AUDIT_ACTION_CLASSES: Readonly<Record<string, AuditClass>> = Object.freeze(

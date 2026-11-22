@@ -12,7 +12,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 import { NewAppWorkspace, productModeCommands, type NewAppProduct } from "@/components/new-app-workspace";
 import { DRAFT_PRODUCT, validateProductDraft } from "@/lib/product-chat";
-import type { NewAppRequest } from "@/lib/new-app";
+import { productIdeaMessage, productIdeasFrom, type ProductIdea } from "@/lib/product-ideas";
+import type { AppKind, NewAppRequest } from "@/lib/new-app";
 
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -94,13 +95,16 @@ const fetcher = (async (url: string, init?: RequestInit) => {
 
 let sent: string[];
 let replies: Reply[];
+let productIdeas: ProductIdea[] | null;
+let kinds: AppKind[];
 function Harness() {
   const [products, setProducts] = useState<NewAppProduct[]>(PRODUCTS);
   const [transport] = useState(() => fakeTransport(sent, replies));
   return (
     <NewAppWorkspace
       products={products}
-      kinds={[]}
+      kinds={kinds}
+      productIdeas={productIdeas}
       onBuild={async (r) => (builds.push(r), null)}
       onProductsChange={(change) => setProducts((l) => change(l))}
       fetcher={fetcher}
@@ -113,6 +117,8 @@ beforeEach(() => {
   builds = [];
   sent = [];
   replies = [];
+  productIdeas = null;
+  kinds = [];
   createReply = { status: 201, body: null };
 });
 
@@ -215,6 +221,136 @@ describe("Build app and Create product", () => {
     expect(modeOf()).toBe("product");
     expect(input().value).toBe("I want to offer a CD to members");
     expect(sent).toEqual([]);
+  });
+});
+
+// Financial product mode's chips and Templates are ideas for new products (list_product_ideas), not app ideas.
+const PIDEA = (id: string, line: string, category: string, label: string) => ({
+  id,
+  label,
+  product_name: `Draft ${id}`,
+  summary: `A factual line about ${id}.`,
+  product_line: line,
+  category,
+  region: "US",
+  key_features: [`${id} feature one`, `${id} feature two`],
+  risk_level: "low",
+  liquidity: "moderate",
+  typical_horizon: "short",
+  return_type: "fixed_interest",
+});
+const IDEAS = productIdeasFrom({
+  ideas: [
+    PIDEA("no-penalty-cd", "account_operations", "deposits", "Gig workers avoid CDs in case they need the cash early"),
+    PIDEA("rate-reset-cd", "account_operations", "deposits", "Savers hesitate to lock in one CD rate for two years"),
+    PIDEA("dual-approval-mma", "account_operations", "deposits", "Nonprofit boards want two signers on reserve cash"),
+    PIDEA("catch-up-ira", "wealth", "retirement", "Savers over 50 miss the higher IRA limit"),
+    PIDEA("payday-ira", "wealth", "retirement", "First-job workers think an IRA needs a lot to open"),
+    PIDEA("sweep-mmf", "wealth", "mutual_funds", "Small businesses leave operating cash idle"),
+    PIDEA("tips-ladder", "credit", "bonds", "Savers want TIPS maturing on a set schedule"),
+    PIDEA("tips-gift", "credit", "bonds", "Grandparents want a gift that arrives at a milestone"),
+  ],
+});
+const APP_KINDS: AppKind[] = [
+  {
+    id: "savings-goals",
+    title: "Savings goals",
+    description: "Save toward goals.",
+    productLines: ["custody_settlement"],
+    goalTemplate: "A savings goals app.",
+    ideas: [{ id: "two-key-household-fund", problem: "Two-adult households argue over the emergency fund", pitch: "Both approve.", goal: "A two-key fund app on the account.", productLines: ["custody_settlement"] }],
+  },
+];
+const productChips = () => [...document.querySelectorAll("[data-product-chip]")].map((c) => c.getAttribute("data-product-chip"));
+const appChips = () => [...document.querySelectorAll("[data-chip]")].map((c) => c.getAttribute("data-chip"));
+
+describe("product ideas in Financial product mode", () => {
+  it("App mode shows app ideas; Financial product mode shows six product ideas as chips instead, one from each line first", async () => {
+    productIdeas = IDEAS;
+    kinds = APP_KINDS;
+    await loaded();
+    expect(appChips()).toEqual(["two-key-household-fund"]);
+    expect(productChips()).toEqual([]);
+    await act(async () => void fireEvent.click(option("product")));
+    await settle();
+    const chips = productChips();
+    expect(chips).toHaveLength(6);
+    expect(new Set(chips).size).toBe(6);
+    expect(appChips()).toEqual([]);
+    const lines = chips.slice(0, 3).map((id) => IDEAS.find((i) => i.id === id)!.productLine);
+    expect(new Set(lines)).toEqual(new Set(["account_operations", "wealth", "credit"]));
+    // Each chip is labelled by who needs the product, with its name and summary as the tooltip.
+    const first = document.querySelector(`[data-product-chip="${chips[0]}"]`)!;
+    const idea = IDEAS.find((i) => i.id === chips[0])!;
+    expect(first.textContent).toBe(idea.label);
+    expect(first.getAttribute("title")).toBe(`${idea.productName}: ${idea.summary}`);
+  });
+
+  it("a chip starts the product chat with the idea as the first message, and starts no build", async () => {
+    productIdeas = IDEAS;
+    await loaded();
+    await act(async () => void fireEvent.click(option("product")));
+    await settle();
+    const id = productChips()[0]!;
+    await act(async () => void fireEvent.click(document.querySelector(`[data-product-chip="${id}"]`)!));
+    await settle();
+    expect(sent).toEqual([productIdeaMessage(IDEAS.find((i) => i.id === id)!)]);
+    expect(builds).toEqual([]);
+    expect(posts).toEqual([]);
+    // The chat has begun: the welcome, and its chips, are gone.
+    expect(productChips()).toEqual([]);
+  });
+
+  it("Templates lists every product idea (Idea, What it is, Product line), and Use opens the Create product sheet filled with it", async () => {
+    productIdeas = IDEAS;
+    await loaded();
+    await act(async () => void fireEvent.click(option("product")));
+    await settle();
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Open Templates" })));
+    await settle();
+    const panel = document.querySelector('[data-panel-content="templates"]') as HTMLElement;
+    expect([...panel.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["Idea", "What it is", "Product line", ""]);
+    expect(panel.querySelectorAll("[data-product-idea-row]").length).toBeGreaterThan(0);
+    expect(panel.querySelector("[data-template-row]")).toBeNull();
+    const row = panel.querySelector('[data-product-idea-row="no-penalty-cd"]') as HTMLElement;
+    expect(row.textContent).toContain("Gig workers avoid CDs in case they need the cash early");
+    expect(row.textContent).toContain("A factual line about no-penalty-cd.");
+    expect(row.textContent).toContain("account operations");
+
+    await act(async () => void fireEvent.click(within(row).getByRole("button", { name: "Use" })));
+    await settle();
+    const s = within(sheet()!);
+    expect((s.getByLabelText("Name") as HTMLInputElement).value).toBe("Draft no-penalty-cd");
+    expect((s.getByLabelText("Product id") as HTMLInputElement).value).toBe("draft-no-penalty-cd");
+    expect((s.getByLabelText("Product line") as HTMLSelectElement).value).toBe("account_operations");
+    expect((s.getByLabelText("Jurisdiction") as HTMLSelectElement).value).toBe("US");
+    expect((s.getByLabelText("Category") as HTMLSelectElement).value).toBe("deposits");
+    expect((s.getByLabelText("Regulator") as HTMLSelectElement).value).toBe("");
+    expect((s.getByLabelText("Risk level") as HTMLSelectElement).value).toBe("low");
+    expect((s.getByLabelText("Description") as HTMLTextAreaElement).value).toBe("A factual line about no-penalty-cd.");
+    expect(sent).toEqual([]);
+    expect(posts).toEqual([]);
+
+    // The firm picks the regulator and creates it with its own click: the idea's features go with it.
+    fireEvent.change(s.getByLabelText("Regulator"), { target: { value: "OCC" } });
+    await act(async () => void fireEvent.click(s.getByRole("button", { name: "Create product" })));
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toMatchObject({ id: "draft-no-penalty-cd", name: "Draft no-penalty-cd", category: "deposits", region: "US", regulator: "OCC", key_features: ["no-penalty-cd feature one", "no-penalty-cd feature two"] });
+  });
+
+  it("back in App mode, Templates lists app ideas again", async () => {
+    productIdeas = IDEAS;
+    kinds = APP_KINDS;
+    await loaded();
+    await act(async () => void fireEvent.click(option("product")));
+    await settle();
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Open Templates" })));
+    await act(async () => void fireEvent.click(option("build")));
+    await settle();
+    const panel = document.querySelector('[data-panel-content="templates"]') as HTMLElement;
+    expect(panel.querySelector('[data-template-row="two-key-household-fund"]')).not.toBeNull();
+    expect(panel.querySelector("[data-product-idea-row]")).toBeNull();
   });
 });
 

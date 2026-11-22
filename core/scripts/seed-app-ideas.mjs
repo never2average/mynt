@@ -6,6 +6,9 @@
 //   node scripts/seed-app-ideas.mjs --url <mynt MCP URL> --login
 //   MYNT_ADMIN_TOKEN=... node scripts/seed-app-ideas.mjs --url <mynt MCP URL>
 //
+// --seed v2 adds the v2 set (ideas.v2.seed.json) instead of v1; --replace then retires every active idea not in
+// that set (never deletes). --products also adds the shipped financial product ideas (seed_product_ideas).
+//
 // Signing in: --login signs you in through the browser (see mynt-login.mjs) and keeps the access token in memory
 // only; otherwise the token is read from MYNT_ADMIN_TOKEN. Either way it is never accepted on the command line,
 // never printed and never written to disk. The MCP URL can also come from MYNT_MCP_URL.
@@ -46,11 +49,23 @@ const client = new Client({ name: "seed-app-ideas", version: "1" });
 let exitCode = 0;
 try {
   await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
-  const res = await client.callTool({ name: "seed_app_ideas", arguments: {} });
-  const text = res.content?.[0]?.text ?? "";
-  if (res.isError) throw new Error(text);
-  const { inserted, kept } = JSON.parse(text);
-  console.log(scrub(`Added ${inserted.length} idea(s)${inserted.length ? `: ${inserted.join(", ")}` : ""}. Left ${kept.length} already there as they are.`));
+  const seed = option("--seed");
+  if (seed && seed !== "v1" && seed !== "v2") throw new Error(`--seed is v1 or v2, not '${seed}'`);
+  const seedArgs = { ...(seed ? { seed } : {}), ...(args.includes("--replace") ? { replace: true } : {}) };
+  const run = async (name, toolArgs, what) => {
+    const res = await client.callTool({ name, arguments: toolArgs });
+    const text = res.content?.[0]?.text ?? "";
+    if (res.isError) throw new Error(text);
+    const { inserted, kept, retired } = JSON.parse(text);
+    console.log(
+      scrub(
+        `Added ${inserted.length} ${what}${inserted.length ? `: ${inserted.join(", ")}` : ""}. Left ${kept.length} already there as they are.` +
+          (retired ? ` Retired ${retired.length}${retired.length ? `: ${retired.join(", ")}` : ""}.` : ""),
+      ),
+    );
+  };
+  await run("seed_app_ideas", seedArgs, "app idea(s)");
+  if (args.includes("--products")) await run("seed_product_ideas", {}, "product idea(s)");
 } catch (e) {
   console.error(scrub(e instanceof Error ? e.message : e));
   exitCode = 1;

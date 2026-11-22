@@ -14,7 +14,9 @@
 // The composer's toggle switches between Build app and Create product (so does /create-product, and
 // "/create-product <description>" sent from Build app goes there with its description). In Create
 // product the chat drafts a product with the assistant (components/product-chat.tsx, lib/product-chat.ts);
-// its draft card opens the same sheet, filled in. A Build app message that clearly asks for a product
+// its draft card opens the same sheet, filled in. Its chips and Templates rows are product ideas
+// (lib/product-ideas.ts) instead of app ideas: a chip starts the chat with the idea as the first message, a
+// row's Use opens the sheet filled with the idea. A Build app message that clearly asks for a product
 // only offers the switch: what's sent in Build app is always a build.
 // Under the welcome, Recent lists the threads the user touched last (components/recent-threads.tsx,
 // lib/threads.ts): an app opens its page, a product chat comes back here in Create product with its
@@ -44,6 +46,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { chipIdeas, CHIPS_MAX, ideaProducts, kindAsIdea, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
+import { chipProductIdeas, productIdeaMessage, productIdeaPrefill, type ProductIdea } from "@/lib/product-ideas"
 import { flagsFor, isPickable, NOT_PUBLISHED, runProductAction, STATUS_LABEL, type ProductAction, type StudioProduct } from "@/lib/products"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { cn } from "@/lib/utils"
@@ -328,6 +331,86 @@ export function TemplatesTab({
   )
 }
 
+// Financial product mode's Templates: ideas for new financial products (lib/product-ideas.ts), one row each. Use
+// opens the Create product sheet filled with the idea.
+const PRODUCT_IDEA_COLUMNS = [
+  { label: "Idea", className: COL.name },
+  { label: "What it is", className: COL.wide },
+  { label: "Product line", className: COL.text },
+  { label: "", className: COL.actions },
+]
+
+export function ProductIdeasTab({ ideas, onUse }: { ideas: ProductIdea[] | null; onUse: (idea: ProductIdea) => void }) {
+  const [query, setQuery] = useState("")
+  const shown = (ideas ?? []).filter((i) => matches(query, i.label, i.productName, i.summary, lineLabel(i.productLine), lineLabel(i.category), ...i.keyFeatures))
+  const fit = useFitRows()
+  const paged = usePaged(shown, fit.size)
+  return (
+    <PanelList
+      id="product-ideas"
+      noun={["product idea", "product ideas"]}
+      search={query}
+      onSearch={(v) => {
+        setQuery(v)
+        paged.setPage(1)
+      }}
+      searchLabel="Search product ideas"
+      areaRef={fit.ref}
+      {...pagerOf(paged, shown.length)}
+    >
+      <Table>
+        <TableHeader className="sticky top-0 bg-card">
+          <TableRow>
+            {PRODUCT_IDEA_COLUMNS.map((c) => (
+              <TableHead key={c.label || "actions"} className={c.className}>
+                {c.label}
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {ideas === null ? (
+            <TableRow data-loading>
+              <TableCell colSpan={PRODUCT_IDEA_COLUMNS.length}>
+                <Skeleton className="h-4" />
+              </TableCell>
+            </TableRow>
+          ) : paged.shown.length ? (
+            paged.shown.map((idea) => (
+              <TableRow key={idea.id} data-product-idea-row={idea.id}>
+                <TableCell className={`${COL.name} font-medium`}>
+                  {idea.label}
+                  <span className="mt-1 block text-xs font-normal text-muted-foreground">{idea.productName}</span>
+                </TableCell>
+                <TableCell className={COL.wide}>
+                  <span className="block max-w-80 truncate" title={idea.summary}>
+                    {idea.summary}
+                  </span>
+                </TableCell>
+                <TableCell className={COL.text}>
+                  <span className="flex flex-wrap gap-1">
+                    <Badge variant="outline">{lineLabel(idea.productLine)}</Badge>
+                    {idea.category && <Badge variant="outline">{lineLabel(idea.category)}</Badge>}
+                  </span>
+                </TableCell>
+                <TableCell className={COL.actions}>
+                  <span className="flex justify-end">
+                    <Button size="sm" variant="outline" onClick={() => onUse(idea)} data-use-product-idea={idea.id}>
+                      Use
+                    </Button>
+                  </span>
+                </TableCell>
+              </TableRow>
+            ))
+          ) : (
+            <EmptyRow cols={PRODUCT_IDEA_COLUMNS.length}>{ideas.length ? "No product ideas match." : "No product ideas on this Mynt yet. Describe your product in the chat."}</EmptyRow>
+          )}
+        </TableBody>
+      </Table>
+    </PanelList>
+  )
+}
+
 const PRODUCT_COLUMNS = [
   { label: "", className: "w-px" },
   { label: "Product", className: COL.name },
@@ -516,6 +599,7 @@ export function ProductsTab({
 export function NewAppWorkspace({
   products,
   kinds,
+  productIdeas = null,
   onBuild,
   onProductsChange,
   isMobile,
@@ -529,6 +613,8 @@ export function NewAppWorkspace({
 }: {
   products: NewAppProduct[] | null
   kinds: AppKind[] | null
+  // Financial product mode's ideas for new products (list_product_ideas): its chips and Templates rows.
+  productIdeas?: ProductIdea[] | null
   // Creates the app and starts its build; returns an error to show, or null once it's on its way.
   onBuild: (request: NewAppRequest) => Promise<string | null>
   // A product created or published here: the page's list, changed.
@@ -553,8 +639,16 @@ export function NewAppWorkspace({
   const [sheetDraft, setSheetDraft] = useState<ProductDraft | null>(null)
   // Drafts already created, by draft id: their cards can't be sent again.
   const [createdDrafts, setCreatedDrafts] = useState<Record<string, string>>({})
+  // Or the product idea whose Use opened it (n: a new fill each time).
+  const [sheetIdea, setSheetIdea] = useState<{ idea: ProductIdea; n: number } | null>(null)
   const openSheet = () => {
     setSheetDraft(null)
+    setSheetIdea(null)
+    setCreating(true)
+  }
+  const openProductIdea = (idea: ProductIdea) => {
+    setSheetDraft(null)
+    setSheetIdea((s) => ({ idea, n: (s?.n ?? 0) + 1 }))
     setCreating(true)
   }
   const onCreated = (p: NewAppProduct) => {
@@ -567,12 +661,17 @@ export function NewAppWorkspace({
       // The new Draft, with its Test and Publish, in view.
       setTab("products")
       setOpened(true)
+    } else if (sheetIdea) {
+      setSheetIdea(null)
+      setTab("products")
+      setOpened(true)
     }
   }
   const cards: DraftCards = {
     created: createdDrafts,
     review: (d) => {
       if (createdDrafts[d.id]) return
+      setSheetIdea(null)
       setSheetDraft(d)
       setCreating(true)
     },
@@ -816,6 +915,31 @@ export function NewAppWorkspace({
     if (all.some((k) => k.ideas.length)) return chipIdeas(all, seed, CHIPS_MAX, products)
     return all.filter((k) => products === null || ideaProducts(kindAsIdea(k), products).length).map((kind) => ({ kind, idea: null }))
   }, [kinds, seed, products])
+  // Financial product mode's chips: a few product ideas, picked once per page load. One starts the product chat
+  // with the idea as its first message (or, until the assistant is known to be on, puts it in the composer).
+  const productChipList = useMemo(() => chipProductIdeas(productIdeas ?? [], seed), [productIdeas, seed])
+  const startProductIdea = (idea: ProductIdea) => {
+    const message = productIdeaMessage(idea)
+    setError(null)
+    if (ai === "enabled" && !drafting) void productChat.sendMessage({ text: message })
+    else setCarry((c) => ({ text: message, n: (c?.n ?? 0) + 1 }))
+  }
+  const productChips = productChipList.length ? (
+    <div className="mt-6 flex flex-wrap justify-center gap-2 px-4" data-product-chips>
+      {productChipList.map((idea) => (
+        <button
+          key={idea.id}
+          type="button"
+          onClick={() => startProductIdea(idea)}
+          className="rounded-full border bg-background px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          data-product-chip={idea.id}
+          title={`${idea.productName}: ${idea.summary}`}
+        >
+          {idea.label}
+        </button>
+      ))}
+    </div>
+  ) : null
   const chips = chipList.length ? (
     <div className="mt-6 flex flex-wrap justify-center gap-2 px-4" data-chips>
       {chipList.map(({ kind, idea }) => (
@@ -836,7 +960,11 @@ export function NewAppWorkspace({
 
   const content = (t: NewAppTab) =>
     t === "templates" ? (
-      <TemplatesTab kinds={kinds} onUse={applyIdea} products={products} onCreate={openSheet} />
+      mode === "product" ? (
+        <ProductIdeasTab ideas={productIdeas} onUse={openProductIdea} />
+      ) : (
+        <TemplatesTab kinds={kinds} onUse={applyIdea} products={products} onCreate={openSheet} />
+      )
     ) : (
       <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onAction={onAction} focus={focus} />
     )
@@ -885,7 +1013,12 @@ export function NewAppWorkspace({
               <ProductChat
                 chat={productChat}
                 cards={cards}
-                welcome={<ChatWelcome title={PRODUCT_WELCOME_TITLE}>{recent}</ChatWelcome>}
+                welcome={
+                  <ChatWelcome title={PRODUCT_WELCOME_TITLE}>
+                    {recent}
+                    {productChips}
+                  </ChatWelcome>
+                }
                 toolbar={modeToggle}
                 commands={productCommands}
                 sendBlocked={ai === "enabled" || drafting ? null : ai === "loading" ? "Checking the assistant…" : AI_OFF}
@@ -917,7 +1050,13 @@ export function NewAppWorkspace({
         products={products}
         onCreated={onCreated}
         fetcher={fetcher}
-        initial={sheetDraft ? { key: sheetDraft.id, request: sheetDraft.request } : null}
+        initial={
+          sheetDraft
+            ? { key: sheetDraft.id, request: sheetDraft.request }
+            : sheetIdea
+              ? { key: `idea:${sheetIdea.idea.id}:${sheetIdea.n}`, request: productIdeaPrefill(sheetIdea.idea) }
+              : null
+        }
       />
     </AssistantRuntimeProvider>
   )

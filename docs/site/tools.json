@@ -16,7 +16,7 @@
       "id": "apps",
       "title": "Apps & developers",
       "summary": "Register apps, read a product's developer contract, and start from app kinds and ideas.",
-      "tools": 18
+      "tools": 23
     },
     {
       "id": "builds",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 221,
+      "tools": 222,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 221,
+      "tools": 222,
       "get_started": [
         {
           "tool": "create_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 341,
+      "tools": 346,
       "get_started": [
         {
           "tool": "define_region",
@@ -3277,6 +3277,141 @@
           "return_type",
           "regulator",
           "description",
+          "key_features"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "create_product_idea",
+      "title": "Add a financial product idea",
+      "description": "Admin: add an idea for a new financial product, offered in the Build page's Financial product mode. Refused if its region, product line or category has no products Mynt runs there (US: account_operations/deposits, wealth/retirement, wealth/mutual_funds, credit/bonds), if any text promises, projects or advises (earnings, yields, returns, a percentage, guarantees, 'risk-free', beating inflation, recommendations, advice), frames the people it serves as sellers of goods, or is about lending, insurance or crypto.",
+      "area": "apps",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,39}$",
+            "description": "A short slug, unique across product ideas"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 80,
+            "description": "The label: who needs the product and what for, in plain words (\"Gig workers with uneven pay can't lock cash away for months\")"
+          },
+          "product_name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 60,
+            "description": "A draft name for the product, which the firm edits"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 200,
+            "description": "One line: what the product is, factually"
+          },
+          "product_line": {
+            "type": "string",
+            "enum": [
+              "account_operations",
+              "wealth",
+              "credit"
+            ],
+            "description": "A product line with products in the region"
+          },
+          "category": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{1,39}$",
+            "description": "A category in that line with products in the region (deposits, retirement, mutual_funds, bonds)"
+          },
+          "region": {
+            "type": "string",
+            "enum": [
+              "US"
+            ],
+            "description": "The region Mynt launches products in"
+          },
+          "key_features": {
+            "minItems": 2,
+            "maxItems": 6,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 160
+            },
+            "description": "The product's key features, each one line, stated as terms the firm sets"
+          },
+          "risk_level": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "low",
+              "moderate",
+              "high",
+              "very_high",
+              "not_applicable"
+            ]
+          },
+          "liquidity": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "high",
+              "moderate",
+              "low",
+              "none",
+              "not_applicable"
+            ]
+          },
+          "typical_horizon": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "short",
+              "short_to_medium",
+              "medium",
+              "medium_to_long",
+              "long"
+            ]
+          },
+          "return_type": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "fixed_interest",
+              "variable_interest",
+              "market_linked",
+              "inflation_linked",
+              "guaranteed_income",
+              "guaranteed_plus_bonus",
+              "protection",
+              "cost_of_credit"
+            ]
+          },
+          "sort": {
+            "description": "Order within the product line, lowest first (default 0)",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "product_name",
+          "summary",
+          "product_line",
+          "category",
+          "region",
           "key_features"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -9357,6 +9492,38 @@
       }
     },
     {
+      "name": "list_product_ideas",
+      "title": "Financial product ideas",
+      "description": "Builder: ideas for new financial products a licensed firm could define, offered on the Build page's Financial product mode. Each has a label (who needs it and what for), a draft product name, a one-line summary, the product line, category and region it sits in, its key features and, optionally, the Create product sheet's risk level, liquidity, typical horizon and return type. They are starting points to edit, not products: create_product defines one. Only active ideas, unless an admin passes include_retired.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "product_line": {
+            "description": "Only this product line's ideas",
+            "type": "string",
+            "enum": [
+              "account_operations",
+              "wealth",
+              "credit"
+            ]
+          },
+          "include_retired": {
+            "description": "Admins only: retired ideas too, with each idea's status and history",
+            "type": "boolean"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_product_requests",
       "title": "Product requests",
       "description": "Innovator: needs people have described to Mynt that are still taking offers, newest first. Requesters are shown only by a pseudonymous id. Answer one with respond_to_product_request.",
@@ -12323,6 +12490,30 @@
       }
     },
     {
+      "name": "retire_product_idea",
+      "title": "Retire a financial product idea",
+      "description": "Admin: stop offering a product idea. The row stays (update_product_idea with status 'active' brings it back).",
+      "area": "apps",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,39}$"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "retry_offboard",
       "title": "Finish cutting someone off from a workspace",
       "description": "Admin: run again the steps of a workspace offboarding that didn't all succeed (a sandbox or VM provider was down): stopping their builds, revoking VM logins. The worker retries on its own every few minutes; this does it now. Without filters, every pending one.",
@@ -13004,7 +13195,36 @@
     {
       "name": "seed_app_ideas",
       "title": "Add Mynt's shipped app ideas",
-      "description": "Admin: add the app ideas that ship with Mynt (workspaces/coding-build/templates/ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. Mynt never does this on its own.",
+      "description": "Admin: add a set of the app ideas that ship with Mynt that aren't in the database yet: seed 'v1' (the default, workspaces/coding-build/templates/ideas.seed.json) or 'v2' (ideas.v2.seed.json: sharper ideas on the same products, with new ids). Safe to run again: an idea already there, edited or retired, is never overwritten. With replace: true, every active idea not in that set is then retired (never deleted; update_app_idea with status 'active' brings one back), and the retired ids are returned. Mynt never does this on its own.",
+      "area": "apps",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "seed": {
+            "description": "Which shipped set to add (default v1)",
+            "type": "string",
+            "enum": [
+              "v1",
+              "v2"
+            ]
+          },
+          "replace": {
+            "description": "Retire every active idea that isn't in the set (never deletes)",
+            "type": "boolean"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "seed_product_ideas",
+      "title": "Add Mynt's shipped financial product ideas",
+      "description": "Admin: add the financial product ideas that ship with Mynt (workspaces/coding-build/templates/product-ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. Mynt never does this on its own.",
       "area": "apps",
       "roles": [
         "admin"
@@ -15222,6 +15442,140 @@
             "items": {
               "type": "string"
             }
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "update_product_idea",
+      "title": "Change a financial product idea",
+      "description": "Admin: change some of a product idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_product_idea checks it. status 'active' brings back a retired idea.",
+      "area": "apps",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,39}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 80,
+            "description": "The label: who needs the product and what for, in plain words (\"Gig workers with uneven pay can't lock cash away for months\")"
+          },
+          "product_name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 60,
+            "description": "A draft name for the product, which the firm edits"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 200,
+            "description": "One line: what the product is, factually"
+          },
+          "product_line": {
+            "type": "string",
+            "enum": [
+              "account_operations",
+              "wealth",
+              "credit"
+            ],
+            "description": "A product line with products in the region"
+          },
+          "category": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{1,39}$",
+            "description": "A category in that line with products in the region (deposits, retirement, mutual_funds, bonds)"
+          },
+          "region": {
+            "type": "string",
+            "enum": [
+              "US"
+            ],
+            "description": "The region Mynt launches products in"
+          },
+          "key_features": {
+            "minItems": 2,
+            "maxItems": 6,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 160
+            },
+            "description": "The product's key features, each one line, stated as terms the firm sets"
+          },
+          "risk_level": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "low",
+              "moderate",
+              "high",
+              "very_high",
+              "not_applicable"
+            ]
+          },
+          "liquidity": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "high",
+              "moderate",
+              "low",
+              "none",
+              "not_applicable"
+            ]
+          },
+          "typical_horizon": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "short",
+              "short_to_medium",
+              "medium",
+              "medium_to_long",
+              "long"
+            ]
+          },
+          "return_type": {
+            "description": "Optional: prefilled in the Create product sheet",
+            "type": "string",
+            "enum": [
+              "fixed_interest",
+              "variable_interest",
+              "market_linked",
+              "inflation_linked",
+              "guaranteed_income",
+              "guaranteed_plus_bonus",
+              "protection",
+              "cost_of_credit"
+            ]
+          },
+          "sort": {
+            "description": "Order within the product line, lowest first (default 0)",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "retired"
+            ]
           }
         },
         "required": [

@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { NewAppWorkspace, type NewAppProduct } from "@/components/new-app-workspace";
 import { useWorkspace } from "@/components/workspace-context";
 import { kindsFromRoute, submitNewApp, type AppKind } from "@/lib/new-app";
+import { productIdeasFromRoute, type ProductIdea } from "@/lib/product-ideas";
 import type { ProjectItem } from "@/lib/project-types";
 import { myProductsFrom, OPEN_THREAD, openFromSearch, type AppThreadSource, type MyProduct, type OpenThreadDetail } from "@/lib/threads";
 import { withWorkspace } from "@/lib/workspaces";
@@ -19,6 +20,7 @@ export default function NewAppPage() {
   const { selected } = useWorkspace();
   const [products, setProducts] = useState<NewAppProduct[] | null>(null);
   const [kinds, setKinds] = useState<AppKind[] | null>(null);
+  const [productIdeas, setProductIdeas] = useState<ProductIdea[] | null>(null);
   const [mine, setMine] = useState<MyProduct[] | null>(null);
   const [owner, setOwner] = useState<string | null>(null);
   const [apps, setApps] = useState<AppThreadSource[] | null>(null);
@@ -38,7 +40,9 @@ export default function NewAppPage() {
     void (async () => {
       const res = await fetch("/api/app-kinds", { cache: "no-store" }).catch(() => null);
       const data = res?.ok ? await res.json().catch(() => null) : null;
-      if (live) setKinds(kindsFromRoute(data));
+      if (!live) return;
+      setKinds(kindsFromRoute(data));
+      setProductIdeas(productIdeasFromRoute(data));
     })();
     return () => {
       live = false;
@@ -79,6 +83,7 @@ export default function NewAppPage() {
       <NewAppWorkspace
         products={products}
         kinds={kinds}
+        productIdeas={productIdeas}
         onBuild={(request) => submitNewApp(request, { fetch, navigate: (path) => router.push(path) })}
         onProductsChange={(change) => setProducts((list) => change(list ?? []))}
         apps={apps}

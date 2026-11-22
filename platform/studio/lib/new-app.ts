@@ -140,7 +140,7 @@ export function chipIdeas(kinds: readonly AppKind[], seed: number, max = CHIPS_M
 }
 
 // A small seeded generator (mulberry32): the same seed, the same chips.
-function seeded(seed: number): () => number {
+export function seeded(seed: number): () => number {
   let a = Math.floor(seed * 2 ** 32) >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;

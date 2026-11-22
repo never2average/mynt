@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { APP_IDEAS_SEED_PATH, appIdeaErrors, createAppIdea, ideaLines, listAppIdeas, PROMISE_WORDS, seedAppIdeas, seedIdeas, updateAppIdea } from "../dist/app-ideas.js";
+import { APP_IDEAS_SEED_PATH, APP_IDEAS_V2_SEED_PATH, appIdeaErrors, createAppIdea, ideaLines, listAppIdeas, PROMISE_WORDS, seedAppIdeas, seedIdeas, updateAppIdea } from "../dist/app-ideas.js";
 import { appKinds } from "../dist/app-kinds.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
@@ -240,4 +240,72 @@ test("the store functions: seeding is idempotent and leaves edited rows alone", 
   assert.equal(kept.length, 16);
   assert.equal((await listAppIdeas(store.db, { kind: "certificates-of-deposit" })).find((i) => i.id === "cd-ladder-planner").pitch, "Lays out each CD's maturity date on one timeline.");
   await assert.rejects(createAppIdea(store.db, { ...ideas[0] }, null), /already an idea/);
+});
+
+// v2: sharper ideas on the same live products, with new ids, loaded by seed_app_ideas { seed: "v2" }.
+const V2 = JSON.parse(readFileSync(APP_IDEAS_V2_SEED_PATH, "utf8"));
+
+test("the v2 ideas validate, have new ids, cover every kind, and each names a live product", () => {
+  const validate = new Ajv2020({ allErrors: true, strict: false }).compile(JSON.parse(readFileSync(new URL("../schemas/app-idea-seed.schema.json", import.meta.url), "utf8")));
+  assert.ok(validate(V2), JSON.stringify(validate.errors));
+  const ideas = seedIdeas(APP_IDEAS_V2_SEED_PATH);
+  assert.equal(ideas.length, 16);
+  const v1 = new Set(SEED.ideas.map((i) => i.id));
+  for (const i of ideas) {
+    assert.deepEqual(appIdeaErrors(i), [], i.id);
+    assert.ok(!v1.has(i.id), `${i.id}: a new id, so v1's rows aren't touched`);
+    assert.ok(i.problem.length <= 80, `${i.id}: a short problem statement`);
+    assert.doesNotMatch(i.problem, /^(A|An|The) /, `${i.id}: names who has the problem, not the app`);
+    assert.match(i.goal, /The app shows information, not advice\.$/, `${i.id}: ends saying it shows information`);
+    const matching = LIVE.filter(
+      (p) => i.product_lines.includes(p.line) && i.categories.includes(p.category) && i.product_names.some((n) => p.name.toLowerCase().includes(n.toLowerCase())),
+    );
+    assert.ok(matching.length, `${i.id}: names a live product`);
+  }
+  for (const k of appKinds()) assert.ok(ideas.filter((i) => i.kind === k.id).length >= 3, `${k.id}: at least three v2 ideas`);
+  assert.equal(new Set(ideas.map((i) => i.id)).size, ideas.length);
+  assert.equal(new Set(ideas.map((i) => i.problem)).size, ideas.length, "no two share a label");
+});
+
+test("seed_app_ideas adds v2 alongside v1, and with replace retires what isn't in the set, never deleting", async () => {
+  const store = await openStore();
+  const admin = await connect(store, (await store.createUser("Ada", ["admin"])).user);
+  const dev = await connect(store, (await store.createUser("Dev", ["developer"])).user);
+  assert.equal((await call(admin, "seed_app_ideas")).body.inserted.length, 16, "v1 is still the default");
+  // An admin's own idea, which replace retires too (it isn't in the set).
+  const own = { ...SEED.ideas.find((i) => i.id === "emergency-fund"), id: "admins-own-idea" };
+  assert.equal((await call(admin, "create_app_idea", own)).error, false);
+
+  // v2 without replace: added beside v1, nothing retired, no retired key.
+  const added = await call(admin, "seed_app_ideas", { seed: "v2" });
+  assert.equal(added.error, false, JSON.stringify(added.body));
+  assert.deepEqual(added.body, { inserted: V2.ideas.map((i) => i.id), kept: [] });
+  assert.equal((await call(dev, "list_app_ideas")).body.ideas.length, 33);
+
+  // v2 with replace: v2 is kept as it is, everything else active is retired, and every row is still there.
+  const replaced = await call(admin, "seed_app_ideas", { seed: "v2", replace: true });
+  assert.equal(replaced.error, false, JSON.stringify(replaced.body));
+  assert.deepEqual(replaced.body.inserted, []);
+  assert.equal(replaced.body.kept.length, 16);
+  assert.deepEqual(replaced.body.retired, [...SEED.ideas.map((i) => i.id), "admins-own-idea"].sort());
+  const active = (await call(dev, "list_app_ideas")).body.ideas.map((i) => i.id).sort();
+  assert.deepEqual(active, V2.ideas.map((i) => i.id).sort());
+  const everything = await listAppIdeas(store.db, { includeRetired: true });
+  assert.equal(everything.length, 33, "replace never deletes");
+  assert.equal(everything.filter((i) => i.status === "retired").length, 17);
+
+  // Again: nothing more to retire. A retired one brought back stays until replace runs again.
+  assert.deepEqual((await call(admin, "seed_app_ideas", { seed: "v2", replace: true })).body.retired, []);
+  assert.equal((await call(admin, "update_app_idea", { id: "tips-calendar", status: "active" })).body.idea.status, "active");
+  assert.ok((await call(dev, "list_app_ideas")).body.ideas.some((i) => i.id === "tips-calendar"));
+  // Replace is audited with what it retired.
+  // (newest first: the first replace is the older of the two)
+  const replaces = (await store.auditLog(50)).filter((a) => a.action === "seed_app_ideas" && a.details?.replace);
+  assert.equal(replaces.length, 2, "each replace is in the audit log");
+  assert.deepEqual(replaces[0].details.retired, []);
+  const entry = replaces[1];
+  assert.equal(entry.details.seed, "v2");
+  assert.equal(entry.details.retired.length, 17);
+  // Only admins seed.
+  assert.ok(!(await dev.listTools()).tools.some((t) => t.name === "seed_app_ideas"));
 });
