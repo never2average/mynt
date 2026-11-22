@@ -51,6 +51,8 @@ export const STUDIO_TOOLS = {
   list_app_kinds: z.object({}).strict(),
   // ...and the specific app ideas on them, from Mynt's database (reading only; admins keep them in Mynt).
   list_app_ideas: z.object({ kind: appKindId.optional() }).strict(),
+  // Financial product mode's ideas for new products a firm could define (reading only; admins keep them in Mynt).
+  list_product_ideas: z.object({ product_line: z.string().max(80).optional() }).strict(),
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
   // New app's Create product: a draft product (create_product's own fields; Mynt checks them again), then

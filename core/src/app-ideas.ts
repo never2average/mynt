@@ -12,10 +12,15 @@ import type { Store, User } from "./store.js";
 // app does about it and a goal to start the build from. They are rows in Postgres (financial_products.app_ideas,
 // app-ideas-schema.ts) that admins keep with create_app_idea, update_app_idea and retire_app_idea; developers read
 // the active ones with list_app_ideas, and the studio shows them as chips and Templates rows. The ones Mynt ships
-// are in workspaces/coding-build/templates/ideas.seed.json, added only when an admin runs seed_app_ideas: never on
-// startup, and never over a row an admin has edited or retired.
+// are in two sets: v1 (workspaces/coding-build/templates/ideas.seed.json, the first sixteen) and v2
+// (ideas.v2.seed.json, sharper ones on the same products, with new ids). Either is added only when an admin runs
+// seed_app_ideas: never on startup, and never over a row an admin has edited or retired. With replace, the active
+// ideas not in the chosen set are retired (never deleted), so the studio offers that set alone.
 
 export const APP_IDEAS_SEED_PATH = join(APP_KINDS_DIR, "..", "ideas.seed.json");
+export const APP_IDEAS_V2_SEED_PATH = join(APP_KINDS_DIR, "..", "ideas.v2.seed.json");
+export const APP_IDEA_SEEDS = { v1: APP_IDEAS_SEED_PATH, v2: APP_IDEAS_V2_SEED_PATH } as const;
+export type AppIdeaSeed = keyof typeof APP_IDEA_SEEDS;
 
 // The product lines an idea may build on: the ones some app kind declares (the kinds follow the products Mynt
 // can build on), and of those only its own kind's.
@@ -210,7 +215,13 @@ export function seedIdeas(path = APP_IDEAS_SEED_PATH, kinds?: readonly AppKind[]
 }
 
 // Adds the shipped ideas that aren't there yet. One that is (edited, retired or untouched) is left exactly as it is.
-export async function seedAppIdeas(db: Pick<Db, "query">, actorId: string | null, ideas: AppIdeaFields[] = seedIdeas()): Promise<{ inserted: string[]; kept: string[] }> {
+// With replace, every active idea not in `ideas` is then retired (the row stays; update_app_idea brings it back).
+export async function seedAppIdeas(
+  db: Pick<Db, "query">,
+  actorId: string | null,
+  ideas: AppIdeaFields[] = seedIdeas(),
+  opts: { replace?: boolean } = {},
+): Promise<{ inserted: string[]; kept: string[]; retired?: string[] }> {
   const inserted: string[] = [];
   const kept: string[] = [];
   for (const f of ideas) {
@@ -221,7 +232,13 @@ export async function seedAppIdeas(db: Pick<Db, "query">, actorId: string | null
     );
     (rows.length ? inserted : kept).push(f.id);
   }
-  return { inserted, kept };
+  if (!opts.replace) return { inserted, kept };
+  const { rows } = await db.query(
+    `UPDATE financial_products.app_ideas SET status = 'retired', updated_at = now()
+     WHERE status = 'active' AND NOT (id = ANY($1::text[])) RETURNING id`,
+    [ideas.map((i) => i.id)],
+  );
+  return { inserted, kept, retired: rows.map((r) => r.id as string).sort() };
 }
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -340,12 +357,21 @@ export function registerAppIdeaAdminTools(server: McpServer, store: Store, user:
     {
       title: "Add Mynt's shipped app ideas",
       description:
-        "Admin: add the app ideas that ship with Mynt (workspaces/coding-build/templates/ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. Mynt never does this on its own.",
-      inputSchema: {},
+        "Admin: add a set of the app ideas that ship with Mynt that aren't in the database yet: seed 'v1' (the default, workspaces/coding-build/templates/ideas.seed.json) or 'v2' (ideas.v2.seed.json: sharper ideas on the same products, with new ids). Safe to run again: an idea already there, edited or retired, is never overwritten. With replace: true, every active idea not in that set is then retired (never deleted; update_app_idea with status 'active' brings one back), and the retired ids are returned. Mynt never does this on its own.",
+      inputSchema: {
+        seed: z.enum(["v1", "v2"]).optional().describe("Which shipped set to add (default v1)"),
+        replace: z.boolean().optional().describe("Retire every active idea that isn't in the set (never deletes)"),
+      },
     },
-    async () => {
-      const result = await seedAppIdeas(store.db, user.id);
-      await store.audit(user.id, "seed_app_ideas", "app_ideas", { inserted: result.inserted, kept: result.kept.length });
+    async ({ seed, replace }) => {
+      const set: AppIdeaSeed = seed ?? "v1";
+      const result = await seedAppIdeas(store.db, user.id, seedIdeas(APP_IDEA_SEEDS[set]), { replace: Boolean(replace) });
+      await store.audit(user.id, "seed_app_ideas", "app_ideas", {
+        seed: set,
+        inserted: result.inserted,
+        kept: result.kept.length,
+        ...(replace ? { replace: true, retired: result.retired ?? [] } : {}),
+      });
       return json(result);
     },
   );

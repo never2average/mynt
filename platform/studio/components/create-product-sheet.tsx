@@ -88,7 +88,8 @@ export function CreateProductSheet({
   onCreated: (product: StudioProduct) => void
   fetcher?: typeof fetch
   // A draft from New app's Create product chat (lib/product-chat.ts), to fill the form with when it opens.
-  initial?: { key: string; request: NewProductRequest } | null
+  // Or a product idea's prefill (lib/product-ideas.ts), which leaves some fields (the regulator) for the user.
+  initial?: { key: string; request: NewProductRequest | Partial<NewProductRequest> } | null
 }) {
   const [options, setOptions] = useState<Options | null>(null)
   const [name, setName] = useState("")
@@ -173,22 +174,23 @@ export function CreateProductSheet({
     if (!initial) filled.current = null
     if (!open || !initial || filled.current === initial.key) return
     filled.current = initial.key
-    const r = initial.request
-    setName(r.name)
-    setIdEdited(r.id !== slugFromName(r.name))
-    setId(r.id)
-    setLine(r.product_line)
-    setRegion(r.region)
-    setCategory(r.category)
-    setRegulator(r.regulator)
-    setAction(r.action)
-    setUnderlying(r.underlying_product_ids)
-    setRisk(r.risk_level)
-    setLiquidity(r.liquidity)
-    setHorizon(r.typical_horizon)
-    setReturnType(r.return_type)
-    setDescription(r.description)
-    setFeatures(r.key_features.join("\n"))
+    const r: Partial<NewProductRequest> = initial.request
+    const name = r.name ?? ""
+    setName(name)
+    setIdEdited(r.id !== undefined && r.id !== slugFromName(name))
+    setId(r.id ?? "")
+    setLine(r.product_line ?? "")
+    setRegion(r.region ?? "")
+    setCategory(r.category ?? "")
+    setRegulator(r.regulator ?? "")
+    setAction(r.action ?? "issuance")
+    setUnderlying(r.underlying_product_ids ?? [])
+    setRisk(r.risk_level ?? "")
+    setLiquidity(r.liquidity ?? "")
+    setHorizon(r.typical_horizon ?? "")
+    setReturnType(r.return_type ?? "")
+    setDescription(r.description ?? "")
+    setFeatures((r.key_features ?? []).join("\n"))
     setError(null)
   }, [open, initial])
 

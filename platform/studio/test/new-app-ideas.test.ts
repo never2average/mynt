@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { appKindsFrom, chipIdeas, ideaProducts, kindAsIdea, kindsFromRoute, picksForKind } from "@/lib/new-app";
+import { chipProductIdeas, productIdeaMessage, productIdeaPrefill, productIdeasFrom, productIdeasFromRoute } from "@/lib/product-ideas";
+import { NewProductRequest } from "@/lib/products";
 import { parseStudioCall } from "@/lib/studio-tools";
 
 // New app's ideas come from Mynt's database (list_app_ideas), each under the kind it names; the kinds from list_app_kinds.
@@ -125,5 +127,99 @@ describe("using an idea picks the published products it names", () => {
     // Until they load, any idea may be a chip: the first of each kind's comes first, so one is the annuity idea.
     expect(shown(null)).toContain("annuity-ladder");
     expect(shown([])).toEqual([]);
+  });
+});
+
+// Financial product mode's ideas: new products a firm could define, from Mynt's database (list_product_ideas).
+const pidea = (id: string, line: string, category: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  label: `People who need ${id}`,
+  product_name: `Product ${id}`,
+  summary: `What ${id} is, factually.`,
+  product_line: line,
+  category,
+  region: "US",
+  key_features: [`First feature of ${id}`, `Second feature of ${id}`],
+  risk_level: "low",
+  liquidity: "moderate",
+  typical_horizon: "short",
+  return_type: "fixed_interest",
+  ...extra,
+});
+const PRODUCT_IDEAS = {
+  ideas: [
+    pidea("no-penalty-cd", "account_operations", "deposits"),
+    pidea("rate-reset-cd", "account_operations", "deposits"),
+    pidea("dual-approval-mma", "account_operations", "deposits"),
+    pidea("catch-up-ira", "wealth", "retirement"),
+    pidea("payday-ira", "wealth", "retirement"),
+    pidea("sweep-mmf", "wealth", "mutual_funds"),
+    pidea("tips-ladder", "credit", "bonds"),
+    pidea("tips-gift", "credit", "bonds", { risk_level: "nonsense" }),
+    // Not shown: no label, a line that isn't one, a bad id.
+    pidea("no-label", "credit", "bonds", { label: "" }),
+    pidea("off-line", "groceries", "bonds"),
+    pidea("Bad Id", "credit", "bonds"),
+  ],
+};
+
+describe("Financial product ideas", () => {
+  it("are list_product_ideas' rows in the studio's shape, dropping the malformed, and survive the route", () => {
+    const ideas = productIdeasFrom(PRODUCT_IDEAS);
+    expect(ideas.map((i) => i.id)).toEqual(["no-penalty-cd", "rate-reset-cd", "dual-approval-mma", "catch-up-ira", "payday-ira", "sweep-mmf", "tips-ladder", "tips-gift"]);
+    expect(ideas[0]).toEqual({
+      id: "no-penalty-cd",
+      label: "People who need no-penalty-cd",
+      productName: "Product no-penalty-cd",
+      summary: "What no-penalty-cd is, factually.",
+      productLine: "account_operations",
+      category: "deposits",
+      region: "US",
+      keyFeatures: ["First feature of no-penalty-cd", "Second feature of no-penalty-cd"],
+      riskLevel: "low",
+      liquidity: "moderate",
+      typicalHorizon: "short",
+      returnType: "fixed_interest",
+    });
+    expect(ideas.find((i) => i.id === "tips-gift")).not.toHaveProperty("riskLevel");
+    expect(productIdeasFromRoute(JSON.parse(JSON.stringify({ kinds: [], productIdeas: ideas })))).toEqual(ideas);
+    expect(productIdeasFrom(null)).toEqual([]);
+    expect(productIdeasFromRoute({ kinds: [] })).toEqual([]);
+  });
+
+  it("six chips per seed, one from every product line first, the same for the same seed", () => {
+    const ideas = productIdeasFrom(PRODUCT_IDEAS);
+    for (const seed of [0, 0.25, 0.5, 0.99]) {
+      const chips = chipProductIdeas(ideas, seed);
+      expect(chips).toHaveLength(6);
+      expect(new Set(chips.map((c) => c.id)).size).toBe(6);
+      expect(new Set(chips.slice(0, 3).map((c) => c.productLine))).toEqual(new Set(["account_operations", "wealth", "credit"]));
+      expect(chipProductIdeas(ideas, seed)).toEqual(chips);
+    }
+    expect(chipProductIdeas([], 0.5)).toEqual([]);
+  });
+
+  it("a chip's first message names the product, who it's for, where, and its features", () => {
+    const [idea] = productIdeasFrom(PRODUCT_IDEAS);
+    const message = productIdeaMessage(idea);
+    expect(message).toContain("Product no-penalty-cd");
+    expect(message).toContain("What no-penalty-cd is, factually.");
+    expect(message).toContain("People who need no-penalty-cd");
+    expect(message).toContain("US, account operations, deposits");
+    expect(message).toContain("- Second feature of no-penalty-cd");
+  });
+
+  it("Use's prefill is the sheet's request but for the regulator, which the firm picks", () => {
+    const [idea] = productIdeasFrom(PRODUCT_IDEAS);
+    const prefill = productIdeaPrefill(idea);
+    expect(prefill).toMatchObject({ id: "product-no-penalty-cd", name: "Product no-penalty-cd", product_line: "account_operations", category: "deposits", region: "US", action: "issuance", description: "What no-penalty-cd is, factually.", key_features: idea.keyFeatures, risk_level: "low", return_type: "fixed_interest" });
+    expect(prefill).not.toHaveProperty("regulator");
+    expect(NewProductRequest.safeParse({ ...prefill, regulator: "OCC" }).success).toBe(true);
+  });
+
+  it("list_product_ideas is a read the studio may call", () => {
+    expect(parseStudioCall("list_product_ideas", {})).toEqual({ tool: "list_product_ideas", args: {} });
+    expect(parseStudioCall("list_product_ideas", { product_line: "credit" })).toEqual({ tool: "list_product_ideas", args: { product_line: "credit" } });
+    expect(parseStudioCall("list_product_ideas", { include_retired: true })).toHaveProperty("error");
   });
 });

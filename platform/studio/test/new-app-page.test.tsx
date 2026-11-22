@@ -132,6 +132,27 @@ describe("the New app page", () => {
     expect(input().value).toBe(KINDS[1].goalTemplate);
   });
 
+  it("reads the route's product ideas: App mode keeps the app ideas, Financial product mode shows the product ideas", async () => {
+    const productIdeas = [
+      { id: "no-penalty-cd", label: "Gig workers avoid CDs in case they need the cash early", productName: "6-Month No-Penalty CD", summary: "A 6-month CD.", productLine: "account_operations", category: "deposits", region: "US", keyFeatures: ["One", "Two"] },
+      { id: "tips-ladder", label: "Savers want TIPS maturing on a set schedule", productName: "TIPS Ladder Bundle", summary: "TIPS with staggered maturities.", productLine: "credit", category: "bonds", region: "US", keyFeatures: ["One", "Two"] },
+    ];
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
+      if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: KINDS, productIdeas }), { status: 200 });
+      return new Response("{}", { status: 404 });
+    });
+    await loaded();
+    expect(chipIds().every((id) => IDEAS.some((e) => e.id === id))).toBe(true);
+    expect(document.querySelector("[data-product-chip]")).toBeNull();
+    await act(async () => void fireEvent.click(document.querySelector('[data-mode-option="product"]')!));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect([...document.querySelectorAll("[data-product-chip]")].map((c) => c.textContent).sort()).toEqual(productIdeas.map((i) => i.label).sort());
+    expect(chipIds()).toEqual([]);
+  });
+
   it("lists the ideas as a table grouped by kind; Use fills the composer with its goal and picks a product of its line", async () => {
     await loaded();
     await openTab("Templates");
