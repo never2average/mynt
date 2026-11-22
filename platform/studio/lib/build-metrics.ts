@@ -1,4 +1,4 @@
-// A build's cost and time as Mynt measured them (get_build / list_builds: cost_cents, cap_cents,
+// A build's cost and time as Mynt measured them (get_build / list_builds: cost_cents,
 // durations_seconds, timing, measured_at, not_measured). Pure, for the Builds page, the builder's
 // top bar, the dashboard and the tests. A figure Mynt didn't measure is null, shown as "Not
 // measured" with Mynt's reason, never as 0.
@@ -15,7 +15,6 @@ export const NOT_REPORTED = "Mynt doesn't report this build's cost and time yet"
 export type DurationKey = "queued" | "coding" | "verify" | "total";
 export type BuildMetrics = {
   costCents: number | null;
-  capCents: number | null;
   seconds: Record<DurationKey, number | null>;
   timing: { queuedAt: string | null; startedAt: string | null; codingStartedAt: string | null; verifyStartedAt: string | null; finishedAt: string | null };
   /** When Mynt measured the durations: a running build's count on from here. */
@@ -32,7 +31,6 @@ export function metricsFrom(build: unknown): BuildMetrics | null {
   const why = isObj(build.not_measured) ? build.not_measured : {};
   return {
     costCents: num(build.cost_cents),
-    capCents: num(build.cap_cents),
     seconds: { queued: num(d.queued), coding: num(d.coding), verify: num(d.verify), total: num(d.total) },
     timing: { queuedAt: str(t.queued_at), startedAt: str(t.started_at), codingStartedAt: str(t.coding_started_at), verifyStartedAt: str(t.verify_started_at), finishedAt: str(t.finished_at) },
     measuredAt: str(build.measured_at),
@@ -60,10 +58,10 @@ export function durationText(seconds: number): string {
 export type Shown = { text: string; measured: boolean; reason: string | null };
 const unmeasured = (reason: string | undefined): Shown => ({ text: NOT_MEASURED, measured: false, reason: reason ?? NOT_REPORTED });
 
-/** "$3.10 of $20.00"; "Not measured" with the reason when the cost is unknown. */
-export function costOfCap(m: BuildMetrics | null | undefined): Shown {
+/** The measured cost, "$3.10"; "Not measured" with the reason when the cost is unknown. */
+export function buildCost(m: BuildMetrics | null | undefined): Shown {
   if (!m || m.costCents === null) return unmeasured(m?.notMeasured.cost_cents);
-  return { text: m.capCents === null ? dollars(m.costCents) : `${dollars(m.costCents)} of ${dollars(m.capCents)}`, measured: true, reason: null };
+  return { text: dollars(m.costCents), measured: true, reason: null };
 }
 
 // How far past Mynt's measurement `now` is: a running build's figure grows by this much.

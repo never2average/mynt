@@ -14,7 +14,7 @@ export default function NewAppPage() {
   const [products, setProducts] = useState<NewAppProduct[] | null>(null);
   const [kinds, setKinds] = useState<AppKind[] | null>(null);
 
-  // The products the user may build on, and Mynt's templates (none on a Mynt without them).
+  // The products the user may build on (and their own drafts), and Mynt's templates (none on a Mynt without them).
   useEffect(() => {
     let live = true;
     void (async () => {
@@ -34,7 +34,12 @@ export default function NewAppPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-new-app-page>
-      <NewAppWorkspace products={products} kinds={kinds} onBuild={(request) => submitNewApp(request, { fetch, navigate: (path) => router.push(path) })} />
+      <NewAppWorkspace
+        products={products}
+        kinds={kinds}
+        onBuild={(request) => submitNewApp(request, { fetch, navigate: (path) => router.push(path) })}
+        onProductsChange={(change) => setProducts((list) => change(list ?? []))}
+      />
     </div>
   );
 }

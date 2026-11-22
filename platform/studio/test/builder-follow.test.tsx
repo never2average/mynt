@@ -44,12 +44,9 @@ const say = (id: string, text: string) => [
   { type: "text-delta", id, delta: text },
   { type: "text-end", id },
 ];
-const budget = (b: Record<string, unknown> | null, session = true) =>
-  new Response(JSON.stringify({ budget: b && { defaultCapUsd: 10, monthLeftUsd: 40, workspaceLeftUsd: null, minCapUsd: 0.5, sessionCapAboveUsd: 2, ...b }, session }), { status: 200 });
-
-// A fake studio: the chat's replies in order (by method), the budget, and Ship; every request recorded.
+// A fake studio: the chat's replies in order (by method), and Ship; every request recorded.
 type Reply = Response | (() => Promise<Response>);
-function studio(opts: { chat?: Reply[]; follow?: Reply[]; budget?: Response; finish?: Response } = {}) {
+function studio(opts: { chat?: Reply[]; follow?: Reply[]; finish?: Response } = {}) {
   const asked: { method: string; url: string; body: unknown }[] = [];
   const chat = [...(opts.chat ?? [])];
   const follow = [...(opts.follow ?? [])];
@@ -59,7 +56,6 @@ function studio(opts: { chat?: Reply[]; follow?: Reply[]; budget?: Response; fin
       const url = String(input);
       const method = init?.method ?? "GET";
       asked.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : null });
-      if (url.startsWith("/api/builds/budget")) return opts.budget ?? budget(null);
       if (url.includes("/finish")) return opts.finish ?? new Response(JSON.stringify({ ok: true }), { status: 200 });
       const next = method === "POST" ? chat.shift() : follow.shift();
       if (typeof next === "function") return next();
@@ -138,33 +134,17 @@ describe("Ship", () => {
   });
 });
 
-describe("the cap for a new build", () => {
-  it("starts at what's left this month when that's less than the usual cap, and is sent with the message", async () => {
-    const s = studio({ budget: budget({ monthLeftUsd: 6.5 }) });
+describe("no spending cap in the builder chat", () => {
+  it("has no cap field or budget block; a message that starts a build goes without a cap (Mynt applies its own)", async () => {
+    const s = studio();
     render(<Assistant initialMessages={history} build={{ buildId: "b1", status: "failed", session: true, finishing: false }} selectedProjectId="app-1" selectedConversationId="b1" />);
-    const field = (await screen.findByLabelText("Spending cap for this build, in US dollars", undefined, { timeout: 4000 })) as HTMLInputElement;
-    expect(field.value).toBe("6.50");
-    fireEvent.change(field, { target: { value: "4" } });
-    fireEvent.blur(field);
-    await send("Add a statements page");
-    await waitFor(() => expect(s.asked.find((a) => a.method === "POST" && a.url === "/api/chat")?.body).toMatchObject({ projectId: "app-1", capUsd: 4 }));
-  });
-
-  it("blocks sending, saying why, when too little is left this month", async () => {
-    studio({ budget: budget({ monthLeftUsd: 1.2 }) });
-    render(<Assistant initialMessages={history} selectedProjectId="app-1" selectedConversationId={null} />);
-    expect(await screen.findByText(/Only US\$1\.20 of your build budget is left this month/, undefined, { timeout: 4000 })).toBeTruthy();
-    // The shared Thread's sendBlocked: Send is off and the reason is under the composer.
-    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(document.querySelector("p[data-send-blocked]")?.textContent).toMatch(/^Only US\$1\.20/);
-    expect(screen.queryByLabelText("Spending cap for this build, in US dollars")).toBeNull();
-  });
-
-  it("isn't shown while a build is running (the message steers it)", async () => {
-    const s = studio({ budget: budget({}) });
-    render(<Assistant initialMessages={history} build={{ buildId: "b1", status: "coding", session: true, finishing: false }} selectedProjectId="app-1" selectedConversationId="b1" />);
     await new Promise((r) => setTimeout(r, 30));
     expect(screen.queryByLabelText("Spending cap for this build, in US dollars")).toBeNull();
+    expect(document.querySelector("[data-cap-field]")).toBeNull();
+    expect(document.querySelector("p[data-send-blocked]")).toBeNull();
+    await send("Add a statements page");
+    await waitFor(() => expect(s.asked.find((a) => a.method === "POST" && a.url === "/api/chat")?.body).toMatchObject({ projectId: "app-1" }));
+    expect(s.asked.find((a) => a.method === "POST" && a.url === "/api/chat")?.body).not.toHaveProperty("capUsd");
     expect(s.asked.some((a) => a.url.startsWith("/api/builds/budget"))).toBe(false);
   });
 });

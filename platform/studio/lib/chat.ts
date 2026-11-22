@@ -68,7 +68,7 @@ export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[
   return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}), ...("kind" in props && tools.some((t) => t.name === "list_app_kinds") ? { appKinds: true } : {}) };
 }
 
-type StartArgs = { goal: string; app_id: string; mode?: "session"; continue_from?: string; cap_usd?: number };
+type StartArgs = { goal: string; app_id: string; mode?: "session"; continue_from?: string };
 
 export type ChatAction =
   | { kind: "steer"; buildId: string; args: { build_id: string; message: string } }
@@ -107,8 +107,6 @@ export function chooseAction(opts: {
   builds: BuildSummary[];
   text: string;
   capabilities: Capabilities;
-  /** The cap the developer picked for a new build (lib/build-cap.ts); Mynt's usual cap without one. */
-  capUsd?: number | null;
 }): ChatAction {
   const text = opts.text.trim();
   if (!text) return { kind: "refuse", message: "Type a message first." };
@@ -131,7 +129,6 @@ export function chooseAction(opts: {
 
   if (text.length < MIN_GOAL) return { kind: "refuse", message: `Say a little more about what to build (at least ${MIN_GOAL} characters).` };
   const args: StartArgs = { goal: text, app_id: opts.appId };
-  if (typeof opts.capUsd === "number") args.cap_usd = opts.capUsd;
   if (opts.capabilities.sessionBuilds) {
     args.mode = "session";
     const previous = mine.find((b) => b.commit_sha);
@@ -470,8 +467,8 @@ export function followFrom(build: unknown, activityReply: unknown): { after: num
 }
 
 /**
- * The build a conversation follows, as its composer needs it: Ship while a session is open, a
- * cap for the next build once nothing is running, and holding messages while it's verified.
+ * The build a conversation follows, as its composer needs it: Ship while a session is open, and
+ * holding messages while it's verified.
  */
 export type BuildState = { buildId: string; status: string; session: boolean; finishing: boolean };
 
@@ -485,7 +482,7 @@ export function buildStateFrom(build: unknown): BuildState | null {
 
 /** Ship is offered while a session build's agent is open and not already shipping. */
 export const canShip = (s: BuildState | null) => !!s && s.session && !s.finishing && STEERABLE.has(s.status);
-/** The next message starts a new build (so it has a cap): nothing is running, starting or being verified. */
+/** The next message starts a new build: nothing is running, starting or being verified. */
 export const startsNewBuild = (s: BuildState | null) => !s || FINISHED.has(s.status);
 
 /** The agent finished answering: a turn ended, or the build is done. */

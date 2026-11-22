@@ -21,7 +21,6 @@ import {
   STEERABLE,
 } from "@/lib/chat";
 import { STREAM_HEADERS } from "@/lib/ai-route";
-import { buildCap } from "@/lib/studio-tools";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
 import { sessionStore, type Release, type Session } from "@/lib/session-store";
@@ -60,8 +59,6 @@ const id = z.string().trim().min(1).max(200);
 const Body = z.object({
   projectId: id,
   conversationId: id.nullish(),
-  // The cap the developer picked for a new build (the composer's Cap); used only when the message starts one.
-  capUsd: buildCap.nullish(),
   messages: z
     .array(
       z
@@ -116,13 +113,13 @@ export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  const { projectId, conversationId, capUsd } = parsed.data;
+  const { projectId, conversationId } = parsed.data;
   const message = lastUserMessage(parsed.data.messages);
 
   const opened = await openMynt();
   if (opened instanceof Response) return opened;
   return streamReply(opened, (writer) =>
-    converse(writer, opened.mynt, opened.session, opened.saveIfChanged, { projectId, conversationId: conversationId ?? null, message, capUsd: capUsd ?? null, signal: req.signal, deadline }),
+    converse(writer, opened.mynt, opened.session, opened.saveIfChanged, { projectId, conversationId: conversationId ?? null, message, signal: req.signal, deadline }),
   );
 }
 
@@ -280,11 +277,11 @@ async function afterFailure(err: unknown, releases: Release[]) {
 
 async function decide(
   mynt: Client,
-  opts: { projectId: string; conversationId: string | null; message: { text: string }; capUsd: number | null },
+  opts: { projectId: string; conversationId: string | null; message: { text: string } },
   capabilities: ReturnType<typeof capabilitiesFrom>,
 ) {
   const builds = buildSummaries(await callStudioTool(mynt, "list_builds", { app_id: opts.projectId }));
-  const action = chooseAction({ appId: opts.projectId, selectedBuildId: opts.conversationId, builds, text: opts.message.text, capabilities, capUsd: opts.capUsd });
+  const action = chooseAction({ appId: opts.projectId, selectedBuildId: opts.conversationId, builds, text: opts.message.text, capabilities });
   // Whether the build the action is about is a session (it waits for the developer's next message), and shipping.
   const target = "buildId" in action ? builds.find((b) => b.id === action.buildId) : undefined;
   return Object.assign(action, { session: target?.mode === "session", finishing: target?.finishing === true });
@@ -295,7 +292,7 @@ async function converse(
   mynt: Client,
   session: Session,
   saveIfChanged: (force?: boolean) => Promise<void>,
-  opts: { projectId: string; conversationId: string | null; message: { id: string | null; text: string }; capUsd: number | null; signal: AbortSignal; deadline: number },
+  opts: { projectId: string; conversationId: string | null; message: { id: string | null; text: string }; signal: AbortSignal; deadline: number },
 ) {
   const capabilities = capabilitiesFrom(await listMyntTools(mynt));
   let action = await decide(mynt, opts, capabilities);
@@ -444,7 +441,7 @@ async function watch(
   buildId: string,
   skip: number,
   opts: { signal: AbortSignal; deadline: number },
-  // What the page shows about the build (data-state, sent as its status changes): Ship, the cap, held messages.
+  // What the page shows about the build (data-state, sent as its status changes): Ship, held messages.
   meta: { session: boolean; finishing: boolean } = { session: false, finishing: false },
 ): Promise<Watched> {
   let phase: string | null = null;

@@ -47,7 +47,6 @@ export type Dashboard = {
   converted: Figure;
   conversion: Figure;
   buildSpend: Figure; // this month
-  buildCap: Figure;
   earnings: Figure; // null: not tracked
   activeProducts: Figure; // products live in the workspace's apps
   licences: Figure; // partner licences behind them
@@ -93,7 +92,6 @@ export function fromDashboardTool(reply: unknown, buildsReply?: unknown): Dashbo
     converted: num(handoffs.converted),
     conversion: rate(handoffs.conversion_rate),
     buildSpend: num(spend.month_usd),
-    buildCap: num(spend.monthly_cap_usd),
     earnings: earnings.tracked === true ? num(earnings.usd) : null,
     activeProducts: countOf(r.active_products),
     licences: countOf(r.licences),
@@ -154,7 +152,6 @@ export function fromAppsAndBuilds(appsReply: unknown, buildsReply: unknown): Das
     converted: null,
     conversion: null,
     buildSpend: num(r.month_spend_usd),
-    buildCap: num(r.monthly_cap_usd),
     earnings: null,
     activeProducts: null,
     licences: null,
@@ -206,7 +203,7 @@ export function facts(d: Dashboard): Fact[] {
       label: "Build spend this month",
       value: usd(d.buildSpend),
       measured: d.buildSpend !== null,
-      note: d.buildCap !== null ? `Of ${usd(d.buildCap)} monthly budget` : "Coding-agent builds",
+      note: "Coding-agent builds",
     },
   ];
 }

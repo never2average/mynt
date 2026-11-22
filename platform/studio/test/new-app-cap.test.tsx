@@ -2,9 +2,8 @@
 import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-// New app's cap for the first build, in the composer's toolbar beside the Products picker: it starts
-// at the usual cap or what's left this month, whichever is less, goes with the request (with the
-// template's kind), and when too little is left, sending is blocked and the composer says why.
+// New app has no spending cap: no "Cap $" in the composer, no budget read, no send blocked for budget,
+// and the request carries no cap_usd (Mynt applies its own cap to the first build).
 
 const pushed: string[] = [];
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: (p: string) => void pushed.push(p) }) }));
@@ -31,11 +30,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function studio(monthLeftUsd: number) {
+function studio() {
   const posted: unknown[] = [];
+  const asked: string[] = [];
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-    if (url.startsWith("/api/builds/budget"))
-      return new Response(JSON.stringify({ budget: { defaultCapUsd: 10, monthLeftUsd, workspaceLeftUsd: null, minCapUsd: 0.5, sessionCapAboveUsd: 2 }, session: true }), { status: 200 });
+    asked.push(url);
     if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
     if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: KINDS }), { status: 200 });
     if (url === "/api/apps") {
@@ -44,36 +43,22 @@ function studio(monthLeftUsd: number) {
     }
     return new Response("{}", { status: 404 });
   });
-  return posted;
+  return { posted, asked };
 }
 const send = () => screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
-const capField = () => screen.queryByLabelText("Spending cap for this build, in US dollars") as HTMLInputElement | null;
 
-describe("New app's cap", () => {
-  it("sits beside the Products picker, starts at what's left this month, and goes with the request", async () => {
-    const posted = studio(6.5);
+describe("New app without a cap", () => {
+  it("has only the Products picker in the composer's toolbar, reads no budget, and sends no cap", async () => {
+    const s = studio();
     render(<NewAppPage />);
-    await waitFor(() => expect(capField()?.value).toBe("6.50"));
+    await waitFor(() => expect(document.querySelector('[data-chips] [data-chip="savings-goals"]')).not.toBeNull());
     expect(document.querySelector("[data-composer-toolbar] [data-product-picker]")).not.toBeNull();
-    expect(document.querySelector("[data-composer-toolbar] [data-cap-field]")).not.toBeNull();
-    fireEvent.change(capField()!, { target: { value: "3" } });
-    fireEvent.blur(capField()!);
+    expect(document.querySelector("[data-cap-field]")).toBeNull();
+    expect(screen.queryByLabelText("Spending cap for this build, in US dollars")).toBeNull();
     await act(async () => void fireEvent.click(document.querySelector('[data-chips] [data-chip="savings-goals"]')!));
     expect(send().disabled).toBe(false);
     await act(async () => void fireEvent.click(send()));
-    await waitFor(() => expect(posted).toEqual([{ prompt: KINDS[0].goalTemplate, product_ids: ["p1"], kind: "savings-goals", cap_usd: 3 }]));
-  });
-
-  it("blocks sending, saying why, when too little is left this month", async () => {
-    const posted = studio(1.5);
-    render(<NewAppPage />);
-    await waitFor(() => expect(document.querySelector('[data-chips] [data-chip="savings-goals"]')).not.toBeNull());
-    await act(async () => void fireEvent.click(document.querySelector('[data-chips] [data-chip="savings-goals"]')!));
-    await waitFor(() => expect(document.querySelector("p[data-send-blocked]")?.textContent).toMatch(/^Only US\$1\.50 of your build budget is left this month/));
-    expect(send().disabled).toBe(true);
-    expect(capField()).toBeNull();
-    fireEvent.keyDown(screen.getByLabelText("Message input"), { key: "Enter" });
-    await act(async () => undefined);
-    expect(posted).toEqual([]);
+    await waitFor(() => expect(s.posted).toEqual([{ prompt: KINDS[0].goalTemplate, product_ids: ["p1"], kind: "savings-goals" }]));
+    expect(s.asked.some((u) => u.startsWith("/api/builds/budget"))).toBe(false);
   });
 });

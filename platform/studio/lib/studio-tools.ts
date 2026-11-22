@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isCalendarDate } from "./compliance";
+import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
@@ -8,7 +9,7 @@ import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 // called from the studio at all.
 //
 // Writing tools join the list with the screens that use them. The chat starts and steers
-// builds, New app creates apps, the dashboard's Connect repository connects repositories and the app's stage
+// builds, New app creates apps (and products, then tests and publishes them), the dashboard's Connect repository connects repositories and the app's stage
 // control promotes, and the builder chat's Ship ships (finish_build); stopping, sandbox commands and hosting changes
 // come later.
 
@@ -16,8 +17,6 @@ const id = z.string().trim().min(1).max(200);
 // A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
 const service = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/).optional();
 const workspaceId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
-// A build's spending cap in dollars, to the cent.
-export const buildCap = z.number().positive().max(10_000).refine((n) => Math.round(n * 100) === n * 100, "whole cents");
 const workspaceName = z.string().trim().min(1).max(80);
 // Roles given from the studio; ownership isn't handed over here.
 const memberRole = z.enum(["admin", "member"]);
@@ -52,6 +51,32 @@ export const STUDIO_TOOLS = {
   list_app_kinds: z.object({}).strict(),
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
+  // New app's Create product: a draft product (create_product's own fields; Mynt checks them again), then
+  // Test and Publish on its row. The user's own products (drafts too) and the regions and categories the
+  // sheet offers are read alongside.
+  list_my_products: z.object({}).strict(),
+  list_regions: z.object({}).strict(),
+  list_product_categories: z.object({ product_line: z.enum(PRODUCT_LINES).optional() }).strict(),
+  create_product: z
+    .object({
+      id: ProductId,
+      name: z.string().trim().min(1).max(200),
+      product_line: z.enum(PRODUCT_LINES),
+      category: z.string().trim().min(1).max(120),
+      region: z.string().trim().regex(/^([A-Za-z]{2}|global)$/),
+      risk_level: z.enum(RISK_LEVELS),
+      liquidity: z.enum(LIQUIDITY),
+      typical_horizon: z.enum(HORIZONS),
+      return_type: z.enum(RETURN_TYPES),
+      regulator: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(4000),
+      key_features: z.array(z.string().trim().min(1).max(500)).max(20),
+      action: z.enum(PRODUCT_ACTIONS),
+      underlying_product_ids: z.array(id).max(20),
+    })
+    .strict(),
+  test_product: z.object({ id: ProductId }).strict(),
+  publish_product: z.object({ id: ProductId }).strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({
@@ -147,8 +172,6 @@ export const STUDIO_TOOLS = {
       continue_from: id.optional(),
       // New app: the app kind it starts from (list_app_kinds), checked by Mynt.
       kind: appKindId.optional(),
-      // The cap the developer picked (lib/build-cap.ts), within what Mynt said is left; Mynt checks it again.
-      cap_usd: buildCap.optional(),
     })
     .strict(),
   steer_build: z.object({ build_id: id, message: z.string().trim().min(3).max(4000) }).strict(),

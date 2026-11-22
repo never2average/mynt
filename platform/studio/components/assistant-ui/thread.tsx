@@ -58,7 +58,8 @@ const TextRenderer = createContext<FC>(MarkdownText);
 // `toolbar` sits in the composer, left of Send (Earn's wallet picker, like a model picker).
 // `commands`: the chat's slash commands (lib/slash-commands.ts), those for `roles` only; typing "/"
 // or the composer's "/" button lists them. `sendBlocked`: why the composer can't send yet (New app's
-// products not picked): Send is disabled, Enter doesn't send, and the reason shows under the composer.
+// products not picked): Send is disabled, Enter doesn't send, and the reason shows under the composer
+// (and as the disabled Send's tooltip). `sendBlockedNote={false}`: the tooltip only, no line under it.
 export const Thread: FC<{
   welcome?: ReactNode;
   disabledNote?: string;
@@ -69,9 +70,11 @@ export const Thread: FC<{
   commands?: readonly SlashCommand[];
   roles?: readonly string[];
   sendBlocked?: string | null;
+  sendBlockedNote?: boolean;
 }> = ({
   welcome,
   sendBlocked,
+  sendBlockedNote = true,
   toolbar,
   commands,
   roles,
@@ -106,9 +109,9 @@ export const Thread: FC<{
         <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mx-auto group-data-[chat-align=left]/chat:ml-0 mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background ${note ? "pb-2 md:pb-3" : "pb-4 md:pb-6"}`}>
           <ThreadScrollToBottom />
           <Composer placeholder={placeholder} toolbar={toolbar} commands={commands} roles={roles} sendBlocked={sendBlocked} />
-          {(disabledNote || sendBlocked) && (
-            <p className="aui-composer-disabled-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground" data-send-blocked={sendBlocked ? "" : undefined}>
-              {sendBlocked || disabledNote}
+          {(disabledNote || (sendBlocked && sendBlockedNote)) && (
+            <p className="aui-composer-disabled-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground" data-send-blocked={sendBlocked && sendBlockedNote ? "" : undefined}>
+              {(sendBlockedNote && sendBlocked) || disabledNote}
             </p>
           )}
           {note && <div className="aui-composer-note -mt-2 px-2 text-center group-data-[chat-align=left]/chat:text-left text-xs text-muted-foreground" data-composer-note>{note}</div>}
@@ -191,9 +194,12 @@ const ComposerAction: FC<{ toolbar?: ReactNode; commandsButton?: ReactNode; send
       )}
 
       <AssistantIf condition={({ thread }) => !thread.isRunning && Boolean(sendBlocked)}>
-        <Button type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message" title={sendBlocked ?? undefined} disabled data-send-blocked>
-          <ArrowUpIcon className="aui-composer-send-icon size-4" />
-        </Button>
+        {/* The reason as its tooltip; the wrapper carries it too, as some browsers show no tooltip on a disabled button. */}
+        <span className="inline-flex" title={sendBlocked ?? undefined}>
+          <Button type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message" title={sendBlocked ?? undefined} aria-description={sendBlocked ?? undefined} disabled data-send-blocked>
+            <ArrowUpIcon className="aui-composer-send-icon size-4" />
+          </Button>
+        </span>
       </AssistantIf>
 
       <AssistantIf condition={({ thread }) => !thread.isRunning && !sendBlocked}>

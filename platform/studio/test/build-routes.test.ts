@@ -1,16 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
 
-// The builder's Ship (POST /api/builds/[buildId]/finish) and the cap pickers' budget
-// (GET /api/builds/budget): signed-in developers only, same-origin writes, the build must be the
-// app's, and Mynt's refusals come back in its own words.
+// The builder's Ship (POST /api/builds/[buildId]/finish): signed-in developers only, same-origin
+// writes, the build must be the app's, and Mynt's refusals come back in its own words. (The studio
+// has no cap pickers, so no budget route: Mynt applies its own cap to every build.)
 
 const fake = {
   session: undefined as Session | undefined,
   calls: [] as { name: string; args: Record<string, unknown> }[],
   build: { id: "b1", app_id: "app-1", status: "coding", mode: "session" } as Record<string, unknown> | null,
   finishRefusal: null as string | null,
-  budget: { default_cap_usd: 10, month_left_usd: 6.5, workspace_left_usd: null, min_cap_usd: 0.5, session_cap_above_usd: 2 } as Record<string, unknown> | undefined,
 };
 
 vi.mock("@/lib/session", () => ({
@@ -35,8 +34,6 @@ vi.mock("@/lib/tokens", () => ({
           return fake.build ? ok(fake.build) : refuse(`No build of yours with id '${args.build_id}'`);
         case "finish_build":
           return fake.finishRefusal ? refuse(fake.finishRefusal) : ok({ build_id: args.build_id, finishing: true });
-        case "list_builds":
-          return ok({ builds: [], ...(fake.budget ? { budget: fake.budget } : {}) });
         default:
           return refuse(`unexpected ${name}`);
       }
@@ -46,7 +43,6 @@ vi.mock("@/lib/tokens", () => ({
 }));
 
 const finish = await import("@/app/api/builds/[buildId]/finish/route");
-const budget = await import("@/app/api/builds/budget/route");
 
 const ship = (buildId: string, body: unknown, origin = "http://localhost:3000") =>
   finish.POST(new Request(`http://localhost:3000/api/builds/${buildId}/finish`, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }), {
@@ -58,7 +54,6 @@ beforeEach(() => {
   fake.calls = [];
   fake.build = { id: "b1", app_id: "app-1", status: "coding", mode: "session" };
   fake.finishRefusal = null;
-  fake.budget = { default_cap_usd: 10, month_left_usd: 6.5, workspace_left_usd: null, min_cap_usd: 0.5, session_cap_above_usd: 2 };
 });
 
 describe("Ship", () => {
@@ -87,18 +82,9 @@ describe("Ship", () => {
   });
 });
 
-describe("the build budget", () => {
-  it("is what list_builds says, with whether new builds start as sessions", async () => {
-    const res = await budget.GET(new Request("http://localhost:3000/api/builds/budget?appId=app-1"));
-    expect(await res.json()).toEqual({ budget: { defaultCapUsd: 10, monthLeftUsd: 6.5, workspaceLeftUsd: null, minCapUsd: 0.5, sessionCapAboveUsd: 2 }, session: true });
-    expect(fake.calls.find((c) => c.name === "list_builds")?.args).toEqual({ app_id: "app-1" });
-    await budget.GET(new Request("http://localhost:3000/api/builds/budget"));
-    expect(fake.calls.filter((c) => c.name === "list_builds").at(-1)?.args).toEqual({});
-  });
-
-  it("is null where Mynt doesn't report one, and refuses a bad app id", async () => {
-    fake.budget = undefined;
-    expect((await (await budget.GET(new Request("http://localhost:3000/api/builds/budget"))).json()).budget).toBeNull();
-    expect((await budget.GET(new Request("http://localhost:3000/api/builds/budget?appId=a%20b"))).status).toBe(400);
+describe("the build budget route", () => {
+  it("is gone: no cap picker reads it", async () => {
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(new URL("../app/api/builds/budget/route.ts", import.meta.url))).toBe(false);
   });
 });
