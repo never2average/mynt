@@ -34,4 +34,6 @@ export type ProjectItem = {
   /** The newest build's preview that exists, if any. */
   previewUrl: string | null;
   conversations: ProjectConversationSummary[];
+  /** When the app or its newest build last changed (null when Mynt doesn't say). */
+  lastActivityAt?: string | null;
 };

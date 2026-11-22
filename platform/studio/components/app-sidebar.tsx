@@ -4,14 +4,18 @@
 // the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
 // members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
-// foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx).
-// Docs (/docs) sits at the foot of the pages, for everyone. New app is in every page's header; Builds isn't in the sidebar (/builds still works).
+// foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx). Under the Apps
+// folders, Financial products (components/nav-products.tsx): the user's products and product chats. Each
+// app and product says which it is (an icon, "App: …" / "Financial product: …" to screen readers).
+// Docs (/docs) sits at the foot of the pages, for everyone. Build is in every page's header; Builds isn't in the
+// sidebar (/builds still works).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
 import { BookOpen, Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
+import { NavProducts } from "@/components/nav-products"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
 import { useWorkspace } from "@/components/workspace-context"
@@ -30,6 +34,7 @@ import {
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
+import { listProductChats, mergeThreads, myProductsFrom, THREADS_UPDATED, type StudioThread, type ThreadsUpdatedDetail } from "@/lib/threads"
 import { groupByStage, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
@@ -61,10 +66,11 @@ export type SidebarViewProps = {
   liquidity?: boolean
   developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
+  productThreads?: StudioThread[] | null // the Financial products group: the user's products and product chats (null while loading)
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, productThreads = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -96,6 +102,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
           </SidebarMenu>
         </SidebarGroup>
         {developer && <NavFolders groups={groups} activeAppId={appId} />}
+        {developer && <NavProducts threads={productThreads} />}
         <SidebarGroup className="mt-auto" data-sidebar-docs>
           <SidebarMenu>
             <SidebarMenuItem>
@@ -149,6 +156,31 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     return () => window.removeEventListener("adorable:projects-updated", again)
   }, [loadApps])
 
+  // The Financial products group: the user's own products (from Mynt) and their product chats (kept in
+  // this browser under the key the route gives), read again when either changes.
+  const [productThreads, setProductThreads] = useState<StudioThread[] | null>(null)
+  useEffect(() => {
+    if (!developer) return
+    let live = true
+    let owner: string | null = null
+    let mine: ReturnType<typeof myProductsFrom> = []
+    const show = () => live && setProductThreads(mergeThreads([], listProductChats(owner), mine))
+    const load = async () => {
+      const res = await fetch("/api/products?mine=1", { cache: "no-store" }).catch(() => null)
+      const data = res?.ok ? ((await res.json().catch(() => null)) as { mine?: unknown; owner?: unknown } | null) : null
+      mine = myProductsFrom(data?.mine)
+      owner = typeof data?.owner === "string" && data.owner ? data.owner : null
+      show()
+    }
+    void load()
+    const again = (e: Event) => ((e as CustomEvent<ThreadsUpdatedDetail>).detail?.products ? void load() : show())
+    window.addEventListener(THREADS_UPDATED, again)
+    return () => {
+      live = false
+      window.removeEventListener(THREADS_UPDATED, again)
+    }
+  }, [developer])
+
   const create = useCallback(
     async (name: string) => {
       const res = await fetch("/api/workspaces", {
@@ -181,6 +213,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       liquidity={liquidity}
       developer={access ? developer : true}
       workspaceSettings={workspaceSettings}
+      productThreads={productThreads}
     />
   )
 }

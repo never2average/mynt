@@ -3,6 +3,8 @@ import { NewProductRequest, productsFrom } from "@/lib/products";
 import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool, isAuthError } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
+import { myProductsFrom } from "@/lib/threads";
+import { ownerOf } from "@/lib/wallets-server";
 
 export const dynamic = "force-dynamic";
 
@@ -10,10 +12,14 @@ export const dynamic = "force-dynamic";
 // ?query= searches their names and descriptions. Their own products that aren't published yet
 // (list_my_products) come after, as drafts: shown, but not pickable until published. A Mynt that
 // doesn't list the user's own products still lists what they can build on.
+// `mine` is every product of the user's own (drafts and published, with when each last changed) and
+// `owner` the hashed key their product chats are kept under in the browser (lib/threads.ts), for the
+// Build page's Recent and the sidebar's Financial products; ?mine=1 returns only those.
 export async function GET(req: NextRequest) {
   const query = req.nextUrl.searchParams.get("query")?.trim().slice(0, 200) || undefined;
-  return asDeveloper("loading products", async (mynt) => {
-    const reply = await callStudioTool(mynt, "list_buildable_products", query ? { query } : {});
+  const onlyMine = req.nextUrl.searchParams.get("mine") === "1";
+  return asDeveloper("loading products", async (mynt, session) => {
+    const reply = onlyMine ? [] : await callStudioTool(mynt, "list_buildable_products", query ? { query } : {});
     let mine: unknown = [];
     if (!query) {
       try {
@@ -22,7 +28,8 @@ export async function GET(req: NextRequest) {
         if (isAuthError(err)) throw err;
       }
     }
-    return json({ products: productsFrom(reply, mine) });
+    const own = { mine: myProductsFrom(mine), owner: ownerOf(session) };
+    return json(onlyMine ? own : { products: productsFrom(reply, mine), ...own });
   });
 }
 

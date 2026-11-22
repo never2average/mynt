@@ -102,6 +102,24 @@ describe("the products list", () => {
     ]);
   });
 
+  it("also gives every product of the user's own, with when it changed, and the hashed key their chats are kept under", async () => {
+    fake.mine = [
+      { id: "dollar-account", name: "Dollar account", status: "published", published_at: "2026-11-02T00:00:00Z" },
+      { id: "green-savings", name: "Green Savings", status: "draft" },
+    ];
+    const body = await (await productsRoute.GET(getReq("/api/products"))).json();
+    expect(body.mine).toEqual([
+      { id: "dollar-account", name: "Dollar account", status: "published", updatedAt: "2026-11-02T00:00:00Z" },
+      { id: "green-savings", name: "Green Savings", status: "draft", updatedAt: null },
+    ]);
+    expect(body.owner).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    // ?mine=1: only those, without asking Mynt what can be built on.
+    fake.calls = [];
+    const only = await (await productsRoute.GET(getReq("/api/products?mine=1"))).json();
+    expect(only).toEqual({ mine: body.mine, owner: body.owner });
+    expect(called("list_buildable_products")).toEqual([]);
+  });
+
   it("still lists what can be built on when Mynt won't list the user's own products", async () => {
     fake.refuse = { list_my_products: "Unknown tool" };
     const res = await productsRoute.GET(getReq("/api/products"));
