@@ -40,7 +40,7 @@ describe("metadata", () => {
     const titles: Record<string, unknown> = {
       Audits: (await import("@/app/(studio)/audits/layout")).metadata.title,
       Earn: (await import("@/app/(studio)/earn/layout")).metadata.title,
-      "New app": (await import("@/app/(studio)/new/layout")).metadata.title,
+      Build: (await import("@/app/(studio)/new/layout")).metadata.title,
       Builds: (await import("@/app/(studio)/builds/layout")).metadata.title,
       Licences: (await import("@/app/(studio)/licences/page")).metadata.title,
       Settings: (await import("@/app/(studio)/settings/page")).metadata.title,

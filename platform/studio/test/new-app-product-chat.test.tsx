@@ -136,8 +136,8 @@ describe("Build app and Create product", () => {
   it("are a labelled toggle in the composer; switching carries what's typed", async () => {
     await loaded();
     expect(screen.getByRole("radiogroup", { name: "What to do" })).toBeTruthy();
-    expect(option("build").textContent).toBe("Build app");
-    expect(option("product").textContent).toBe("Create product");
+    expect(option("build").textContent).toBe("App");
+    expect(option("product").textContent).toBe("Financial product");
     expect(option("build").getAttribute("aria-checked")).toBe("true");
     expect(modeOf()).toBe("build");
 
