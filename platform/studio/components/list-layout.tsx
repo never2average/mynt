@@ -70,6 +70,15 @@ export const COL = {
   actions: "w-px min-w-36 text-right", // as wide as its buttons
 } as const
 
+/**
+ * A page's one toolbar row (search, filters, actions): it never wraps. Where the window is too
+ * narrow for it (a phone), the row scrolls sideways and every button keeps its label. The padding
+ * (offset by the negative margin) keeps focus rings from being clipped by the scroll.
+ */
+export const TOOLBAR_ROW = "-m-1 flex flex-nowrap items-center gap-2 overflow-x-auto p-1 [scrollbar-width:none] [&>*]:shrink-0"
+/** The toolbar's search: it takes the room left, never less than it needs to read. */
+export const TOOLBAR_SEARCH = "relative min-w-48 flex-1 sm:min-w-64"
+
 export function ListLayout({
   search,
   onSearch,
@@ -95,8 +104,8 @@ export function ListLayout({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-list-layout>
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-64 flex-1">
+      <div className={TOOLBAR_ROW} data-toolbar>
+        <div className={TOOLBAR_SEARCH}>
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={search} onChange={(e) => onSearch(e.target.value)} placeholder={searchLabel} aria-label={searchLabel} className="pl-8" />
         </div>

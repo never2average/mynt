@@ -209,7 +209,7 @@ export function ChatWorkspaceShell({
         <button
           type="button"
           onClick={() => setMobileView(mobileView === "chat" ? "panel" : "chat")}
-          className="fixed right-4 bottom-20 z-50 flex size-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform active:scale-95"
+          className="fixed right-4 bottom-44 z-50 flex size-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform active:scale-95"
           title={mobileView === "chat" ? `Show ${current?.label ?? "panel"}` : "Show chat"}
           aria-label={mobileView === "chat" ? `Show ${current?.label ?? "panel"}` : "Show chat"}
           data-mobile-switch

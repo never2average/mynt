@@ -69,7 +69,7 @@ export function KpiRow({ kpis, grid = false }: { kpis: Kpi[]; grid?: boolean }) 
             <dd className={cn("font-semibold tabular-nums", measured ? "text-2xl" : "text-base text-muted-foreground")} data-measured={measured}>
               {k.unit === "money" ? money(k.value) : k.value === null ? NOT_MEASURED : k.unit === "duration" ? durationText(k.value) : k.value.toLocaleString("en-US")}
             </dd>
-            <dd className="flex items-center justify-between gap-2">
+            <dd className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 @3xl/main:flex-nowrap" data-kpi-foot>
               {k.delta ? (
                 <span
                   className={cn("inline-flex items-center gap-1 text-xs", k.delta.good === true && "text-emerald-600 dark:text-emerald-400", k.delta.good === false && "text-destructive", k.delta.good === null && "text-muted-foreground")}

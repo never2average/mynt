@@ -24,7 +24,8 @@ export function ModeSwitch({ modes, mode, onMode }: { modes: DashboardMode[]; mo
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="sm" className="h-7 gap-1.5 px-1.5 text-base font-medium" aria-label={`Dashboard view: ${MODE_LABELS[mode]}`} data-mode-trigger>
-            <Current className="size-4 text-muted-foreground" aria-hidden data-mode-icon={mode} />
+            {/* On a phone the icon gives its room to the page's title. */}
+            <Current className="hidden size-4 text-muted-foreground sm:block" aria-hidden data-mode-icon={mode} />
             {MODE_LABELS[mode]}
             <ChevronDown className="size-4 text-muted-foreground" aria-hidden />
           </Button>

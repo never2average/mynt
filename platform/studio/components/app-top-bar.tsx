@@ -95,12 +95,14 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
           Back
         </Button>
       )}
-      <div className="flex min-w-0 items-center gap-2 pr-2">
+      {/* The app's name gives up room first; nothing here ever runs under the controls on the right. */}
+      <div className="flex min-w-0 items-center gap-2 overflow-hidden pr-2" data-app-title>
         <h1 className="truncate text-base font-medium" data-app-name>
           {appName ?? "Loading app…"}
         </h1>
         {stage && (
-          <Badge variant="outline" className="shrink-0 font-normal" data-app-stage={stage}>
+          // On a phone the sidebar's folders say the stage; the name needs the room.
+          <Badge variant="outline" className="hidden shrink-0 font-normal sm:inline-flex" data-app-stage={stage}>
             {STAGE_LABELS[stage]}
           </Badge>
         )}

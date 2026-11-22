@@ -15,7 +15,7 @@ import { KpiRow } from "@/components/charts"
 import { Panel } from "@/components/dashboard-panels"
 import { anyOf, DateRangeFilter, FiltersPopover, picksOf, type Facet, type Picks } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
-import { ListPager, usePaged } from "@/components/list-layout"
+import { ListPager, TOOLBAR_ROW, TOOLBAR_SEARCH, usePaged } from "@/components/list-layout"
 import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -195,8 +195,8 @@ export function AuditsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-audit-class={auditClass}>
-      <div className="flex flex-wrap items-center gap-2" data-toolbar>
-        <div className="relative min-w-64 flex-1">
+      <div className={TOOLBAR_ROW} data-toolbar>
+        <div className={TOOLBAR_SEARCH}>
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search records" className="pl-8" aria-label="Search the audit trail" />
         </div>
@@ -331,8 +331,8 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS, 
         <KpiRow kpis={obligationKpis(obligations, now)} />
       </Panel>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2" data-toolbar>
-        <div className="relative min-w-64 flex-1">
+      <div className={TOOLBAR_ROW} data-toolbar>
+        <div className={TOOLBAR_SEARCH}>
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={f.query} onChange={set("query")} placeholder="Search obligations" className="pl-8" aria-label="Search obligations" />
         </div>
