@@ -5,6 +5,36 @@
   "description": "A dollar balance settled in USDC by the provider: add from a bank, hold, cash out.",
   "product_lines": ["exchange"],
   "goal_template": "A dollar balance app settled in USDC by the licensed provider. Customers add US dollars from their bank account, keep a dollar balance and cash it back out to their bank account. Every screen shows dollars only, never crypto. Show the amount and the fee before the customer accepts each one.",
+  "examples": [
+    {
+      "id": "contractor-payday",
+      "title": "Contractor payday",
+      "pitch": "A small studio keeps a dollar balance settled in USDC and pays its US contractors from it, in dollars, on payday.",
+      "goal": "A contractor payroll app for small US studios. The studio's owner signs up, adds dollars from the studio's bank account to a dollar balance settled in USDC by the licensed provider, and lists its contractors with each one's rate. On payday the app shows every payout's amount and fee in dollars; the owner accepts, and each payout is cashed out to the contractor's bank account through the provider's hosted flow. Every screen shows dollars only, never crypto, and each payout's status shows until it settles.",
+      "product_lines": ["exchange"]
+    },
+    {
+      "id": "nonprofit-reserve",
+      "title": "Nonprofit reserve",
+      "pitch": "A small nonprofit holds its operating dollars in a USDC-settled balance, with two board members approving each cash-out.",
+      "goal": "A reserve app for a small US nonprofit. The treasurer signs up, adds dollars from the nonprofit's bank account to a dollar balance settled in USDC by the licensed provider, and names the board members who approve spending. A cash-out request needs two approvals before the app starts the provider's hosted cash-out flow to the nonprofit's bank account. Every screen shows dollars only, never crypto; the board sees the balance, each request with its approvals, and the amount and fee before anyone accepts.",
+      "product_lines": ["exchange"]
+    },
+    {
+      "id": "driver-cash-out",
+      "title": "Any-day cash-out for drivers",
+      "pitch": "Rideshare and delivery drivers keep a dollar balance and cash out any day of the week, seeing the fee first.",
+      "goal": "A cash-out app for rideshare and delivery drivers. A driver signs up, adds dollars from their bank account to a dollar balance settled in USDC by the licensed provider, and cashes out to their bank account any day, including weekends. The home screen shows the balance and recent activity in dollars only, never crypto, and the amount, the fee and the expected arrival before the driver accepts each cash-out.",
+      "product_lines": ["exchange"]
+    },
+    {
+      "id": "club-dues",
+      "title": "Club dues balance",
+      "pitch": "A running club or book club keeps its dues in one dollar balance; members see every dollar in and out.",
+      "goal": "A dues app for small clubs (a running club, a book club, a community garden). The club's organiser signs up and opens a dollar balance settled in USDC by the licensed provider; members add their dues in dollars from their bank accounts, and the organiser cashes out to the club's bank account to pay for shared costs. Every member sees the balance and each payment in and out, in dollars only, never crypto, with the amount and the fee shown before each one is accepted.",
+      "product_lines": ["exchange"]
+    }
+  ],
   "screens": [
     { "id": "balance", "title": "Balance", "purpose": "The dollar balance and recent activity, in dollars only, from the lifecycle events api/ receives on Mynt's webhook." },
     { "id": "sign-up", "title": "Sign up", "purpose": "Onboarding: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },

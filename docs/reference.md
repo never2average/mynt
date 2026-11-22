@@ -253,6 +253,7 @@ Builds measured before the parts were kept keep their total; their parts are `nu
 - a title and a one-line description;
 - the product lines it builds on;
 - a goal to start from and edit;
+- three to five specific app ideas on it (`examples`), each a title, a one-line pitch, a goal to edit and the kind's product lines it uses, which New app offers as chips and Templates rows;
 - the screens and flows to build first;
 - the SDK calls it relies on.
 

@@ -1,9 +1,9 @@
 "use client"
 
 // New app, on the same chat workspace as Earn (components/chat-workspace-shell.tsx): the centred
-// "What do you want to build?" with the composer, and the tabs on the right: Templates (Mynt's app
-// kinds) and Products (what the app builds on). The composer's Products picker and the Products tab
-// share one selection. Sending the message is Build it: it creates the app on the picked products and
+// "What do you want to build?" with the composer and a few app ideas as chips, and the tabs on the right:
+// Templates (the ideas on each of Mynt's app kinds) and Products (what the app builds on). The composer's
+// Products picker and the Products tab share one selection. Sending the message is Build it: it creates the app on the picked products and
 // starts its first build with the message as the goal (and the template's kind), then opens the app.
 // The first build runs on Mynt's own cap (there is no cap control here). Until it can send, the reason
 // is the disabled Send's tooltip, never a line under the composer.
@@ -12,7 +12,7 @@
 // with Test and Publish on its row, and can't be picked until it's published.
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
 import { Check, ChevronDown, LayoutTemplate, Package, Plus } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 
 import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
@@ -26,7 +26,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { NewAppRequest, picksForKind, sendBlockedReason, type AppKind } from "@/lib/new-app"
+import { chipIdeas, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
 import { flagsFor, isPickable, NOT_PUBLISHED, runProductAction, STATUS_LABEL, type ProductAction, type StudioProduct } from "@/lib/products"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { cn } from "@/lib/utils"
@@ -183,15 +183,17 @@ export function ProductPicker({
 // ---- the tabs ----
 
 const TEMPLATE_COLUMNS = [
-  { label: "Kind", className: COL.name },
-  { label: "Description", className: COL.wide },
+  { label: "Idea", className: COL.name },
+  { label: "Pitch", className: COL.wide },
+  { label: "Kind", className: COL.text },
   { label: "Product lines", className: COL.text },
   { label: "", className: COL.actions },
 ]
 
-export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse: (k: AppKind) => void }) {
+// Every kind's app ideas, grouped by kind: a heading row where each kind's ideas start on the page.
+export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse: (k: AppKind, idea: AppIdea) => void }) {
   const [query, setQuery] = useState("")
-  const shown = (kinds ?? []).filter((k) => matches(query, k.title, k.description, ...k.productLines.map(lineLabel)))
+  const shown = kindIdeas(kinds ?? []).filter(({ kind, idea }) => matches(query, idea.title, idea.pitch, kind.title, ...idea.productLines.map(lineLabel)))
   const fit = useFitRows()
   const paged = usePaged(shown, fit.size)
   return (
@@ -225,29 +227,39 @@ export function TemplatesTab({ kinds, onUse }: { kinds: AppKind[] | null; onUse:
               </TableCell>
             </TableRow>
           ) : paged.shown.length ? (
-            paged.shown.map((k) => (
-              <TableRow key={k.id} data-template-row={k.id}>
-                <TableCell className={`${COL.name} font-medium`}>{k.title}</TableCell>
-                <TableCell className={COL.wide}>
-                  <span className="block max-w-80 truncate" title={k.description}>
-                    {k.description}
-                  </span>
-                </TableCell>
-                <TableCell className={COL.text}>
-                  <span className="flex flex-wrap gap-1">
-                    {k.productLines.map((l) => (
-                      <Badge key={l} variant="outline">
-                        {lineLabel(l)}
-                      </Badge>
-                    ))}
-                  </span>
-                </TableCell>
-                <TableCell className={COL.actions}>
-                  <Button size="sm" variant="outline" onClick={() => onUse(k)} data-use-template={k.id}>
-                    Use
-                  </Button>
-                </TableCell>
-              </TableRow>
+            paged.shown.map(({ kind, idea }, i) => (
+              <Fragment key={`${kind.id}/${idea.id}`}>
+                {(i === 0 || paged.shown[i - 1].kind.id !== kind.id) && (
+                  <TableRow className="hover:bg-transparent" data-template-group={kind.id}>
+                    <TableCell colSpan={TEMPLATE_COLUMNS.length} className="bg-muted/40 py-1.5 text-xs font-medium text-muted-foreground">
+                      {kind.title}
+                    </TableCell>
+                  </TableRow>
+                )}
+                <TableRow data-template-row={idea.id} data-template-kind={kind.id}>
+                  <TableCell className={`${COL.name} font-medium`}>{idea.title}</TableCell>
+                  <TableCell className={COL.wide}>
+                    <span className="block max-w-80 truncate" title={idea.pitch}>
+                      {idea.pitch}
+                    </span>
+                  </TableCell>
+                  <TableCell className={COL.text}>{kind.title}</TableCell>
+                  <TableCell className={COL.text}>
+                    <span className="flex flex-wrap gap-1">
+                      {idea.productLines.map((l) => (
+                        <Badge key={l} variant="outline">
+                          {lineLabel(l)}
+                        </Badge>
+                      ))}
+                    </span>
+                  </TableCell>
+                  <TableCell className={COL.actions}>
+                    <Button size="sm" variant="outline" onClick={() => onUse(kind, idea)} data-use-template={idea.id}>
+                      Use
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              </Fragment>
             ))
           ) : (
             <EmptyRow cols={TEMPLATE_COLUMNS.length}>{kinds.length ? "No templates match." : "No templates on this Mynt yet. Describe your app in the chat."}</EmptyRow>
@@ -511,27 +523,37 @@ export function NewAppWorkspace({
     setTab(t)
     setOpened(true)
   }
-  // A template: its goal in the composer to edit, its product lines filtered and one product of each picked.
-  const applyKind = (k: AppKind) => {
+  // An idea (or a kind's own goal): its goal in the composer to edit, its kind, its product lines filtered
+  // and one product of each picked.
+  const applyIdea = (k: AppKind, idea?: AppIdea) => {
+    const lines = idea?.productLines ?? k.productLines
     setKind(k.id)
-    runtime.thread.composer.setText(k.goalTemplate)
-    setLines(k.productLines)
-    if (products) setPicked((p) => picksForKind(k, products.filter(isPickable), p))
+    runtime.thread.composer.setText(idea?.goal ?? k.goalTemplate)
+    setLines(lines)
+    if (products) setPicked((p) => picksForKind({ productLines: lines }, products.filter(isPickable), p))
     setError(null)
   }
+  const applyKind = (k: AppKind) => applyIdea(k)
   const commands = newAppCommands({ tab: open, applyKind, createProduct }, kinds ?? [])
-  const chips = (kinds ?? []).length ? (
+  // A few ideas under the welcome, picked once per page load (a Mynt whose kinds carry no ideas shows the kinds).
+  const [seed] = useState(() => Math.random())
+  const chipList = useMemo<{ kind: AppKind; idea: AppIdea | null }[]>(() => {
+    const ideas = chipIdeas(kinds ?? [], seed)
+    return ideas.length ? ideas : (kinds ?? []).map((kind) => ({ kind, idea: null }))
+  }, [kinds, seed])
+  const chips = chipList.length ? (
     <div className="mt-6 flex flex-wrap justify-center gap-2 px-4" data-chips>
-      {(kinds ?? []).map((k) => (
+      {chipList.map(({ kind, idea }) => (
         <button
-          key={k.id}
+          key={idea?.id ?? kind.id}
           type="button"
-          onClick={() => applyKind(k)}
+          onClick={() => applyIdea(kind, idea ?? undefined)}
           className="rounded-full border bg-background px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-          data-chip={k.id}
-          title={k.description}
+          data-chip={idea?.id ?? kind.id}
+          data-chip-kind={kind.id}
+          title={idea?.pitch ?? kind.description}
         >
-          {k.title}
+          {idea?.title ?? kind.title}
         </button>
       ))}
     </div>
@@ -539,12 +561,7 @@ export function NewAppWorkspace({
 
   const content = (t: NewAppTab) =>
     t === "templates" ? (
-      <TemplatesTab
-        kinds={kinds}
-        onUse={(k) => {
-          applyKind(k)
-        }}
-      />
+      <TemplatesTab kinds={kinds} onUse={applyIdea} />
     ) : (
       <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={createProduct} onAction={onAction} />
     )

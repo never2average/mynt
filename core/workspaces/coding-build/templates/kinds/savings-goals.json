@@ -5,6 +5,36 @@
   "description": "Set savings goals and put dollars aside toward each one in a held balance.",
   "product_lines": ["custody_settlement"],
   "goal_template": "A savings goals app. Customers open a dollar balance, create goals with a name, a target amount and a date, add money toward a goal from their bank account, and see each goal's progress. Show the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
+  "examples": [
+    {
+      "id": "skipped-it-jar",
+      "title": "Skipped-it jar",
+      "pitch": "Tap \"I skipped it\" whenever you pass on a coffee or a takeout order, and its price goes into your rainy-day pot.",
+      "goal": "A rainy-day savings app built around skipped purchases. Customers open a dollar balance and one rainy-day goal with a target. On the home screen they tap a quick button for something they skipped (a coffee, a takeout order, a ride) or type its price; the skips add up, and one tap moves the total from their bank account toward the goal through the provider's hosted flow. Show the goal's progress, the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": ["custody_settlement"]
+    },
+    {
+      "id": "family-goal-board",
+      "title": "Family goal board",
+      "pitch": "A parent holds the balance and sets goals with their teen, like a first car; the parent approves each top-up.",
+      "goal": "A family savings app. A parent opens the dollar balance and creates goals with their teen, such as a first car or a school trip, each with a target and a date. The teen proposes a top-up from the family's list of chores or birthday money; the parent approves it and adds the dollars from their own bank account through the provider's hosted flow. Both see each goal's progress. The parent is the only account holder. Show the amount and any fee before each transfer, and every document the product requires before the parent agrees.",
+      "product_lines": ["custody_settlement"]
+    },
+    {
+      "id": "rent-ready-streak",
+      "title": "Rent-ready streak",
+      "pitch": "Put aside a slice of next month's rent every week; a streak counter shows how many weeks in a row you've been on track.",
+      "goal": "A rent-ready savings app. Customers open a dollar balance and a rent goal with the rent amount and its due date; the app works out the weekly amount to be ready in time. Each week they add that amount from their bank account through the provider's hosted flow, and a streak counter shows how many weeks in a row they've been on track. Show the goal's progress, the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": ["custody_settlement"]
+    },
+    {
+      "id": "payday-envelopes",
+      "title": "Payday envelopes",
+      "pitch": "On payday, split one deposit across named envelopes (rent, groceries, fun) by the percentages you set.",
+      "goal": "A payday envelopes app. Customers open a dollar balance and create envelopes, each a goal with a name and a share of their pay (rent 40%, groceries 20%, fun 10%, and so on). On payday they enter the amount and the app shows how it splits; each envelope's share is added from their bank account through the provider's hosted flow. The home screen shows every envelope's balance and progress. Show the amounts and any fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": ["custody_settlement"]
+    }
+  ],
   "screens": [
     { "id": "goals", "title": "Goals", "purpose": "Each goal with its target, date and progress, from the balance the product holds and the lifecycle events api/ receives." },
     { "id": "new-goal", "title": "New goal", "purpose": "Name a goal, its target and its date. The goal's details are saved to Mynt's vault (saveFields) after consent, never to the app's own database." },
