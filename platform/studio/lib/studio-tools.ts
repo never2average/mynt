@@ -49,6 +49,8 @@ export const STUDIO_TOOLS = {
   get_product: z.object({ id }).strict(),
   // New app's Templates: starting points for common finance apps.
   list_app_kinds: z.object({}).strict(),
+  // ...and the specific app ideas on them, from Mynt's database (reading only; admins keep them in Mynt).
+  list_app_ideas: z.object({ kind: appKindId.optional() }).strict(),
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
   // New app's Create product: a draft product (create_product's own fields; Mynt checks them again), then

@@ -24,16 +24,14 @@ export interface AppKind {
   description: string;
   product_lines: ProductLine[];
   goal_template: string;
-  // Specific app ideas on this kind (New app's chips and Templates rows), each with its own goal.
-  examples: { id: string; title: string; pitch: string; goal: string; product_lines: ProductLine[] }[];
   screens: { id: string; title: string; purpose: string; journey?: boolean }[];
   flows: { id: string; title: string; steps: string[] }[];
   sdk_calls: { server: string[]; browser: string[] };
 }
 
 // What's wrong with one kind file: its schema, then what the schema can't say (its id is its file's name,
-// its lines are real product lines, at most one journey screen, no screen, flow or example twice, and each
-// example builds on the kind's own lines).
+// its lines are real product lines, at most one journey screen, no screen or flow twice). Specific app ideas
+// on a kind are rows in Postgres (app-ideas.ts), not part of the file.
 export function appKindErrors(file: string, data: unknown, validate = kindValidator()): string[] {
   if (!validate(data)) return (validate.errors ?? []).map((e) => `${file}${e.instancePath} ${e.message ?? "is invalid"}`);
   const k = data as AppKind;
@@ -41,9 +39,7 @@ export function appKindErrors(file: string, data: unknown, validate = kindValida
   if (`${k.id}.json` !== file) errors.push(`${file}: id '${k.id}' isn't the file's name`);
   for (const l of k.product_lines) if (!(PRODUCT_LINES as readonly string[]).includes(l)) errors.push(`${file}: '${l}' isn't a product line`);
   if (k.screens.filter((s) => s.journey).length > 1) errors.push(`${file}: more than one journey screen`);
-  for (const e of k.examples)
-    for (const l of e.product_lines) if (!k.product_lines.includes(l)) errors.push(`${file}: example '${e.id}' builds on '${l}', which isn't one of the kind's product lines`);
-  for (const [what, ids] of [["screen", k.screens.map((s) => s.id)], ["flow", k.flows.map((f) => f.id)], ["example", k.examples.map((e) => e.id)]] as const)
+  for (const [what, ids] of [["screen", k.screens.map((s) => s.id)], ["flow", k.flows.map((f) => f.id)]] as const)
     for (const id of new Set(ids)) if (ids.filter((x) => x === id).length > 1) errors.push(`${file}: ${what} '${id}' twice`);
   return errors;
 }
@@ -68,9 +64,6 @@ export function appKinds(dir = APP_KINDS_DIR): AppKind[] {
     kinds.push(kind);
   }
   kinds.sort((a, b) => a.title.localeCompare(b.title));
-  // An example's id names it across every kind (the studio keys its chips by it).
-  const ids = kinds.flatMap((k) => k.examples.map((e) => e.id));
-  for (const id of new Set(ids)) if (ids.filter((x) => x === id).length > 1) throw new Error(`Bad app kind: example '${id}' is in more than one kind`);
   if (dir === APP_KINDS_DIR) loaded = kinds;
   return kinds;
 }
@@ -92,7 +85,7 @@ export function registerAppKindTools(server: McpServer) {
     {
       title: "App kinds",
       description:
-        "Developer: starting points for common finance apps (a dollar account, savings goals, money transfers, …): each one's title, one-line description, the product lines it builds on, a goal to start from and edit, specific app ideas on it (examples: a title, a one-line pitch and a goal each), the screens and flows built first and the SDK calls it relies on. Pass its id as start_build's kind: the coding agent starts from the starter app with those screens laid down.",
+        "Developer: starting points for common finance apps (a dollar account, savings goals, money transfers, …): each one's title, one-line description, the product lines it builds on, a goal to start from and edit, the screens and flows built first and the SDK calls it relies on. Pass its id as start_build's kind: the coding agent starts from the starter app with those screens laid down. Specific app ideas on each kind: list_app_ideas.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },

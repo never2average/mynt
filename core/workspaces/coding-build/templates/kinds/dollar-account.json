@@ -5,36 +5,6 @@
   "description": "Hold US dollars, add them from a bank account and withdraw them back.",
   "product_lines": ["custody_settlement"],
   "goal_template": "A dollar account app. Customers open an account, add US dollars from their own bank account, see their balance and recent activity, and withdraw back to their bank account. Show the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
-  "examples": [
-    {
-      "id": "milestone-escrow",
-      "title": "Milestone escrow for gigs",
-      "pitch": "A client funds a freelance gig up front; each milestone's dollars go to the freelancer once the client approves it.",
-      "goal": "A milestone escrow app for freelance gigs. A client opens a held dollar account for a gig, adds the agreed amount from their own bank account and splits it into named milestones. The freelancer marks a milestone done; when the client approves it, that milestone's dollars are withdrawn to the freelancer's bank account through the provider's hosted flow. Both sides see each milestone's amount, status and fee before anything moves, and every document the product requires before they agree.",
-      "product_lines": ["custody_settlement"]
-    },
-    {
-      "id": "cool-off-cash",
-      "title": "Cool-off cash",
-      "pitch": "A dollar account for impulse-proof money: every withdrawal waits 24 hours and can be called off before it starts.",
-      "goal": "A cool-off cash app. Customers open a dollar account, add dollars from their own bank account and set a waiting period (24 hours by default). A withdrawal request sits in a countdown on the home screen, where the customer can call it off; only when the countdown ends does the app start the provider's hosted withdrawal flow. Show the balance, the pending request, the amount and the fee before each transfer, and every document the product requires before the customer agrees.",
-      "product_lines": ["custody_settlement"]
-    },
-    {
-      "id": "tax-set-aside",
-      "title": "Freelancer tax set-aside",
-      "pitch": "Freelancers move a slice of every client payment into a separate dollar account, ready when quarterly taxes are due.",
-      "goal": "A tax set-aside app for US freelancers. Customers open a dollar account and choose the share of each client payment they want to put aside. When they log a payment they received, the app suggests the set-aside amount and adds it from their bank account through the provider's hosted flow. The home screen shows the total set aside this quarter and the next quarterly due date, and withdrawing sends it back to their bank account. Show the amount and fee before each transfer and every document the product requires before the customer agrees. The app gives no tax advice.",
-      "product_lines": ["custody_settlement"]
-    },
-    {
-      "id": "roommate-bills-pot",
-      "title": "Roommate bills pot",
-      "pitch": "One dollar account for a shared apartment: each roommate adds their share of rent and bills, and all see who paid.",
-      "goal": "A roommate bills app. One roommate opens a dollar account for the apartment and invites the others. Each month the app lists rent and shared bills with each roommate's share; each roommate adds their share from their own bank account through the provider's hosted flow, and the board shows who has paid. The account holder withdraws to their bank account to pay the landlord. Show the amount and fee before each transfer, and every document the product requires before anyone agrees.",
-      "product_lines": ["custody_settlement"]
-    }
-  ],
   "screens": [
     { "id": "home", "title": "Account", "purpose": "The balance and recent activity, from the product's lifecycle events that api/ receives on Mynt's webhook, with Add money and Withdraw." },
     { "id": "open", "title": "Open an account", "purpose": "Opening the account: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },

@@ -315,6 +315,11 @@ const WORKSPACE = [
   "bd_pause",
   "bd_resume",
   "bd_run_now",
+  // New app's ideas (app-ideas.ts)
+  "create_app_idea",
+  "update_app_idea",
+  "retire_app_idea",
+  "seed_app_ideas",
 ] as const;
 
 export const AUDIT_ACTION_CLASSES: Readonly<Record<string, AuditClass>> = Object.freeze(
