@@ -171,8 +171,10 @@ describe("dashboard page", () => {
     expect(at('data-section="kpis"')).toBeLessThan(at("data-chart-filters"));
     expect(at("data-chart-filters")).toBeLessThan(at('data-section="money-moved"'));
     expect(at('data-section="money-moved"')).toBeLessThan(at('data-section="costs"'));
-    // Money moved and Costs are two panels, side by side on wide screens.
-    expect(html.match(/<div[^>]*data-chart-pair[^>]*>/)![0]).toContain("@4xl/main:grid-cols-2");
+    // Money moved and Costs are two panels, one above the other (never side by side).
+    const pair = html.match(/<div[^>]*data-chart-pair[^>]*>/)![0];
+    expect(pair).toContain("flex-col");
+    expect(pair).not.toContain("grid-cols-2");
     expect(at("data-chart-pair")).toBeLessThan(at('data-row="money"'));
     expect(at('data-row="money"')).toBeLessThan(at('data-row="costs"'));
     expect(at('data-row="costs"')).toBeLessThan(at('data-section="costs"'));

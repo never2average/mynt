@@ -79,8 +79,8 @@ export function DashboardView({
       </Panel>
 
       <ChartToolbar filter={filter} onFilter={onFilter} apps={stages.kind === "ready" ? stages.data.apps : []} />
-      {/* Money moved and Costs: each its own panel, side by side on wide screens. */}
-      <div className="grid gap-4 lg:gap-5 @4xl/main:grid-cols-2" data-chart-pair>
+      {/* Money moved and Costs: each its own panel, one above the other. */}
+      <div className="flex flex-col gap-4 lg:gap-5" data-chart-pair>
         <Panel id="money">
           <PnlChart state={charts} granularity={range.granularity} periods={periods} controls={false} only="revenue" variant="area" title="Money moved" id="money-moved" empty="Not measured yet: Mynt hasn't recorded money moved for these periods." />
         </Panel>

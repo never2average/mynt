@@ -198,9 +198,10 @@ describe("the investor view", () => {
     );
     expect(html).not.toContain('data-slot="card"');
     for (const s of ["portfolio", "capital-in", "paid-out", "financial-activity"]) expect(html).toContain(`data-section="${s}"`);
-    // Capital in and Paid out are two panels, side by side on wide screens.
+    // Capital in and Paid out are two panels, one above the other (never side by side).
     const pair = html.match(/<div[^>]*data-chart-pair[^>]*>/)![0];
-    expect(pair).toContain("@4xl/main:grid-cols-2");
+    expect(pair).toContain("flex-col");
+    expect(pair).not.toContain("grid-cols-2");
     expect(html.indexOf('data-row="money"')).toBeGreaterThan(-1);
     expect(html.indexOf('data-row="paid-out"')).toBeGreaterThan(html.indexOf('data-row="money"'));
     expect(html.indexOf('data-row="money"')).toBeGreaterThan(html.indexOf("data-chart-pair"));

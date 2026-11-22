@@ -210,8 +210,8 @@ export function InvestorView({
       </Panel>
 
       <InvestorToolbar filter={filter} onFilter={setFilter} pools={pools} />
-      {/* Capital in and Paid out: each its own panel, side by side on wide screens. */}
-      <div className="grid gap-4 lg:gap-5 @4xl/main:grid-cols-2" data-chart-pair>
+      {/* Capital in and Paid out: each its own panel, one above the other. */}
+      <div className="flex flex-col gap-4 lg:gap-5" data-chart-pair>
       <Panel id="money">
         <PnlChart
           state={chart}
