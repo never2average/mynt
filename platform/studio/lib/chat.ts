@@ -13,6 +13,8 @@ export const STEERABLE = new Set(["coding", "auditing", "checking", "previewing"
 export const FINISHED = new Set(["succeeded", "blocked", "failed", "stopped", "over_budget"]);
 /** A build that's starting: not steerable yet, but another must not be started beside it. */
 export const STARTING = new Set(["queued", "provisioning"]);
+/** The agent is done and Mynt is verifying its work in a clean sandbox: it ships, or says why not. */
+export const VERIFYING = "verifying";
 
 export type BuildSummary = {
   id: string;
@@ -22,6 +24,8 @@ export type BuildSummary = {
   updated_at: string;
   /** "once" or "session", where Mynt says. */
   mode?: string;
+  /** A session that's shipping (finish_build, or idle): it takes no more messages. */
+  finishing?: boolean;
 };
 
 export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
@@ -30,7 +34,17 @@ export function buildSummaries(listBuildsReply: unknown): BuildSummary[] {
     const id = str(b.id);
     if (!id) return [];
     const mode = str(b.mode);
-    return [{ id, app_id: str(b.app_id) ?? null, status: str(b.status) ?? "unknown", commit_sha: str(b.commit_sha) ?? null, updated_at: str(b.updated_at) ?? str(b.created_at) ?? "", ...(mode ? { mode } : {}) }];
+    return [
+      {
+        id,
+        app_id: str(b.app_id) ?? null,
+        status: str(b.status) ?? "unknown",
+        commit_sha: str(b.commit_sha) ?? null,
+        updated_at: str(b.updated_at) ?? str(b.created_at) ?? "",
+        ...(mode ? { mode } : {}),
+        ...(str(b.finish_requested_at) ? { finishing: true } : {}),
+      },
+    ];
   });
 }
 
@@ -54,9 +68,12 @@ export function capabilitiesFrom(tools: { name: string; inputSchema?: unknown }[
   return { sessionBuilds: "mode" in props && "continue_from" in props && tools.some((t) => t.name === "finish_build"), ...("text_deltas" in activityProps ? { textDeltas: true } : {}), ...("reasoning" in activityProps ? { reasoning: true } : {}), ...("kind" in props && tools.some((t) => t.name === "list_app_kinds") ? { appKinds: true } : {}) };
 }
 
+type StartArgs = { goal: string; app_id: string; mode?: "session"; continue_from?: string; cap_usd?: number };
+
 export type ChatAction =
   | { kind: "steer"; buildId: string; args: { build_id: string; message: string } }
-  | { kind: "start"; args: { goal: string; app_id: string; mode?: "session"; continue_from?: string } }
+  | { kind: "start"; args: StartArgs }
+  | { kind: "hold"; buildId: string }
   | { kind: "follow"; buildId: string; message: string }
   | { kind: "refuse"; message: string };
 
@@ -68,9 +85,14 @@ export const STARTING_NOTE = "A build of this app is still starting. Send your m
 export const START_BUSY_NOTE = "A build of this app is being started right now (from here or another window). Open the app again in a moment to follow it.";
 export const MAYBE_LOST_NOTE =
   "_Your message may not have reached the agent: it was finishing its turn as the message arrived. If nothing above answers it, send it again._";
-/** After a session's agent has answered: what happens next, since the studio has no ship button yet. */
+/** After a session's agent has answered: what happens next. */
 export const SESSION_WAITING_NOTE =
-  "_The agent is waiting for your next message. After 15 minutes without one, it ships the work: it reviews, checks and pushes it, then Mynt verifies it in a clean sandbox, and only that decides whether it ships._";
+  "_The agent is waiting for your next message. When you're done, press Ship (or type /ship): it reviews, checks and pushes the work, then Mynt verifies it in a clean sandbox, and only that decides whether it ships. With no message for 15 minutes, it ships on its own._";
+/** After Ship: what happens now. */
+export const SHIPPING_NOTE =
+  "_Shipping: the agent wraps up its current request, then reviews, checks and pushes the work, and Mynt verifies it in a clean sandbox. Only that verification decides whether it ships._";
+/** A message sent while the app's build is shipping or being verified: held, then sent. */
+export const HELD_NOTE = "Queued — sent when verification finishes.";
 export const FINISHING_NOTE =
   "The agent has finished its work on this build, and Mynt is checking and shipping it, so it can't take more instructions. Here's its progress; send your message again once it's done to start a new build.";
 
@@ -85,6 +107,8 @@ export function chooseAction(opts: {
   builds: BuildSummary[];
   text: string;
   capabilities: Capabilities;
+  /** The cap the developer picked for a new build (lib/build-cap.ts); Mynt's usual cap without one. */
+  capUsd?: number | null;
 }): ChatAction {
   const text = opts.text.trim();
   if (!text) return { kind: "refuse", message: "Type a message first." };
@@ -92,6 +116,11 @@ export function chooseAction(opts: {
   const mine = opts.builds.filter((b) => b.app_id === opts.appId).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const live = mine.filter((b) => STEERABLE.has(b.status));
   const target = live.find((b) => b.id === opts.selectedBuildId) ?? live[0];
+  // A session that's shipping takes no more messages, and a build being verified can't be steered:
+  // the message is held, and sent once verification ends (never a second build beside it).
+  if (target?.finishing) return { kind: "hold", buildId: target.id };
+  const verifying = mine.find((b) => b.status === VERIFYING);
+  if (!target && verifying) return { kind: "hold", buildId: verifying.id };
   if (target) {
     if (text.length < MIN_STEER) return { kind: "refuse", message: `Say a little more (at least ${MIN_STEER} characters).` };
     return { kind: "steer", buildId: target.id, args: { build_id: target.id, message: text } };
@@ -101,7 +130,8 @@ export function chooseAction(opts: {
   if (starting) return { kind: "follow", buildId: starting.id, message: STARTING_NOTE };
 
   if (text.length < MIN_GOAL) return { kind: "refuse", message: `Say a little more about what to build (at least ${MIN_GOAL} characters).` };
-  const args: { goal: string; app_id: string; mode?: "session"; continue_from?: string } = { goal: text, app_id: opts.appId };
+  const args: StartArgs = { goal: text, app_id: opts.appId };
+  if (typeof opts.capUsd === "number") args.cap_usd = opts.capUsd;
   if (opts.capabilities.sessionBuilds) {
     args.mode = "session";
     const previous = mine.find((b) => b.commit_sha);
@@ -438,6 +468,25 @@ export function followFrom(build: unknown, activityReply: unknown): { after: num
   const cursor = isObj(activityReply) && typeof activityReply.cursor === "number" ? activityReply.cursor : null;
   return cursor === null ? null : { after: cursor };
 }
+
+/**
+ * The build a conversation follows, as its composer needs it: Ship while a session is open, a
+ * cap for the next build once nothing is running, and holding messages while it's verified.
+ */
+export type BuildState = { buildId: string; status: string; session: boolean; finishing: boolean };
+
+export function buildStateFrom(build: unknown): BuildState | null {
+  const b = isObj(build) ? build : {};
+  const buildId = str(b.id);
+  const status = str(b.status);
+  if (!buildId || !status) return null;
+  return { buildId, status, session: b.mode === "session", finishing: !!str(b.finish_requested_at) };
+}
+
+/** Ship is offered while a session build's agent is open and not already shipping. */
+export const canShip = (s: BuildState | null) => !!s && s.session && !s.finishing && STEERABLE.has(s.status);
+/** The next message starts a new build (so it has a cap): nothing is running, starting or being verified. */
+export const startsNewBuild = (s: BuildState | null) => !s || FINISHED.has(s.status);
 
 /** The agent finished answering: a turn ended, or the build is done. */
 export function turnOver(items: ActivityItem[], status: string | null): boolean {

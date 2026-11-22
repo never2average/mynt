@@ -326,10 +326,10 @@ describe("slash commands in the builder chat", () => {
     );
   }
 
-  it("lists the panel tabs by their ids and the agent prompts; no /new", async () => {
+  it("lists the panel tabs by their ids, /ship and the agent prompts; no /new", async () => {
     render(<BuilderChat sent={[]} />);
     await type("/");
-    expect(names()).toEqual(["preview", "pnl", "licences", "security", "sdk", "activity", "fix", "add"]);
+    expect(names()).toEqual(["preview", "pnl", "licences", "security", "sdk", "activity", "ship", "fix", "add"]);
     await type("/fi");
     await press("Enter");
     await settle();

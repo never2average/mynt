@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import { buildToMessages, followFrom, type HistoryMessage } from "./chat";
+import { buildStateFrom, buildToMessages, followFrom, type BuildState, type HistoryMessage } from "./chat";
 import { connectMynt } from "./mynt-client";
 import { currentSession } from "./session";
 import { sessionStore } from "./session-store";
@@ -22,8 +22,11 @@ export function toUIMessages(history: HistoryMessage[]): UIMessage[] {
 // signed in, not theirs, not this app's, or Mynt unreachable): the page then just shows the
 // project's welcome. A build that's still going comes with where to follow it from (`follow`):
 // the chat carries on showing what the agent and Mynt do from there, live.
-export async function loadConversation(appId: string, buildId: string): Promise<{ messages: UIMessage[]; follow: { after: number } | null }> {
-  const none = { messages: [], follow: null };
+export async function loadConversation(
+  appId: string,
+  buildId: string,
+): Promise<{ messages: UIMessage[]; follow: { after: number } | null; build: BuildState | null }> {
+  const none = { messages: [], follow: null, build: null };
   const session = await currentSession();
   if (!session?.tokens) return none;
   try {
@@ -32,7 +35,7 @@ export async function loadConversation(appId: string, buildId: string): Promise<
       const build = (await callStudioTool(mynt, "get_build", { build_id: buildId })) as { app_id?: unknown } | null;
       if (build?.app_id !== appId) return none;
       const activity = await callStudioTool(mynt, "get_build_activity", { build_id: buildId, limit: 200 });
-      return { messages: toUIMessages(buildToMessages(build, activity)), follow: followFrom(build, activity) };
+      return { messages: toUIMessages(buildToMessages(build, activity)), follow: followFrom(build, activity), build: buildStateFrom(build) };
     } finally {
       await mynt.close().catch(() => undefined);
     }

@@ -51,10 +51,26 @@ describe("start or steer", () => {
   });
 
   it("never steers another app's build, or one that isn't running", () => {
-    const builds = [build("x", "coding", { app_id: "other" }), build("v", "verifying"), build("s", "succeeded")];
+    const builds = [build("x", "coding", { app_id: "other" }), build("s", "succeeded")];
     expect(chooseAction({ appId: "app", selectedBuildId: "x", builds, text: "Build the onboarding flow", capabilities: plain })).toEqual({
       kind: "start",
       args: { goal: "Build the onboarding flow", app_id: "app" },
+    });
+  });
+
+  it("holds a message while the app's build is being verified, or its session is shipping: never a build beside it", () => {
+    const builds = [build("x", "coding", { app_id: "other" }), build("v", "verifying"), build("s", "succeeded")];
+    expect(chooseAction({ appId: "app", selectedBuildId: "x", builds, text: "Build the onboarding flow", capabilities: plain })).toEqual({ kind: "hold", buildId: "v" });
+    const shipping = [build("live", "coding", { mode: "session", finishing: true })];
+    expect(chooseAction({ appId: "app", selectedBuildId: "live", builds: shipping, text: "Make it green", capabilities: session })).toEqual({ kind: "hold", buildId: "live" });
+    // list_builds says a session is shipping by its finish_requested_at.
+    expect(buildSummaries({ builds: [{ id: "b", app_id: "app", status: "coding", mode: "session", finish_requested_at: "2026-11-22T10:00:00Z", updated_at: "x" }] })[0].finishing).toBe(true);
+  });
+
+  it("starts a build with the cap the developer picked", () => {
+    expect(chooseAction({ appId: "app", selectedBuildId: null, builds: [], text: "Build the onboarding flow", capabilities: plain, capUsd: 7.5 })).toEqual({
+      kind: "start",
+      args: { goal: "Build the onboarding flow", app_id: "app", cap_usd: 7.5 },
     });
   });
 

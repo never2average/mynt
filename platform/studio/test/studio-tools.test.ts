@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import { isDeveloper, parseStudioCall, rolesFrom, STUDIO_TOOLS } from "@/lib/studio-tools";
 
 describe("STUDIO_TOOLS", () => {
-  it("can create apps and start and steer builds, and nothing else that writes: no running, shipping, hosting changes or VM access", () => {
+  it("can create apps and start, steer and ship builds, and nothing else that writes: no running, stopping, hosting changes or VM access", () => {
     const names = Object.keys(STUDIO_TOOLS);
-    expect(names).toEqual(expect.arrayContaining(["start_build", "steer_build", "create_app"]));
+    // finish_build is the builder chat's Ship.
+    expect(names).toEqual(expect.arrayContaining(["start_build", "steer_build", "finish_build", "create_app"]));
+    expect(parseStudioCall("finish_build", { build_id: "b1" })).toEqual({ tool: "finish_build", args: { build_id: "b1" } });
+    expect(parseStudioCall("finish_build", { build_id: "b1", reason: "ttl" })).toHaveProperty("error");
     for (const banned of [
-      "finish_build",
       "stop_build",
       "sandbox_run",
       "open_sandbox_editor",
@@ -48,7 +50,10 @@ describe("STUDIO_TOOLS", () => {
     });
     expect(parseStudioCall("start_build", { goal: "short", app_id: "a1" })).toHaveProperty("error");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker" })).toHaveProperty("error"); // an app is required
-    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: 500 })).toHaveProperty("error");
+    // The cap the developer picked goes through (Mynt checks it against the budget); nothing absurd does.
+    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: 500 })).toHaveProperty("tool");
+    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: 20_000 })).toHaveProperty("error");
+    expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", cap_usd: -1 })).toHaveProperty("error");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", mode: "batch" })).toHaveProperty("error");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", mode: "session", continue_from: "b0" })).toHaveProperty("tool");
     expect(parseStudioCall("start_build", { goal: "A savings screen with a goal tracker", app_id: "a1", repository: "not a repo" })).toHaveProperty("error");

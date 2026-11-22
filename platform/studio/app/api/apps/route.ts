@@ -22,7 +22,7 @@ export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
   const parsed = NewAppRequest.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return json({ error: "bad_request", message: parsed.error.issues[0]?.message ?? "Check what you entered." }, 400);
-  const { prompt, product_ids, kind } = parsed.data;
+  const { prompt, product_ids, kind, cap_usd } = parsed.data;
   const requested = workspaceOf(req);
 
   return asDeveloper("creating an app", async (mynt, session) => {
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
     const { sessionBuilds, appKinds } = capabilitiesFrom(tools);
     try {
       // The template it starts from, where this Mynt takes one (an older one builds from the prompt alone).
-      const build = (await callStudioTool(mynt, "start_build", { goal: prompt, app_id: appId, ...(sessionBuilds ? { mode: "session" as const } : {}), ...(kind && appKinds ? { kind } : {}) })) as {
+      const build = (await callStudioTool(mynt, "start_build", { goal: prompt, app_id: appId, ...(sessionBuilds ? { mode: "session" as const } : {}), ...(kind && appKinds ? { kind } : {}), ...(cap_usd !== undefined ? { cap_usd } : {}) })) as {
         id?: unknown;
       } | null;
       return json({ appId, buildId: typeof build?.id === "string" ? build.id : null }, 201);
