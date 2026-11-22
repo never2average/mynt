@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -87,7 +87,7 @@ describe("connect your agent", () => {
   });
 });
 
-describe("the connect page is the guide too (/docs comes here)", () => {
+describe("the connect page is the guide too (and the docs' Connect your agent page)", () => {
   afterEach(cleanup);
 
   it("has the picker first, then every section of the guide, with this site's /mcp address", async () => {
@@ -133,13 +133,17 @@ describe("the connect page is the guide too (/docs comes here)", () => {
     window.history.replaceState(null, "", "#");
   });
 
-  it("/docs sends people to /connect", async () => {
-    vi.resetModules();
-    const redirect = vi.fn();
-    vi.doMock("next/navigation", () => ({ redirect }));
-    const { default: DocsPage } = await import("@/app/(studio)/docs/page");
-    (DocsPage as () => void)();
-    expect(redirect).toHaveBeenCalledWith("/connect");
-    vi.doUnmock("next/navigation");
+  it("/docs is the docs site now, and its Connect your agent page is this same guide", async () => {
+    const { docsRoute } = await import("@/lib/docs");
+    const { docsPageParts } = await import("@/components/docs/docs-page");
+    const route = docsRoute(["connect"])!;
+    expect(route.kind).toBe("markdown");
+    const { title, toc, body } = docsPageParts(route);
+    expect(title).toBe("Connect your agent");
+    expect(toc.map((s) => s.id)).toEqual(["connect", "address", "sign-in", "access", "try", "trouble"]);
+    render(<>{body}</>);
+    await act(async () => {});
+    const order = [...document.querySelectorAll("[data-docs-section]")].map((e) => e.getAttribute("data-docs-section"));
+    expect(order).toEqual(["connect", "address", "sign-in", "access", "try", "trouble"]);
   });
 });

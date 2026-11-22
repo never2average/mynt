@@ -6,7 +6,7 @@
 // agent goes through Mynt's normal sign-in (OAuth), so nothing secret is shown here.
 import Link from "next/link"
 import { useEffect, useState } from "react"
-import { Check, Copy, ExternalLink, Plug } from "lucide-react"
+import { BookOpen, Check, Copy, ExternalLink, Plug } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Tab, TabList } from "@/components/ui/tabs"
@@ -159,5 +159,17 @@ export function ConnectAgentButton() {
       </TooltipTrigger>
       <TooltipContent>Connect your agent</TooltipContent>
     </Tooltip>
+  )
+}
+
+// The header's Docs link (/docs, Mynt's docs and tool reference), labelled, beside Connect your agent; from md up.
+export function DocsButton() {
+  return (
+    <Button asChild variant="outline" size="sm" className="hidden shrink-0 md:inline-flex">
+      <a href="/docs" data-docs-open>
+        <BookOpen />
+        Docs
+      </a>
+    </Button>
   )
 }
