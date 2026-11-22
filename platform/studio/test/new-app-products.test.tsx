@@ -99,6 +99,22 @@ describe("flags", () => {
     expect(flagsFor(["global", "XX"])).toEqual([]);
   });
 
+  it("carry the category Mynt gives (what an app idea picks by), and none when it gives none", () => {
+    const products = productsFrom(
+      [
+        { id: "money-market-account", name: "Money Market Account", product_line: "account_operations", category: "deposits", region: "US" },
+        { id: "older", name: "Older", product_line: "account_operations", region: "US" },
+      ],
+      [{ id: "d", name: "Draft", product_line: "wealth", category: "retirement", region: "US", status: "draft" }],
+    );
+    expect(products.map((p) => [p.id, p.category])).toEqual([
+      ["money-market-account", "deposits"],
+      ["older", undefined],
+      ["d", "retirement"],
+    ]);
+    expect("category" in products[1]).toBe(false);
+  });
+
   it("come from Mynt's region and any jurisdictions it lists; the user's drafts follow what they can build on", () => {
     const products = productsFrom(
       [

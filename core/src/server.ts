@@ -747,7 +747,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "Products you can build on",
       description:
-        "Developer: published products you can build experiences on, with each one's access mode (open: build and publish; approval: build now, publish once the innovator approves; private: invitation only), build terms and who issues or distributes it.",
+        "Developer: published products you can build experiences on, with each one's product line and category, access mode (open: build and publish; approval: build now, publish once the innovator approves; private: invitation only), build terms and who issues or distributes it.",
       inputSchema: {
         product_line: z.enum(PRODUCT_LINES).optional(),
         query: z.string().optional(),
@@ -770,6 +770,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
           id: p.id,
           name: p.name,
           product_line: p.product_line,
+          category: p.category,
           region: p.region,
           action: record.action,
           by: entity?.name ?? (record.owner_id ? null : "Mynt reference catalogue"),

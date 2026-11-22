@@ -23,6 +23,8 @@ export interface AppKind {
   title: string;
   description: string;
   product_lines: ProductLine[];
+  // The product categories in those lines it's for (deposits, retirement, …): the studio picks products in them.
+  categories?: string[];
   goal_template: string;
   screens: { id: string; title: string; purpose: string; journey?: boolean }[];
   flows: { id: string; title: string; steps: string[] }[];
@@ -85,7 +87,7 @@ export function registerAppKindTools(server: McpServer) {
     {
       title: "App kinds",
       description:
-        "Developer: starting points for common finance apps (a dollar account, savings goals, money transfers, …): each one's title, one-line description, the product lines it builds on, a goal to start from and edit, the screens and flows built first and the SDK calls it relies on. Pass its id as start_build's kind: the coding agent starts from the starter app with those screens laid down. Specific app ideas on each kind: list_app_ideas.",
+        "Developer: starting points for common finance apps (savings goals, certificates of deposit, a retirement account, …): each one's title, one-line description, the product lines it builds on (and, optionally, the product categories in them), a goal to start from and edit, the screens and flows built first and the SDK calls it relies on. Pass its id as start_build's kind: the coding agent starts from the starter app with those screens laid down. Specific app ideas on each kind: list_app_ideas.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },

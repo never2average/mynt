@@ -1,0 +1,31 @@
+{
+  "$schema": "../../../../schemas/app-kind.schema.json",
+  "id": "retirement-account",
+  "title": "Retirement account",
+  "description": "Open an IRA or join a 401(k) plan and follow contributions against the yearly limit.",
+  "product_lines": ["wealth"],
+  "categories": ["retirement"],
+  "goal_template": "A retirement account app on an IRA or a 401(k) plan. Customers open the account, contribute from their bank account through the provider's hosted flow, and see this year's contributions next to the yearly limit the product's terms state. Show the terms, fees and every required document exactly as the product states them before the customer agrees. The app shows information, not advice.",
+  "screens": [
+    { "id": "account", "title": "Account", "purpose": "This year's contributions next to the yearly limit from the product's terms, and recent activity, from the lifecycle events api/ receives." },
+    { "id": "open", "title": "Open an account", "purpose": "Opening the account: the product's journey, with its consents, required documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "contribute", "title": "Contribute", "purpose": "Contribute an amount from the customer's bank account: the amount, any fee and the room left under the limit shown first, then the provider's hosted flow." },
+    { "id": "reminders", "title": "Reminders", "purpose": "Reminders the customer sets, such as a contribution date. Their settings are saved to Mynt's vault (saveFields) after consent." }
+  ],
+  "flows": [
+    {
+      "id": "contribute",
+      "title": "Make a contribution",
+      "steps": [
+        "read the offer (offers) for the terms, fees and the yearly limit",
+        "show the amount, any fee and the room left under the limit before the customer confirms",
+        "start the provider's hosted contribution flow (startAction) and send the customer to its redirect_url",
+        "api/ records the outcome from Mynt's webhook (verifyWebhook) and the year's total updates"
+      ]
+    }
+  ],
+  "sdk_calls": {
+    "server": ["createClientSession", "getContract", "verifyWebhook", "trackEvent"],
+    "browser": ["offers", "createJourneyRunner", "documentShown", "giveConsent", "saveFields", "knownFields", "startAction"]
+  }
+}

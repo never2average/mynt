@@ -2,21 +2,23 @@
   "$schema": "../../../../schemas/app-kind.schema.json",
   "id": "savings-goals",
   "title": "Savings goals",
-  "description": "Set savings goals and put dollars aside toward each one in a held balance.",
-  "product_lines": ["custody_settlement"],
-  "goal_template": "A savings goals app. Customers open a dollar balance, create goals with a name, a target amount and a date, add money toward a goal from their bank account, and see each goal's progress. Show the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
+  "description": "Set savings goals and put dollars aside toward each one in a deposit account.",
+  "product_lines": ["account_operations"],
+  "categories": ["deposits"],
+  "goal_template": "A savings goals app on a deposit account, such as a money market account. Customers open the account, create goals with a name, a target amount and a date, add money toward a goal from their bank account, and see each goal's progress. Show the account's terms, its interest rate and fees exactly as the product's offer states them, the amount before each transfer, and every document the product requires before the customer agrees. The app shows information, not advice.",
   "screens": [
-    { "id": "goals", "title": "Goals", "purpose": "Each goal with its target, date and progress, from the balance the product holds and the lifecycle events api/ receives." },
+    { "id": "goals", "title": "Goals", "purpose": "Each goal with its target, date and progress, from the account's balance and the lifecycle events api/ receives on Mynt's webhook." },
     { "id": "new-goal", "title": "New goal", "purpose": "Name a goal, its target and its date. The goal's details are saved to Mynt's vault (saveFields) after consent, never to the app's own database." },
-    { "id": "open", "title": "Open a balance", "purpose": "Opening the dollar balance the goals draw on: the product's journey, with its consents, documents and the provider's hosted identity checks.", "journey": true },
-    { "id": "add-money", "title": "Add to a goal", "purpose": "Add dollars from the customer's bank account toward a goal: amount and fee shown first, then the provider's hosted flow." }
+    { "id": "open", "title": "Open an account", "purpose": "Opening the deposit account the goals draw on: the product's journey, with its consents, documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "add-money", "title": "Add to a goal", "purpose": "Add dollars from the customer's bank account toward a goal: the amount and any fee shown first, then the provider's hosted flow." },
+    { "id": "terms", "title": "Account terms", "purpose": "The account's terms, interest rate, fees and limits as the product's offer states them, and its required documents shown verbatim." }
   ],
   "flows": [
     {
       "id": "first-goal",
       "title": "Create the first goal",
       "steps": [
-        "open the balance with the product's journey if the customer has none",
+        "open the account with the product's journey if the customer has none",
         "ask for consent, then save the goal's name, target and date with saveFields",
         "show the goal with no progress yet and an Add money button"
       ]
@@ -25,7 +27,8 @@
       "id": "add-to-goal",
       "title": "Add money to a goal",
       "steps": [
-        "show the amount and the fee",
+        "read the offer (offers) for the account's terms, rate, fees and limits",
+        "show the amount and any fee before the customer confirms",
         "start the provider's hosted funding flow (startAction) and send the customer to its redirect_url",
         "api/ records the outcome from Mynt's webhook (verifyWebhook); the goal's progress updates"
       ]
@@ -33,6 +36,6 @@
   ],
   "sdk_calls": {
     "server": ["createClientSession", "getContract", "verifyWebhook"],
-    "browser": ["offers", "createJourneyRunner", "giveConsent", "saveFields", "knownFields", "startAction"]
+    "browser": ["offers", "createJourneyRunner", "documentShown", "giveConsent", "saveFields", "knownFields", "startAction"]
   }
 }

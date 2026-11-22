@@ -259,30 +259,32 @@ Builds measured before the parts were kept keep their total; their parts are `nu
 - the screens and flows to build first;
 - the SDK calls it relies on.
 
-Mynt refuses a kind that isn't there, stores the kind with the build (`kind` on `get_build`) and puts it in the agent's build spec. The agent reads that file and scaffolds with `scripts/scaffold_app.py --kind <kind>`. This lays the kind's screens over the starter app as placeholders that compile: `web/src/screens/` with a shell that switches between them, and `mobile/app/<screen>.tsx` for Expo. The kind's journey screen is the starter's journey runner. A copy of the kind is kept as `mynt-kind.json`. The kinds cover the product lines that Mynt's US regulatory model has product types for:
+Mynt refuses a kind that isn't there, stores the kind with the build (`kind` on `get_build`) and puts it in the agent's build spec. The agent reads that file and scaffolds with `scripts/scaffold_app.py --kind <kind>`. This lays the kind's screens over the starter app as placeholders that compile: `web/src/screens/` with a shell that switches between them, and `mobile/app/<screen>.tsx` for Expo. The kind's journey screen is the starter's journey runner. A copy of the kind is kept as `mynt-kind.json`. The kinds follow the products published for US developers to build on: deposit accounts (a certificate of deposit, a money market account), retirement accounts (an IRA, a 401(k) plan), a money market fund, and Treasury Inflation-Protected Securities. A kind may also name the product categories in its lines it's for (`categories`), so a retirement kind doesn't pick a money market fund:
 
-| Kind | Product lines |
-|---|---|
-| `dollar-account` (Dollar account) | `custody_settlement` |
-| `savings-goals` (Savings goals) | `custody_settlement` |
-| `money-transfers` (Money transfers) | `payments` |
-| `stablecoin-account` (Stablecoin-settled account) | `exchange` |
+| Kind | Product lines | Categories |
+|---|---|---|
+| `savings-goals` (Savings goals) | `account_operations` | `deposits` |
+| `certificates-of-deposit` (Certificates of deposit) | `account_operations` | `deposits` |
+| `cash-reserve` (Cash reserve) | `account_operations`, `wealth` | `deposits`, `mutual_funds` |
+| `retirement-account` (Retirement account) | `wealth` | `retirement` |
+| `treasury-securities` (Treasury securities) | `credit` | `bonds` |
 
-The studio's New app page lists them on its Templates tab. Using one fills the prompt with its goal and picks a product from each of its lines. CI scaffolds every kind and compiles its api, web and mobile.
+The studio's New app page lists them on its Templates tab. Using one fills the prompt with its goal and picks the published products in its lines (and categories). CI scaffolds every kind and compiles its api, web and mobile.
 
 **App ideas.** Specific apps someone could build on a kind are rows in Postgres (`financial_products.app_ideas`), not part of the kind's file. Each has:
 - an id (a slug, unique across every idea) and the kind it builds on;
 - a problem statement as its label: who has the problem and what it is, in plain words, such as "Roommates chase each other for their share of rent and bills" (at most 80 characters, one line);
 - a pitch: what the app does about it, in one line of at most 120 characters;
 - a goal to start the build from and edit (40 to 1200 characters);
-- the product lines it builds on: some or all of the kind's, and only ones Mynt builds on in the US (`payments`, `custody_settlement`, `exchange`);
+- the product lines it builds on: some or all of the kind's (a line is allowed only when some kind declares it);
+- optionally, the product categories in those lines it's for (`categories`, within the kind's own), and words from the names of the products it's for (`product_names`, such as "Money Market Account") when a category is still too wide;
 - a status (`active` or `retired`) and a sort order within its kind.
 
-Developers read the active ones with `list_app_ideas` (optionally one `kind`'s). Admins keep them with `create_app_idea`, `update_app_idea` (the fields left out stay; `status: "active"` brings back a retired one) and `retire_app_idea`, and see retired ones with `list_app_ideas` and `include_retired`. Each change is audited. Mynt checks every idea it stores. It refuses an idea whose kind isn't there or whose lines aren't the kind's. It refuses text that promises what Mynt can't build in the US or a finance app mustn't promise: lending, insurance, investing, interest, returns, guarantees or cards. It refuses text that frames the people an app serves as sellers of goods. It also refuses a web address, an SDK call the kind doesn't rely on, and, for a stablecoin-settled kind, a goal that doesn't say it shows dollars only, never crypto.
+Developers read the active ones with `list_app_ideas` (optionally one `kind`'s). Admins keep them with `create_app_idea`, `update_app_idea` (the fields left out stay; `status: "active"` brings back a retired one) and `retire_app_idea`, and see retired ones with `list_app_ideas` and `include_retired`. Each change is audited. Mynt checks every idea it stores. It refuses an idea whose kind isn't there or whose lines aren't the kind's. It refuses text about what no kind builds on (lending, insurance, investing, trading or cards) and text that frames the people an app serves as sellers of goods. It refuses promises, projections and advice: earnings, yields, returns, a percentage, guarantees, "risk-free", beating or outpacing inflation, recommendations and advice ("the app shows information, not advice" is the one way the word may appear). Factual words about the products, such as interest, rate, matures, retirement and fund, are fine. It also refuses a web address, an SDK call the kind doesn't rely on, and, for a stablecoin-settled kind, a goal that doesn't say it shows dollars only, never crypto.
 
 The ideas Mynt ships are in `core/workspaces/coding-build/templates/ideas.seed.json`, checked against `core/schemas/app-idea-seed.schema.json`. Mynt never adds them by itself, on startup or on deploy. An admin adds them with `seed_app_ideas`, or `node scripts/seed-app-ideas.mjs --url <mynt MCP URL> --login` from `core/`. It adds the ones that aren't there yet, and never overwrites an idea already there, edited or retired, so it's safe to run again.
 
-The studio's New app page shows six ideas as chips, picked once per page load with at least one per kind when it can. It shows every idea as a row of its Templates tab, with the problem, what the app does, the kind, its product lines and Use. Using an idea fills the prompt with its goal and picks a product from each of its lines. A Mynt with no ideas yet (not seeded, or older) offers the kinds themselves as chips.
+The studio's New app page shows six ideas as chips, picked once per page load with at least one per kind when it can. It shows every idea as a row of its Templates tab, with the problem, what the app does, the kind, its product lines and Use. Using an idea fills the prompt with its goal and picks every published product in its lines that is in its categories and, when it names some, whose name contains one of its product names; the composer's Products button then names the one product, or says how many. A chip is shown only for an idea that has a published product to pick; one with none stays on the Templates tab, marked "No product yet", with Create product. A Mynt with no ideas yet (not seeded, or older) offers the kinds themselves as chips.
 
 **Spend** is capped per build (`BUILD_CAP_USD`, default 10) and per developer per month (`BUILD_MONTHLY_CAP_USD`, default 100). A workspace can have its own monthly budget too, shared by everyone building its apps (`BUILD_WORKSPACE_MONTHLY_CAP_USD`, unset by default: no workspace budget); a build must fit both. Mynt reads the sandbox's machine and model cost as it runs, and stops a build that passes its cap.
 

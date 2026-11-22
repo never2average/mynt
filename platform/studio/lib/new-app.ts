@@ -29,8 +29,10 @@ export function sendBlockedReason(productIds: readonly string[], text = ""): str
 // Templates tab and as slash commands. The specific app ideas on them come from Mynt's database
 // (list_app_ideas): each is labelled by the problem it solves, with a one-line pitch saying what the app does
 // about it. New app offers them as chips under the welcome and as the Templates tab's rows.
-export type AppIdea = { id: string; problem: string; pitch: string; goal: string; productLines: string[] };
-export type AppKind = { id: string; title: string; description: string; productLines: string[]; goalTemplate: string; ideas: AppIdea[] };
+// An idea or a kind may narrow its lines to some product categories (deposits, retirement, ...), and an idea to
+// words from its products' names ("Money Market Account"): what's picked when it's used.
+export type AppIdea = { id: string; problem: string; pitch: string; goal: string; productLines: string[]; categories?: string[]; productNames?: string[] };
+export type AppKind = { id: string; title: string; description: string; productLines: string[]; categories?: string[]; goalTemplate: string; ideas: AppIdea[] };
 type Obj = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((l): l is string => typeof l === "string") : []);
@@ -44,7 +46,17 @@ function ideasFrom(list: unknown, kindLines: readonly string[]): AppIdea[] {
     .filter((e): e is Obj => isObj(e) && appKindId.safeParse(e.id).success && str(e.problem).length > 0 && str(e.goal).length > 0)
     .map((e) => {
       const own = strings(e.product_lines ?? e.productLines);
-      return { id: str(e.id), problem: str(e.problem), pitch: str(e.pitch), goal: str(e.goal), productLines: own.length ? own : [...kindLines] };
+      const categories = strings(e.categories);
+      const productNames = strings(e.product_names ?? e.productNames);
+      return {
+        id: str(e.id),
+        problem: str(e.problem),
+        pitch: str(e.pitch),
+        goal: str(e.goal),
+        productLines: own.length ? own : [...kindLines],
+        ...(categories.length ? { categories } : {}),
+        ...(productNames.length ? { productNames } : {}),
+      };
     })
     .filter((e) => e.productLines.every((l) => kindLines.includes(l)));
 }
@@ -58,11 +70,13 @@ export function appKindsFrom(kindsReply: unknown, ideasReply: unknown = null): A
     .filter((k): k is Obj => isObj(k) && appKindId.safeParse(k.id).success && typeof k.goal_template === "string")
     .map((k) => {
       const productLines = strings(k.product_lines);
+      const categories = strings(k.categories);
       return {
         id: str(k.id),
         title: str(k.title) || str(k.id),
         description: str(k.description),
         productLines,
+        ...(categories.length ? { categories } : {}),
         goalTemplate: str(k.goal_template),
         ideas: ideasFrom(ideas.filter((i) => i.kind === k.id), productLines),
       };
@@ -76,7 +90,8 @@ export function kindsFromRoute(data: unknown): AppKind[] {
     .filter((k): k is Obj => isObj(k) && appKindId.safeParse(k.id).success && typeof k.title === "string" && typeof k.goalTemplate === "string" && Array.isArray(k.productLines))
     .map((k) => {
       const productLines = strings(k.productLines);
-      return { id: str(k.id), title: str(k.title), description: str(k.description), productLines, goalTemplate: str(k.goalTemplate), ideas: ideasFrom(k.ideas, productLines) };
+      const categories = strings(k.categories);
+      return { id: str(k.id), title: str(k.title), description: str(k.description), productLines, ...(categories.length ? { categories } : {}), goalTemplate: str(k.goalTemplate), ideas: ideasFrom(k.ideas, productLines) };
     });
 }
 
@@ -85,16 +100,27 @@ export function kindsFromRoute(data: unknown): AppKind[] {
 export type KindIdea = { kind: AppKind; idea: AppIdea };
 export function kindIdeas(kinds: readonly AppKind[]): KindIdea[] {
   return kinds.flatMap((kind) =>
-    (kind.ideas.length ? kind.ideas : [{ id: kind.id, problem: kind.title, pitch: kind.description, goal: kind.goalTemplate, productLines: kind.productLines }]).map((idea) => ({ kind, idea })),
+    (kind.ideas.length ? kind.ideas : [kindAsIdea(kind)]).map((idea) => ({ kind, idea })),
   );
 }
 
+// A kind used as an idea: its title as the label, its description, goal, lines and categories.
+export const kindAsIdea = (kind: AppKind): AppIdea => ({
+  id: kind.id,
+  problem: kind.title,
+  pitch: kind.description,
+  goal: kind.goalTemplate,
+  productLines: kind.productLines,
+  ...(kind.categories?.length ? { categories: kind.categories } : {}),
+});
+
 // The welcome's chips: a few ideas picked by a seed (one per page load, so they don't change while the user
 // looks), one from each kind first so every kind shows, then others. Between `min` and `max` when there are
-// that many ideas.
+// that many ideas. Once the products are known, an idea with nothing published to pick isn't a chip (it stays
+// on the Templates tab).
 export const CHIPS_MIN = 4;
 export const CHIPS_MAX = 6;
-export function chipIdeas(kinds: readonly AppKind[], seed: number, max = CHIPS_MAX): KindIdea[] {
+export function chipIdeas(kinds: readonly AppKind[], seed: number, max = CHIPS_MAX, products: readonly PickableProduct[] | null = null): KindIdea[] {
   const rand = seeded(seed);
   const shuffle = <T>(xs: readonly T[]) => {
     const out = [...xs];
@@ -104,7 +130,8 @@ export function chipIdeas(kinds: readonly AppKind[], seed: number, max = CHIPS_M
     }
     return out;
   };
-  const withIdeas = kinds.filter((k) => k.ideas.length);
+  const buildable = (idea: AppIdea) => products === null || ideaProducts(idea, products).length > 0;
+  const withIdeas = kinds.map((k) => ({ ...k, ideas: k.ideas.filter(buildable) })).filter((k) => k.ideas.length);
   if (!withIdeas.length) return [];
   const firsts = shuffle(withIdeas).map((kind) => ({ kind, idea: shuffle(kind.ideas)[0] }));
   const taken = new Set(firsts.map((f) => f.idea.id));
@@ -124,13 +151,36 @@ function seeded(seed: number): () => number {
   };
 }
 
-// Using a kind picks one product from each of its lines (the first listed), keeping any already picked
-// in those lines; picks in other lines stay too.
-export function picksForKind(kind: Pick<AppKind, "productLines">, products: readonly { id: string; productLine: string }[], picked: readonly string[]): string[] {
+// What an idea or a kind is for, and the products it can pick from (the pickable ones: published).
+export type PickTarget = { productLines: readonly string[]; categories?: readonly string[]; productNames?: readonly string[] };
+export type PickableProduct = { id: string; productLine: string; name?: string; category?: string; status?: string };
+const published = (p: PickableProduct) => (p.status ?? "published") === "published";
+
+// The published products an idea names: in its lines, in its categories when it lists some (a product Mynt gives
+// no category for counts as in them), and, when it names products, those whose names contain one of the names
+// (or, if none do, every one in its categories). Empty: nothing to build it on yet.
+export function ideaProducts(target: PickTarget, products: readonly PickableProduct[]): PickableProduct[] {
+  const cats = target.categories ?? [];
+  const inScope = products.filter((p) => published(p) && target.productLines.includes(p.productLine) && (!cats.length || !p.category || cats.includes(p.category)));
+  const names = (target.productNames ?? []).map((n) => n.toLowerCase());
+  if (!names.length) return inScope;
+  const named = inScope.filter((p) => names.some((n) => (p.name ?? "").toLowerCase().includes(n)));
+  return named.length ? named : inScope;
+}
+
+// The products using an idea or a kind adds to `picked`. One that names categories or products adds every
+// published product it names; one that names only lines adds the first product of each line, unless one in that
+// line is picked already. What's picked already stays.
+export function picksForKind(target: PickTarget, products: readonly PickableProduct[], picked: readonly string[]): string[] {
   const out = [...picked];
-  for (const line of kind.productLines) {
-    const inLine = products.filter((p) => p.productLine === line);
-    if (!inLine.length || inLine.some((p) => out.includes(p.id))) continue;
+  const named = ideaProducts(target, products);
+  if (target.categories?.length || target.productNames?.length) {
+    for (const p of named) if (!out.includes(p.id)) out.push(p.id);
+    return out;
+  }
+  for (const line of target.productLines) {
+    const inLine = named.filter((p) => p.productLine === line);
+    if (!inLine.length || products.some((p) => p.productLine === line && out.includes(p.id))) continue;
     out.push(inLine[0].id);
   }
   return out;

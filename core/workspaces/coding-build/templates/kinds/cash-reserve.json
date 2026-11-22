@@ -1,0 +1,31 @@
+{
+  "$schema": "../../../../schemas/app-kind.schema.json",
+  "id": "cash-reserve",
+  "title": "Cash reserve",
+  "description": "A money market account for spending cash and a money market fund for cash set aside.",
+  "product_lines": ["account_operations", "wealth"],
+  "categories": ["deposits", "mutual_funds"],
+  "goal_template": "A cash reserve app. Customers keep spending cash in a money market account and can move cash they set aside into a money market fund, and back, through the provider's hosted flows. Show both products side by side with their terms, fees and documents exactly as each product states them, and the amount before each move. A money market fund is not a deposit account: show the fund's own documents verbatim before the customer agrees. The app shows information, not advice.",
+  "screens": [
+    { "id": "overview", "title": "Overview", "purpose": "The money market account's balance and the fund holding side by side, with recent activity, from the lifecycle events api/ receives." },
+    { "id": "open", "title": "Open", "purpose": "Opening the account and the fund: the products' journeys, with their consents, required documents and the provider's hosted identity checks.", "journey": true },
+    { "id": "move", "title": "Move cash", "purpose": "Move an amount between the account and the fund: the amount and any fee shown first, then the provider's hosted flow." },
+    { "id": "compare", "title": "Compare", "purpose": "Each product's terms, fees, limits and how quickly cash can come back, as each one's offer states them, and its documents shown verbatim." }
+  ],
+  "flows": [
+    {
+      "id": "move-cash",
+      "title": "Move cash",
+      "steps": [
+        "read both offers (offers) for terms, fees and limits",
+        "show the amount, any fee and the fund's documents verbatim (documentShown) before the customer confirms",
+        "start the provider's hosted flow (startAction) and send the customer to its redirect_url",
+        "api/ records the outcome from Mynt's webhook (verifyWebhook)"
+      ]
+    }
+  ],
+  "sdk_calls": {
+    "server": ["createClientSession", "getContract", "verifyWebhook", "trackEvent"],
+    "browser": ["offers", "createJourneyRunner", "documentShown", "giveConsent", "startAction"]
+  }
+}

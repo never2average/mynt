@@ -272,6 +272,92 @@ describe("the New app page", () => {
   });
 });
 
+// The products published for US developers today, and ideas on the kinds that follow them.
+const LIVE_PRODUCTS = [
+  { id: "certificate-of-deposit", name: "Certificate of Deposit (CD)", productLine: "account_operations", category: "deposits", by: "Reference", accessMode: "open", jurisdictions: ["US"], status: "published" },
+  { id: "money-market-account", name: "Money Market Account", productLine: "account_operations", category: "deposits", by: "Reference", accessMode: "open", jurisdictions: ["US"], status: "published" },
+  { id: "401k", name: "401(k) Plan", productLine: "wealth", category: "retirement", by: "Reference", accessMode: "open", jurisdictions: ["US"], status: "published" },
+  { id: "ira", name: "Individual Retirement Account (IRA)", productLine: "wealth", category: "retirement", by: "Reference", accessMode: "open", jurisdictions: ["US"], status: "published" },
+  { id: "money-market-fund", name: "Money Market Fund", productLine: "wealth", category: "mutual_funds", by: "Reference", accessMode: "open", jurisdictions: ["US"], status: "published" },
+];
+const liveIdea = (id: string, problem: string, lines: string[], categories: string[], productNames?: string[]) => ({ ...idea(id, problem, lines), categories, ...(productNames ? { productNames } : {}) });
+const LIVE_KINDS = [
+  {
+    id: "savings-goals",
+    title: "Savings goals",
+    description: "Set savings goals in a deposit account.",
+    productLines: ["account_operations"],
+    categories: ["deposits"],
+    goalTemplate: "A savings goals app on a deposit account.",
+    ideas: [liveIdea("emergency-fund", "Families have nothing set aside for a surprise bill", ["account_operations"], ["deposits"], ["Money Market Account"])],
+  },
+  {
+    id: "retirement-account",
+    title: "Retirement account",
+    description: "An IRA or a 401(k) plan.",
+    productLines: ["wealth"],
+    categories: ["retirement"],
+    goalTemplate: "A retirement account app.",
+    ideas: [liveIdea("any-retirement", "Savers don't know how much room is left under the yearly limit", ["wealth"], ["retirement"])],
+  },
+  {
+    id: "treasury-securities",
+    title: "Treasury securities",
+    description: "TIPS, not published here.",
+    productLines: ["credit"],
+    categories: ["bonds"],
+    goalTemplate: "A Treasury securities app.",
+    ideas: [liveIdea("tips-calendar", "Holders lose track of maturity dates", ["credit"], ["bonds"])],
+  },
+];
+
+describe("New app on the live products: a chip picks its idea's products", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: LIVE_PRODUCTS }), { status: 200 });
+      if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: LIVE_KINDS }), { status: 200 });
+      return new Response("{}", { status: 404 });
+    });
+  });
+  const label = () => document.querySelector("[data-product-picker-label]")!.textContent;
+
+  it("an idea naming one product picks it, and the picker names it with its flag", async () => {
+    await loaded();
+    await act(async () => void fireEvent.click(document.querySelector('[data-chip="emergency-fund"]')!));
+    expect(label()).toBe("🇺🇸 Money Market Account");
+    await openTab("Products");
+    expect(pickedCount()).toBe("1 picked");
+    expect(tabCheckbox("money-market-account").checked).toBe(true);
+    expect(tabCheckbox("certificate-of-deposit").checked).toBe(false);
+  });
+
+  it("an idea naming a category picks every published product in it, and another chip replaces the picks", async () => {
+    await loaded();
+    await act(async () => void fireEvent.click(document.querySelector('[data-chip="any-retirement"]')!));
+    expect(label()).toBe("Products · 2");
+    await openTab("Products");
+    expect(["401k", "ira", "money-market-fund"].map((id) => tabCheckbox(id).checked)).toEqual([true, true, false]);
+    await act(async () => void fireEvent.click(document.querySelector('[data-chip="emergency-fund"]')!));
+    expect(label()).toBe("🇺🇸 Money Market Account");
+  });
+
+  it("an idea with no published product isn't a chip, and its Templates row says so with Create product", async () => {
+    await loaded();
+    expect(chipIds().sort()).toEqual(["any-retirement", "emergency-fund"]);
+    await openTab("Templates");
+    const row = document.querySelector('[data-template-row="tips-calendar"]') as HTMLElement;
+    expect(row.querySelector("[data-no-product]")!.textContent).toBe("No product yet");
+    expect(within(row).getByRole("button", { name: "Create product" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Use" })).toBeTruthy();
+    const ok = document.querySelector('[data-template-row="emergency-fund"]') as HTMLElement;
+    expect(ok.querySelector("[data-no-product]")).toBeNull();
+    expect(within(ok).queryByRole("button", { name: "Create product" })).toBeNull();
+    // Create product opens the sheet.
+    await act(async () => void fireEvent.click(within(row).getByRole("button", { name: "Create product" })));
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+});
+
 describe("New app's commands and picker label", () => {
   it("has /templates, /products and one command per template", () => {
     const tab = vi.fn();
