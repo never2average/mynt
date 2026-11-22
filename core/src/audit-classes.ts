@@ -200,6 +200,10 @@ const OBLIGATIONS = [
 ] as const;
 
 const WORKSPACE = [
+  // a user's own studio chats (chat-sessions.ts): counts only, never what was said
+  "create_chat_session",
+  "append_chat_events",
+  "delete_chat_session",
   // the workspace, its members, roles and invites
   "create_workspace",
   "rename_workspace",

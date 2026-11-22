@@ -3,15 +3,12 @@
 // the product chats they had on the Build page and the products they created (list_my_products, through
 // /api/products). One list, newest first, each labelled App or Financial product.
 //
-// Product chats are kept per signed-in user in this browser (localStorage), as Earn keeps its
-// conversations (lib/earn-history.ts): the product assistant (app/api/product-chat) stores nothing on the
-// server, so this is the only copy, and another browser starts with none. The owner key is the same hash
-// of the user Earn uses (lib/wallets-server.ts ownerOf), never their name or email.
+// Product chats are kept per signed-in user on Mynt's server (lib/chat-sessions.ts, through
+// app/api/threads), as Earn keeps its conversations: the same chats in every browser they sign in from.
+// Only the user reads their own.
 //
-// Pure apart from the storage calls, so the page, the sidebar and the tests share it.
-import type { UIMessage } from "ai";
-
-import { historyStorage, newThreadId, threadTitle } from "./earn-history";
+// Pure, so the page, the sidebar and the tests share it.
+import type { ThreadSummary } from "./chat-sessions";
 import { STATUS_LABEL, type ProductStatus } from "./products";
 import type { Stage } from "./workspaces";
 
@@ -28,7 +25,7 @@ export const THREAD_FILTERS: { id: ThreadFilter; label: string }[] = [
 export const APP_STATUS: Record<Stage, string> = { production: "Production", staging: "Staging", idea: "Idea" };
 export const CHAT_STATUS = { open: "Chat", created: "Created" } as const;
 
-// "app": one of the user's apps; "chat": a product chat in this browser; "product": a product they created.
+// "app": one of the user's apps; "chat": a product chat of theirs; "product": a product they created.
 export type ThreadSource = "app" | "chat" | "product";
 export type StudioThread = {
   key: string; // `${source}:${id}`, unique across the list
@@ -45,63 +42,13 @@ export type StudioThread = {
 export type AppThreadSource = { id: string; name: string; stage: Stage; lastActivityAt?: string | null };
 export type MyProduct = { id: string; name: string; status: ProductStatus; updatedAt: string | null };
 
-// ---- product chats in this browser ----
+// ---- product chats ----
 
-export const PRODUCT_CHATS_KEY = "mynt.studio.product-chats";
-export const MAX_PRODUCT_CHATS = 30;
-// created: the chat's drafts already created, by draft id: the product id each became.
-export type ProductChatRecord = { id: string; title: string; updatedAt: string; messages: UIMessage[]; created: Record<string, string> };
-type StorageLike = Pick<Storage, "getItem" | "setItem">;
+// A product chat as the list has it (lib/chat-sessions.ts): its metadata's product_ids are the products
+// its drafts became.
+export type ProductChatRecord = Pick<ThreadSummary, "id" | "title" | "updatedAt" | "metadata">;
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-
-function readAll(s: StorageLike | null): Record<string, ProductChatRecord[]> {
-  try {
-    const v = JSON.parse(s?.getItem(PRODUCT_CHATS_KEY) ?? "{}") as unknown;
-    if (!isObj(v)) return {};
-    const out: Record<string, ProductChatRecord[]> = {};
-    for (const [owner, list] of Object.entries(v)) {
-      if (!Array.isArray(list)) continue;
-      out[owner] = list
-        .filter((t): t is ProductChatRecord => isObj(t) && typeof t.id === "string" && typeof t.title === "string" && typeof t.updatedAt === "string" && Array.isArray(t.messages))
-        .map((t) => ({ ...t, created: isObj(t.created) ? (t.created as Record<string, string>) : {} }));
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-// This user's product chats in this browser, newest first.
-export function listProductChats(owner: string | null | undefined, s: StorageLike | null = historyStorage()): ProductChatRecord[] {
-  if (!owner) return [];
-  return [...(readAll(s)[owner] ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-}
-
-// Saves (or replaces) one chat; returns the user's chats as they now are, newest first, at most
-// MAX_PRODUCT_CHATS. Full storage drops the oldest until it fits; blocked storage keeps nothing.
-export function saveProductChat(owner: string | null | undefined, chat: ProductChatRecord, s: StorageLike | null = historyStorage()): ProductChatRecord[] {
-  if (!owner || !s || !chat.messages.length) return listProductChats(owner, s);
-  const all = readAll(s);
-  let mine = [chat, ...(all[owner] ?? []).filter((t) => t.id !== chat.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, MAX_PRODUCT_CHATS);
-  for (;;) {
-    try {
-      s.setItem(PRODUCT_CHATS_KEY, JSON.stringify({ ...all, [owner]: mine }));
-      return mine;
-    } catch {
-      if (mine.length <= 1) return listProductChats(owner, s);
-      mine = mine.slice(0, Math.ceil(mine.length / 2));
-    }
-  }
-}
-
-export const productChatRecord = (id: string, messages: UIMessage[], created: Record<string, string>, now = new Date()): ProductChatRecord => ({
-  id,
-  title: threadTitle(messages),
-  updatedAt: now.toISOString(),
-  messages,
-  created,
-});
-export { newThreadId };
+export const chatCreated = (c: Pick<ThreadSummary, "metadata">) => Array.isArray(c.metadata.product_ids) && c.metadata.product_ids.length > 0;
 
 // ---- the list ----
 
@@ -122,7 +69,7 @@ export function mergeThreads(apps: readonly AppThreadSource[] | null | undefined
   for (const a of apps ?? [])
     out.push({ key: `app:${a.id}`, kind: "app", source: "app", id: a.id, name: a.name, updatedAt: a.lastActivityAt || null, status: APP_STATUS[a.stage], href: appHref(a.id) });
   for (const c of chats ?? [])
-    out.push({ key: `chat:${c.id}`, kind: "product", source: "chat", id: c.id, name: c.title, updatedAt: c.updatedAt, status: Object.keys(c.created).length ? CHAT_STATUS.created : CHAT_STATUS.open, href: chatHref(c.id) });
+    out.push({ key: `chat:${c.id}`, kind: "product", source: "chat", id: c.id, name: c.title, updatedAt: c.updatedAt, status: chatCreated(c) ? CHAT_STATUS.created : CHAT_STATUS.open, href: chatHref(c.id) });
   for (const p of products ?? [])
     out.push({ key: `product:${p.id}`, kind: "product", source: "product", id: p.id, name: p.name, updatedAt: p.updatedAt, status: STATUS_LABEL[p.status], href: productHref(p.id) });
   return out.sort(byUpdate);
@@ -150,7 +97,7 @@ export function relativeTime(iso: string | null, now: Date = new Date()): string
 
 // ---- telling the page and the sidebar ----
 
-// A product chat saved (the sidebar reads this browser's chats again) or, with products, a product
+// A product chat saved (the sidebar reads the user's chats again) or, with products, a product
 // created or published (it asks Mynt for the user's products again too).
 export const THREADS_UPDATED = "mynt:threads-updated";
 export type ThreadsUpdatedDetail = { products?: boolean };
