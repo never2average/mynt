@@ -33,6 +33,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 | "Change the sample chat app or developer console" | `platform/chat/` | `cd platform/chat && npx vitest run && npx tsc --noEmit` |
 | "Change Mynt Studio" (the chat-to-build web app, built on Adorable) | `platform/studio/` (its README lists what was changed from Adorable) | `cd platform/studio && npx vitest run && npx tsc --noEmit`; CI's `platform` job also builds it |
 | "Change sign-in for Studio and the chat" | `platform/packages/auth/` (`@mynt/auth`; each app hands it its settings, cookie name and session store in `lib/session.ts`) | both apps' checks, and `npx tsc --noEmit -p platform/packages/auth` |
+| "Change the docs site" (Studio's public `/docs`: the tool reference and pages from the repository's Markdown) | `docs/site/manifest.json` (which headings make which page), `core/src/docs-site.ts`, `core/src/tool-catalogue.ts` (tool areas), `platform/studio/app/docs/`, `platform/studio/components/docs/`; after changing a tool, a role or a quoted doc, `cd core && npm run build && npm run docs-data` and commit `docs/site/*.json` | `core/test/tool-catalogue.test.js` (fails when the committed data is stale); `cd platform/studio && npx vitest run test/docs.test.tsx` |
 | "What needs attention in production?" | the `ops_status` admin tool | |
 
 ## How to check your work
