@@ -33,38 +33,10 @@ test("every app kind validates against its schema and names real product lines",
   assert.throws(() => requireAppKind("nope"), /No app kind 'nope'; list_app_kinds lists them \(.*savings-goals/);
 });
 
-// What Mynt can't build on in the US today (no US product types for lending, insurance or investments), and
-// what a finance app must never promise or call its users.
-const UNSUPPORTED = /\b(loans?|lend\w*|borrow\w*|credit|bnpl|mortgages?|insur\w*|invest\w*|stocks?|bonds?|mutual funds?|index funds?|etfs?|brokerage|retirement|interest|yields?|apy|apr|dividends?|earn|returns?|profits?|guarantee\w*|risk-free|cards?|merchants?|shopkeepers?|sellers?|storefronts?|crypto trading|trading)\b/i;
-
-test("every kind's examples validate, build on the kind's own lines and SDK calls, and offer nothing Mynt can't build", () => {
-  const ids = [];
-  for (const k of appKinds()) {
-    assert.ok(k.examples.length >= 3 && k.examples.length <= 5, `${k.id}: 3 to 5 examples`);
-    const calls = new Set([...k.sdk_calls.server, ...k.sdk_calls.browser]);
-    for (const e of k.examples) {
-      ids.push(e.id);
-      assert.ok(e.product_lines.length && e.product_lines.every((l) => k.product_lines.includes(l)), `${k.id}/${e.id}: the kind's product lines only`);
-      for (const text of [e.title, e.pitch, e.goal]) assert.doesNotMatch(text, UNSUPPORTED, `${k.id}/${e.id}`);
-      assert.ok(e.pitch.length <= 120 && !e.pitch.includes("\n"), `${k.id}/${e.id}: one-line pitch`);
-      // An SDK call named in the goal is one the kind relies on.
-      for (const name of e.goal.match(/\b[a-z]+[A-Z]\w*\b/g) ?? []) assert.ok(calls.has(name), `${k.id}/${e.id}: ${name} isn't one of the kind's SDK calls`);
-      // No hostname-like strings (a word, a dot, a word).
-      assert.doesNotMatch(`${e.goal} ${e.pitch}`, /\b[a-z0-9-]+\.[a-z]{2,}\b/i, `${k.id}/${e.id}`);
-      if (k.product_lines.includes("exchange")) assert.match(e.goal, /dollars only, never crypto/, `${k.id}/${e.id}: a stablecoin-settled app shows dollars only`);
-    }
-  }
-  assert.equal(new Set(ids).size, ids.length, "example ids are unique across kinds");
+test("a kind file carries no app ideas: they're rows in Postgres (app-ideas.ts, test/app-ideas.test.js)", () => {
   const good = JSON.parse(readFileSync(join(APP_KINDS_DIR, "money-transfers.json"), "utf8"));
-  const withExample = (e) => ({ ...good, examples: [...good.examples.slice(0, 2), { ...good.examples[2], ...e }] });
-  assert.deepEqual(appKindErrors("money-transfers.json", good), []);
-  assert.match(appKindErrors("money-transfers.json", withExample({ product_lines: ["credit"] })).join(), /example 'shift-end-payouts' builds on 'credit'/);
-  assert.match(appKindErrors("money-transfers.json", withExample({ id: good.examples[0].id })).join(), /example 'trip-kitty' twice/);
-  assert.ok(appKindErrors("money-transfers.json", { ...good, examples: good.examples.slice(0, 2) }).length, "at least three examples");
-  assert.ok(appKindErrors("money-transfers.json", withExample({ pitch: "x".repeat(121) })).length, "a pitch is one short line");
-  assert.ok(appKindErrors("money-transfers.json", withExample({ extra: 1 })).length, "an example has no unknown fields");
-  const { examples: _, ...noExamples } = good;
-  assert.ok(appKindErrors("money-transfers.json", noExamples).length, "every kind has examples");
+  assert.ok(!("examples" in good));
+  assert.ok(appKindErrors("money-transfers.json", { ...good, examples: [] }).length, "the schema refuses an examples list");
 });
 
 test("a kind's own checks: its id is its file's name, its lines are product lines, one journey at most", () => {

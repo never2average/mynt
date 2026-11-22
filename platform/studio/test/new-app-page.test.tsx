@@ -18,7 +18,7 @@ const PRODUCTS = [
   { id: "p2", name: "Bank transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
   { id: "p3", name: "Wire transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
 ];
-const idea = (id: string, title: string, lines: string[]) => ({ id, title, pitch: `${title}: the one-line pitch.`, goal: `A ${title.toLowerCase()} app. The goal to start from and edit.`, productLines: lines });
+const idea = (id: string, problem: string, lines: string[]) => ({ id, problem, pitch: `What the app does about it (${id}).`, goal: `An app for this: ${problem.toLowerCase()}. The goal to start from and edit.`, productLines: lines });
 const KINDS = [
   {
     id: "money-transfers",
@@ -26,7 +26,7 @@ const KINDS = [
     description: "Move US dollars in and out by bank transfer or wire.",
     productLines: ["payments"],
     goalTemplate: "A money transfers app. Customers move dollars in and out.",
-    examples: [idea("trip-kitty", "Trip kitty", ["payments"]), idea("creator-tip-jar", "Creator tip jar", ["payments"]), idea("closing-day-wire", "Closing-day wire", ["payments"])],
+    ideas: [idea("trip-kitty", "Friends on a trip lose track of who owes whom", ["payments"]), idea("creator-tip-jar", "Fans have no simple way to send a creator a few dollars", ["payments"]), idea("closing-day-wire", "Homebuyers fear wiring closing funds to a fraudster", ["payments"])],
   },
   {
     id: "savings-goals",
@@ -34,10 +34,10 @@ const KINDS = [
     description: "Set savings goals and put dollars aside toward each.",
     productLines: ["custody_settlement"],
     goalTemplate: "A savings goals app. Customers set goals and add money.",
-    examples: [idea("skipped-it-jar", "Skipped-it jar", ["custody_settlement"]), idea("rent-ready-streak", "Rent-ready streak", ["custody_settlement"]), idea("payday-envelopes", "Payday envelopes", ["custody_settlement"]), idea("family-goal-board", "Family goal board", ["custody_settlement"])],
+    ideas: [idea("skipped-it-jar", "Money saved by skipping a coffee never actually gets saved", ["custody_settlement"]), idea("rent-ready-streak", "Renters scramble to find the full rent when it falls due", ["custody_settlement"]), idea("payday-envelopes", "Paychecks are gone before rent and groceries are covered", ["custody_settlement"]), idea("family-goal-board", "Teens saving for a first car have no shared plan with parents", ["custody_settlement"])],
   },
 ];
-const IDEAS = KINDS.flatMap((k) => k.examples.map((e) => ({ ...e, kind: k.id })));
+const IDEAS = KINDS.flatMap((k) => k.ideas.map((e) => ({ ...e, kind: k.id })));
 const chipIds = () => [...document.querySelectorAll("[data-chat-welcome] [data-chips] [data-chip]")].map((c) => c.getAttribute("data-chip")!);
 const chipOf = (kind: string) => document.querySelector(`[data-chips] [data-chip-kind="${kind}"]`) as HTMLElement;
 const ideaOf = (id: string) => IDEAS.find((e) => e.id === id)!;
@@ -88,12 +88,12 @@ describe("the New app page", () => {
     await loaded();
     expect(document.querySelector("[data-new-app-page] [data-chat-workspace]")).not.toBeNull();
     expect(screen.getByRole("heading", { level: 1, name: "What do you want to build?" })).toBeTruthy();
-    // Four to six of the kinds' ideas, at least one from each kind, each named by its title.
+    // Four to six of the ideas, at least one from each kind, each labelled by the problem it solves.
     const ids = chipIds();
     expect(ids.length).toBeGreaterThanOrEqual(4);
     expect(ids.length).toBeLessThanOrEqual(6);
     expect(new Set(ids).size).toBe(ids.length);
-    for (const id of ids) expect(document.querySelector(`[data-chip="${id}"]`)!.textContent).toBe(ideaOf(id).title);
+    for (const id of ids) expect(document.querySelector(`[data-chip="${id}"]`)!.textContent).toBe(ideaOf(id).problem);
     expect(new Set(ids.map((id) => ideaOf(id).kind))).toEqual(new Set(["money-transfers", "savings-goals"]));
     // Closed until a tab is picked or a message is sent; its tabs wait as icons in the chat's corner.
     expect(document.querySelector("[data-chat-workspace]")!.getAttribute("data-panel-open")).toBe("false");
@@ -119,8 +119,8 @@ describe("the New app page", () => {
     expect(seen.size).toBeGreaterThan(4);
   });
 
-  it("a Mynt whose kinds carry no ideas offers the kinds themselves as chips", async () => {
-    const bare = KINDS.map(({ examples: _, ...k }) => k);
+  it("a Mynt with no ideas yet (not seeded, or older) offers the kinds themselves as chips", async () => {
+    const bare = KINDS.map(({ ideas: _, ...k }) => k);
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
       if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: bare }), { status: 200 });
@@ -136,13 +136,13 @@ describe("the New app page", () => {
     await loaded();
     await openTab("Templates");
     const panel = document.querySelector('[data-panel-content="templates"]')!;
-    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["Idea", "Pitch", "Kind", "Product lines", ""]);
+    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["Problem", "What the app does", "Kind", "Product lines", ""]);
     // Each kind's heading, then its ideas.
     const order = [...panel.querySelectorAll("tbody tr")].map((r) => r.getAttribute("data-template-group") ?? r.getAttribute("data-template-row"));
     expect(order.slice(0, 5)).toEqual(["money-transfers", "trip-kitty", "creator-tip-jar", "closing-day-wire", "savings-goals"]);
     expect(order.slice(5).every((id) => ideaOf(id!).kind === "savings-goals")).toBe(true);
     const row = panel.querySelector('[data-template-row="trip-kitty"]')!;
-    expect([...row.querySelectorAll("td")].map((c) => c.textContent)).toEqual(["Trip kitty", "Trip kitty: the one-line pitch.", "Money transfers", "payments", "Use"]);
+    expect([...row.querySelectorAll("td")].map((c) => c.textContent)).toEqual(["Friends on a trip lose track of who owes whom", "What the app does about it (trip-kitty).", "Money transfers", "payments", "Use"]);
     await act(async () => void fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use" })));
     expect(input().value).toBe(ideaOf("trip-kitty").goal);
     expect(pickedCount()).toBe("1 picked");

@@ -1,0 +1,181 @@
+{
+  "$schema": "../../../schemas/app-idea-seed.schema.json",
+  "ideas": [
+    {
+      "id": "milestone-escrow",
+      "kind": "dollar-account",
+      "problem": "Freelancers wait weeks to get paid for finished milestones",
+      "pitch": "The client funds the gig up front; each milestone's dollars go to the freelancer once the client approves it.",
+      "goal": "A milestone escrow app for freelance gigs. A client opens a held dollar account for a gig, adds the agreed amount from their own bank account and splits it into named milestones. The freelancer marks a milestone done; when the client approves it, that milestone's dollars are withdrawn to the freelancer's bank account through the provider's hosted flow. Both sides see each milestone's amount, status and fee before anything moves, and every document the product requires before they agree.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 10
+    },
+    {
+      "id": "cool-off-cash",
+      "kind": "dollar-account",
+      "problem": "People pull money out on impulse and regret it the next day",
+      "pitch": "A dollar account where every withdrawal waits 24 hours and can be called off before it starts.",
+      "goal": "A cool-off cash app. Customers open a dollar account, add dollars from their own bank account and set a waiting period (24 hours by default). A withdrawal request sits in a countdown on the home screen, where the customer can call it off; only when the countdown ends does the app start the provider's hosted withdrawal flow. Show the balance, the pending request, the amount and the fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 20
+    },
+    {
+      "id": "tax-set-aside",
+      "kind": "dollar-account",
+      "problem": "Freelancers come up short when quarterly taxes are due",
+      "pitch": "Moves a slice of every client payment into a separate dollar account, ready for the quarterly due date.",
+      "goal": "A tax set-aside app for US freelancers. Customers open a dollar account and choose the share of each client payment they want to put aside. When they log a payment they received, the app suggests the set-aside amount and adds it from their bank account through the provider's hosted flow. The home screen shows the total set aside this quarter and the next quarterly due date, and withdrawing sends it back to their bank account. Show the amount and fee before each transfer and every document the product requires before the customer agrees. The app gives no tax advice.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 30
+    },
+    {
+      "id": "roommate-bills-pot",
+      "kind": "dollar-account",
+      "problem": "Roommates chase each other for their share of rent and bills",
+      "pitch": "One shared dollar account for the apartment: each roommate adds their share, and everyone sees who has paid.",
+      "goal": "A roommate bills app. One roommate opens a dollar account for the apartment and invites the others. Each month the app lists rent and shared bills with each roommate's share; each roommate adds their share from their own bank account through the provider's hosted flow, and the board shows who has paid. The account holder withdraws to their bank account to pay the landlord. Show the amount and fee before each transfer, and every document the product requires before anyone agrees.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 40
+    },
+    {
+      "id": "trip-kitty",
+      "kind": "money-transfers",
+      "problem": "Friends on a trip lose track of who owes whom",
+      "pitch": "Log who paid for what; the app works out who owes whom and settles up by bank transfer.",
+      "goal": "A group trip app that splits costs and settles up. One traveller creates a trip and invites friends. Anyone logs an expense with who paid and who it was for; the app keeps a running tally of who owes whom. At the end, each person settles their balance by bank transfer through the provider's hosted flow, seeing the amount, the fee and when it arrives before they confirm, and the trip shows each transfer's status until everyone is square.",
+      "product_lines": [
+        "payments"
+      ],
+      "sort": 50
+    },
+    {
+      "id": "creator-tip-jar",
+      "kind": "money-transfers",
+      "problem": "Fans have no simple way to send a creator a few dollars",
+      "pitch": "A tip page fans pay by bank transfer, with one payout to the creator every week.",
+      "goal": "A tip jar app for creators. A creator signs up and gets a tip page with their name and a short note. Fans choose an amount and send it by bank transfer through the provider's hosted flow, seeing the fee before they confirm. The creator sees every tip and its status, and once a week the collected tips are sent to their bank account, with the amount, the fee and the arrival date shown first.",
+      "product_lines": [
+        "payments"
+      ],
+      "sort": 60
+    },
+    {
+      "id": "shift-end-payouts",
+      "kind": "money-transfers",
+      "problem": "Small crews wait days after a shift to get their share",
+      "pitch": "The crew lead pays each worker their share by bank transfer as the shift ends.",
+      "goal": "A shift payouts app for small crews (cleaning, moving, catering). The crew lead signs up, adds the crew and, at the end of a shift, enters the hours or share for each worker. The app shows each payout's amount, fee and arrival time, then the crew lead confirms the transfers through the provider's hosted flow. Workers see their payout's status until it settles, and the lead sees a history of every shift.",
+      "product_lines": [
+        "payments"
+      ],
+      "sort": 70
+    },
+    {
+      "id": "closing-day-wire",
+      "kind": "money-transfers",
+      "problem": "Homebuyers fear wiring closing funds to a fraudster",
+      "pitch": "A guided closing wire: confirm the title company's details twice, see the cut-off, then follow it in.",
+      "goal": "A closing-day wire app for homebuyers. The buyer signs up, enters the closing date and the amount, and adds the title company's wire details. Before the wire, the app asks them to confirm those details a second time against what the title company gave them by phone, and shows the fee, the day's cut-off time and when it should arrive. The wire goes through the provider's hosted flow, and the app follows its status until it settles, with a clear warning about wire fraud on every step.",
+      "product_lines": [
+        "payments"
+      ],
+      "sort": 80
+    },
+    {
+      "id": "skipped-it-jar",
+      "kind": "savings-goals",
+      "problem": "Money saved by skipping a coffee never actually gets saved",
+      "pitch": "Tap \"I skipped it\" when you pass on a coffee or takeout, and its price goes toward your rainy-day goal.",
+      "goal": "A rainy-day savings app built around skipped purchases. Customers open a dollar balance and one rainy-day goal with a target. On the home screen they tap a quick button for something they skipped (a coffee, a takeout order, a ride) or type its price; the skips add up, and one tap moves the total from their bank account toward the goal through the provider's hosted flow. Show the goal's progress, the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 90
+    },
+    {
+      "id": "family-goal-board",
+      "kind": "savings-goals",
+      "problem": "Teens saving for a first car have no shared plan with parents",
+      "pitch": "Parent and teen set goals together; the teen proposes top-ups and the parent approves each one.",
+      "goal": "A family savings app. A parent opens the dollar balance and creates goals with their teen, such as a first car or a school trip, each with a target and a date. The teen proposes a top-up from the family's list of chores or birthday money; the parent approves it and adds the dollars from their own bank account through the provider's hosted flow. Both see each goal's progress. The parent is the only account holder. Show the amount and any fee before each transfer, and every document the product requires before the parent agrees.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 100
+    },
+    {
+      "id": "rent-ready-streak",
+      "kind": "savings-goals",
+      "problem": "Renters scramble to find the full rent when it falls due",
+      "pitch": "Puts aside a slice of next month's rent every week, with a streak counter to keep you on track.",
+      "goal": "A rent-ready savings app. Customers open a dollar balance and a rent goal with the rent amount and its due date; the app works out the weekly amount to be ready in time. Each week they add that amount from their bank account through the provider's hosted flow, and a streak counter shows how many weeks in a row they've been on track. Show the goal's progress, the amount and any fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 110
+    },
+    {
+      "id": "payday-envelopes",
+      "kind": "savings-goals",
+      "problem": "Paychecks are gone before rent and groceries are covered",
+      "pitch": "On payday, splits one deposit across named envelopes (rent, groceries, fun) by the percentages you set.",
+      "goal": "A payday envelopes app. Customers open a dollar balance and create envelopes, each a goal with a name and a share of their pay (rent 40%, groceries 20%, fun 10%, and so on). On payday they enter the amount and the app shows how it splits; each envelope's share is added from their bank account through the provider's hosted flow. The home screen shows every envelope's balance and progress. Show the amounts and any fee before each transfer, and every document the product requires before the customer agrees.",
+      "product_lines": [
+        "custody_settlement"
+      ],
+      "sort": 120
+    },
+    {
+      "id": "contractor-payday",
+      "kind": "stablecoin-account",
+      "problem": "Small studios lose hours paying contractors one by one",
+      "pitch": "A dollar balance settled in USDC that pays every US contractor, in dollars, on payday.",
+      "goal": "A contractor payroll app for small US studios. The studio's owner signs up, adds dollars from the studio's bank account to a dollar balance settled in USDC by the licensed provider, and lists its contractors with each one's rate. On payday the app shows every payout's amount and fee in dollars; the owner accepts, and each payout is cashed out to the contractor's bank account through the provider's hosted flow. Every screen shows dollars only, never crypto, and each payout's status shows until it settles.",
+      "product_lines": [
+        "exchange"
+      ],
+      "sort": 130
+    },
+    {
+      "id": "nonprofit-reserve",
+      "kind": "stablecoin-account",
+      "problem": "Nonprofit treasurers can move money without a second sign-off",
+      "pitch": "Operating dollars in a USDC-settled balance, with two board members approving each cash-out.",
+      "goal": "A reserve app for a small US nonprofit. The treasurer signs up, adds dollars from the nonprofit's bank account to a dollar balance settled in USDC by the licensed provider, and names the board members who approve spending. A cash-out request needs two approvals before the app starts the provider's hosted cash-out flow to the nonprofit's bank account. Every screen shows dollars only, never crypto; the board sees the balance, each request with its approvals, and the amount and fee before anyone accepts.",
+      "product_lines": [
+        "exchange"
+      ],
+      "sort": 140
+    },
+    {
+      "id": "driver-cash-out",
+      "kind": "stablecoin-account",
+      "problem": "Rideshare drivers wait days to cash out what they made",
+      "pitch": "A dollar balance drivers cash out to their bank any day of the week, seeing the fee first.",
+      "goal": "A cash-out app for rideshare and delivery drivers. A driver signs up, adds dollars from their bank account to a dollar balance settled in USDC by the licensed provider, and cashes out to their bank account any day, including weekends. The home screen shows the balance and recent activity in dollars only, never crypto, and the amount, the fee and the expected arrival before the driver accepts each cash-out.",
+      "product_lines": [
+        "exchange"
+      ],
+      "sort": 150
+    },
+    {
+      "id": "club-dues",
+      "kind": "stablecoin-account",
+      "problem": "Club organizers juggle members' dues in their own bank accounts",
+      "pitch": "One dollar balance for a club's dues, where every member sees each dollar in and out.",
+      "goal": "A dues app for small clubs (a running club, a book club, a community garden). The club's organiser signs up and opens a dollar balance settled in USDC by the licensed provider; members add their dues in dollars from their bank accounts, and the organiser cashes out to the club's bank account to pay for shared costs. Every member sees the balance and each payment in and out, in dollars only, never crypto, with the amount and the fee shown before each one is accepted.",
+      "product_lines": [
+        "exchange"
+      ],
+      "sort": 160
+    }
+  ]
+}

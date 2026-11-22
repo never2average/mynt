@@ -5,6 +5,7 @@ import type { DeveloperContract } from "./contract.js";
 import type { Component, PartyBinding } from "./regime.js";
 import { inTransaction, type Db } from "./db.js";
 import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
+import { APP_IDEA_TABLES } from "./app-ideas-schema.js";
 import { grandfatherLiveApps, PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
@@ -1744,6 +1745,7 @@ const TABLES = `
   ${LIQUIDITY_TABLES}
 ${WORKSPACE_TABLES}
 ${PROMOTION_TABLES}
+${APP_IDEA_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");

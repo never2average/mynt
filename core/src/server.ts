@@ -14,6 +14,7 @@ import { attributionFor, offersFor, registerGtmTools } from "./gtm.js";
 import { registerAdminTools, type AdminContext } from "./admin.js";
 import { registerCodingAgentAdminTools, registerCodingAgentTools } from "./builds.js";
 import { registerAppKindTools } from "./app-kinds.js";
+import { registerAppIdeaAdminTools, registerAppIdeaTools } from "./app-ideas.js";
 import { registerRepoAccessNoticeTools, registerRepoApprovalAdminTools } from "./repo-approvals.js";
 import { registerBdAdminTools, registerBdAgentTools, registerConnectTools } from "./bd.js";
 import { feasibilityCheck, registerDeskTools, type DeskService } from "./desk.js";
@@ -194,6 +195,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds, ctx.identity ?? null);
   // Starting points for common finance apps, for start_build's kind (app-kinds.ts).
   if (has("developer") && ctx.builds) registerAppKindTools(server);
+  // Specific app ideas on those kinds, kept in Postgres by admins (app-ideas.ts).
+  if (has("developer")) registerAppIdeaTools(server, store, { admin: has("admin") });
   // Repository connections wait for an admin's approval (repo-approvals.ts): who asked sees the decisions; admins decide.
   if (user && (ctx.builds || ctx.desk) && (has("developer") || has("innovator"))) registerRepoAccessNoticeTools(server, store, user.id);
   if (user && (ctx.builds || ctx.desk) && has("admin")) registerRepoApprovalAdminTools(server, store, user.id, ctx.builds?.repos ?? ctx.desk?.repos ?? null);
@@ -219,6 +222,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     );
     if (ctx.hosting) registerHostingAdminTools(server, store, user!, ctx.hosting);
     registerTakeRateAdminTools(server, store, user!);
+    registerAppIdeaAdminTools(server, store, user!);
     registerVendorAdminTools(server, store, user!);
     registerFirmCheckAdminTools(server, store, user!);
     if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
