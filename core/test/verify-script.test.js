@@ -62,7 +62,12 @@ test("the auditor's copy is the verified archive, read-only; git's own folders d
     // What git commands rewrite (its index, at any depth) isn't source: still unchanged.
     writeFileSync(join(f.copy, ".git/index"), "git index v2");
     writeFileSync(join(f.copy, "web/.git/config"), "[core]\nbare = false\n");
+    // Installed packages aren't source either. The copy is read-only, so (as an ordinary user, as in CI)
+    // the folder can only be added by opening its parent for a moment, then putting its mode back exactly.
+    const webMode = statSync(join(f.copy, "web")).mode & 0o7777;
+    chmodSync(join(f.copy, "web"), webMode | 0o200);
     mkdirSync(join(f.copy, "web/node_modules"), { recursive: true });
+    chmodSync(join(f.copy, "web"), webMode);
     let r = f.run("--rehash");
     assert.equal(tree(r.stdout), before, r.stdout + r.stderr);
     assert.equal(readFileSync(join(f.V, "changed.txt"), "utf8"), "");
