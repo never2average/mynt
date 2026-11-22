@@ -1,12 +1,13 @@
 "use client"
 
 // New app's Create product: create_product's inputs as one form in a sheet, opened from the composer's
-// Products picker, the Products tab's toolbar and /create-product. The id is derived from the name
+// Products picker, the Products tab's toolbar, and a draft card in Create product mode's chat (filled
+// with the draft, every field editable). The id is derived from the name
 // until it's edited, and checked with create_product's own rule. Sale and repackaging name the
 // published products they build on. Key features, optional, wait under More. Creating makes a draft
 // (POST /api/products): it shows in the list as Draft, to Test and Publish from its row.
 import { ChevronDown } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -78,6 +79,7 @@ export function CreateProductSheet({
   products,
   onCreated,
   fetcher = (...a) => fetch(...a),
+  initial = null,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -85,6 +87,8 @@ export function CreateProductSheet({
   products: StudioProduct[] | null
   onCreated: (product: StudioProduct) => void
   fetcher?: typeof fetch
+  // A draft from New app's Create product chat (lib/product-chat.ts), to fill the form with when it opens.
+  initial?: { key: string; request: NewProductRequest } | null
 }) {
   const [options, setOptions] = useState<Options | null>(null)
   const [name, setName] = useState("")
@@ -163,13 +167,42 @@ export function CreateProductSheet({
     setError(null)
   }
 
+  // A draft from the chat fills every field when the sheet opens on it; each stays editable.
+  const filled = useRef<string | null>(null)
+  useEffect(() => {
+    if (!initial) filled.current = null
+    if (!open || !initial || filled.current === initial.key) return
+    filled.current = initial.key
+    const r = initial.request
+    setName(r.name)
+    setIdEdited(r.id !== slugFromName(r.name))
+    setId(r.id)
+    setLine(r.product_line)
+    setRegion(r.region)
+    setCategory(r.category)
+    setRegulator(r.regulator)
+    setAction(r.action)
+    setUnderlying(r.underlying_product_ids)
+    setRisk(r.risk_level)
+    setLiquidity(r.liquidity)
+    setHorizon(r.typical_horizon)
+    setReturnType(r.return_type)
+    setDescription(r.description)
+    setFeatures(r.key_features.join("\n"))
+    setError(null)
+  }, [open, initial])
+
+  // Sent once: a second click (or Enter) while it's being created does nothing.
+  const sending = useRef(false)
   const submit = async () => {
-    if (busy) return
+    if (busy || sending.current) return
     const parsed = NewProductRequest.safeParse(request)
     if (!parsed.success) return setError(parsed.error.issues[0]?.message ?? "Check what you entered.")
+    sending.current = true
     setBusy(true)
     setError(null)
     const result = await createProduct(parsed.data, fetcher)
+    sending.current = false
     setBusy(false)
     if (!result.ok) return setError(result.message)
     onCreated(result.data.product)
