@@ -11,14 +11,17 @@ import {
   chooseAction,
   consumeTurnEnds,
   FINISHED,
+  HELD_NOTE,
   MAYBE_LOST_NOTE,
   outcomeNote,
   planSteer,
   SESSION_WAITING_NOTE,
+  SHIPPING_NOTE,
   START_BUSY_NOTE,
   STEERABLE,
 } from "@/lib/chat";
 import { STREAM_HEADERS } from "@/lib/ai-route";
+import { buildCap } from "@/lib/studio-tools";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
 import { sessionStore, type Release, type Session } from "@/lib/session-store";
@@ -57,6 +60,8 @@ const id = z.string().trim().min(1).max(200);
 const Body = z.object({
   projectId: id,
   conversationId: id.nullish(),
+  // The cap the developer picked for a new build (the composer's Cap); used only when the message starts one.
+  capUsd: buildCap.nullish(),
   messages: z
     .array(
       z
@@ -111,30 +116,35 @@ export async function POST(req: Request) {
   if (!fromOwnOrigin(req)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  const { projectId, conversationId } = parsed.data;
+  const { projectId, conversationId, capUsd } = parsed.data;
   const message = lastUserMessage(parsed.data.messages);
 
   const opened = await openMynt();
   if (opened instanceof Response) return opened;
   return streamReply(opened, (writer) =>
-    converse(writer, opened.mynt, opened.session, opened.saveIfChanged, { projectId, conversationId: conversationId ?? null, message, signal: req.signal, deadline }),
+    converse(writer, opened.mynt, opened.session, opened.saveIfChanged, { projectId, conversationId: conversationId ?? null, message, capUsd: capUsd ?? null, signal: req.signal, deadline }),
   );
 }
 
-const FollowQuery = z.object({ projectId: id, buildId: id, after: z.coerce.number().int().min(0).optional() });
+const FollowQuery = z.object({ projectId: id, buildId: id, after: z.coerce.number().int().min(0).optional(), shipping: z.literal("1").optional() });
 
 // Following a build on, with no message: when its page opens while it's still going, and when a
 // reply's watch ran out of time or the agent handed over to Mynt's verification. Streams what the
 // agent and Mynt do from `after` (the activity cursor already shown), until the agent has answered
 // in a session that then waits for the developer, the build finishes, or the watch's deadline.
-// 204 when there's nothing to follow (the AI SDK's resumeStream then leaves the chat as it is).
+// With shipping=1 (the page's Ship was just pressed) it first says what shipping does. 204 when there's nothing to follow (the AI SDK's resumeStream then leaves the chat as it is).
 export async function GET(req: Request) {
   const deadline = Date.now() + WATCH_MS;
   if (!fromOwnOrigin(req)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const params = new URL(req.url).searchParams;
-  const parsed = FollowQuery.safeParse({ projectId: params.get("projectId"), buildId: params.get("buildId"), after: params.get("after") ?? undefined });
+  const parsed = FollowQuery.safeParse({
+    projectId: params.get("projectId"),
+    buildId: params.get("buildId"),
+    after: params.get("after") ?? undefined,
+    shipping: params.get("shipping") ?? undefined,
+  });
   if (!parsed.success) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  const { projectId, buildId, after } = parsed.data;
+  const { projectId, buildId, after, shipping } = parsed.data;
   const opened = await openMynt();
   if (opened instanceof Response) return opened;
   const { mynt, saveIfChanged } = opened;
@@ -158,12 +168,15 @@ export async function GET(req: Request) {
     const capabilities = capabilitiesFrom(await listMyntTools(mynt));
     const follower = new ActivityFollower({ textDeltas: capabilities.textDeltas, reasoning: capabilities.reasoning, after });
     // A session's agent at work is followed to the end of its turn: then it waits for the
-    // developer, who must be able to type. Anything else (a one-off build, Mynt's verification,
-    // a build still starting) is followed until it finishes.
-    const session = build.mode === "session" && STEERABLE.has(status);
+    // developer, who must be able to type. Anything else (a one-off build, a session that's
+    // shipping, Mynt's verification, a build still starting) is followed until it finishes.
+    const finishing = typeof build.finish_requested_at === "string" && !!build.finish_requested_at;
+    const session = build.mode === "session" && STEERABLE.has(status) && !finishing;
+    if (shipping && finishing) writeText(writer, SHIPPING_NOTE);
     await saveIfChanged(true);
-    const watched = await watch(writer, mynt, follower, buildId, session ? 0 : Number.POSITIVE_INFINITY, { signal: req.signal, deadline });
-    afterWatch(writer, follower, buildId, watched, session);
+    const meta = { session: build.mode === "session", finishing };
+    const watched = await watch(writer, mynt, follower, buildId, session ? 0 : Number.POSITIVE_INFINITY, { signal: req.signal, deadline }, meta);
+    await afterWatch(writer, mynt, follower, buildId, watched, session);
   });
 }
 
@@ -267,14 +280,14 @@ async function afterFailure(err: unknown, releases: Release[]) {
 
 async function decide(
   mynt: Client,
-  opts: { projectId: string; conversationId: string | null; message: { text: string } },
+  opts: { projectId: string; conversationId: string | null; message: { text: string }; capUsd: number | null },
   capabilities: ReturnType<typeof capabilitiesFrom>,
 ) {
   const builds = buildSummaries(await callStudioTool(mynt, "list_builds", { app_id: opts.projectId }));
-  const action = chooseAction({ appId: opts.projectId, selectedBuildId: opts.conversationId, builds, text: opts.message.text, capabilities });
-  // Whether the build the action is about is a session (it waits for the developer's next message).
+  const action = chooseAction({ appId: opts.projectId, selectedBuildId: opts.conversationId, builds, text: opts.message.text, capabilities, capUsd: opts.capUsd });
+  // Whether the build the action is about is a session (it waits for the developer's next message), and shipping.
   const target = "buildId" in action ? builds.find((b) => b.id === action.buildId) : undefined;
-  return Object.assign(action, { session: target?.mode === "session" });
+  return Object.assign(action, { session: target?.mode === "session", finishing: target?.finishing === true });
 }
 
 async function converse(
@@ -282,7 +295,7 @@ async function converse(
   mynt: Client,
   session: Session,
   saveIfChanged: (force?: boolean) => Promise<void>,
-  opts: { projectId: string; conversationId: string | null; message: { id: string | null; text: string }; signal: AbortSignal; deadline: number },
+  opts: { projectId: string; conversationId: string | null; message: { id: string | null; text: string }; capUsd: number | null; signal: AbortSignal; deadline: number },
 ) {
   const capabilities = capabilitiesFrom(await listMyntTools(mynt));
   let action = await decide(mynt, opts, capabilities);
@@ -341,6 +354,15 @@ async function converse(
   } else if (action.kind === "follow") {
     buildId = action.buildId;
     writeText(writer, action.message);
+  } else if (action.kind === "hold") {
+    // Shipping or being verified: nothing is sent. The page keeps the message (data-hold) and sends
+    // it once verification ends; until then the chat follows the build to its end.
+    buildId = action.buildId;
+    follower.baseline(await callStudioTool(mynt, "get_build_activity", follower.next(buildId)));
+    writeText(writer, HELD_NOTE);
+    writer.write({ type: "data-hold", data: { buildId, text: opts.message.text, after: follower.position }, transient: true });
+    skipTurnEnds = Number.POSITIVE_INFINITY;
+    isSession = false;
   } else if (action.kind === "steer") {
     buildId = action.buildId;
     // What the agent did before this message isn't part of the reply.
@@ -367,26 +389,32 @@ async function converse(
     return; // a second "start" can't follow a decision made under the lock
   }
   // Tells the page which build this conversation is (it shows that build's preview).
-  writer.write({ type: "data-build", data: { buildId, started: startedId !== null }, transient: true });
+  writer.write({ type: "data-build", data: { buildId, started: startedId !== null, session: isSession }, transient: true });
 
   // Saved before the long watch (refreshed tokens, roles); at the end only if changed again.
   await saveIfChanged(true);
-  const watched = await watch(writer, mynt, follower, buildId, skipTurnEnds, opts);
+  const meta = { session: action.kind === "start" ? isSession : action.session, finishing: action.finishing };
+  const watched = await watch(writer, mynt, follower, buildId, skipTurnEnds, opts, meta);
   if (watched.how !== "answered" && steered && !capabilities.sessionBuilds) writeText(writer, MAYBE_LOST_NOTE);
-  afterWatch(writer, follower, buildId, watched, isSession);
+  await afterWatch(writer, mynt, follower, buildId, watched, isSession);
 }
 
 type Watched = { how: "answered" | "finished" | "timeout" | "aborted"; status: string | null };
 
 // What follows a watch: a session's agent that has answered waits for the developer's next
-// message (and the chat says how to ship). Otherwise, while the build is still going (the watch
+// message (and the chat says how to ship), unless it's shipping (Ship was pressed meanwhile).
+// Otherwise, while the build is still going (the watch
 // ran out of time, or a one-off build's agent handed over to Mynt's verification), the page is
 // told to follow it on from here (data-follow), so the chat keeps showing what happens.
-function afterWatch(writer: UIMessageStreamWriter, follower: ActivityFollower, buildId: string, watched: Watched, session: boolean) {
+async function afterWatch(writer: UIMessageStreamWriter, mynt: Client, follower: ActivityFollower, buildId: string, watched: Watched, session: boolean) {
   if (watched.how === "aborted" || watched.how === "finished" || (watched.status && FINISHED.has(watched.status))) return;
   if (watched.how === "answered" && session) {
-    if (watched.status && STEERABLE.has(watched.status)) writeText(writer, SESSION_WAITING_NOTE);
-    return;
+    const build = (await callStudioTool(mynt, "get_build", { build_id: buildId }).catch(() => null)) as { finish_requested_at?: unknown } | null;
+    const shipping = typeof build?.finish_requested_at === "string" && !!build.finish_requested_at;
+    if (!shipping) {
+      if (watched.status && STEERABLE.has(watched.status)) writeText(writer, SESSION_WAITING_NOTE);
+      return;
+    }
   }
   if (follower.position === null) {
     if (watched.how === "timeout") writeText(writer, "_Still working. The build carries on; open it again to see the rest._");
@@ -416,6 +444,8 @@ async function watch(
   buildId: string,
   skip: number,
   opts: { signal: AbortSignal; deadline: number },
+  // What the page shows about the build (data-state, sent as its status changes): Ship, the cap, held messages.
+  meta: { session: boolean; finishing: boolean } = { session: false, finishing: false },
 ): Promise<Watched> {
   let phase: string | null = null;
   let status: string | null = null;
@@ -425,6 +455,7 @@ async function watch(
   try {
     while (!opts.signal.aborted) {
       const r = follower.take(await callStudioTool(mynt, "get_build_activity", follower.next(buildId)));
+      if (r.status && r.status !== status) writer.write({ type: "data-state", data: { buildId, status: r.status, after: follower.position, ...meta }, transient: true });
       status = r.status ?? status;
       if (follower.missed) {
         live.close();
@@ -462,5 +493,7 @@ async function watch(
     return { how: "aborted", status };
   } finally {
     live.close();
+    // Where the chat has got to, so the page can follow on from there (after Ship, say).
+    if (status && !opts.signal.aborted) writer.write({ type: "data-state", data: { buildId, status, after: follower.position, ...meta }, transient: true });
   }
 }

@@ -542,7 +542,13 @@ test("the workspace's monthly build budget is shared by everyone building its ap
   const a = (await call(ana.client, "create_app", { ...app("Team app"), workspace_id: ws.id })).data;
   const spent = await build(ana.user.id, a.id, "succeeded");
   await pg.query("UPDATE financial_products.build_runs SET cost_usd = 10 WHERE id = $1", [spent]);
-  // Ben has spent nothing himself, but the workspace has US$2 left.
+  // Ben has spent nothing himself, but the workspace has US$2 left: list_builds says so, for a cap picker.
+  const listed = (await call(ben.client, "list_builds", { app_id: a.id })).data;
+  assert.deepEqual(listed.budget, { default_cap_usd: 5, month_left_usd: listed.monthly_cap_usd, workspace_left_usd: 2, min_cap_usd: 0.5, session_cap_above_usd: 2 });
+  // Without an app, or for an app that isn't theirs, no workspace's budget.
+  assert.equal((await call(ben.client, "list_builds", {})).data.budget.workspace_left_usd, null);
+  const outsider = await connect("Cy");
+  assert.equal((await call(outsider.client, "list_builds", { app_id: a.id })).data.budget.workspace_left_usd, null);
   const r = await call(ben.client, "start_build", { app_id: a.id, goal: "Add a savings calculator" });
   assert.match(r.data.error, /workspace's remaining build budget .*US\$2\.00 of US\$12/);
   const small = await call(ben.client, "start_build", { app_id: a.id, goal: "Add a savings calculator", cap_usd: 2 });
