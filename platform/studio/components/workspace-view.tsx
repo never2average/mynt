@@ -122,7 +122,7 @@ export function AppsTab({ workspace, apps }: { workspace: Workspace; apps: Works
           <Button asChild>
             <Link href="/new">
               <Plus />
-              New app
+              Build
             </Link>
           </Button>
         }

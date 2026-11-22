@@ -31,7 +31,7 @@ function EmptyState() {
       <Button asChild size="sm" className="ml-auto">
         <Link href="/new">
           <Plus />
-          New app
+          Build
         </Link>
       </Button>
     </div>

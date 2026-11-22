@@ -147,7 +147,7 @@ describe("page titles", () => {
       "Earn",
       "Earn", // /liquidity redirects to Earn
       "Builds",
-      "New app",
+      "Build",
     ]);
     expect(pageTitle("/app-1")).toBeNull();
     expect(pageTitle("/app-1/build-9")).toBeNull();
@@ -162,7 +162,7 @@ describe("the studio's header", () => {
     ["/audits", "Audits"],
     ["/settings", "Settings"],
     ["/builds", "Builds"],
-    ["/new", "New app"],
+    ["/new", "Build"],
   ];
 
   for (const [path, title] of pages) {
@@ -179,7 +179,7 @@ describe("the studio's header", () => {
       expect(header.textContent!.replace(title, "")).not.toMatch(/·|workspace|Personal/i);
       const newApp = header.querySelector("[data-new-app]");
       expect(newApp?.getAttribute("href")).toBe("/new");
-      expect(newApp?.textContent).toContain("New app");
+      expect(newApp?.textContent).toContain("Build");
       expect(header.querySelector("[data-search-trigger]")).not.toBeNull();
       expect(container.querySelector("[data-app-top-bar]")).toBeNull();
     });
@@ -233,7 +233,7 @@ describe("an app's top bar", () => {
     expect(open.getAttribute("href")).toBe("https://pv.example.test/dashboard?token=abc");
     expect(open.getAttribute("target")).toBe("_blank");
     expect(open.getAttribute("rel")).toContain("noopener");
-    expect(bar.querySelector("[data-new-app]")?.getAttribute("aria-label")).toBe("New app");
+    expect(bar.querySelector("[data-new-app]")?.getAttribute("aria-label")).toBe("Build");
     expect(bar.querySelector("[data-search-trigger]")).not.toBeNull();
     // Not the generic page header.
     expect(container.querySelector("[data-site-header]")).toBeNull();
@@ -252,7 +252,7 @@ describe("an app's top bar", () => {
     expect(back).toEqual([1]);
     // Labelled forms shown from md, the icon forms only below it.
     const labelled = [...bar.querySelectorAll("[data-search-trigger], [data-new-app]")].filter((e) => e.closest(".hidden")?.className.includes("md:flex"));
-    expect(labelled.map((e) => e.textContent)).toEqual([expect.stringContaining("Search or ask AI"), "New app"]);
+    expect(labelled.map((e) => e.textContent)).toEqual([expect.stringContaining("Search or ask AI"), "Build"]);
     const icons = [...bar.querySelectorAll("[data-search-trigger], [data-new-app]")].filter((e) => e.closest(".md\\:hidden"));
     expect(icons).toHaveLength(2);
     // The preview's icon controls each have a name and a tooltip.

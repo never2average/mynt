@@ -260,7 +260,7 @@ describe("the Settings page (once Workspace)", () => {
     expect(html).toContain('href="/a1/b1"');
     expect(html).toContain(">Open app<");
     expect(html).toContain("Not shown by Mynt"); // an owner Mynt doesn't name
-    expect(html).toMatch(/>\s*New app\s*</);
+    expect(html).toMatch(/>\s*Build\s*</);
     expect(view("members")).toContain('data-tab-panel="members"');
     expect(view("invitations")).toContain('data-tab-panel="invitations"');
   });
