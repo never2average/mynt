@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// The /new page on Earn's chat workspace: the centred "What do you want to build?" with the composer and the
-// templates as chips; the tabs on the right (Templates, Products) with their icons beside the chat corner
+// The /new page on Earn's chat workspace: the centred "What do you want to build?" with the composer and a
+// few of the kinds' app ideas as chips; the tabs on the right (Templates, Products) with their icons beside the chat corner
 // while the panel is closed; the composer's Products picker sharing the selection with the Products tab; and
 // sending as Build it, blocked until a product is picked.
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -17,10 +17,29 @@ const PRODUCTS = [
   { id: "p2", name: "Bank transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
   { id: "p3", name: "Wire transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
 ];
+const idea = (id: string, title: string, lines: string[]) => ({ id, title, pitch: `${title}: the one-line pitch.`, goal: `A ${title.toLowerCase()} app. The goal to start from and edit.`, productLines: lines });
 const KINDS = [
-  { id: "money-transfers", title: "Money transfers", description: "Move US dollars in and out by bank transfer or wire.", productLines: ["payments"], goalTemplate: "A money transfers app. Customers move dollars in and out." },
-  { id: "savings-goals", title: "Savings goals", description: "Set savings goals and put dollars aside toward each.", productLines: ["custody_settlement"], goalTemplate: "A savings goals app. Customers set goals and add money." },
+  {
+    id: "money-transfers",
+    title: "Money transfers",
+    description: "Move US dollars in and out by bank transfer or wire.",
+    productLines: ["payments"],
+    goalTemplate: "A money transfers app. Customers move dollars in and out.",
+    examples: [idea("trip-kitty", "Trip kitty", ["payments"]), idea("creator-tip-jar", "Creator tip jar", ["payments"]), idea("closing-day-wire", "Closing-day wire", ["payments"])],
+  },
+  {
+    id: "savings-goals",
+    title: "Savings goals",
+    description: "Set savings goals and put dollars aside toward each.",
+    productLines: ["custody_settlement"],
+    goalTemplate: "A savings goals app. Customers set goals and add money.",
+    examples: [idea("skipped-it-jar", "Skipped-it jar", ["custody_settlement"]), idea("rent-ready-streak", "Rent-ready streak", ["custody_settlement"]), idea("payday-envelopes", "Payday envelopes", ["custody_settlement"]), idea("family-goal-board", "Family goal board", ["custody_settlement"])],
+  },
 ];
+const IDEAS = KINDS.flatMap((k) => k.examples.map((e) => ({ ...e, kind: k.id })));
+const chipIds = () => [...document.querySelectorAll("[data-chat-welcome] [data-chips] [data-chip]")].map((c) => c.getAttribute("data-chip")!);
+const chipOf = (kind: string) => document.querySelector(`[data-chips] [data-chip-kind="${kind}"]`) as HTMLElement;
+const ideaOf = (id: string) => IDEAS.find((e) => e.id === id)!;
 
 let posted: unknown[] = [];
 beforeAll(() => {
@@ -64,11 +83,17 @@ const tabCheckbox = (id: string) => document.querySelector(`[data-pick="${id}"]`
 const openPicker = async () => act(async () => void fireEvent.click(document.querySelector("[data-product-picker]")!));
 
 describe("the New app page", () => {
-  it("is Earn's chat workspace: the centred welcome with the templates as chips, and the tabs' icons beside the chat", async () => {
+  it("is Earn's chat workspace: the centred welcome with app ideas as chips, and the tabs' icons beside the chat", async () => {
     await loaded();
     expect(document.querySelector("[data-new-app-page] [data-chat-workspace]")).not.toBeNull();
     expect(screen.getByRole("heading", { level: 1, name: "What do you want to build?" })).toBeTruthy();
-    expect([...document.querySelectorAll("[data-chat-welcome] [data-chips] [data-chip]")].map((c) => c.textContent)).toEqual(["Money transfers", "Savings goals"]);
+    // Four to six of the kinds' ideas, at least one from each kind, each named by its title.
+    const ids = chipIds();
+    expect(ids.length).toBeGreaterThanOrEqual(4);
+    expect(ids.length).toBeLessThanOrEqual(6);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(document.querySelector(`[data-chip="${id}"]`)!.textContent).toBe(ideaOf(id).title);
+    expect(new Set(ids.map((id) => ideaOf(id).kind))).toEqual(new Set(["money-transfers", "savings-goals"]));
     // Closed until a tab is picked or a message is sent; its tabs wait as icons in the chat's corner.
     expect(document.querySelector("[data-chat-workspace]")!.getAttribute("data-panel-open")).toBe("false");
     expect(screen.getByRole("button", { name: "Open Templates" })).toBeTruthy();
@@ -76,18 +101,49 @@ describe("the New app page", () => {
     await openTab("Templates");
     expect(document.querySelector("[data-chat-workspace]")!.getAttribute("data-panel-open")).toBe("true");
     expect([...document.querySelectorAll("[data-panel-tab]")].map((t) => t.textContent)).toEqual(["Templates", "Products"]);
+    // The chips don't change while the user looks.
+    expect(chipIds()).toEqual(ids);
   });
 
-  it("lists the templates as a table; Use fills the composer with its goal and picks a product of its line", async () => {
+  it("picks the chips once per page load: another load may pick others, but always from the ideas", async () => {
+    const seen = new Set<string>();
+    for (const r of [0.01, 0.37, 0.73, 0.99]) {
+      const random = vi.spyOn(Math, "random").mockReturnValue(r);
+      await loaded();
+      random.mockRestore();
+      for (const id of chipIds()) seen.add(id);
+      cleanup();
+    }
+    for (const id of seen) expect(ideaOf(id)).toBeTruthy();
+    expect(seen.size).toBeGreaterThan(4);
+  });
+
+  it("a Mynt whose kinds carry no ideas offers the kinds themselves as chips", async () => {
+    const bare = KINDS.map(({ examples: _, ...k }) => k);
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
+      if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: bare }), { status: 200 });
+      return new Response("{}", { status: 404 });
+    });
+    await loaded();
+    expect(chipIds()).toEqual(["money-transfers", "savings-goals"]);
+    await act(async () => void fireEvent.click(document.querySelector('[data-chip="savings-goals"]')!));
+    expect(input().value).toBe(KINDS[1].goalTemplate);
+  });
+
+  it("lists the ideas as a table grouped by kind; Use fills the composer with its goal and picks a product of its line", async () => {
     await loaded();
     await openTab("Templates");
     const panel = document.querySelector('[data-panel-content="templates"]')!;
-    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["Kind", "Description", "Product lines", ""]);
-    const row = panel.querySelector('[data-template-row="money-transfers"]')!;
-    expect(row.textContent).toContain("Move US dollars in and out");
-    expect(row.textContent).toContain("payments");
+    expect([...panel.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["Idea", "Pitch", "Kind", "Product lines", ""]);
+    // Each kind's heading, then its ideas.
+    const order = [...panel.querySelectorAll("tbody tr")].map((r) => r.getAttribute("data-template-group") ?? r.getAttribute("data-template-row"));
+    expect(order.slice(0, 5)).toEqual(["money-transfers", "trip-kitty", "creator-tip-jar", "closing-day-wire", "savings-goals"]);
+    expect(order.slice(5).every((id) => ideaOf(id!).kind === "savings-goals")).toBe(true);
+    const row = panel.querySelector('[data-template-row="trip-kitty"]')!;
+    expect([...row.querySelectorAll("td")].map((c) => c.textContent)).toEqual(["Trip kitty", "Trip kitty: the one-line pitch.", "Money transfers", "payments", "Use"]);
     await act(async () => void fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use" })));
-    expect(input().value).toBe(KINDS[0].goalTemplate);
+    expect(input().value).toBe(ideaOf("trip-kitty").goal);
     expect(pickedCount()).toBe("1 picked");
     expect(tabCheckbox("p2").checked).toBe(true);
     // The Products tab is filtered to the template's line.
@@ -98,8 +154,9 @@ describe("the New app page", () => {
 
   it("a chip under the welcome does what Use does", async () => {
     await loaded();
-    await act(async () => void fireEvent.click(document.querySelector('[data-chips] [data-chip="savings-goals"]')!));
-    expect(input().value).toBe(KINDS[1].goalTemplate);
+    const chip = chipOf("savings-goals");
+    await act(async () => void fireEvent.click(chip));
+    expect(input().value).toBe(ideaOf(chip.getAttribute("data-chip")!).goal);
     expect(document.querySelector("[data-product-picker-label]")!.textContent).toBe("Dollar account");
   });
 
@@ -157,12 +214,13 @@ describe("the New app page", () => {
     await act(async () => undefined);
     expect(posted).toEqual([]);
 
-    await act(async () => void fireEvent.click(document.querySelector('[data-chips] [data-chip="savings-goals"]')!));
+    const chip = chipOf("savings-goals");
+    await act(async () => void fireEvent.click(chip));
     expect(document.querySelector("p[data-send-blocked]")).toBeNull();
     expect(send().disabled).toBe(false);
     await act(async () => void fireEvent.click(send()));
     await act(async () => new Promise((r) => setTimeout(r, 0)));
-    expect(posted).toEqual([{ prompt: KINDS[1].goalTemplate, product_ids: ["p1"], kind: "savings-goals" }]);
+    expect(posted).toEqual([{ prompt: ideaOf(chip.getAttribute("data-chip")!).goal, product_ids: ["p1"], kind: "savings-goals" }]);
     expect(pushed).toEqual(["/app-1/build-1"]);
   });
 

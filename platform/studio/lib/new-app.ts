@@ -28,30 +28,91 @@ export function sendBlockedReason(productIds: readonly string[], text = ""): str
 }
 
 // Mynt's app kinds (list_app_kinds): starting points for common finance apps, offered on New app's
-// Templates tab, as chips under the welcome and as slash commands.
-export type AppKind = { id: string; title: string; description: string; productLines: string[]; goalTemplate: string };
+// Templates tab and as slash commands. Each kind carries specific app ideas (its examples), which New app
+// offers as chips under the welcome and as the Templates tab's rows.
+export type AppIdea = { id: string; title: string; pitch: string; goal: string; productLines: string[] };
+export type AppKind = { id: string; title: string; description: string; productLines: string[]; goalTemplate: string; examples: AppIdea[] };
 type Obj = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v : "");
-export function appKindsFrom(reply: unknown): AppKind[] {
-  const list = reply && typeof reply === "object" && Array.isArray((reply as Obj).kinds) ? ((reply as Obj).kinds as unknown[]) : [];
+const strings = (v: unknown) => (Array.isArray(v) ? v.filter((l): l is string => typeof l === "string") : []);
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
+
+// A kind's ideas, from Mynt's shape (product_lines) or the studio's (productLines). An idea without its own
+// lines builds on the kind's; one naming a line the kind doesn't have is dropped.
+function ideasFrom(list: unknown, kindLines: readonly string[]): AppIdea[] {
+  if (!Array.isArray(list)) return [];
   return list
-    .filter((k): k is Obj => typeof k === "object" && k !== null && appKindId.safeParse((k as Obj).id).success && typeof (k as Obj).goal_template === "string")
-    .map((k) => ({
-      id: str(k.id),
-      title: str(k.title) || str(k.id),
-      description: str(k.description),
-      productLines: Array.isArray(k.product_lines) ? k.product_lines.filter((l): l is string => typeof l === "string") : [],
-      goalTemplate: str(k.goal_template),
-    }));
+    .filter((e): e is Obj => isObj(e) && appKindId.safeParse(e.id).success && str(e.title).length > 0 && str(e.goal).length > 0)
+    .map((e) => {
+      const own = strings(e.product_lines ?? e.productLines);
+      return { id: str(e.id), title: str(e.title), pitch: str(e.pitch), goal: str(e.goal), productLines: own.length ? own : [...kindLines] };
+    })
+    .filter((e) => e.productLines.every((l) => kindLines.includes(l)));
+}
+
+export function appKindsFrom(reply: unknown): AppKind[] {
+  const list = isObj(reply) && Array.isArray(reply.kinds) ? (reply.kinds as unknown[]) : [];
+  return list
+    .filter((k): k is Obj => isObj(k) && appKindId.safeParse(k.id).success && typeof k.goal_template === "string")
+    .map((k) => {
+      const productLines = strings(k.product_lines);
+      return { id: str(k.id), title: str(k.title) || str(k.id), description: str(k.description), productLines, goalTemplate: str(k.goal_template), examples: ideasFrom(k.examples, productLines) };
+    });
 }
 
 // /api/app-kinds' answer (the studio's shape), as the page reads it: anything else is no templates.
 export function kindsFromRoute(data: unknown): AppKind[] {
-  const list = data && typeof data === "object" && Array.isArray((data as Obj).kinds) ? ((data as Obj).kinds as unknown[]) : [];
-  return list.filter(
-    (k): k is AppKind =>
-      typeof k === "object" && k !== null && appKindId.safeParse((k as Obj).id).success && typeof (k as Obj).title === "string" && typeof (k as Obj).goalTemplate === "string" && Array.isArray((k as Obj).productLines),
+  const list = isObj(data) && Array.isArray(data.kinds) ? (data.kinds as unknown[]) : [];
+  return list
+    .filter((k): k is Obj => isObj(k) && appKindId.safeParse(k.id).success && typeof k.title === "string" && typeof k.goalTemplate === "string" && Array.isArray(k.productLines))
+    .map((k) => {
+      const productLines = strings(k.productLines);
+      return { id: str(k.id), title: str(k.title), description: str(k.description), productLines, goalTemplate: str(k.goalTemplate), examples: ideasFrom(k.examples, productLines) };
+    });
+}
+
+// Every idea with the kind it builds on, grouped by kind in the kinds' order. A kind without ideas is one
+// idea itself (its title, description and goal), so it can still be used.
+export type KindIdea = { kind: AppKind; idea: AppIdea };
+export function kindIdeas(kinds: readonly AppKind[]): KindIdea[] {
+  return kinds.flatMap((kind) =>
+    (kind.examples.length ? kind.examples : [{ id: kind.id, title: kind.title, pitch: kind.description, goal: kind.goalTemplate, productLines: kind.productLines }]).map((idea) => ({ kind, idea })),
   );
+}
+
+// The welcome's chips: a few ideas picked by a seed (one per page load, so they don't change while the user
+// looks), one from each kind first so every kind shows, then others. Between `min` and `max` when there are
+// that many ideas.
+export const CHIPS_MIN = 4;
+export const CHIPS_MAX = 6;
+export function chipIdeas(kinds: readonly AppKind[], seed: number, max = CHIPS_MAX): KindIdea[] {
+  const rand = seeded(seed);
+  const shuffle = <T>(xs: readonly T[]) => {
+    const out = [...xs];
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  };
+  const withIdeas = kinds.filter((k) => k.examples.length);
+  if (!withIdeas.length) return [];
+  const firsts = shuffle(withIdeas).map((kind) => ({ kind, idea: shuffle(kind.examples)[0] }));
+  const taken = new Set(firsts.map((f) => f.idea.id));
+  const rest = shuffle(kindIdeas(withIdeas).filter((x) => !taken.has(x.idea.id)));
+  return [...firsts, ...rest].slice(0, max);
+}
+
+// A small seeded generator (mulberry32): the same seed, the same chips.
+function seeded(seed: number): () => number {
+  let a = Math.floor(seed * 2 ** 32) >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
 }
 
 // Using a kind picks one product from each of its lines (the first listed), keeping any already picked
