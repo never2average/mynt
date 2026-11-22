@@ -145,7 +145,7 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
           <Button asChild data-new-app>
             <Link href="/new">
               <Plus />
-              New app
+              Build
             </Link>
           </Button>
         }
@@ -190,7 +190,7 @@ export function BuildsView({ rows, error = null, initial = NO_BUILD_FILTERS }: {
             ) : (
               <TableRow>
                 <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
-                  {all.length ? "No builds match these filters." : error ? "Builds couldn't be loaded." : "No builds yet. Start one with New app."}
+                  {all.length ? "No builds match these filters." : error ? "Builds couldn't be loaded." : "No builds yet. Start one with Build."}
                 </TableCell>
               </TableRow>
             )}
