@@ -11,6 +11,7 @@ import { Bar, BarChart, Cell, Line, LineChart, Pie, PieChart, XAxis, YAxis } fro
 
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { seriesSummary, type FunnelStep, type Kpi, type Slice } from "@/lib/dashboard-visual"
+import { durationText } from "@/lib/build-metrics"
 import { money, moneyShort, NOT_MEASURED } from "@/lib/pnl"
 import { cn } from "@/lib/utils"
 import { STAGE_LABELS } from "@/lib/workspaces"
@@ -66,7 +67,7 @@ export function KpiRow({ kpis, grid = false }: { kpis: Kpi[]; grid?: boolean }) 
           <div key={k.key} className={cn("flex min-w-0 flex-col gap-1 @3xl/main:px-4", grid ? "@3xl/main:[&:nth-child(4n+1)]:pl-0" : "@3xl/main:first:pl-0")} data-kpi={k.key}>
             <dt className="text-xs text-muted-foreground">{k.label}</dt>
             <dd className={cn("font-semibold tabular-nums", measured ? "text-2xl" : "text-base text-muted-foreground")} data-measured={measured}>
-              {k.unit === "money" ? money(k.value) : k.value === null ? NOT_MEASURED : k.value.toLocaleString("en-US")}
+              {k.unit === "money" ? money(k.value) : k.value === null ? NOT_MEASURED : k.unit === "duration" ? durationText(k.value) : k.value.toLocaleString("en-US")}
             </dd>
             <dd className="flex items-center justify-between gap-2">
               {k.delta ? (

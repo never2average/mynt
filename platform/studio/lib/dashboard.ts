@@ -6,6 +6,8 @@
 // list_my_apps and list_builds: apps, their last builds and build spend, with the money
 // figures not measured.
 
+import { buildAverages, metricsFrom } from "./build-metrics";
+
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -51,7 +53,18 @@ export type Dashboard = {
   licences: Figure; // partner licences behind them
   daily: { date: string; value: number }[] | null; // money moved per day; null when not measured
   apps: DashboardApp[];
+  /** Average cost (cents) and time (seconds) of the builds finished this month that Mynt measured; null when none. */
+  buildAverages?: { costCents: Figure; seconds: Figure; costCount: number; timeCount: number };
 };
+
+// This calendar month's finished builds (list_builds), averaged over those whose figure was measured.
+export function buildAveragesOf(buildsReply: unknown, now = new Date()): NonNullable<Dashboard["buildAverages"]> {
+  const builds = isObj(buildsReply) && Array.isArray(buildsReply.builds) ? buildsReply.builds.filter(isObj) : [];
+  const start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  return buildAverages(
+    builds.filter((b) => Date.parse(str(b.created_at) ?? "") >= start).map((b) => ({ status: str(b.status) ?? "unknown", metrics: metricsFrom(b) })),
+  );
+}
 
 function lastBuild(v: unknown): DashboardApp["lastBuild"] {
   if (!isObj(v) || !str(v.id)) return null;
@@ -59,7 +72,7 @@ function lastBuild(v: unknown): DashboardApp["lastBuild"] {
 }
 
 // get_developer_dashboard's reply.
-export function fromDashboardTool(reply: unknown): Dashboard {
+export function fromDashboardTool(reply: unknown, buildsReply?: unknown): Dashboard {
   const r = isObj(reply) ? reply : {};
   const money = isObj(r.money_moved) ? r.money_moved : {};
   const customers = isObj(r.customers) ? r.customers : {};
@@ -84,6 +97,7 @@ export function fromDashboardTool(reply: unknown): Dashboard {
     earnings: earnings.tracked === true ? num(earnings.usd) : null,
     activeProducts: countOf(r.active_products),
     licences: countOf(r.licences),
+    ...(buildsReply === undefined ? {} : { buildAverages: buildAveragesOf(buildsReply) }),
     daily: daily && daily.length ? daily.sort((a, b) => a.date.localeCompare(b.date)) : null,
     apps: (Array.isArray(r.apps) ? r.apps : []).filter(isObj).flatMap((a) =>
       str(a.app_id)
@@ -146,6 +160,7 @@ export function fromAppsAndBuilds(appsReply: unknown, buildsReply: unknown): Das
     licences: null,
     daily: null,
     apps,
+    buildAverages: buildAveragesOf(buildsReply),
   };
 }
 

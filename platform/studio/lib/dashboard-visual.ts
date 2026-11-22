@@ -8,7 +8,7 @@ import type { Pnl, PnlLine, Values } from "./pnl";
 import type { Stage } from "./workspaces";
 
 export type Delta = { direction: "up" | "down" | "flat"; text: string; good: boolean | null } | null;
-export type Kpi = { key: string; label: string; value: number | null; unit: "money" | "count"; delta: Delta; spark: (number | null)[] | null; note?: string };
+export type Kpi = { key: string; label: string; value: number | null; unit: "money" | "count" | "duration"; delta: Delta; spark: (number | null)[] | null; note?: string };
 
 const pct = (a: number, b: number) => (b > 0 ? Math.round(((a - b) / b) * 100) : null);
 
@@ -41,6 +41,15 @@ export function builderKpis(pnl: Pnl | null, appsLive: number | null): Kpi[] {
     { key: "build-spend", label: "Build spend", value: build?.values.this_period ?? null, unit: "money", delta: deltaOf(build?.values ?? null, true), spark: null, note: build ? undefined : "Mynt hasn't reported build spend" },
     { key: "hosting", label: "Hosting", value: hosting?.values.this_period ?? null, unit: "money", delta: deltaOf(hosting?.values ?? null, true), spark: null, note: hosting ? undefined : "Mynt hasn't reported hosting" },
     { key: "apps-live", label: "Apps live", value: appsLive, unit: "count", delta: null, spark: null },
+  ];
+}
+
+/** Average build cost (cents) and time (seconds) this month: finished builds Mynt measured; Not measured if none. */
+export function buildAverageKpis(avg: { costCents: number | null; seconds: number | null; costCount: number; timeCount: number } | null | undefined): Kpi[] {
+  const note = (n: number) => (n ? `${n} finished ${n === 1 ? "build" : "builds"} this month` : "No finished build measured this month");
+  return [
+    { key: "avg-build-cost", label: "Average build cost", value: avg?.costCents ?? null, unit: "money", delta: null, spark: null, note: note(avg?.costCount ?? 0) },
+    { key: "avg-build-time", label: "Average build time", value: avg?.seconds ?? null, unit: "duration", delta: null, spark: null, note: note(avg?.timeCount ?? 0) },
   ];
 }
 

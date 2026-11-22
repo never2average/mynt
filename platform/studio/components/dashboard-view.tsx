@@ -13,7 +13,7 @@ import { NeedsAttention, Panel, RecentActivity, type StageApp, type StagesData }
 import { PnlChart, PNL_NOT_AVAILABLE } from "@/components/pnl"
 import { KpiRow } from "@/components/charts"
 import { Skeleton } from "@/components/ui/skeleton"
-import { appsForStage, builderKpis, dateRange, DEFAULT_CHART_FILTER, defaultChartFilter, trimSeries, type ChartFilter } from "@/lib/dashboard-visual"
+import { appsForStage, buildAverageKpis, builderKpis, dateRange, DEFAULT_CHART_FILTER, defaultChartFilter, trimSeries, type ChartFilter } from "@/lib/dashboard-visual"
 import { Button } from "@/components/ui/button"
 import type { Dashboard } from "@/lib/dashboard"
 import type { AttentionItem } from "@/lib/attention"
@@ -74,7 +74,7 @@ export function DashboardView({
 
       <Panel id="kpis">
         <section className="flex flex-col gap-3" data-section="kpis" aria-label="Key figures this period">
-          <KpiRow kpis={builderKpis(ready, appsLive)} />
+          <KpiRow kpis={[...builderKpis(ready, appsLive), ...buildAverageKpis(dashboard.buildAverages)]} grid />
         </section>
       </Panel>
 

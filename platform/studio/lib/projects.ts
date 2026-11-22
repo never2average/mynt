@@ -1,3 +1,4 @@
+import { metricsFrom } from "./build-metrics";
 import { stageOf } from "./workspaces";
 import type { ProjectConversationSummary, ProjectItem } from "./project-types";
 
@@ -42,6 +43,7 @@ function conversation(build: Obj): ProjectConversationSummary | null {
     previewUrl: buildPreviewUrl(build),
     createdAt: str(build.created_at),
     updatedAt: str(build.updated_at, str(build.created_at)),
+    metrics: metricsFrom(build),
   };
 }
 
