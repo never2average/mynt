@@ -17,6 +17,10 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
+// The visitor's session, as app/docs/layout.tsx reads it.
+const signIn = vi.hoisted(() => ({ session: undefined as { tokens?: object } | undefined }));
+vi.mock("@/lib/session", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/session")>()), currentSession: async () => signIn.session }));
+
 const docs = await import("@/lib/docs");
 const { source, allDocsSlugs } = await import("@/lib/docs-source");
 const { docsPageParts, DocsPage } = await import("@/components/docs/docs-page");
@@ -188,6 +192,57 @@ describe("Connect your agent", () => {
     const { STUDIO_REDIRECTS, STUDIO_REWRITES } = await import("@/lib/redirects");
     expect(STUDIO_REWRITES).toContainEqual({ source: "/connect", destination: "/docs/connect" });
     expect(STUDIO_REDIRECTS).toContainEqual({ source: "/docs/connect", destination: "/connect", permanent: false });
+  }, 30_000);
+});
+
+describe("signed in, the docs are inside the studio's shell", () => {
+  // A docs page as a visitor gets it: app/docs/layout.tsx picks the layout from the session.
+  const visit = async (slug: string[], session: { tokens?: object } | undefined) => {
+    signIn.session = session;
+    const { default: Layout } = await import("@/app/docs/layout");
+    const tree = await Layout({ children: <DocsPage route={docs.docsRoute(slug)!} /> });
+    return dom(renderToStaticMarkup(<TooltipProvider>{tree}</TooltipProvider>));
+  };
+
+  it("has the studio's sidebar and header, with Fumadocs' tree, search and contents in the content pane", async () => {
+    nav.pathname = "/docs/tools/hosting";
+    const el = await visit(["tools", "hosting"], { tokens: {} });
+    // The studio's sidebar (the app's nav) and header, titled Docs, with its Docs button shown as current.
+    const sidebar = el.querySelector('[data-slot="sidebar"]')!;
+    expect(sidebar).not.toBeNull();
+    expect(sidebar.querySelector("#nd-docs-layout")).toBeNull();
+    const header = el.querySelector("[data-site-header]")!;
+    expect(header.querySelector("h1")!.textContent).toBe("Docs");
+    expect(header.querySelector("[data-docs-open]")!.getAttribute("data-active")).toBe("true");
+    // Nothing in the studio's sidebar is the current page.
+    expect(sidebar.querySelector('[data-active="true"]')).toBeNull();
+    // Fumadocs' layout in the content pane, which scrolls it: its tree (the page marked), search and contents.
+    const pane = el.querySelector('[data-slot="sidebar-inset"] [data-docs-in-shell]')!;
+    expect(pane.className).toContain("overflow-y-auto");
+    const tree = pane.querySelector("#nd-docs-layout #nd-sidebar")!;
+    expect(tree.querySelector('a[href="/docs/tools/hosting"]')!.getAttribute("data-active")).toBe("true");
+    expect(pane.querySelector("[data-search-full]")).not.toBeNull();
+    expect(pane.querySelector("h1[data-docs-title]")!.textContent).toBe("Hosting");
+    // The studio is already open, so no Open Studio link, and the theme switch is the header's.
+    expect([...el.querySelectorAll("a")].some((a) => a.textContent === "Open Studio")).toBe(false);
+    nav.pathname = "/docs";
+  }, 30_000);
+
+  it("and /connect too; signed out (or a session without a sign-in), the standalone public layout", async () => {
+    nav.pathname = "/connect";
+    const inShell = await visit(["connect"], { tokens: {} });
+    expect(inShell.querySelector("[data-site-header] h1")!.textContent).toBe("Docs");
+    expect(inShell.querySelector("[data-docs-in-shell] #nd-docs-layout [data-docs-connect]")).not.toBeNull();
+    for (const session of [undefined, {}]) {
+      const el = await visit(["connect"], session);
+      expect(el.querySelector("[data-site-header]")).toBeNull();
+      expect(el.querySelector('[data-slot="sidebar"]')).toBeNull();
+      expect(el.querySelector("[data-docs-in-shell]")).toBeNull();
+      expect(el.querySelector("#nd-docs-layout [data-docs-connect]")).not.toBeNull();
+      expect(el.querySelector('#nd-sidebar a[href="/connect"]')!.getAttribute("data-active")).toBe("true");
+      expect([...el.querySelectorAll('a[href="/"]')].some((a) => a.textContent === "Open Studio")).toBe(true);
+    }
+    nav.pathname = "/docs";
   }, 30_000);
 });
 

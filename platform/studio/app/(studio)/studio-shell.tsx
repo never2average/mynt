@@ -20,6 +20,7 @@ import { StudioSearchProvider } from "@/components/studio-search";
 import { useWorkspace, WorkspaceProvider } from "@/components/workspace-context";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { isDocsPath } from "@/lib/page-gate";
 import { pageTitle } from "@/lib/studio-search";
 import { useStudioAccess } from "@/lib/use-liquidity-access";
 import type { Workspace } from "@/lib/workspaces";
@@ -39,6 +40,8 @@ function PageBody({ children }: { children: React.ReactNode }) {
     },
     [reload, select],
   );
+  // The docs are public: no stand-in, for any role.
+  if (isDocsPath(pathname)) return <>{children}</>;
   if (!access || (access.developer && loading))
     return (
       <div className="flex flex-col gap-4 p-4 lg:p-6" data-gate="loading">
@@ -52,9 +55,10 @@ function PageBody({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-export function StudioShell({ children }: { children: React.ReactNode }) {
+// `title`: the header's title where it isn't the page's own (the docs, app/docs/layout.tsx, are "Docs" throughout).
+export function StudioShell({ title: fixedTitle, children }: { title?: string; children: React.ReactNode }) {
   const pathname = usePathname();
-  const title = pageTitle(pathname);
+  const title = fixedTitle ?? pageTitle(pathname);
   const access = useStudioAccess();
   return (
     <WorkspaceProvider enabled={access?.developer === true}>

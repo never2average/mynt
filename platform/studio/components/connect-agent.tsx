@@ -5,12 +5,14 @@
 // the studio's domain), read in the browser, so no host is written into the code. Signing in from the
 // agent goes through Mynt's normal sign-in (OAuth), so nothing secret is shown here.
 import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
 import { BookOpen, Check, Copy, ExternalLink, Plug } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Tab, TabList } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { isDocsPath } from "@/lib/page-gate"
 
 export type AgentId = "claude-code" | "claude" | "cursor" | "vscode" | "chatgpt" | "other"
 export const AGENTS: { id: AgentId; label: string }[] = [
@@ -163,10 +165,12 @@ export function ConnectAgentButton() {
 }
 
 // The header's Docs link (/docs, Mynt's docs and tool reference), labelled, beside Connect your agent; from md up.
+// Shown as the current page on the docs (inside the studio's shell when signed in).
 export function DocsButton() {
+  const active = isDocsPath(usePathname() ?? "")
   return (
-    <Button asChild variant="outline" size="sm" className="hidden shrink-0 md:inline-flex">
-      <a href="/docs" data-docs-open>
+    <Button asChild variant={active ? "secondary" : "outline"} size="sm" className="hidden shrink-0 md:inline-flex">
+      <a href="/docs" data-docs-open aria-current={active ? "page" : undefined} data-active={active ? "true" : undefined}>
         <BookOpen />
         Docs
       </a>
