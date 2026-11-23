@@ -57,7 +57,7 @@ const INNOVATOR_TOOLS = [
   // archiving: out of the way, never deleted
   "archive_product", "unarchive_product",
   // versioning
-  "create_product_version", "diff_product_versions", "list_product_versions", "restore_product_version",
+  "create_product_version", "diff_product_versions", "list_product_activity", "list_product_versions", "restore_product_version",
   "update_product_version", "upgrade_enrollments",
   // firm, licences, and who may build on its products
   "create_entity", "get_my_entity", "invite_developer", "list_experiences", "list_requests", "register_license",

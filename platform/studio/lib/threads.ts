@@ -56,7 +56,18 @@ export const chatCreated = (c: Pick<ThreadSummary, "metadata">) => Array.isArray
 // An app's page; with a build, that build's conversation (the app's builder chat as it was left).
 export const appHref = (id: string, conversationId?: string | null) => `/${encodeURIComponent(id)}${conversationId ? `/${encodeURIComponent(conversationId)}` : ""}`;
 export const chatHref = (id: string) => `/new?thread=${encodeURIComponent(id)}`;
-export const productHref = (id: string) => `/new?product=${encodeURIComponent(id)}`;
+// A financial product's own workspace (app/(studio)/products/[productId]).
+export const productHref = (id: string) => `/products/${encodeURIComponent(id)}`;
+// The product whose workspace a path is (/products/<id>), if it is one.
+export function productIdOfPath(pathname: string): string | undefined {
+  const [first, id] = pathname.split("/").filter(Boolean);
+  if (first !== "products" || !id) return undefined;
+  try {
+    return decodeURIComponent(id);
+  } catch {
+    return undefined;
+  }
+}
 
 // Newest first; those with no time after, by name.
 export function byUpdate(a: StudioThread, b: StudioThread): number {

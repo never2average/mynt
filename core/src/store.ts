@@ -2531,6 +2531,24 @@ export class Store {
     }));
   }
 
+  // One target's audit entries with these actions, newest first (a product's activity: versions.ts).
+  async auditFor(target: string, actions: readonly string[], limit = 50): Promise<AuditEntry[]> {
+    const rows = await this.all(
+      `SELECT a.* FROM financial_products.audit_log a
+       WHERE a.target = $1 AND a.action = ANY($2::text[]) ORDER BY a.created_at DESC, a.id LIMIT $3`,
+      [target, [...actions], limit],
+    );
+    return rows.map((r) => ({
+      id: r.id as string,
+      actor_id: (r.actor_id as string | null) ?? null,
+      actor_email: null,
+      action: r.action as string,
+      target: r.target as string,
+      details: r.details,
+      created_at: iso(r.created_at)!,
+    }));
+  }
+
   async allCampaigns(): Promise<Campaign[]> {
     return (await this.all("SELECT * FROM financial_products.campaigns ORDER BY created_at DESC")).map(toCampaign);
   }

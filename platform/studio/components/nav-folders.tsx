@@ -9,8 +9,7 @@
 // last one picked (remembered in this browser), else Production. Collapsed to icons, the three
 // icons stay, the open folder's marked as selected, and clicking one picks it and expands the
 // sidebar to show its items. An app opens its workspace view on its newest build's conversation; a
-// product opens the Build page on the product chat that made it, with the product in the Products tab
-// (in place when that page is open, the one already open included). The item on screen is marked active.
+// product opens its own workspace (/products/<id>: its chat and its tabs). The item on screen is marked active.
 import Link from "next/link"
 import { useEffect, useState } from "react"
 import { AppWindow, ChevronRight, FlaskConical, Landmark, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
@@ -31,7 +30,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar"
-import { APP_STATUS, appHref, openThreadInPlace, productHref, THREAD_KIND_LABELS } from "@/lib/threads"
+import { APP_STATUS, appHref, productHref, THREAD_KIND_LABELS } from "@/lib/threads"
 import { STAGE_LABELS, STAGES, type StagedApp, type Stage } from "@/lib/workspaces"
 
 // Every item says what it is: an app or a financial product.
@@ -80,7 +79,7 @@ export function NavFolders({
 }: {
   groups: Record<Stage, StagedApp[]> | null // null while loading
   activeAppId?: string
-  activeProductId?: string // the product open on the Build page (?product=, or picked here)
+  activeProductId?: string // the product whose workspace is open (/products/<id>)
 }) {
   const { state, setOpen } = useSidebar()
   const collapsed = state === "collapsed"
@@ -151,7 +150,6 @@ export function NavFolders({
                               href={kind === "app" ? appHref(item.id, item.conversationId) : productHref(item.id)}
                               aria-label={`${label}: ${item.name}`}
                               title={`${label} · ${APP_STATUS[stage]}`}
-                              onClick={kind === "product" ? () => openThreadInPlace({ product: item.id }) : undefined}
                               data-thread-item={`${kind}:${item.id}`}
                               data-kind={kind}
                             >

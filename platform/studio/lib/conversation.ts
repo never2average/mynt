@@ -3,6 +3,7 @@ import { buildStateFrom, buildToMessages, followFrom, type BuildState, type Hist
 import { connectMynt } from "./mynt-client";
 import { currentSession } from "./session";
 import { sessionStore } from "./session-store";
+import { workspaceProductFrom } from "./product-panel";
 import { callStudioTool, logLine } from "./studio-server";
 
 // History messages in the AI SDK's shape, as the chat panel draws them.
@@ -64,6 +65,28 @@ export async function loadAppName(appId: string): Promise<string> {
   } catch (err) {
     console.error(logLine("loading an app's name", err));
     return "App";
+  } finally {
+    await sessionStore()
+      .save(session)
+      .catch(() => undefined);
+  }
+}
+
+// One of the user's own products' name (a product's workspace's tab title), else "Financial product".
+export async function loadProductName(productId: string): Promise<string> {
+  const session = await currentSession();
+  if (!session?.tokens) return "Financial product";
+  try {
+    const mynt = await connectMynt(session);
+    try {
+      const p = workspaceProductFrom(await callStudioTool(mynt, "list_my_products", { include_archived: true }), productId);
+      return p ? p.name.slice(0, 80) : "Financial product";
+    } finally {
+      await mynt.close().catch(() => undefined);
+    }
+  } catch (err) {
+    console.error(logLine("loading a product's name", err));
+    return "Financial product";
   } finally {
     await sessionStore()
       .save(session)

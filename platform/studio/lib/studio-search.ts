@@ -31,15 +31,21 @@ const MOVED: readonly StudioPage[] = [
 // A tab of a page (/licences?tab=coverage) is that page.
 const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
 
-/** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page. */
-export function isAppPath(pathname: string): boolean {
-  const first = pathname.split("/").filter(Boolean)[0];
-  return first !== undefined && !PAGE_BY_SEGMENT.has(first);
+/** Whether a path is a financial product's workspace (/products/<product id>). */
+export function isProductPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts[0] === "products" && parts.length >= 2;
 }
 
-/** The header's title for a fixed page: only the page's name. Null inside an app (its own top bar names it). */
+/** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page (or a product's workspace). */
+export function isAppPath(pathname: string): boolean {
+  const first = pathname.split("/").filter(Boolean)[0];
+  return first !== undefined && first !== "products" && !PAGE_BY_SEGMENT.has(first);
+}
+
+/** The header's title for a fixed page: only the page's name. Null inside an app or a product (their own header names them). */
 export function pageTitle(pathname: string): string | null {
-  if (isAppPath(pathname)) return null;
+  if (isAppPath(pathname) || isProductPath(pathname)) return null;
   const first = pathname.split("/").filter(Boolean)[0] ?? "";
   return PAGE_BY_SEGMENT.get(first)?.label ?? "Mynt Studio";
 }
@@ -66,14 +72,16 @@ export const APP_SEARCH_TABS = [
   { tab: "customers", label: "Customers", keywords: "customers personas segments target audience" },
 ] as const;
 
-export type SearchGroup = "Pages" | "Apps" | "Members" | "Licences" | "Audit actions";
-export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Members", "Licences", "Audit actions"];
+export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Licences" | "Audit actions";
+export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Financial products", "Members", "Licences", "Audit actions"];
 
 // `requires`: an item found only when one of the words typed is among these (an app's tab isn't listed for its name alone).
 export type SearchItem = { id: string; group: SearchGroup; label: string; hint?: string; href: string; text: string; requires?: string };
 
 export type SearchSources = {
   apps?: { id: string; name: string; stage: Stage }[];
+  // The user's own financial products: each opens its workspace (/products/<id>).
+  products?: { id: string; name: string; stage?: Stage }[];
   members?: { userId: string; name: string | null; email: string | null; role: string }[];
   licences?: { partner: string | null; type: string | null; regulator: string | null; number: string | null; states: string[]; status: string | null }[];
   auditActions?: string[];
@@ -90,6 +98,10 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
     // Its business tabs, found by what they hold (an app holds no licences: its products' sponsors are on Products).
     for (const t of APP_SEARCH_TABS)
       items.push({ id: `apptab:${a.id}:${t.tab}`, group: "Apps", label: `${a.name}: ${t.label}`, hint: "App tab", href: `/${encodeURIComponent(a.id)}?tab=${t.tab}`, text: lower(a.name, t.label, t.keywords), requires: lower(t.label, t.keywords) });
+  }
+  for (const p of sources.products ?? []) {
+    const stage = p.stage ? STAGE_LABELS[p.stage] : undefined;
+    items.push({ id: `product:${p.id}`, group: "Financial products", label: p.name, hint: stage, href: `/products/${encodeURIComponent(p.id)}`, text: lower(p.name, p.id, stage, p.stage, "financial product") });
   }
   for (const m of sources.members ?? []) {
     const label = m.name ?? m.email ?? "Member";
@@ -118,7 +130,7 @@ export function searchStudio(items: SearchItem[], query: string, perGroup = PER_
   const words = q.split(/\s+/).filter(Boolean);
   const hits = words.length
     ? items.filter((i) => words.every((w) => i.text.includes(w) || i.label.toLowerCase().includes(w)) && (!i.requires || words.some((w) => i.requires!.includes(w))))
-    : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires));
+    : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires) || i.group === "Financial products");
   const rank = (i: SearchItem) => {
     const label = i.label.toLowerCase();
     return !q ? 0 : label.startsWith(q) ? 0 : label.includes(q) ? 1 : 2;
