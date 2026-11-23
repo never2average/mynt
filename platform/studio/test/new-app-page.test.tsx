@@ -11,6 +11,7 @@ const pushed: string[] = [];
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: (p: string) => void pushed.push(p) }) }));
 
 const { default: NewAppPage } = await import("@/app/(studio)/new/page");
+const { chipText } = await import("@/lib/new-app");
 const { newAppCommands, pickerLabel } = await import("@/components/new-app-workspace");
 
 const PRODUCTS = [
@@ -18,7 +19,7 @@ const PRODUCTS = [
   { id: "p2", name: "Bank transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
   { id: "p3", name: "Wire transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open" },
 ];
-const idea = (id: string, problem: string, lines: string[]) => ({ id, problem, pitch: `What the app does about it (${id}).`, goal: `An app for this: ${problem.toLowerCase()}. The goal to start from and edit.`, productLines: lines });
+const idea = (id: string, problem: string, lines: string[], chipLabel?: string) => ({ id, ...(chipLabel ? { chipLabel } : {}), problem, pitch: `What the app does about it (${id}).`, goal: `An app for this: ${problem.toLowerCase()}. The goal to start from and edit.`, productLines: lines });
 const KINDS = [
   {
     id: "money-transfers",
@@ -26,7 +27,7 @@ const KINDS = [
     description: "Move US dollars in and out by bank transfer or wire.",
     productLines: ["payments"],
     goalTemplate: "A money transfers app. Customers move dollars in and out.",
-    ideas: [idea("trip-kitty", "Friends on a trip lose track of who owes whom", ["payments"]), idea("creator-tip-jar", "Fans have no simple way to send a creator a few dollars", ["payments"]), idea("closing-day-wire", "Homebuyers fear wiring closing funds to a fraudster", ["payments"])],
+    ideas: [idea("trip-kitty", "Friends on a trip lose track of who owes whom", ["payments"], "Trip kitty"), idea("creator-tip-jar", "Fans have no simple way to send a creator a few dollars", ["payments"]), idea("closing-day-wire", "Homebuyers fear wiring closing funds to a fraudster", ["payments"])],
   },
   {
     id: "savings-goals",
@@ -34,13 +35,20 @@ const KINDS = [
     description: "Set savings goals and put dollars aside toward each.",
     productLines: ["custody_settlement"],
     goalTemplate: "A savings goals app. Customers set goals and add money.",
-    ideas: [idea("skipped-it-jar", "Money saved by skipping a coffee never actually gets saved", ["custody_settlement"]), idea("rent-ready-streak", "Renters scramble to find the full rent when it falls due", ["custody_settlement"]), idea("payday-envelopes", "Paychecks are gone before rent and groceries are covered", ["custody_settlement"]), idea("family-goal-board", "Teens saving for a first car have no shared plan with parents", ["custody_settlement"])],
+    ideas: [idea("skipped-it-jar", "Money saved by skipping a coffee never actually gets saved", ["custody_settlement"], "Skipped-coffee jar"), idea("rent-ready-streak", "Renters scramble to find the full rent when it falls due", ["custody_settlement"]), idea("payday-envelopes", "Paychecks are gone before rent and groceries are covered", ["custody_settlement"]), idea("family-goal-board", "Teens saving for a first car have no shared plan with parents", ["custody_settlement"])],
   },
 ];
 const IDEAS = KINDS.flatMap((k) => k.ideas.map((e) => ({ ...e, kind: k.id })));
 const chipIds = () => [...document.querySelectorAll("[data-chat-welcome] [data-chips] [data-chip]")].map((c) => c.getAttribute("data-chip")!);
 const chipOf = (kind: string) => document.querySelector(`[data-chips] [data-chip-kind="${kind}"]`) as HTMLElement;
 const ideaOf = (id: string) => IDEAS.find((e) => e.id === id)!;
+// What a chip says: the idea's short label, or (an idea added before chip labels) its problem cut to 34 characters.
+const chipTextOf = (id: string) => {
+  const e = ideaOf(id) as { chipLabel?: string; problem: string };
+  return chipText(e.chipLabel, e.problem);
+};
+const SINGLE_LINE = ["whitespace-nowrap", "truncate", "max-w-full", "rounded-full"];
+const singleLine = (el: Element) => SINGLE_LINE.every((c) => el.classList.contains(c)) && !el.classList.contains("text-balance") && !el.classList.contains("rounded-2xl");
 
 let posted: unknown[] = [];
 beforeAll(() => {
@@ -88,12 +96,19 @@ describe("the New app page", () => {
     await loaded();
     expect(document.querySelector("[data-new-app-page] [data-chat-workspace]")).not.toBeNull();
     expect(screen.getByRole("heading", { level: 1, name: "What do you want to build?" })).toBeTruthy();
-    // Four to six of the ideas, at least one from each kind, each labelled by the problem it solves.
+    // Four to six of the ideas, at least one from each kind, each named by its short chip label on one line (or its
+    // problem cut short, for an idea without one), with the problem it solves as the tooltip.
     const ids = chipIds();
     expect(ids.length).toBeGreaterThanOrEqual(4);
     expect(ids.length).toBeLessThanOrEqual(6);
     expect(new Set(ids).size).toBe(ids.length);
-    for (const id of ids) expect(document.querySelector(`[data-chip="${id}"]`)!.textContent).toBe(ideaOf(id).problem);
+    for (const id of ids) {
+      const chip = document.querySelector(`[data-chip="${id}"]`)!;
+      expect(chip.textContent).toBe(chipTextOf(id));
+      expect(chip.textContent!.length).toBeLessThan(35);
+      expect(chip.getAttribute("title")).toBe(ideaOf(id).problem);
+      expect(singleLine(chip)).toBe(true);
+    }
     expect(new Set(ids.map((id) => ideaOf(id).kind))).toEqual(new Set(["money-transfers", "savings-goals"]));
     // Closed until a tab is picked or a message is sent; its tabs wait as icons in the chat's corner.
     expect(document.querySelector("[data-chat-workspace]")!.getAttribute("data-panel-open")).toBe("false");
@@ -134,7 +149,7 @@ describe("the New app page", () => {
 
   it("reads the route's product ideas: App mode keeps the app ideas, Financial product mode shows the product ideas", async () => {
     const productIdeas = [
-      { id: "no-penalty-cd", label: "Gig workers avoid CDs in case they need the cash early", productName: "6-Month No-Penalty CD", summary: "A 6-month CD.", productLine: "account_operations", category: "deposits", region: "US", keyFeatures: ["One", "Two"] },
+      { id: "no-penalty-cd", chipLabel: "No-penalty CD for gig workers", label: "Gig workers avoid CDs in case they need the cash early", productName: "6-Month No-Penalty CD", summary: "A 6-month CD.", productLine: "account_operations", category: "deposits", region: "US", keyFeatures: ["One", "Two"] },
       { id: "tips-ladder", label: "Savers want TIPS maturing on a set schedule", productName: "TIPS Ladder Bundle", summary: "TIPS with staggered maturities.", productLine: "credit", category: "bonds", region: "US", keyFeatures: ["One", "Two"] },
     ];
     vi.stubGlobal("fetch", async (url: string) => {
@@ -149,7 +164,10 @@ describe("the New app page", () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 20));
     });
-    expect([...document.querySelectorAll("[data-product-chip]")].map((c) => c.textContent).sort()).toEqual(productIdeas.map((i) => i.productName).sort());
+    // Named by the chip label, or the product name when there's none; one line each.
+    const productChipEls = [...document.querySelectorAll("[data-product-chip]")];
+    expect(productChipEls.map((c) => c.textContent).sort()).toEqual(["No-penalty CD for gig workers", "TIPS Ladder Bundle"]);
+    expect(productChipEls.every(singleLine)).toBe(true);
     expect(chipIds()).toEqual([]);
   });
 

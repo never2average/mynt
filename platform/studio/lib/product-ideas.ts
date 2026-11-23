@@ -4,13 +4,15 @@ import { seeded } from "./new-app";
 // The Build page's Financial product mode offers ideas for new financial products a licensed firm could define,
 // from Mynt's database (list_product_ideas): each with the problem it answers (its label), a draft product name,
 // a line of what it is, its product line, category and region, and its key features. They are chips under the
-// product chat's welcome, named by the draft product name with the problem as the tooltip (a chip starts the chat
-// with the idea as the first message), and the Templates tab's rows
+// product chat's welcome, named by the short chip label (at most 34 characters) with the product name and the
+// problem as the tooltip (a chip starts the chat with the idea as the first message), and the Templates tab's rows
 // in that mode (Use opens the Create product sheet filled with the idea). App ideas (lib/new-app.ts) stay in App
 // mode. Pure, so the route, the page and the tests share it.
 
 export type ProductIdea = {
   id: string;
+  // The chip's short label (Mynt's chip_label); none on an idea added before chip labels.
+  chipLabel?: string;
   label: string;
   productName: string;
   summary: string;
@@ -43,8 +45,10 @@ function ideaFrom(e: Obj): ProductIdea | null {
   const liquidity = oneOf(LIQUIDITY, e.liquidity);
   const typicalHorizon = oneOf(HORIZONS, e.typical_horizon ?? e.typicalHorizon);
   const returnType = oneOf(RETURN_TYPES, e.return_type ?? e.returnType);
+  const chipLabel = str(e.chip_label ?? e.chipLabel).trim();
   return {
     id,
+    ...(chipLabel ? { chipLabel } : {}),
     label,
     productName,
     summary: str(e.summary).trim(),

@@ -13,9 +13,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "label", "product_name", "summary", "product_line", "category", "region", "key_features"],
+        "required": ["id", "chip_label", "label", "product_name", "summary", "product_line", "category", "region", "key_features"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "Unique across product ideas" },
+          "chip_label": { "type": "string", "minLength": 1, "maxLength": 34, "pattern": "^[^\\r\\n]+$", "description": "The chip's label on the Build page: 1 to 34 characters on one line, usually a shortened product name" },
           "label": { "type": "string", "minLength": 10, "maxLength": 80, "description": "Who needs the product and what for, in plain words" },
           "product_name": { "type": "string", "minLength": 3, "maxLength": 60, "description": "A draft name for the product, which the firm edits" },
           "summary": { "type": "string", "minLength": 20, "maxLength": 200, "description": "One line: what the product is" },

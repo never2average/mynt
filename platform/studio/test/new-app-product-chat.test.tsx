@@ -13,7 +13,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { NewAppWorkspace, productModeCommands, type NewAppProduct } from "@/components/new-app-workspace";
 import { DRAFT_PRODUCT, validateProductDraft } from "@/lib/product-chat";
 import { productIdeaMessage, productIdeasFrom, type ProductIdea } from "@/lib/product-ideas";
-import type { AppKind, NewAppRequest } from "@/lib/new-app";
+import { chipText, type AppKind, type NewAppRequest } from "@/lib/new-app";
 
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -225,10 +225,12 @@ describe("Build app and Create product", () => {
 });
 
 // Financial product mode's chips and Templates are ideas for new products (list_product_ideas), not app ideas.
-const PIDEA = (id: string, line: string, category: string, label: string) => ({
+const PIDEA = (id: string, line: string, category: string, label: string, chipLabel?: string) => ({
   id,
+  ...(chipLabel ? { chip_label: chipLabel } : {}),
   label,
-  product_name: `Draft ${id}`,
+  // The one without a chip label has a long name, which its chip cuts short.
+  product_name: chipLabel ? `Draft ${id}` : `Draft ${id} with a name too long for a chip`,
   summary: `A factual line about ${id}.`,
   product_line: line,
   category,
@@ -241,13 +243,13 @@ const PIDEA = (id: string, line: string, category: string, label: string) => ({
 });
 const IDEAS = productIdeasFrom({
   ideas: [
-    PIDEA("no-penalty-cd", "account_operations", "deposits", "Gig workers avoid CDs in case they need the cash early"),
-    PIDEA("rate-reset-cd", "account_operations", "deposits", "Savers hesitate to lock in one CD rate for two years"),
-    PIDEA("dual-approval-mma", "account_operations", "deposits", "Nonprofit boards want two signers on reserve cash"),
-    PIDEA("catch-up-ira", "wealth", "retirement", "Savers over 50 miss the higher IRA limit"),
-    PIDEA("payday-ira", "wealth", "retirement", "First-job workers think an IRA needs a lot to open"),
-    PIDEA("sweep-mmf", "wealth", "mutual_funds", "Small businesses leave operating cash idle"),
-    PIDEA("tips-ladder", "credit", "bonds", "Savers want TIPS maturing on a set schedule"),
+    PIDEA("no-penalty-cd", "account_operations", "deposits", "Gig workers avoid CDs in case they need the cash early", "No-penalty CD for gig workers"),
+    PIDEA("rate-reset-cd", "account_operations", "deposits", "Savers hesitate to lock in one CD rate for two years", "Two-year CD with a rate reset"),
+    PIDEA("dual-approval-mma", "account_operations", "deposits", "Nonprofit boards want two signers on reserve cash", "Two-signer nonprofit reserve"),
+    PIDEA("catch-up-ira", "wealth", "retirement", "Savers over 50 miss the higher IRA limit", "IRA catch-up schedule"),
+    PIDEA("payday-ira", "wealth", "retirement", "First-job workers think an IRA needs a lot to open", "Starter payday IRA"),
+    PIDEA("sweep-mmf", "wealth", "mutual_funds", "Small businesses leave operating cash idle", "Business cash sweep"),
+    PIDEA("tips-ladder", "credit", "bonds", "Savers want TIPS maturing on a set schedule", "TIPS ladder bundle"),
     PIDEA("tips-gift", "credit", "bonds", "Grandparents want a gift that arrives at a milestone"),
   ],
 });
@@ -261,6 +263,8 @@ const APP_KINDS: AppKind[] = [
     ideas: [{ id: "two-key-household-fund", problem: "Two-adult households argue over the emergency fund", pitch: "Both approve.", goal: "A two-key fund app on the account.", productLines: ["custody_settlement"] }],
   },
 ];
+const SINGLE_LINE = ["whitespace-nowrap", "truncate", "max-w-full", "rounded-full"];
+const singleLine = (el: Element) => SINGLE_LINE.every((c) => el.classList.contains(c)) && !el.classList.contains("text-balance") && !el.classList.contains("rounded-2xl");
 const productChips = () => [...document.querySelectorAll("[data-product-chip]")].map((c) => c.getAttribute("data-product-chip"));
 const appChips = () => [...document.querySelectorAll("[data-chip]")].map((c) => c.getAttribute("data-chip"));
 
@@ -279,13 +283,23 @@ describe("product ideas in Financial product mode", () => {
     expect(appChips()).toEqual([]);
     const lines = chips.slice(0, 3).map((id) => IDEAS.find((i) => i.id === id)!.productLine);
     expect(new Set(lines)).toEqual(new Set(["account_operations", "wealth", "credit"]));
-    // Each chip is named by its draft product name, with the problem it answers as the tooltip.
+    // Each chip is named by its short chip label on one line (an idea without one: its product name cut to 34
+    // characters), with the product name and the problem it answers as the tooltip.
     for (const id of chips) {
       const chip = document.querySelector(`[data-product-chip="${id}"]`)!;
       const idea = IDEAS.find((i) => i.id === id)!;
-      expect(chip.textContent).toBe(idea.productName);
-      expect(chip.getAttribute("title")).toBe(idea.label);
+      expect(chip.textContent).toBe(chipText(idea.chipLabel, idea.productName));
+      expect(chip.textContent!.length).toBeLessThan(35);
+      expect(chip.getAttribute("title")).toBe(`${idea.productName}: ${idea.label}`);
+      expect(singleLine(chip)).toBe(true);
     }
+    // The app idea's chip, back in App mode: its label cut short (it has no chip label), the problem as the tooltip.
+    await act(async () => void fireEvent.click(option("build")));
+    await settle();
+    const appChip = document.querySelector('[data-chip="two-key-household-fund"]')!;
+    expect(appChip.textContent).toBe("Two-adult households argue over…");
+    expect(appChip.getAttribute("title")).toBe("Two-adult households argue over the emergency fund");
+    expect(singleLine(appChip)).toBe(true);
   });
 
   it("a chip starts the product chat with the idea as the first message, and starts no build", async () => {

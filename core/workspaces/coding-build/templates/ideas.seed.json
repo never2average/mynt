@@ -3,6 +3,7 @@
   "ideas": [
     {
       "id": "emergency-fund",
+      "chip_label": "Family emergency fund",
       "kind": "savings-goals",
       "problem": "Families have nothing set aside when the car or the boiler breaks",
       "pitch": "An emergency fund goal in a money market account, filled by a weekly amount the family picks.",
@@ -14,6 +15,7 @@
     },
     {
       "id": "rent-cushion",
+      "chip_label": "Rent cushion",
       "kind": "savings-goals",
       "problem": "Renters scramble to find the full rent when it falls due",
       "pitch": "Puts a little aside each payday toward next month's rent, with the progress shown.",
@@ -25,6 +27,7 @@
     },
     {
       "id": "gift-season",
+      "chip_label": "Holiday gift fund",
       "kind": "savings-goals",
       "problem": "Parents overspend in December because nothing was put aside",
       "pitch": "A savings goal for each person on the gift list, filled a little each month.",
@@ -36,6 +39,7 @@
     },
     {
       "id": "shared-home-goal",
+      "chip_label": "Shared first-home goal",
       "kind": "savings-goals",
       "problem": "Couples saving for a first home can't see their joint progress",
       "pitch": "One shared goal both partners add to from their own accounts, with the combined progress shown.",
@@ -47,6 +51,7 @@
     },
     {
       "id": "cd-ladder-planner",
+      "chip_label": "CD ladder planner",
       "kind": "certificates-of-deposit",
       "problem": "Savers lose track of when each of their CDs matures",
       "pitch": "A CD ladder planner that lays out each CD's term and the date it matures, soonest first.",
@@ -58,6 +63,7 @@
     },
     {
       "id": "cd-maturity-reminder",
+      "chip_label": "CD maturity reminder",
       "kind": "certificates-of-deposit",
       "problem": "CD holders miss the window to decide what happens at maturity",
       "pitch": "Reminds the customer ahead of each maturity date and shows the options the product's terms give.",
@@ -69,6 +75,7 @@
     },
     {
       "id": "cd-early-exit-check",
+      "chip_label": "CD early-withdrawal check",
       "kind": "certificates-of-deposit",
       "problem": "People open a CD without knowing the cost of taking money out early",
       "pitch": "Shows the early withdrawal penalty in plain words, from the product's terms, before anyone commits.",
@@ -80,6 +87,7 @@
     },
     {
       "id": "idle-cash-nudge",
+      "chip_label": "Idle cash nudge",
       "kind": "cash-reserve",
       "problem": "Spare cash piles up well above what the month's bills need",
       "pitch": "Nudges the customer when the account holds more than the buffer they set, with a move to a money market fund.",
@@ -91,6 +99,7 @@
     },
     {
       "id": "freelancer-tax-pot",
+      "chip_label": "Freelancer tax pot",
       "kind": "cash-reserve",
       "problem": "Freelancers with uneven income can't tell spare cash from tax money",
       "pitch": "Splits each payment between a spending buffer and a reserve set aside for taxes, by rules the freelancer sets.",
@@ -102,6 +111,7 @@
     },
     {
       "id": "cash-side-by-side",
+      "chip_label": "Fund vs. deposit side by side",
       "kind": "cash-reserve",
       "problem": "People can't tell a money market fund from a deposit account",
       "pitch": "Puts both products' terms, fees and access to cash side by side, in each product's own words.",
@@ -113,6 +123,7 @@
     },
     {
       "id": "ira-catch-up",
+      "chip_label": "IRA catch-up tracker",
       "kind": "retirement-account",
       "problem": "Savers over 50 don't know they may be able to put more in an IRA",
       "pitch": "Shows this year's contributions next to the IRA's limit, including any catch-up amount its terms list.",
@@ -124,6 +135,7 @@
     },
     {
       "id": "ira-deadline-reminder",
+      "chip_label": "IRA deadline reminder",
       "kind": "retirement-account",
       "problem": "Savers miss the deadline to contribute for the past tax year",
       "pitch": "Reminds the customer before the contribution deadline in the IRA's terms, with the room left shown.",
@@ -135,6 +147,7 @@
     },
     {
       "id": "plan-sign-up-nudge",
+      "chip_label": "401(k) sign-up nudge",
       "kind": "retirement-account",
       "problem": "New hires put off joining the 401(k) plan and then forget about it",
       "pitch": "Walks a new hire through joining the plan and reminds them to set their contribution.",
@@ -146,6 +159,7 @@
     },
     {
       "id": "rising-prices-planner",
+      "chip_label": "Rising-prices goal planner",
       "kind": "treasury-securities",
       "problem": "Savers worry rising prices will eat into a goal that is years away",
       "pitch": "Plans a goal with TIPS and explains how the product adjusts principal for inflation, in its own words.",
@@ -157,6 +171,7 @@
     },
     {
       "id": "tips-calendar",
+      "chip_label": "TIPS payment calendar",
       "kind": "treasury-securities",
       "problem": "Holders lose track of maturity dates and interest payment days",
       "pitch": "A calendar of each holding's maturity date and interest payment dates, from what the product reports.",
@@ -168,6 +183,7 @@
     },
     {
       "id": "tips-explainer",
+      "chip_label": "TIPS principal explainer",
       "kind": "treasury-securities",
       "problem": "First-time buyers don't understand how TIPS principal adjustments work",
       "pitch": "Explains the principal adjustment on the customer's own holdings, in the product's words.",

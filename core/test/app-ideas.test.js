@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { APP_IDEAS_SEED_PATH, APP_IDEAS_V2_SEED_PATH, appIdeaErrors, createAppIdea, ideaLines, listAppIdeas, PROMISE_WORDS, seedAppIdeas, seedIdeas, updateAppIdea } from "../dist/app-ideas.js";
+import { APP_IDEAS_SEED_PATH, APP_IDEAS_V2_SEED_PATH, appIdeaErrors, createAppIdea, fillAppIdeaChipLabels, ideaLines, listAppIdeas, PROMISE_WORDS, seedAppIdeas, seedIdeas, updateAppIdea } from "../dist/app-ideas.js";
 import { appKinds } from "../dist/app-kinds.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
@@ -122,6 +122,16 @@ test("an idea is refused for a missing kind, someone else's lines or categories,
   assert.match(errs({ problem: "x".repeat(81) }), /the problem is 10 to 80 characters/);
   assert.match(errs({ problem: "Two lines\nof problem" }), /the problem is one line/);
   assert.match(errs({ goal: "Too short." }), /the goal is 40 to 1200 characters/);
+  // The chip label: required, at most 34 characters, one line, and checked like the rest.
+  assert.match(errs({ chip_label: "" }), /the chip label is 1 to 34 characters, not 0/);
+  assert.match(errs({ chip_label: undefined }), /the chip label is 1 to 34 characters, not 0/);
+  assert.match(errs({ chip_label: "x".repeat(35) }), /the chip label is 1 to 34 characters, not 35/);
+  assert.equal(errs({ chip_label: "x".repeat(34) }), "");
+  assert.match(errs({ chip_label: "Two\nlines" }), /the chip label is one line/);
+  assert.match(errs({ chip_label: "Guaranteed rainy-day pot" }), /the chip label says 'Guaranteed'/);
+  assert.match(errs({ chip_label: "Rainy-day loan" }), /the chip label says 'loan'/);
+  assert.match(errs({ chip_label: "Pot for sellers" }), /the chip label says 'sellers'/);
+  assert.match(errs({ chip_label: "pot.example.com" }), /the chip label has a web address/);
   // Factual words about the products are fine.
   assert.equal(errs({ pitch: "Shows the interest rate and the date each CD matures, from the terms." }), "");
   assert.equal(errs({ problem: "Savers don't know their retirement fund's yearly limit" }), "");
@@ -174,7 +184,8 @@ test("ideas are in Postgres: not seeded on startup, added by seed_app_ideas with
   // Developers see active ideas, optionally by kind, in each kind's order, with the fields they need only.
   const all = (await call(dev, "list_app_ideas")).body.ideas;
   assert.equal(all.length, 16);
-  assert.deepEqual(Object.keys(all[0]).sort(), ["categories", "goal", "id", "kind", "pitch", "problem", "product_lines", "product_names"]);
+  assert.deepEqual(Object.keys(all[0]).sort(), ["categories", "chip_label", "goal", "id", "kind", "pitch", "problem", "product_lines", "product_names"]);
+  assert.equal(all.find((i) => i.id === "emergency-fund").chip_label, "Family emergency fund");
   const goals = (await call(dev, "list_app_ideas", { kind: "savings-goals" })).body.ideas;
   assert.deepEqual(goals.map((i) => i.id), ["emergency-fund", "rent-cushion", "gift-season", "shared-home-goal"]);
   assert.equal(goals[0].problem, "Families have nothing set aside when the car or the boiler breaks");
@@ -201,6 +212,7 @@ test("ideas are in Postgres: not seeded on startup, added by seed_app_ideas with
   const fresh = {
     id: "school-trip-pot",
     kind: "savings-goals",
+    chip_label: "School trip pot",
     problem: "Parents face one big bill for the school trip in spring",
     pitch: "A goal for the trip's cost, filled a little each week from the parent's bank account.",
     goal: "A school trip pot app on a money market account. A parent sets a goal for the trip's cost and its date and adds a weekly amount from their bank account through the provider's hosted flow, seeing the goal's progress and the account's terms as the product's offer states them.",
@@ -308,4 +320,64 @@ test("seed_app_ideas adds v2 alongside v1, and with replace retires what isn't i
   assert.equal(entry.details.retired.length, 17);
   // Only admins seed.
   assert.ok(!(await dev.listTools()).tools.some((t) => t.name === "seed_app_ideas"));
+});
+
+test("every shipped app idea, v1 and v2, has a plain chip label under 35 characters, unique in its set", () => {
+  for (const path of [APP_IDEAS_SEED_PATH, APP_IDEAS_V2_SEED_PATH]) {
+    const ideas = seedIdeas(path);
+    for (const i of ideas) {
+      assert.ok(i.chip_label.length > 0 && i.chip_label.length < 35, `${i.id}: '${i.chip_label}' is ${i.chip_label.length} characters`);
+      assert.doesNotMatch(i.chip_label, /[\r\n]/);
+      assert.notEqual(i.chip_label, i.problem, `${i.id}: the chip label is short, not the problem`);
+    }
+    assert.equal(new Set(ideas.map((i) => i.chip_label)).size, ideas.length, "no two chips share a label");
+  }
+});
+
+test("labels only: seed_app_ideas fills in missing chip labels on rows already there, never overwrites one, adds nothing", async () => {
+  const store = await openStore();
+  const adminUser = (await store.createUser("Ada", ["admin"])).user;
+  const admin = await connect(store, adminUser);
+  const dev = await connect(store, (await store.createUser("Dev", ["developer"])).user);
+  assert.equal((await call(admin, "seed_app_ideas", { seed: "v2" })).body.inserted.length, 16);
+  // Rows added before chip labels have none; an admin set one of them by hand.
+  await store.db.query(`UPDATE financial_products.app_ideas SET chip_label = NULL WHERE id IN ('wedding-cd-ladder', 'found-money-sweep', 'payroll-buffer')`);
+  await store.db.query(`UPDATE financial_products.app_ideas SET chip_label = 'Payroll cash on hand' WHERE id = 'payroll-buffer'`);
+  await store.db.query(`UPDATE financial_products.app_ideas SET chip_label = NULL WHERE id = 'tips-yearly-ladder'`);
+  await call(admin, "retire_app_idea", { id: "tips-yearly-ladder" });
+  // The developer sees null until it's filled; updating such a row needs a chip label.
+  assert.equal((await call(dev, "list_app_ideas")).body.ideas.find((i) => i.id === "wedding-cd-ladder").chip_label, null);
+  assert.match((await call(admin, "update_app_idea", { id: "wedding-cd-ladder", sort: 3 })).body.error, /the chip label is 1 to 34 characters, not 0/);
+  const before = await listAppIdeas(store.db, { includeRetired: true });
+
+  // replace and labels_only don't mix.
+  assert.match((await call(admin, "seed_app_ideas", { seed: "v2", labels_only: true, replace: true })).body.error, /labels_only fills in chip labels only/);
+  const filled = await call(admin, "seed_app_ideas", { seed: "v2", labels_only: true });
+  assert.equal(filled.error, false, JSON.stringify(filled.body));
+  assert.deepEqual(filled.body.filled.sort(), ["found-money-sweep", "tips-yearly-ladder", "wedding-cd-ladder"]);
+  assert.equal(filled.body.kept.length, 13);
+  assert.deepEqual(filled.body.missing, []);
+  const after = await listAppIdeas(store.db, { includeRetired: true });
+  const byId = Object.fromEntries(after.map((i) => [i.id, i]));
+  assert.equal(byId["wedding-cd-ladder"].chip_label, "Wedding CD ladder");
+  assert.equal(byId["found-money-sweep"].chip_label, "Found-money sweep");
+  assert.equal(byId["payroll-buffer"].chip_label, "Payroll cash on hand", "an admin's label is never overwritten");
+  assert.equal(byId["tips-yearly-ladder"].status, "retired", "a retired idea gets its label and stays retired");
+  for (const b of before) {
+    const a = byId[b.id];
+    for (const k of ["kind", "problem", "pitch", "goal", "status", "sort"]) assert.deepEqual(a[k], b[k], `${b.id}: ${k} unchanged`);
+  }
+  // Again: nothing left to fill. Another set's ids aren't added, only listed as missing.
+  assert.deepEqual((await call(admin, "seed_app_ideas", { seed: "v2", labels_only: true })).body.filled, []);
+  const v1 = await call(admin, "seed_app_ideas", { labels_only: true });
+  assert.deepEqual(v1.body, { filled: [], kept: [], missing: SEED.ideas.map((i) => i.id) });
+  assert.equal((await listAppIdeas(store.db, { includeRetired: true })).length, 16, "labels_only adds nothing");
+  // Audited, with what it filled.
+  const entry = (await store.auditLog(50)).find((a) => a.action === "seed_app_ideas" && a.details?.labels_only && a.details.filled.length);
+  assert.deepEqual(entry.details.filled.sort(), ["found-money-sweep", "tips-yearly-ladder", "wedding-cd-ladder"]);
+
+  // The store function the same way, and it refuses a set with a bad label.
+  await store.db.query(`UPDATE financial_products.app_ideas SET chip_label = NULL WHERE id = 'closing-date-cd'`);
+  assert.deepEqual((await fillAppIdeaChipLabels(store.db, seedIdeas(APP_IDEAS_V2_SEED_PATH))).filled, ["closing-date-cd"]);
+  await assert.rejects(fillAppIdeaChipLabels(store.db, [{ ...seedIdeas(APP_IDEAS_V2_SEED_PATH)[0], chip_label: "x".repeat(35) }]), /chip label is 1 to 34/);
 });

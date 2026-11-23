@@ -46,7 +46,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { chipIdeas, CHIPS_MAX, ideaProducts, kindAsIdea, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
+import { chipIdeas, CHIPS_MAX, chipText, ideaProducts, kindAsIdea, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
 import { chipProductIdeas, productIdeaMessage, productIdeaPrefill, type ProductIdea } from "@/lib/product-ideas"
 import { ProductStageSheet, demoteMove, promoteMove, type ProductMove } from "@/components/product-stage-sheet"
 import { ProductArchiveSheet, type ArchiveMode } from "@/components/product-archive-sheet"
@@ -63,6 +63,9 @@ export const WELCOME_TITLE = "What do you want to build?"
 const TAB_LABELS: Record<NewAppTab, string> = { templates: "Templates", products: "Products" }
 const TAB_ICONS: Record<NewAppTab, typeof Package> = { templates: LayoutTemplate, products: Package }
 export const lineLabel = (line: string) => line.replace(/_/g, " ")
+// A welcome chip, in either mode: its short label on one line, never wrapping (the full text is its tooltip).
+const CHIP_CLASS =
+  "max-w-full truncate whitespace-nowrap rounded-full border bg-background px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
 
 // A product's flags: one per country it's offered in, before its name (none for global or unknown).
 export const flagText = (p: Pick<NewAppProduct, "jurisdictions"> | undefined) =>
@@ -1017,7 +1020,7 @@ export function NewAppWorkspace({
   const modeToggle = <ModeToggle mode={mode} onMode={(m) => switchMode(m)} />
   // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
   const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
-  // A few ideas under the welcome, each labelled by its problem, picked once per page load (a Mynt with no
+  // A few ideas under the welcome, each named by its short chip label (the problem is the tooltip), picked once per page load (a Mynt with no
   // ideas yet shows the kinds). Once the products are known, only ones with a published product to pick.
   const [seed] = useState(() => Math.random())
   const chipList = useMemo<{ kind: AppKind; idea: AppIdea | null }[]>(() => {
@@ -1025,8 +1028,8 @@ export function NewAppWorkspace({
     if (all.some((k) => k.ideas.length)) return chipIdeas(all, seed, CHIPS_MAX, products)
     return all.filter((k) => products === null || ideaProducts(kindAsIdea(k), products).length).map((kind) => ({ kind, idea: null }))
   }, [kinds, seed, products])
-  // Financial product mode's chips: a few product ideas, picked once per page load, each named by its draft
-  // product name with the problem it answers as the tooltip (a long name wraps). One starts the product chat
+  // Financial product mode's chips: a few product ideas, picked once per page load, each named by its short chip
+  // label with the product name and the problem it answers as the tooltip (one line, never wrapping). One starts the product chat
   // with the idea as its first message (or, until the assistant is known to be on, puts it in the composer).
   const productChipList = useMemo(() => chipProductIdeas(productIdeas ?? [], seed), [productIdeas, seed])
   const startProductIdea = (idea: ProductIdea) => {
@@ -1042,11 +1045,11 @@ export function NewAppWorkspace({
           key={idea.id}
           type="button"
           onClick={() => startProductIdea(idea)}
-          className="max-w-xs rounded-2xl border bg-background px-3 py-1.5 text-sm text-balance text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          className={CHIP_CLASS}
           data-product-chip={idea.id}
-          title={idea.label}
+          title={`${idea.productName}: ${idea.label}`}
         >
-          {idea.productName}
+          {chipText(idea.chipLabel, idea.productName)}
         </button>
       ))}
     </div>
@@ -1058,12 +1061,12 @@ export function NewAppWorkspace({
           key={idea?.id ?? kind.id}
           type="button"
           onClick={() => applyIdea(kind, idea ?? undefined)}
-          className="rounded-full border bg-background px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          className={CHIP_CLASS}
           data-chip={idea?.id ?? kind.id}
           data-chip-kind={kind.id}
-          title={idea?.pitch ?? kind.description}
+          title={idea ? idea.problem : kind.description}
         >
-          {idea?.problem ?? kind.title}
+          {idea ? chipText(idea.chipLabel, idea.problem) : chipText(undefined, kind.title)}
         </button>
       ))}
     </div>

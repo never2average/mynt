@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appKindsFrom, chipIdeas, ideaProducts, kindAsIdea, kindsFromRoute, picksForKind } from "@/lib/new-app";
+import { appKindsFrom, chipIdeas, chipText, ideaProducts, kindAsIdea, kindsFromRoute, picksForKind } from "@/lib/new-app";
 import { chipProductIdeas, productIdeaMessage, productIdeaPrefill, productIdeasFrom, productIdeasFromRoute } from "@/lib/product-ideas";
 import { NewProductRequest } from "@/lib/products";
 import { parseStudioCall } from "@/lib/studio-tools";
@@ -221,5 +221,37 @@ describe("Financial product ideas", () => {
     expect(parseStudioCall("list_product_ideas", {})).toEqual({ tool: "list_product_ideas", args: {} });
     expect(parseStudioCall("list_product_ideas", { product_line: "credit" })).toEqual({ tool: "list_product_ideas", args: { product_line: "credit" } });
     expect(parseStudioCall("list_product_ideas", { include_retired: true })).toHaveProperty("error");
+  });
+});
+
+describe("chip labels", () => {
+  it("an app idea's chip_label (Mynt's shape or the studio's) is its chip's text; without one, its problem cut to 34 characters", () => {
+    const kinds = appKindsFrom(
+      { kinds: [{ id: "savings-goals", title: "Savings goals", description: "Goals.", product_lines: ["account_operations"], goal_template: "A savings goals app." }] },
+      {
+        ideas: [
+          { id: "two-key-household-fund", kind: "savings-goals", chip_label: " Two-key household fund ", problem: "Two-adult households argue over when the emergency fund gets used", goal: "A two-key fund." },
+          { id: "old-row", kind: "savings-goals", chip_label: null, problem: "Two-adult households argue over when the emergency fund gets used", goal: "A fund." },
+        ],
+      },
+    );
+    const [withLabel, without] = kinds[0].ideas;
+    expect(withLabel.chipLabel).toBe("Two-key household fund");
+    expect(without.chipLabel).toBeUndefined();
+    expect(chipText(withLabel.chipLabel, withLabel.problem)).toBe("Two-key household fund");
+    const cut = chipText(without.chipLabel, without.problem);
+    expect(cut).toBe("Two-adult households argue over…");
+    expect(cut.length).toBeLessThanOrEqual(34);
+    expect(chipText(undefined, "Savings goals")).toBe("Savings goals");
+    expect(chipText(undefined, "x".repeat(34))).toBe("x".repeat(34));
+    expect(chipText(undefined, "x".repeat(35))).toBe(`${"x".repeat(33)}…`);
+  });
+
+  it("a product idea's chip_label is kept, and one without it has none", () => {
+    const base = { label: "Savers want TIPS maturing on a set schedule", product_name: "TIPS Ladder Bundle", product_line: "credit", category: "bonds", region: "US", key_features: ["One", "Two"] };
+    const [a, b] = productIdeasFrom({ ideas: [{ id: "tips-ladder", chip_label: "TIPS ladder bundle", ...base }, { id: "old-row", chip_label: null, ...base }] });
+    expect(a.chipLabel).toBe("TIPS ladder bundle");
+    expect(b.chipLabel).toBeUndefined();
+    expect(productIdeasFromRoute({ productIdeas: [a] })[0].chipLabel).toBe("TIPS ladder bundle");
   });
 });

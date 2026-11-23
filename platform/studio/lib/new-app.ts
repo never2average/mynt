@@ -31,7 +31,7 @@ export function sendBlockedReason(productIds: readonly string[], text = ""): str
 // about it. New app offers them as chips under the welcome and as the Templates tab's rows.
 // An idea or a kind may narrow its lines to some product categories (deposits, retirement, ...), and an idea to
 // words from its products' names ("Money Market Account"): what's picked when it's used.
-export type AppIdea = { id: string; problem: string; pitch: string; goal: string; productLines: string[]; categories?: string[]; productNames?: string[] };
+export type AppIdea = { id: string; chipLabel?: string; problem: string; pitch: string; goal: string; productLines: string[]; categories?: string[]; productNames?: string[] };
 export type AppKind = { id: string; title: string; description: string; productLines: string[]; categories?: string[]; goalTemplate: string; ideas: AppIdea[] };
 type Obj = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v : "");
@@ -50,6 +50,7 @@ function ideasFrom(list: unknown, kindLines: readonly string[]): AppIdea[] {
       const productNames = strings(e.product_names ?? e.productNames);
       return {
         id: str(e.id),
+        ...(str(e.chip_label ?? e.chipLabel).trim() ? { chipLabel: str(e.chip_label ?? e.chipLabel).trim() } : {}),
         problem: str(e.problem),
         pitch: str(e.pitch),
         goal: str(e.goal),
@@ -102,6 +103,20 @@ export function kindIdeas(kinds: readonly AppKind[]): KindIdea[] {
   return kinds.flatMap((kind) =>
     (kind.ideas.length ? kind.ideas : [kindAsIdea(kind)]).map((idea) => ({ kind, idea })),
   );
+}
+
+// What a chip says: its short label (an idea's chip_label, at most 34 characters), or, for an idea added before
+// chip labels (or a kind used as one), its longer text cut to 34 characters with an ellipsis, at a word break
+// when there's one past the middle. Chips never wrap.
+export const CHIP_LABEL_MAX = 34;
+export function chipText(label: string | undefined, fallback: string): string {
+  const own = label?.trim();
+  if (own) return own;
+  const text = fallback.trim();
+  if (text.length <= CHIP_LABEL_MAX) return text;
+  const cut = text.slice(0, CHIP_LABEL_MAX - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space >= CHIP_LABEL_MAX / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 // A kind used as an idea: its title as the label, its description, goal, lines and categories.

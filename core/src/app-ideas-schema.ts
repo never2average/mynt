@@ -23,6 +23,9 @@ export const APP_IDEA_TABLES = `
   -- table: existing rows have none).
   ALTER TABLE financial_products.app_ideas ADD COLUMN IF NOT EXISTS categories text[] NOT NULL DEFAULT '{}';
   ALTER TABLE financial_products.app_ideas ADD COLUMN IF NOT EXISTS product_names text[] NOT NULL DEFAULT '{}';
+  -- The chip's short label on the Build page (1 to 34 characters; the problem is its tooltip). Added after the
+  -- table: existing rows have none until an admin fills it (seed_app_ideas with labels_only, or update_app_idea).
+  ALTER TABLE financial_products.app_ideas ADD COLUMN IF NOT EXISTS chip_label text;
   CREATE INDEX IF NOT EXISTS app_ideas_kind_idx ON financial_products.app_ideas (kind, status, sort);
 
   -- Ideas for new financial products a licensed firm could define, offered in the Build page's Financial product
@@ -47,5 +50,8 @@ export const APP_IDEA_TABLES = `
     updated_at timestamptz NOT NULL DEFAULT now(),
     created_by uuid REFERENCES financial_products.users(id)
   );
+  -- The chip's short label (1 to 34 characters; the product name and label are its tooltip). Added after the
+  -- table: existing rows have none until an admin fills it (seed_product_ideas with labels_only, or update_product_idea).
+  ALTER TABLE financial_products.product_ideas ADD COLUMN IF NOT EXISTS chip_label text;
   CREATE INDEX IF NOT EXISTS product_ideas_line_idx ON financial_products.product_ideas (product_line, status, sort);
 `;
