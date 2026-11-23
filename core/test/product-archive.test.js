@@ -140,3 +140,28 @@ test("only the owner archives or unarchives, and nothing is deleted", async () =
   assert.match((await call(rival, "unarchive_product", { product_id: "green-fd" })).data.error, /No product of yours/);
   assert.equal((await store.db.query("SELECT count(*)::int AS n FROM financial_products.products WHERE id = 'green-fd'")).rows[0].n, 1);
 });
+
+test("list_product_activity: the owner reads the product's stage moves and archiving, newest first; others can't", async () => {
+  const { store, inno } = await setup();
+  await call(inno, "create_product", fd("act-fd"));
+  await call(inno, "archive_product", { product_id: "act-fd", reason: "Parked for now" });
+  await call(inno, "unarchive_product", { product_id: "act-fd" });
+  // Something about another target, and an action the activity doesn't list, stay out.
+  await store.audit(null, "product_archived", "other-fd", { reason: "not this one" });
+  await store.audit(null, "covenant_breached", "act-fd", { observed: 123 });
+  await store.audit(null, "covenant_paused_product", "act-fd", { breach_id: "b1", covenant_id: "c1", rule_type: "min_reserve", observed: 9 });
+  const r = await call(inno, "list_product_activity", { id: "act-fd" });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.product_id, "act-fd");
+  const actions = r.data.events.map((e) => e.action);
+  assert.deepEqual([...actions].sort(), ["covenant_paused_product", "product_archived", "product_unarchived"]);
+  const archived = r.data.events.find((e) => e.action === "product_archived");
+  assert.equal(archived.actor, "you");
+  assert.equal(archived.details.reason, "Parked for now");
+  const paused = r.data.events.find((e) => e.action === "covenant_paused_product");
+  assert.equal(paused.actor, "mynt");
+  assert.deepEqual(paused.details, { rule_type: "min_reserve" });
+  assert.ok(r.data.events.every((e, i, all) => i === 0 || all[i - 1].at >= e.at));
+  const rival = await connect(store, (await store.createUser("Ravi", ["innovator"])).user);
+  assert.match((await call(rival, "list_product_activity", { id: "act-fd" })).data.error, /No product of yours/);
+});
