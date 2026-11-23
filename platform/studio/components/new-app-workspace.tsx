@@ -331,11 +331,11 @@ export function TemplatesTab({
   )
 }
 
-// Financial product mode's Templates: ideas for new financial products (lib/product-ideas.ts), one row each. Use
-// opens the Create product sheet filled with the idea.
+// Financial product mode's Templates: ideas for new financial products (lib/product-ideas.ts), one row each: the
+// draft product's name, then the problem it answers. Use opens the Create product sheet filled with the idea.
 const PRODUCT_IDEA_COLUMNS = [
-  { label: "Idea", className: COL.name },
-  { label: "What it is", className: COL.wide },
+  { label: "Product", className: COL.name },
+  { label: "For", className: COL.wide },
   { label: "Product line", className: COL.text },
   { label: "", className: COL.actions },
 ]
@@ -378,13 +378,12 @@ export function ProductIdeasTab({ ideas, onUse }: { ideas: ProductIdea[] | null;
           ) : paged.shown.length ? (
             paged.shown.map((idea) => (
               <TableRow key={idea.id} data-product-idea-row={idea.id}>
-                <TableCell className={`${COL.name} font-medium`}>
-                  {idea.label}
-                  <span className="mt-1 block text-xs font-normal text-muted-foreground">{idea.productName}</span>
+                <TableCell className={`${COL.name} font-semibold`} title={idea.summary || undefined} data-product-idea-name>
+                  {idea.productName}
                 </TableCell>
                 <TableCell className={COL.wide}>
-                  <span className="block max-w-80 truncate" title={idea.summary}>
-                    {idea.summary}
+                  <span className="block max-w-80 truncate text-muted-foreground" title={idea.label} data-product-idea-problem>
+                    {idea.label}
                   </span>
                 </TableCell>
                 <TableCell className={COL.text}>
@@ -915,7 +914,8 @@ export function NewAppWorkspace({
     if (all.some((k) => k.ideas.length)) return chipIdeas(all, seed, CHIPS_MAX, products)
     return all.filter((k) => products === null || ideaProducts(kindAsIdea(k), products).length).map((kind) => ({ kind, idea: null }))
   }, [kinds, seed, products])
-  // Financial product mode's chips: a few product ideas, picked once per page load. One starts the product chat
+  // Financial product mode's chips: a few product ideas, picked once per page load, each named by its draft
+  // product name with the problem it answers as the tooltip (a long name wraps). One starts the product chat
   // with the idea as its first message (or, until the assistant is known to be on, puts it in the composer).
   const productChipList = useMemo(() => chipProductIdeas(productIdeas ?? [], seed), [productIdeas, seed])
   const startProductIdea = (idea: ProductIdea) => {
@@ -931,11 +931,11 @@ export function NewAppWorkspace({
           key={idea.id}
           type="button"
           onClick={() => startProductIdea(idea)}
-          className="rounded-full border bg-background px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          className="max-w-xs rounded-2xl border bg-background px-3 py-1.5 text-sm text-balance text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
           data-product-chip={idea.id}
-          title={`${idea.productName}: ${idea.summary}`}
+          title={idea.label}
         >
-          {idea.label}
+          {idea.productName}
         </button>
       ))}
     </div>

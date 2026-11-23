@@ -2,9 +2,10 @@ import { HORIZONS, LIQUIDITY, PRODUCT_LINES, RETURN_TYPES, RISK_LEVELS, slugFrom
 import { seeded } from "./new-app";
 
 // The Build page's Financial product mode offers ideas for new financial products a licensed firm could define,
-// from Mynt's database (list_product_ideas): each labelled by who needs it and what for, with a draft product name,
+// from Mynt's database (list_product_ideas): each with the problem it answers (its label), a draft product name,
 // a line of what it is, its product line, category and region, and its key features. They are chips under the
-// product chat's welcome (a chip starts the chat with the idea as the first message) and the Templates tab's rows
+// product chat's welcome, named by the draft product name with the problem as the tooltip (a chip starts the chat
+// with the idea as the first message), and the Templates tab's rows
 // in that mode (Use opens the Create product sheet filled with the idea). App ideas (lib/new-app.ts) stay in App
 // mode. Pure, so the route, the page and the tests share it.
 
@@ -88,11 +89,14 @@ export function chipProductIdeas(ideas: readonly ProductIdea[], seed: number, ma
   return [...firsts, ...shuffle(ideas.filter((i) => !taken.has(i.id)))].slice(0, max);
 }
 
-// A chip's first message to the product assistant: the idea in plain words, for it to ask what's missing.
+// A chip's first message to the product assistant: the idea in plain words (its name, the problem it answers,
+// what it is, where, its features), for it to ask what's missing.
 export function productIdeaMessage(idea: ProductIdea): string {
   const where = [idea.region, idea.productLine.replace(/_/g, " "), idea.category.replace(/_/g, " ")].filter(Boolean).join(", ");
   const features = idea.keyFeatures.length ? `\nKey features:\n${idea.keyFeatures.map((f) => `- ${f}`).join("\n")}` : "";
-  return `I want to define a new product: ${idea.productName}. ${idea.summary}\nWho it's for: ${idea.label}.\nWhere: ${where}.${features}`;
+  const problem = idea.label.replace(/[.\s]+$/, "");
+  const summary = idea.summary ? ` ${idea.summary}` : "";
+  return `Help me define ${idea.productName}.${summary}\nThe problem it answers: ${problem}.\nWhere: ${where}.${features}`;
 }
 
 // What Use fills the Create product sheet with: the idea's name, line, category, region, summary as the
