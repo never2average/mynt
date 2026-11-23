@@ -63,7 +63,8 @@ export type SidebarViewProps = {
   invitations?: Invitation[]
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
   liquidity?: boolean
-  developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
+  developer?: boolean // false: only Dashboard (and Earn for liquidity providers, Licences for licence providers); no workspaces or apps
+  licenceProvider?: boolean // a licence provider: Licences (its Agreements tab) even without the developer role
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
   products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
   activeProductId?: string // the product open on the Build page, marked in its folder
@@ -77,7 +78,7 @@ export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products:
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, products = null, activeProductId, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, activeProductId, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -96,7 +97,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            {[...(developer ? PAGES : PAGES.slice(0, 1)), ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
+            {[...(developer ? PAGES : [...PAGES.slice(0, 1), ...(licenceProvider ? PAGES.slice(1, 2) : [])]), ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
                   <Link href={href}>
@@ -220,6 +221,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       onAnswerInvitation={answerInvitation}
       liquidity={liquidity}
       developer={access ? developer : true}
+      licenceProvider={access?.licenceProvider === true}
       workspaceSettings={workspaceSettings}
       products={products}
       activeProductId={activeProductId}

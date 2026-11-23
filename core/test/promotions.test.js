@@ -268,7 +268,7 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
   let r = await get();
   assert.equal(r.data.from_stage, "staging");
-  assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "webhooks", "audit_findings", "program_gate"]);
+  assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "program_agreements", "webhooks", "audit_findings", "program_gate"]);
   assert.equal(check(r, "hosting_healthy").status, "fail", "production runs on Mynt's hosting");
   // No target states: production fails it, even for an app on no regulated products.
   assert.equal(check(r, "licences").status, "fail");

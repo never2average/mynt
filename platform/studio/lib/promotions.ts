@@ -20,7 +20,26 @@ export const CHECK_TONE: Record<CheckStatus, "green" | "amber" | "red"> = { pass
 
 // A fix: a link (a studio page, or an https page) and/or a Mynt tool that fixes it.
 export type CheckFix = { label: string; href: string | null; external: boolean; tool: string | null };
-export type PromotionCheck = { id: string; label: string; status: CheckStatus; detail: string | null; fix: CheckFix | null };
+// The program_agreements check's rows: each product the app uses and the licence provider sponsoring it where the
+// app serves, and whether a signed program agreement in force covers it (production needs every one). `note` says
+// why the nearest agreement doesn't count, in Mynt's words.
+export type AgreementCoverage = { productId: string; productName: string; sponsorId: string; sponsorName: string; covered: boolean; agreementId: string | null; note: string | null };
+export type PromotionCheck = { id: string; label: string; status: CheckStatus; detail: string | null; fix: CheckFix | null; coverage?: AgreementCoverage[] };
+
+export const PROGRAM_AGREEMENTS_CHECK = "program_agreements";
+
+// list_app_agreements' program_coverage, or the check's coverage: rows without ids are dropped.
+export function coverageFrom(v: unknown): AgreementCoverage[] {
+  return (Array.isArray(v) ? v : []).filter(isObj).flatMap((c) => {
+    const productId = str(c.product_id);
+    const sponsorId = str(c.sponsor_entity_id);
+    if (!productId || !sponsorId) return [];
+    return [{ productId, productName: str(c.product_name) ?? productId, sponsorId, sponsorName: str(c.sponsor_name) ?? "Unnamed firm", covered: c.covered === true, agreementId: str(c.agreement_id), note: str(c.note) }];
+  });
+}
+
+/** One row's words: "Signed" or why not, as the check says it. */
+export const coverageText = (c: AgreementCoverage) => (c.covered ? "Signed and in force" : `No signed program agreement${c.note ? ` (${c.note})` : ""}`);
 export type Signoff = { status: "none" | "requested" | "approved" | "rejected"; by: string | null; at: string | null };
 
 export type PromotionChecks = {
@@ -92,7 +111,8 @@ export function fromPromotionChecks(reply: unknown, toStage: PromotionTarget): P
     const label = str(c.label);
     if (!label) return [];
     const status = CHECK_STATUSES.find((s) => s === c.status) ?? "pending";
-    return [{ id: str(c.id) ?? `check-${i}`, label, status, detail: str(c.detail), fix: status === "pass" ? null : fixOf(c.fix) }];
+    const id = str(c.id) ?? `check-${i}`;
+    return [{ id, label, status, detail: str(c.detail), fix: status === "pass" ? null : fixOf(c.fix), ...(id === PROGRAM_AGREEMENTS_CHECK ? { coverage: coverageFrom(c.coverage) } : {}) }];
   });
   const from = str(reply.from_stage);
   return {
