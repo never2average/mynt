@@ -184,7 +184,10 @@ jobs:
           assert re.fullmatch(r"[0-9a-f]{64}", programs[0]["cargo_lock_sha256"] or ""), programs
           assert programs[0]["cargo_lock_committed"] is True, programs
           assert hashlib.sha256(open(f"{tmp}/out/solana.Cargo.lock", "rb").read()).hexdigest() == programs[0]["cargo_lock_sha256"]
-          assert open(f"{tmp}/out/solana.Cargo.lock", "rb").read() == open(f"{tmp}/app/solana/Cargo.lock", "rb").read(), "the build changed the committed Cargo.lock"
+          # Package for package (cargo re-sorts the lock once the scaffold has renamed the program).
+          import tomllib
+          pkgs = lambda f: sorted((p["name"], p["version"], p.get("source"), p.get("checksum")) for p in tomllib.load(open(f, "rb"))["package"])
+          assert pkgs(f"{tmp}/out/solana.Cargo.lock") == pkgs(f"{tmp}/app/solana/Cargo.lock"), "the build changed the committed Cargo.lock's crates"
           assert "warning: no Cargo.lock committed" not in checks["solana_build"]["detail"], checks["solana_build"]
           PY
       - name: The mainnet program gate passes the template as Mynt captured it, and refuses a token vault
