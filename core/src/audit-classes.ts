@@ -185,6 +185,8 @@ const OBLIGATIONS = [
   "esign_canceled",
   "esign_expired",
   "download_agreement_document",
+  // a vendor's standard terms accepted by click-through, one agreement per app (vendor-terms.ts)
+  "accept_vendor_terms",
   // covenants on sponsorships
   "set_covenant",
   "set_covenant_refused",
@@ -335,6 +337,8 @@ const WORKSPACE = [
   "create_vendor_offering",
   "update_vendor_offering",
   "admin_update_vendor_offering",
+  // a vendor's standard terms on an offering, a new version each change (vendor-terms.ts)
+  "set_vendor_terms",
   "suspend_vendor_offering",
   "run_conformance",
   "admin_run_conformance",

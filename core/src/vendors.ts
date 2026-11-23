@@ -37,6 +37,10 @@ import {
   resolveCustomerState,
 } from "./money-rails.js";
 import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
+import { inTransaction } from "./db.js";
+import { noticeFirm } from "./firm-notices.js";
+import { endSubscriptionAgreements, openSubscriptionAgreements, recordClickThrough, setOfferingTerms, StandardTermsSchema, termsOfRow, type StandardTerms, type TermsApp } from "./vendor-terms.js";
+import { appRole, memberApp } from "./workspaces.js";
 
 // Vendors: firms that offer standard services (identity, KYC, account data, bureau reports, e-sign,
 // e-mandates…) which innovators plug into their products instead of each integrating them.
@@ -146,6 +150,7 @@ export interface Offering {
   adapter: string | null; // a ramp offering Mynt answers through an adapter in front of the partner's API (src/ramp-adapters/)
   status: OfferingStatus;
   status_note: string | null;
+  terms: StandardTerms | null; // the vendor's standard terms (vendor-terms.ts); null: none on file
   created_at: string;
   updated_at: string;
 }
@@ -200,6 +205,7 @@ const toOffering = (r: Row): Offering => ({
   adapter: (r.adapter as string | null) ?? null,
   status: r.status as OfferingStatus,
   status_note: (r.status_note as string | null) ?? null,
+  terms: termsOfRow(r),
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
 });
@@ -1486,6 +1492,41 @@ export async function sweepVendorActionRuns(store: Store, o: { callingMinutes?: 
   return n;
 }
 
+// The live products handing off through a subscription: while there are any, it can't end.
+export async function subscriptionInLiveUse(store: Store, s: Subscription): Promise<string | null> {
+  const using = (await store.pinnedProducts(s.entity_id)).filter((r) => r.status === "published" && r.pins?.vendor_bindings?.some((b) => b.subscription_id === s.id));
+  return using.length ? `Live products hand off through it: ${using.map((r) => r.product.id).join(", ")}. Publish versions without it first.` : null;
+}
+
+/**
+ * Ends a subscription: its credentials leave the key vault, the vendor leaves the roster if it joined for it, and the
+ * agreements accepted with it (the vendor's standard terms) end, the vendor told. Refused while live products hand off
+ * through it. Audited as unsubscribe_vendor_service by whoever ended it (the subscriber, or either side ending its last
+ * agreement).
+ */
+export type EndedSubscription = { subscription_id: string; status: "ended"; party_ended: boolean; agreements_ended: string[]; drifted_products: string[] };
+export async function endVendorSubscription(store: Store, s: Subscription, by: string, reason: string): Promise<EndedSubscription | { error: string }> {
+  const inUse = await subscriptionInLiveUse(store, s);
+  if (inUse) return { error: inUse };
+  const done = await store.db.query(
+    `UPDATE ${T}.vendor_subscriptions SET status = 'ended', live = false, ended_at = now(), test_credential_key_id = NULL, live_credential_key_id = NULL WHERE id = $1 AND status = 'active' RETURNING id`,
+    [s.id],
+  );
+  if (!done.rows[0]) return { error: "That subscription has already ended" };
+  for (const k of [s.test_credential_key_id, s.live_credential_key_id]) if (k) await store.db.query(`DELETE FROM ${T}.key_vault WHERE id = $1`, [k]);
+  let partyEnded = false;
+  if (s.party_created) {
+    const others = (await store.db.query(`SELECT 1 FROM ${T}.vendor_subscriptions WHERE party_id = $1 AND status = 'active'`, [s.party_id])).rows.length;
+    if (!others) {
+      await store.endParty(s.party_id, today());
+      partyEnded = true;
+    }
+  }
+  const agreementsEnded = await endSubscriptionAgreements(store, s.id, by, reason);
+  await store.audit(by, "unsubscribe_vendor_service", s.id, { party_ended: partyEnded, agreements_ended: agreementsEnded, reason });
+  return { subscription_id: s.id, status: "ended" as const, party_ended: partyEnded, agreements_ended: agreementsEnded, drifted_products: partyEnded ? await driftSweep(store, s.entity_id) : [] };
+}
+
 // ---- tools ----
 
 const PriceSchema = z.object({ amount: z.number().min(0), currency: z.string().regex(/^[A-Z]{3}$/, "ISO 4217, e.g. INR, USD") });
@@ -1673,10 +1714,10 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Offer a standard service",
       description:
-        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
-      inputSchema: { region: z.string().regex(/^[A-Z]{2}$/), service_type: Key, ...OfferingFields },
+        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary and your pricing in words; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+      inputSchema: { region: z.string().regex(/^[A-Z]{2}$/), service_type: Key, ...OfferingFields, standard_terms: StandardTermsSchema.optional() },
     },
-    async (o) => {
+    async ({ standard_terms, ...o }) => {
       const entityId = await entityOf(store, user);
       if (!entityId) return fail("You don't belong to a firm yet; an admin adds you to one");
       const t = await serviceType(store.db, o.region, o.service_type);
@@ -1706,8 +1747,13 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
           user.id,
         ],
       );
-      const offering = toOffering(rows[0]);
+      let offering = toOffering(rows[0]);
       await audit("create_vendor_offering", offering.id, { region: o.region, service_type: o.service_type });
+      if (standard_terms) {
+        const set = await setOfferingTerms(store.db, offering.id, standard_terms, user.id);
+        await audit("set_vendor_terms", offering.id, { version: set.terms.version, document_sha256: set.terms.document_sha256 });
+        offering = (await getOffering(store.db, offering.id))!;
+      }
       return json({
         ...offering,
         conformance_signing_secret: secret,
@@ -1722,7 +1768,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Change or list an offering",
       description:
-        "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it).",
+        "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms: any change is a new version, which new subscribers accept; agreements already made keep the version they accepted. Only your firm's own members set its terms.",
       // No defaults here: a field left out keeps its value.
       inputSchema: {
         offering_id: z.string(),
@@ -1734,12 +1780,15 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
         licence_ids: z.array(z.string().uuid()).max(10).optional(),
         requires_credential: z.boolean().optional(),
         listed: z.boolean().optional(),
+        standard_terms: StandardTermsSchema.optional(),
       },
     },
-    async (args) => {
+    async ({ standard_terms, ...args }) => {
       const a = args as Partial<Record<keyof typeof OfferingFields, unknown>> & { offering_id: string; listed?: boolean };
       const o = await mine(a.offering_id);
       if (!o) return fail(`No offering of yours '${a.offering_id}'`);
+      // The terms are the vendor's own standing acceptance, so only its members set them (never an admin for it).
+      if (standard_terms && o.entity_id !== (await entityOf(store, user))) return fail("Only the vendor's own members set its standard terms");
       const bad =
         (await checkUrls([a.test_base_url as string | undefined, a.live_base_url as string | undefined])) ??
         (a.licence_ids ? await checkLicences(o.entity_id, o.region, a.licence_ids as string[]) : null);
@@ -1774,6 +1823,11 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
         [o.id, next.name, next.test_base_url, next.live_base_url, JSON.stringify(next.price), next.sla_notes, next.licence_ids, next.requires_credential, next.status],
       );
       await auditOffering("update_vendor_offering", o, { status: next.status, reverify, fields: Object.keys(a).filter((k) => k !== "offering_id") });
+      if (standard_terms) {
+        const set = await setOfferingTerms(store.db, o.id, standard_terms, user.id);
+        if (set.changed) await audit("set_vendor_terms", o.id, { version: set.terms.version, document_sha256: set.terms.document_sha256 });
+        return json((await getOffering(store.db, o.id))!);
+      }
       return json(toOffering(rows[0]));
     },
   );
@@ -1824,7 +1878,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Who subscribes to my offerings",
       description:
-        "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), and calls per day (counts only).",
+        "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), the version of your standard terms each accepted and the apps it's for (null: subscribed before you had terms on file), and calls per day (counts only).",
       inputSchema: { offering_id: z.string().optional(), days: z.number().int().min(1).max(90).default(30) },
     },
     async ({ offering_id, days }) => {
@@ -1840,6 +1894,13 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       const out = [];
       for (const r of rows) {
         const s = toSubscription(r);
+        const agreements = (
+          await store.db.query(
+            `SELECT a.id, a.app_id, a.status, a.terms_version, a.document_sha256, a.app_signed_at, p.name AS app_name FROM ${T}.app_agreements a LEFT JOIN ${T}.apps p ON p.id = a.app_id
+              WHERE a.vendor_subscription_id = $1 ORDER BY a.created_at`,
+            [s.id],
+          )
+        ).rows;
         out.push({
           subscription_id: s.id,
           offering_id: s.offering_id,
@@ -1849,6 +1910,9 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
           status: s.status,
           created_at: s.created_at,
           secret_revealed: s.secret_shown,
+          terms_accepted: agreements.length
+            ? agreements.map((a) => ({ agreement_id: a.id, app: { id: a.app_id, name: a.app_name ?? null }, status: a.status, terms_version: a.terms_version, document_sha256: a.document_sha256, accepted_at: iso(a.app_signed_at) }))
+            : null,
           usage: usageFor(usage, s.id),
         });
       }
@@ -1923,6 +1987,9 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       const k = id ? (await store.db.query(`SELECT id, label, created_at FROM ${T}.key_vault WHERE id = $1`, [id])).rows[0] : null;
       return k ? { key_id: k.id, label: k.label, set_at: iso(k.created_at) } : null;
     };
+    const agreements = (
+      await store.db.query(`SELECT id, app_id, status, terms_version, document_sha256, app_signed_at FROM ${T}.app_agreements WHERE vendor_subscription_id = $1 ORDER BY created_at`, [s.id])
+    ).rows;
     return {
       subscription_id: s.id,
       offering_id: o.id,
@@ -1930,14 +1997,38 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       region: o.region,
       service_type: o.service_type,
       vendor: vendor?.name ?? o.entity_id,
+      vendor_entity_id: o.entity_id,
       vendor_party_id: s.party_id,
       live: s.live,
       status: s.status,
       offering_status: o.status,
       credentials: { test: await keyView(s.test_credential_key_id), live: await keyView(s.live_credential_key_id) },
+      // The standard terms accepted, per app (click-through agreements); null: subscribed with no standard terms on file.
+      terms_accepted: agreements.length
+        ? agreements.map((a) => ({ agreement_id: a.id, app_id: a.app_id, status: a.status, terms_version: a.terms_version, document_sha256: a.document_sha256, accepted_at: iso(a.app_signed_at) }))
+        : null,
+      current_terms_version: o.terms?.version ?? null,
       created_at: s.created_at,
       ended_at: s.ended_at,
     };
+  };
+  // Each click-through agreement in the obligations trail (with its app, so the app's trail shows it); the vendor told.
+  const auditTerms = async (made: { id: string; app_id: string }[], o: Offering, subscriptionId: string) => {
+    for (const a of made) {
+      const app = await store.getApp(a.app_id);
+      await audit("accept_vendor_terms", a.id, {
+        app_id: a.app_id,
+        workspace_id: app?.workspace_id ?? null,
+        counterparty_entity_id: o.entity_id,
+        offering_id: o.id,
+        vendor_subscription_id: subscriptionId,
+        terms_version: o.terms!.version,
+        document_sha256: o.terms!.document_sha256,
+        vendor_accepted_by: o.terms!.set_by,
+        vendor_accepted_at: o.terms!.set_at,
+      });
+      await noticeFirm(store, o.entity_id, "app_agreement.signed", { agreement_id: a.id, app_id: a.app_id, kind: "vendor", status: "signed", offering_id: o.id, vendor_subscription_id: subscriptionId, terms_version: o.terms!.version, via: "standard_terms" }).catch(() => null);
+    }
   };
 
   server.registerTool(
@@ -1945,7 +2036,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Standard services you can plug in",
       description:
-        "Innovator: listed vendors' offerings of standard services, by region, service type or category: price per call, SLA notes, the vendor's licences, and whether your firm meets the licence prerequisites to subscribe.",
+        "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
       inputSchema: {
         region: z.string().optional(),
         service_type: z.string().optional(),
@@ -1968,17 +2059,23 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
         const vendor = await store.getEntity(o.entity_id);
         const licences = (await store.licensesOf(o.entity_id)).filter((l) => o.licence_ids.includes(l.id)).map(licenceView);
         const gap = entityId ? await innovatorLicenceGap(store, entityId, t) : "You don't belong to a firm";
+        const run = (await store.db.query(`SELECT passed, created_at FROM ${T}.vendor_conformance_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 1`, [o.id])).rows[0];
+        const subscribed = entityId ? (await store.db.query(`SELECT id FROM ${T}.vendor_subscriptions WHERE offering_id = $1 AND entity_id = $2 AND status = 'active'`, [o.id, entityId])).rows[0] : undefined;
         out.push({
           offering_id: o.id,
           name: o.name,
           vendor: vendor?.name ?? o.entity_id,
+          vendor_entity_id: o.entity_id,
           region: o.region,
-          service_type: { key: t.key, name: t.name, category: t.category, consent_purpose: t.consent_purpose, fills: t.fills },
+          service_type: { key: t.key, name: t.name, category: t.category, consent_purpose: t.consent_purpose, fills: t.fills, innovator_licences: t.innovator_licences },
+          standard_terms: o.terms ? { version: o.terms.version, document_url: o.terms.document_url, document_sha256: o.terms.document_sha256, summary: o.terms.summary, pricing_summary: o.terms.pricing_summary, set_at: o.terms.set_at } : null,
           price: o.price,
           sla_notes: o.sla_notes,
           live_available: Boolean(o.live_base_url),
           requires_credential: o.requires_credential,
           vendor_licences: licences,
+          conformance: run ? { passed: run.passed as boolean, at: iso(run.created_at) } : null,
+          your_subscription_id: (subscribed?.id as string | undefined) ?? null,
           ...(include_unlisted && opts.admin ? { status: o.status } : {}),
           you_can_subscribe: !gap,
           ...(gap ? { prerequisite: gap } : {}),
@@ -1993,15 +2090,18 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Subscribe to a vendor's service",
       description:
-        "Innovator: subscribe your firm to a listed offering (in the sandbox first). Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id.",
+        "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version and SHA-256. Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       inputSchema: {
         offering_id: z.string(),
+        accept_terms_version: z.number().int().min(1).optional().describe("The version of the vendor's standard terms you accept; must be the current one"),
+        app_ids: z.array(z.string().uuid()).max(20).optional().describe("The apps the service is for (needed when the vendor has standard terms)"),
+        products: z.array(z.string().min(1).max(200)).max(20).optional().describe("Ids of those apps' products the service is used for"),
         test_credential: z.string().min(1).max(2000).optional().describe("The test API credential the vendor issued your firm, if the offering requires one; sent only to its test endpoint"),
         live_credential: z.string().min(1).max(2000).optional().describe("The live credential; sent only to its live endpoint (can also be given to set_subscription_live)"),
         credential_label: z.string().min(1).max(100).optional(),
       },
     },
-    async ({ offering_id, test_credential, live_credential, credential_label }) => {
+    async ({ offering_id, accept_terms_version, app_ids, products, test_credential, live_credential, credential_label }) => {
       const entityId = await entityOf(store, user);
       if (!entityId) return fail("You don't belong to an entity yet; create one with create_entity");
       const o = await getOffering(store.db, offering_id);
@@ -2009,9 +2109,38 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       const t = (await serviceType(store.db, o.region, o.service_type))!;
       const gap = await innovatorLicenceGap(store, entityId, t);
       if (gap) return fail(gap);
-      if (o.requires_credential && !test_credential) return fail(`${o.name} requires a credential the vendor issues you: pass its test one as test_credential`);
+      // The vendor's standard terms: accepted by version, for named apps.
+      const appIds = [...new Set(app_ids ?? [])];
+      if (!o.terms && (accept_terms_version !== undefined || appIds.length)) return fail(`${o.name} has no standard terms on file, so there's nothing to accept; subscribe without accept_terms_version and app_ids, or propose an agreement (propose_app_agreement)`);
+      let termsApps: TermsApp[] = [];
+      if (o.terms) {
+        if (accept_terms_version === undefined) return fail(`${o.name} has standard terms (version ${o.terms.version}): read them (${o.terms.document_url}) and pass accept_terms_version: ${o.terms.version} to accept them`);
+        if (accept_terms_version !== o.terms.version) return fail(`Those aren't ${o.name}'s current terms: version ${o.terms.version} is current (you named ${accept_terms_version}). Read it and accept that version.`);
+        if (!appIds.length) return fail("Name the apps the service is for (app_ids): the agreement is made for them");
+        for (const id of appIds) {
+          const app = await memberApp(store, user, id);
+          if (!app) return fail(`No app '${id}' of yours`);
+          if (!["owner", "admin"].includes((await appRole(store, user, app)) ?? "")) return fail(`Only ${app.name}'s workspace owners and admins accept terms for it`);
+          termsApps.push({ id: app.id, name: app.name, workspace_id: app.workspace_id, products: [] });
+        }
+        const wanted = [...new Set(products ?? [])];
+        const apps = await Promise.all(termsApps.map((a) => store.getApp(a.id)));
+        const foreign = wanted.filter((p) => !apps.some((a) => a?.product_ids.includes(p)));
+        if (foreign.length) return fail(`None of those apps uses ${foreign.map((p) => `'${p}'`).join(", ")}`);
+        termsApps = termsApps.map((a, i) => ({ ...a, products: wanted.filter((p) => apps[i]!.product_ids.includes(p)) }));
+      } else if (products?.length) return fail("products names what an accepted agreement covers: this offering has no standard terms on file");
       const existing = (await store.db.query(`SELECT id FROM ${T}.vendor_subscriptions WHERE offering_id = $1 AND entity_id = $2 AND status = 'active'`, [o.id, entityId])).rows[0];
+      if (existing && o.terms) {
+        // Already subscribed: the terms accepted for more apps.
+        const covered = (await openSubscriptionAgreements(store.db, existing.id as string)).map((r) => r.app_id as string);
+        const more = termsApps.filter((a) => !covered.includes(a.id));
+        if (!more.length) return fail(`Your firm already subscribes to this offering (${existing.id}) for ${termsApps.length === 1 ? "that app" : "those apps"}`);
+        const made = await inTransaction(store.db, (tx) => recordClickThrough(tx, { subscription_id: existing.id as string, offering_id: o.id, vendor_entity_id: o.entity_id, terms: o.terms!, apps: more, by: user.id }));
+        await auditTerms(made, o, existing.id as string);
+        return json({ ...(await subscriptionView((await getSubscription(store.db, existing.id as string))!)), added_apps: more.map((a) => a.id) });
+      }
       if (existing) return fail(`Your firm already subscribes to this offering (${existing.id})`);
+      if (o.requires_credential && !test_credential) return fail(`${o.name} requires a credential the vendor issues you: pass its test one as test_credential`);
       if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep credentials or signing secrets");
       // The vendor stands behind the handoffs bound to it, so it goes on the roster (an existing party is reused).
       let party = (await store.partiesOf(entityId)).find((p) => p.kind === "external" && p.legal_entity_id === o.entity_id && partyActive(p));
@@ -2026,13 +2155,26 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       const label = credential_label ?? o.name;
       const testKey = test_credential ? await vaultKey(entityId, "vendor_test_credential", `${label} (test)`, test_credential) : null;
       const liveKey = live_credential ? await vaultKey(entityId, "vendor_live_credential", `${label} (live)`, live_credential) : null;
-      const { rows } = await store.db.query(
-        `INSERT INTO ${T}.vendor_subscriptions (id, offering_id, entity_id, party_id, party_created, signing_secret, test_credential_key_id, live_credential_key_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-        [randomUUID(), o.id, entityId, party.id, created, seal(newSecret(), false), testKey, liveKey, user.id],
-      );
-      const s = toSubscription(rows[0]);
-      await audit("subscribe_vendor_service", s.id, { offering_id: o.id, test_credential: Boolean(testKey), live_credential: Boolean(liveKey) });
+      // The subscription and its click-through agreements together, or neither.
+      const subscriptionId = randomUUID();
+      const { row, made } = await inTransaction(store.db, async (tx) => {
+        const { rows } = await tx.query(
+          `INSERT INTO ${T}.vendor_subscriptions (id, offering_id, entity_id, party_id, party_created, signing_secret, test_credential_key_id, live_credential_key_id, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+          [subscriptionId, o.id, entityId, party!.id, created, seal(newSecret(), false), testKey, liveKey, user.id],
+        );
+        const made = o.terms ? await recordClickThrough(tx, { subscription_id: subscriptionId, offering_id: o.id, vendor_entity_id: o.entity_id, terms: o.terms, apps: termsApps, by: user.id }) : [];
+        return { row: rows[0], made };
+      });
+      const s = toSubscription(row);
+      await audit("subscribe_vendor_service", s.id, {
+        offering_id: o.id,
+        test_credential: Boolean(testKey),
+        live_credential: Boolean(liveKey),
+        terms_version: o.terms?.version ?? null,
+        app_ids: termsApps.map((a) => a.id),
+      });
+      await auditTerms(made, o, s.id);
       return json({
         ...(await subscriptionView(s)),
         next: `Bind a partner handoff: handoff_to_party to party ${party.id} with attributes { vendor_subscription_id: '${s.id}', service_type: '${t.key}', consent_purpose: '${t.consent_purpose}' }. Sandbox sessions then call the vendor's test endpoint; set_subscription_live when you're ready for live.`,
@@ -2096,30 +2238,16 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "End a vendor service",
       description:
-        "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, and the vendor leaves your roster if it joined for this subscription.",
-      inputSchema: { subscription_id: z.string() },
+        "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, the vendor leaves your roster if it joined for this subscription, and the vendor agreements accepted with it (its standard terms) end too, the vendor told.",
+      inputSchema: { subscription_id: z.string(), reason: z.string().trim().min(3).max(2000).optional().describe("Why, for the agreements it ends (default: 'Subscription ended')") },
       annotations: { destructiveHint: true },
     },
-    async ({ subscription_id }) => {
+    async ({ subscription_id, reason }) => {
       const s = await mySubscription(subscription_id);
       if (!s || s.status !== "active") return fail(`No active subscription of your firm '${subscription_id}'`);
-      const using = (await store.pinnedProducts(s.entity_id)).filter((r) => r.status === "published" && r.pins?.vendor_bindings?.some((b) => b.subscription_id === s.id));
-      if (using.length) return fail(`Live products hand off through it: ${using.map((r) => r.product.id).join(", ")}. Publish versions without it first.`);
-      await store.db.query(
-        `UPDATE ${T}.vendor_subscriptions SET status = 'ended', live = false, ended_at = now(), test_credential_key_id = NULL, live_credential_key_id = NULL WHERE id = $1`,
-        [s.id],
-      );
-      for (const k of [s.test_credential_key_id, s.live_credential_key_id]) if (k) await store.db.query(`DELETE FROM ${T}.key_vault WHERE id = $1`, [k]);
-      let partyEnded = false;
-      if (s.party_created) {
-        const others = (await store.db.query(`SELECT 1 FROM ${T}.vendor_subscriptions WHERE party_id = $1 AND status = 'active'`, [s.party_id])).rows.length;
-        if (!others) {
-          await store.endParty(s.party_id, today());
-          partyEnded = true;
-        }
-      }
-      await audit("unsubscribe_vendor_service", s.id, { party_ended: partyEnded });
-      return json({ subscription_id: s.id, status: "ended", party_ended: partyEnded, drifted_products: partyEnded ? await driftSweep(store, s.entity_id) : [] });
+      const ended = await endVendorSubscription(store, s, user.id, reason ?? "Subscription ended");
+      if ("error" in ended) return fail(ended.error);
+      return json(ended);
     },
   );
 
