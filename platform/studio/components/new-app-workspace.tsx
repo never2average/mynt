@@ -1020,9 +1020,7 @@ export function NewAppWorkspace({
                     <span role="status" data-product-ai-off>
                       {AI_OFF}
                     </span>
-                  ) : (
-                    <span data-product-note>Drafts only: nothing is created until you confirm it in the Create product form.</span>
-                  )
+                  ) : null
                 }
                 seed={carry}
                 onText={onProductText}

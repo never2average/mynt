@@ -112,7 +112,7 @@ export const Thread: FC<{
           }}
         />
 
-        <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mx-auto group-data-[chat-align=left]/chat:ml-0 mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background ${note ? "pb-2 md:pb-3" : "pb-4 md:pb-6"}`}>
+        <ThreadPrimitive.ViewportFooter className={`aui-thread-viewport-footer sticky bottom-0 mx-auto group-data-[chat-align=left]/chat:ml-0 mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-2 md:pb-3`}>
           <ThreadScrollToBottom />
           <Composer placeholder={placeholder} toolbar={toolbar} commands={commands} roles={roles} sendBlocked={sendBlocked} />
           {(disabledNote || (sendBlocked && sendBlockedNote)) && (
