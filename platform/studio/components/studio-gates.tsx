@@ -19,7 +19,11 @@ export const ASK_FOR_ROLE = "Ask a Mynt admin for the developer role."
 
 /** Which stand-in a page gets: none, the developer gate, or creating a workspace first. */
 export function pageGateFor(pathname: string, access: StudioAccess, needsWorkspace: boolean): "none" | "developer" | "workspace" {
+  // The Admin area is across all workspaces: a Mynt admin needs none of their own (its page answers 404 to anyone else).
+  if (access.admin && (pathname === "/admin" || pathname.startsWith("/admin/"))) return "none"
   const investorPage = pathname === "/" || pathname === "/earn" || pathname.startsWith("/earn/") || pathname === "/liquidity"
+  // A licence provider without the developer role answers apps' agreements on the Licences page's Agreements tab.
+  if (!access.developer && access.licenceProvider && pathname === "/licences") return "none"
   if (!access.developer) return access.liquidity.liquidityProvider && investorPage ? "none" : "developer"
   // Everything but Earn needs a workspace (Earn's pools and positions are the user's own).
   if (needsWorkspace && pathname !== "/" && investorPage) return "none"

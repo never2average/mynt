@@ -25,6 +25,9 @@ import type { EarnWalletState } from "@/components/earn-wallet";
 import { BuildsView } from "@/components/builds-view";
 import { LicencesPageView } from "@/components/licences-page-view";
 import { AuditsView, AuditTabs, NO_AUDIT_FILTERS, ObligationsView } from "@/components/audits-view";
+import { AgreementAuditsView } from "@/components/agreement-audits-view";
+import { fromAgreementAuditList } from "@/lib/agreement-audits";
+import type { AuditsTab } from "@/lib/audit-classes";
 import { NO_SETTINGS_TOOLS, WorkspaceView } from "@/components/workspace-view";
 import { fromDashboardTool } from "@/lib/dashboard";
 import { fromPnl } from "@/lib/pnl";
@@ -271,7 +274,7 @@ const APP_RISKS = {
   signals: {
     fraud: { available: false, reason: "Not measured yet: Mynt records no fraud or velocity signals from customer sessions." },
     vendors: { available: true, rows: [{ subscription_id: "v1", vendor: "KYC Works", offering: "Identity check", issue: "conformance_failed", detail: "The service's latest conformance run failed", since: "2026-11-12T00:00:00Z" }] },
-    conduct: { available: false, reason: "Not available yet: oversight audits of agreements come with Mynt's next update." },
+    conduct: { available: true, rows: [{ audit_id: "au1", agreement_id: "g1", kind: "complaints", requirement: "Quarterly complaints review", finding: "Responses slower than 15 days", severity: "medium", since: "2026-11-05T00:00:00Z" }] },
     products: { available: true, rows: [] },
   },
 };
@@ -388,8 +391,18 @@ function Licences({ map = false }: { map?: boolean }) {
   );
 }
 
-function Audits({ tab }: { tab: "security" | "obligations" | "financial" | "workspace" }) {
-  const [t, setT] = useState(tab);
+// The Agreement audits tab's sample: a program agreement's quarterly complaints review, overdue, and
+// an annual compliance review passed.
+const agreementAudits = fromAgreementAuditList({
+  agreements: [{ id: "ag1", kind: "program", status: "signed", app: { id: "a1", name: "Round-up savings" }, counterparty: { entity_id: "f1", name: "Harbor Bank" }, your_side: "app", can_add_requirements: false }],
+  audits: [
+    { id: "x1", agreement_id: "ag1", app_id: "a1", app: { id: "a1", name: "Round-up savings" }, counterparty: { entity_id: "f1", name: "Harbor Bank" }, due_at: "2026-11-10T23:59:59Z", status: "in_progress", overdue: true, findings_open: 1, findings: [{ id: "f", status: "open" }], evidence: [], requirement: { name: "Quarterly complaints review", kind: "complaints_review", cadence: "quarterly" }, your_side: "app", actions: ["submit_evidence"] },
+    { id: "x2", agreement_id: "ag1", app_id: "a1", app: { id: "a1", name: "Round-up savings" }, counterparty: { entity_id: "f1", name: "Harbor Bank" }, due_at: "2026-09-30T23:59:59Z", status: "passed", overdue: false, findings_open: 0, findings: [], evidence: [{ id: "e" }], requirement: { name: "Annual compliance review", kind: "compliance_review", cadence: "annual" }, your_side: "app", actions: [] },
+  ],
+})!;
+
+function Audits({ tab }: { tab: AuditsTab }) {
+  const [t, setT] = useState<AuditsTab>(tab);
   const rows = t === "security" ? securityRows : t === "financial" ? financialRows : [];
   return (
     <Page>
@@ -397,6 +410,8 @@ function Audits({ tab }: { tab: "security" | "obligations" | "financial" | "work
       <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel={t}>
         {t === "obligations" ? (
           <ObligationsView obligations={obligations} />
+        ) : t === "agreements" ? (
+          <AgreementAuditsView list={agreementAudits} onOpen={noop} />
         ) : (
           <AuditsView auditClass={t} rows={rows} filters={NO_AUDIT_FILTERS} onFilters={noop} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["build.audit_finding"]} page={1} hasNext onPrev={noop} onNext={noop} />
         )}
@@ -438,6 +453,7 @@ const SCREENS: Record<string, { path: string; render: () => React.ReactNode }> =
   "licences-map": { path: "/licences", render: () => <Licences map /> },
   "audits-security": { path: "/audits", render: () => <Audits tab="security" /> },
   "audits-obligations": { path: "/audits", render: () => <Audits tab="obligations" /> },
+  "audits-agreements": { path: "/audits", render: () => <Audits tab="agreements" /> },
   "audits-financial": { path: "/audits", render: () => <Audits tab="financial" /> },
   "audits-workspace": { path: "/audits", render: () => <Audits tab="workspace" /> },
   "settings-members": { path: "/settings", render: () => <Settings tab="members" /> },

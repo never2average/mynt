@@ -8,7 +8,9 @@
 import { useEffect, useState } from "react";
 import { NO_ACCESS, type LiquidityAccess } from "./liquidity";
 
-export type StudioAccess = { developer: boolean; liquidity: LiquidityAccess; owner: string | null };
+// licenceProvider: Mynt's licence-provider role, which opens the Licences page's Agreements tab (apps' agreements with its firm).
+// admin: a Mynt admin (the role Mynt gave the account, read from its whoami), who sees the sidebar's Admin group (/admin).
+export type StudioAccess = { developer: boolean; liquidity: LiquidityAccess; owner: string | null; licenceProvider?: boolean; admin?: boolean };
 export const NO_STUDIO_ACCESS: StudioAccess = { developer: false, liquidity: NO_ACCESS, owner: null };
 
 let pending: Promise<StudioAccess> | null = null;
@@ -16,8 +18,10 @@ let pending: Promise<StudioAccess> | null = null;
 function load(): Promise<StudioAccess> {
   pending ??= fetch("/api/liquidity/access", { cache: "no-store" })
     .then((r) => (r.ok ? r.json() : null))
-    .then((b: { access?: Partial<LiquidityAccess>; developer?: boolean; owner?: string } | null) => ({
+    .then((b: { access?: Partial<LiquidityAccess>; developer?: boolean; licenceProvider?: boolean; admin?: boolean; owner?: string } | null) => ({
       developer: b?.developer === true,
+      licenceProvider: b?.licenceProvider === true,
+      admin: b?.admin === true,
       liquidity: { builder: b?.access?.builder === true, liquidityProvider: b?.access?.liquidityProvider === true },
       owner: typeof b?.owner === "string" ? b.owner : null,
     }))

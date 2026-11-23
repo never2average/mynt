@@ -18,8 +18,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
-  AUDIT_CLASS_LABELS,
-  AUDIT_CLASSES,
+  AUDITS_TAB_LABELS,
+  AUDITS_TABS,
   filterObligations,
   NO_OBLIGATION_FILTERS,
   OBLIGATION_LABELS,
@@ -27,6 +27,7 @@ import {
   searchRows,
   type AuditClass,
   type AuditRow,
+  type AuditsTab,
   type Obligation,
   type ObligationFilters,
   type ObligationStatus,
@@ -35,12 +36,12 @@ import { distinct, toCsv } from "@/lib/compliance"
 import { cn } from "@/lib/utils"
 import { Tab, TabList } from "@/components/ui/tabs"
 
-export function AuditTabs({ tab, onTab }: { tab: AuditClass; onTab: (t: AuditClass) => void }) {
+export function AuditTabs({ tab, onTab }: { tab: AuditsTab; onTab: (t: AuditsTab) => void }) {
   return (
     <TabList aria-label="Audits">
-      {AUDIT_CLASSES.map((t) => (
+      {AUDITS_TABS.map((t) => (
         <Tab key={t} selected={tab === t} data-tab={t} onClick={() => onTab(t)}>
-          {AUDIT_CLASS_LABELS[t]}
+          {AUDITS_TAB_LABELS[t]}
         </Tab>
       ))}
     </TabList>

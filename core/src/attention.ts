@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import { effectiveStages, stageChecks, staleSignoff } from "./promotions.js";
 import { PENDING } from "./repo-approvals.js";
+import { overdueAuditsOfApps } from "./agreement-audits.js";
 import type { Store, User } from "./store.js";
 import { workspaceLicences } from "./workspace-compliance.js";
 import { workspaceRole, type WorkspaceRole } from "./workspaces.js";
@@ -11,7 +12,7 @@ import { workspaceRole, type WorkspaceRole } from "./workspaces.js";
 // workspace's members ask, and only about that workspace: its apps, its licences, its own members' offboarding.
 // Everyone sees the workspace frozen (its organization deleted in the identity provider) or being archived, failed
 // and blocked builds, production apps whose checks now fail, licences expiring within 30 days, and their own
-// repository connections waiting for an admin. Owners and admins also see join requests (people not on Mynt who
+// repository connections waiting for an admin, and what the other firm did lately with the apps' agreements. Owners and admins also see join requests (people not on Mynt who
 // joined its organization), offboarding that didn't finish, webhooks whose receivers need a new secret (or that were
 // turned off), and sign-offs: asked, decided, or approved but no longer counting. Nobody in a workspace decides its
 // sign-offs, so none is ever shown as waiting for the caller.
@@ -209,6 +210,75 @@ export async function workspaceAttention(store: Store, user: Pick<User, "id">, w
         });
   }
 
+  // Oversight audits under the apps' agreements past their due date and not closed: each flags its app.
+  for (const a of await overdueAuditsOfApps(store, ids, new Date(now)))
+    items.push({
+      id: `agreement_audit_overdue:${a.id}`,
+      kind: "agreement_audit_overdue",
+      severity: "high",
+      title: `${name.get(a.app_id)}: ${a.name} is overdue`,
+      detail: `${a.counterparty ?? "The licence provider"}'s oversight audit was due ${a.due_at.slice(0, 10)} and isn't closed; submit its evidence or answer its findings`,
+      href: `/audits?tab=agreements&agreement=${a.agreement_id}`,
+      at: a.due_at,
+    });
+
+  // The other firm's side of the apps' agreements, lately: accepted, declined, signed or ended by it (app-agreements.ts).
+  // This is how the app's side hears of them; their own actions they know. Signing is the owners' and admins' to do.
+  if (ids.length) {
+    const WORDS: Record<string, string> = { accept_app_agreement: "accepted", decline_app_agreement: "declined", sign_app_agreement: "signed", terminate_app_agreement: "ended" };
+    // Program agreements signed by e-signature (agreement-esign.ts): the other firm's signature on the document, the
+    // document completed (signed by both: the agreement is signed), declined at signing, or expired or cancelled at
+    // the service (the agreement ends). A cancellation Mynt made itself, when someone ended the agreement, is that
+    // termination's, so it isn't listed twice.
+    const ESIGN: Record<string, string> = { esign_signer_signed: "signed", esign_completed: "completed", esign_declined: "declined", esign_expired: "expired", esign_canceled: "cancelled" };
+    const done = await rowsOf(
+      db,
+      `SELECT l.id::text AS id, l.action, l.target, l.details, l.created_at, g.kind, g.status, g.app_signed_at, doc.app_signed_at AS esign_app_signed_at, e.name AS firm
+       FROM ${T}.audit_log l JOIN ${T}.app_agreements g ON g.id::text = l.target LEFT JOIN ${T}.entities e ON e.id = g.counterparty_entity_id
+         LEFT JOIN ${T}.app_agreement_documents doc ON doc.agreement_id = g.id
+       WHERE l.action = ANY($1) AND l.details->>'app_id' = ANY($2) AND l.created_at > now() - make_interval(days => $3)
+         AND (l.action IN ('accept_app_agreement', 'decline_app_agreement', 'esign_completed', 'esign_declined', 'esign_expired', 'esign_canceled') OR l.details->>'side' = 'counterparty')
+       ORDER BY l.created_at DESC LIMIT 50`,
+      [[...Object.keys(WORDS), ...Object.keys(ESIGN)], ids, RECENT_DAYS],
+    );
+    for (const d of done) {
+      const details = (d.details ?? {}) as Record<string, unknown>;
+      const app = String(details.app_id);
+      const what = String(d.kind) === "program" ? "program agreement" : String(d.kind) === "vendor" ? "vendor contract" : "data-sharing agreement";
+      const esign = String(d.action) in ESIGN;
+      const ended = d.action === "terminate_app_agreement" || d.action === "esign_expired" || d.action === "esign_canceled";
+      const declined = d.action === "decline_app_agreement" || d.action === "esign_declined";
+      const yoursToSign = d.status === "accepted" && !d.app_signed_at && !d.esign_app_signed_at;
+      items.push({
+        id: `app_agreement:${d.id}`,
+        kind: "app_agreement_update",
+        severity: ended && d.kind === "program" ? "high" : ended || declined || (yoursToSign && manager) ? "medium" : "low",
+        title: esign
+          ? d.action === "esign_signer_signed"
+            ? `${name.get(app)}: ${d.firm ?? "the other firm"} signed the ${what} by e-signature`
+            : d.action === "esign_completed"
+              ? `${name.get(app)}: the ${what} with ${d.firm ?? "the other firm"} is signed by both sides`
+              : d.action === "esign_declined"
+                ? `${name.get(app)}: the ${what} with ${d.firm ?? "the other firm"} was declined at signing`
+                : `${name.get(app)}: the ${what} with ${d.firm ?? "the other firm"} ended: its e-signature document ${ESIGN[d.action as string]}`
+          : `${name.get(app)}: ${d.firm ?? "the other firm"} ${WORDS[d.action as string]} the ${what}`,
+        detail: esign && ended
+          ? `${d.kind === "program" ? "Production needs a signed program agreement with each product's sponsor: propose a new one" : "Propose a new one if you still need it"}`
+          : esign && d.action === "esign_completed"
+            ? "Signed by both sides. Download the signed copy on the app's Agreements tab"
+          : ended
+          ? `Reason: ${String(details.reason ?? "none given")}.${d.kind === "program" ? " Production needs a signed program agreement with each product's sponsor: propose a new one" : ""}`
+          : declined
+            ? `${details.note ? `Their note: ${String(details.note)}. ` : ""}Propose another if you still need one`
+            : yoursToSign
+              ? manager ? "It waits for your side's signature: Sign it on the app's Agreements tab" : "It waits for an owner or admin to sign it"
+              : d.status === "signed" ? "Signed by both sides" : `It's ${d.status}`,
+        href: `/${app}?tab=agreements`,
+        at: iso(d.created_at),
+      });
+    }
+  }
+
   // Licences behind the workspace's products that lapse within 30 days.
   for (const l of await workspaceLicences(store, workspaceId, { status: "verified" })) {
     if (!l.expires_at) continue;
@@ -281,7 +351,7 @@ export function registerAttentionTools(server: McpServer, store: Store, user: Us
     {
       title: "What needs attention in a workspace",
       description:
-        "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
+        "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail (a program agreement that ended or expired among them: the app stays in production, flagged), what the other firm did lately with the apps' agreements (accepted, declined, signed or ended them), oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
       inputSchema: { workspace_id: z.string() },
       annotations: { readOnlyHint: true },
     },

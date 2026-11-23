@@ -152,36 +152,35 @@ async function vendorSignals(store: Store, app: App) {
   return { available: true as const, rows };
 }
 
-// Open findings from oversight audits of the app's agreements, of the marketing and complaints kinds. The audits
-// come with a later version of Mynt: until its table is here, this says so.
-async function conductSignals(store: Store, app: App): Promise<Signal<{ audit_id: string; agreement_id: string | null; kind: string; finding: string; severity: string | null; since: string | null }>> {
-  if (!(await tableExists(store, "agreement_audits"))) return { available: false, reason: "Not available yet: oversight audits of agreements come with Mynt's next update." };
-  try {
-    const { rows } = await store.db.query(
-      `SELECT a.* FROM ${T}.agreement_audits a JOIN ${T}.app_agreements g ON g.id = a.agreement_id
-        WHERE g.app_id = $1 AND a.kind IN ('marketing', 'complaints') ORDER BY a.created_at DESC LIMIT 50`,
-      [app.id],
-    );
-    const out = [];
-    for (const a of rows) {
-      const findings = Array.isArray(a.findings) ? (a.findings as Row[]) : [];
-      for (const f of findings) {
-        const status = typeof f?.status === "string" ? f.status : "open";
-        if (["closed", "resolved", "remediated"].includes(status)) continue;
-        out.push({
-          audit_id: String(a.id),
-          agreement_id: (a.agreement_id as string | null) ?? null,
-          kind: String(a.kind),
-          finding: typeof f?.title === "string" ? f.title : typeof f?.summary === "string" ? f.summary : "Finding",
-          severity: typeof f?.severity === "string" ? f.severity : null,
-          since: iso(a.created_at),
-        });
-      }
+// Open findings from the oversight audits licence providers run under the app's agreements (agreement-audits.ts),
+// for requirements of the marketing and complaints kinds: each finding still "open", newest audit first. A server
+// without those tables says so.
+async function conductSignals(store: Store, app: App): Promise<Signal<{ audit_id: string; agreement_id: string; kind: string; requirement: string; finding: string; severity: string | null; since: string | null }>> {
+  if (!(await tableExists(store, "agreement_audits")) || !(await tableExists(store, "agreement_audit_requirements")))
+    return { available: false, reason: "Not available yet: oversight audits of agreements come with Mynt's next update." };
+  const { rows } = await store.db.query(
+    `SELECT a.id, a.agreement_id, a.findings, a.created_at, r.kind, r.name AS requirement
+       FROM ${T}.agreement_audits a JOIN ${T}.agreement_audit_requirements r ON r.id = a.requirement_id JOIN ${T}.app_agreements g ON g.id = a.agreement_id
+      WHERE (a.app_id = $1 OR g.app_id = $1) AND r.kind IN ('marketing_review', 'complaints_review') ORDER BY a.created_at DESC LIMIT 100`,
+    [app.id],
+  );
+  const out = [];
+  for (const a of rows) {
+    const findings = Array.isArray(a.findings) ? (a.findings as Row[]) : [];
+    for (const f of findings) {
+      if (f?.status !== "open") continue;
+      out.push({
+        audit_id: String(a.id),
+        agreement_id: String(a.agreement_id),
+        kind: a.kind === "complaints_review" ? "complaints" : "marketing",
+        requirement: String(a.requirement),
+        finding: typeof f.title === "string" ? f.title : "Finding",
+        severity: typeof f.severity === "string" ? f.severity : null,
+        since: iso(typeof f.recorded_at === "string" ? f.recorded_at : a.created_at),
+      });
     }
-    return { available: true, rows: out };
-  } catch {
-    return { available: false, reason: "Not available yet: this server's agreement audits aren't in a shape the risk register reads." };
   }
+  return { available: true, rows: out };
 }
 
 // The app's products whose new sales are paused: by a licence provider's covenant, or because the product drifted

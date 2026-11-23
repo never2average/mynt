@@ -127,7 +127,7 @@ export function signalsFrom(reply: unknown): AppSignals {
     ),
     conduct: signal(
       s.conduct,
-      (r) => [str(r.finding) ?? "Finding", str(r.kind) === "complaints" ? "Complaints audit" : str(r.kind) === "marketing" ? "Marketing audit" : (str(r.kind) ?? "Audit"), str(r.severity) ?? "Not graded", when(str(r.since))],
+      (r) => [str(r.finding) ?? "Finding", [str(r.kind) === "complaints" ? "Complaints audit" : str(r.kind) === "marketing" ? "Marketing audit" : (str(r.kind) ?? "Audit"), str(r.requirement)].filter(Boolean).join(": "), str(r.severity) ?? "Not graded", when(str(r.since))],
       (r, i) => `${str(r.audit_id) ?? "a"}:${i}`,
     ),
     products: signal(s.products, (r) => [str(r.name) ?? str(r.product_id) ?? "Product", ISSUES[str(r.issue) ?? ""] ?? str(r.issue) ?? "—", str(r.detail) ?? "—", when(str(r.since))], (r, i) => `${str(r.product_id) ?? "p"}:${str(r.issue) ?? ""}:${i}`),

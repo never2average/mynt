@@ -9,6 +9,8 @@ import { APP_IDEA_TABLES } from "./app-ideas-schema.js";
 import { CHAT_SESSION_TABLES } from "./chat-sessions-schema.js";
 import { APP_AGREEMENT_TABLES } from "./app-agreements-schema.js";
 import { RISK_REGISTER_TABLES } from "./risk-register-schema.js";
+import { AGREEMENT_ESIGN_TABLES } from "./agreement-esign-schema.js";
+import { AGREEMENT_AUDIT_TABLES } from "./agreement-audits-schema.js";
 import { grandfatherLiveApps, PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
@@ -1766,6 +1768,8 @@ ${APP_IDEA_TABLES}
 ${CHAT_SESSION_TABLES}
 ${APP_AGREEMENT_TABLES}
 ${RISK_REGISTER_TABLES}
+${AGREEMENT_ESIGN_TABLES}
+${AGREEMENT_AUDIT_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");

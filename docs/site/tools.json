@@ -15,8 +15,8 @@
     {
       "id": "apps",
       "title": "Apps & developers",
-      "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products, keep apps' and products' risk registers, and start from app kinds and ideas.",
-      "tools": 33
+      "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers, and start from app kinds and ideas.",
+      "tools": 48
     },
     {
       "id": "builds",
@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 31
+      "tools": 42
     }
   ],
   "roles": [
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 237,
+      "tools": 243,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 237,
+      "tools": 243,
       "get_started": [
         {
           "tool": "create_entity",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 42,
+      "tools": 47,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 80,
+      "tools": 93,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 362,
+      "tools": 388,
       "get_started": [
         {
           "tool": "define_region",
@@ -430,6 +430,75 @@
         },
         "required": [
           "breach_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_agreement_audit_requirement",
+      "title": "Add an oversight audit to an agreement",
+      "description": "Licence provider (a member of the agreement's counterparty firm): add an oversight audit you run on the app under a program agreement with your firm, from the proposal on (so it can come with your terms): its name, kind, cadence (once, monthly, quarterly, annual, or on_change: each time the app's builds give it new verified source, or when you open one by hand), the first due date (not for on_change), what it covers and the evidence you need. Once the agreement is signed, Mynt opens each audit when it's time (monthly 14 days before it's due, quarterly 30, annual 60) and the next when one closes. Audited; the app's side sees it in list_agreement_audits.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "compliance_review",
+              "complaints_review",
+              "marketing_review",
+              "security_review",
+              "financial_review",
+              "other"
+            ]
+          },
+          "cadence": {
+            "type": "string",
+            "enum": [
+              "once",
+              "monthly",
+              "quarterly",
+              "annual",
+              "on_change"
+            ]
+          },
+          "first_due": {
+            "description": "YYYY-MM-DD; required unless cadence is on_change",
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "evidence_required": {
+            "description": "What the app's side must submit",
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "agreement_id",
+          "name",
+          "kind",
+          "cadence"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -741,6 +810,56 @@
           "category",
           "likelihood",
           "impact"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_get_app",
+      "title": "One app, as an admin sees it",
+      "description": "Admin: one app with its workspace, owner, stage, products (with names), its latest coding-agent builds (status, goal, cost, when; never a preview link) and its hosting on Mynt (status, runtime, last error), if any.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_get_workspace",
+      "title": "One workspace, as an admin sees it",
+      "description": "Admin: one workspace with its members (name, email, role, when they joined), its apps (stage, status, latest build), its invitations (open, accepted, declined or revoked) and its latest activity from the audit log (events about the workspace or its apps, newest first).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "workspace_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -2131,6 +2250,45 @@
       }
     },
     {
+      "name": "close_agreement_audit",
+      "title": "Pass, fail or waive an oversight audit",
+      "description": "Licence provider: close an open audit of an agreement with your firm. passed: only once the app's side has submitted evidence and every finding is resolved. failed or waived: at any point, with a note saying why. Mynt opens the requirement's next audit when its time comes. Audited; the app's side is told.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "waived"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "audit_id",
+          "outcome"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "close_program",
       "title": "Close a devnet program",
       "description": "Admin: close a deployed devnet program for good, with the upgradeable loader's Close on its program data, signed by Mynt's devnet deploy authority; the program data's lamports go back to that authority. The program can never run or be deployed again, and its record is marked closed. Refused on mainnet: Mynt never closes a mainnet program.",
@@ -3173,7 +3331,10 @@
                 "firm.recovery_pending",
                 "app_agreement.proposed",
                 "app_agreement.signed",
-                "app_agreement.terminated"
+                "app_agreement.terminated",
+                "agreement_audit.opened",
+                "agreement_audit.submitted",
+                "agreement_audit.closed"
               ]
             }
           }
@@ -3811,7 +3972,7 @@
     {
       "name": "create_vendor_offering",
       "title": "Offer a standard service",
-      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary and your pricing in words; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -3884,6 +4045,39 @@
             "default": false,
             "description": "true when subscribers must give Mynt a credential you issue them; it's sent as Authorization: Bearer",
             "type": "boolean"
+          },
+          "standard_terms": {
+            "type": "object",
+            "properties": {
+              "document_url": {
+                "type": "string",
+                "maxLength": 2000,
+                "format": "uri"
+              },
+              "document_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 2000,
+                "description": "The terms in a few sentences, as subscribers see them before accepting"
+              },
+              "pricing_summary": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 1000,
+                "description": "Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"
+              }
+            },
+            "required": [
+              "document_url",
+              "document_sha256",
+              "summary",
+              "pricing_summary"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -6678,6 +6872,43 @@
       }
     },
     {
+      "name": "download_agreement_document",
+      "title": "Download a signed agreement",
+      "description": "Either party's members (the app's workspace, or the other firm): the signed copy of a program agreement Mynt holds (part 'signed'), or the e-signature service's audit certificate with it (part 'certificate'), as base64 with its SHA-256, checked against what Mynt recorded when it was signed. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "part": {
+            "default": "signed",
+            "type": "string",
+            "enum": [
+              "signed",
+              "certificate"
+            ]
+          }
+        },
+        "required": [
+          "agreement_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "enable_webhook",
       "title": "Turn a disabled webhook back on",
       "description": "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace, since its address may be theirs. Turning it back on takes its URL: the one it has (list_webhooks shows it), to confirm it's still the right receiver, or a new one. It gets a new signing secret, shown once to you.",
@@ -6980,6 +7211,63 @@
           "sdk_id",
           "version",
           "changelog"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_agreement_audit",
+      "title": "An oversight audit",
+      "description": "One oversight audit under an app agreement you're a party to: its requirement, due date, status, whether it's overdue, findings (with the app side's answers), evidence (links with their SHA-256), its history (every change, who made it and when) and what you may do next (actions).",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "audit_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_agreement_signing_link",
+      "title": "Sign a program agreement",
+      "description": "The signer on either side of an accepted program agreement (who accepted it for the licence provider, who proposed it for the app): a link to sign it inside Mynt Studio (an embedded signing page, valid for a short while; ask again for a fresh one). Mynt makes the e-signature document from the licence provider's active template the first time if it wasn't made when the agreement was accepted, and reads its state back from the e-signature service. The agreement is signed only once the service reports both signatures complete.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "agreement_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -7374,6 +7662,22 @@
       }
     },
     {
+      "name": "get_esign_settings",
+      "title": "E-signature settings",
+      "description": "Admin: how e-signature is set up here: the provider, whether its API key is set (by whom and when, or by the server's environment), whether its webhook is registered and where it points, test mode, and when Mynt last received an event. Never the key or the webhook's id.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_exploration",
       "title": "An exploration",
       "description": "Innovator: an exploration's status, leaderboard, dataset assumptions and spend. Without job_id, your firm's recent explorations.",
@@ -7516,6 +7820,22 @@
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           }
         },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_platform_settings",
+      "title": "Operational settings",
+      "description": "Admin: the operational settings this server runs with that aren't secrets (build and audit spend caps, the build audit, the exploration cap, the hosted VM hour's price): each one's value in effect, its default, and whether the server's environment sets it. Read-only: they're changed on the server, never through a tool.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -7814,7 +8134,7 @@
     {
       "name": "get_promotion_checks",
       "title": "What an app needs to move up a stage",
-      "description": "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
+      "description": "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
       "area": "workspaces",
       "roles": [
         "developer",
@@ -8123,7 +8443,7 @@
     {
       "name": "get_workspace_attention",
       "title": "What needs attention in a workspace",
-      "description": "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
+      "description": "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail (a program agreement that ended or expired among them: the app stays in production, flagged), what the other firm did lately with the apps' agreements (accepted, declined, signed or ended them), oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
       "area": "workspaces",
       "roles": [
         "developer",
@@ -8475,6 +8795,132 @@
       }
     },
     {
+      "name": "list_agreement_audits",
+      "title": "Oversight audits under app agreements",
+      "description": "The oversight audits under app agreements you're a party to, with those agreements (can_add_requirements: whether you can add one to it) and their requirements. Developer: your apps' (any member of the app's workspace; workspace_id or app_id narrow it). Licence provider: those on agreements with your firm. agreement_id, status and overdue narrow it further; side picks one side when you're both. Each audit says whether it's overdue (past its due date and not closed), its open findings and what you may do next (actions).",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "scheduled",
+              "in_progress",
+              "submitted",
+              "passed",
+              "failed",
+              "waived"
+            ]
+          },
+          "overdue": {
+            "type": "boolean"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "app",
+              "counterparty"
+            ]
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_agreement_templates",
+      "title": "Your firm's agreement templates",
+      "description": "Licence provider: your firm's program agreement templates, each version with what it's attached to, its SHA-256 and whether it's the active one. include_retired lists the versions no longer in use too.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_retired": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_all_apps",
+      "title": "Every app",
+      "description": "Admin: every app on Mynt across all workspaces, newest first, paged: its workspace, owner, stage (idea, staging or production), status, products, latest build and whether Mynt hosts it. query matches the name, the workspace's name, the owner's email or the id. Remove a test app with remove_app.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "idea",
+              "staging",
+              "production"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_all_builds",
       "title": "All builds and spend",
       "description": "Admin: every developer's coding-agent builds, newest first, and total spend this month.",
@@ -8536,6 +8982,52 @@
       }
     },
     {
+      "name": "list_all_products",
+      "title": "Every financial product",
+      "description": "Admin: every financial product on Mynt across all firms, newest first, paged: its name, line and region, the firm that owns it (none: one of Mynt's reference products), status, stage (idea, staging or production), whether it's archived, and its sponsors (licence providers' sponsorships, approved or pending). query matches the name, the id or the firm's name.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "unpublished"
+            ]
+          },
+          "include_archived": {
+            "default": true,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_all_programs",
       "title": "Every Solana program",
       "description": "Admin: every developer's Solana programs on devnet and mainnet, newest first, with the signer that deployed them.",
@@ -8554,6 +9046,48 @@
               "devnet",
               "mainnet"
             ]
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_all_workspaces",
+      "title": "Every workspace",
+      "description": "Admin: every workspace on Mynt, newest first, paged: its name, first owner, members and apps counted, status (active; archived by an owner; or frozen, its organization deleted in the identity provider until an owner relinks or archives it) and when it was made. query matches the name, the owner's email or the id.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived",
+              "frozen"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -8587,7 +9121,7 @@
     {
       "name": "list_app_agreements",
       "title": "App agreements",
-      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on, and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
+      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
       "area": "apps",
       "roles": [
         "developer",
@@ -8958,7 +9492,7 @@
     {
       "name": "list_entities",
       "title": "Firms",
-      "description": "Admin: every registered legal entity with its members, licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
+      "description": "Admin: every registered legal entity with its members (and their roles), licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
       "area": "admin",
       "roles": [
         "admin"
@@ -9548,7 +10082,7 @@
     {
       "name": "list_my_subscribers",
       "title": "Who subscribes to my offerings",
-      "description": "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), and calls per day (counts only).",
+      "description": "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), the version of your standard terms each accepted and the apps it's for (null: subscribed before you had terms on file), and calls per day (counts only).",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -10519,7 +11053,7 @@
     {
       "name": "list_vendor_offerings",
       "title": "Standard services you can plug in",
-      "description": "Innovator: listed vendors' offerings of standard services, by region, service type or category: price per call, SLA notes, the vendor's licences, and whether your firm meets the licence prerequisites to subscribe.",
+      "description": "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -10880,6 +11414,38 @@
       }
     },
     {
+      "name": "open_agreement_audit",
+      "title": "Open an oversight audit",
+      "description": "Licence provider: start an oversight audit on an app under a signed agreement with your firm. With audit_id: open a scheduled one (it's in progress, and you're its reviewer). With requirement_id: open one now by hand (an on_change review of a change you've seen, say), due on `due` or 30 days from now; refused while that requirement has one open. Audited; the app's side is told.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "requirement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "due": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "open_review_case",
       "title": "Open a governance review",
       "description": "Admin: have the review agent check a firm (entity id), a licence it registered (licence record id) or a product (product id) against public sources and Mynt's regulatory model. Mynt decides what it can from its own records, verifies every quote the agent cites, and recommends; you decide with decide_review_case.",
@@ -10940,7 +11506,7 @@
     {
       "name": "ops_status",
       "title": "What needs attention",
-      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail) and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
+      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
       "area": "admin",
       "roles": [
         "admin"
@@ -11556,6 +12122,52 @@
       }
     },
     {
+      "name": "record_agreement_audit_finding",
+      "title": "Record a finding on an oversight audit",
+      "description": "Licence provider: record a finding on an open audit of an agreement with your firm (severity, title, detail). It's open until you resolve it (resolve_agreement_audit_finding); the app's side answers it (respond_to_agreement_audit_finding). A scheduled or submitted audit goes back to in progress. Audited.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "audit_id",
+          "severity",
+          "title"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "recover_firm_member",
       "title": "Recover a firm's licence provider nobody there can accept",
       "description": "Admin, last resort: a request for licence-provider standing at a firm that none of its licence providers can decide (none has standing from before it, past the cool-off). The first call, with a reason, starts a 7-day wait and tells every current and past licence provider of the firm (firm.recovery_pending), any of whom can block it (block_firm_recovery). Calling again after the wait completes it. Audited. One admin is enough, because production has one.",
@@ -11583,6 +12195,22 @@
           "request_id",
           "reason"
         ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "register_esign_webhook",
+      "title": "Re-register the e-signature webhook",
+      "description": "Admin: register the e-signature service's webhook to this server again (reusing one already pointing here), with the stored key. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -12043,6 +12671,30 @@
         },
         "required": [
           "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "remove_esign_api_key",
+      "title": "Remove the e-signature API key",
+      "description": "Admin: delete the stored e-signature API key and webhook id, deleting the webhook at the service first. E-signature then stays off (and program agreements are signed by hand) unless the server's environment sets a key. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "confirm"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -12706,6 +13358,42 @@
       }
     },
     {
+      "name": "resolve_agreement_audit_finding",
+      "title": "Resolve a finding on an oversight audit",
+      "description": "Licence provider: mark an open finding on an open audit of an agreement with your firm resolved, with an optional note. Audited.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "finding_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "audit_id",
+          "finding_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "resolve_pool_flag",
       "title": "Resolve an open pool item",
       "description": "Admin: close an open pool item, saying why. For a double_claim, accept_settlement records the settlement anyway, once you've confirmed the money really moved twice; reject_settlement leaves the movement as it is. For a link_conflict, link_movement ties the ledger row to its claim (refused if the amount has since gone out another way), or close_movement marks it failed if the money never moved. For anything else, acknowledge. Whoever belongs to the pool's sponsor firm, the product's firm or the firm the item concerns can't do this. The decision and its effect on the ledger happen together. Audited.",
@@ -12772,6 +13460,45 @@
         "required": [
           "flag_id",
           "note"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "respond_to_agreement_audit_finding",
+      "title": "Answer a finding on an oversight audit",
+      "description": "Developer (the app's workspace owners and admins): answer an open finding the licence provider recorded on an open audit of your app (what you changed, or why it stands). The licence provider resolves it. Audited; the licence provider is told.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "finding_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "response": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "audit_id",
+          "finding_id",
+          "response"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -12993,6 +13720,69 @@
         },
         "required": [
           "tenant_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "retire_agreement_audit_requirement",
+      "title": "Retire an oversight audit requirement",
+      "description": "Licence provider: stop an oversight audit requirement on an agreement with your firm, with the reason. Its open audit, if any, is waived with that reason; closed ones stay as they are. Audited.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "requirement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "requirement_id",
+          "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "retire_agreement_template",
+      "title": "Retire an agreement template",
+      "description": "Licence provider: stop using one of your firm's templates for new agreements. Documents already made from it are unaffected, and the version is kept. Audited.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "template_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "template_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -14099,6 +14889,62 @@
       }
     },
     {
+      "name": "set_esign_api_key",
+      "title": "Set the e-signature API key",
+      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed (never shown again), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "signwell"
+            ]
+          },
+          "api_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 500,
+            "pattern": "^[\\x21-\\x7e]+$"
+          }
+        },
+        "required": [
+          "provider",
+          "api_key"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "set_esign_test_mode",
+      "title": "E-signature test mode",
+      "description": "Admin: turn the e-signature service's test mode on or off. On (the default): documents are free and not legally binding, for trying the flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in. ESIGN_TEST_MODE in the server's environment, where set, takes precedence. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "test_mode": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "test_mode"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "set_experience",
       "title": "Define an app's experience",
       "description": "Developer: set the structured experience of one of your apps: screens of components (product_card, comparison_table, calculator, disclosure_block, handoff_cta, text). check_experience then checks its structure against each product's terms; publish_app refuses failures. Pass null to clear it.",
@@ -14964,7 +15810,7 @@
     {
       "name": "sign_app_agreement",
       "title": "Sign an app agreement",
-      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Audited, and the other firm is told when it's signed.",
+      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Where e-signature is configured, program agreements are signed by e-signature instead (get_agreement_signing_link) and this refuses them. Audited, and the other firm is told when it's signed.",
       "area": "apps",
       "roles": [
         "developer",
@@ -15382,6 +16228,68 @@
       }
     },
     {
+      "name": "submit_agreement_audit_evidence",
+      "title": "Submit evidence for an oversight audit",
+      "description": "Developer (the app's workspace owners and admins): submit evidence for an open oversight audit of your app: each item a name, an https link to it and its SHA-256 (Mynt stores links and hashes, not files), with an optional note. The audit becomes submitted, waiting for the licence provider's review. Audited; the licence provider is told.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "evidence": {
+            "minItems": 1,
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2000,
+                  "format": "uri"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "name",
+                "url",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "audit_id",
+          "evidence"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "submit_partner_signature",
       "title": "Co-sign a product-health snapshot",
       "description": "Licence provider: co-sign a snapshot waiting for a signature (status pending_signature in list_product_health, before its window closes), while your firm still sponsors the product. Sign, with Ed25519, the UTF-8 text 'mynt.product_health.cosign.v1', one zero byte, then the 32 bytes of its fingerprint. A live product's snapshot counts as verified only when co-signed; one with no signature by the deadline is published as mynt_only, and says so. Schema: mynt.product_health.v1.",
@@ -15426,7 +16334,7 @@
     {
       "name": "subscribe_vendor_service",
       "title": "Subscribe to a vendor's service",
-      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id.",
+      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version and SHA-256. Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -15440,6 +16348,32 @@
         "properties": {
           "offering_id": {
             "type": "string"
+          },
+          "accept_terms_version": {
+            "description": "The version of the vendor's standard terms you accept; must be the current one",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "app_ids": {
+            "description": "The apps the service is for (needed when the vendor has standard terms)",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          "products": {
+            "description": "Ids of those apps' products the service is used for",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
           },
           "test_credential": {
             "description": "The test API credential the vendor issued your firm, if the offering requires one; sent only to its test endpoint",
@@ -15587,7 +16521,7 @@
     {
       "name": "terminate_app_agreement",
       "title": "End an app agreement",
-      "description": "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told.",
+      "description": "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told. A vendor's standard terms accepted with a subscription (vendor_subscription_id): ending the last such agreement ends the subscription too, refused while live products hand off through it.",
       "area": "apps",
       "roles": [
         "developer",
@@ -15752,7 +16686,7 @@
     {
       "name": "unsubscribe_vendor_service",
       "title": "End a vendor service",
-      "description": "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, and the vendor leaves your roster if it joined for this subscription.",
+      "description": "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, the vendor leaves your roster if it joined for this subscription, and the vendor agreements accepted with it (its standard terms) end too, the vendor told.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -15766,6 +16700,12 @@
         "properties": {
           "subscription_id": {
             "type": "string"
+          },
+          "reason": {
+            "description": "Why, for the agreements it ends (default: 'Subscription ended')",
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
           }
         },
         "required": [
@@ -16463,7 +17403,7 @@
     {
       "name": "update_vendor_offering",
       "title": "Change or list an offering",
-      "description": "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it).",
+      "description": "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms: any change is a new version, which new subscribers accept; agreements already made keep the version they accepted. Only your firm's own members set its terms.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -16528,6 +17468,39 @@
           },
           "listed": {
             "type": "boolean"
+          },
+          "standard_terms": {
+            "type": "object",
+            "properties": {
+              "document_url": {
+                "type": "string",
+                "maxLength": 2000,
+                "format": "uri"
+              },
+              "document_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 2000,
+                "description": "The terms in a few sentences, as subscribers see them before accepting"
+              },
+              "pricing_summary": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 1000,
+                "description": "Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"
+              }
+            },
+            "required": [
+              "document_url",
+              "document_sha256",
+              "summary",
+              "pricing_summary"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -16613,6 +17586,120 @@
         "required": [
           "program_id",
           "build_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "upload_agreement_template",
+      "title": "Upload a program agreement template",
+      "description": "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 120
+          },
+          "source": {
+            "default": "upload",
+            "type": "string",
+            "enum": [
+              "upload",
+              "provider_template"
+            ]
+          },
+          "licence_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "sponsorship_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "file_name": {
+            "type": "string",
+            "pattern": "^[^/\\\\\\0]{1,150}\\.(pdf|docx)$"
+          },
+          "file_base64": {
+            "type": "string",
+            "maxLength": 6990515,
+            "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+          },
+          "provider_template_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]{1,100}$"
+          },
+          "placeholders": {
+            "type": "object",
+            "properties": {
+              "counterparty": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            },
+            "required": [
+              "counterparty",
+              "app"
+            ],
+            "additionalProperties": false
+          },
+          "field_map": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "licence_provider",
+                "developer_firm",
+                "app",
+                "products",
+                "states",
+                "effective_from",
+                "effective_to",
+                "agreement_id",
+                "terms_summary"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          "signature_placement": {
+            "default": "signature_page",
+            "description": "signature_page: a signature page is added at the end; text_tags: the file carries the service's text tags",
+            "type": "string",
+            "enum": [
+              "signature_page",
+              "text_tags"
+            ]
+          },
+          "notes": {
+            "description": "Notes on the template, e.g. where fields go",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "name"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

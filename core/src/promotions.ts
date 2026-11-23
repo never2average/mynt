@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { missingAgreementText, programAgreementCoverage, type ProgramCoverage } from "./app-agreements.js";
 import { inTransaction, type Db } from "./db.js";
 import type { App, Store, User } from "./store.js";
 import { coveredStates, US_STATE_NAMES } from "./workspace-compliance.js";
@@ -10,7 +11,7 @@ import { appRole, frozenReason, isUuid, memberApp, type AppStage } from "./works
 // Promoting an app between the studio's folders: idea → staging → production, one step at a time, and back down.
 //
 // Every check is computed here by Mynt from its own records (the builds Mynt verified in its clean sandbox and the
-// independent audit it ran, its hosting's state, the licences and sponsorships behind each product, the app's keys
+// independent audit it ran, its hosting's state, the licences and sponsorships behind each product, the program agreements with its sponsors, the app's keys
 // and webhooks, the mainnet program gate, admins' sign-offs), never from anything an app or an agent reports. What
 // Mynt can't measure is "pending", never "pass", and blocks a promotion like a failure; "warn" blocks too, except where it is advisory (every staging warning; in production, ADVISORY_PRODUCTION_CHECKS).
 //
@@ -38,6 +39,7 @@ export interface PromotionCheck {
   status: CheckStatus;
   detail: string;
   fix?: { label: string; href?: string; tool?: string };
+  coverage?: ProgramCoverage[]; // program_agreements: each product and sponsor, and whether a signed agreement covers it
 }
 export type SignoffStatus = "none" | "requested" | "approved" | "rejected";
 export interface PromotionChecks {
@@ -220,6 +222,20 @@ async function licenceCheck(store: Store, app: App, s: State): Promise<{ check: 
   const moneyFirms = [...firms];
   if (problems.length) return { check: { ...base, status: "fail", detail: problems.join("; "), fix }, moneyFirms };
   return { check: { ...base, status: "pass", detail: `Covered by a licence in force for every target state: ${covered.join("; ")}` }, moneyFirms };
+}
+
+// A signed program agreement, in force today, with the licence provider sponsoring each product the app uses
+// (app-agreements.ts programAgreementCoverage says which sponsors count). A product no licence provider sponsors needs
+// none: its own firm's licences cover it.
+async function programAgreementsCheck(q: Q, store: Store, app: App, s: State): Promise<PromotionCheck> {
+  const base = { id: "program_agreements", label: "Signed program agreement with each product's sponsor" };
+  if (!app.product_ids.length) return { ...base, status: "pass", detail: "Not applicable: the app uses no financial products", coverage: [] };
+  const coverage = await programAgreementCoverage(q, store, app);
+  if (!coverage.length) return { ...base, status: "pass", detail: "Not applicable: no licence provider sponsors the app's products; their own firms' licences cover them", coverage };
+  const missing = coverage.filter((c) => !c.covered);
+  if (missing.length)
+    return { ...base, status: "fail", detail: missing.map(missingAgreementText).join("; "), fix: { label: "Propose agreement", href: `/${app.id}?tab=agreements`, tool: "propose_app_agreement" }, coverage };
+  return { ...base, status: "pass", detail: `Signed and in force: ${coverage.map((c) => `${c.sponsor_name ?? c.sponsor_entity_id} for ${c.product_name}`).join("; ")}`, coverage };
 }
 
 // No live-key check: live keys come after promotion (production gates real money), so an app can't hold one before.
@@ -405,6 +421,7 @@ async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "stagi
       auditCheck(s, { production: true, strict: needs }),
       hostingCheck(app.id, s, true),
       check,
+      await programAgreementsCheck(q, store, app, s),
       await webhookCheck(q, app),
       findingsCheck(app.id, s, needs),
       programCheck(app.id, s, programs),
@@ -656,7 +673,7 @@ export function registerPromotionTools(server: McpServer, store: Store, user: Us
     {
       title: "What an app needs to move up a stage",
       description:
-        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
+        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
       inputSchema: { app_id: z.string(), to_stage: TO },
       annotations: { readOnlyHint: true },
     },

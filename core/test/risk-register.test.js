@@ -124,11 +124,10 @@ test("an app's register: owners and admins keep it, members read it, outsiders s
   assert.equal(ok(await w.dev.call("list_risks", { subject_type: "app", subject_id: w.app.id })).can_manage, true);
   refused(await w.member.call("update_risk", { risk_id: added.risk.id, status: "mitigating" }), /owners and admins/);
 
-  // The app's signals: fraud isn't measured, conduct waits on agreement audits, vendors and products are lists.
+  // The app's signals: fraud isn't measured; conduct, vendors and products are lists.
   assert.equal(read.signals.fraud.available, false);
   assert.match(read.signals.fraud.reason, /Not measured/);
-  assert.equal(read.signals.conduct.available, false);
-  assert.match(read.signals.conduct.reason, /Not available yet/);
+  assert.deepEqual(read.signals.conduct, { available: true, rows: [] });
   assert.deepEqual(read.signals.vendors, { available: true, rows: [] });
   assert.deepEqual(read.signals.products, { available: true, rows: [] });
 
@@ -204,4 +203,30 @@ test("overdue reviews: flagged on the risk and in ops_status, until closed", asy
   ops = await opsStatus(w.store.db);
   assert.equal(ops.risks.overdue_reviews, 0);
   assert.ok(!ops.attention.some((a) => a.startsWith("risks:")));
+});
+
+test("conduct: open findings from marketing and complaints oversight audits under the app's agreements", async () => {
+  const w = await setup();
+  const agreement = randomUUID();
+  await w.store.db.query(
+    `INSERT INTO ${T}.app_agreements (id, workspace_id, app_id, counterparty_entity_id, kind, status, products, terms_summary) VALUES ($1, $2, $3, $4, 'program', 'signed', '["savings-account"]', 'Program terms for the app')`,
+    [agreement, w.workspace, w.app.id, w.lp.user.entity_id],
+  );
+  const requirement = async (kind, name) => {
+    const id = randomUUID();
+    await w.store.db.query(`INSERT INTO ${T}.agreement_audit_requirements (id, agreement_id, name, kind, cadence) VALUES ($1, $2, $3, $4, 'quarterly')`, [id, agreement, name, kind]);
+    return id;
+  };
+  const audit = async (req, findings) =>
+    w.store.db.query(`INSERT INTO ${T}.agreement_audits (id, requirement_id, agreement_id, app_id, due_at, status, findings) VALUES ($1, $2, $3, $4, now(), 'in_progress', $5)`, [randomUUID(), req, agreement, w.app.id, JSON.stringify(findings)]);
+  const f = (title, status, severity = "high") => ({ id: randomUUID(), title, status, severity, recorded_at: "2026-11-01T00:00:00.000Z" });
+  await audit(await requirement("marketing_review", "Ad review"), [f("Rate shown without APR", "open"), f("Old banner", "resolved")]);
+  await audit(await requirement("complaints_review", "Complaints review"), [f("Slow responses", "open", "medium")]);
+  await audit(await requirement("security_review", "Pen test"), [f("Weak TLS", "open")]);
+
+  const { signals } = ok(await w.dev.call("list_risks", { subject_type: "app", subject_id: w.app.id }));
+  assert.equal(signals.conduct.available, true);
+  const rows = signals.conduct.rows.map((r) => [r.kind, r.finding, r.severity]).sort();
+  assert.deepEqual(rows, [["complaints", "Slow responses", "medium"], ["marketing", "Rate shown without APR", "high"]], "only open marketing and complaints findings");
+  assert.equal(signals.conduct.rows[0].since, "2026-11-01T00:00:00.000Z");
 });

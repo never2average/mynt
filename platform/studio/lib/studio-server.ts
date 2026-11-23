@@ -4,7 +4,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { callMyntTool, NotSignedInError } from "./mynt-client";
 import type { Session } from "./session-store";
-import { isDeveloper, parseStudioCall, parseToolText, rolesFrom } from "./studio-tools";
+import { isDeveloper, isMyntAdmin, parseAdminCall, parseStudioCall, parseToolText, rolesFrom, type AdminTool } from "./studio-tools";
 
 // A refusal whose message may be shown to the user: Mynt's own error message ({"error": "..."}),
 // or a generic one. Raw replies and validation details are never shown.
@@ -82,6 +82,19 @@ export async function callStudioTool(client: Client, tool: string, args: Record<
   if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text), outcome.text);
   return parseToolText(outcome.text);
 }
+
+// The Admin area's only way to call Mynt: an admin tool (ADMIN_TOOLS), for a session whose account Mynt says is an
+// admin. Anyone else's call never leaves the studio. Mynt checks the role again.
+export async function callAdminTool(client: Client, session: Session, tool: AdminTool, args: Record<string, unknown> = {}): Promise<unknown> {
+  if (!isMyntAdmin(session.roles ?? [])) throw new ToolRefusedError("That's for Mynt admins.");
+  const call = parseAdminCall(tool, args);
+  if ("error" in call) throw new ToolRefusedError("The studio couldn't send that to Mynt.");
+  const outcome = await callMyntTool(client, call.tool, call.args);
+  if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text), outcome.text);
+  return parseToolText(outcome.text);
+}
+
+export const sessionIsAdmin = (session: Session) => isMyntAdmin(session.roles ?? []);
 
 // Asks Mynt who the session's user is and remembers their roles (and id) on the session.
 export async function refreshRoles(session: Session, client: Client): Promise<string[]> {

@@ -19,6 +19,7 @@ const { InvestorView } = await import("@/components/investor-view");
 const { BuildsView } = await import("@/components/builds-view");
 const { ExpiryBadge, LicencesView } = await import("@/components/licences-view");
 const { AuditsView, NO_AUDIT_FILTERS, ObligationsView } = await import("@/components/audits-view");
+const { AgreementAuditsView } = await import("@/components/agreement-audits-view");
 const { KpiRow } = await import("@/components/charts");
 const { ChatWorkspaceShell } = await import("@/components/chat-workspace-shell");
 const { SiteHeader } = await import("@/components/site-header");
@@ -62,6 +63,7 @@ describe("page toolbars", () => {
       ["licences", renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />)],
       ["audits", renderToStaticMarkup(<AuditsView auditClass="security" rows={[]} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[]} apps={[]} actions={[]} page={1} hasNext={false} onPrev={() => undefined} onNext={() => undefined} />)],
       ["obligations", renderToStaticMarkup(<ObligationsView obligations={[]} />)],
+      ["agreement audits", renderToStaticMarkup(<AgreementAuditsView list={{ agreements: [], requirements: [], audits: [], counts: { audits: null, open: null, overdue: null } }} onOpen={() => undefined} />)],
     ];
     for (const [page, html] of pages) {
       const row = toolbarOf(html).split(" ");

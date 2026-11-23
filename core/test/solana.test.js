@@ -2243,6 +2243,56 @@ test("the build records the Cargo.lock it used and warns, without failing, when 
   assert.match(build, /warning: no Cargo\.lock committed in \$NO_LOCK/);
 });
 
+test("without a committed Cargo.lock the fetch resolves one and moves pinned crates back; a committed one is used as it is", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { SOLANA_LOCK_PINS, parseLockPins } = await import("../dist/solana/toolchain.js");
+  assert.ok(SOLANA_LOCK_PINS.some((p) => p.crate === "ahash" && p.precise === "0.8.12"));
+  assert.throws(() => parseLockPins(JSON.stringify({ pins: [{ crate: "a;rm -rf /", from: "1.0.0", below: "2.0.0", precise: "0.9.0", why: "" }] })));
+  assert.throws(() => parseLockPins(JSON.stringify({ pins: [{ crate: "a", from: "1.0", below: "2.0.0", precise: "0.9.0", why: "" }] })));
+  const build = SOLANA_VERIFY_SCRIPT.slice(SOLANA_VERIFY_SCRIPT.indexOf('if [ "$MODE" = build ]'), SOLANA_VERIFY_SCRIPT.indexOf("# test:"));
+  assert.match(build, /-e MYNT_LOCK_PINS="\$LOCK_PINS" \\\n\s+\S+ bash -c "\$FETCH"/, "the fetch container gets the pins");
+  const fetch = build.match(/\n  FETCH='([^']*)'\n/)[1];
+  // Run the fetch's own shell against a stand-in cargo that "resolves" a lock with a pinned-out ahash.
+  const root = mkdtempSync(join(tmpdir(), "mynt-pins-"));
+  mkdirSync(join(root, "bin"));
+  const resolved = '[[package]]\nname = "ahash"\nversion = "0.8.13"\n\n[[package]]\nname = "ahash"\nversion = "0.7.8"\n\n[[package]]\nname = "zerocopy"\nversion = "0.8.13"\n';
+  writeFileSync(join(root, "resolved.lock"), resolved);
+  writeFileSync(join(root, "bin", "cargo"), `#!/bin/sh\necho "$*" >> "${root}/calls"\n[ "$1" = generate-lockfile ] && cp "${root}/resolved.lock" Cargo.lock\nexit 0\n`, { mode: 0o755 });
+  const run = (dir) => {
+    writeFileSync(join(root, "calls"), "");
+    const env = { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, MYNT_LOCK_PINS: SOLANA_LOCK_PINS.map((p) => `${p.crate}:${p.from}:${p.below}:${p.precise}`).join(" ") };
+    const r = spawnSync("bash", ["-c", fetch, "_", "programs/p/Cargo.toml"], { cwd: dir, env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return readFileSync(join(root, "calls"), "utf8").trim().split("\n");
+  };
+  mkdirSync(join(root, "nolock"));
+  assert.deepEqual(run(join(root, "nolock")), ["generate-lockfile", "update -p ahash@0.8.13 --precise 0.8.12", "fetch --manifest-path programs/p/Cargo.toml"]);
+  mkdirSync(join(root, "locked"));
+  writeFileSync(join(root, "locked", "Cargo.lock"), resolved);
+  assert.deepEqual(run(join(root, "locked")), ["fetch --manifest-path programs/p/Cargo.toml"], "a committed lock is never changed");
+  // A fetch that fails on a crate the platform tools' Cargo can't read says what to do.
+  assert.ok(build.includes('grep -q "edition2024\\|requires rustc" "$log.build.log" && hint='), "the hint");
+  assert.ok(build.includes("cargo update -p <crate>@<version> --precise <older>, and commit Cargo.lock"), "the hint says what to do");
+});
+
+test("the Solana starter program and Mynt's own program commit a Cargo.lock with no pinned-out crate", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { SOLANA_LOCK_PINS } = await import("../dist/solana/toolchain.js");
+  const cmp = (a, b) => { const x = a.split(/[.+-]/).map(Number), y = b.split(/[.+-]/).map(Number); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; };
+  for (const dir of ["workspaces/coding-build/templates/solana-program", "programs/product-health"]) {
+    const lock = readFileSync(new URL(`../${dir}/Cargo.lock`, import.meta.url), "utf8");
+    const versions = (name) => [...lock.matchAll(new RegExp(`\\nname = "${name}"\\nversion = "([^"]+)"`, "g"))].map((m) => m[1]);
+    assert.ok(versions("anchor-lang").includes(SOLANA_TOOLCHAIN.anchor.version), dir);
+    for (const p of SOLANA_LOCK_PINS) {
+      const out = versions(p.crate).filter((v) => cmp(v, p.from) >= 0 && cmp(v, p.below) < 0);
+      assert.deepEqual(out, [], `${dir}: ${p.crate} ${out} is pinned out (${p.why})`);
+    }
+    assert.deepEqual(versions("getrandom").filter((v) => !/^0\.[123]\./.test(v)), [], `${dir}: getrandom 0.4 needs a newer Cargo than the platform tools'`);
+  }
+});
+
 test("the exact toolchain each program was built with is kept with it, its deployed versions and get_program", async () => {
   const { toolchainRecord, TOOLCHAIN_PINS_SHA256 } = await import("../dist/solana/toolchain.js");
   const w = await world();

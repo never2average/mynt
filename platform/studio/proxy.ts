@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { contentSecurityPolicy } from "./lib/csp";
+import { esignFrameOrigins } from "./lib/esign-frame";
 import { appUrlFor, clientAddress, loginAllowed, shouldGoToAppUrl, warnUntrustedEdgeOnce } from "./lib/rate-limit";
 import { pageNeedsSignIn, signInPathFor } from "./lib/page-gate";
 import { sessionCookieName } from "./lib/session";
@@ -38,7 +39,10 @@ export async function proxy(req: NextRequest) {
   }
 
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
-  const csp = contentSecurityPolicy(process.env.PREVIEW_FRAME_SRC, process.env.NODE_ENV !== "production", nonce);
+  // Frames: app previews (PREVIEW_FRAME_SRC) and the e-signature service's signing pages (the origins Mynt's adapter
+  // lists, plus ESIGN_FRAME_SRC; lib/esign-frame.ts).
+  const frames = [process.env.PREVIEW_FRAME_SRC, ...(await esignFrameOrigins())].filter(Boolean).join(" ");
+  const csp = contentSecurityPolicy(frames, process.env.NODE_ENV !== "production", nonce);
   const requestHeaders = new Headers(req.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("Content-Security-Policy", csp);

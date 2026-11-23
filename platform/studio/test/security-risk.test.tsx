@@ -27,7 +27,7 @@ const LIST = {
   signals: {
     fraud: { available: false, reason: "Not measured yet: Mynt records no fraud or velocity signals from customer sessions." },
     vendors: { available: true, rows: [{ subscription_id: "v1", agreement_id: null, vendor: "KYC Works", offering: "Identity check", issue: "conformance_failed", detail: "The service's latest conformance run failed", since: "2026-11-12T00:00:00.000Z" }] },
-    conduct: { available: false, reason: "Not available yet: oversight audits of agreements come with Mynt's next update." },
+    conduct: { available: true, rows: [{ audit_id: "au1", agreement_id: "g1", kind: "marketing", requirement: "Ad review", finding: "Rate shown without APR", severity: "high", since: "2026-11-01T00:00:00.000Z" }] },
     products: { available: true, rows: [] },
   },
 };
@@ -118,7 +118,8 @@ describe("the Security & risk tab", () => {
     expect(html).toContain("Not available. Not measured yet: Mynt records no fraud or velocity signals from customer sessions.");
     expect(html).toContain("KYC Works");
     expect(html).toContain("Conformance failing");
-    expect(html).toContain("Not available. Not available yet: oversight audits of agreements come with Mynt&#x27;s next update.");
+    expect(html).toContain("Rate shown without APR");
+    expect(html).toContain("Marketing audit: Ad review");
     expect(html).toContain("None of this app&#x27;s products is paused or drifted.");
   });
 
@@ -144,7 +145,7 @@ describe("the Security & risk tab", () => {
     expect(data.register.available && data.register.risks.length).toBe(2);
     expect(data.register.available && data.register.owners).toEqual([{ userId: OWNER, name: "Ines" }]);
     expect(data.signals.vendors.available).toBe(true);
-    expect(data.signals.conduct.available).toBe(false);
+    expect(data.signals.conduct.available && data.signals.conduct.rows[0].cells.slice(0, 3)).toEqual(["Rate shown without APR", "Marketing audit: Ad review", "high"]);
   });
 });
 

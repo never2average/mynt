@@ -10,6 +10,7 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/", label: "Dashboard", keywords: "home money customers spend" },
   { href: "/licences", label: "Licences", keywords: "licenses partners regulators coverage states map where serve" },
   { href: "/licences?view=map&region=us", label: "Coverage", keywords: "states map where serve licences world" },
+  { href: "/marketplace", label: "Marketplace", keywords: "vendors service providers services identity kyc bureau account data esign subscribe standard terms pricing" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
   { href: "/settings", label: "Settings", keywords: "workspace members team invite invitations people roles apps repositories general rename" },
   { href: "/earn", label: "Earn", keywords: "liquidity pools opportunities capital commit withdraw positions invest wallet" },
@@ -27,8 +28,12 @@ const MOVED: readonly StudioPage[] = [
   { href: "/coverage", label: "Licences" },
 ];
 
+// Pages only some accounts have (the Admin area, for Mynt admins): fixed pages, never an app's id, and not offered in
+// search.
+const RESTRICTED: readonly StudioPage[] = [{ href: "/admin", label: "Admin" }];
+
 // A tab of a page (/licences?tab=coverage) is that page.
-const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
+const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED, ...RESTRICTED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
 
 /** Whether a path is a financial product's workspace (/products/<product id>). */
 export function isProductPath(pathname: string): boolean {

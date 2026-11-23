@@ -11,18 +11,22 @@
 // sections with headings, tables in a bordered box, and a View all row under a preview of a list.
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { ChevronRight, FilePlus2, RefreshCw, Users } from "lucide-react"
+import { Blocks, ChevronRight, FilePlus2, RefreshCw, Users } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel, Section } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
-import { ChoosePersonasSheet, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
+import { AgreementActionButtons, AgreementActionSheet, ChoosePersonasSheet, ProgramCoverage, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
+import { SignedCopyLinks, SigningSheet } from "@/components/agreement-esign"
+import { EndSubscriptionSheet } from "@/components/end-subscription-sheet"
+import { marketplaceHref } from "@/lib/marketplace"
 import { StageMark, StatusDot } from "@/components/promotion-view"
 import { RiskRegisterSection, SignalSection } from "@/components/risk-register"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
+  agreementActions,
   buildStatusLabel,
   buildTone,
   countText,
@@ -30,6 +34,8 @@ import {
   STAGE_TEXT,
   stateLabel,
   updatedAgo,
+  type AgreementAction,
+  type AgreementRow,
   type AppActivity,
   type AppAgreements,
   type AppCustomers,
@@ -40,7 +46,9 @@ import {
   type InfoTab,
   type PanelEvent,
   type TabData,
+  type VendorContractRow,
 } from "@/lib/app-panel"
+import { auditsHref, type AgreementAuditSummary } from "@/lib/agreement-audits"
 import { deltaOf, type Kpi } from "@/lib/dashboard-visual"
 import { SIGNAL_COLUMNS } from "@/lib/risk-register"
 import { CHECK_LABELS, CHECK_TONE } from "@/lib/promotions"
@@ -274,11 +282,25 @@ export function PnlView({ pnl }: { pnl: AppPnl }) {
 // The app's products: the regulated things, each with its stage, the licence providers sponsoring it
 // and the states they cover. The app's licence coverage is seen here, through its products: it holds
 // no licences of its own.
-export function ProductsTabView({ data }: { data: AppProducts }) {
+export function ProductsTabView({ data, appId = "", onChanged }: { data: AppProducts; appId?: string; onChanged?: () => void }) {
   if (!data.products.length) return <Quiet>This app uses no financial products yet.</Quiet>
   const check = data.productionCheck
+  const agreements = data.agreementCheck ?? null
+  const coverage = data.coverage ?? agreements?.coverage ?? []
   return (
     <div className="flex flex-col gap-4" data-app-products>
+      {(agreements || data.gate?.flagged || coverage.length > 0) && (
+        <Section id="app-program-agreements" title="Program agreements for production" description="A signed program agreement with each product's sponsor, in force today.">
+          {agreements ? (
+            <div className="flex min-w-0 items-center gap-2 text-sm" data-agreement-check={agreements.status}>
+              <StatusDot tone={CHECK_TONE[agreements.status]} label={CHECK_LABELS[agreements.status]} />
+              <span className="min-w-0 truncate font-medium">{agreements.label}</span>
+            </div>
+          ) : null}
+          {data.gate?.flagged && <ProductionFlag missing={data.gate.missing} />}
+          <ProgramCoverage appId={appId} coverage={coverage} canPropose={data.canManage === true} onChanged={onChanged} />
+        </Section>
+      )}
       {check && (
         <Section id="app-production-check" title="Production check">
           <div className="flex flex-col gap-1 text-sm" data-production-check={check.status}>
@@ -325,12 +347,45 @@ export function ProductsTabView({ data }: { data: AppProducts }) {
 
 const dates = (from: string | null, to: string | null) => (from || to ? `${from ?? "—"} to ${to ?? "open-ended"}` : "Not set")
 
+// An agreement's oversight audits: how many, the next one due and how many are overdue (in words),
+// with a link to Audits filtered to this agreement.
+function AgreementAuditsCell({ agreementId, summary }: { agreementId: string; summary: AgreementAuditSummary | undefined }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      {summary ? (
+        <>
+          <span>
+            {summary.count} {summary.count === 1 ? "audit" : "audits"}
+            {summary.nextDue ? `, next due ${summary.nextDue.slice(0, 10)}` : ", none open"}
+          </span>
+          {summary.overdue > 0 && <StatusDot tone="red" label={`${summary.overdue} overdue`} />}
+        </>
+      ) : (
+        <span className="text-muted-foreground">None yet</span>
+      )}
+      <Link href={auditsHref(agreementId)} className="font-medium underline-offset-4 hover:underline" data-agreement-audits-link={agreementId}>
+        View audits
+      </Link>
+    </div>
+  )
+}
+
 // Business development: program agreements with the products' sponsors, vendor contracts and the
 // introductions in progress. Status is always in words. Propose agreement is a labelled action.
 export function AgreementsTabView({ appId, data, onChanged }: { appId: string; data: AppAgreements; onChanged?: () => void }) {
   const [proposing, setProposing] = useState(false)
+  const [ending, setEnding] = useState<VendorContractRow | null>(null)
+  const [acting, setActing] = useState<{ action: AgreementAction; row: AgreementRow } | null>(null)
+  const [signing, setSigning] = useState<string | null>(null)
+  const coverage = data.coverage ?? []
   return (
     <div className="flex flex-col gap-5" data-app-agreements>
+      {data.gate?.flagged && <ProductionFlag missing={data.gate.missing} />}
+      {coverage.length > 0 && (
+        <Section id="app-program-coverage" title="Program agreements for production" description="Production needs a signed program agreement, in force today, with each product's sponsor.">
+          <ProgramCoverage appId={appId} coverage={coverage} canPropose={data.canManage} onChanged={onChanged} sheetData={data} />
+        </Section>
+      )}
       <Section
         id="app-agreements"
         title="Agreements"
@@ -353,19 +408,49 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Status</TableHead>
                   <TableHead>Products covered</TableHead>
                   <TableHead>Effective</TableHead>
+                  {data.audits && <TableHead>Audits</TableHead>}
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {data.agreements.map((a) => (
                   <TableRow key={a.id} data-agreement={a.id} data-status={a.statusKey}>
-                    <TableCell className="whitespace-normal font-medium">{a.counterparty}</TableCell>
+                    <TableCell className="whitespace-normal font-medium">
+                      {a.counterparty}
+                      {a.documentUrl && (
+                        <div>
+                          <a href={a.documentUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-normal underline-offset-4 hover:underline" data-agreement-document={a.id}>
+                            Document
+                          </a>
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell>{a.kind}</TableCell>
                     <TableCell className="whitespace-normal">
                       {a.status}
                       {a.signatures && <div className="text-xs text-muted-foreground">{a.signatures}</div>}
+                      {a.statusKey === "terminated" && a.endedReason && <div className="text-xs text-muted-foreground">Reason: {a.endedReason}</div>}
                     </TableCell>
                     <TableCell className="whitespace-normal">{a.products.join(", ") || "—"}</TableCell>
                     <TableCell className="text-xs whitespace-nowrap tabular-nums">{dates(a.from, a.to)}</TableCell>
+                    {data.audits && (
+                      <TableCell className="whitespace-normal text-xs" data-agreement-audits={a.id}>
+                        <AgreementAuditsCell agreementId={a.id} summary={data.audits[a.id]} />
+                      </TableCell>
+                    )}
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1.5">
+                        {data.canManage && (
+                          <AgreementActionButtons
+                            id={a.id}
+                            actions={agreementActions(a, "app")}
+                            // Sign on a program agreement signed by e-signature opens the signer's embedded signing page.
+                            onAction={(action) => (action === "sign" && a.esign?.byEsign ? setSigning(a.id) : setActing({ action, row: a }))}
+                          />
+                        )}
+                        <SignedCopyLinks agreementId={a.id} esign={a.esign} />
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -375,7 +460,18 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
           <Quiet>No agreements yet.{data.canManage ? " Propose one to a firm sponsoring this app's products." : ""}</Quiet>
         )}
       </Section>
-      <Section id="app-vendor-contracts" title="Vendor contracts" description="The vendor services this app's workspace subscribes to.">
+      <Section
+        id="app-vendor-contracts"
+        title="Vendor contracts"
+        description="The service providers this app's workspace subscribes to, under their standard terms."
+        action={
+          <Button size="sm" variant="outline" asChild data-browse-vendors>
+            <Link href={marketplaceHref(appId)}>
+              <Blocks /> Browse vendors
+            </Link>
+          </Button>
+        }
+      >
         {data.vendorContracts.length ? (
           <TableBox>
             <Table>
@@ -385,7 +481,9 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Kind</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Service</TableHead>
+                  <TableHead>Terms</TableHead>
                   <TableHead>Since</TableHead>
+                  {data.canManage && <TableHead>Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -395,14 +493,24 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                     <TableCell>Vendor subscription</TableCell>
                     <TableCell>Active ({v.environment})</TableCell>
                     <TableCell className="whitespace-normal">{v.offering}</TableCell>
+                    <TableCell className="whitespace-normal" data-vendor-terms={v.termsVersion ?? (v.noStandardTerms ? "none" : "other-app")}>
+                      {v.termsVersion !== null ? `Standard terms v${v.termsVersion}` : v.noStandardTerms ? "No standard terms on file" : "Accepted for another app"}
+                    </TableCell>
                     <TableCell className="text-xs whitespace-nowrap tabular-nums">{when(v.since)}</TableCell>
+                    {data.canManage && (
+                      <TableCell>
+                        <Button size="sm" variant="outline" onClick={() => setEnding(v)} data-end-subscription={v.id}>
+                          End subscription
+                        </Button>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </TableBox>
         ) : (
-          <Quiet>No vendor services subscribed.</Quiet>
+          <Quiet>No vendor services subscribed. Browse vendors to subscribe to a service provider&apos;s standard terms.</Quiet>
         )}
       </Section>
       <Section id="app-introductions" title="Introductions in progress" description="From Mynt's business-development agent: the other side is named once both have said yes.">
@@ -436,6 +544,41 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
         )}
       </Section>
       {data.canManage && <ProposeAgreementSheet appId={appId} data={data} open={proposing} onClose={() => setProposing(false)} onDone={() => onChanged?.()} />}
+      {data.canManage && <EndSubscriptionSheet contract={ending} onClose={() => setEnding(null)} onDone={() => onChanged?.()} />}
+      {data.canManage && (
+        <>
+        <SigningSheet
+          agreementId={signing ?? ""}
+          open={signing !== null}
+          onClose={() => {
+            setSigning(null)
+            onChanged?.()
+          }}
+        />
+        <AgreementActionSheet
+          url={acting ? `/api/apps/${encodeURIComponent(appId)}/agreements/${encodeURIComponent(acting.row.id)}` : ""}
+          action={acting?.action ?? null}
+          agreement={acting ? { id: acting.row.id, title: `${acting.row.kind} with ${acting.row.counterparty}`, lines: [`Covers: ${acting.row.products.join(", ") || "no products named"}`, `Effective: ${dates(acting.row.from, acting.row.to)}`, acting.row.status] } : null}
+          onClose={() => setActing(null)}
+          onDone={() => onChanged?.()}
+        />
+        </>
+      )}
+    </div>
+  )
+}
+
+/** An app in production that lost a program agreement: it keeps running, and this says what's missing. */
+export function ProductionFlag({ missing }: { missing: string[] }) {
+  return (
+    <div role="alert" className="flex flex-col gap-1 rounded-lg border border-destructive/50 bg-destructive/5 p-3 text-sm" data-production-flag>
+      <p className="font-medium">This app is in production without every program agreement it needs</p>
+      <p className="text-muted-foreground">It keeps running, but its production checks fail until a new one is signed:</p>
+      <ul className="list-disc pl-5">
+        {missing.map((m) => (
+          <li key={m}>{m}</li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -643,7 +786,7 @@ export function ActivityView({ data }: { data: AppActivity }) {
 
 export function InfoTabBody({ tab, data, appId = "", onChanged }: { tab: InfoTab; data: TabData; appId?: string; onChanged?: () => void }) {
   if (!data.available) return <NotYetNote reason={data.reason} />
-  if (tab === "products") return <ProductsTabView data={data as AppProducts} />
+  if (tab === "products") return <ProductsTabView data={data as AppProducts} appId={appId} onChanged={onChanged} />
   if (tab === "agreements") return <AgreementsTabView appId={appId} data={data as AppAgreements} onChanged={onChanged} />
   if (tab === "customers") return <CustomersTabView appId={appId} data={data as AppCustomers} onChanged={onChanged} />
   if (tab === "pnl") return <PnlView pnl={data as AppPnl} />

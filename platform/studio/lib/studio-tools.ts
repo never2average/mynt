@@ -4,6 +4,7 @@ import { isCalendarDate } from "./compliance";
 import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
 import { RISK_CATEGORIES, RISK_STATUSES } from "./risk-register";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
+import { AGREEMENT_FILE_MAX_BYTES } from "./agreement-esign";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
 // checks everything again (who owns what, roles, limits); these keep junk off the wire and keep
@@ -159,7 +160,13 @@ export const STUDIO_TOOLS = {
   request_promotion_signoff: z.object({ app_id: id }).strict(),
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
-  list_app_agreements: z.object({ app_id: id, status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
+  list_app_agreements: z.object({ app_id: id.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Each side's row actions: the licence provider accepts or declines (Accept / Decline), either side signs (Sign) and
+  // either side ends one with a reason (End agreement; Withdraw for the app's own proposal). Mynt decides who may.
+  respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
+  sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
+  terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
   propose_app_agreement: z
     .object({
       app_id: id,
@@ -173,6 +180,48 @@ export const STUDIO_TOOLS = {
       effective_to: auditDate.optional(),
     })
     .strict(),
+  // Program agreements signed by e-signature: a licence provider's templates (Upload agreement template, on its
+  // Agreements page), each signer's embedded signing page (Sign) and the signed copy (Download signed copy), on both
+  // sides' agreement rows. The file is checked again by the upload route (type and size) and by Mynt.
+  upload_agreement_template: z
+    .object({
+      name: z.string().trim().min(3).max(120),
+      source: z.literal("upload"),
+      licence_id: uuid.optional(),
+      sponsorship_id: uuid.optional(),
+      file_name: z.string().trim().regex(/^[^/\\\0]{1,150}\.(pdf|docx)$/i),
+      file_base64: z.string().max(Math.ceil((AGREEMENT_FILE_MAX_BYTES * 4) / 3) + 8).regex(/^[A-Za-z0-9+/]*={0,2}$/),
+      signature_placement: z.enum(["signature_page", "text_tags"]).optional(),
+      notes: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  list_my_licenses: z.object({}).strict(),
+  list_agreement_templates: z.object({ include_retired: z.boolean().optional() }).strict(),
+  retire_agreement_template: z.object({ template_id: uuid, reason: z.string().trim().max(500).optional() }).strict(),
+  get_agreement_signing_link: z.object({ agreement_id: uuid }).strict(),
+  download_agreement_document: z.object({ agreement_id: uuid, part: z.enum(["signed", "certificate"]).optional() }).strict(),
+  // The Marketplace (/marketplace): service providers' standard services under their standard terms, subscribed to
+  // by accepting the current version for the apps it's for (click-through only: the studio never subscribes
+  // without terms), and ending a subscription (the app's Agreements tab's End subscription). A test credential
+  // goes to Mynt's key vault and is never read back; live credentials and going live stay with the MCP tools.
+  list_vendor_offerings: z
+    .object({
+      region: z.string().regex(/^[A-Z]{2}$/).optional(),
+      service_type: z.string().regex(/^[a-z][a-z0-9_]{0,59}$/).optional(),
+      category: z.enum(["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"]).optional(),
+    })
+    .strict(),
+  subscribe_vendor_service: z
+    .object({
+      offering_id: uuid,
+      accept_terms_version: z.number().int().min(1).max(1_000_000),
+      app_ids: z.array(uuid).min(1).max(20),
+      products: z.array(id).max(20).optional(),
+      test_credential: z.string().min(1).max(2000).optional(),
+      credential_label: z.string().trim().min(1).max(100).optional(),
+    })
+    .strict(),
+  unsubscribe_vendor_service: z.object({ subscription_id: uuid, reason: z.string().trim().min(3).max(2000).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Risk registers: an app's (its Security & risk tab) and a financial product's (its Risk tab). Add risk and
@@ -213,6 +262,56 @@ export const STUDIO_TOOLS = {
       note: z.string().trim().max(2000).optional(),
     })
     .strict(),
+  // The Audits page's Agreement audits tab: oversight audits licence providers run on apps under program agreements.
+  // Read by either party; the licence provider adds requirements, opens, records findings and closes; the app's side
+  // submits evidence (https links with their SHA-256, never files) and answers findings. Mynt checks each side again.
+  list_agreement_audits: z
+    .object({
+      workspace_id: workspaceId.optional(),
+      app_id: id.optional(),
+      agreement_id: uuid.optional(),
+      status: z.enum(["scheduled", "in_progress", "submitted", "passed", "failed", "waived"]).optional(),
+      overdue: z.boolean().optional(),
+      side: z.enum(["app", "counterparty"]).optional(),
+    })
+    .strict(),
+  get_agreement_audit: z.object({ audit_id: uuid }).strict(),
+  add_agreement_audit_requirement: z
+    .object({
+      agreement_id: uuid,
+      name: z.string().trim().min(3).max(200),
+      kind: z.enum(["compliance_review", "complaints_review", "marketing_review", "security_review", "financial_review", "other"]),
+      cadence: z.enum(["once", "monthly", "quarterly", "annual", "on_change"]),
+      first_due: auditDate.optional(),
+      description: z.string().trim().max(4000).optional(),
+      evidence_required: z.string().trim().max(4000).optional(),
+    })
+    .strict(),
+  open_agreement_audit: z.object({ audit_id: uuid }).strict(),
+  record_agreement_audit_finding: z
+    .object({ audit_id: uuid, severity: z.enum(["low", "medium", "high", "critical"]), title: z.string().trim().min(3).max(200), detail: z.string().trim().max(4000).optional() })
+    .strict(),
+  resolve_agreement_audit_finding: z.object({ audit_id: uuid, finding_id: uuid, note: z.string().trim().max(2000).optional() }).strict(),
+  close_agreement_audit: z.object({ audit_id: uuid, outcome: z.enum(["passed", "failed", "waived"]), note: z.string().trim().max(4000).optional() }).strict(),
+  submit_agreement_audit_evidence: z
+    .object({
+      audit_id: uuid,
+      evidence: z
+        .array(
+          z
+            .object({
+              name: z.string().trim().min(1).max(200),
+              url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link"),
+              sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(20),
+      note: z.string().trim().max(4000).optional(),
+    })
+    .strict(),
+  respond_to_agreement_audit_finding: z.object({ audit_id: uuid, finding_id: uuid, response: z.string().trim().min(3).max(4000) }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
   // (no workspace_id for the implicit Personal one).
   get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),
@@ -334,6 +433,99 @@ export const STUDIO_TOOLS = {
   get_chat_session: z.object({ id: SessionId, after_seq: z.number().int().min(0).optional() }).strict(),
   delete_chat_session: z.object({ id: SessionId }).strict(),
 } as const;
+
+// Mynt admins' tools, for the Admin area (/admin) only: a separate allow-list that only an admin's session may call
+// (lib/studio-server.ts callAdminTool checks the role Mynt gave the account; Mynt checks it again on every call). The
+// chat, Ask AI and every other page use STUDIO_TOOLS, which holds none of these. Each is an existing admin tool,
+// with the arguments the Admin area sends; anything else (approving mainnet programs, the regulatory model, rails,
+// the connector...) stays with the MCP tools.
+const ENTITY_STATUSES = ["active", "suspended", "under_liquidation", "dissolved", "struck_off"] as const;
+const LEGAL_FORMS = ["company_private", "company_public", "llp", "partnership", "sole_proprietorship", "trust", "cooperative", "society", "nonprofit_company", "statutory_corporation", "government_entity", "foreign_branch"] as const;
+export const MYNT_ROLES = ["consumer", "developer", "innovator", "vendor", "license_provider", "liquidity_provider", "admin"] as const;
+export const SERVICE_CATEGORIES = ["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"] as const;
+const email = z.string().trim().toLowerCase().email().max(320);
+const page = { limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).max(1_000_000).optional() };
+const query = z.string().trim().max(200).optional();
+const snake = z.string().regex(/^[a-z][a-z0-9_]*$/).max(60);
+const jsonObject = z.record(z.string(), z.unknown());
+const licenceTypeIds = z.array(z.string().trim().min(1).max(120)).max(20);
+
+export const ADMIN_TOOLS = {
+  // Overview: what needs attention across Mynt.
+  ops_status: z.object({ hours: z.number().int().min(1).max(720).optional() }).strict(),
+  // Platform settings: the operational settings (read-only) and e-signature (moved here from workspace Settings).
+  get_platform_settings: z.object({}).strict(),
+  get_esign_settings: z.object({}).strict(),
+  set_esign_api_key: z.object({ provider: z.enum(["signwell"]), api_key: z.string().trim().min(8).max(500).regex(/^[\x21-\x7e]+$/) }).strict(),
+  register_esign_webhook: z.object({}).strict(),
+  remove_esign_api_key: z.object({ confirm: z.literal(true) }).strict(),
+  set_esign_test_mode: z.object({ test_mode: z.boolean() }).strict(),
+  // Workspaces, apps and financial products across Mynt (core/src/platform-admin.ts), and removing a test app.
+  list_all_workspaces: z.object({ query, status: z.enum(["active", "archived", "frozen"]).optional(), ...page }).strict(),
+  admin_get_workspace: z.object({ workspace_id: uuid }).strict(),
+  list_all_apps: z.object({ query, workspace_id: uuid.optional(), stage: z.enum(["idea", "staging", "production"]).optional(), ...page }).strict(),
+  admin_get_app: z.object({ app_id: uuid }).strict(),
+  remove_app: z.object({ app_id: uuid, confirm: z.boolean(), reason: z.string().trim().max(500).optional() }).strict(),
+  list_all_products: z.object({ query, status: z.enum(["draft", "published", "unpublished"]).optional(), include_archived: z.boolean().optional(), ...page }).strict(),
+  // Firms: registered by hand, their members (an email allowed to sign in with roles, then added to the firm) and status.
+  list_entities: z.object({}).strict(),
+  register_firm: z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      legal_form: z.enum(LEGAL_FORMS).optional(),
+      incorporation: z
+        .object({ country: z.string().regex(/^[a-z]{2}$/), subdivision: z.string().regex(/^[a-z]{2}-[a-z0-9]{1,3}$/).optional(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() })
+        .strict()
+        .optional(),
+      identifiers: z.array(z.object({ scheme: z.string().regex(/^(lei|[a-z]{2}_[a-z0-9_]+)$/), value: z.string().trim().min(1).max(100) }).strict()).max(20).optional(),
+      regions: z.array(z.string().regex(/^([A-Z]{2}|global)$/)).max(20).optional(),
+    })
+    .strict(),
+  // Who may sign in, with which roles: read before inviting a firm member, so their other roles are kept.
+  list_whitelist: z.object({}).strict(),
+  invite_user: z.object({ email, roles: z.array(z.enum(MYNT_ROLES)).min(1).max(MYNT_ROLES.length) }).strict(),
+  add_entity_member: z.object({ email, entity_id: uuid }).strict(),
+  set_entity_status: z.object({ entity_id: uuid, status: z.enum(ENTITY_STATUSES), note: z.string().trim().max(2000).optional() }).strict(),
+  // Licences: firms' registered licences by review status, and the decision on one.
+  list_license_reviews: z.object({ status: z.enum(["pending", "verified", "rejected", "suspended"]).optional() }).strict(),
+  review_license: z.object({ license_record_id: uuid, decision: z.enum(["verified", "rejected", "suspended"]), note: z.string().trim().max(2000).optional() }).strict(),
+  // Vendors: the standard service types (added, never edited here: define_service_type replaces) and every offering.
+  list_service_types: z.object({ region: z.string().regex(/^[A-Z]{2}$/).optional(), category: z.enum(SERVICE_CATEGORIES).optional() }).strict(),
+  define_service_type: z
+    .object({
+      service_type: z
+        .object({
+          region: z.string().regex(/^[A-Z]{2}$/),
+          key: snake,
+          name: z.string().trim().min(1).max(200),
+          category: z.enum(SERVICE_CATEGORIES),
+          description: z.string().trim().max(2000).optional(),
+          input_schema: jsonObject,
+          output_schema: jsonObject,
+          consent_purpose: snake,
+          fills: z.array(z.string().trim().min(1).max(120)).max(30).optional(),
+          innovator_licences: licenceTypeIds.optional(),
+          vendor_licences: licenceTypeIds.optional(),
+          moves_money: z.boolean(),
+        })
+        .strict(),
+    })
+    .strict(),
+  list_vendor_offerings: z.object({ include_unlisted: z.literal(true) }).strict(),
+  suspend_vendor_offering: z.object({ offering_id: uuid, suspended: z.boolean(), note: z.string().trim().max(500).optional() }).strict(),
+} as const;
+
+export type AdminTool = keyof typeof ADMIN_TOOLS;
+export const isAdminTool = (name: unknown): name is AdminTool => typeof name === "string" && Object.prototype.hasOwnProperty.call(ADMIN_TOOLS, name);
+export const isMyntAdmin = (roles: string[]) => roles.includes("admin");
+
+// Checks an admin tool's name and arguments against ADMIN_TOOLS (the caller checks the session is an admin's).
+export function parseAdminCall(tool: unknown, args: unknown): { tool: AdminTool; args: Record<string, unknown> } | { error: string } {
+  if (!isAdminTool(tool)) return { error: "That tool isn't available in the Admin area" };
+  const parsed = ADMIN_TOOLS[tool].safeParse(args ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".") || "args"}: ${i.message}`).join("; ") };
+  return { tool, args: parsed.data as Record<string, unknown> };
+}
 
 export type StudioTool = keyof typeof STUDIO_TOOLS;
 

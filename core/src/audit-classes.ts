@@ -28,6 +28,13 @@ const SECURITY = [
   // secrets kept from leaking: revealed, rotated, or rotated out of a leaver's reach
   "webhook_secret_rotated_on_offboard",
   "reveal_partner_ledger_secret",
+  // e-signature set up from Mynt Studio: the service's key (never its value) and webhook, test mode (esign-settings.ts)
+  "set_esign_api_key",
+  "set_esign_api_key_refused",
+  "register_esign_webhook",
+  "register_esign_webhook_refused",
+  "remove_esign_api_key",
+  "set_esign_test_mode",
   "rotate_partner_ledger_secret",
   "reveal_subscription_secret",
   "rotate_subscription_secret",
@@ -168,6 +175,34 @@ const OBLIGATIONS = [
   // the risk registers of apps and financial products: risks added and reviewed (risk-register.ts)
   "add_risk",
   "update_risk",
+  // program agreements signed by e-signature: licence providers' templates, the documents, the signed copies read
+  // (agreement-esign.ts)
+  "upload_agreement_template",
+  "retire_agreement_template",
+  "esign_document_created",
+  "esign_document_failed",
+  "open_agreement_signing",
+  "esign_signer_signed",
+  "esign_completed",
+  "esign_declined",
+  "esign_canceled",
+  "esign_expired",
+  "download_agreement_document",
+  // oversight audits under app agreements: requirements the licence provider sets, audits opened by the schedule or by
+  // hand, evidence and answers from the app's side, findings, and the outcome (agreement-audits.ts)
+  "add_agreement_audit_requirement",
+  "retire_agreement_audit_requirement",
+  "agreement_audit_scheduled",
+  "open_agreement_audit",
+  "record_agreement_audit_finding",
+  "resolve_agreement_audit_finding",
+  "submit_agreement_audit_evidence",
+  "respond_to_agreement_audit_finding",
+  "pass_agreement_audit",
+  "fail_agreement_audit",
+  "waive_agreement_audit",
+  // a vendor's standard terms accepted by click-through, one agreement per app (vendor-terms.ts)
+  "accept_vendor_terms",
   // covenants on sponsorships
   "set_covenant",
   "set_covenant_refused",
@@ -318,6 +353,8 @@ const WORKSPACE = [
   "create_vendor_offering",
   "update_vendor_offering",
   "admin_update_vendor_offering",
+  // a vendor's standard terms on an offering, a new version each change (vendor-terms.ts)
+  "set_vendor_terms",
   "suspend_vendor_offering",
   "run_conformance",
   "admin_run_conformance",

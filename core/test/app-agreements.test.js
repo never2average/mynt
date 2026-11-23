@@ -225,3 +225,166 @@ test("remove_app removes an app's chosen personas, and refuses an app with agree
   assert.equal(refusedRemoval.isError, true, refusedRemoval.text);
   assert.match(refusedRemoval.text, /agreements with other firms/);
 });
+
+// ---- production waits on program agreements ----
+
+const day = (offset) => new Date(Date.now() + offset * 86400_000).toISOString().slice(0, 10);
+const gate = async (w) => {
+  const r = ok(await w.dev.call("get_promotion_checks", { app_id: w.app.id, to_stage: "production" }));
+  return { checks: r, check: r.checks.find((c) => c.id === "program_agreements") };
+};
+// Propose, accept and have both sides sign a program agreement; `dates` as the proposal takes them.
+const signedProgram = async (w, lp, firmId, products, dates = {}) => {
+  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: firmId, kind: "program", products, terms_summary: "The sponsor's program for these products", ...dates }));
+  ok(await lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  ok(await w.dev.call("sign_app_agreement", { agreement_id: a.id }));
+  return ok(await lp.call("sign_app_agreement", { agreement_id: a.id }));
+};
+
+test("production: blocked without a signed program agreement with each product's sponsor, passes once one is signed and in force", async () => {
+  const w = await setup();
+  const productName = CATALOG.find((p) => p.id === "savings-account").name;
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [w.app.id]);
+
+  // None: blocked in plain words, naming the sponsor and the product; the unsponsored product needs none.
+  let { checks, check } = await gate(w);
+  assert.equal(check.status, "fail");
+  assert.equal(check.detail, `No signed program agreement with Sponsor Bank for ${productName}`);
+  assert.equal(check.fix.tool, "propose_app_agreement");
+  assert.equal(check.fix.href, `/${w.app.id}?tab=agreements`);
+  assert.deepEqual(check.coverage.map((c) => [c.product_id, c.sponsor_entity_id, c.sponsor_name, c.covered]), [["savings-account", w.lpFirm.id, "Sponsor Bank", false]]);
+  assert.equal(checks.can_promote, false);
+  assert.equal(checks.checks.findIndex((c) => c.id === "program_agreements"), checks.checks.findIndex((c) => c.id === "licences") + 1, "right after the licences check");
+
+  // On its way: still blocked, saying where it stands.
+  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
+  assert.match((await gate(w)).check.detail, /proposed, waiting for Sponsor Bank to accept/);
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  assert.match((await gate(w)).check.detail, /waiting for both signatures/);
+  ok(await w.dev.call("sign_app_agreement", { agreement_id: a.id }));
+  assert.match((await gate(w)).check.detail, /waiting for Sponsor Bank's signature/);
+  ok(await w.lp.call("sign_app_agreement", { agreement_id: a.id }));
+  ({ checks, check } = await gate(w));
+  assert.equal(check.status, "pass", check.detail);
+  assert.equal(check.detail, `Signed and in force: Sponsor Bank for ${productName}`);
+  assert.equal(check.coverage[0].agreement_id, a.id);
+
+  // The app's own view says the same.
+  const listed = ok(await w.member.call("list_app_agreements", { app_id: w.app.id }));
+  assert.deepEqual(listed.production_gate, { met: true, missing: [], flagged: false });
+  assert.equal(listed.app.stage, "staging");
+
+  // An app on no sponsored product needs none.
+  const solo = await w.store.createApp(w.dev.user.id, { name: "Deposits", description: "d", audience: "a", product_ids: ["fixed-deposit"] }, w.workspace);
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [solo.id]);
+  const soloCheck = ok(await w.dev.call("get_promotion_checks", { app_id: solo.id, to_stage: "production" })).checks.find((c) => c.id === "program_agreements");
+  assert.equal(soloCheck.status, "pass");
+  assert.match(soloCheck.detail, /Not applicable/);
+  // Staging doesn't ask for agreements.
+  await w.store.db.query(`UPDATE ${T}.app_promotions SET stage = 'idea' WHERE app_id = $1`, [solo.id]);
+  assert.equal(ok(await w.dev.call("get_promotion_checks", { app_id: solo.id, to_stage: "staging" })).checks.some((c) => c.id === "program_agreements"), false);
+});
+
+test("production: an agreement not yet in force, expired, terminated or declined blocks", async () => {
+  const w = await setup();
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [w.app.id]);
+
+  const future = await signedProgram(w, w.lp, w.lpFirm.id, ["savings-account"], { effective_from: day(5) });
+  let { check } = await gate(w);
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, new RegExp(`No signed program agreement with Sponsor Bank for .*takes effect on ${day(5)}`));
+
+  // Effective from today counts; until today counts too (the last day it runs).
+  await w.store.db.query(`UPDATE ${T}.app_agreements SET effective_from = $2, effective_to = $2 WHERE id = $1`, [future.id, day(0)]);
+  assert.equal((await gate(w)).check.status, "pass");
+
+  // Expired.
+  await w.store.db.query(`UPDATE ${T}.app_agreements SET effective_from = $2, effective_to = $3 WHERE id = $1`, [future.id, day(-30), day(-1)]);
+  ({ check } = await gate(w));
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, new RegExp(`its signed agreement ended on ${day(-1)}`));
+
+  // Terminated.
+  await w.store.db.query(`UPDATE ${T}.app_agreements SET effective_to = NULL WHERE id = $1`, [future.id]);
+  assert.equal((await gate(w)).check.status, "pass");
+  ok(await w.lp.call("terminate_app_agreement", { agreement_id: future.id, reason: "Program wound down" }));
+  ({ check } = await gate(w));
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /it was ended on \d{4}-\d{2}-\d{2}: Program wound down/);
+
+  // Declined.
+  const d = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program, second try" }));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: d.id, decision: "decline" }));
+  assert.match((await gate(w)).check.detail, /Sponsor Bank declined it/);
+  // A signed data-sharing agreement isn't a program agreement.
+  const shared = await signedProgram(w, w.lp, w.lpFirm.id, ["savings-account"]);
+  assert.equal((await gate(w)).check.status, "pass");
+  await w.store.db.query(`UPDATE ${T}.app_agreements SET kind = 'data_sharing' WHERE id = $1`, [shared.id]);
+  assert.equal((await gate(w)).check.status, "fail");
+});
+
+test("production: a product with several sponsors needs every one of them, wherever the app serves", async () => {
+  const w = await setup();
+  const productName = CATALOG.find((p) => p.id === "savings-account").name;
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [w.app.id]);
+  // Other Bank sponsors the savings product in Texas.
+  await w.store.db.query(
+    `INSERT INTO ${T}.sponsorships (id, product_id, component_key, builder_entity_id, provider_entity_id, jurisdictions, status) VALUES ($1, 'savings-account', 'rate', $2, $3, ARRAY['us-tx'], 'approved')`,
+    [randomUUID(), w.lpFirm.id, w.otherFirm.id],
+  );
+  await signedProgram(w, w.lp, w.lpFirm.id, ["savings-account"]);
+  // No states set: every sponsor counts.
+  let { check } = await gate(w);
+  assert.equal(check.status, "fail");
+  assert.equal(check.detail, `No signed program agreement with Other Bank for ${productName}`);
+  assert.deepEqual(check.coverage.map((c) => [c.sponsor_name, c.covered]).sort(), [["Other Bank", false], ["Sponsor Bank", true]]);
+
+  // Serving New York only: Other Bank sponsors the product only in Texas, and still counts.
+  ok(await w.dev.call("set_app_target_states", { app_id: w.app.id, states: ["us-ny"] }));
+  ({ check } = await gate(w));
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /No signed program agreement with Other Bank/);
+  assert.deepEqual(check.coverage.map((c) => c.sponsor_name).sort(), ["Other Bank", "Sponsor Bank"]);
+
+  // A signed agreement with Other Bank covering it: passes.
+  await signedProgram(w, w.otherLp, w.otherFirm.id, ["savings-account"]);
+  ({ check } = await gate(w));
+  assert.equal(check.status, "pass", check.detail);
+  assert.equal(check.coverage.length, 2);
+});
+
+test("production: an agreement ending after the app went live doesn't move it back; it's flagged to the workspace and in ops_status", async () => {
+  const w = await setup();
+  const { opsStatus } = await import("../dist/ops.js");
+  const a = await signedProgram(w, w.lp, w.lpFirm.id, ["savings-account"]);
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'production')`, [w.app.id]);
+  const attention = async () => ok(await w.member.call("get_workspace_attention", { workspace_id: w.workspace })).items;
+  const failing = async () => (await attention()).find((i) => i.kind === "promotion_checks_failing" && i.href === `/${w.app.id}`);
+  assert.doesNotMatch((await failing())?.detail ?? "", /program agreement/);
+  assert.deepEqual((await opsStatus(w.store.db)).apps.production_without_program_agreements, []);
+  // What the sponsor did is the app side's notice: it accepted and signed.
+  const signedNote = (await attention()).find((i) => i.kind === "app_agreement_update" && i.title.includes("Sponsor Bank signed"));
+  assert.ok(signedNote, "the sponsor's signature is told to the workspace");
+  assert.equal(signedNote.href, `/${w.app.id}?tab=agreements`);
+  assert.ok((await attention()).some((i) => i.kind === "app_agreement_update" && i.title.includes("Sponsor Bank accepted")));
+
+  ok(await w.lp.call("terminate_app_agreement", { agreement_id: a.id, reason: "Program wound down" }));
+  assert.equal(ok(await w.member.call("list_my_apps")).find((x) => x.id === w.app.id).stage, "production", "not moved back");
+  assert.match((await failing()).detail, /No signed program agreement with Sponsor Bank/);
+  const ended = (await attention()).find((i) => i.kind === "app_agreement_update" && i.title.includes("ended"));
+  assert.equal(ended.severity, "high");
+  assert.match(ended.detail, /Program wound down/);
+  const listed = ok(await w.member.call("list_app_agreements", { app_id: w.app.id }));
+  assert.equal(listed.production_gate.flagged, true);
+  assert.match(listed.production_gate.missing[0], /No signed program agreement with Sponsor Bank/);
+  const ops = await opsStatus(w.store.db);
+  assert.deepEqual(ops.apps.production_without_program_agreements.map((x) => [x.app_id, x.missing]), [[w.app.id, 1]]);
+  assert.ok(ops.attention.some((l) => l.includes("without a signed program agreement") && l.includes("Pay app")));
+
+  // An expired one too, once signed again.
+  const b = await signedProgram(w, w.lp, w.lpFirm.id, ["savings-account"]);
+  assert.deepEqual((await opsStatus(w.store.db)).apps.production_without_program_agreements, []);
+  await w.store.db.query(`UPDATE ${T}.app_agreements SET effective_to = $2 WHERE id = $1`, [b.id, day(-1)]);
+  assert.equal((await opsStatus(w.store.db)).apps.production_without_program_agreements.length, 1);
+  assert.match((await failing()).detail, /ended on/);
+});

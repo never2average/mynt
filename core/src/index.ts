@@ -32,7 +32,9 @@ import { sweepStaleMovements } from "./money-rails.js";
 import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf } from "./liquidity.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
+import { EsignSettings } from "./esign-settings.js";
 import { CovenantService } from "./covenants.js";
+import { sweepAgreementAudits } from "./agreement-audits.js";
 import { TreasuryService, treasuryConfigFromEnv } from "./treasury.js";
 import { partnerLedgerFor } from "./partner-kit.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
@@ -91,7 +93,10 @@ Environment:
                             attester is generated in the vault (MYNT_VAULT_KEY) on first use
   PRODUCT_HEALTH_PROGRAM_ID The deployed product-health program (devnet); unset, the worker doesn't run. PRODUCT_HEALTH_INTERVAL_MINUTES (default 60)
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
-                            (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)`;
+                            (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)
+  ESIGN_PROVIDER=signwell   Overrides for e-signature, which admins set up in Mynt Studio (Settings → E-signature):
+                            SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID, ESIGN_TEST_MODE=off. Keys and signed copies are
+                            sealed with MYNT_VAULT_KEY`;
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -175,7 +180,11 @@ const openServices = async () => {
   const covenants = await CovenantService.open(db, store, productHealth);
   // Pools' on-chain treasuries (devnet): the registry, Mynt's deposit attester and the indexer.
   const treasury = await TreasuryService.open(db, store, solana, treasuryConfigFromEnv(), { sandboxes });
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury };
+  // E-signature for program agreements: set up by an admin in Mynt Studio (Settings → E-signature), with the
+  // environment's ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides. Off until
+  // then, and the manual flow stays.
+  const esign = await EsignSettings.open(store);
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign };
 };
 
 const parseRoles = (): Role[] => {
@@ -221,13 +230,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -259,7 +268,7 @@ if (values.help) {
         .finally(() => setTimeout(tick, wait));
     setTimeout(tick, 60_000);
   }
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
@@ -287,6 +296,8 @@ if (values.help) {
     sweepStaleMovements(store).catch((e) => console.error("money movement sweep:", (e as Error).message));
   }, 60 * 1000);
   vendorRuns.unref();
+  // App agreements' oversight audits: the next one of each requirement opens when its time comes (agreement-audits.ts).
+  const agreementAudits = serialLoop(() => sweepAgreementAudits(store), 60_000, "agreement audits:");
   // Deployed Solana programs' new events go to their firms' webhooks.
   const programEvents = setInterval(() => solana.pollEvents().catch((e) => console.error("solana indexer:", (e as Error).message)), Number(process.env.SOLANA_INDEX_POLL_MS ?? 30_000));
   programEvents.unref();
@@ -304,6 +315,7 @@ if (values.help) {
     clearInterval(drift);
     clearInterval(firmChecks);
     clearInterval(vendorRuns);
+    clearInterval(agreementAudits);
     clearInterval(programEvents);
     webhooks.stop();
     builds.stopWorker();
