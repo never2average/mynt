@@ -92,7 +92,7 @@ describe("the threads list", () => {
     expect(list.map((t) => t.status)).toEqual(["Idea", "Idea", "Chat", "Staging", "Production", "Created", "Production"]);
     expect(list.find((t) => t.key === "app:app-1")?.href).toBe("/app-1");
     expect(list.find((t) => t.key === "chat:c1")?.href).toBe("/new?thread=c1");
-    expect(list.find((t) => t.key === "product:green-savings")?.href).toBe("/new?product=green-savings");
+    expect(list.find((t) => t.key === "product:green-savings")?.href).toBe("/products/green-savings");
     expect(mergeThreads(null, null, null)).toEqual([]);
   });
 
@@ -456,13 +456,13 @@ describe("the sidebar's threads", () => {
     expect(idea[0].querySelector("[data-thread-icon=product]")).not.toBeNull();
     expect(idea[1].querySelector("[data-thread-icon=app]")).not.toBeNull();
     expect(idea[0].getAttribute("title")).toBe("Financial product · Idea");
-    expect(idea[0].getAttribute("href")).toBe("/new?product=green-savings");
+    expect(idea[0].getAttribute("href")).toBe("/products/green-savings");
     // No separate Financial products group; product chats aren't in the folders (they have no stage).
     expect(document.querySelector("[data-products-group]")).toBeNull();
     expect(document.querySelector("[data-thread-item^=chat]")).toBeNull();
   });
 
-  it("picking a product there opens it in place when the Build page is open", () => {
+  it("picking a product there opens its own workspace (a link), not the Build page in place", () => {
     window.localStorage.setItem("mynt_studio_folder", "idea");
     const seen: unknown[] = [];
     const listen = (e: Event) => seen.push((e as CustomEvent).detail);
@@ -471,10 +471,12 @@ describe("the sidebar's threads", () => {
     const stay = (e: Event) => e.preventDefault();
     document.addEventListener("click", stay);
     render(withSidebar(<NavFolders groups={stagedItems(groups, MINE)} />));
-    fireEvent.click(screen.getByRole("link", { name: "Financial product: Green Savings" }));
+    const link = screen.getByRole("link", { name: "Financial product: Green Savings" });
+    expect(link.getAttribute("href")).toBe("/products/green-savings");
+    fireEvent.click(link);
     window.removeEventListener("mynt:open-thread", listen);
     document.removeEventListener("click", stay);
-    expect(seen).toEqual([{ product: "green-savings" }]);
+    expect(seen).toEqual([]);
   });
 
   it("an app opens its newest build's conversation; the app or product on screen is marked active, in its folder", () => {
