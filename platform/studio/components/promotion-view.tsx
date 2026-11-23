@@ -10,6 +10,7 @@ import Link from "next/link"
 import { useCallback, useEffect, useState } from "react"
 import { ArrowDownToLine, ArrowUpRight, ExternalLink, Rocket, ShieldCheck } from "lucide-react"
 
+import { ProgramCoverage } from "@/components/app-agreement-sheets"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import {
@@ -17,6 +18,7 @@ import {
   CHECK_TONE,
   earlierStages,
   nextStage,
+  PROGRAM_AGREEMENTS_CHECK,
   STAGE_NAMES,
   type DemotionTarget,
   type PromotionCheck,
@@ -83,6 +85,8 @@ function Fix({ check }: { check: PromotionCheck }) {
 
 export type PromotionViewProps = {
   appName: string
+  appId?: string // for the program agreements check's Propose agreement shortcut
+  onChanged?: () => void // after a proposal: read the checks again
   checks: PromotionChecks
   canChange: boolean // an owner or admin of the app's workspace
   signoffSupported: boolean
@@ -101,7 +105,7 @@ const SIGNOFF_TEXT = {
 } as const
 
 /** Mynt's checks for a move, each with its status, its detail in Mynt's words and its fix (apps and products alike). */
-export function CheckList({ checks, name, to }: { checks: PromotionCheck[]; name: string; to: string }) {
+export function CheckList({ checks, name, to, appId, canPropose = false, onChanged }: { checks: PromotionCheck[]; name: string; to: string; appId?: string; canPropose?: boolean; onChanged?: () => void }) {
   if (!checks.length) return <p className="text-sm text-muted-foreground">Mynt has no checks for moving {name} to {to}.</p>
   return (
     <ul className="flex flex-col divide-y rounded-lg border" data-checks>
@@ -112,25 +116,28 @@ export function CheckList({ checks, name, to }: { checks: PromotionCheck[]; name
             <StatusDot tone={CHECK_TONE[c.status]} label={CHECK_LABELS[c.status]} />
           </div>
           {c.detail && <p className="text-sm text-muted-foreground">{c.detail}</p>}
-          {c.fix && (
+          {/* Program agreements: each sponsor and product, a missing one with a Propose agreement shortcut pre-filled. */}
+          {appId && c.id === PROGRAM_AGREEMENTS_CHECK && c.coverage && c.coverage.length > 0 && c.status !== "pass" ? (
+            <ProgramCoverage appId={appId} coverage={c.coverage} canPropose={canPropose} onChanged={onChanged} />
+          ) : c.fix ? (
             <div>
               <Fix check={c} />
             </div>
-          )}
+          ) : null}
         </li>
       ))}
     </ul>
   )
 }
 
-export function PromotionView({ appName, checks, canChange, signoffSupported, busy = false, error = null, result = null, onPromote, onRequestSignoff }: PromotionViewProps) {
+export function PromotionView({ appName, appId, onChanged, checks, canChange, signoffSupported, busy = false, error = null, result = null, onPromote, onRequestSignoff }: PromotionViewProps) {
   const to = STAGE_NAMES[checks.toStage]
   const failing = checks.checks.filter((c) => c.status === "fail").length
   const signoff = checks.signoff?.status ?? "none"
   const enabled = checks.canPromote && canChange && !busy
   return (
     <div className="flex flex-col gap-4" data-promotion-view>
-      <CheckList checks={checks.checks} name={appName} to={to} />
+      <CheckList checks={checks.checks} name={appName} to={to} appId={appId} canPropose={canChange} onChanged={onChanged} />
 
       {checks.needsAdminSignoff && (
         <div className="flex flex-col gap-2 rounded-lg border p-3" data-signoff={signoff}>
@@ -362,6 +369,7 @@ export function StageControl({ appId, appName, stage }: { appId: string; appName
             ) : checks ? (
               <PromotionView
                 appName={appName}
+                appId={appId}
                 checks={checks}
                 canChange={meta.canChange && !promoted}
                 signoffSupported={meta.tools.signoff}

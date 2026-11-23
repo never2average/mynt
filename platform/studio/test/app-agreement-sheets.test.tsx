@@ -12,6 +12,7 @@ import { fromAgreements, fromCustomers } from "@/lib/app-panel";
 const APP = "a1";
 const SPONSOR = "11111111-1111-4111-8111-111111111111";
 const OTHER_SPONSOR = "22222222-2222-4222-8222-222222222222";
+const AGREEMENT = "33333333-3333-4333-8333-333333333333";
 const AGREEMENTS = fromAgreements({
   can_manage: true,
   agreements: [],
@@ -38,6 +39,7 @@ vi.mock("@/lib/tokens", () => ({
       fake.calls.push({ name, args });
       const ok = (d: unknown) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
       if (name === "list_my_apps") return ok([{ id: APP, name: "Cards", workspace_id: "w1", stage: "staging", product_ids: ["p1", "p2"] }]);
+      if (name === "list_app_agreements") return ok({ agreements: [{ id: AGREEMENT, status: "accepted" }] });
       if (fake.refuse) return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: fake.refuse }) }] };
       return ok({ id: "g1", status: "proposed" });
     },
@@ -47,6 +49,11 @@ vi.mock("@/lib/tokens", () => ({
 
 const sheets = await import("@/components/app-agreement-sheets");
 const agreementsRoute = await import("@/app/api/apps/[appId]/agreements/route");
+const agreementRoute = await import("@/app/api/apps/[appId]/agreements/[agreementId]/route");
+const panelTabs = await import("@/components/app-panel-tabs");
+const { agreementActions } = await import("@/lib/app-panel");
+const { fromPromotionChecks } = await import("@/lib/promotions");
+const { CheckList } = await import("@/components/promotion-view");
 const customersRoute = await import("@/app/api/apps/[appId]/customers/route");
 
 beforeEach(() => {
@@ -157,5 +164,145 @@ describe("Choose personas", () => {
     expect(fake.calls.find((c) => c.name === "set_app_target_segments")?.args).toEqual({ app_id: APP, segments: [{ product_id: "p1", segment_id: "retail" }] });
     fake.tools = [{ name: "list_my_apps" }];
     expect((await post(customersRoute, { segments: [] })).status).toBe(501);
+  });
+});
+
+// ---- the app side's row actions, and production's program agreements ----
+
+const WITH_ROWS = fromAgreements({
+  app: { id: APP, name: "Cards", stage: "production" },
+  can_manage: true,
+  agreements: [
+    { id: "g-proposed", status: "proposed", kind: "program", counterparty: { name: "Lead Bank" }, products: [{ id: "p1", name: "Card" }], signatures: { app_side: false, counterparty_side: false } },
+    { id: "g-accepted", status: "accepted", kind: "program", counterparty: { name: "Lead Bank" }, products: [{ id: "p1", name: "Card" }], signatures: { app_side: false, counterparty_side: true }, document_url: "https://docs.example.com/p.pdf" },
+    { id: "g-half", status: "accepted", kind: "program", counterparty: { name: "Harbor Bank" }, products: [{ id: "p2", name: "Savings" }], signatures: { app_side: true, counterparty_side: false }, document_url: "javascript:alert(1)" },
+    { id: "g-signed", status: "signed", kind: "data_sharing", counterparty: { name: "Harbor Bank" }, products: [], signatures: { app_side: true, counterparty_side: true } },
+    { id: "g-ended", status: "terminated", kind: "program", counterparty: { name: "Lead Bank" }, products: [], termination_reason: "Program wound down" },
+  ],
+  products: AGREEMENTS.products.map((p) => ({ id: p.id, name: p.name, sponsors: [] })),
+  program_coverage: [
+    { product_id: "p1", product_name: "Card", sponsor_entity_id: SPONSOR, sponsor_name: "Lead Bank", covered: false, agreement_id: "g-ended", note: "it was ended on 2026-11-20: Program wound down" },
+    { product_id: "p2", product_name: "Savings", sponsor_entity_id: OTHER_SPONSOR, sponsor_name: "Harbor Bank", covered: true, agreement_id: "g-x", note: null },
+  ],
+  production_gate: { met: false, missing: ["No signed program agreement with Lead Bank for Card (it was ended on 2026-11-20: Program wound down)"], flagged: true },
+  vendor_contracts: [],
+  introductions: null,
+})!;
+
+describe("Agreements tab: each row's labelled actions", () => {
+  it("offers Withdraw on our proposal, Sign while our side hasn't signed, End agreement once accepted or signed, nothing once ended", () => {
+    const html = renderToStaticMarkup(<panelTabs.AgreementsTabView appId={APP} data={WITH_ROWS} />);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const labels = (id: string) => [...doc.querySelectorAll(`[data-agreement-actions="${id}"] [data-agreement-action]`)].map((b) => b.textContent);
+    expect(labels("g-proposed")).toEqual(["Withdraw"]);
+    expect(labels("g-accepted")).toEqual(["Sign", "End agreement"]);
+    expect(labels("g-half")).toEqual(["End agreement"]);
+    expect(labels("g-signed")).toEqual(["End agreement"]);
+    expect(labels("g-ended")).toEqual([]);
+    expect(html).toContain("Reason: Program wound down");
+    // Only an https document is linked.
+    expect(doc.querySelector('[data-agreement-document="g-accepted"]')?.getAttribute("href")).toBe("https://docs.example.com/p.pdf");
+    expect(doc.querySelector('[data-agreement-document="g-half"]')).toBeNull();
+    // A member (not an owner or admin) sees no actions.
+    expect(renderToStaticMarkup(<panelTabs.AgreementsTabView appId={APP} data={{ ...WITH_ROWS, canManage: false }} />)).not.toContain("data-agreement-action=");
+    expect(agreementActions({ statusKey: "proposed", appSigned: false, counterpartySigned: false }, "counterparty")).toEqual(["accept", "decline"]);
+  });
+
+  it("flags an app in production that lost a program agreement, and lists what production needs with a Propose agreement shortcut", () => {
+    const html = renderToStaticMarkup(<panelTabs.AgreementsTabView appId={APP} data={WITH_ROWS} />);
+    expect(html).toContain("data-production-flag");
+    expect(html).toContain("No signed program agreement with Lead Bank for Card (it was ended on 2026-11-20: Program wound down)");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector(`[data-coverage="p1/${SPONSOR}"]`)?.getAttribute("data-covered")).toBe("false");
+    expect(doc.querySelector(`[data-coverage="p2/${OTHER_SPONSOR}"]`)?.textContent).toContain("Signed and in force");
+    expect([...doc.querySelectorAll("[data-propose-for]")].map((b) => b.getAttribute("data-propose-for"))).toEqual([`p1/${SPONSOR}`]);
+  });
+
+  it("the shortcut opens Propose agreement pre-filled with that sponsor and product", async () => {
+    const coverage = WITH_ROWS.coverage!;
+    const { ProgramCoverage } = sheets;
+    render(<ProgramCoverage appId={APP} coverage={coverage} canPropose sheetData={AGREEMENTS} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-propose-for="p1/${SPONSOR}"]`)!));
+    expect((document.querySelector("[data-agreement-counterparty]") as HTMLSelectElement).value).toBe(SPONSOR);
+    expect((document.querySelector('[data-agreement-product="p1"]') as HTMLInputElement).checked).toBe(true);
+    expect((document.querySelector("[data-agreement-kind]") as HTMLSelectElement).value).toBe("program");
+  });
+
+  it("Sign and End agreement each open a sheet that says what it does and posts to this app's agreement route", async () => {
+    const requests: { url: string; body: unknown }[] = [];
+    const fetcher = (async (url: string, init: RequestInit) => {
+      requests.push({ url, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ ok: true, message: "Done." }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const summary = { id: AGREEMENT, title: "Program agreement with Lead Bank", lines: ["Covers: Card"] };
+    let done = 0;
+    const { rerender } = render(<sheets.AgreementActionSheet url={`/api/apps/${APP}/agreements/${AGREEMENT}`} action="sign" agreement={summary} onClose={() => undefined} onDone={() => done++} fetcher={fetcher} />);
+    await act(async () => undefined);
+    expect(screen.getByRole("heading", { name: "Sign agreement" })).toBeTruthy();
+    await act(async () => void fireEvent.click(document.querySelector('[data-agreement-action-submit="sign"]')!));
+    expect(requests.at(-1)).toEqual({ url: `/api/apps/${APP}/agreements/${AGREEMENT}`, body: { action: "sign" } });
+    expect(done).toBe(1);
+    rerender(<sheets.AgreementActionSheet url={`/api/apps/${APP}/agreements/${AGREEMENT}`} action="end" agreement={summary} onClose={() => undefined} onDone={() => done++} fetcher={fetcher} />);
+    await act(async () => undefined);
+    const submit = document.querySelector('[data-agreement-action-submit="end"]') as HTMLButtonElement;
+    expect(submit.disabled).toBe(true); // the reason first
+    fireEvent.change(document.querySelector("[data-agreement-reason]")!, { target: { value: "We're closing the card" } });
+    await act(async () => void fireEvent.click(submit));
+    expect(requests.at(-1)?.body).toEqual({ action: "terminate", reason: "We're closing the card" });
+  });
+
+  it("the route: own origin, a strict body, the user's app and one of its agreements, then sign or terminate", async () => {
+    fake.tools = [{ name: "list_my_apps" }, { name: "list_app_agreements" }, { name: "sign_app_agreement" }, { name: "terminate_app_agreement" }];
+    const call = (body: unknown, app = APP, id = AGREEMENT) =>
+      agreementRoute.POST(new Request(`http://localhost:3000/api/apps/${app}/agreements/${id}`, { method: "POST", body: JSON.stringify(body) }), { params: Promise.resolve({ appId: app, agreementId: id }) });
+    fake.sameOrigin = false;
+    expect((await call({ action: "sign" })).status).toBe(403);
+    fake.sameOrigin = true;
+    expect((await call({ action: "accept" })).status).toBe(400); // the other firm's
+    expect((await call({ action: "terminate" })).status).toBe(400); // a reason
+    expect((await call({ action: "sign", extra: 1 })).status).toBe(400);
+    expect((await call({ action: "sign" }, APP, "not-a-uuid")).status).toBe(400);
+    expect((await call({ action: "sign" }, "not-mine")).status).toBe(404);
+    expect((await call({ action: "sign" }, APP, "44444444-4444-4444-8444-444444444444")).status).toBe(404); // not one of this app's
+    expect((await call({ action: "sign" })).status).toBe(200);
+    expect(fake.calls.find((c) => c.name === "sign_app_agreement")?.args).toEqual({ agreement_id: AGREEMENT });
+    expect((await call({ action: "terminate", reason: "Closing it" })).status).toBe(200);
+    expect(fake.calls.find((c) => c.name === "terminate_app_agreement")?.args).toEqual({ agreement_id: AGREEMENT, reason: "Closing it" });
+    fake.refuse = "Your side has already signed it";
+    const refused = await call({ action: "sign" });
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as { message: string }).message).toContain("already signed");
+  });
+});
+
+describe("Move to production: the program agreements check", () => {
+  const checks = fromPromotionChecks(
+    {
+      app_id: APP,
+      from_stage: "staging",
+      to_stage: "production",
+      can_promote: false,
+      checks: [
+        {
+          id: "program_agreements",
+          label: "Signed program agreement with each product's sponsor",
+          status: "fail",
+          detail: "No signed program agreement with Lead Bank for Card",
+          fix: { label: "Propose agreement", href: `/${APP}?tab=agreements`, tool: "propose_app_agreement" },
+          coverage: [{ product_id: "p1", product_name: "Card", sponsor_entity_id: SPONSOR, sponsor_name: "Lead Bank", covered: false, agreement_id: null, note: null }],
+        },
+      ],
+    },
+    "production",
+  )!;
+
+  it("shows the check in Mynt's words with each missing sponsor's Propose agreement shortcut, for owners and admins", () => {
+    expect(checks.checks[0].coverage).toEqual([{ productId: "p1", productName: "Card", sponsorId: SPONSOR, sponsorName: "Lead Bank", covered: false, agreementId: null, note: null }]);
+    const html = renderToStaticMarkup(<CheckList checks={checks.checks} name="Cards" to="Production" appId={APP} canPropose />);
+    expect(html).toContain("No signed program agreement with Lead Bank for Card");
+    expect(html).toContain(`data-propose-for="p1/${SPONSOR}"`);
+    // Members see the rows, not the shortcut; without the app (a product's checks) it's the plain fix link.
+    expect(renderToStaticMarkup(<CheckList checks={checks.checks} name="Cards" to="Production" appId={APP} />)).not.toContain("data-propose-for");
+    expect(renderToStaticMarkup(<CheckList checks={checks.checks} name="Cards" to="Production" />)).toContain(`href="/${APP}?tab=agreements"`);
   });
 });

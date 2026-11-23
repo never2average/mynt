@@ -4,7 +4,7 @@
 // Tabs show information; anything that changes state (promoting, moving back, setting target
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
-import { CHECK_LABELS, type PromotionCheck } from "./promotions";
+import { CHECK_LABELS, coverageFrom, type AgreementCoverage, type PromotionCheck } from "./promotions";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -87,7 +87,36 @@ export function fromPnl(reply: unknown): AppPnl | null {
 export const STAGE_TEXT: Record<string, string> = { idea: "Idea", staging: "Staging", production: "Production" };
 export type Sponsor = { entityId: string; name: string; states: string[] };
 export type AppProduct = { id: string; name: string; stage: string | null; sponsors: Sponsor[]; states: string[]; missing: boolean };
-export type AppProducts = { available: true; products: AppProduct[]; productionCheck: PromotionCheck | null };
+// Production needs a signed program agreement in force with each product's sponsor (Mynt's program_agreements
+// check). `flagged`: the app is in production already and one ended or expired; it keeps running, its checks fail.
+export type AgreementGate = { met: boolean; missing: string[]; flagged: boolean };
+export type AppProducts = {
+  available: true;
+  products: AppProduct[];
+  productionCheck: PromotionCheck | null; // the licences check, while the app's next stage is production
+  agreementCheck?: PromotionCheck | null; // the program agreements check, likewise
+  coverage?: AgreementCoverage[]; // each product and sponsor, and whether a signed agreement covers it
+  gate?: AgreementGate | null;
+  canManage?: boolean; // an owner or admin: offered Propose agreement for a missing one
+};
+
+export function gateFrom(v: unknown): AgreementGate | null {
+  if (!isObj(v)) return null;
+  return { met: v.met === true, missing: arr(v.missing).map(str).filter((s): s is string => Boolean(s)), flagged: v.flagged === true };
+}
+
+// What the Propose agreement sheet offers, from the coverage rows: each sponsor with the products it sponsors.
+export function sponsorsFromCoverage(coverage: AgreementCoverage[]): { sponsors: AppAgreements["sponsors"]; products: AppAgreements["products"] } {
+  const sponsors = new Map<string, { entityId: string; name: string; productIds: string[] }>();
+  const products = new Map<string, string>();
+  for (const c of coverage) {
+    const s = sponsors.get(c.sponsorId) ?? { entityId: c.sponsorId, name: c.sponsorName, productIds: [] };
+    if (!s.productIds.includes(c.productId)) s.productIds.push(c.productId);
+    sponsors.set(c.sponsorId, s);
+    products.set(c.productId, c.productName);
+  }
+  return { sponsors: [...sponsors.values()], products: [...products].map(([id, name]) => ({ id, name })) };
+}
 
 const sponsorsFrom = (v: unknown): Sponsor[] =>
   arr(v)
@@ -128,6 +157,11 @@ export type AgreementRow = {
   from: string | null;
   to: string | null;
   signatures: string | null;
+  kindKey: string;
+  appSigned: boolean;
+  counterpartySigned: boolean;
+  documentUrl: string | null; // https only
+  endedReason: string | null;
 };
 export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null };
 export type IntroRow = { id: string; counterparty: string | null; status: string; since: string | null };
@@ -140,7 +174,36 @@ export type AppAgreements = {
   // For the Propose agreement sheet: the sponsors of the app's products, and the products.
   sponsors: { entityId: string; name: string; productIds: string[] }[];
   products: { id: string; name: string }[];
+  // What production needs: each product and sponsor, and whether a signed agreement covers it.
+  coverage?: AgreementCoverage[];
+  gate?: AgreementGate | null;
+  stage?: string | null;
 };
+
+/** A document link as the studio shows it: https only, without credentials; anything else isn't linked. */
+export function documentLink(v: unknown): string | null {
+  const raw = str(v);
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:" && !u.username && !u.password ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+// What each side may do with an agreement now, by its status and signatures (Mynt decides again):
+// the app's owners and admins sign an accepted one they haven't, withdraw their own proposal, and end an
+// accepted or signed one; the other firm accepts or declines a proposal, signs an accepted one it hasn't, and
+// ends an accepted or signed one.
+export type AgreementAction = "sign" | "withdraw" | "end" | "accept" | "decline";
+export function agreementActions(a: { statusKey: string; appSigned: boolean; counterpartySigned: boolean }, side: "app" | "counterparty"): AgreementAction[] {
+  if (a.statusKey === "proposed") return side === "app" ? ["withdraw"] : ["accept", "decline"];
+  if (a.statusKey === "accepted") return [...((side === "app" ? !a.appSigned : !a.counterpartySigned) ? (["sign"] as const) : []), "end"];
+  if (a.statusKey === "signed") return ["end"];
+  return [];
+}
+export const AGREEMENT_ACTION_LABELS: Record<AgreementAction, string> = { sign: "Sign", withdraw: "Withdraw", end: "End agreement", accept: "Accept", decline: "Decline" };
 
 const INTRO_STATUS: Record<string, string> = { proposed: "Asked: waiting for both to say yes", agreed: "Both said yes", made: "Introduced" };
 
@@ -177,9 +240,17 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
             from: str(a.effective_from),
             to: str(a.effective_to),
             signatures,
+            kindKey: str(a.kind) ?? "",
+            appSigned: sig.app_side === true,
+            counterpartySigned: sig.counterparty_side === true,
+            documentUrl: documentLink(a.document_url),
+            endedReason: str(a.termination_reason),
           },
         ];
       }),
+    coverage: coverageFrom(reply.program_coverage),
+    gate: gateFrom(reply.production_gate),
+    stage: isObj(reply["app"]) ? str(reply["app"].stage) : null,
     vendorContracts: arr(reply.vendor_contracts)
       .filter(isObj)
       .flatMap((v): VendorContractRow[] => {
