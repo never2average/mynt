@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   return asDeveloper(
     "reading liquidity roles",
-    async (_mynt, session) => json({ access: sessionAccess(session), developer: sessionIsDeveloper(session), licenceProvider: isLicenceProvider(session.roles ?? []), owner: ownerOf(session) }),
+    async (_mynt, session) => json({ access: sessionAccess(session), developer: sessionIsDeveloper(session), licenceProvider: isLicenceProvider(session.roles ?? []), admin: (session.roles ?? []).includes("admin"), owner: ownerOf(session) }),
     () => true,
   );
 }

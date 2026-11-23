@@ -1,6 +1,6 @@
 // E-signature, brand-neutral: what Mynt needs from an e-signature service to have a program agreement signed by both
 // parties and keep the signed copy. One adapter per service (signwell.ts); which one runs, and its keys, are settings
-// read by name (esignFromEnv below). Nothing here names a service.
+// set from Mynt Studio by an admin (esign-settings.ts), with environment overrides. Nothing here names a service.
 //
 // The adapter never decides an agreement is signed by itself: Mynt asks it for the document's state (getStatus) and
 // only a completed document, downloaded and sealed by Mynt, signs an agreement (agreement-esign.ts).
@@ -74,6 +74,24 @@ export interface ESignProvider {
   // A webhook delivery, checked against the service's own scheme with the raw body and headers as received.
   verifyWebhook(rawBody: string, headers: Record<string, string | undefined>, now?: Date): WebhookCheck;
   cancel(documentId: string): Promise<void>;
+  // The https origins the service's embedded signing pages are served from (the adapter's own list): a signing link
+  // from anywhere else is never framed.
+  readonly signingOrigins: readonly string[];
+}
+
+// Setting the service up from Mynt itself (esign-settings.ts): check a key, and register, find or remove the webhook
+// that sends Mynt the service's events. Uses only the key it's given.
+export interface ESignSetup {
+  validateKey(): Promise<void>; // throws ESignError("not_authorised") for a key the service refuses
+  registerWebhook(callbackUrl: string): Promise<{ id: string; reused: boolean }>;
+  deleteWebhook(id: string): Promise<void>;
+}
+
+export interface ESignAdapter {
+  name: string;
+  // A provider for documents and webhooks, with the key and, once registered, the webhook's id.
+  provider(opts: { apiKey: string; webhookId: string | null; fetch?: typeof fetch }): ESignProvider;
+  setup(opts: { apiKey: string; fetch?: typeof fetch }): ESignSetup;
 }
 
 export class ESignError extends Error {

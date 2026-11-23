@@ -194,6 +194,13 @@ export const STUDIO_TOOLS = {
   retire_agreement_template: z.object({ template_id: uuid, reason: z.string().trim().max(500).optional() }).strict(),
   get_agreement_signing_link: z.object({ agreement_id: uuid }).strict(),
   download_agreement_document: z.object({ agreement_id: uuid, part: z.enum(["signed", "certificate"]).optional() }).strict(),
+  // Settings → E-signature (admins): the e-signature service's key (sent once, never shown again), its webhook, and
+  // test mode. Mynt checks the key with the service and keeps it sealed.
+  get_esign_settings: z.object({}).strict(),
+  set_esign_api_key: z.object({ provider: z.enum(["signwell"]), api_key: z.string().trim().min(8).max(500).regex(/^[\x21-\x7e]+$/) }).strict(),
+  register_esign_webhook: z.object({}).strict(),
+  remove_esign_api_key: z.object({ confirm: z.literal(true) }).strict(),
+  set_esign_test_mode: z.object({ test_mode: z.boolean() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace

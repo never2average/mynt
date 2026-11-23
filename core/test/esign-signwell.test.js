@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { createSignWell, signwellFromEnv } from "../dist/esign/signwell.js";
-import { esignFromEnv } from "../dist/esign/adapters.js";
+import { signwellSetup, SIGNING_ORIGINS } from "../dist/esign/signwell.js";
 import { testModeFromEnv } from "../dist/esign/provider.js";
 import { schedulePdf } from "../dist/esign/schedule-pdf.js";
 
@@ -168,17 +168,41 @@ test("webhook events: the hash of type@time under the webhook id, compared in co
   assert.deepEqual(noHook.verifyWebhook(event("document_completed", t), {}, now), { ok: false, reason: "unconfigured" });
 });
 
-test("settings by name: off without a key; test mode on unless turned off", async () => {
+test("the adapter's environment names and test-mode words; the signing origins it frames from", () => {
   assert.equal(signwellFromEnv({}), null);
   assert.ok(signwellFromEnv({ SIGNWELL_API_KEY: KEY }));
-  assert.equal(await esignFromEnv({}), null);
-  assert.equal(await esignFromEnv({ ESIGN_PROVIDER: "signwell" }), null, "no key: off");
-  const on = await esignFromEnv({ ESIGN_PROVIDER: "signwell", SIGNWELL_API_KEY: KEY });
-  assert.equal(on.provider.name, "signwell");
-  assert.equal(on.testMode, true);
-  assert.equal((await esignFromEnv({ ESIGN_PROVIDER: "signwell", SIGNWELL_API_KEY: KEY, ESIGN_TEST_MODE: "off" })).testMode, false);
+  assert.equal(testModeFromEnv({}), true, "test mode on unless turned off");
   assert.equal(testModeFromEnv({ ESIGN_TEST_MODE: "on" }), true);
-  assert.equal(await esignFromEnv({ ESIGN_PROVIDER: "nobody", SIGNWELL_API_KEY: KEY }), null);
+  assert.equal(testModeFromEnv({ ESIGN_TEST_MODE: "off" }), false);
+  const p = createSignWell({ apiKey: KEY, fetch: fakeFetch(() => ({})).f });
+  assert.deepEqual([...p.signingOrigins], [...SIGNING_ORIGINS]);
+  assert.ok(SIGNING_ORIGINS.every((o) => o.startsWith("https://")));
+});
+
+test("setup: the key checked with a read of its own account; the webhook found by its URL or created; removal tolerates a gone hook", async () => {
+  const hooks = [{ id: "hook-old", callback_url: "https://other.example.test/hook" }];
+  const { f, calls } = fakeFetch((c) => {
+    if (c.url.endsWith("/me")) return c.headers["X-Api-Key"] === KEY ? { json: { id: "u" } } : { status: 401, json: {} };
+    if (c.url.endsWith("/hooks") && c.method === "GET") return { json: hooks };
+    if (c.url.endsWith("/hooks") && c.method === "POST") {
+      const h = { id: `hook-${hooks.length + 1}`, callback_url: c.body.callback_url };
+      hooks.push(h);
+      return { status: 201, json: h };
+    }
+    if (c.method === "DELETE") return c.url.endsWith("/hooks/gone") ? { status: 404, json: {} } : { status: 204 };
+    return { status: 404, json: {} };
+  });
+  await signwellSetup({ apiKey: KEY, fetch: f }).validateKey();
+  await assert.rejects(signwellSetup({ apiKey: "wrong-key-value", fetch: f }).validateKey(), (e) => e.code === "not_authorised" && !e.message.includes("wrong-key-value"));
+  const s = signwellSetup({ apiKey: KEY, fetch: f });
+  const made = await s.registerWebhook("https://mynt.example.test/esign/webhook");
+  assert.deepEqual(made, { id: "hook-2", reused: false });
+  assert.deepEqual(calls.at(-1).body, { callback_url: "https://mynt.example.test/esign/webhook" });
+  assert.deepEqual(await s.registerWebhook("https://mynt.example.test/esign/webhook"), { id: "hook-2", reused: true }, "one already pointing here is reused");
+  await assert.rejects(s.registerWebhook("http://mynt.example.test/esign/webhook"), (e) => e.code === "webhook_url_not_https");
+  await s.deleteWebhook("hook-2");
+  await s.deleteWebhook("gone");
+  assert.ok(calls.every((c) => c.url.startsWith("https://") && !JSON.stringify(c.body ?? {}).includes(KEY)));
 });
 
 test("Mynt's program schedule is a well-formed PDF stating what Mynt filled in", () => {

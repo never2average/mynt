@@ -26,6 +26,7 @@ import { toCsv } from "@/lib/compliance"
 import type { Kpi } from "@/lib/dashboard-visual"
 import { Tab, TabList } from "@/components/ui/tabs"
 import { TAB_LABELS, WORKSPACE_TABS, type WorkspaceTab } from "@/lib/workspace-tabs"
+import { useStudioAccess } from "@/lib/use-liquidity-access"
 import { STAGE_LABELS, STAGES, type Stage, type Workspace } from "@/lib/workspaces"
 
 
@@ -56,7 +57,9 @@ export type SettingsActions = {
   relink(): Promise<string | null>
 }
 
-export function TabSelector({ tab, onTab }: { tab: WorkspaceTab; onTab: (t: WorkspaceTab) => void }) {
+// Admins also get E-signature (/settings?tab=esign), which is Mynt's own setting rather than the workspace's.
+export function TabSelector({ tab, onTab, esign = false }: { tab: WorkspaceTab | "esign"; onTab: (t: WorkspaceTab) => void; esign?: boolean }) {
+  const admin = useStudioAccess()?.admin === true
   return (
     <TabList aria-label="Settings">
       {WORKSPACE_TABS.map((t) => (
@@ -64,6 +67,11 @@ export function TabSelector({ tab, onTab }: { tab: WorkspaceTab; onTab: (t: Work
           {TAB_LABELS[t]}
         </Tab>
       ))}
+      {(admin || esign) && (
+        <Tab selected={tab === "esign"} data-tab="esign" onClick={() => window.location.assign("/settings?tab=esign")}>
+          E-signature
+        </Tab>
+      )}
     </TabList>
   )
 }

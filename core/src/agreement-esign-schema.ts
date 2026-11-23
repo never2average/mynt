@@ -78,4 +78,13 @@ export const AGREEMENT_ESIGN_TABLES = `
     PRIMARY KEY (provider, event_id)
   );
   ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS signed_at timestamptz;
+  -- Mynt's own secrets that admins set from Mynt Studio (the e-signature service's API key and webhook id,
+  -- esign-settings.ts): one row per key, sealed under the vault key, never returned.
+  CREATE TABLE IF NOT EXISTS ${T}.platform_secrets (
+    id uuid PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    sealed text NOT NULL,
+    set_by uuid REFERENCES ${T}.users(id),
+    set_at timestamptz NOT NULL DEFAULT now()
+  );
 `;

@@ -32,7 +32,7 @@ import { sweepStaleMovements } from "./money-rails.js";
 import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks, LiquidityWorker, liquidityProvidersOf, openWithdrawalRequests, poolSponsorOf, poolsOf } from "./liquidity.js";
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
-import { esignFromEnv } from "./esign/adapters.js";
+import { EsignSettings } from "./esign-settings.js";
 import { CovenantService } from "./covenants.js";
 import { TreasuryService, treasuryConfigFromEnv } from "./treasury.js";
 import { partnerLedgerFor } from "./partner-kit.js";
@@ -93,9 +93,9 @@ Environment:
   PRODUCT_HEALTH_PROGRAM_ID The deployed product-health program (devnet); unset, the worker doesn't run. PRODUCT_HEALTH_INTERVAL_MINUTES (default 60)
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
                             (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)
-  ESIGN_PROVIDER=signwell   Program agreements signed by e-signature (with SIGNWELL_API_KEY; SIGNWELL_WEBHOOK_ID verifies its
-                            webhook at <PUBLIC_URL>/esign/webhook). ESIGN_TEST_MODE=off for legally binding documents (default on).
-                            Signed copies are sealed with MYNT_VAULT_KEY`;
+  ESIGN_PROVIDER=signwell   Overrides for e-signature, which admins set up in Mynt Studio (Settings → E-signature):
+                            SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID, ESIGN_TEST_MODE=off. Keys and signed copies are
+                            sealed with MYNT_VAULT_KEY`;
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -179,8 +179,10 @@ const openServices = async () => {
   const covenants = await CovenantService.open(db, store, productHealth);
   // Pools' on-chain treasuries (devnet): the registry, Mynt's deposit attester and the indexer.
   const treasury = await TreasuryService.open(db, store, solana, treasuryConfigFromEnv(), { sandboxes });
-  // E-signature for program agreements (ESIGN_PROVIDER and its keys); off without them, and the manual flow stays.
-  const esign = await esignFromEnv();
+  // E-signature for program agreements: set up by an admin in Mynt Studio (Settings → E-signature), with the
+  // environment's ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides. Off until
+  // then, and the manual flow stays.
+  const esign = await EsignSettings.open(store);
   return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign };
 };
 

@@ -45,6 +45,7 @@ import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
 import { registerAppAgreementTools } from "./app-agreements.js";
 import { registerAgreementEsignTools } from "./agreement-esign.js";
+import { registerEsignAdminTools, type EsignSettings } from "./esign-settings.js";
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
@@ -204,6 +205,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     // Licence providers' agreement templates, and signing program agreements by e-signature (agreement-esign.ts).
     registerAgreementEsignTools(server, store, user, ctx.esign ?? null, sides);
   }
+  // Admins set e-signature up from Mynt Studio: the service's key, its webhook, test mode (esign-settings.ts).
+  if (user && has("admin") && typeof (ctx.esign as Partial<EsignSettings> | null | undefined)?.setKey === "function") registerEsignAdminTools(server, store, user, ctx.esign as EsignSettings);
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds, ctx.identity ?? null);
   // Starting points for common finance apps, for start_build's kind (app-kinds.ts).

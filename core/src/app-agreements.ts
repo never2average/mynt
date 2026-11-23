@@ -5,6 +5,7 @@ import { APP_AGREEMENT_KINDS, APP_AGREEMENT_STATUSES } from "./app-agreements-sc
 import { cancelSigning, signatureDocumentOf, startSigning } from "./agreement-esign.js";
 import { inTransaction } from "./db.js";
 import type { ESign } from "./esign/provider.js";
+import { currentEsign, type EsignSource } from "./esign-settings.js";
 import { noticeFirm } from "./firm-notices.js";
 import type { FirmWebhookEvent } from "./runtime.js";
 import { effectiveRoles, productStage, type App, type Store, type User } from "./store.js";
@@ -333,7 +334,9 @@ async function describe(store: Store, esign: ESign | null, a: AppAgreement) {
 // The app's side (developers): propose, sign, terminate and list an app's agreements; choose its target customers.
 // The counterparty's side (licence providers and vendors): respond, sign, terminate and list the agreements naming its
 // firm. One account can be both; each call works out which side it acts for from the agreement.
-export function registerAppAgreementTools(server: McpServer, store: Store, user: User, sides: { app: boolean; counterparty: boolean }, esign: ESign | null = null) {
+export function registerAppAgreementTools(server: McpServer, store: Store, user: User, sides: { app: boolean; counterparty: boolean }, esignSource: EsignSource = null) {
+  // E-signature as it's configured now (an admin may set it up or change it while the server runs).
+  const esign = () => currentEsign(esignSource);
   // The caller's firm, when it may act for it as a counterparty (read afresh: a licence provider without standing at
   // its firm acts for none, store.ts rolesWithStanding).
   const myFirm = async () => {
@@ -419,7 +422,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         const a = toAgreement(r);
         await store.audit(user.id, "propose_app_agreement", a.id, { app_id: app.id, workspace_id: app.workspace_id, counterparty_entity_id, kind, products: covered, document_sha256: document_sha256 ?? null });
         const told = await tell(a, "app_agreement.proposed", { app_name: app.name, terms_summary, respond_with: "respond_to_app_agreement { agreement_id, decision }" });
-        return json({ ...(await describe(store, esign, a)), counterparty_told: told > 0 });
+        return json({ ...(await describe(store, esign(), a)), counterparty_told: told > 0 });
       },
     );
   }
@@ -449,8 +452,8 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         await store.audit(user.id, decision === "accept" ? "accept_app_agreement" : "decline_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: firm, kind: done.kind, note: note ?? null });
         // An accepted program agreement goes to e-signature at once where it's configured; if that can't happen yet
         // (no template, the service unreachable) it's made when someone first asks to sign (get_agreement_signing_link).
-        const signing = esign && done.kind === "program" && status === "accepted" ? await startSigning(store, esign, done.id, user.id) : null;
-        return json({ ...(await describe(store, esign, done)), ...(signing ? { signing: signing.ok ? { ready: true } : { ready: false, reason: signing.error } } : {}) });
+        const signing = esign() && done.kind === "program" && status === "accepted" ? await startSigning(store, esign(), done.id, user.id) : null;
+        return json({ ...(await describe(store, esign(), done)), ...(signing ? { signing: signing.ok ? { ready: true } : { ready: false, reason: signing.error } } : {}) });
       },
     );
   }
@@ -469,7 +472,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       if (!a || !side) return fail(`No agreement '${agreement_id}' you can sign`);
       if (a.status !== "accepted") return fail(a.status === "proposed" ? "The other firm hasn't accepted it yet" : `That agreement is ${a.status}`);
       // With e-signature configured, only a completed e-signature signs a program agreement.
-      if (esign && a.kind === "program") return fail("This deployment signs program agreements by e-signature: each signer opens get_agreement_signing_link, and it's signed once both have");
+      if (esign() && a.kind === "program") return fail("This deployment signs program agreements by e-signature: each signer opens get_agreement_signing_link, and it's signed once both have");
       const col = side === "app" ? "app" : "counterparty";
       if (side === "app" ? a.app_signed_at : a.counterparty_signed_at) return fail("Your side has already signed it");
       const r = (
@@ -485,7 +488,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       const done = toAgreement(r);
       await store.audit(user.id, "sign_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, side, signed: done.status === "signed" });
       if (done.status === "signed") await tell(done, "app_agreement.signed");
-      return json(await describe(store, esign, done));
+      return json(await describe(store, esign(), done));
     },
   );
 
@@ -510,9 +513,9 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       if (!r) return fail(`That agreement is already ${a.status}`);
       const done = toAgreement(r);
       await store.audit(user.id, "terminate_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, side, from_status: a.status, reason });
-      await cancelSigning(store, esign, done.id, user.id);
+      await cancelSigning(store, esign(), done.id, user.id);
       if (side === "app") await tell(done, "app_agreement.terminated", { reason });
-      return json(await describe(store, esign, done));
+      return json(await describe(store, esign(), done));
     },
   );
 
@@ -536,7 +539,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         return json({
           app: { id: app.id, name: app.name, workspace_id: app.workspace_id, stage },
           can_manage: MANAGERS.includes((await appRole(store, user, app)) ?? ""),
-          agreements: await Promise.all(rows.map((r) => describe(store, esign, toAgreement(r)))),
+          agreements: await Promise.all(rows.map((r) => describe(store, esign(), toAgreement(r)))),
           // Production needs a signed program agreement in force for each of these (the program_agreements check).
           program_coverage: coverage,
           production_gate: {
@@ -553,7 +556,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       const firm = await myFirm();
       if (!firm) return fail(sides.app ? "Name the app (app_id) whose agreements you want" : "You don't belong to a firm as a licence provider or vendor yet");
       const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE counterparty_entity_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`, [firm, status ?? null]);
-      return json({ entity_id: firm, agreements: await Promise.all(rows.map((r) => describe(store, esign, toAgreement(r)))) });
+      return json({ entity_id: firm, agreements: await Promise.all(rows.map((r) => describe(store, esign(), toAgreement(r)))) });
     },
   );
 

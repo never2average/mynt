@@ -54,6 +54,7 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerAppRemovalTools: "apps",
   registerAppAgreementTools: "apps",
   registerAgreementEsignTools: "apps",
+  registerEsignAdminTools: "admin",
   registerCodingAgentTools: "builds",
   registerCodingAgentAdminTools: "builds",
   registerRepoAccessNoticeTools: "builds",
@@ -132,7 +133,7 @@ const READ_NAME = /^(list|get|search|whoami|describe|preview|explain|check|show|
 // tools a fully configured server has. Nothing is ever called (no request runs).
 function inertServices(): AdminContext {
   const inert = () => new Proxy({}, { get: (_t, k) => (k === "then" ? undefined : () => null) });
-  const keys = ["clerkAdmin", "identity", "workspaceSync", "builds", "bd", "desk", "review", "explore", "hosting", "modules", "solana", "gate", "productHealth", "covenants", "treasury"] as const;
+  const keys = ["clerkAdmin", "identity", "workspaceSync", "builds", "bd", "desk", "review", "explore", "hosting", "modules", "solana", "gate", "productHealth", "covenants", "treasury", "esign"] as const;
   return Object.fromEntries(keys.map((k) => [k, inert()])) as AdminContext;
 }
 

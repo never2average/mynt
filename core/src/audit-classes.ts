@@ -28,6 +28,13 @@ const SECURITY = [
   // secrets kept from leaking: revealed, rotated, or rotated out of a leaver's reach
   "webhook_secret_rotated_on_offboard",
   "reveal_partner_ledger_secret",
+  // e-signature set up from Mynt Studio: the service's key (never its value) and webhook, test mode (esign-settings.ts)
+  "set_esign_api_key",
+  "set_esign_api_key_refused",
+  "register_esign_webhook",
+  "register_esign_webhook_refused",
+  "remove_esign_api_key",
+  "set_esign_test_mode",
   "rotate_partner_ledger_secret",
   "reveal_subscription_secret",
   "rotate_subscription_secret",

@@ -4,8 +4,10 @@ import {
   type CreateFromDocumentInput,
   type CreateFromTemplateInput,
   type ESignDocument,
+  type ESignAdapter,
   type ESignDocumentStatus,
   type ESignProvider,
+  type ESignSetup,
   type ESignSigner,
   type WebhookCheck,
 } from "./provider.js";
@@ -258,8 +260,73 @@ export function createSignWell(opts: SignWellOptions): ESignProvider {
         if (!(e instanceof ESignError && e.code === "not_found")) throw e;
       }
     },
+
+    signingOrigins: SIGNING_ORIGINS,
   };
 }
+
+// Where SignWell serves its embedded signing pages: Mynt frames a signing link only from here.
+export const SIGNING_ORIGINS = ["https://www.signwell.com"] as const;
+
+// Setting SignWell up from Mynt: the key checked with a cheap authenticated read (the key's own account), and the
+// webhook found by its callback URL or created (SignWell's webhook id is the key its events are signed with).
+export function signwellSetup(opts: { apiKey: string; fetch?: Fetch }): ESignSetup {
+  const doFetch: Fetch = opts.fetch ?? fetch;
+  async function call(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<unknown> {
+    let res: Response;
+    try {
+      res = await doFetch(`${BASE}${path}`, {
+        method,
+        headers: { "X-Api-Key": opts.apiKey, Accept: "application/json", "User-Agent": "Mynt-ESign/1", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+      });
+    } catch (e) {
+      throw new ESignError((e as Error).name === "TimeoutError" ? "timeout" : "unreachable");
+    }
+    const raw = await readCapped(res, MAX_JSON_BYTES);
+    if (res.status === 401 || res.status === 403) throw new ESignError("not_authorised", res.status);
+    if (res.status === 404) throw new ESignError("not_found", res.status);
+    if (res.status === 429) throw new ESignError("rate_limited", res.status);
+    if (res.status >= 300) throw new ESignError(res.status === 422 || res.status === 400 ? "refused" : "provider_error", res.status);
+    if (!raw.length) return null;
+    try {
+      return JSON.parse(raw.toString("utf8"));
+    } catch {
+      throw new ESignError("malformed_response", res.status);
+    }
+  }
+  return {
+    async validateKey() {
+      const me = (await call("GET", "/me")) as Row | null;
+      if (!me || typeof me !== "object") throw new ESignError("malformed_response");
+    },
+    async registerWebhook(callbackUrl: string) {
+      if (!callbackUrl.startsWith("https://")) throw new ESignError("webhook_url_not_https");
+      const hooks = await call("GET", "/hooks");
+      const found = (Array.isArray(hooks) ? (hooks as Row[]) : []).find((h) => h.callback_url === callbackUrl && typeof h.id === "string");
+      if (found) return { id: found.id as string, reused: true };
+      const made = (await call("POST", "/hooks", { callback_url: callbackUrl })) as Row | null;
+      if (!made || typeof made.id !== "string") throw new ESignError("malformed_response");
+      return { id: made.id, reused: false };
+    },
+    async deleteWebhook(id: string) {
+      if (!/^[A-Za-z0-9-]{1,100}$/.test(id)) throw new ESignError("bad_webhook_id");
+      try {
+        await call("DELETE", `/hooks/${id}`);
+      } catch (e) {
+        if (!(e instanceof ESignError && e.code === "not_found")) throw e;
+      }
+    },
+  };
+}
+
+export const SIGNWELL: ESignAdapter = {
+  name: "signwell",
+  provider: ({ apiKey, webhookId, fetch: f }) => createSignWell({ apiKey, webhookId, fetch: f }),
+  setup: ({ apiKey, fetch: f }) => signwellSetup({ apiKey, fetch: f }),
+};
 
 export function signwellFromEnv(env: NodeJS.ProcessEnv = process.env, fetchImpl?: Fetch): ESignProvider | null {
   const apiKey = env.SIGNWELL_API_KEY?.trim();

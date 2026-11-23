@@ -1,16 +1,13 @@
-import { testModeFromEnv, type ESign } from "./provider.js";
+import type { ESignAdapter } from "./provider.js";
+import { SIGNWELL } from "./signwell.js";
 
-// The e-signature adapters this server has, by the name ESIGN_PROVIDER gives (the one file that names them besides
-// the adapters themselves). Unset, or a name with no adapter, leaves e-signature off and the manual flow in place.
-export async function esignFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<ESign | null> {
-  const which = (env.ESIGN_PROVIDER ?? "").trim().toLowerCase();
-  if (!which) return null;
-  if (which === "signwell") {
-    const { signwellFromEnv } = await import("./signwell.js");
-    const provider = signwellFromEnv(env);
-    if (!provider) console.error("ESIGN_PROVIDER=signwell needs SIGNWELL_API_KEY; e-signature stays off");
-    return provider ? { provider, testMode: testModeFromEnv(env) } : null;
-  }
-  console.error(`ESIGN_PROVIDER: no e-signature adapter called "${which}"; e-signature stays off`);
-  return null;
-}
+// The e-signature adapters this server has, by name (the one file that names them besides the adapters themselves).
+// Which one runs, and its keys, are set from Mynt Studio by an admin (esign-settings.ts), with the environment's
+// ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides.
+export const ESIGN_ADAPTERS: Record<string, ESignAdapter> = { signwell: SIGNWELL };
+export const ESIGN_PROVIDER_NAMES = ["signwell"] as const;
+
+// Each adapter's environment variables (names only; values are read where they're used).
+export const ESIGN_ENV: Record<string, { apiKey: string; webhookId: string }> = {
+  signwell: { apiKey: "SIGNWELL_API_KEY", webhookId: "SIGNWELL_WEBHOOK_ID" },
+};

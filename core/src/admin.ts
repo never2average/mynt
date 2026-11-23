@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ESign } from "./esign/provider.js";
+import type { EsignSource } from "./esign-settings.js";
 import type { WorkspaceSync } from "./workspace-sync.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
 import { noticeFirm, recoverMembership } from "./firm-notices.js";
@@ -69,7 +69,7 @@ export interface AdminContext {
   covenants?: CovenantService | null; // licence providers' rules on the products they sponsor
   treasury?: TreasuryService | null; // pools' on-chain treasuries (devnet): registry, deposit approvals, indexer
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
-  esign?: ESign | null; // e-signature for program agreements (esign/), when configured
+  esign?: EsignSource; // e-signature for program agreements: the live settings (esign-settings.ts), or a fixed one in tests
 }
 
 // Admin: everything is managed through Mynt itself, and every change is written to the audit log.

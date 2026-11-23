@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AGREEMENT_TEMPLATE_SOURCES, SIGNATURE_PLACEMENTS } from "./agreement-esign-schema.js";
 import { ESIGN_NOT_CONFIGURED, ESignError, type ESign, type ESignDocument, type ESignSigner } from "./esign/provider.js";
 import { schedulePdf } from "./esign/schedule-pdf.js";
+import { currentEsign, type EsignSource } from "./esign-settings.js";
 import { noticeFirm } from "./firm-notices.js";
 import { effectiveRoles, type Store, type User } from "./store.js";
 import { open as unseal, seal, vaultAvailable } from "./vault.js";
@@ -44,7 +45,7 @@ const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOStrin
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 type Row = Record<string, unknown>;
 
-export const ESIGN_WEBHOOK_PATH = "/esign/webhook";
+export { ESIGN_WEBHOOK_PATH } from "./esign-settings.js";
 export const MAX_TEMPLATE_BYTES = 5 * 1024 * 1024;
 // The variables Mynt fills in; a provider template maps each it wants to one of its own fields (field_map).
 export const TEMPLATE_VARIABLES = ["licence_provider", "developer_firm", "app", "products", "states", "effective_from", "effective_to", "agreement_id", "terms_summary"] as const;
@@ -407,7 +408,8 @@ export async function cancelSigning(store: Store, esign: ESign | null, agreement
 // The e-signature service's webhook: the raw body checked with the service's own scheme, each event handled once, and
 // the document's state read back from the service (an event's body is never trusted). Answers 2xx once handled or
 // ignored, 401 for a bad signature, 5xx when the service should send it again.
-export async function esignWebhook(store: Store, esign: ESign | null, req: IncomingMessage, res: ServerResponse) {
+export async function esignWebhook(store: Store, source: EsignSource, req: IncomingMessage, res: ServerResponse) {
+  const esign = currentEsign(source);
   const reply = (status: number, body: unknown) => {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
@@ -447,7 +449,8 @@ export async function esignWebhook(store: Store, esign: ESign | null, req: Incom
 }
 
 // Licence providers' templates (their firm's members only), and both parties' signing and signed copies.
-export function registerAgreementEsignTools(server: McpServer, store: Store, user: User, esign: ESign | null, sides: { app: boolean; counterparty: boolean }) {
+export function registerAgreementEsignTools(server: McpServer, store: Store, user: User, esignSource: EsignSource, sides: { app: boolean; counterparty: boolean }) {
+  const esign = () => currentEsign(esignSource);
   // The caller's firm when they act for it as a licence provider (read afresh: no standing, no firm).
   const lpFirm = async () => {
     if (!sides.counterparty) return null;
@@ -517,7 +520,7 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
         } else {
           if (!provider_template_id) return fail("A provider template needs provider_template_id");
           if (file_base64) return fail("A provider template is kept at the e-signature service: send no file");
-          if (!esign) return fail(`${ESIGN_NOT_CONFIGURED}, so a template kept there can't be used`);
+          if (!esign()) return fail(`${ESIGN_NOT_CONFIGURED}, so a template kept there can't be used`);
         }
         const id = randomUUID();
         const r = await store.db.query(`SELECT coalesce(max(version), 0) + 1 AS v FROM ${T}.agreement_templates WHERE entity_id = $1 AND name = $2`, [firm, name]);
@@ -540,7 +543,7 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
               file?.length ?? null,
               file ? seal(file.toString("base64"), false) : null,
               file ? sha256(file) : null,
-              source === "provider_template" ? esign!.provider.name : null,
+              source === "provider_template" ? esign()!.provider.name : null,
               provider_template_id ?? null,
               JSON.stringify(placeholders ?? {}),
               JSON.stringify(field_map ?? {}),
@@ -552,7 +555,7 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
         ).rows[0];
         const t = toTemplate(row);
         await store.audit(user.id, "upload_agreement_template", t.id, { entity_id: firm, name, version, source, licence_id: t.licence_id, sponsorship_id: t.sponsorship_id, sha256: t.sha256, file_size: t.file_size });
-        return json({ ...t, e_signature_configured: esign !== null });
+        return json({ ...t, e_signature_configured: esign() !== null });
       },
     );
 
@@ -568,7 +571,7 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
         const firm = await lpFirm();
         if (!firm) return fail(noLpFirm);
         const { rows } = await store.db.query(`SELECT * FROM ${T}.agreement_templates WHERE entity_id = $1 AND ($2::boolean OR active) ORDER BY name, version DESC`, [firm, include_retired]);
-        return json({ entity_id: firm, e_signature_configured: esign !== null, test_mode: esign?.testMode ?? null, templates: rows.map(toTemplate) });
+        return json({ entity_id: firm, e_signature_configured: esign() !== null, test_mode: esign()?.testMode ?? null, templates: rows.map(toTemplate) });
       },
     );
 
@@ -602,18 +605,19 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
       inputSchema: { agreement_id: UUID },
     },
     async ({ agreement_id }) => {
-      if (!esign) return fail(`${ESIGN_NOT_CONFIGURED}: both sides record their signatures with sign_app_agreement`);
+      const live = esign();
+      if (!live) return fail(`${ESIGN_NOT_CONFIGURED}: both sides record their signatures with sign_app_agreement`);
       const a = await agreementRow(store, agreement_id);
       const side = a ? await partyOf(a, true) : null;
       if (!a || !side) return fail(`No agreement '${agreement_id}' you can sign`);
       if (a.kind !== "program") return fail("Only program agreements are signed by e-signature");
       if (a.status === "signed") return fail("It's signed already: download_agreement_document has the signed copy");
       if (a.status !== "accepted") return fail(a.status === "proposed" ? "The licence provider hasn't accepted it yet" : `That agreement is ${a.status}`);
-      const started = await startSigning(store, esign, agreement_id, user.id);
+      const started = await startSigning(store, live, agreement_id, user.id);
       if (!started.ok) return fail(started.error);
       let d: DocumentRow | undefined;
       try {
-        d = await syncDocument(store, esign, agreement_id);
+        d = await syncDocument(store, live, agreement_id);
       } catch (e) {
         return fail(`Couldn't reach the e-signature service (${e instanceof ESignError ? e.code : "unexpected"}); try again shortly`);
       }
@@ -628,13 +632,13 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
       if (side === "app" ? d.app_signed_at : d.counterparty_signed_at) return json({ agreement_id, status: "accepted", signing_url: null, message: "You've signed it; waiting for the other side" });
       let url: string | null;
       try {
-        url = await esign.provider.embeddedSigningUrl(d.provider_document_id, side);
+        url = await live.provider.embeddedSigningUrl(d.provider_document_id, side);
       } catch (e) {
         return fail(`Couldn't reach the e-signature service (${e instanceof ESignError ? e.code : "unexpected"}); try again shortly`);
       }
       if (!url) return fail("The e-signature service has no signing page for you on this document right now");
       await store.audit(user.id, "open_agreement_signing", agreement_id, { side, provider_document_id: d.provider_document_id });
-      return json({ agreement_id, side, signing_url: url, signing_origin: new URL(url).origin, test_mode: d.test_mode, signature_document: await signatureDocumentOf(store, esign, agreement_id) });
+      return json({ agreement_id, side, signing_url: url, signing_origin: new URL(url).origin, signing_origin_allowed: live.provider.signingOrigins.includes(new URL(url).origin), test_mode: d.test_mode, signature_document: await signatureDocumentOf(store, live, agreement_id) });
     },
   );
 
@@ -651,7 +655,8 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
       const a = await agreementRow(store, agreement_id);
       const side = a ? await partyOf(a, false) : null;
       if (!a || !side) return fail(`No agreement '${agreement_id}' of yours`);
-      if (esign && a.status === "accepted") await syncDocument(store, esign, agreement_id).catch(() => undefined);
+      const live = esign();
+      if (live && a.status === "accepted") await syncDocument(store, live, agreement_id).catch(() => undefined);
       const r = (await store.db.query(`SELECT signed_sealed, signed_sha256, certificate_sealed, certificate_sha256, test_mode FROM ${T}.app_agreement_documents WHERE agreement_id = $1`, [agreement_id])).rows[0];
       const sealedCol = part === "signed" ? r?.signed_sealed : r?.certificate_sealed;
       const hash = (part === "signed" ? r?.signed_sha256 : r?.certificate_sha256) as string | undefined;
