@@ -127,7 +127,8 @@ export function openFromSearch(search: string): OpenThreadDetail | null {
 // list_my_products' reply: the user's own products, with when each last changed when Mynt says.
 export function myProductsFrom(reply: unknown): MyProduct[] {
   const str = (v: unknown) => (typeof v === "string" ? v : "");
-  return (Array.isArray(reply) ? reply : []).filter((p): p is Record<string, unknown> => isObj(p) && typeof p.id === "string" && p.id !== "").map((p) => ({
+  // Archived ones (archive_product) are out of Recent and the sidebar's folders.
+  return (Array.isArray(reply) ? reply : []).filter((p): p is Record<string, unknown> => isObj(p) && typeof p.id === "string" && p.id !== "" && p.archived !== true).map((p) => ({
     id: str(p.id),
     name: str(p.name) || str(p.id),
     status: p.status === "draft" || p.status === "unpublished" ? p.status : "published",

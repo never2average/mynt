@@ -29,6 +29,13 @@ import { vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.
 // or an agent reports counts. Every move is in the audit trail (product_promoted, product_demoted) with the checks it
 // passed. Only staging is stored (products.stage); a published product is in production, anything else an idea.
 //
+// An owner can archive a product in idea or staging (archive_product) to put it out of the way: it leaves their lists
+// (list_my_products, the studio's sidebar and Products tab) and every build (list_buildable_products, create_app,
+// update_app, builds), can't be promoted or demoted, and keeps its stored stage, so unarchive_product puts it back
+// where it was. Nothing is deleted: a product whose pool has treasury records can't be, and needn't be. A product in
+// production is never archived; it is moved back first (demote_product). Audited as product_archived and
+// product_unarchived.
+//
 // publish_product stays as it was: promotion to production, straight from an idea too, since production's checks
 // include staging's. A published product's next version (create_product_version) goes live the same way, by a
 // promotion to production while the product stays there.
@@ -128,6 +135,7 @@ export async function publishGate(store: Store, user: Pick<User, "entity_id">, r
 // The checks for moving a product one step up to `to`.
 export async function productPromotionChecks(store: Store, user: Pick<User, "entity_id">, record: ProductRecord, to: "staging" | "production"): Promise<ProductPromotionChecks> {
   const from = productStage(record);
+  if (record.archived_at) throw new ProductStageError("The product is archived; unarchive it first (unarchive_product)");
   const draft = await store.draftVersion(record.product.id);
   // In production, a pending draft version is promoted in place: the product stays in production meanwhile.
   const nextVersion = from === "production" && to === "production" && draft;
@@ -225,6 +233,7 @@ export async function promoteProduct(store: Store, user: Pick<User, "id" | "enti
 export async function demoteProduct(store: Store, user: Pick<User, "id">, record: ProductRecord, to: "idea" | "staging", reason: string) {
   const id = record.product.id;
   const from = productStage(record);
+  if (record.archived_at) throw new ProductStageError("The product is archived; unarchive it first (unarchive_product)");
   if (ORDER.indexOf(to) !== ORDER.indexOf(from) - 1)
     throw new ProductStageError(from === "idea" ? "The product is in idea, the first stage" : `Demote one step at a time: the product is in ${from}, so it goes down to ${ORDER[ORDER.indexOf(from) - 1]}`);
   let drifted: string[] = [];
@@ -237,6 +246,29 @@ export async function demoteProduct(store: Store, user: Pick<User, "id">, record
   } else await store.setProductStage(id, null);
   await store.audit(user.id, "product_demoted", id, { product_id: id, from_stage: from, to_stage: to, reason, unpublished: from === "production" });
   return { product_id: id, from_stage: from, to_stage: to, reason, ...(from === "production" ? { unpublished: true } : {}), ...(drifted.length ? { drifted_products: drifted } : {}) };
+}
+
+// Out of the way: in idea or staging only (production is moved back first). Its stage is kept for unarchiving; a
+// staging product leaves sandbox builds because builds and listings skip archived products.
+export async function archiveProduct(store: Store, user: Pick<User, "id">, record: ProductRecord, reason: string) {
+  const id = record.product.id;
+  const stage = productStage(record);
+  if (record.archived_at) throw new ProductStageError(`The product is already archived (since ${record.archived_at})`);
+  if (stage === "production")
+    throw new ProductStageError("The product is in production; move it back first (demote_product to staging), then archive it");
+  const saved = await store.setProductArchived(id, true);
+  await store.audit(user.id, "product_archived", id, { product_id: id, stage, reason, ...(stage === "staging" ? { left_sandbox_builds: true } : {}) });
+  return { product_id: id, archived: true as const, archived_at: saved.archived_at, stage, reason, ...(stage === "staging" ? { left_sandbox_builds: true } : {}) };
+}
+
+// Back to the stage it was archived in (staging reopens it to sandbox builds).
+export async function unarchiveProduct(store: Store, user: Pick<User, "id">, record: ProductRecord, reason?: string) {
+  const id = record.product.id;
+  if (!record.archived_at) throw new ProductStageError("The product isn't archived");
+  const saved = await store.setProductArchived(id, false);
+  const stage = productStage(saved);
+  await store.audit(user.id, "product_unarchived", id, { product_id: id, stage, archived_at: record.archived_at, ...(reason ? { reason } : {}) });
+  return { product_id: id, archived: false as const, stage, ...(reason ? { reason } : {}) };
 }
 
 // ---- tools ----
@@ -299,6 +331,36 @@ export function registerProductStageTools(server: McpServer, store: Store, user:
       const record = await mine(product_id);
       if (!record) return fail(`No product of yours with id '${product_id}'`);
       return guard(() => demoteProduct(store, user, record, to_stage, reason));
+    },
+  );
+
+  server.registerTool(
+    "archive_product",
+    {
+      title: "Archive a financial product",
+      description:
+        "Innovator: put one of your products in idea or staging out of the way, with the reason (audited as product_archived). It leaves list_my_products (include_archived shows it) and every build: list_buildable_products, create_app and update_app no longer take it and builds skip it, so a product in staging leaves sandbox builds. It can't be promoted while archived. Nothing is deleted, and its stage is kept: unarchive_product puts it back. A product in production is refused: move it back first (demote_product).",
+      inputSchema: { product_id: z.string(), reason: z.string().min(1).max(1000) },
+    },
+    async ({ product_id, reason }) => {
+      const record = await mine(product_id);
+      if (!record) return fail(`No product of yours with id '${product_id}'`);
+      return guard(() => archiveProduct(store, user, record, reason));
+    },
+  );
+
+  server.registerTool(
+    "unarchive_product",
+    {
+      title: "Unarchive a financial product",
+      description:
+        "Innovator: bring back one of your archived products, to the stage it was archived in (staging reopens it to sandbox builds). Audited as product_unarchived.",
+      inputSchema: { product_id: z.string(), reason: z.string().min(1).max(1000).optional() },
+    },
+    async ({ product_id, reason }) => {
+      const record = await mine(product_id);
+      if (!record) return fail(`No product of yours with id '${product_id}'`);
+      return guard(() => unarchiveProduct(store, user, record, reason));
     },
   );
 }

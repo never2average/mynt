@@ -74,6 +74,8 @@ export type StudioProduct = {
   // The user's own product (moving it between stages is theirs).
   mine?: boolean;
   lastTestPassed?: boolean | null;
+  // Archived by the user (archive_product): only in the Products tab's Archived view, with Unarchive.
+  archived?: boolean;
 };
 
 type Obj = Record<string, unknown>;
@@ -106,6 +108,8 @@ export function productsFrom(buildable: unknown, mine: unknown = []): StudioProd
     };
   });
   for (const p of (Array.isArray(mine) ? mine : []).filter(isObj)) {
+    // Archived ones aren't listed (Mynt leaves them out unless asked); the Archived view reads them apart.
+    if (p.archived === true) continue;
     const status = statusOf(p.status);
     const stage = productStageOf(p);
     const listed = out.find((o) => o.id === p.id);
@@ -131,6 +135,30 @@ export function productsFrom(buildable: unknown, mine: unknown = []): StudioProd
   }
   return out;
 }
+
+// list_my_products({ include_archived: true })'s archived ones, for the Products tab's Archived view.
+export function archivedProductsFrom(mine: unknown): StudioProduct[] {
+  return (Array.isArray(mine) ? mine : [])
+    .filter(isObj)
+    .filter((p) => p.archived === true)
+    .map((p) => ({
+      id: str(p.id),
+      name: str(p.name) || str(p.id),
+      productLine: str(p.product_line),
+      ...(str(p.category) ? { category: str(p.category) } : {}),
+      by: "You",
+      accessMode: "",
+      jurisdictions: jurisdictionsOf(p),
+      status: statusOf(p.status),
+      stage: productStageOf(p),
+      mine: true,
+      archived: true,
+      lastTestPassed: typeof p.last_test_passed === "boolean" ? p.last_test_passed : null,
+    }));
+}
+
+// Only an idea or a staging product can be archived; one in production is moved back first.
+export const canArchive = (stage: Stage) => stage !== "production";
 
 // A new app starts as an idea, building in the sandbox: products in production or staging can be picked.
 export const isPickable = (p: Pick<StudioProduct, "status" | "stage">) => (p.stage ?? productStageOf(p)) !== "idea";
@@ -186,12 +214,16 @@ export const NewProductRequest = z
 export type NewProductRequest = z.infer<typeof NewProductRequest>;
 
 // A product's stage actions (POST /api/products/<id>): Test (test_product), Move to staging or production
-// (promote_product), Move back (demote_product, with a reason), and Publish (publish_product) for older callers.
+// (promote_product), Move back (demote_product, with a reason), Archive and Unarchive (archive_product, with a
+// reason, and unarchive_product), and Publish (publish_product) for older callers.
 export const ProductActionRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("test") }).strict(),
   z.object({ action: z.literal("publish") }).strict(),
   z.object({ action: z.literal("promote"), to_stage: z.enum(["staging", "production"]) }).strict(),
   z.object({ action: z.literal("demote"), to_stage: z.enum(["idea", "staging"]), reason: z.string().trim().min(3).max(1000) }).strict(),
+  // Archive (archive_product, with a reason; idea or staging only) and Unarchive (unarchive_product).
+  z.object({ action: z.literal("archive"), reason: z.string().trim().min(3).max(1000) }).strict(),
+  z.object({ action: z.literal("unarchive") }).strict(),
 ]);
 export type ProductActionRequest = z.infer<typeof ProductActionRequest>;
 export type ProductAction = ProductActionRequest["action"];
@@ -245,6 +277,8 @@ const FALLBACK: Record<ProductAction, string> = {
   publish: "Couldn't publish the product. Please try again.",
   promote: "Couldn't move the product. Please try again.",
   demote: "Couldn't move the product back. Please try again.",
+  archive: "Couldn't archive the product. Please try again.",
+  unarchive: "Couldn't unarchive the product. Please try again.",
 };
 export const runProductAction = (id: string, request: ProductActionRequest, fetcher: typeof fetch = fetch) =>
   post<{ passed?: boolean; message?: string; stage?: Stage }>(fetcher, `/api/products/${encodeURIComponent(id)}`, request, FALLBACK[request.action]);

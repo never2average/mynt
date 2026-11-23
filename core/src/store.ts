@@ -345,6 +345,7 @@ export interface ProductRecord {
   owner_id: string | null; // null = bundled catalog product
   status: ProductStatus;
   stage: "staging" | null; // stored only for staging; see productStage
+  archived_at: string | null; // archived by its owner (archive_product): out of their lists and builds, stage kept
   version: number;
   last_test: TestReport | null;
   entity_id: string | null;
@@ -1339,6 +1340,9 @@ const TABLES = `
   -- existing row) moves no product and changes no published product's availability. Staging: tested and open to
   -- sandbox builds only (promote_product); publishing clears it.
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS stage text CHECK (stage IS NULL OR stage = 'staging');
+  -- When its owner archived the product (archive_product): hidden from their lists and closed to builds, its stage kept
+  -- so unarchive_product puts it back where it was. NULL on every existing row; nothing is ever deleted.
+  ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS archived_at timestamptz;
   -- Licence providers' sponsorships: one component of a builder's product covered by the provider's held
   -- licences in the jurisdictions it approved (see sponsorships.ts).
   CREATE TABLE IF NOT EXISTS financial_products.sponsorships (
@@ -1856,6 +1860,7 @@ const toProductRecord = (r: Row): ProductRecord => ({
   owner_id: r.owner_id as string | null,
   status: r.status as ProductStatus,
   stage: r.stage === "staging" ? "staging" : null,
+  archived_at: iso(r.archived_at),
   version: Number(r.version ?? 1),
   last_test: (r.last_test as TestReport | null) ?? null,
   entity_id: (r.entity_id as string | null) ?? null,
@@ -3225,14 +3230,23 @@ export class Store {
     return rows.map((r) => toProductRecord(r).product);
   }
 
-  // Products in staging: tested, not published, open to sandbox builds only.
+  // Products in staging: tested, not published, not archived, open to sandbox builds only.
   async stagingProducts(): Promise<ProductRecord[]> {
-    return (await this.all("SELECT * FROM financial_products.products WHERE stage = 'staging' AND status <> 'published' ORDER BY updated_at, id")).map(toProductRecord);
+    return (await this.all("SELECT * FROM financial_products.products WHERE stage = 'staging' AND status <> 'published' AND archived_at IS NULL ORDER BY updated_at, id")).map(toProductRecord);
   }
 
   // Sets or clears the stored staging stage (a published product is production whatever this says).
   async setProductStage(id: string, stage: "staging" | null): Promise<ProductRecord> {
     const r = await this.one("UPDATE financial_products.products SET stage = $2, updated_at = now() WHERE id = $1 RETURNING *", [id, stage]);
+    return toProductRecord(r!);
+  }
+
+  // Archives (now) or unarchives a product. Its stage and everything else are left as they are.
+  async setProductArchived(id: string, archived: boolean): Promise<ProductRecord> {
+    const r = await this.one(
+      `UPDATE financial_products.products SET archived_at = ${archived ? "now()" : "NULL"}, updated_at = now() WHERE id = $1 RETURNING *`,
+      [id],
+    );
     return toProductRecord(r!);
   }
 

@@ -49,8 +49,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { chipIdeas, CHIPS_MAX, ideaProducts, kindAsIdea, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
 import { chipProductIdeas, productIdeaMessage, productIdeaPrefill, type ProductIdea } from "@/lib/product-ideas"
 import { ProductStageSheet, demoteMove, promoteMove, type ProductMove } from "@/components/product-stage-sheet"
+import { ProductArchiveSheet, type ArchiveMode } from "@/components/product-archive-sheet"
 import { StageMark } from "@/components/promotion-view"
-import { flagsFor, isPickable, MOVE_LABEL, NOT_PUBLISHED, productStageOf, STAGE_STATUS, type StudioProduct } from "@/lib/products"
+import { canArchive, flagsFor, isPickable, MOVE_LABEL, NOT_PUBLISHED, productStageOf, STAGE_STATUS, type StudioProduct } from "@/lib/products"
 import type { Stage } from "@/lib/workspaces"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { cn } from "@/lib/utils"
@@ -433,6 +434,8 @@ export function ProductsTab({
   onLines,
   onCreate,
   onMoved,
+  onArchived,
+  onUnarchived,
   fetcher,
   focus = null,
 }: {
@@ -444,20 +447,44 @@ export function ProductsTab({
   onCreate?: () => void
   // One of the user's own products moved stage (through the approval sheet).
   onMoved?: (id: string, stage: Stage) => void
+  // One of the user's own products was archived (it leaves the list), or unarchived (it comes back, in its stage).
+  onArchived?: (id: string) => void
+  onUnarchived?: (product: NewAppProduct) => void
   fetcher?: typeof fetch
   // A product opened from Recent or the sidebar: searched for and marked.
   focus?: string | null
 }) {
+  // The Archived filter: the user's archived products instead (GET /api/products?archived=1), each with
+  // Unarchive. Archive and Unarchive open their sheet (components/product-archive-sheet.tsx).
+  const [showArchived, setShowArchived] = useState(false)
+  const [archived, setArchived] = useState<NewAppProduct[] | null>(null)
+  const [archiving, setArchiving] = useState<{ id: string; name: string; stage: Stage; mode: ArchiveMode } | null>(null)
+  const fetchArchived = useRef(fetcher ?? ((...a: Parameters<typeof fetch>) => fetch(...a)))
+  fetchArchived.current = fetcher ?? ((...a: Parameters<typeof fetch>) => fetch(...a))
+  useEffect(() => {
+    if (!showArchived) return
+    let live = true
+    setArchived(null)
+    void (async () => {
+      const res = await fetchArchived.current("/api/products?archived=1", { cache: "no-store" }).catch(() => null)
+      const data = res?.ok ? ((await res.json().catch(() => null)) as { products?: NewAppProduct[] } | null) : null
+      if (live) setArchived(Array.isArray(data?.products) ? data.products : [])
+    })()
+    return () => {
+      live = false
+    }
+  }, [showArchived])
+  const listed = showArchived ? archived : products
   // The approval sheet a row's action opened: the product, its move and the stage it was opened at (the
   // sheet keeps it: after the move it still shows what was done).
   const [moving, setMoving] = useState<{ id: string; move: ProductMove; stage: Stage } | null>(null)
   const movingProduct = moving ? products?.find((p) => p.id === moving.id) : undefined
   const [query, setQuery] = useState("")
   const options = useMemo(
-    () => [...new Set((products ?? []).map((p) => p.productLine).filter(Boolean))].sort().map((l) => ({ value: l, label: lineLabel(l) })),
-    [products],
+    () => [...new Set((listed ?? []).map((p) => p.productLine).filter(Boolean))].sort().map((l) => ({ value: l, label: lineLabel(l) })),
+    [listed],
   )
-  const shown = (products ?? []).filter((p) => matches(query, p.name, p.by) && (!lines.length || lines.includes(p.productLine)))
+  const shown = (listed ?? []).filter((p) => matches(query, p.name, p.by) && (!lines.length || lines.includes(p.productLine)))
   const fit = useFitRows()
   const paged = usePaged(shown, fit.size)
   const focused = focus ? products?.find((p) => p.id === focus) : undefined
@@ -490,9 +517,20 @@ export function ProductsTab({
             paged.setPage(1)
           },
         },
+        {
+          id: "archived",
+          label: "Show",
+          options: [{ value: "archived", label: "Archived" }],
+          selected: showArchived ? ["archived"] : [],
+          onChange: (v) => {
+            setShowArchived(v.includes("archived"))
+            paged.setPage(1)
+          },
+        },
       ]}
       onClearFilters={() => {
         onLines([])
+        setShowArchived(false)
         paged.setPage(1)
       }}
       cta={
@@ -521,8 +559,8 @@ export function ProductsTab({
             ))}
           </TableRow>
         </TableHeader>
-        <TableBody data-product-list>
-          {products === null ? (
+        <TableBody data-product-list data-archived-view={showArchived ? "true" : undefined}>
+          {listed === null ? (
             [0, 1, 2].map((i) => (
               <TableRow key={i} data-loading>
                 <TableCell colSpan={PRODUCT_COLUMNS.length}>
@@ -533,7 +571,7 @@ export function ProductsTab({
           ) : paged.shown.length ? (
             paged.shown.map((p) => {
               const on = picked.includes(p.id)
-              const pickable = isPickable(p)
+              const pickable = !p.archived && isPickable(p)
               const stage = stageOf(p)
               const up = promoteMove(stage)
               const down = demoteMove(stage)
@@ -566,7 +604,13 @@ export function ProductsTab({
                   <TableCell className={COL.text}>{p.by || "—"}</TableCell>
                   <TableCell className={COL.text}>{p.productLine ? <Badge variant="outline">{lineLabel(p.productLine)}</Badge> : "—"}</TableCell>
                   <TableCell className={COL.actions}>
-                    {p.mine && onMoved && (
+                    {p.archived ? (
+                      <span className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" onClick={() => setArchiving({ id: p.id, name: p.name, stage, mode: "unarchive" })} data-product-unarchive={p.id}>
+                          Unarchive
+                        </Button>
+                      </span>
+                    ) : p.mine && onMoved && (
                       <span className="flex justify-end gap-2">
                         {up?.mode === "promote" && (
                           <Button size="sm" variant="outline" onClick={() => setMoving({ id: p.id, move: up, stage })} data-product-move={up.to}>
@@ -578,6 +622,11 @@ export function ProductsTab({
                             Move back
                           </Button>
                         )}
+                        {onArchived && canArchive(stage) && (
+                          <Button size="sm" variant="ghost" onClick={() => setArchiving({ id: p.id, name: p.name, stage, mode: "archive" })} data-product-archive={p.id}>
+                            Archive
+                          </Button>
+                        )}
                       </span>
                     )}
                   </TableCell>
@@ -585,7 +634,7 @@ export function ProductsTab({
               )
             })
           ) : (
-            <EmptyRow cols={PRODUCT_COLUMNS.length}>{products.length ? "No products match." : "No products you can build on yet."}</EmptyRow>
+            <EmptyRow cols={PRODUCT_COLUMNS.length}>{listed.length ? "No products match." : showArchived ? "No archived products." : "No products you can build on yet."}</EmptyRow>
           )}
         </TableBody>
       </Table>
@@ -594,6 +643,18 @@ export function ProductsTab({
         move={moving?.move ?? null}
         onClose={() => setMoving(null)}
         onMoved={(id, stage) => onMoved?.(id, stage)}
+        fetcher={fetcher}
+      />
+      <ProductArchiveSheet
+        product={archiving}
+        mode={archiving?.mode ?? null}
+        onClose={() => setArchiving(null)}
+        onDone={(id, mode, stage) => {
+          if (mode === "archive") return onArchived?.(id)
+          const back = archived?.find((x) => x.id === id)
+          setArchived((list) => (list ? list.filter((x) => x.id !== id) : list))
+          if (back) onUnarchived?.({ ...back, archived: undefined, stage, status: stage === "production" ? "published" : "draft" })
+        }}
         fetcher={fetcher}
       />
     </PanelList>
@@ -708,6 +769,14 @@ export function NewAppWorkspace({
     const p = products?.find((x) => x.id === id)
     if (p) noteMine({ id, name: p.name, status, stage, updatedAt: new Date().toISOString() })
   }
+  // One of the user's products was archived: out of the page's list, the picks and Recent (the sidebar reads
+  // Mynt again); unarchived: back in the list.
+  const onArchived = (id: string) => {
+    onProductsChange?.((list) => list.filter((p) => p.id !== id))
+    setPicked((picks) => picks.filter((x) => x !== id))
+    setLocalMine((l) => l.filter((x) => x.id !== id))
+  }
+  const onUnarchived = (p: NewAppProduct) => onProductsChange?.((list) => [...list.filter((x) => x.id !== p.id), p])
   const [picked, setPicked] = useState<string[]>([])
   const [lines, setLines] = useState<string[]>([])
   const [kind, setKind] = useState<string | null>(null)
@@ -1008,7 +1077,7 @@ export function NewAppWorkspace({
         <TemplatesTab kinds={kinds} onUse={applyIdea} products={products} onCreate={openSheet} />
       )
     ) : (
-      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onMoved={onMoved} fetcher={fetcher} focus={focus} />
+      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onMoved={onMoved} onArchived={onArchived} onUnarchived={onUnarchived} fetcher={fetcher} focus={focus} />
     )
 
   return (
