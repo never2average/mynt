@@ -1,6 +1,6 @@
 "use client"
 
-// Settings → E-signature, for Mynt admins (lib/esign-settings.ts): where it stands (configured, test mode, the
+// Admin → Platform settings → E-signature, for Mynt admins (lib/esign-settings.ts): where it stands (configured, test mode, the
 // webhook, the last event received), then the changes, each a labelled action: paste the service's API key (a
 // password field; sent once, never shown again), Re-register webhook, Remove key, and the test-mode switch with what
 // each mode means. Mynt checks the key with the service before keeping it. Server-renderable for the tests.
@@ -146,10 +146,10 @@ export function EsignSettingsPanel({ fetcher = (...a) => fetch(...a) }: { fetche
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const load = useCallback(async () => {
-    const res = await fetch("/api/esign", { cache: "no-store" }).catch(() => null)
+    const res = await fetch("/api/admin/esign", { cache: "no-store" }).catch(() => null)
     const body = (await res?.json().catch(() => null)) as { settings?: EsignStatus; message?: string } | null
     if (res?.status === 401) window.dispatchEvent(new Event("mynt:signed-out"))
-    if (res?.status === 403) return setState({ kind: "error", message: "E-signature settings are for Mynt admins." })
+    if (res?.status === 403 || res?.status === 404) return setState({ kind: "error", message: "E-signature settings are for Mynt admins." })
     setState(res?.ok && body?.settings ? { kind: "ready", status: body.settings } : { kind: "error", message: body?.message ?? "Couldn't reach Mynt. Please try again." })
   }, [])
   useEffect(() => {
@@ -161,7 +161,7 @@ export function EsignSettingsPanel({ fetcher = (...a) => fetch(...a) }: { fetche
     setError(null)
     setMessage(null)
     const payload = a.action === "remove_key" ? { action: "remove_key", confirm: true } : a
-    const res = await fetcher("/api/esign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) }).catch(() => null)
+    const res = await fetcher("/api/admin/esign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) }).catch(() => null)
     const body = (await res?.json().catch(() => null)) as { message?: string; settings?: EsignStatus } | null
     setBusy(false)
     if (res?.status === 401) window.dispatchEvent(new Event("mynt:signed-out"))

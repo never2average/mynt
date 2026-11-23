@@ -13,7 +13,7 @@
 import { usePathname } from "next/navigation";
 import { useCallback } from "react";
 
-import { AppSidebar } from "@/components/app-sidebar";
+import { AppSidebar, isAdminPath } from "@/components/app-sidebar";
 import { SiteHeader } from "@/components/site-header";
 import { CreateWorkspace, DeveloperGate, pageGateFor } from "@/components/studio-gates";
 import { StudioSearchProvider } from "@/components/studio-search";
@@ -69,7 +69,7 @@ export function StudioShell({ title: fixedTitle, children }: { title?: string; c
         >
           <AppSidebar variant="inset" />
           <SidebarInset className="min-h-0 overflow-hidden">
-            {title !== null && <SiteHeader title={title} />}
+            {title !== null && <SiteHeader title={title} scope={access?.admin && isAdminPath(pathname) ? "All workspaces" : undefined} />}
             <div className="flex min-h-0 flex-1 flex-col">
               <PageBody>{children}</PageBody>
             </div>

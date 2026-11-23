@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 36
+      "tools": 42
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 369,
+      "tools": 375,
       "get_started": [
         {
           "tool": "define_region",
@@ -655,6 +655,56 @@
         },
         "required": [
           "kind"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_get_app",
+      "title": "One app, as an admin sees it",
+      "description": "Admin: one app with its workspace, owner, stage, products (with names), its latest coding-agent builds (status, goal, cost, when; never a preview link) and its hosting on Mynt (status, runtime, last error), if any.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_get_workspace",
+      "title": "One workspace, as an admin sees it",
+      "description": "Admin: one workspace with its members (name, email, role, when they joined), its apps (stage, status, latest build), its invitations (open, accepted, declined or revoked) and its latest activity from the audit log (events about the workspace or its apps, newest first).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "workspace_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -7549,6 +7599,22 @@
       }
     },
     {
+      "name": "get_platform_settings",
+      "title": "Operational settings",
+      "description": "Admin: the operational settings this server runs with that aren't secrets (build and audit spend caps, the build audit, the exploration cap, the hosted VM hour's price): each one's value in effect, its default, and whether the server's environment sets it. Read-only: they're changed on the server, never through a tool.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_product",
       "title": "Get a financial product",
       "description": "Return full details for one product by its id (e.g. 'ppf', 'index-fund'). Innovators can also fetch their own drafts.",
@@ -8527,6 +8593,53 @@
       }
     },
     {
+      "name": "list_all_apps",
+      "title": "Every app",
+      "description": "Admin: every app on Mynt across all workspaces, newest first, paged: its workspace, owner, stage (idea, staging or production), status, products, latest build and whether Mynt hosts it. query matches the name, the workspace's name, the owner's email or the id. Remove a test app with remove_app.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "idea",
+              "staging",
+              "production"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_all_builds",
       "title": "All builds and spend",
       "description": "Admin: every developer's coding-agent builds, newest first, and total spend this month.",
@@ -8588,6 +8701,52 @@
       }
     },
     {
+      "name": "list_all_products",
+      "title": "Every financial product",
+      "description": "Admin: every financial product on Mynt across all firms, newest first, paged: its name, line and region, the firm that owns it (none: one of Mynt's reference products), status, stage (idea, staging or production), whether it's archived, and its sponsors (licence providers' sponsorships, approved or pending). query matches the name, the id or the firm's name.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "unpublished"
+            ]
+          },
+          "include_archived": {
+            "default": true,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_all_programs",
       "title": "Every Solana program",
       "description": "Admin: every developer's Solana programs on devnet and mainnet, newest first, with the signer that deployed them.",
@@ -8606,6 +8765,48 @@
               "devnet",
               "mainnet"
             ]
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_all_workspaces",
+      "title": "Every workspace",
+      "description": "Admin: every workspace on Mynt, newest first, paged: its name, first owner, members and apps counted, status (active; archived by an owner; or frozen, its organization deleted in the identity provider until an owner relinks or archives it) and when it was made. query matches the name, the owner's email or the id.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived",
+              "frozen"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -9010,7 +9211,7 @@
     {
       "name": "list_entities",
       "title": "Firms",
-      "description": "Admin: every registered legal entity with its members, licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
+      "description": "Admin: every registered legal entity with its members (and their roles), licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
       "area": "admin",
       "roles": [
         "admin"

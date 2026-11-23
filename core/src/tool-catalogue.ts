@@ -104,6 +104,7 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerAdminTools: "admin",
   registerTakeRateAdminTools: "admin",
   registerOpsTools: "admin",
+  registerPlatformAdminTools: "admin",
 };
 
 export type CatalogueTool = {

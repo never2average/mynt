@@ -386,7 +386,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "list_entities",
     {
       title: "Firms",
-      description: "Admin: every registered legal entity with its members, licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
+      description: "Admin: every registered legal entity with its members (and their roles), licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -396,7 +396,7 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
         await Promise.all(
           (await store.listEntities()).map(async (e) => ({
             ...e,
-            members: (await store.entityMembers(e.id)).map((m) => ({ id: m.id, name: m.name, email: m.email })),
+            members: (await store.entityMembers(e.id)).map((m) => ({ id: m.id, name: m.name, email: m.email, roles: m.roles })),
             licenses: await store.licensesOf(e.id),
             parties: await store.partiesOf(e.id),
             reconciliation: await reconcileEntity(store, e.id, ref),

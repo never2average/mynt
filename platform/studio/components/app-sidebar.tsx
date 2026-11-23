@@ -10,11 +10,13 @@
 // icon, "App: …" / "Financial product: …" to screen readers). Product chats that haven't made a product
 // yet have no stage, so they aren't in the folders: they reopen from the Build page (?thread=).
 // Docs isn't in the sidebar (the header's Docs button opens /docs). Build is in every page's header; Builds isn't in
-// the sidebar (/builds still works).
+// the sidebar (/builds still works). Mynt admins (the role Mynt gave their account, never a list in the studio's
+// settings) also get the Admin group (/admin, components/admin-view.tsx). The Admin area is across all workspaces:
+// while it's open the switcher gives way to "All workspaces" and the workspace's folders aren't shown.
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Blocks, Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
+import { Blocks, Building2, Coins, FileBadge, FileCheck2, Gauge, Globe2, History, LayoutDashboard, Layers, Package, Settings, SlidersHorizontal, Store } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -26,6 +28,7 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
@@ -33,6 +36,7 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import type { Invitation } from "@/lib/invitations"
+import { ADMIN_TAB_CHANGED, adminHref, adminTabOf, type AdminTab } from "@/lib/admin"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
 import { myProductsFrom, productIdOfPath, THREADS_UPDATED, type MyProduct, type ThreadsUpdatedDetail } from "@/lib/threads"
@@ -53,6 +57,18 @@ const PAGES = [
 ] as const
 // Only for builders and liquidity providers, after Settings.
 const EARN_PAGE = { href: "/earn", label: "Earn", icon: Coins } as const
+// Only for Mynt admins: the Admin area's tabs, across all workspaces.
+export const ADMIN_PAGES: { tab: AdminTab; label: string; icon: typeof Gauge }[] = [
+  { tab: "overview", label: "Overview", icon: Gauge },
+  { tab: "workspaces", label: "Workspaces", icon: Layers },
+  { tab: "apps", label: "Apps", icon: Globe2 },
+  { tab: "products", label: "Products", icon: Package },
+  { tab: "firms", label: "Firms", icon: Building2 },
+  { tab: "licences", label: "Licences", icon: FileCheck2 },
+  { tab: "vendors", label: "Vendors", icon: Store },
+  { tab: "settings", label: "Platform settings", icon: SlidersHorizontal },
+]
+export const isAdminPath = (pathname: string) => pathname === "/admin" || pathname.startsWith("/admin/")
 
 export type SidebarViewProps = {
   workspaces: Workspace[]
@@ -70,6 +86,8 @@ export type SidebarViewProps = {
   licenceProvider?: boolean // a licence provider: Licences (its Agreements tab) even without the developer role
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
   products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
+  admin?: boolean // a Mynt admin: the Admin group
+  adminTab?: AdminTab | null // the Admin area's tab on screen, marked in the group
 }
 
 // The folders' items: the workspace's apps and the user's products, each in its stage.
@@ -80,14 +98,30 @@ export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products:
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, admin = false, adminTab = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   // The app or product on screen, marked in its folder: an app's workspace is /<app id>, a product's /products/<id>.
   const activeProductId = productIdOfPath(pathname)
   const appId = activeProductId ? undefined : pathname.split("/").filter(Boolean)[0]
+  // The Admin area is across all workspaces: no switcher, no workspace folders, only admins (a non-admin's /admin is a 404).
+  const inAdmin = admin && isAdminPath(pathname)
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        {developer && <TeamSwitcher
+        {inAdmin ? (
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton size="lg" className="cursor-default" data-all-workspaces>
+                <span className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                  <Globe2 className="size-4" />
+                </span>
+                <span className="grid flex-1 text-left text-sm leading-tight">
+                  <span className="truncate font-medium">All workspaces</span>
+                  <span className="truncate text-xs text-muted-foreground">Mynt admin</span>
+                </span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        ) : developer && <TeamSwitcher
           workspaces={workspaces}
           selected={selected}
           supported={supported}
@@ -113,7 +147,24 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
-        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={activeProductId} />}
+        {admin && (
+          <SidebarGroup data-admin-group>
+            <SidebarGroupLabel>Admin</SidebarGroupLabel>
+            <SidebarMenu>
+              {ADMIN_PAGES.map(({ tab, label, icon: Icon }) => (
+                <SidebarMenuItem key={tab}>
+                  <SidebarMenuButton asChild tooltip={`Admin: ${label}`} isActive={inAdmin && adminTab === tab}>
+                    <Link href={adminHref(tab)} data-admin-link={tab}>
+                      <Icon />
+                      <span>{label}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroup>
+        )}
+        {developer && !inAdmin && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={activeProductId} />}
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={account} />
@@ -123,8 +174,26 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
   )
 }
 
+// The Admin area's tab, from the address (?tab=), read again whenever the page or its tab changes.
+function useAdminTab(pathname: string): AdminTab | null {
+  const [tab, setTab] = useState<AdminTab | null>(null)
+  useEffect(() => {
+    if (!isAdminPath(pathname)) return setTab(null)
+    const read = () => setTab(adminTabOf(new URLSearchParams(window.location.search).get("tab")))
+    read()
+    window.addEventListener("popstate", read)
+    window.addEventListener(ADMIN_TAB_CHANGED, read)
+    return () => {
+      window.removeEventListener("popstate", read)
+      window.removeEventListener(ADMIN_TAB_CHANGED, read)
+    }
+  }, [pathname])
+  return tab
+}
+
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname()
+  const adminTab = useAdminTab(pathname)
   const { workspaces, selected, supported, select, reload, invitations, answerInvitation } = useWorkspace()
   const [groups, setGroups] = useState<Record<Stage, StagedApp[]> | null>(null)
   const [account, setAccount] = useState<Account>({ name: null, email: null })
@@ -210,6 +279,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       licenceProvider={access?.licenceProvider === true}
       workspaceSettings={workspaceSettings}
       products={products}
+      admin={access?.admin === true}
+      adminTab={adminTab}
     />
   )
 }

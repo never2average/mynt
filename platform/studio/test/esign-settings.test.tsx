@@ -4,8 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
 import { esignStatusFrom, keyLine, webhookLine } from "@/lib/esign-settings";
 
-// Settings → E-signature (admins): what the section shows (never a key or a webhook id), the route behind it (same
-// origin, signed in, admins only, strict actions, the key passed to Mynt once and never echoed), and the frame
+// Admin → Platform settings → E-signature (moved from workspace Settings): what the section shows (never a key or a webhook id), the route behind it (same
+// origin, signed in, admins only (anyone else: 404, as for the whole Admin area), strict actions, the key passed to Mynt once and never echoed), and the frame
 // origins the studio learns from Mynt for the signing sheet and its Content-Security-Policy.
 
 const fake = {
@@ -30,7 +30,7 @@ vi.mock("@/lib/tokens", () => ({
   }),
 }));
 
-const route = await import("@/app/api/esign/route");
+const route = await import("@/app/api/admin/esign/route");
 const { EsignSettingsView } = await import("@/components/esign-settings-view");
 const frame = await import("@/lib/esign-frame");
 
@@ -46,7 +46,7 @@ const STATUS = {
   last_event_at: null,
 };
 const session = (roles: string[]) => ({ id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() }) as Session;
-const post = (body: unknown) => route.POST(new Request("http://studio.test/api/esign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+const post = (body: unknown) => route.POST(new Request("http://studio.test/api/admin/esign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
 
 beforeEach(() => {
   fake.session = session(["admin"]);
@@ -115,8 +115,8 @@ describe("the route", () => {
     fake.refuse = null;
 
     fake.session = session(["developer", "license_provider"]);
-    expect((await route.GET()).status).toBe(403);
-    expect((await post({ action: "register_webhook" })).status).toBe(403);
+    expect((await route.GET()).status).toBe(404);
+    expect((await post({ action: "register_webhook" })).status).toBe(404);
     fake.session = undefined;
     expect((await route.GET()).status).toBe(401);
     fake.session = session(["admin"]);

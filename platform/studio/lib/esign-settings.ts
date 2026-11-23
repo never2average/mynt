@@ -1,4 +1,4 @@
-// Settings → E-signature (admins): how e-signature is set up on this Mynt (core/src/esign-settings.ts), as the page
+// Admin → Platform settings → E-signature: how e-signature is set up on this Mynt (core/src/esign-settings.ts), as the page
 // shows it. Never a key or a webhook id: only whether each is set, by whom, when and from where. Pure, for the route,
 // the view and the tests.
 

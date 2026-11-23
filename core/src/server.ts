@@ -73,6 +73,7 @@ import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
 import { registerOpsTools } from "./ops.js";
+import { registerPlatformAdminTools } from "./platform-admin.js";
 import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
 import { effectiveStages, registerPromotionAdminTools, registerPromotionTools } from "./promotions.js";
@@ -251,6 +252,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);
     registerOpsTools(server, store.db);
+    // Every workspace, app and financial product, for the Studio's Admin area (read-only; platform-admin.ts).
+    registerPlatformAdminTools(server, store.db);
   }
 
   return server;
