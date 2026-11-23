@@ -140,7 +140,7 @@ export async function POST(req: Request, { params }: Params) {
     const after = await hostingOf(mynt, appId, app.workspaceId);
     return json({
       ok: true,
-      hosting: after.app.state === "not_online" && !after.app.error ? { ...after, app: { ...after.app, state: "deploying", buildId: build.id, commitSha: build.commitSha } } : after,
+      hosting: after["app"].state === "not_online" && !after["app"].error ? { ...after, app: { ...after["app"], state: "deploying", buildId: build.id, commitSha: build.commitSha } } : after,
       message: `Putting ${app.name} online: Mynt's hosting fetches commit ${shortCommit(build.commitSha)} from ${build.repository}, builds it and starts it. This takes a few minutes; its address shows here once it answers.`,
       // Where it will answer, when Mynt already says (it isn't up until the state says Online).
       address: typeof reply?.url === "string" && reply.url.startsWith("https://") ? reply.url : null,

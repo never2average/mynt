@@ -51,11 +51,11 @@ export type HostingMeta =
 // The route's answers, checked before they're drawn (anything else is ignored).
 const isHosting = (v: unknown): v is WorkspaceHosting => {
   const h = v as { on?: unknown; app?: { state?: unknown } } | null
-  return typeof h?.on === "boolean" && typeof h.app?.state === "string"
+  return typeof h?.on === "boolean" && typeof h["app"]?.state === "string"
 }
 const isHostingMeta = (v: unknown): v is HostingMeta => {
   const m = v as { supported?: unknown; hosting?: unknown; app?: unknown } | null
-  return m?.supported === false || (m?.supported === true && isHosting(m.hosting) && typeof m.app === "object" && m.app !== null)
+  return m?.supported === false || (m?.supported === true && isHosting(m.hosting) && typeof m["app"] === "object" && m["app"] !== null)
 }
 
 const hostOf =(url: string) => {
@@ -98,16 +98,16 @@ export type PutOnlineViewProps = {
 /** The sheet's body: the build, its repository and commit, what happens, then the state and the confirm. */
 export function PutOnlineView({ meta, busy = false, error = null, result = null, onPutOnline, onChooseRepository }: PutOnlineViewProps) {
   const { build, hosting } = meta
-  const online = hosting.app
+  const online = hosting["app"]
   const [choice, setChoice] = useState<string>(meta.repositories?.[0]?.repository ?? "")
   if (!build)
     return (
       <p className="text-sm text-muted-foreground" data-no-shipped-build>
-        {meta.app.name} has no build that Mynt has verified yet. Ship a build from the chat; once Mynt verifies it, you can put it online here.
+        {meta["app"].name} has no build that Mynt has verified yet. Ship a build from the chat; once Mynt verifies it, you can put it online here.
       </p>
     )
   const ready = deployable(build)
-  const membersBlocked = !hosting.on && !meta.canTurnOn && !!meta.app.workspaceId
+  const membersBlocked = !hosting.on && !meta.canTurnOn && !!meta["app"].workspaceId
   const already = runsBuild(online, build)
   return (
     <div className="flex flex-col gap-4" data-put-online-view>
@@ -290,7 +290,7 @@ export function HostingControl({ appId, appName }: { appId: string; appName: str
   }, [appId, load])
 
   // While it deploys, Mynt is asked again every few seconds until it answers or stops.
-  const deploying = meta?.supported === true && meta.hosting.app.state === "deploying"
+  const deploying = meta?.supported === true && meta.hosting["app"].state === "deploying"
   useEffect(() => {
     if (!deploying) return
     const t = window.setInterval(async () => {
@@ -299,8 +299,8 @@ export function HostingControl({ appId, appName }: { appId: string; appName: str
       if (!live.current || !res?.ok || !isHosting(body?.hosting)) return
       const hosting = body.hosting
       setMeta((m) => (m && m.supported ? { ...m, hosting } : m))
-      if (hosting.app.state === "online") setResult(hosting.app.url ? `${appName} is online at ${hosting.app.url}` : `${appName} is online.`)
-      if (hosting.app.state === "not_online") setResult(null)
+      if (hosting["app"].state === "online") setResult(hosting["app"].url ? `${appName} is online at ${hosting["app"].url}` : `${appName} is online.`)
+      if (hosting["app"].state === "not_online") setResult(null)
     }, POLL_MS)
     return () => window.clearInterval(t)
   }, [deploying, base, appName])
@@ -322,7 +322,7 @@ export function HostingControl({ appId, appName }: { appId: string; appName: str
   }
 
   if (!meta?.supported) return null
-  const online = meta.hosting.app
+  const online = meta.hosting["app"]
   const offered = !!meta.build && !runsBuild(online, meta.build)
   return (
     <>

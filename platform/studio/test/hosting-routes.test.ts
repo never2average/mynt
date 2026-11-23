@@ -146,7 +146,7 @@ describe("POST /api/apps/[appId]/hosting: Put online", () => {
     expect(called("deploy_app").map((c) => c.args)).toEqual([{ app_id: "a1", build_id: "b2" }]);
     const order = fake.calls.map((c) => c.name);
     expect(order.indexOf("request_hosting")).toBeLessThan(order.indexOf("deploy_app"));
-    expect(body.hosting.app).toMatchObject({ state: "deploying", buildId: "b2" });
+    expect(body.hosting["app"]).toMatchObject({ state: "deploying", buildId: "b2" });
     expect(body.message).toMatch(/^Putting Cards online: Mynt's hosting fetches commit abcdef1 from octo\/cards/);
   });
 
