@@ -18,7 +18,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
-  AUDITS_TAB_HELP,
   AUDITS_TAB_LABELS,
   AUDITS_TABS,
   filterObligations,
@@ -41,7 +40,7 @@ export function AuditTabs({ tab, onTab }: { tab: AuditsTab; onTab: (t: AuditsTab
   return (
     <TabList aria-label="Audits">
       {AUDITS_TABS.map((t) => (
-        <Tab key={t} selected={tab === t} data-tab={t} title={AUDITS_TAB_HELP[t]} onClick={() => onTab(t)}>
+        <Tab key={t} selected={tab === t} data-tab={t} onClick={() => onTab(t)}>
           {AUDITS_TAB_LABELS[t]}
         </Tab>
       ))}

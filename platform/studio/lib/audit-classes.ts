@@ -33,10 +33,6 @@ export const auditClassOf = (v: unknown): AuditClass => (AUDIT_CLASSES.includes(
 export const AUDITS_TABS = ["security", "obligations", "agreements", "financial", "workspace"] as const;
 export type AuditsTab = (typeof AUDITS_TABS)[number];
 export const AUDITS_TAB_LABELS: Record<AuditsTab, string> = { ...AUDIT_CLASS_LABELS, agreements: "Agreement audits" };
-export const AUDITS_TAB_HELP: Record<AuditsTab, string> = {
-  ...AUDIT_CLASS_HELP,
-  agreements: "The oversight audits licence providers run on your apps under program agreements: due dates, status, findings and evidence",
-};
 export const auditsTabOf = (v: unknown): AuditsTab => (AUDITS_TABS.includes(v as AuditsTab) ? (v as AuditsTab) : "security");
 
 // ---- rows ----
