@@ -165,6 +165,19 @@ const OBLIGATIONS = [
   "decline_app_agreement",
   "sign_app_agreement",
   "terminate_app_agreement",
+  // program agreements signed by e-signature: licence providers' templates, the documents, the signed copies read
+  // (agreement-esign.ts)
+  "upload_agreement_template",
+  "retire_agreement_template",
+  "esign_document_created",
+  "esign_document_failed",
+  "open_agreement_signing",
+  "esign_signer_signed",
+  "esign_completed",
+  "esign_declined",
+  "esign_canceled",
+  "esign_expired",
+  "download_agreement_document",
   // covenants on sponsorships
   "set_covenant",
   "set_covenant_refused",

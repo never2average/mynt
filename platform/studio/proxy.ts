@@ -38,7 +38,9 @@ export async function proxy(req: NextRequest) {
   }
 
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
-  const csp = contentSecurityPolicy(process.env.PREVIEW_FRAME_SRC, process.env.NODE_ENV !== "production", nonce);
+  // Frames: app previews (PREVIEW_FRAME_SRC) and the e-signature service's signing pages (ESIGN_FRAME_SRC).
+  const frames = [process.env.PREVIEW_FRAME_SRC, process.env.ESIGN_FRAME_SRC].filter(Boolean).join(" ");
+  const csp = contentSecurityPolicy(frames, process.env.NODE_ENV !== "production", nonce);
   const requestHeaders = new Headers(req.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("Content-Security-Policy", csp);

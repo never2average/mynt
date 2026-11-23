@@ -1,6 +1,7 @@
 import { sessionAccess } from "@/lib/liquidity-server";
 import { ownerOf } from "@/lib/wallets-server";
 import { asDeveloper, json } from "@/lib/studio-route";
+import { sessionIsLicenceProvider } from "@/lib/agreement-esign-server";
 import { sessionIsDeveloper } from "@/lib/studio-server";
 
 export const dynamic = "force-dynamic";
@@ -10,5 +11,5 @@ export const dynamic = "force-dynamic";
 // every few minutes; Mynt checks every call. `owner` is an opaque hash of the user, so a choice
 // remembered in this browser is the user's own.
 export async function GET() {
-  return asDeveloper("reading liquidity roles", async (_mynt, session) => json({ access: sessionAccess(session), developer: sessionIsDeveloper(session), owner: ownerOf(session) }), () => true);
+  return asDeveloper("reading liquidity roles", async (_mynt, session) => json({ access: sessionAccess(session), developer: sessionIsDeveloper(session), licence_provider: sessionIsLicenceProvider(session), owner: ownerOf(session) }), () => true);
 }

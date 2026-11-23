@@ -17,6 +17,7 @@ import { KpiRow } from "@/components/charts"
 import { Panel, Section } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
 import { ChoosePersonasSheet, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
+import { AgreementRowActions } from "@/components/agreement-esign"
 import { StageMark, StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -351,6 +352,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Status</TableHead>
                   <TableHead>Products covered</TableHead>
                   <TableHead>Effective</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -364,6 +366,9 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                     </TableCell>
                     <TableCell className="whitespace-normal">{a.products.join(", ") || "—"}</TableCell>
                     <TableCell className="text-xs whitespace-nowrap tabular-nums">{dates(a.from, a.to)}</TableCell>
+                    <TableCell>
+                      <AgreementRowActions agreementId={a.id} esign={a.esign} statusKey={a.statusKey} side="app" canAct={data.canManage} onChanged={onChanged} />
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

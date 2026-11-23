@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { APP_AGREEMENT_KINDS, APP_AGREEMENT_STATUSES } from "./app-agreements-schema.js";
+import { cancelSigning, signatureDocumentOf, startSigning } from "./agreement-esign.js";
 import { inTransaction } from "./db.js";
+import type { ESign } from "./esign/provider.js";
 import { noticeFirm } from "./firm-notices.js";
 import type { FirmWebhookEvent } from "./runtime.js";
 import { effectiveRoles, productStage, type App, type Store, type User } from "./store.js";
@@ -60,6 +62,7 @@ export interface AppAgreement {
   app_signed_at: string | null;
   counterparty_signed_by: string | null;
   counterparty_signed_at: string | null;
+  signed_at: string | null; // when it became signed (by both sides, or by a completed e-signature)
   terminated_by: string | null;
   terminated_at: string | null;
   termination_reason: string | null;
@@ -89,6 +92,7 @@ const toAgreement = (r: Row): AppAgreement => ({
   app_signed_at: iso(r.app_signed_at),
   counterparty_signed_by: (r.counterparty_signed_by as string | null) ?? null,
   counterparty_signed_at: iso(r.counterparty_signed_at),
+  signed_at: iso(r.signed_at),
   terminated_by: (r.terminated_by as string | null) ?? null,
   terminated_at: iso(r.terminated_at),
   termination_reason: (r.termination_reason as string | null) ?? null,
@@ -204,7 +208,7 @@ const isVendorFirm = async (store: Store, entityId: string) =>
   Boolean((await store.db.query(`SELECT 1 FROM ${T}.vendor_offerings WHERE entity_id = $1 LIMIT 1`, [entityId])).rows[0]);
 
 // An agreement as either side sees it: both parties named, the products named.
-async function describe(store: Store, a: AppAgreement) {
+async function describe(store: Store, esign: ESign | null, a: AppAgreement) {
   const [app, counterparty] = await Promise.all([a.app_id ? store.getApp(a.app_id) : undefined, store.getEntity(a.counterparty_entity_id)]);
   const products = await Promise.all(a.products.map(async (id) => ({ id, name: (await store.getProduct(id))?.product.name ?? id })));
   return {
@@ -213,13 +217,16 @@ async function describe(store: Store, a: AppAgreement) {
     counterparty: { entity_id: a.counterparty_entity_id, name: counterparty?.name ?? null },
     products: products,
     signatures: { app_side: a.app_signed_at !== null, counterparty_side: a.counterparty_signed_at !== null },
+    // Program agreements are signed by e-signature where it's configured (agreement-esign.ts).
+    signed_by_esignature: esign !== null && a.kind === "program",
+    signature_document: a.kind === "program" ? await signatureDocumentOf(store, esign, a.id) : null,
   };
 }
 
 // The app's side (developers): propose, sign, terminate and list an app's agreements; choose its target customers.
 // The counterparty's side (licence providers and vendors): respond, sign, terminate and list the agreements naming its
 // firm. One account can be both; each call works out which side it acts for from the agreement.
-export function registerAppAgreementTools(server: McpServer, store: Store, user: User, sides: { app: boolean; counterparty: boolean }) {
+export function registerAppAgreementTools(server: McpServer, store: Store, user: User, sides: { app: boolean; counterparty: boolean }, esign: ESign | null = null) {
   // The caller's firm, when it may act for it as a counterparty (read afresh: a licence provider without standing at
   // its firm acts for none, store.ts rolesWithStanding).
   const myFirm = async () => {
@@ -305,7 +312,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         const a = toAgreement(r);
         await store.audit(user.id, "propose_app_agreement", a.id, { app_id: app.id, workspace_id: app.workspace_id, counterparty_entity_id, kind, products: covered, document_sha256: document_sha256 ?? null });
         const told = await tell(a, "app_agreement.proposed", { app_name: app.name, terms_summary, respond_with: "respond_to_app_agreement { agreement_id, decision }" });
-        return json({ ...(await describe(store, a)), counterparty_told: told > 0 });
+        return json({ ...(await describe(store, esign, a)), counterparty_told: told > 0 });
       },
     );
   }
@@ -333,7 +340,10 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         if (!r) return fail(`That agreement is ${a.status}, not waiting for an answer`);
         const done = toAgreement(r);
         await store.audit(user.id, decision === "accept" ? "accept_app_agreement" : "decline_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: firm, kind: done.kind, note: note ?? null });
-        return json(await describe(store, done));
+        // An accepted program agreement goes to e-signature at once where it's configured; if that can't happen yet
+        // (no template, the service unreachable) it's made when someone first asks to sign (get_agreement_signing_link).
+        const signing = esign && done.kind === "program" && status === "accepted" ? await startSigning(store, esign, done.id, user.id) : null;
+        return json({ ...(await describe(store, esign, done)), ...(signing ? { signing: signing.ok ? { ready: true } : { ready: false, reason: signing.error } } : {}) });
       },
     );
   }
@@ -343,7 +353,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     {
       title: "Sign an app agreement",
       description:
-        "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Audited, and the other firm is told when it's signed.",
+        "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Where e-signature is configured, program agreements are signed by e-signature instead (get_agreement_signing_link) and this refuses them. Audited, and the other firm is told when it's signed.",
       inputSchema: { agreement_id: UUID },
     },
     async ({ agreement_id }) => {
@@ -351,12 +361,15 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       const side = a ? await sideOf(a) : null;
       if (!a || !side) return fail(`No agreement '${agreement_id}' you can sign`);
       if (a.status !== "accepted") return fail(a.status === "proposed" ? "The other firm hasn't accepted it yet" : `That agreement is ${a.status}`);
+      // With e-signature configured, only a completed e-signature signs a program agreement.
+      if (esign && a.kind === "program") return fail("This deployment signs program agreements by e-signature: each signer opens get_agreement_signing_link, and it's signed once both have");
       const col = side === "app" ? "app" : "counterparty";
       if (side === "app" ? a.app_signed_at : a.counterparty_signed_at) return fail("Your side has already signed it");
       const r = (
         await store.db.query(
           `UPDATE ${T}.app_agreements SET ${col}_signed_by = $2, ${col}_signed_at = now(), updated_at = now(),
-             status = CASE WHEN ${col === "app" ? "counterparty" : "app"}_signed_at IS NOT NULL THEN 'signed' ELSE status END
+             status = CASE WHEN ${col === "app" ? "counterparty" : "app"}_signed_at IS NOT NULL THEN 'signed' ELSE status END,
+             signed_at = CASE WHEN ${col === "app" ? "counterparty" : "app"}_signed_at IS NOT NULL THEN now() ELSE signed_at END
            WHERE id = $1 AND status = 'accepted' AND ${col}_signed_at IS NULL RETURNING *`,
           [a.id, user.id],
         )
@@ -365,7 +378,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       const done = toAgreement(r);
       await store.audit(user.id, "sign_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, side, signed: done.status === "signed" });
       if (done.status === "signed") await tell(done, "app_agreement.signed");
-      return json(await describe(store, done));
+      return json(await describe(store, esign, done));
     },
   );
 
@@ -390,8 +403,9 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       if (!r) return fail(`That agreement is already ${a.status}`);
       const done = toAgreement(r);
       await store.audit(user.id, "terminate_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, side, from_status: a.status, reason });
+      await cancelSigning(store, esign, done.id, user.id);
       if (side === "app") await tell(done, "app_agreement.terminated", { reason });
-      return json(await describe(store, done));
+      return json(await describe(store, esign, done));
     },
   );
 
@@ -412,7 +426,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         return json({
           app: { id: app.id, name: app.name, workspace_id: app.workspace_id },
           can_manage: MANAGERS.includes((await appRole(store, user, app)) ?? ""),
-          agreements: await Promise.all(rows.map((r) => describe(store, toAgreement(r)))),
+          agreements: await Promise.all(rows.map((r) => describe(store, esign, toAgreement(r)))),
           products: (await appProducts(store, app)).map(({ customer_segments: _s, ...p }) => p),
           vendor_contracts: await vendorContracts(store, app),
           introductions: await introductions(store, app),
@@ -421,7 +435,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       const firm = await myFirm();
       if (!firm) return fail(sides.app ? "Name the app (app_id) whose agreements you want" : "You don't belong to a firm as a licence provider or vendor yet");
       const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE counterparty_entity_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`, [firm, status ?? null]);
-      return json({ entity_id: firm, agreements: await Promise.all(rows.map((r) => describe(store, toAgreement(r)))) });
+      return json({ entity_id: firm, agreements: await Promise.all(rows.map((r) => describe(store, esign, toAgreement(r)))) });
     },
   );
 

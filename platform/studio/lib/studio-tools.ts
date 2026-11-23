@@ -3,6 +3,7 @@ import { ChatKindSchema, SessionEvent, SessionId, SessionMetadata } from "./chat
 import { isCalendarDate } from "./compliance";
 import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
+import { AGREEMENT_FILE_MAX_BYTES } from "./agreement-esign";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
 // checks everything again (who owns what, roles, limits); these keep junk off the wire and keep
@@ -142,7 +143,8 @@ export const STUDIO_TOOLS = {
   request_promotion_signoff: z.object({ app_id: id }).strict(),
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
-  list_app_agreements: z.object({ app_id: id, status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Without app_id: a licence provider's Agreements page, the agreements apps made with its firm.
+  list_app_agreements: z.object({ app_id: id.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
   propose_app_agreement: z
     .object({
       app_id: id,
@@ -156,6 +158,26 @@ export const STUDIO_TOOLS = {
       effective_to: auditDate.optional(),
     })
     .strict(),
+  // Program agreements signed by e-signature: a licence provider's templates (Upload agreement template, on its
+  // Agreements page), each signer's embedded signing page (Sign) and the signed copy (Download signed copy), on both
+  // sides' agreement rows. The file is checked again by the upload route (type and size) and by Mynt.
+  upload_agreement_template: z
+    .object({
+      name: z.string().trim().min(3).max(120),
+      source: z.literal("upload"),
+      licence_id: uuid.optional(),
+      sponsorship_id: uuid.optional(),
+      file_name: z.string().trim().regex(/^[^/\\\0]{1,150}\.(pdf|docx)$/i),
+      file_base64: z.string().max(Math.ceil((AGREEMENT_FILE_MAX_BYTES * 4) / 3) + 8).regex(/^[A-Za-z0-9+/]*={0,2}$/),
+      signature_placement: z.enum(["signature_page", "text_tags"]).optional(),
+      notes: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  list_my_licenses: z.object({}).strict(),
+  list_agreement_templates: z.object({ include_retired: z.boolean().optional() }).strict(),
+  retire_agreement_template: z.object({ template_id: uuid, reason: z.string().trim().max(500).optional() }).strict(),
+  get_agreement_signing_link: z.object({ agreement_id: uuid }).strict(),
+  download_agreement_document: z.object({ agreement_id: uuid, part: z.enum(["signed", "certificate"]).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace

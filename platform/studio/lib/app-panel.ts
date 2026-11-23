@@ -4,6 +4,7 @@
 // Tabs show information; anything that changes state (promoting, moving back, setting target
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
+import { esignOf, esignStatusLine, type EsignInfo } from "./agreement-esign";
 import { CHECK_LABELS, type PromotionCheck } from "./promotions";
 
 type Obj = Record<string, unknown>;
@@ -128,6 +129,7 @@ export type AgreementRow = {
   from: string | null;
   to: string | null;
   signatures: string | null;
+  esign: EsignInfo | null; // a program agreement's e-signature (Sign, Download signed copy)
 };
 export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null };
 export type IntroRow = { id: string; counterparty: string | null; status: string; since: string | null };
@@ -165,7 +167,14 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
         if (!id) return [];
         const statusKey = str(a.status) ?? "unknown";
         const sig = isObj(a.signatures) ? a.signatures : {};
-        const signatures = statusKey === "accepted" ? `${sig.app_side === true ? "You signed" : "You haven't signed"}; ${sig.counterparty_side === true ? "they signed" : "they haven't signed"}` : null;
+        const esign = esignOf(a);
+        const signatures = esign?.byEsign
+          ? statusKey === "accepted" || statusKey === "signed"
+            ? esignStatusLine(esign, "app")
+            : null
+          : statusKey === "accepted"
+            ? `${sig.app_side === true ? "You signed" : "You haven't signed"}; ${sig.counterparty_side === true ? "they signed" : "they haven't signed"}`
+            : null;
         return [
           {
             id,
@@ -177,6 +186,7 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
             from: str(a.effective_from),
             to: str(a.effective_to),
             signatures,
+            esign,
           },
         ];
       }),

@@ -6,6 +6,7 @@ import type { AdminContext } from "./admin.js";
 import { agentProxy } from "./agent-proxy.js";
 import type { ClerkAuth } from "./auth.js";
 import { RAMP_ADAPTER_WEBHOOK_PATH, rampAdapterWebhook } from "./ramp-adapters/index.js";
+import { ESIGN_WEBHOOK_PATH, esignWebhook } from "./agreement-esign.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
 import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
@@ -117,6 +118,8 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   }
   // The identity provider's organization events (workspaces follow them): verified, each handled once.
   if (url.pathname === ORG_WEBHOOK_PATH && req.method === "POST") return orgWebhook(store, ctx.workspaceSync ?? null, req, res);
+  // The e-signature service's events for program agreements: verified with its own scheme, each handled once.
+  if (url.pathname === ESIGN_WEBHOOK_PATH) return esignWebhook(store, ctx.esign ?? null, req, res);
   // A ramp partner's webhooks, for an offering Mynt runs through an adapter: verified with the partner's own scheme.
   if (url.pathname.startsWith(RAMP_ADAPTER_WEBHOOK_PATH)) return rampAdapterWebhook(store, req, res, url);
   // The runtime API for developers' apps authenticates with app keys, not Clerk.

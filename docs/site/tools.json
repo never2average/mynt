@@ -16,7 +16,7 @@
       "id": "apps",
       "title": "Apps & developers",
       "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products, and start from app kinds and ideas.",
-      "tools": 30
+      "tools": 35
     },
     {
       "id": "builds",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 233,
+      "tools": 235,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 233,
+      "tools": 235,
       "get_started": [
         {
           "tool": "create_entity",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 42,
+      "tools": 47,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 79,
+      "tools": 84,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 358,
+      "tools": 363,
       "get_started": [
         {
           "tool": "define_region",
@@ -6592,6 +6592,43 @@
       }
     },
     {
+      "name": "download_agreement_document",
+      "title": "Download a signed agreement",
+      "description": "Either party's members (the app's workspace, or the other firm): the signed copy of a program agreement Mynt holds (part 'signed'), or the e-signature service's audit certificate with it (part 'certificate'), as base64 with its SHA-256, checked against what Mynt recorded when it was signed. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "part": {
+            "default": "signed",
+            "type": "string",
+            "enum": [
+              "signed",
+              "certificate"
+            ]
+          }
+        },
+        "required": [
+          "agreement_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "enable_webhook",
       "title": "Turn a disabled webhook back on",
       "description": "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace, since its address may be theirs. Turning it back on takes its URL: the one it has (list_webhooks shows it), to confirm it's still the right receiver, or a new one. It gets a new signing secret, shown once to you.",
@@ -6894,6 +6931,35 @@
           "sdk_id",
           "version",
           "changelog"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_agreement_signing_link",
+      "title": "Sign a program agreement",
+      "description": "The signer on either side of an accepted program agreement (who accepted it for the licence provider, who proposed it for the app): a link to sign it inside Mynt Studio (an embedded signing page, valid for a short while; ask again for a fresh one). Mynt makes the e-signature document from the licence provider's active template the first time if it wasn't made when the agreement was accepted, and reads its state back from the e-signature service. The agreement is signed only once the service reports both signatures complete.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "agreement_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -8385,6 +8451,29 @@
         "required": [
           "campaign_id"
         ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_agreement_templates",
+      "title": "Your firm's agreement templates",
+      "description": "Licence provider: your firm's program agreement templates, each version with what it's attached to, its SHA-256 and whether it's the active one. include_retired lists the versions no longer in use too.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_retired": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -12813,6 +12902,37 @@
       }
     },
     {
+      "name": "retire_agreement_template",
+      "title": "Retire an agreement template",
+      "description": "Licence provider: stop using one of your firm's templates for new agreements. Documents already made from it are unaffected, and the version is kept. Audited.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "template_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "template_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "retire_app_idea",
       "title": "Retire an app idea",
       "description": "Admin: stop offering an app idea on New app. The row stays (update_app_idea with status 'active' brings it back).",
@@ -14779,7 +14899,7 @@
     {
       "name": "sign_app_agreement",
       "title": "Sign an app agreement",
-      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Audited, and the other firm is told when it's signed.",
+      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Where e-signature is configured, program agreements are signed by e-signature instead (get_agreement_signing_link) and this refuses them. Audited, and the other firm is told when it's signed.",
       "area": "apps",
       "roles": [
         "developer",
@@ -16364,6 +16484,120 @@
         "required": [
           "program_id",
           "build_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "upload_agreement_template",
+      "title": "Upload a program agreement template",
+      "description": "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 120
+          },
+          "source": {
+            "default": "upload",
+            "type": "string",
+            "enum": [
+              "upload",
+              "provider_template"
+            ]
+          },
+          "licence_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "sponsorship_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "file_name": {
+            "type": "string",
+            "pattern": "^[^/\\\\\\0]{1,150}\\.(pdf|docx)$"
+          },
+          "file_base64": {
+            "type": "string",
+            "maxLength": 6990515,
+            "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+          },
+          "provider_template_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]{1,100}$"
+          },
+          "placeholders": {
+            "type": "object",
+            "properties": {
+              "counterparty": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            },
+            "required": [
+              "counterparty",
+              "app"
+            ],
+            "additionalProperties": false
+          },
+          "field_map": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "licence_provider",
+                "developer_firm",
+                "app",
+                "products",
+                "states",
+                "effective_from",
+                "effective_to",
+                "agreement_id",
+                "terms_summary"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          "signature_placement": {
+            "default": "signature_page",
+            "description": "signature_page: a signature page is added at the end; text_tags: the file carries the service's text tags",
+            "type": "string",
+            "enum": [
+              "signature_page",
+              "text_tags"
+            ]
+          },
+          "notes": {
+            "description": "Notes on the template, e.g. where fields go",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "name"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

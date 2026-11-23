@@ -8,6 +8,7 @@ import { LIQUIDITY_TABLES } from "./liquidity-schema.js";
 import { APP_IDEA_TABLES } from "./app-ideas-schema.js";
 import { CHAT_SESSION_TABLES } from "./chat-sessions-schema.js";
 import { APP_AGREEMENT_TABLES } from "./app-agreements-schema.js";
+import { AGREEMENT_ESIGN_TABLES } from "./agreement-esign-schema.js";
 import { grandfatherLiveApps, PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
@@ -1764,6 +1765,7 @@ ${PROMOTION_TABLES}
 ${APP_IDEA_TABLES}
 ${CHAT_SESSION_TABLES}
 ${APP_AGREEMENT_TABLES}
+${AGREEMENT_ESIGN_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
