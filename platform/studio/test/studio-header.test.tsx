@@ -320,6 +320,17 @@ describe("search", () => {
     expect(index.find((i) => i.label === "Crypto vault")?.href).toBe("/a3");
   });
 
+  it("finds an app's Products, Agreements and Customers tabs by what they hold, never by the app's name alone", () => {
+    const labels = (q: string) => searchStudio(index, q).map((i) => `${i.group}:${i.label}`);
+    expect(labels("budgeting agreements")).toEqual(["Apps:Budgeting: Agreements"]);
+    expect(searchStudio(index, "budgeting agreements")[0].href).toBe("/a2?tab=agreements");
+    expect(labels("crypto personas")).toEqual(["Apps:Crypto vault: Customers"]);
+    expect(labels("round sponsors")).toEqual(["Apps:Round-up savings: Products"]);
+    expect(labels("budg")).toEqual(["Apps:Budgeting"]);
+    expect(searchStudio(index, "").some((i) => i.href.includes("?tab="))).toBe(false);
+    expect(index.some((i) => /Licences$/.test(i.label) && i.group === "Apps")).toBe(false);
+  });
+
   function results(askStatus: "enabled" | "disabled", onSelect: (i: unknown) => unknown = () => undefined, onAsk: () => unknown = () => undefined) {
     const Harness = () => {
       const [q, setQ] = useState("");

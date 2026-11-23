@@ -58,10 +58,18 @@ export function isStudioPath(href: unknown): href is string {
   }
 }
 
+// An app's tabs that search finds by name and by what they hold; each opens the app on that tab.
+export const APP_SEARCH_TABS = [
+  { tab: "products", label: "Products", keywords: "products sponsors sponsor licence provider states" },
+  { tab: "agreements", label: "Agreements", keywords: "agreements program contract vendor data sharing introductions partners sign" },
+  { tab: "customers", label: "Customers", keywords: "customers personas segments target audience" },
+] as const;
+
 export type SearchGroup = "Pages" | "Apps" | "Members" | "Licences" | "Audit actions";
 export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Members", "Licences", "Audit actions"];
 
-export type SearchItem = { id: string; group: SearchGroup; label: string; hint?: string; href: string; text: string };
+// `requires`: an item found only when one of the words typed is among these (an app's tab isn't listed for its name alone).
+export type SearchItem = { id: string; group: SearchGroup; label: string; hint?: string; href: string; text: string; requires?: string };
 
 export type SearchSources = {
   apps?: { id: string; name: string; stage: Stage }[];
@@ -78,6 +86,9 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
   for (const a of sources.apps ?? []) {
     const stage = STAGE_LABELS[a.stage];
     items.push({ id: `app:${a.id}`, group: "Apps", label: a.name, hint: stage, href: `/${encodeURIComponent(a.id)}`, text: lower(a.name, stage, a.stage) });
+    // Its business tabs, found by what they hold (an app holds no licences: its products' sponsors are on Products).
+    for (const t of APP_SEARCH_TABS)
+      items.push({ id: `apptab:${a.id}:${t.tab}`, group: "Apps", label: `${a.name}: ${t.label}`, hint: "App tab", href: `/${encodeURIComponent(a.id)}?tab=${t.tab}`, text: lower(a.name, t.label, t.keywords), requires: lower(t.label, t.keywords) });
   }
   for (const m of sources.members ?? []) {
     const label = m.name ?? m.email ?? "Member";
@@ -105,8 +116,8 @@ export function searchStudio(items: SearchItem[], query: string, perGroup = PER_
   const q = query.trim().toLowerCase();
   const words = q.split(/\s+/).filter(Boolean);
   const hits = words.length
-    ? items.filter((i) => words.every((w) => i.text.includes(w) || i.label.toLowerCase().includes(w)))
-    : items.filter((i) => i.group === "Pages" || i.group === "Apps");
+    ? items.filter((i) => words.every((w) => i.text.includes(w) || i.label.toLowerCase().includes(w)) && (!i.requires || words.some((w) => i.requires!.includes(w))))
+    : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires));
   const rank = (i: SearchItem) => {
     const label = i.label.toLowerCase();
     return !q ? 0 : label.startsWith(q) ? 0 : label.includes(q) ? 1 : 2;

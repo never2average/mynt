@@ -61,9 +61,11 @@ const EMPTY_MESSAGES: UIMessage[] = [];
 
 const TAB_DESCRIPTIONS: Record<AppTab, string> = {
   preview: "Show the app's live preview",
-  pnl: "Open the app's P&L",
-  licences: "Open the licences behind the app",
+  products: "Open the products the app uses, with their sponsors",
+  agreements: "Open the app's agreements with the firms behind its products",
+  customers: "Open the customers and personas the app targets",
   security: "Open the app's security checks",
+  pnl: "Open the app's P&L",
   sdk: "Open the app's SDK",
   activity: "Open the app's activity",
 };

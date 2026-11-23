@@ -210,6 +210,9 @@ test("client actions served by the bound vendor: the device gets a status, the i
     "firm.member_pending",
     "firm.member_standing_lost",
     "firm.recovery_pending",
+    "app_agreement.proposed",
+    "app_agreement.signed",
+    "app_agreement.terminated",
   ]);
   assert.ok(!JSON.stringify(await ok(innovator, "list_firm_webhooks")).includes(hook.secret), "the secret is shown once");
 

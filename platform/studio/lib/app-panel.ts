@@ -1,5 +1,6 @@
 // An app's right-hand panel in the builder (beside its chat): besides Preview, the information
-// tabs P&L, Licences, Security, SDK and Activity, each read live from Mynt and only for this app.
+// tabs Products, Agreements, Customers, Security, P&L, SDK and Activity, each read live from Mynt
+// and only for this app. There's no Licences tab: an app holds no licences, its products do.
 // Tabs show information; anything that changes state (promoting, moving back, setting target
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
@@ -11,9 +12,18 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
-export const APP_TABS = ["preview", "pnl", "licences", "security", "sdk", "activity"] as const;
+export const APP_TABS = ["preview", "products", "agreements", "customers", "security", "pnl", "sdk", "activity"] as const;
 export type AppTab = (typeof APP_TABS)[number];
-export const APP_TAB_LABELS: Record<AppTab, string> = { preview: "Preview", pnl: "P&L", licences: "Licences", security: "Security", sdk: "SDK", activity: "Activity" };
+export const APP_TAB_LABELS: Record<AppTab, string> = {
+  preview: "Preview",
+  products: "Products",
+  agreements: "Agreements",
+  customers: "Customers",
+  security: "Security",
+  pnl: "P&L",
+  sdk: "SDK",
+  activity: "Activity",
+};
 export type InfoTab = Exclude<AppTab, "preview">;
 // The builder chat's slash commands ask the workspace shell to show a tab: detail { projectId, tab }.
 export const PANEL_TAB_EVENT = "adorable:panel-tab";
@@ -67,46 +77,170 @@ export function fromPnl(reply: unknown): AppPnl | null {
   };
 }
 
-// ---- Licences (get_compliance_coverage, for this app's products only) ----
+// ---- Products, Agreements and Customers (list_app_agreements and get_app_customers, for this app) ----
+//
+// An app is the distribution layer and holds no licences of its own: the products it uses are the
+// regulated things, each with its stage and the licence providers sponsoring it in some states. The
+// app's workspace holds agreements with those firms (and its vendors), and targets customer personas
+// its products declare.
 
-export type StateLicence = { type: string | null; regulator: string | null; number: string | null; status: string | null; expiresAt: string | null };
-export type AppStateCoverage = { code: string; name: string; covered: string[]; missing: string[]; licences: StateLicence[] };
-export type AppLicences = {
+export const STAGE_TEXT: Record<string, string> = { idea: "Idea", staging: "Staging", production: "Production" };
+export type Sponsor = { entityId: string; name: string; states: string[] };
+export type AppProduct = { id: string; name: string; stage: string | null; sponsors: Sponsor[]; states: string[]; missing: boolean };
+export type AppProducts = { available: true; products: AppProduct[]; productionCheck: PromotionCheck | null };
+
+const sponsorsFrom = (v: unknown): Sponsor[] =>
+  arr(v)
+    .filter(isObj)
+    .flatMap((s) => {
+      const entityId = str(s.entity_id);
+      return entityId ? [{ entityId, name: str(s.name) ?? "Unnamed firm", states: arr(s.jurisdictions).map(str).filter((j): j is string => Boolean(j)) }] : [];
+    });
+
+export function appProductsFrom(reply: unknown): AppProduct[] {
+  return (isObj(reply) ? arr(reply.products) : [])
+    .filter(isObj)
+    .flatMap((p) => {
+      const id = str(p.id);
+      if (!id) return [];
+      return [{ id, name: str(p.name) ?? id, stage: str(p.stage), sponsors: sponsorsFrom(p.sponsors), states: arr(p.states).map(str).filter((s): s is string => Boolean(s)), missing: p.missing === true }];
+    });
+}
+
+/** A state code as people read it: "us-ny" is "NY", a country code stays as it is ("US"). */
+export const stateLabel = (code: string) => (code.includes("-") ? code.split("-").slice(1).join("-") : code).toUpperCase();
+
+export const AGREEMENT_KIND_LABELS: Record<string, string> = { program: "Program agreement", vendor: "Vendor contract", data_sharing: "Data sharing" };
+export const AGREEMENT_STATUS_LABELS: Record<string, string> = {
+  proposed: "Proposed: waiting for them",
+  accepted: "Accepted: waiting for signatures",
+  signed: "Signed",
+  declined: "Declined",
+  terminated: "Ended",
+};
+export type AgreementRow = {
+  id: string;
+  counterparty: string;
+  kind: string; // the label
+  status: string; // the label, in words
+  statusKey: string;
+  products: string[];
+  from: string | null;
+  to: string | null;
+  signatures: string | null;
+};
+export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null };
+export type IntroRow = { id: string; counterparty: string | null; status: string; since: string | null };
+export type AppAgreements = {
   available: true;
+  canManage: boolean;
+  agreements: AgreementRow[];
+  vendorContracts: VendorContractRow[];
+  introductions: IntroRow[] | null; // null: the business-development agent isn't running on this Mynt
+  // For the Propose agreement sheet: the sponsors of the app's products, and the products.
+  sponsors: { entityId: string; name: string; productIds: string[] }[];
   products: { id: string; name: string }[];
-  states: AppStateCoverage[]; // every state where at least one of the app's products is covered
-  fullyCovered: number; // states where every product is
-  productionCheck: PromotionCheck | null; // the licences check for production, when the app is in staging
 };
 
-// The coverage Mynt answers for the workspace, narrowed to this app's products. A state counts as
-// covered for a product only where Mynt lists that product there (by id).
-export function appLicences(coverage: unknown, products: { id: string; name: string }[], productionCheck: PromotionCheck | null): AppLicences {
-  const ids = new Set(products.map((p) => p.id));
+const INTRO_STATUS: Record<string, string> = { proposed: "Asked: waiting for both to say yes", agreed: "Both said yes", made: "Introduced" };
+
+export function fromAgreements(reply: unknown): AppAgreements | null {
+  if (!isObj(reply) || !Array.isArray(reply.agreements)) return null;
+  const products = appProductsFrom(reply);
   const name = (id: string) => products.find((p) => p.id === id)?.name ?? id;
-  const states = (isObj(coverage) ? arr(coverage.states) : []).filter(isObj).flatMap((s): AppStateCoverage[] => {
-    const code = str(s.code)?.toLowerCase();
-    if (!code) return [];
-    const here = arr(s.products)
+  const sponsors = new Map<string, { entityId: string; name: string; productIds: string[] }>();
+  for (const p of products)
+    for (const s of p.sponsors) {
+      const e = sponsors.get(s.entityId) ?? { entityId: s.entityId, name: s.name, productIds: [] };
+      e.productIds.push(p.id);
+      sponsors.set(s.entityId, e);
+    }
+  return {
+    available: true,
+    canManage: reply.can_manage === true,
+    agreements: arr(reply.agreements)
       .filter(isObj)
-      .map((p) => str(p.id))
-      .filter((id): id is string => Boolean(id && ids.has(id)));
-    if (!here.length) return [];
-    return [
-      {
-        code,
-        name: str(s.name) ?? code,
-        covered: here.map(name),
-        missing: products.filter((p) => !here.includes(p.id)).map((p) => p.name),
-        licences: arr(s.licences)
-          .filter(isObj)
-          .map((l) => ({ type: str(l.type), regulator: str(l.regulator), number: str(l.number), status: str(l.status), expiresAt: str(l.expires_at) })),
-      },
-    ];
-  });
-  states.sort((a, b) => a.name.localeCompare(b.name));
-  return { available: true, products, states, fullyCovered: states.filter((s) => !s.missing.length).length, productionCheck };
+      .flatMap((a): AgreementRow[] => {
+        const id = str(a.id);
+        if (!id) return [];
+        const statusKey = str(a.status) ?? "unknown";
+        const sig = isObj(a.signatures) ? a.signatures : {};
+        const signatures = statusKey === "accepted" ? `${sig.app_side === true ? "You signed" : "You haven't signed"}; ${sig.counterparty_side === true ? "they signed" : "they haven't signed"}` : null;
+        return [
+          {
+            id,
+            counterparty: (isObj(a.counterparty) ? str(a.counterparty.name) : null) ?? "Unnamed firm",
+            kind: AGREEMENT_KIND_LABELS[str(a.kind) ?? ""] ?? str(a.kind) ?? "Agreement",
+            status: AGREEMENT_STATUS_LABELS[statusKey] ?? statusKey,
+            statusKey,
+            products: arr(a.products).map((p) => (isObj(p) ? (str(p.name) ?? str(p.id)) : str(p) ? name(str(p)!) : null)).filter((p): p is string => Boolean(p)),
+            from: str(a.effective_from),
+            to: str(a.effective_to),
+            signatures,
+          },
+        ];
+      }),
+    vendorContracts: arr(reply.vendor_contracts)
+      .filter(isObj)
+      .flatMap((v): VendorContractRow[] => {
+        const id = str(v.subscription_id);
+        if (!id) return [];
+        return [{ id, vendor: (isObj(v.vendor) ? str(v.vendor.name) : null) ?? "Unnamed vendor", offering: str(v.offering) ?? str(v.service_type) ?? "Service", environment: str(v.environment) === "live" ? "Live" : "Test", since: str(v.since) }];
+      }),
+    introductions: Array.isArray(reply.introductions)
+      ? reply.introductions.filter(isObj).flatMap((i): IntroRow[] => {
+          const id = str(i.id);
+          if (!id) return [];
+          const st = str(i.status) ?? "";
+          return [{ id, counterparty: isObj(i.counterparty) ? str(i.counterparty.name) : null, status: INTRO_STATUS[st] ?? (st || "Unknown"), since: str(i.since) }];
+        })
+      : null,
+    sponsors: [...sponsors.values()],
+    products: products.map((p) => ({ id: p.id, name: p.name })),
+  };
 }
+
+export type Persona = { id: string; name: string; kind: string | null; targeted: boolean };
+export type CustomerCount = { withSessions: number | null; inVault: number | null; reason: string | null };
+export type AppCustomers = {
+  available: true;
+  canManage: boolean;
+  products: { id: string; name: string; personas: Persona[] }[];
+  live: CustomerCount;
+  sandbox: CustomerCount;
+};
+
+const countFrom = (v: unknown): CustomerCount => {
+  const c = isObj(v) ? v : {};
+  return { withSessions: num(c.customers_with_sessions), inVault: num(c.customers_in_vault), reason: str(c.reason) };
+};
+
+export function fromCustomers(reply: unknown): AppCustomers | null {
+  if (!isObj(reply) || !Array.isArray(reply.products)) return null;
+  const customers = isObj(reply.customers) ? reply.customers : {};
+  return {
+    available: true,
+    canManage: reply.can_manage === true,
+    products: arr(reply.products)
+      .filter(isObj)
+      .flatMap((p) => {
+        const id = str(p.id);
+        if (!id) return [];
+        const personas = arr(p.segments)
+          .filter(isObj)
+          .flatMap((s): Persona[] => {
+            const sid = str(s.id);
+            return sid ? [{ id: sid, name: str(s.name) ?? sid, kind: str(s.customer_kind), targeted: s.targeted === true }] : [];
+          });
+        return [{ id, name: str(p.name) ?? id, personas }];
+      }),
+    live: countFrom(customers.live),
+    sandbox: countFrom(customers.sandbox),
+  };
+}
+
+/** A count Mynt measured, or "Not measured": never 0 for want of data. */
+export const countText = (n: number | null) => (n === null ? "Not measured" : String(n));
 
 // ---- Security ----
 
@@ -207,7 +341,15 @@ export function buildStatusLabel(status: string): string {
   return t ? t[0].toUpperCase() + t.slice(1) : "Unknown";
 }
 
-export type PanelData = { pnl: AppPnl | NotYet; licences: AppLicences | NotYet; security: AppSecurity | NotYet; sdk: AppSdk | NotYet; activity: AppActivity | NotYet };
+export type PanelData = {
+  products: AppProducts | NotYet;
+  agreements: AppAgreements | NotYet;
+  customers: AppCustomers | NotYet;
+  pnl: AppPnl | NotYet;  security: AppSecurity | NotYet;
+  sdk: AppSdk | NotYet;
+  activity: AppActivity | NotYet;
+};
+export type TabData = AppProducts | AppAgreements | AppCustomers | AppPnl | AppSecurity | AppSdk | AppActivity | NotYet;
 
 export const checkLabel = (c: PromotionCheck) => `${c.label}: ${CHECK_LABELS[c.status]}`;
 

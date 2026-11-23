@@ -63,6 +63,7 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   // Which repository the app's builds pushed to. The repository itself (and its code) stays where it is.
   { table: "app_repositories", where: "t.app_id = $1", list: "repository" },
   // Its stage, target states and production sign-off requests (promotions.ts).
+  { table: "app_target_segments", where: "t.app_id = $1" },
   { table: "promotion_signoffs", where: "t.app_id = $1", list: "id" },
   { table: "app_promotions", where: "t.app_id = $1" },
   { table: "apps", where: "t.id = $1", list: "id" },
@@ -87,6 +88,7 @@ const LIVE: { table: string; where: string }[] = [
 // someone else's records with it, so the app is refused and the table named.
 const ENTANGLED: { table: string; where: string; why: string }[] = [
   { table: "customer_state_history", where: "t.app_id = $1", why: "it is append-only (customers' state changes are never deleted)" },
+  { table: "app_agreements", where: "t.app_id = $1", why: "agreements with other firms name the app (they're the other firm's record too)" },
   { table: "pool_movements", where: `t.movement_id IN (SELECT id FROM ${T}.money_movements WHERE app_id = $1)`, why: "liquidity pools' books name the app's money movements" },
   { table: "pool_flags", where: `t.movement_id IN (SELECT id FROM ${T}.money_movements WHERE app_id = $1)`, why: "liquidity providers' flags name the app's money movements" },
   { table: "pool_movement_states", where: `t.movement_id IN (SELECT id FROM ${T}.money_movements WHERE app_id = $1)`, why: "liquidity pools' records name the app's money movements" },

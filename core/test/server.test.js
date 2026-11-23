@@ -45,6 +45,8 @@ const DEVELOPER_TOOLS = [
   // promotion between stages, and what needs attention
   "demote_app", "get_promotion_checks", "get_workspace_attention", "promote_app", "request_promotion_signoff", "set_app_target_states",
   "enable_webhook",
+  // an app's agreements with the firms behind its products, and the customers it targets
+  "get_app_customers", "list_app_agreements", "propose_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement",
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",

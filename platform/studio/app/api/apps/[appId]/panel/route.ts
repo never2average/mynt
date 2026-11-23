@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ appId: string }> };
 const APP_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
-// GET ?tab=pnl|licences|security|sdk|activity: one information tab of the app's right-hand
+// GET ?tab=products|agreements|customers|security|pnl|sdk|activity: one information tab of the app's right-hand
 // panel (lib/app-panel-server.ts), for this app only. Read-only.
 export async function GET(req: Request, { params }: Params) {
   const { appId } = await params;

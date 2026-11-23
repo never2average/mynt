@@ -158,6 +158,13 @@ const OBLIGATIONS = [
   "approve_identity_provider",
   "approve_identity_provider_refused",
   "revoke_identity_provider",
+  // app agreements: an app's program agreements with the licence providers sponsoring its products, vendor contracts
+  // and data sharing (app-agreements.ts)
+  "propose_app_agreement",
+  "accept_app_agreement",
+  "decline_app_agreement",
+  "sign_app_agreement",
+  "terminate_app_agreement",
   // covenants on sponsorships
   "set_covenant",
   "set_covenant_refused",
@@ -250,6 +257,7 @@ const WORKSPACE = [
   "app_promoted",
   "app_demoted",
   "app_stage_grandfathered",
+  "set_app_target_segments",
   // financial products move through the same stages (product-stages.ts)
   "product_promoted",
   "product_demoted",

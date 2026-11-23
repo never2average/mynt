@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
-import { appLicences, buildsFrom, buildStatusLabel, buildTone, eventsFrom, fromPnl, NOT_YET, updatedAgo, type AppActivity, type AppSdk, type AppSecurity } from "@/lib/app-panel";
+import { appProductsFrom, buildsFrom, buildStatusLabel, buildTone, eventsFrom, fromAgreements, fromCustomers, fromPnl, NOT_YET, updatedAgo, type AppActivity, type AppAgreements, type AppCustomers, type AppProducts, type AppSdk, type AppSecurity } from "@/lib/app-panel";
 import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { parseStudioCall } from "@/lib/studio-tools";
 
-// An app's information tabs (P&L, Licences, Security, SDK, Activity): what each shows with data,
+// An app's information tabs (Products, Agreements, Customers, Security, P&L, SDK, Activity; no Licences tab: an app
+// holds no licences, its products do): what each shows with data,
 // with none, and before Mynt has its tool; that every read is for this app only; and that they're live.
 
 const APP = "a1";
@@ -28,7 +29,36 @@ const ALL = [
   { name: "list_builds", inputSchema: props("app_id") },
   { name: "get_product_sdk", inputSchema: props("product_id") },
   { name: "get_workspace_pnl", inputSchema: props("workspace_id", "app_id") },
+  { name: "list_app_agreements", inputSchema: props("app_id", "status") },
+  { name: "get_app_customers", inputSchema: props("app_id") },
 ];
+const SPONSOR = "11111111-1111-4111-8111-111111111111";
+const AGREEMENTS = {
+  app: { id: APP, name: "Cards" },
+  can_manage: true,
+  agreements: [
+    { id: "g1", kind: "program", status: "accepted", counterparty: { entity_id: SPONSOR, name: "Lead Bank" }, products: [{ id: "p1", name: "Card" }], effective_from: "2026-12-01", effective_to: null, signatures: { app_side: true, counterparty_side: false } },
+    { id: "g2", kind: "data_sharing", status: "terminated", counterparty: { entity_id: SPONSOR, name: "Lead Bank" }, products: [], effective_from: null, effective_to: null, signatures: { app_side: false, counterparty_side: false } },
+  ],
+  products: [
+    { id: "p1", name: "Card", stage: "production", sponsors: [{ entity_id: SPONSOR, name: "Lead Bank", jurisdictions: ["us-ny", "us-ca"] }], states: ["us-ca", "us-ny"] },
+    { id: "p2", name: "Savings", stage: "staging", sponsors: [], states: [] },
+  ],
+  vendor_contracts: [{ subscription_id: "v1", vendor: { entity_id: "e9", name: "KYC Works" }, offering: "Identity check", service_type: "kyc", environment: "test", since: "2026-11-01T00:00:00.000Z" }],
+  introductions: [{ id: "i1", status: "proposed", counterparty: null, since: "2026-11-10T00:00:00.000Z" }],
+};
+const CUSTOMERS = {
+  app: { id: APP, name: "Cards" },
+  can_manage: true,
+  products: [
+    { id: "p1", name: "Card", segments: [{ id: "retail", name: "Retail savers", customer_kind: "individual", targeted: true }, { id: "students", name: "Students", customer_kind: null, targeted: false }] },
+    { id: "p2", name: "Savings", segments: [] },
+  ],
+  customers: {
+    live: { customers_with_sessions: null, customers_in_vault: null, reason: "No live client sessions yet, so Mynt hasn't measured customers here" },
+    sandbox: { customers_with_sessions: 3, customers_in_vault: 2, reason: null },
+  },
+};
 const PNL = {
   series: [
     { start: "2026-10-01T00:00:00.000Z", revenue_cents: 50_000, costs_cents: 20_000, net_cents: 30_000 },
@@ -90,6 +120,10 @@ vi.mock("@/lib/tokens", () => ({
           return ok({ product: { id: args.product_id, name: args.product_id === "p1" ? "Card" : "Savings" }, version: 3, action: "issuance", access: { status: "public" }, contract: null, integration: { data_shape: { name: "string", apr: "number" }, actions: { deep_link: "permitted", initiate_onboarding: "not permitted" }, hand_off: "Onboarding happens in the innovator's flow." } });
         case "get_workspace_pnl":
           return ok(PNL);
+        case "list_app_agreements":
+          return ok(AGREEMENTS);
+        case "get_app_customers":
+          return ok(CUSTOMERS);
         default:
           return ok({});
       }
@@ -142,14 +176,41 @@ describe("the app panel route", () => {
     expect((await get("pnl")).body.data).toEqual({ available: false, reason: "The app's P&L comes with Mynt's next update." });
   });
 
-  it("Licences: the coverage of this app's products only, with the production licences check", async () => {
-    const { body } = await get("licences");
-    const data = body.data as unknown as ReturnType<typeof appLicences>;
-    expect(data.states.map((s) => s.code)).toEqual(["us-ca", "us-ny"]);
-    expect(data.states.find((s) => s.code === "us-ca")?.missing).toEqual(["Savings"]);
-    expect(data.fullyCovered).toBe(1);
+  it("Products: this app's products with their stage, sponsors and states, and the production licences check; no Licences tab", async () => {
+    expect((await get("licences")).status).toBe(400);
+    const data = (await get("products")).body.data as unknown as AppProducts;
+    expect(fake.calls.find((c) => c.name === "list_app_agreements")?.args).toEqual({ app_id: APP });
+    expect(data.products.map((p) => [p.name, p.stage, p.sponsors.map((x) => x.name), p.states])).toEqual([
+      ["Card", "production", ["Lead Bank"], ["us-ca", "us-ny"]],
+      ["Savings", "staging", [], []],
+    ]);
     expect(data.productionCheck?.detail).toBe("Savings isn't covered in California");
-    expect(fake.calls.find((c) => c.name === "get_compliance_coverage")?.args).toEqual({ workspace_id: WS });
+    scoped();
+    fake.tools = ALL.filter((t) => t.name !== "list_app_agreements");
+    expect((await get("products")).body.data?.available).toBe(false);
+  });
+
+  it("Agreements: this app's agreements, vendor contracts and introductions, and the sponsors to propose to", async () => {
+    const data = (await get("agreements")).body.data as unknown as AppAgreements;
+    expect(fake.calls.find((c) => c.name === "list_app_agreements")?.args).toEqual({ app_id: APP });
+    expect(data.agreements.map((a) => [a.counterparty, a.kind, a.status, a.products])).toEqual([
+      ["Lead Bank", "Program agreement", "Accepted: waiting for signatures", ["Card"]],
+      ["Lead Bank", "Data sharing", "Ended", []],
+    ]);
+    expect(data.sponsors).toEqual([{ entityId: SPONSOR, name: "Lead Bank", productIds: ["p1"] }]);
+    expect(data.vendorContracts.map((v) => v.vendor)).toEqual(["KYC Works"]);
+    expect(data.introductions?.map((i) => i.status)).toEqual(["Asked: waiting for both to say yes"]);
+    scoped();
+    fake.tools = ALL.filter((t) => t.name !== "list_app_agreements");
+    expect((await get("agreements")).body.data).toEqual({ available: false, reason: "Agreements come with Mynt's next update." });
+  });
+
+  it("Customers: the personas from this app's products, and counts only where measured", async () => {
+    const data = (await get("customers")).body.data as unknown as AppCustomers;
+    expect(fake.calls.find((c) => c.name === "get_app_customers")?.args).toEqual({ app_id: APP });
+    expect(data.products[0].personas.map((s) => [s.id, s.targeted])).toEqual([["retail", true], ["students", false]]);
+    expect(data.live).toEqual({ withSessions: null, inVault: null, reason: "No live client sessions yet, so Mynt hasn't measured customers here" });
+    expect(data.sandbox.withSessions).toBe(3);
     scoped();
   });
 
@@ -194,6 +255,16 @@ describe("the app panel route", () => {
     expect(parseStudioCall("get_product_sdk", { product_id: "p1" })).toHaveProperty("tool");
     expect(parseStudioCall("list_workspace_audit", { app_id: APP, class: "security" })).toHaveProperty("tool");
     expect(parseStudioCall("list_workspace_audit", { app_id: APP, class: "everything" })).toHaveProperty("error");
+    expect(parseStudioCall("list_app_agreements", { app_id: APP })).toHaveProperty("tool");
+    expect(parseStudioCall("list_app_agreements", { app_id: APP, status: "whatever" })).toHaveProperty("error");
+    expect(parseStudioCall("get_app_customers", { app_id: APP, extra: 1 })).toHaveProperty("error");
+    expect(parseStudioCall("set_app_target_segments", { app_id: APP, segments: [{ product_id: "p1", segment_id: "retail" }] })).toHaveProperty("tool");
+    expect(parseStudioCall("set_app_target_segments", { app_id: APP, segments: [{ product_id: "p1" }] })).toHaveProperty("error");
+    const proposal = { app_id: APP, counterparty_entity_id: SPONSOR, kind: "program", products: ["p1"], terms_summary: "Lead Bank's card program" };
+    expect(parseStudioCall("propose_app_agreement", proposal)).toHaveProperty("tool");
+    expect(parseStudioCall("propose_app_agreement", { ...proposal, counterparty_entity_id: "not-a-firm" })).toHaveProperty("error");
+    expect(parseStudioCall("propose_app_agreement", { ...proposal, kind: "licence" })).toHaveProperty("error");
+    expect(parseStudioCall("propose_app_agreement", { ...proposal, document_url: "http://plain.example.com/x" })).toHaveProperty("error");
   });
 });
 
@@ -207,14 +278,46 @@ describe("the tabs' content", () => {
     expect(fromPnl({ nope: true })).toBeNull();
   });
 
-  it("Licences: covered and not covered per state, and an app with no products", () => {
-    const data = appLicences(COVERAGE, [{ id: "p1", name: "Card" }, { id: "p2", name: "Savings" }], null);
-    const html = renderToStaticMarkup(<views.LicencesTabView data={data} />);
-    expect(html).toContain('data-state="us-ca" data-covered="partly"');
-    expect(html).toContain('data-state="us-ny" data-covered="fully"');
-    expect(html).not.toContain("Texas");
-    expect(renderToStaticMarkup(<views.LicencesTabView data={appLicences(COVERAGE, [], null)} />)).toContain("uses no regulated products");
-    expect(renderToStaticMarkup(<views.LicencesTabView data={appLicences({ states: [] }, [{ id: "p1", name: "Card" }], null)} />)).toContain("None of this app&#x27;s products is covered");
+  it("Products: each product links to its page, with stage, sponsor and states; an app with none says so", () => {
+    const html = renderToStaticMarkup(<views.ProductsTabView data={{ available: true, products: appProductsFrom(AGREEMENTS), productionCheck: null }} />);
+    expect(html).toContain('href="/products/p1"');
+    expect(html).toContain("Lead Bank");
+    expect(html).toContain("CA, NY");
+    expect(html).toContain("No sponsor on record");
+    expect(html).toMatch(/data-app-product="p2"[^]*Staging/);
+    expect(renderToStaticMarkup(<views.ProductsTabView data={{ available: true, products: [], productionCheck: null }} />)).toContain("uses no financial products yet");
+  });
+
+  it("Agreements: rows with status in words, a labelled Propose agreement button for owners and admins only", () => {
+    const data = fromAgreements(AGREEMENTS)!;
+    const html = renderToStaticMarkup(<views.AgreementsTabView appId={APP} data={data} />);
+    expect(html).toContain("Propose agreement");
+    expect(html).toContain("data-propose-agreement");
+    expect(html).toMatch(/data-agreement="g1" data-status="accepted"[^]*Accepted: waiting for signatures[^]*You signed; they haven&#x27;t signed/);
+    expect(html).toContain("2026-12-01 to open-ended");
+    expect(html).toContain("KYC Works");
+    expect(html).toContain("Named once both say yes");
+    expect(html).not.toContain('data-slot="badge"');
+    const viewer = renderToStaticMarkup(<views.AgreementsTabView appId={APP} data={{ ...data, canManage: false, agreements: [], introductions: null }} />);
+    expect(viewer).not.toContain("data-propose-agreement");
+    expect(viewer).toContain("No agreements yet.");
+    expect(viewer).toContain("business-development agent isn&#x27;t running here");
+    expect(fromAgreements({ nope: true })).toBeNull();
+  });
+
+  it("Customers: counts read Not measured, never 0; targeted personas; a labelled Choose personas button", () => {
+    const data = fromCustomers(CUSTOMERS)!;
+    const html = renderToStaticMarkup(<views.CustomersTabView appId={APP} data={data} />);
+    expect(html).toContain("Choose personas");
+    expect(html).toContain("data-choose-personas");
+    expect(html).toContain('data-targeted-persona="retail"');
+    expect(html).not.toContain('data-targeted-persona="students"');
+    expect(html).toContain("In the customer vault: Not measured live, 2 sandbox.");
+    const el = document.createElement("div");
+    el.innerHTML = html;
+    expect(el.querySelector('[data-kpi="live-customers"] dd')?.textContent).toBe("Not measured");
+    expect(el.querySelector('[data-kpi="sandbox-customers"] dd')?.textContent).toBe("3");
+    expect(renderToStaticMarkup(<views.CustomersTabView appId={APP} data={{ ...data, canManage: false }} />)).not.toContain("data-choose-personas");
   });
 
   it("Security, SDK and Activity: empty and not-available-yet states", () => {
@@ -259,18 +362,13 @@ describe("the tabs' layout, as the dashboard's", () => {
     expect(renderToStaticMarkup(<views.PnlView pnl={empty} />).match(/data-pnl-empty="unmeasured"/g)).toHaveLength(2);
   });
 
-  it("Licences: key figures, the production check as a section with a status dot, the table in a box and View all", () => {
+  it("Products: the production check as a section with a status dot, the table in a box", () => {
     const check = { id: "licences", label: "Every product licensed", status: "fail" as const, detail: "Savings isn't covered in California", fix: { label: "See licences", href: "/licences", external: false, tool: null } };
-    const html = renderToStaticMarkup(<views.LicencesTabView data={appLicences(COVERAGE, [{ id: "p1", name: "Card" }, { id: "p2", name: "Savings" }], check)} />);
-    expect(kpi(html, "states-covered")).toBe("1");
-    expect(kpi(html, "partly-covered")).toBe("1");
-    expect(kpi(html, "products")).toBe("2");
-    expect(html).not.toContain("every product covered in");
+    const html = renderToStaticMarkup(<views.ProductsTabView data={{ available: true, products: appProductsFrom(AGREEMENTS), productionCheck: check }} />);
     expect(html).toContain('data-section="app-production-check"');
     expect(html).toMatch(/data-production-check="fail".*data-tone="red"/);
     expect(html).not.toContain('data-slot="badge"');
-    expect(html).toContain('data-view-all="/licences"');
-    expect(html).toContain('href="/licences"');
+    expect(html).toContain('rounded-lg border"><div data-slot="table-container"');
   });
 
   it("Security: build checks as status dots, at most 10 events, View all to the security audits", () => {
