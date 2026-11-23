@@ -39,7 +39,9 @@ export const ROLE_LABEL: Record<DocsRole, string> = {
 };
 export const ACCESS_LABEL: Record<DocsTool["access"], string> = { read: "Read", write: "Changes data", destructive: "Removes data" };
 
-export const pageHref = (slug: string) => (slug ? `${DOCS_HOME}/${slug}` : DOCS_HOME);
+// Connect your agent lives at /connect (served from the docs, next.config.ts; /docs/connect redirects there).
+export const CONNECT_HREF = "/connect";
+export const pageHref = (slug: string) => (slug === "connect" ? CONNECT_HREF : slug ? `${DOCS_HOME}/${slug}` : DOCS_HOME);
 export const TOOLS_HREF = `${DOCS_HOME}/tools`;
 export const areaHref = (id: string) => `${TOOLS_HREF}/${id}`;
 export const toolHref = (t: Pick<DocsTool, "name" | "area">) => `${areaHref(t.area)}#${t.name}`;
@@ -141,7 +143,9 @@ export function docsRoute(slug: string[] = []): DocsRoute | null {
 
 export const docsTitle = (route: DocsRoute) => (route.kind === "tools" ? "All tools" : route.kind === "area" ? route.area.title : route.page.title);
 
-export const allDocsSlugs = (): string[][] => FLAT().map((p) => p.href.slice(DOCS_HOME.length + 1).split("/").filter(Boolean));
+// Every page's slug under /docs (Connect your agent's href is /connect, but its page is still /docs/connect).
+export const allDocsSlugs = (): string[][] =>
+  FLAT().map((p) => (p.href === CONNECT_HREF ? ["connect"] : p.href.slice(DOCS_HOME.length + 1).split("/").filter(Boolean)));
 
 // ---- tools ----
 

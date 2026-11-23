@@ -16,7 +16,7 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/builds", label: "Builds", keywords: "coding agent" },
   { href: "/new", label: "Build", keywords: "new app create build start financial product" },
   { href: "/docs", label: "Docs", keywords: "documentation reference tools mcp guides help api roles" },
-  { href: "/docs/connect", label: "Connect your agent", keywords: "mcp agent claude cursor vscode chatgpt connect plug docs documentation help guide" },
+  { href: "/connect", label: "Connect your agent", keywords: "mcp agent claude cursor vscode chatgpt connect plug docs documentation help guide" },
 ];
 
 // Old pages that now redirect elsewhere: still fixed pages, never an app's id.

@@ -46,10 +46,10 @@ describe("the nav tree", () => {
     render(<DocsNav nav={tree} pathname="/docs/tools/hosting" />);
     const links = [...document.querySelectorAll("[data-nav-link]")].map((a) => a.getAttribute("href"));
     for (const a of docs.CATALOGUE.areas) expect(links).toContain(`/docs/tools/${a.id}`);
-    for (const href of ["/docs", "/docs/connect", "/docs/roles", "/docs/first-app", "/docs/concepts/products", "/docs/tools", "/docs/guides/partners"]) expect(links).toContain(href);
+    for (const href of ["/docs", "/connect", "/docs/roles", "/docs/first-app", "/docs/concepts/products", "/docs/tools", "/docs/guides/partners"]) expect(links).toContain(href);
     expect(document.querySelector('[aria-current="page"]')!.getAttribute("href")).toBe("/docs/tools/hosting");
     expect(docs.neighbours("/docs").prev).toBeNull();
-    expect(docs.neighbours("/docs").next?.href).toBe("/docs/connect");
+    expect(docs.neighbours("/docs").next?.href).toBe("/connect");
     expect(docs.neighbours("/docs/tools").next?.href).toBe(`/docs/tools/${docs.CATALOGUE.areas[0].id}`);
     expect(docs.breadcrumbs("/docs/tools/hosting").map((c) => c.title)).toEqual(["Docs", "Tool reference", "Hosting"]);
   });
@@ -151,7 +151,7 @@ describe("search", () => {
     const index = docs.searchIndex();
     expect(searchDocs(index, "define_region")[0]).toMatchObject({ kind: "tool", title: "define_region", href: "/docs/tools/admin#define_region" });
     expect(searchDocs(index, "define region")[0].title).toBe("define_region");
-    expect(searchDocs(index, "connect your agent")[0]).toMatchObject({ kind: "page", href: "/docs/connect" });
+    expect(searchDocs(index, "connect your agent")[0]).toMatchObject({ kind: "page", href: "/connect" });
     expect(searchDocs(index, "")).toEqual([]);
     expect(searchDocs(index, "zzzz-nothing")).toEqual([]);
   });
@@ -175,7 +175,7 @@ describe("search", () => {
 
 describe("public access", () => {
   it("needs no sign-in for /docs or any page under it", async () => {
-    for (const p of ["/docs", "/docs/tools", "/docs/tools/hosting", "/docs/connect", "/docs/search-index"]) expect(pageNeedsSignIn(p), p).toBe(false);
+    for (const p of ["/docs", "/docs/tools", "/docs/tools/hosting", "/docs/connect", "/connect", "/docs/search-index"]) expect(pageNeedsSignIn(p), p).toBe(false);
     expect(pageNeedsSignIn("/docsx")).toBe(true);
     expect(pageNeedsSignIn("/")).toBe(true);
     const { proxy } = await import("@/proxy");
