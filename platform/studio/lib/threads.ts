@@ -9,7 +9,7 @@
 //
 // Pure, so the page, the sidebar and the tests share it.
 import type { ThreadSummary } from "./chat-sessions";
-import { STATUS_LABEL, type ProductStatus } from "./products";
+import { productStageOf, STAGE_STATUS, type ProductStatus } from "./products";
 import type { Stage } from "./workspaces";
 
 export type ThreadKind = "app" | "product";
@@ -40,7 +40,8 @@ export type StudioThread = {
 
 // What the list is made from.
 export type AppThreadSource = { id: string; name: string; stage: Stage; lastActivityAt?: string | null };
-export type MyProduct = { id: string; name: string; status: ProductStatus; updatedAt: string | null };
+// A product's stage is its status, as an app's is (Idea, Staging, Production).
+export type MyProduct = { id: string; name: string; status: ProductStatus; stage?: Stage; updatedAt: string | null };
 
 // ---- product chats ----
 
@@ -71,7 +72,7 @@ export function mergeThreads(apps: readonly AppThreadSource[] | null | undefined
   for (const c of chats ?? [])
     out.push({ key: `chat:${c.id}`, kind: "product", source: "chat", id: c.id, name: c.title, updatedAt: c.updatedAt, status: chatCreated(c) ? CHAT_STATUS.created : CHAT_STATUS.open, href: chatHref(c.id) });
   for (const p of products ?? [])
-    out.push({ key: `product:${p.id}`, kind: "product", source: "product", id: p.id, name: p.name, updatedAt: p.updatedAt, status: STATUS_LABEL[p.status], href: productHref(p.id) });
+    out.push({ key: `product:${p.id}`, kind: "product", source: "product", id: p.id, name: p.name, updatedAt: p.updatedAt, status: STAGE_STATUS[p.stage ?? productStageOf(p)], href: productHref(p.id) });
   return out.sort(byUpdate);
 }
 
@@ -129,6 +130,7 @@ export function myProductsFrom(reply: unknown): MyProduct[] {
     id: str(p.id),
     name: str(p.name) || str(p.id),
     status: p.status === "draft" || p.status === "unpublished" ? p.status : "published",
+    stage: productStageOf(p),
     updatedAt: str(p.updated_at) || str(p.updatedAt) || str(p.published_at) || str(p.created_at) || null,
   }));
 }

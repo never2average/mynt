@@ -10,7 +10,7 @@
       "id": "products",
       "title": "Products & innovators",
       "summary": "Compose products from regulated primitives, test, publish and version them, and decide who may build on them.",
-      "tools": 41
+      "tools": 44
     },
     {
       "id": "apps",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 222,
+      "tools": 225,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 222,
+      "tools": 225,
       "get_started": [
         {
           "tool": "create_entity",
@@ -168,8 +168,8 @@
           "why": "compose it from regulated primitives (validate with check_product_definition)"
         },
         {
-          "tool": "publish_product",
-          "why": "publish once its tests pass (test_product)"
+          "tool": "promote_product",
+          "why": "move it to staging once its tests pass (test_product), then to production (publish_product does the same)"
         }
       ]
     },
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 346,
+      "tools": 349,
       "get_started": [
         {
           "tool": "define_region",
@@ -6374,6 +6374,45 @@
       }
     },
     {
+      "name": "demote_product",
+      "title": "Move a financial product down one stage",
+      "description": "Innovator: move one of your products down one stage (production → staging, staging → idea), with the reason, recorded in the audit trail (product_demoted). Out of production it leaves the catalogue as unpublish_product does (existing enrollments are kept, no new ones; products built on it pause their sales) and stays open to sandbox builds; out of staging, sandbox builds can no longer pick it.",
+      "area": "products",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string"
+          },
+          "to_stage": {
+            "type": "string",
+            "enum": [
+              "idea",
+              "staging"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "product_id",
+          "to_stage",
+          "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "deploy_app",
       "title": "Host an app",
       "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it.",
@@ -7445,6 +7484,39 @@
       }
     },
     {
+      "name": "get_product_promotion_checks",
+      "title": "What a product needs to move up a stage",
+      "description": "Innovator: the checks for promoting one of your financial products one step, idea → staging or staging → production (or a production product's pending draft version to production), the same stages as an app's, computed by Mynt from its own records. staging: test_product passed on what would go live, unchanged since. production: what publishing needs: that test, the v2 definition still checking out, a verified licence covering it (your firm's, or a licence provider's sponsorship of each component you don't provide yourself), and published underlying products. Each check is pass or fail with Mynt's detail and a fix; can_promote when all pass.",
+      "area": "products",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string"
+          },
+          "to_stage": {
+            "type": "string",
+            "enum": [
+              "staging",
+              "production"
+            ]
+          }
+        },
+        "required": [
+          "product_id",
+          "to_stage"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_product_regime",
       "title": "A product's regulatory regime",
       "description": "The regulated primitives a product is made of and, for each, what it falls under (regulated product types), who supervises it, which licences may provide it, the law recorded against it, who provides it and whether their licence covers it, and the stakeholders that licence mandates. A published product shows its pinned live composition and any drift; its firm and admins can pass working: true for the unpublished working copy.",
@@ -8447,7 +8519,7 @@
     {
       "name": "list_buildable_products",
       "title": "Products you can build on",
-      "description": "Developer: published products you can build experiences on, with each one's product line and category, access mode (open: build and publish; approval: build now, publish once the innovator approves; private: invitation only), build terms and who issues or distributes it.",
+      "description": "Developer: products you can build experiences on, with each one's stage, product line and category, access mode (open: build and publish; approval: build now, publish once the innovator approves; private: invitation only), build terms and who issues or distributes it. environment 'production' (the default): published products, in production. 'sandbox': also products in staging, which apps in Ideas or Staging may pin for sandbox builds but no production app may use (promote_app refuses until the product is in production).",
       "area": "apps",
       "roles": [
         "developer",
@@ -8484,6 +8556,15 @@
               "open",
               "approval",
               "private"
+            ]
+          },
+          "environment": {
+            "default": "production",
+            "description": "sandbox: include products in staging, for sandbox builds only",
+            "type": "string",
+            "enum": [
+              "production",
+              "sandbox"
             ]
           }
         },
@@ -9178,7 +9259,7 @@
     {
       "name": "list_my_products",
       "title": "List my financial products",
-      "description": "Innovator: list the products you created with their status and latest test result.",
+      "description": "Innovator: list the products you created with their status, stage (idea, staging or production, as apps have: promote_product, demote_product) and latest test result.",
       "area": "products",
       "roles": [
         "developer",
@@ -10814,6 +10895,39 @@
         },
         "required": [
           "app_id",
+          "to_stage"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "promote_product",
+      "title": "Promote a financial product one stage",
+      "description": "Innovator: move one of your products up one stage, as apps move. idea → staging: test_product passed on it; it opens to sandbox builds only (developers may pin it on apps in Ideas or Staging; no production app may use it). staging → production: publishes it, with everything publish_product requires (a verified licence or sponsorship covering it); a production product's pending draft version goes live the same way. Mynt runs every check again at that moment and refuses unless all pass; the move and the checks it passed with are in the audit trail (product_promoted).",
+      "area": "products",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string"
+          },
+          "to_stage": {
+            "type": "string",
+            "enum": [
+              "staging",
+              "production"
+            ]
+          }
+        },
+        "required": [
+          "product_id",
           "to_stage"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"

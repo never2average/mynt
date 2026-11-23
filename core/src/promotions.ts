@@ -199,7 +199,7 @@ async function licenceCheck(store: Store, app: App, s: State): Promise<{ check: 
       continue;
     }
     if (record.status !== "published") {
-      problems.push(`${record.product.name} isn't published`);
+      problems.push(record.stage === "staging" ? `${record.product.name} is in staging (sandbox builds only): its firm promotes it to production first` : `${record.product.name} isn't published`);
       continue;
     }
     if (record.drift) {

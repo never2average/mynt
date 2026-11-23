@@ -45,6 +45,8 @@ vi.mock("@/lib/tokens", () => ({
           return ok({ passed: false, fingerprint: "f", checks: [{ name: "region", status: "fail", message: "Region 'XX' isn't defined or active" }] });
         case "publish_product":
           return ok({ id: args.id, version: 1 });
+        case "get_product_promotion_checks":
+          return ok({ product_id: args.product_id, from_stage: "idea", to_stage: args.to_stage, checks: [{ id: "tests_passed", label: "Latest test passed (test_product)", status: "pass", detail: "passed" }], can_promote: true });
         default:
           return ok({});
       }
@@ -97,9 +99,11 @@ describe("the products list", () => {
     ];
     const body = await (await productsRoute.GET(getReq("/api/products"))).json();
     expect(body.products).toEqual([
-      { id: "dollar-account", name: "Dollar account", productLine: "custody_settlement", by: "Lead Trust", accessMode: "open", jurisdictions: ["US"], status: "published" },
-      { id: "green-savings", name: "Green Savings", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", mine: true, lastTestPassed: null },
+      { id: "dollar-account", name: "Dollar account", productLine: "custody_settlement", by: "Lead Trust", accessMode: "open", jurisdictions: ["US"], status: "published", stage: "production", mine: true, lastTestPassed: null },
+      { id: "green-savings", name: "Green Savings", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", stage: "idea", mine: true, lastTestPassed: null },
     ]);
+    // New apps build in the sandbox: products in staging can be picked too.
+    expect(called("list_buildable_products")[0].args).toEqual({ environment: "sandbox" });
   });
 
   it("also gives every product of the user's own, with when it changed, and the hashed key their chats are kept under", async () => {
@@ -109,8 +113,8 @@ describe("the products list", () => {
     ];
     const body = await (await productsRoute.GET(getReq("/api/products"))).json();
     expect(body.mine).toEqual([
-      { id: "dollar-account", name: "Dollar account", status: "published", updatedAt: "2026-11-02T00:00:00Z" },
-      { id: "green-savings", name: "Green Savings", status: "draft", updatedAt: null },
+      { id: "dollar-account", name: "Dollar account", status: "published", stage: "production", updatedAt: "2026-11-02T00:00:00Z" },
+      { id: "green-savings", name: "Green Savings", status: "draft", stage: "idea", updatedAt: null },
     ]);
     expect(body.owner).toMatch(/^[A-Za-z0-9_-]{22}$/);
     // ?mine=1: only those, without asking Mynt what can be built on.
@@ -170,7 +174,7 @@ describe("Create product (POST /api/products)", () => {
     const res = await productsRoute.POST(req("/api/products", "POST", NEW));
     expect(res.status).toBe(201);
     expect(called("create_product")).toEqual([{ name: "create_product", args: NEW }]);
-    expect((await res.json()).product).toEqual({ id: "green-savings", name: "Green Savings", productLine: "account_operations", category: "deposits", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", mine: true, lastTestPassed: null });
+    expect((await res.json()).product).toEqual({ id: "green-savings", name: "Green Savings", productLine: "account_operations", category: "deposits", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", stage: "idea", mine: true, lastTestPassed: null });
     const sale = { ...NEW, id: "dollar-resale", action: "sale", underlying_product_ids: ["dollar-account"] };
     expect((await productsRoute.POST(req("/api/products", "POST", sale))).status).toBe(201);
     expect(called("create_product")[1].args).toEqual(sale);
@@ -222,6 +226,38 @@ describe("a draft's Test and Publish (POST /api/products/<id>)", () => {
   });
 });
 
+describe("a product's stage (GET and POST /api/products/<id>)", () => {
+  it("reads Mynt's checks for the next stage", async () => {
+    const res = await productRoute.GET(req("/api/products/green-savings?to=staging"), product("green-savings"));
+    expect(res.status).toBe(200);
+    expect(called("get_product_promotion_checks")).toEqual([{ name: "get_product_promotion_checks", args: { product_id: "green-savings", to_stage: "staging" } }]);
+    const { checks } = await res.json();
+    expect(checks.canPromote).toBe(true);
+    expect(checks.checks.map((c: { id: string }) => c.id)).toEqual(["tests_passed"]);
+    expect((await productRoute.GET(req("/api/products/green-savings?to=idea"), product("green-savings"))).status).toBe(400);
+  });
+
+  it("moves it up with promote_product and back with demote_product (a reason needed)", async () => {
+    const up = await productRoute.POST(req("/api/products/green-savings", "POST", { action: "promote", to_stage: "staging" }), product("green-savings"));
+    expect(up.status).toBe(200);
+    expect((await up.json()).stage).toBe("staging");
+    expect(called("promote_product")).toEqual([{ name: "promote_product", args: { product_id: "green-savings", to_stage: "staging" } }]);
+    expect((await productRoute.POST(req("/api/products/green-savings", "POST", { action: "demote", to_stage: "idea" }), product("green-savings"))).status).toBe(400);
+    const down = await productRoute.POST(req("/api/products/green-savings", "POST", { action: "demote", to_stage: "idea", reason: "Rates changing" }), product("green-savings"));
+    expect(down.status).toBe(200);
+    expect(called("demote_product")).toEqual([{ name: "demote_product", args: { product_id: "green-savings", to_stage: "idea", reason: "Rates changing" } }]);
+    expect((await productRoute.POST(req("/api/products/green-savings", "POST", { action: "promote", to_stage: "idea" }), product("green-savings"))).status).toBe(400);
+  });
+
+  it("shows why Mynt won't move it to production, in Mynt's words", async () => {
+    const reason = "Not promoted: Licensed: a verified licence or sponsorship covers it: Publishing needs a verified licence for issuance of 'deposits' in US, held by your entity. See get_product_promotion_checks";
+    fake.refuse = { promote_product: reason };
+    const res = await productRoute.POST(req("/api/products/green-savings", "POST", { action: "promote", to_stage: "production" }), product("green-savings"));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "mynt_refused", message: reason });
+  });
+});
+
 describe("Create product's choices", () => {
   it("are Mynt's regions with their regulators, and its categories", async () => {
     const body = await (await optionsRoute.GET()).json();
@@ -237,5 +273,8 @@ describe("the allow-list", () => {
     expect(parseStudioCall("test_product", { id: "green-savings" })).toEqual({ tool: "test_product", args: { id: "green-savings" } });
     expect(parseStudioCall("publish_product", { id: "green-savings", force: true })).toHaveProperty("error");
     expect(parseStudioCall("unpublish_product", { id: "green-savings" })).toHaveProperty("error");
+    expect(parseStudioCall("promote_product", { product_id: "green-savings", to_stage: "production" })).toEqual({ tool: "promote_product", args: { product_id: "green-savings", to_stage: "production" } });
+    expect(parseStudioCall("promote_product", { product_id: "green-savings", to_stage: "idea" })).toHaveProperty("error");
+    expect(parseStudioCall("demote_product", { product_id: "green-savings", to_stage: "idea" })).toHaveProperty("error");
   });
 });

@@ -48,6 +48,8 @@ const DEVELOPER_TOOLS = [
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",
+  // idea → staging → production, as apps move
+  "demote_product", "get_product_promotion_checks", "promote_product",
   // versioning
   "create_product_version", "diff_product_versions", "list_product_versions", "restore_product_version",
   "update_product_version", "upgrade_enrollments",

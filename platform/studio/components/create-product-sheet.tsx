@@ -5,7 +5,7 @@
 // with the draft, every field editable). The id is derived from the name
 // until it's edited, and checked with create_product's own rule. Sale and repackaging name the
 // published products they build on. Key features, optional, wait under More. Creating makes a draft
-// (POST /api/products): it shows in the list as Draft, to Test and Publish from its row.
+// (POST /api/products): it shows in the list as an Idea, to move to staging from its row.
 import { ChevronDown } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
@@ -18,7 +18,7 @@ import {
   createProduct,
   flagEmoji,
   HORIZONS,
-  isPickable,
+  productStageOf,
   LIQUIDITY,
   NewProductRequest,
   PRODUCT_ACTIONS,
@@ -128,7 +128,8 @@ export function CreateProductSheet({
   const slugError = slug && !PRODUCT_SLUG.test(slug) ? SLUG_HINT : null
   const categories = useMemo(() => (options?.categories ?? []).filter((c) => !line || !c.productLines.length || c.productLines.includes(line)), [options, line])
   const regulators = options?.regions.find((r) => r.code === region)?.regulators ?? []
-  const bases = (products ?? []).filter(isPickable)
+  // Only products in production: what a product sells or repackages must be published.
+  const bases = (products ?? []).filter((p) => (p.stage ?? productStageOf(p)) === "production")
   const request = {
     id: slug,
     name: name.trim(),

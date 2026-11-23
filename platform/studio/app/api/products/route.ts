@@ -20,7 +20,7 @@ export async function GET(req: NextRequest) {
   const query = req.nextUrl.searchParams.get("query")?.trim().slice(0, 200) || undefined;
   const onlyMine = req.nextUrl.searchParams.get("mine") === "1";
   return asDeveloper("loading products", async (mynt, session) => {
-    const reply = onlyMine ? [] : await callStudioTool(mynt, "list_buildable_products", query ? { query } : {});
+    const reply = onlyMine ? [] : await callStudioTool(mynt, "list_buildable_products", query ? { query, environment: "sandbox" } : { environment: "sandbox" });
     let mine: unknown = [];
     if (!query) {
       try {
