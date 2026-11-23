@@ -33,35 +33,20 @@ describe("connect your agent", () => {
     }
   });
 
-  it("is a page of its own, opened from the header's plug button", async () => {
+  it("the plug button opens the docs' Connect your agent page; /connect sends old links there", async () => {
     render(<TooltipProvider><ConnectAgentButton /></TooltipProvider>);
     const button = document.querySelector("[data-connect-agent-open]")!;
-    expect(button.getAttribute("href")).toBe("/connect");
+    expect(button.getAttribute("href")).toBe("/docs/connect");
     expect(button.getAttribute("aria-label")).toBe("Connect your agent");
-    cleanup();
     const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
-    render(<ConnectPage />);
-    await act(async () => {});
-    // The page header names it ("Connect your agent"); the body doesn't repeat it.
-    expect(document.querySelector("[data-connect-page] h1")).toBeNull();
-    expect(document.querySelector("[data-connect-page] [data-connect-agent]")).not.toBeNull();
-  });
-
-  it("is laid out in the dashboard's page frame, each section a panel with its section heading", async () => {
-    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
-    render(<ConnectPage />);
-    await act(async () => {});
-    const page = document.querySelector("[data-connect-page]")!;
-    expect(page.className).toContain("p-4");
-    expect(page.className).toContain("lg:p-6");
-    expect(page.className).not.toContain("max-w-5xl");
-    expect(document.querySelector("article")!.className).toMatch(/gap-4 lg:gap-5/);
-    for (const s of document.querySelectorAll("[data-docs-section]")) {
-      expect(s.className).toContain("rounded-lg border");
-      expect(s.querySelector("h2")!.className).toBe("text-sm font-semibold");
+    let thrown: unknown;
+    try {
+      ConnectPage();
+    } catch (e) {
+      thrown = e;
     }
-    // No box inside the panel around the picker.
-    expect(document.querySelector('[data-docs-section="connect"] .rounded-lg.border')).toBeNull();
+    // next/navigation's redirect throws, carrying where it goes.
+    expect(String((thrown as { digest?: string })?.digest ?? thrown)).toContain("/docs/connect");
   });
 
   it("picks the agent with the studio's line tabs", async () => {
@@ -87,51 +72,8 @@ describe("connect your agent", () => {
   });
 });
 
-describe("the connect page is the guide too (and the docs' Connect your agent page)", () => {
+describe("the docs' Connect your agent page is the guide", () => {
   afterEach(cleanup);
-
-  it("has the picker first, then every section of the guide, with this site's /mcp address", async () => {
-    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
-    render(<ConnectPage />);
-    await act(async () => {});
-    const order = [...document.querySelectorAll("[data-docs-section]")].map((e) => e.getAttribute("data-docs-section"));
-    expect(order).toEqual(["connect", "address", "sign-in", "access", "try", "trouble"]);
-    expect(document.querySelector('[data-docs-section="connect"] [data-connect-agent]')).not.toBeNull();
-    // It scrolls in its own box, as every long studio page does (the shell fixes the window's height).
-    expect(document.querySelector("[data-connect-scroll]")!.className).toMatch(/min-h-0 flex-1 [^"]*overflow-y-auto/);
-    expect(document.querySelector("[data-connect-scroll] [data-connect-page]")).not.toBeNull();
-    expect(document.querySelector('[data-docs-section="address"] [data-copy-value]')!.textContent).toBe(`${window.location.origin}/mcp`);
-    expect(document.querySelector("[data-docs-link]")).toBeNull();
-    // On this page sits on the right, after the guide, behind a vertical rule.
-    const nav = document.querySelector('[data-on-this-page="side"]')!;
-    expect(nav.className).toContain("border-l");
-    expect(document.querySelector("article")!.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
-
-  it("goes to a section on a click and highlights it, wherever the page scrolls", async () => {
-    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
-    const scrolled: string[] = [];
-    Element.prototype.scrollIntoView = function (this: Element) {
-      scrolled.push(this.id);
-    };
-    render(<ConnectPage />);
-    await act(async () => {});
-    const link = document.querySelector('[data-on-this-page="side"] [data-section-link="access"]')!;
-    await act(async () => void fireEvent.click(link));
-    expect(scrolled).toContain("access");
-    expect(window.location.hash).toBe("#access");
-    // Opened at a #section, it goes there.
-    cleanup();
-    scrolled.length = 0;
-    window.history.replaceState(null, "", "#trouble");
-    render(<ConnectPage />);
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 30));
-    });
-    expect(scrolled).toContain("trouble");
-    expect(document.querySelector('[data-on-this-page="side"] [aria-current="location"]')!.getAttribute("data-section-link")).toBe("trouble");
-    window.history.replaceState(null, "", "#");
-  });
 
   it("/docs is the docs site now, and its Connect your agent page is this same guide", async () => {
     const { docsRoute } = await import("@/lib/docs");
@@ -145,5 +87,5 @@ describe("the connect page is the guide too (and the docs' Connect your agent pa
     await act(async () => {});
     const order = [...document.querySelectorAll("[data-docs-section]")].map((e) => e.getAttribute("data-docs-section"));
     expect(order).toEqual(["connect", "address", "sign-in", "access", "try", "trouble"]);
-  });
+  }, 30_000); // the docs modules' first import takes a while on a cold start
 });
