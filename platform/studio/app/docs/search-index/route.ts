@@ -1,7 +1,8 @@
-// The docs' search index (components/docs/docs-search.tsx loads it once): pages, their sections and every tool.
-// Public, as the docs are.
-import { searchIndex } from "@/lib/docs";
+// The docs' search (Fumadocs' search dialog asks it, components/docs/docs-frame.tsx): Fumadocs' own index over every
+// page, its sections and every tool (lib/docs-source.ts), held by this app; no outside search service. Public, as
+// the docs are. GET ?query=<words> answers the matches.
+import { createFromSource } from "fumadocs-core/search/server";
 
-export function GET() {
-  return Response.json({ items: searchIndex() }, { headers: { "Cache-Control": "public, max-age=300" } });
-}
+import { source } from "@/lib/docs-source";
+
+export const { GET } = createFromSource(source);

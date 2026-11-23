@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-// The docs site (/docs): public, its nav tree, the tool reference from core's catalogue, search, and the Docs links
-// in the studio.
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+// The docs site (/docs), on Fumadocs: public, its nav tree (Fumadocs' source from core's generated data), the tool
+// reference, search (Fumadocs' index, served by the app), /connect inside the docs' layout, and the Docs links in
+// the studio.
+import { cleanup, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { NextRequest } from "next/server";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -9,25 +10,55 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 const nav = vi.hoisted(() => ({ pushed: [] as string[], pathname: "/docs" }));
 vi.mock("next/navigation", () => ({
   usePathname: () => nav.pathname,
-  useRouter: () => ({ push: (h: string) => nav.pushed.push(h), replace: () => undefined, prefetch: () => undefined, back: () => undefined }),
+  useParams: () => ({}),
+  useRouter: () => ({ push: (h: string) => nav.pushed.push(h), replace: () => undefined, prefetch: () => undefined, back: () => undefined, refresh: () => undefined }),
   notFound: () => {
     throw new Error("not found");
   },
 }));
 
 const docs = await import("@/lib/docs");
+const { source, allDocsSlugs } = await import("@/lib/docs-source");
 const { docsPageParts, DocsPage } = await import("@/components/docs/docs-page");
-const { DocsNav, DocsShell } = await import("@/components/docs/docs-shell");
-const { DocsSearch } = await import("@/components/docs/docs-search");
-const { searchDocs } = await import("@/lib/docs-search");
+const { DocsFrame } = await import("@/components/docs/docs-frame");
+const { findNeighbour, flattenTree } = await import("fumadocs-core/page-tree");
+const { getBreadcrumbItems } = await import("fumadocs-core/breadcrumb");
 const { exampleCall, exampleValue, inputRows } = await import("@/lib/docs-schema");
 const { pageNeedsSignIn } = await import("@/lib/page-gate");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 
 beforeAll(() => {
   window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false })) as unknown as typeof window.matchMedia;
+  globalThis.IntersectionObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
 });
 afterEach(cleanup);
+
+// A docs page as the app serves it: Fumadocs' layout around the page.
+const served = (slug: string[]) => {
+  const route = docs.docsRoute(slug)!;
+  return renderToStaticMarkup(
+    <DocsFrame>
+      <DocsPage route={route} />
+    </DocsFrame>,
+  );
+};
+const dom = (html: string) => {
+  const el = document.createElement("div");
+  el.innerHTML = html;
+  return el;
+};
 
 describe("the docs' data", () => {
   it("documents every tool of core's catalogue, each in exactly one area", () => {
@@ -39,43 +70,39 @@ describe("the docs' data", () => {
   });
 });
 
-describe("the nav tree", () => {
-  it("has every section, every page and every tool area, in order, with previous and next between them", () => {
-    const tree = docs.docsNav();
-    expect(tree.map((s) => s.title)).toEqual(["Getting started", "Concepts", "Tool reference", "Guides"]);
-    render(<DocsNav nav={tree} pathname="/docs/tools/hosting" />);
-    const links = [...document.querySelectorAll("[data-nav-link]")].map((a) => a.getAttribute("href"));
+describe("the nav tree (Fumadocs' source)", () => {
+  it("has every section, every page and every tool area, in order, with previous, next and breadcrumbs", () => {
+    const tree = source.pageTree;
+    expect(tree.children.map((c) => (c.type === "folder" ? c.name : null))).toEqual(["Getting started", "Concepts", "Tool reference", "Guides"]);
+    const urls = flattenTree(tree.children).map((p) => p.url);
+    for (const a of docs.CATALOGUE.areas) expect(urls).toContain(`/docs/tools/${a.id}`);
+    for (const href of ["/docs", "/connect", "/docs/roles", "/docs/first-app", "/docs/concepts/products", "/docs/tools", "/docs/guides/partners"]) expect(urls).toContain(href);
+    expect(urls.length).toBe(allDocsSlugs().length);
+    expect(findNeighbour(tree, "/docs").previous).toBeUndefined();
+    expect(findNeighbour(tree, "/docs").next?.url).toBe("/connect");
+    expect(findNeighbour(tree, "/docs/tools").next?.url).toBe(`/docs/tools/${docs.CATALOGUE.areas[0].id}`);
+    expect(getBreadcrumbItems("/docs/tools/hosting", tree, { includePage: true }).map((c) => c.name)).toEqual(["Tool reference", "Hosting"]);
+  });
+
+  it("is the sidebar of every page, the page being read marked, with Open Studio linking back to the studio", () => {
+    nav.pathname = "/docs/tools/hosting";
+    const el = dom(served(["tools", "hosting"]));
+    const sidebar = el.querySelector("#nd-sidebar")!;
+    expect(sidebar).not.toBeNull();
+    const links = [...sidebar.querySelectorAll("a[href]")].map((a) => a.getAttribute("href"));
     for (const a of docs.CATALOGUE.areas) expect(links).toContain(`/docs/tools/${a.id}`);
-    for (const href of ["/docs", "/connect", "/docs/roles", "/docs/first-app", "/docs/concepts/products", "/docs/tools", "/docs/guides/partners"]) expect(links).toContain(href);
-    expect(document.querySelector('[aria-current="page"]')!.getAttribute("href")).toBe("/docs/tools/hosting");
-    expect(docs.neighbours("/docs").prev).toBeNull();
-    expect(docs.neighbours("/docs").next?.href).toBe("/connect");
-    expect(docs.neighbours("/docs/tools").next?.href).toBe(`/docs/tools/${docs.CATALOGUE.areas[0].id}`);
-    expect(docs.breadcrumbs("/docs/tools/hosting").map((c) => c.title)).toEqual(["Docs", "Tool reference", "Hosting"]);
-  });
-
-  it("collapses a section", async () => {
-    render(<DocsNav nav={docs.docsNav()} pathname="/docs" />);
-    const section = document.querySelector('[data-nav-section="concepts"]')!;
-    expect(section.querySelector("[data-nav-link]")).not.toBeNull();
-    await act(async () => void fireEvent.click(section.querySelector("[data-nav-section-toggle]")!));
-    expect(section.querySelector("[data-nav-link]")).toBeNull();
-  });
-
-  it("is in a sheet on a phone, opened by a labelled Menu button; the header links back to the studio", async () => {
-    render(
-      <TooltipProvider>
-        <DocsShell nav={docs.docsNav()}>
-          <p>page</p>
-        </DocsShell>
-      </TooltipProvider>,
-    );
-    const menu = document.querySelector("[data-docs-menu]")!;
-    expect(menu.textContent).toBe("Menu");
-    expect(document.querySelector("[data-docs-studio-link]")!.getAttribute("href")).toBe("/");
-    await act(async () => void fireEvent.click(menu));
-    expect(document.querySelector('[role="dialog"] [data-docs-nav]')).not.toBeNull();
-  });
+    expect(links).toContain("/connect");
+    expect(sidebar.querySelector('a[href="/docs/tools/hosting"]')!.getAttribute("data-active")).toBe("true");
+    const studio = [...el.querySelectorAll('a[href="/"]')].find((a) => a.textContent === "Open Studio");
+    expect(studio).toBeDefined();
+    // Breadcrumbs and previous / next from the tree.
+    expect(el.textContent).toContain("Tool reference");
+    const hrefs = [...el.querySelectorAll("a[href]")].map((a) => a.getAttribute("href"));
+    const { previous, next } = findNeighbour(source.pageTree, "/docs/tools/hosting");
+    expect(hrefs).toContain(previous!.url);
+    expect(hrefs).toContain(next!.url);
+    nav.pathname = "/docs";
+  }, 30_000);
 });
 
 describe("a tool area's page", () => {
@@ -125,52 +152,70 @@ describe("a tool area's page", () => {
   });
 });
 
-describe("Markdown pages", () => {
-  it("render every page, with On this page naming the ids its headings get", () => {
-    for (const slug of docs.allDocsSlugs()) {
+describe("every page", () => {
+  it("renders in Fumadocs' layout, with its title and the ids its table of contents links to", () => {
+    for (const slug of allDocsSlugs()) {
       const route = docs.docsRoute(slug)!;
       expect(route, slug.join("/")).not.toBeNull();
       const { toc } = docsPageParts(route);
-      const html = renderToStaticMarkup(<DocsPage route={route} />);
-      expect(html).toContain(`data-docs-title="true">${renderToStaticMarkup(<>{docs.docsTitle(route)}</>)}</h1>`);
-      for (const t of toc) expect(html.includes(`id="${t.id}"`), `${slug.join("/")}#${t.id}`).toBe(true);
+      const html = served(slug);
+      expect(html).toContain('id="nd-docs-layout"');
+      const title = dom(html).querySelector("h1[data-docs-title]");
+      expect(title?.textContent, slug.join("/")).toBe(docs.docsTitle(route));
+      for (const t of toc) {
+        expect(html.includes(`id="${t.id}"`), `${slug.join("/")}#${t.id}`).toBe(true);
+        expect(html.includes(`href="#${t.id}"`), `toc ${slug.join("/")}#${t.id}`).toBe(true);
+      }
     }
-  }, 60_000);
+  }, 120_000);
 
-  it("link a tool named in code to its reference, and the roles page lists every role", () => {
-    const el = document.createElement("div");
-    el.innerHTML = renderToStaticMarkup(<>{docsPageParts(docs.docsRoute(["roles"])!).body}</>);
+  it("links a tool named in code to its reference, and the roles page lists every role", () => {
+    const el = dom(renderToStaticMarkup(<>{docsPageParts(docs.docsRoute(["roles"])!).body}</>));
     expect([...el.querySelectorAll("[data-role-row]")].map((r) => r.getAttribute("data-role-row"))).toEqual(docs.CATALOGUE.roles.map((r) => r.role));
     el.innerHTML = renderToStaticMarkup(<>{docsPageParts(docs.docsRoute(["concepts", "workspaces"])!).body}</>);
     expect(el.querySelector('[data-tool-link="list_workspaces"]')!.getAttribute("href")).toBe(docs.TOOL_LINKS.list_workspaces);
   });
 });
 
-describe("search", () => {
-  it("finds a tool by its name, its words or its title, and pages by title", () => {
-    const index = docs.searchIndex();
-    expect(searchDocs(index, "define_region")[0]).toMatchObject({ kind: "tool", title: "define_region", href: "/docs/tools/admin#define_region" });
-    expect(searchDocs(index, "define region")[0].title).toBe("define_region");
-    expect(searchDocs(index, "connect your agent")[0]).toMatchObject({ kind: "page", href: "/connect" });
-    expect(searchDocs(index, "")).toEqual([]);
-    expect(searchDocs(index, "zzzz-nothing")).toEqual([]);
+describe("Connect your agent", () => {
+  it("is served at /connect inside the docs' layout, with the agent picker; /docs/connect redirects there", async () => {
+    nav.pathname = "/connect";
+    const el = dom(served(["connect"]));
+    expect(el.querySelector("#nd-docs-layout [data-docs-connect]")).not.toBeNull();
+    expect(el.querySelector('[data-docs-section="connect"]')).not.toBeNull();
+    expect(el.querySelector("#nd-sidebar a[href=\"/connect\"]")!.getAttribute("data-active")).toBe("true");
+    nav.pathname = "/docs";
+    const { STUDIO_REDIRECTS, STUDIO_REWRITES } = await import("@/lib/redirects");
+    expect(STUDIO_REWRITES).toContainEqual({ source: "/connect", destination: "/docs/connect" });
+    expect(STUDIO_REDIRECTS).toContainEqual({ source: "/docs/connect", destination: "/connect", permanent: false });
+  }, 30_000);
+});
+
+describe("search (Fumadocs' index, served by the app)", () => {
+  const search = async (q: string) => {
+    const { GET } = await import("@/app/docs/search-index/route");
+    const res = await GET(new Request(`https://studio.example.com/docs/search-index?query=${encodeURIComponent(q)}`));
+    expect(res.status).toBe(200);
+    return (await res.json()) as { type: string; url: string; content: string }[];
+  };
+
+  it("finds a tool by its name or its words, and a page by its title", async () => {
+    const hits = await search("define_region");
+    expect(hits.some((h) => h.url === "/docs/tools/admin#define_region")).toBe(true);
+    expect((await search("define region")).some((h) => h.url === "/docs/tools/admin#define_region")).toBe(true);
+    expect((await search("start_build")).some((h) => h.url === docs.TOOL_LINKS.start_build)).toBe(true);
+    expect((await search("connect your agent"))[0]).toMatchObject({ type: "page", url: "/connect" });
+    expect(await search("zzzzqqqq")).toEqual([]);
   });
 
-  it("is served as JSON, and the box shows results and goes to one", async () => {
-    const { GET } = await import("@/app/docs/search-index/route");
-    const body = (await GET().json()) as { items: { title: string }[] };
-    expect(body.items.some((i) => i.title === "start_build")).toBe(true);
-    render(<DocsSearch initialIndex={docs.searchIndex()} />);
-    const input = document.querySelector("[data-docs-search-input]") as HTMLInputElement;
-    await act(async () => {
-      fireEvent.focus(input);
-      fireEvent.change(input, { target: { value: "start_build" } });
-    });
-    const first = document.querySelector("[data-docs-result]")!;
-    expect(first.getAttribute("data-docs-result")).toBe(docs.TOOL_LINKS.start_build);
-    await act(async () => void fireEvent.keyDown(input, { key: "Enter" }));
-    expect(nav.pushed).toContain(docs.TOOL_LINKS.start_build);
-  });
+  it("is the layout's search, asking /docs/search-index", async () => {
+    const { DOCS_SEARCH_API } = await import("@/components/docs/docs-frame");
+    expect(DOCS_SEARCH_API).toBe("/docs/search-index");
+    expect(pageNeedsSignIn(DOCS_SEARCH_API)).toBe(false);
+    const el = dom(served([]));
+    // Fumadocs' search box in the sidebar, labelled with its words (it opens Fumadocs' search dialog).
+    expect(el.querySelector("[data-search-full]")!.textContent).toMatch(/Search/);
+  }, 30_000);
 });
 
 describe("public access", () => {

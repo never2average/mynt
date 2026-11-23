@@ -1,30 +1,20 @@
-// What each docs address shows (lib/docs.ts docsRoute), on the server: a Markdown page (with the generated tables
-// some pages carry: roles, first steps, runtime endpoints), Connect your agent, or the tool reference.
+// What each docs address shows (lib/docs.ts docsRoute), on the server, inside Fumadocs' page (title, breadcrumbs,
+// table of contents, previous and next): a Markdown page (with the generated tables some pages carry: roles, first
+// steps, runtime endpoints), Connect your agent (the studio's guide, with its agent picker), or the tool reference.
+// The Markdown is set by Fumadocs' typography (DocsBody); the studio's own blocks keep their styles (not-prose).
 import Link from "next/link";
+import { DocsBody, DocsPage as FumadocsPage, DocsTitle } from "fumadocs-ui/layouts/docs/page";
+import { findNeighbour } from "fumadocs-core/page-tree";
 
 import { ConnectGuide } from "@/components/connect-guide";
-import { CONNECT_SECTIONS } from "@/lib/connect-sections";
-import { DocsArticle } from "@/components/docs/docs-article";
 import { DocsMarkdown } from "@/components/docs/docs-markdown";
 import { AllTools, AreaTools, LinkedText } from "@/components/docs/tool-reference";
-import type { OnThisPageItem } from "@/components/docs/on-this-page";
-import {
-  CATALOGUE,
-  ROLE_LABEL,
-  TOOL_LINKS,
-  TOOLS_HREF,
-  breadcrumbs,
-  docsTitle,
-  markdownHeadings,
-  neighbours,
-  pageHref,
-  toolsInArea,
-  type DocsRoute,
-} from "@/lib/docs";
+import { CATALOGUE, ROLE_LABEL, TOOL_LINKS, TOOLS_HREF, docsSections, docsTitle, pageHref, type DocsHeading, type DocsRoute } from "@/lib/docs";
+import { docsUrl, source } from "@/lib/docs-source";
 
 function H2({ id, children }: { id: string; children: React.ReactNode }) {
   return (
-    <h2 id={id} className="mt-10 scroll-mt-6 border-b pb-2 font-heading text-xl font-semibold first:mt-0" data-docs-heading>
+    <h2 id={id} data-docs-heading>
       {children}
     </h2>
   );
@@ -42,7 +32,7 @@ function Th({ children }: { children: React.ReactNode }) {
 
 function RolesTable() {
   return (
-    <div className="mt-4 overflow-x-auto rounded-lg border">
+    <div className="not-prose mt-4 overflow-x-auto rounded-lg border">
       <table className="w-full text-left text-sm" data-roles-table>
         <thead className="bg-muted/50">
           <tr className="border-b">
@@ -81,7 +71,7 @@ function RolesTable() {
 function Steps({ role }: { role: "innovator" | "developer" }) {
   const steps = CATALOGUE.roles.find((r) => r.role === role)?.get_started ?? [];
   return (
-    <ol className="mt-4 list-decimal space-y-1.5 pl-5 text-sm leading-relaxed" data-steps={role}>
+    <ol data-steps={role}>
       {steps.map((s) => (
         <li key={s.tool}>
           <ToolLink name={s.tool} />: <LinkedText text={s.why} />
@@ -93,7 +83,7 @@ function Steps({ role }: { role: "innovator" | "developer" }) {
 
 function Endpoints() {
   return (
-    <div className="mt-4 overflow-x-auto rounded-lg border">
+    <div className="not-prose mt-4 overflow-x-auto rounded-lg border">
       <table className="w-full text-left text-sm" data-endpoints-table>
         <thead className="bg-muted/50">
           <tr className="border-b">
@@ -125,100 +115,82 @@ const START_HERE = [
   { title: "Tool reference", href: TOOLS_HREF },
 ];
 
-// A page's title, its "On this page" and its content.
-export function docsPageParts(route: DocsRoute): { title: string; toc: OnThisPageItem[]; body: React.ReactNode } {
-  if (route.kind === "tools") {
-    return { title: docsTitle(route), toc: CATALOGUE.areas.map((a) => ({ id: a.id, label: a.title })), body: <AllTools /> };
-  }
-  if (route.kind === "area") {
-    return { title: route.area.title, toc: toolsInArea(route.area.id).map((t) => ({ id: t.name, label: t.name })), body: <AreaTools area={route.area} /> };
-  }
+function body(route: DocsRoute): React.ReactNode {
+  if (route.kind === "tools") return <AllTools />;
+  if (route.kind === "area") return <AreaTools area={route.area} />;
   const { page } = route;
   const md = page.markdown ? <DocsMarkdown source={page.markdown} toolLinks={TOOL_LINKS} /> : null;
-  const headings = markdownHeadings(page.markdown);
   switch (page.kind) {
     case "connect":
-      return {
-        title: page.title,
-        toc: [...CONNECT_SECTIONS],
-        body: (
-          <div className="flex flex-col gap-4 lg:gap-5" data-docs-connect>
-            <ConnectGuide />
-          </div>
-        ),
-      };
+      return (
+        <div className="not-prose flex flex-col gap-4 lg:gap-5" data-docs-connect>
+          <ConnectGuide />
+        </div>
+      );
     case "roles":
-      return {
-        title: page.title,
-        toc: [{ id: "roles", label: "Roles" }, ...headings],
-        body: (
-          <>
-            <H2 id="roles">Roles</H2>
-            <p className="mt-4 text-sm leading-relaxed">
-              You sign in with OAuth from any MCP client (see <Link href={pageHref("connect")} className="font-medium text-link underline underline-offset-4">Connect your agent</Link>), and Mynt registers only the tools your roles allow. Roles nest: admin holds every role, and innovator and developer are two names for the builder role.
-            </p>
-            <RolesTable />
-            {md}
-          </>
-        ),
-      };
+      return (
+        <>
+          <H2 id="roles">Roles</H2>
+          <p>
+            You sign in with OAuth from any MCP client (see <Link href={pageHref("connect")}>Connect your agent</Link>), and Mynt registers only the tools your roles allow. Roles nest: admin holds every role, and innovator and developer are two names for the builder role.
+          </p>
+          <RolesTable />
+          {md}
+        </>
+      );
     case "first-app":
-      return {
-        title: page.title,
-        toc: [{ id: "steps", label: "First steps" }, ...headings],
-        body: (
-          <>
-            <H2 id="steps">First steps</H2>
-            <p className="mt-4 text-sm leading-relaxed">To compose a product:</p>
-            <Steps role="innovator" />
-            <p className="mt-4 text-sm leading-relaxed">To build an app on one:</p>
-            <Steps role="developer" />
-            {md}
-          </>
-        ),
-      };
+      return (
+        <>
+          <H2 id="steps">First steps</H2>
+          <p>To compose a product:</p>
+          <Steps role="innovator" />
+          <p>To build an app on one:</p>
+          <Steps role="developer" />
+          {md}
+        </>
+      );
     case "runtime":
-      return {
-        title: page.title,
-        toc: [{ id: "endpoints", label: "Endpoints" }, ...headings],
-        body: (
-          <>
-            <H2 id="endpoints">Endpoints</H2>
-            <Endpoints />
-            {md}
-          </>
-        ),
-      };
+      return (
+        <>
+          <H2 id="endpoints">Endpoints</H2>
+          <Endpoints />
+          {md}
+        </>
+      );
     default:
-      if (page.slug === "") {
-        return {
-          title: page.title,
-          toc: [{ id: "start-here", label: "Start here" }, ...headings],
-          body: (
-            <>
-              <H2 id="start-here">Start here</H2>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2" data-start-here>
-                {START_HERE.map((s) => (
-                  <Link key={s.href} href={s.href} className="rounded-lg border p-3 text-sm font-medium hover:bg-muted">
-                    {s.title}
-                  </Link>
-                ))}
-              </div>
-              {md}
-            </>
-          ),
-        };
-      }
-      return { title: page.title, toc: headings, body: md };
+      if (page.slug !== "") return md;
+      return (
+        <>
+          <H2 id="start-here">Start here</H2>
+          <div className="not-prose mt-4 grid gap-3 sm:grid-cols-2" data-start-here>
+            {START_HERE.map((s) => (
+              <Link key={s.href} href={s.href} className="rounded-lg border p-3 text-sm font-medium hover:bg-muted">
+                {s.title}
+              </Link>
+            ))}
+          </div>
+          {md}
+        </>
+      );
   }
 }
 
+// A page's title, its table of contents and its content.
+export function docsPageParts(route: DocsRoute): { title: string; toc: DocsHeading[]; body: React.ReactNode } {
+  return { title: docsTitle(route), toc: docsSections(route), body: body(route) };
+}
+
+const routeSlugs = (route: DocsRoute): string[] => (route.kind === "tools" ? ["tools"] : route.kind === "area" ? ["tools", route.area.id] : route.page.slug ? route.page.slug.split("/") : []);
+
 export function DocsPage({ route }: { route: DocsRoute }) {
   const { title, toc, body } = docsPageParts(route);
-  const { prev, next } = neighbours(route.href);
+  // Previous and next follow the nav tree, found by the page's own address (so /connect, served from /docs/connect,
+  // gets its neighbours too).
+  const { previous, next } = findNeighbour(source.pageTree, docsUrl(routeSlugs(route)));
   return (
-    <DocsArticle title={title} crumbs={breadcrumbs(route.href)} toc={toc} prev={prev} next={next}>
-      {body}
-    </DocsArticle>
+    <FumadocsPage toc={toc.map((t) => ({ title: t.label, url: `#${t.id}`, depth: 2 }))} footer={{ items: { previous, next } }}>
+      <DocsTitle data-docs-title>{title}</DocsTitle>
+      <DocsBody data-docs-content>{body}</DocsBody>
+    </FumadocsPage>
   );
 }

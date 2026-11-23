@@ -11,7 +11,7 @@ import { AgentInstructions, ConnectAgentPanel, mcpUrl } from "@/components/conne
 // Each section is a flat outlined panel with the dashboard's section heading (components/dashboard-panels.tsx).
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   return (
-    <section id={id} className="scroll-mt-6 rounded-lg border" data-docs-section={id} data-panel aria-labelledby={`section-${id}`}>
+    <section id={id} className="scroll-mt-28 rounded-lg border" data-docs-section={id} data-panel aria-labelledby={`section-${id}`}>
       <div className="flex flex-col gap-3 p-4">
         <h2 id={`section-${id}`} className="text-sm font-semibold">
           {title}

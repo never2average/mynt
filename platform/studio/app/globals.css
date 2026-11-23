@@ -1,5 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* Fumadocs UI (the docs, app/docs): its shadcn preset reads the studio's tokens below; its utilities are generated
+   from its own components. */
+@import "fumadocs-ui/css/shadcn.css";
+@import "fumadocs-ui/css/preset.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -165,4 +169,29 @@
   [data-slot="card-title"] {
     font-family: var(--font-heading);
   }
+}
+
+/* The docs (Fumadocs UI, components/docs/docs-frame.tsx) on the studio's tokens. Its accent text (the page being
+   read in the table of contents, the breadcrumb) is the link colour, as the studio's links are; the sidebar's
+   active row stays neutral, as the studio's sidebar does. */
+:root,
+.dark {
+  --color-fd-primary: var(--link);
+}
+:root {
+  --color-fd-primary-foreground: #ffffff;
+}
+.dark {
+  --color-fd-primary-foreground: var(--primary-foreground);
+}
+#nd-sidebar {
+  --color-fd-primary: var(--sidebar-foreground);
+}
+
+/* The studio's pages scroll in their own boxes (app/layout.tsx fixes <html> and <body> to the window); the docs
+   scroll the window, as Fumadocs' layout expects. */
+html:has(#nd-docs-layout),
+html:has(#nd-docs-layout) body {
+  height: auto;
+  overflow: visible;
 }
