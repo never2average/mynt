@@ -11,6 +11,7 @@ import { useState } from "react";
 import type { MapRegion } from "@/components/coverage-view";
 import { HeaderTabs } from "@/components/header-tabs";
 import { LicencesPageView } from "@/components/licences-page-view";
+import { AgreementTemplatesSection, useAgreementTemplates } from "@/components/agreement-esign";
 import { LpAgreementsView, useLpAgreements } from "@/components/lp-agreements-view";
 import { Tab, TabList } from "@/components/ui/tabs";
 import type { Coverage, Licence } from "@/lib/compliance";
@@ -54,7 +55,26 @@ function AgreementsTabPanel() {
         {state.message}
       </p>
     );
-  return <LpAgreementsView rows={state.rows} onChanged={reload} />;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-6">
+      <LpAgreementsView rows={state.rows} onChanged={reload} />
+      <TemplatesPanel />
+    </div>
+  );
+}
+
+// The firm's agreement templates, below its agreements (components/agreement-esign.tsx). Nothing while Mynt has no
+// templates yet (an older Mynt).
+function TemplatesPanel() {
+  const { state, reload } = useAgreementTemplates(true);
+  if (state.kind === "loading" || state.kind === "unsupported") return null;
+  if (state.kind === "error")
+    return (
+      <p role="alert" className="text-sm text-destructive">
+        {state.message}
+      </p>
+    );
+  return <AgreementTemplatesSection data={state.data} onChanged={reload} />;
 }
 
 export function LicencesTabs({ tabs, tab, onTab }: { tabs: LicencesTab[]; tab: LicencesTab; onTab: (t: LicencesTab) => void }) {

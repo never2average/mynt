@@ -17,6 +17,7 @@ import { KpiRow } from "@/components/charts"
 import { Panel, Section } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
 import { AgreementActionButtons, AgreementActionSheet, ChoosePersonasSheet, ProgramCoverage, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
+import { SignedCopyLinks, SigningSheet } from "@/components/agreement-esign"
 import { EndSubscriptionSheet } from "@/components/end-subscription-sheet"
 import { marketplaceHref } from "@/lib/marketplace"
 import { StageMark, StatusDot } from "@/components/promotion-view"
@@ -373,6 +374,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
   const [proposing, setProposing] = useState(false)
   const [ending, setEnding] = useState<VendorContractRow | null>(null)
   const [acting, setActing] = useState<{ action: AgreementAction; row: AgreementRow } | null>(null)
+  const [signing, setSigning] = useState<string | null>(null)
   const coverage = data.coverage ?? []
   return (
     <div className="flex flex-col gap-5" data-app-agreements>
@@ -405,7 +407,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Products covered</TableHead>
                   <TableHead>Effective</TableHead>
                   {data.audits && <TableHead>Audits</TableHead>}
-                  {data.canManage && <TableHead>Actions</TableHead>}
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -434,11 +436,19 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                         <AgreementAuditsCell agreementId={a.id} summary={data.audits[a.id]} />
                       </TableCell>
                     )}
-                    {data.canManage && (
-                      <TableCell>
-                        <AgreementActionButtons id={a.id} actions={agreementActions(a, "app")} onAction={(action) => setActing({ action, row: a })} />
-                      </TableCell>
-                    )}
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1.5">
+                        {data.canManage && (
+                          <AgreementActionButtons
+                            id={a.id}
+                            actions={agreementActions(a, "app")}
+                            // Sign on a program agreement signed by e-signature opens the signer's embedded signing page.
+                            onAction={(action) => (action === "sign" && a.esign?.byEsign ? setSigning(a.id) : setActing({ action, row: a }))}
+                          />
+                        )}
+                        <SignedCopyLinks agreementId={a.id} esign={a.esign} />
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -534,6 +544,15 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
       {data.canManage && <ProposeAgreementSheet appId={appId} data={data} open={proposing} onClose={() => setProposing(false)} onDone={() => onChanged?.()} />}
       {data.canManage && <EndSubscriptionSheet contract={ending} onClose={() => setEnding(null)} onDone={() => onChanged?.()} />}
       {data.canManage && (
+        <>
+        <SigningSheet
+          agreementId={signing ?? ""}
+          open={signing !== null}
+          onClose={() => {
+            setSigning(null)
+            onChanged?.()
+          }}
+        />
         <AgreementActionSheet
           url={acting ? `/api/apps/${encodeURIComponent(appId)}/agreements/${encodeURIComponent(acting.row.id)}` : ""}
           action={acting?.action ?? null}
@@ -541,6 +560,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
           onClose={() => setActing(null)}
           onDone={() => onChanged?.()}
         />
+        </>
       )}
     </div>
   )

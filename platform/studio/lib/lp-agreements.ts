@@ -2,6 +2,7 @@
 // proposed to or made with the provider's firm (list_app_agreements without app_id), and what it may do with each
 // (Accept, Decline, Sign, End agreement). Pure, so the route, the view and the tests share it; Mynt checks every
 // action again.
+import { esignOf, esignStatusLine, type EsignInfo } from "./agreement-esign";
 import { AGREEMENT_KIND_LABELS, agreementActions, documentLink, type AgreementAction } from "./app-panel";
 
 type Obj = Record<string, unknown>;
@@ -39,6 +40,7 @@ export type LpAgreementRow = {
   terms: string | null;
   endedReason: string | null;
   actions: AgreementAction[];
+  esign: EsignInfo | null; // a program agreement signed by e-signature: Sign opens the signing page; the signed copy
 };
 
 export function lpAgreementsFrom(reply: unknown): LpAgreementRow[] | null {
@@ -50,8 +52,11 @@ export function lpAgreementsFrom(reply: unknown): LpAgreementRow[] | null {
       if (!id) return [];
       const statusKey = str(a.status) ?? "unknown";
       const sig = isObj(a.signatures) ? a.signatures : {};
-      const appSigned = sig.app_side === true;
-      const counterpartySigned = sig.counterparty_side === true;
+      // Where Mynt signs by e-signature, each side's signature is the e-signature document's (the agreement's own are
+      // set only once both have signed there).
+      const esign = esignOf(a);
+      const appSigned = sig.app_side === true || Boolean(esign?.byEsign && esign.appSigned);
+      const counterpartySigned = sig.counterparty_side === true || Boolean(esign?.byEsign && esign.counterpartySigned);
       const app = isObj(a["app"]) ? a["app"] : {};
       const ws = isObj(a.workspace) ? a.workspace : {};
       return [
@@ -65,7 +70,7 @@ export function lpAgreementsFrom(reply: unknown): LpAgreementRow[] | null {
           kindKey: str(a.kind) ?? "",
           status: LP_STATUS_LABELS[statusKey] ?? statusKey,
           statusKey,
-          signatures: statusKey === "accepted" ? `${counterpartySigned ? "You signed" : "You haven't signed"}; ${appSigned ? "the app's side signed" : "the app's side hasn't signed"}` : null,
+          signatures: esign?.byEsign && (statusKey === "accepted" || statusKey === "signed") ? esignStatusLine(esign, "counterparty") : statusKey === "accepted" ? `${counterpartySigned ? "You signed" : "You haven't signed"}; ${appSigned ? "the app's side signed" : "the app's side hasn't signed"}` : null,
           from: str(a.effective_from),
           to: str(a.effective_to),
           proposedAt: str(a.proposed_at),
@@ -73,6 +78,7 @@ export function lpAgreementsFrom(reply: unknown): LpAgreementRow[] | null {
           terms: str(a.terms_summary),
           endedReason: str(a.termination_reason),
           actions: agreementActions({ statusKey, appSigned, counterpartySigned }, "counterparty"),
+          esign,
         },
       ];
     });

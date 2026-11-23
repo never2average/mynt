@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { ClipboardList, Download, FileSearch, Search } from "lucide-react"
 
+import { SignedCopyLinks, SigningSheet } from "@/components/agreement-esign"
 import { AddRequirementSheet } from "@/components/agreement-audits-view"
 import { AgreementActionButtons, AgreementActionSheet, type AgreementSummary } from "@/components/app-agreement-sheets"
 import { FilterSelect } from "@/components/filter-controls"
@@ -112,12 +113,15 @@ export function LpAgreementsView({
   const [status, setStatus] = useState("")
   const [reviewing, setReviewing] = useState<LpAgreementRow | null>(null)
   const [acting, setActing] = useState<{ action: AgreementAction; row: LpAgreementRow } | null>(null)
+  // Sign on a program agreement signed by e-signature: the signer's embedded signing page instead of the manual sheet.
+  const [signing, setSigning] = useState<string | null>(null)
   const shown = useMemo(() => filterLpAgreements(rows, query, status), [rows, query, status])
   const { page, pages, shown: onPage, setPage } = usePaged(shown)
   const waiting = rows.filter((r) => r.actions.includes("accept") || r.actions.includes("sign")).length
   const act = (row: LpAgreementRow) => (action: AgreementAction) => {
     setReviewing(null)
-    setActing({ action, row })
+    if (action === "sign" && row.esign?.byEsign) setSigning(row.id)
+    else setActing({ action, row })
   }
 
   return (
@@ -198,6 +202,7 @@ export function LpAgreementsView({
                         Review agreement
                       </Button>
                       <AgreementActionButtons id={r.id} actions={r.actions} onAction={act(r)} />
+                      <SignedCopyLinks agreementId={r.id} esign={r.esign} />
                       {auditRequirements && takesAuditRequirements(r) && (
                         <Button size="sm" variant="outline" className="h-7" onClick={() => setRequiring(r)} data-add-audit-requirement={r.id}>
                           <ClipboardList />
@@ -228,6 +233,15 @@ export function LpAgreementsView({
           <div className="px-4 pb-6">{reviewing && <ReviewAgreementView row={reviewing} onAction={act(reviewing)} />}</div>
         </SheetContent>
       </Sheet>
+      <SigningSheet
+        agreementId={signing ?? ""}
+        open={signing !== null}
+        onClose={() => {
+          setSigning(null)
+          onChanged()
+        }}
+        fetcher={fetcher}
+      />
       <AddRequirementSheet
         agreements={requiring ? [{ id: requiring.id, label: `${requiring.appName} (${requiring.workspace})`, appName: requiring.appName, counterparty: requiring.workspace, canAddRequirements: true }] : []}
         open={requiring !== null}

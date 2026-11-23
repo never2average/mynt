@@ -28,7 +28,8 @@ export function NewAppButton({ compact = false }: { compact?: boolean }) {
   )
 }
 
-export function SiteHeader({ title, children }: { title: string; children?: React.ReactNode }) {
+// `scope`: what the page covers when it isn't the sidebar's workspace (the Admin area: "All workspaces").
+export function SiteHeader({ title, scope, children }: { title: string; scope?: string; children?: React.ReactNode }) {
   return (
     <header
       className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-(--header-height)"
@@ -38,6 +39,11 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
         <SidebarTrigger />
         <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" data-toggle-separator />
         <h1 className="truncate text-base font-medium">{title}</h1>
+        {scope && (
+          <span className="ml-1 shrink-0 rounded-md border px-2 py-0.5 text-xs text-muted-foreground" data-header-scope>
+            {scope}
+          </span>
+        )}
         {/* What a page puts beside its title (the dashboard's "/ Builder ▾"): HeaderTabs. */}
         <div id={HEADER_TABS_ID} className="ml-1 flex min-w-0 items-center overflow-hidden" data-header-slot />
         <div className="ml-auto flex shrink-0 items-center gap-2">

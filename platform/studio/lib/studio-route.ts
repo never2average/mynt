@@ -4,7 +4,7 @@ import { NotAllowedError } from "./mynt-client";
 import { currentSession } from "./session";
 import { finishSession } from "./session-response";
 import type { Session } from "./session-store";
-import { ensureRoles, isAuthError, logLine, rolesFresh, sessionIsDeveloper, ToolRefusedError } from "./studio-server";
+import { ensureRoles, isAuthError, logLine, rolesFresh, sessionIsAdmin, sessionIsDeveloper, ToolRefusedError } from "./studio-server";
 import { connectStudio } from "./tokens";
 
 const noStore = { "Cache-Control": "no-store" };
@@ -24,13 +24,14 @@ export async function asDeveloper(
   what: string,
   handle: (mynt: Client, session: Session) => Promise<NextResponse>,
   allowed: (session: Session) => boolean = sessionIsDeveloper,
+  refused: () => NextResponse = () => json(NOT_DEVELOPER, 403),
 ): Promise<NextResponse> {
   const session = await currentSession();
   if (!session?.tokens) return json({ error: "auth_required" }, 401);
   // Roles read in the last few minutes that don't allow this route: refused at once, without
   // connecting to Mynt (a non-developer's page fires several of these; each used to open a
   // connection and wait on Mynt before being refused).
-  if (rolesFresh(session) && !allowed(session)) return finishSession(json(NOT_DEVELOPER, 403), session);
+  if (rolesFresh(session) && !allowed(session)) return finishSession(refused(), session);
   let mynt: Client | undefined;
   let res: NextResponse;
   try {
@@ -38,7 +39,7 @@ export async function asDeveloper(
     await ensureRoles(session, mynt);
     res = allowed(session)
       ? await handle(mynt, session)
-      : json(NOT_DEVELOPER, 403);
+      : refused();
   } catch (err) {
     if (isAuthError(err)) {
       session.tokens = undefined;
@@ -55,4 +56,11 @@ export async function asDeveloper(
     await mynt?.close().catch(() => undefined);
   }
   return finishSession(res, session);
+}
+
+// The Admin area's routes (app/api/admin/*): only for an account Mynt says is an admin. Anyone else is told there's
+// nothing here (404), as the /admin page tells them; Mynt checks every call again.
+export const NOT_FOUND = { error: "not_found" } as const;
+export function asAdmin(what: string, handle: (mynt: Client, session: Session) => Promise<NextResponse>): Promise<NextResponse> {
+  return asDeveloper(what, handle, sessionIsAdmin, () => json(NOT_FOUND, 404));
 }

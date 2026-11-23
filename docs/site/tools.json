@@ -16,7 +16,7 @@
       "id": "apps",
       "title": "Apps & developers",
       "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, and start from app kinds and ideas.",
-      "tools": 40
+      "tools": 45
     },
     {
       "id": "builds",
@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 31
+      "tools": 42
     }
   ],
   "roles": [
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 238,
+      "tools": 240,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 238,
+      "tools": 240,
       "get_started": [
         {
           "tool": "create_entity",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 42,
+      "tools": 47,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 87,
+      "tools": 92,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 369,
+      "tools": 385,
       "get_started": [
         {
           "tool": "define_region",
@@ -724,6 +724,56 @@
         },
         "required": [
           "kind"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_get_app",
+      "title": "One app, as an admin sees it",
+      "description": "Admin: one app with its workspace, owner, stage, products (with names), its latest coding-agent builds (status, goal, cost, when; never a preview link) and its hosting on Mynt (status, runtime, last error), if any.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_get_workspace",
+      "title": "One workspace, as an admin sees it",
+      "description": "Admin: one workspace with its members (name, email, role, when they joined), its apps (stage, status, latest build), its invitations (open, accepted, declined or revoked) and its latest activity from the audit log (events about the workspace or its apps, newest first).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "workspace_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -6736,6 +6786,43 @@
       }
     },
     {
+      "name": "download_agreement_document",
+      "title": "Download a signed agreement",
+      "description": "Either party's members (the app's workspace, or the other firm): the signed copy of a program agreement Mynt holds (part 'signed'), or the e-signature service's audit certificate with it (part 'certificate'), as base64 with its SHA-256, checked against what Mynt recorded when it was signed. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "part": {
+            "default": "signed",
+            "type": "string",
+            "enum": [
+              "signed",
+              "certificate"
+            ]
+          }
+        },
+        "required": [
+          "agreement_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "enable_webhook",
       "title": "Turn a disabled webhook back on",
       "description": "Developer (the workspace's owners and admins): a webhook stops when the person who made it leaves the workspace, since its address may be theirs. Turning it back on takes its URL: the one it has (list_webhooks shows it), to confirm it's still the right receiver, or a new one. It gets a new signing secret, shown once to you.",
@@ -7066,6 +7153,35 @@
         },
         "required": [
           "audit_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_agreement_signing_link",
+      "title": "Sign a program agreement",
+      "description": "The signer on either side of an accepted program agreement (who accepted it for the licence provider, who proposed it for the app): a link to sign it inside Mynt Studio (an embedded signing page, valid for a short while; ask again for a fresh one). Mynt makes the e-signature document from the licence provider's active template the first time if it wasn't made when the agreement was accepted, and reads its state back from the e-signature service. The agreement is signed only once the service reports both signatures complete.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "agreement_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -7460,6 +7576,22 @@
       }
     },
     {
+      "name": "get_esign_settings",
+      "title": "E-signature settings",
+      "description": "Admin: how e-signature is set up here: the provider, whether its API key is set (by whom and when, or by the server's environment), whether its webhook is registered and where it points, test mode, and when Mynt last received an event. Never the key or the webhook's id.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_exploration",
       "title": "An exploration",
       "description": "Innovator: an exploration's status, leaderboard, dataset assumptions and spend. Without job_id, your firm's recent explorations.",
@@ -7602,6 +7734,22 @@
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           }
         },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_platform_settings",
+      "title": "Operational settings",
+      "description": "Admin: the operational settings this server runs with that aren't secrets (build and audit spend caps, the build audit, the exploration cap, the hosted VM hour's price): each one's value in effect, its default, and whether the server's environment sets it. Read-only: they're changed on the server, never through a tool.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -8617,6 +8765,76 @@
       }
     },
     {
+      "name": "list_agreement_templates",
+      "title": "Your firm's agreement templates",
+      "description": "Licence provider: your firm's program agreement templates, each version with what it's attached to, its SHA-256 and whether it's the active one. include_retired lists the versions no longer in use too.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_retired": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_all_apps",
+      "title": "Every app",
+      "description": "Admin: every app on Mynt across all workspaces, newest first, paged: its workspace, owner, stage (idea, staging or production), status, products, latest build and whether Mynt hosts it. query matches the name, the workspace's name, the owner's email or the id. Remove a test app with remove_app.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "idea",
+              "staging",
+              "production"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_all_builds",
       "title": "All builds and spend",
       "description": "Admin: every developer's coding-agent builds, newest first, and total spend this month.",
@@ -8678,6 +8896,52 @@
       }
     },
     {
+      "name": "list_all_products",
+      "title": "Every financial product",
+      "description": "Admin: every financial product on Mynt across all firms, newest first, paged: its name, line and region, the firm that owns it (none: one of Mynt's reference products), status, stage (idea, staging or production), whether it's archived, and its sponsors (licence providers' sponsorships, approved or pending). query matches the name, the id or the firm's name.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "unpublished"
+            ]
+          },
+          "include_archived": {
+            "default": true,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_all_programs",
       "title": "Every Solana program",
       "description": "Admin: every developer's Solana programs on devnet and mainnet, newest first, with the signer that deployed them.",
@@ -8696,6 +8960,48 @@
               "devnet",
               "mainnet"
             ]
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_all_workspaces",
+      "title": "Every workspace",
+      "description": "Admin: every workspace on Mynt, newest first, paged: its name, first owner, members and apps counted, status (active; archived by an owner; or frozen, its organization deleted in the identity provider until an owner relinks or archives it) and when it was made. query matches the name, the owner's email or the id.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived",
+              "frozen"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "description": "Rows per page (at most 500)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -9100,7 +9406,7 @@
     {
       "name": "list_entities",
       "title": "Firms",
-      "description": "Admin: every registered legal entity with its members, licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
+      "description": "Admin: every registered legal entity with its members (and their roles), licences, party roster, each licence's mandated stakeholders reconciled against the roster, and legitimacy: Mynt's public checks that it's a real company (GLEIF LEI, FinCEN MSB; run_firm_checks), whether it passes the sponsorship rule, and what to check by hand (NMLS).",
       "area": "admin",
       "roles": [
         "admin"
@@ -11739,6 +12045,22 @@
       }
     },
     {
+      "name": "register_esign_webhook",
+      "title": "Re-register the e-signature webhook",
+      "description": "Admin: register the e-signature service's webhook to this server again (reusing one already pointing here), with the stored key. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "register_firm",
       "title": "Register a firm",
       "description": "Admin: add a legal entity to Mynt by hand, with no members yet (e.g. a vendor). Then invite_user its people and add_entity_member them to it.",
@@ -12195,6 +12517,30 @@
         },
         "required": [
           "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "remove_esign_api_key",
+      "title": "Remove the e-signature API key",
+      "description": "Admin: delete the stored e-signature API key and webhook id, deleting the webhook at the service first. E-signature then stays off (and program agreements are signed by hand) unless the server's environment sets a key. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "confirm"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -13252,6 +13598,37 @@
         "required": [
           "requirement_id",
           "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "retire_agreement_template",
+      "title": "Retire an agreement template",
+      "description": "Licence provider: stop using one of your firm's templates for new agreements. Documents already made from it are unaffected, and the version is kept. Audited.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "template_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "template_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -14358,6 +14735,62 @@
       }
     },
     {
+      "name": "set_esign_api_key",
+      "title": "Set the e-signature API key",
+      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed (never shown again), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "signwell"
+            ]
+          },
+          "api_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 500,
+            "pattern": "^[\\x21-\\x7e]+$"
+          }
+        },
+        "required": [
+          "provider",
+          "api_key"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "set_esign_test_mode",
+      "title": "E-signature test mode",
+      "description": "Admin: turn the e-signature service's test mode on or off. On (the default): documents are free and not legally binding, for trying the flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in. ESIGN_TEST_MODE in the server's environment, where set, takes precedence. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "test_mode": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "test_mode"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "set_experience",
       "title": "Define an app's experience",
       "description": "Developer: set the structured experience of one of your apps: screens of components (product_card, comparison_table, calculator, disclosure_block, handoff_cta, text). check_experience then checks its structure against each product's terms; publish_app refuses failures. Pass null to clear it.",
@@ -15223,7 +15656,7 @@
     {
       "name": "sign_app_agreement",
       "title": "Sign an app agreement",
-      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Audited, and the other firm is told when it's signed.",
+      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Where e-signature is configured, program agreements are signed by e-signature instead (get_agreement_signing_link) and this refuses them. Audited, and the other firm is told when it's signed.",
       "area": "apps",
       "roles": [
         "developer",
@@ -16935,6 +17368,120 @@
         "required": [
           "program_id",
           "build_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "upload_agreement_template",
+      "title": "Upload a program agreement template",
+      "description": "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
+      "area": "apps",
+      "roles": [
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 120
+          },
+          "source": {
+            "default": "upload",
+            "type": "string",
+            "enum": [
+              "upload",
+              "provider_template"
+            ]
+          },
+          "licence_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "sponsorship_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "file_name": {
+            "type": "string",
+            "pattern": "^[^/\\\\\\0]{1,150}\\.(pdf|docx)$"
+          },
+          "file_base64": {
+            "type": "string",
+            "maxLength": 6990515,
+            "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+          },
+          "provider_template_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]{1,100}$"
+          },
+          "placeholders": {
+            "type": "object",
+            "properties": {
+              "counterparty": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            },
+            "required": [
+              "counterparty",
+              "app"
+            ],
+            "additionalProperties": false
+          },
+          "field_map": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "licence_provider",
+                "developer_firm",
+                "app",
+                "products",
+                "states",
+                "effective_from",
+                "effective_to",
+                "agreement_id",
+                "terms_summary"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          "signature_placement": {
+            "default": "signature_page",
+            "description": "signature_page: a signature page is added at the end; text_tags: the file carries the service's text tags",
+            "type": "string",
+            "enum": [
+              "signature_page",
+              "text_tags"
+            ]
+          },
+          "notes": {
+            "description": "Notes on the template, e.g. where fields go",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "name"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

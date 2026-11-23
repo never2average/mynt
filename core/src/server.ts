@@ -44,6 +44,8 @@ import {
 import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
 import { registerAppAgreementTools } from "./app-agreements.js";
+import { registerAgreementEsignTools } from "./agreement-esign.js";
+import { registerEsignAdminTools, type EsignSettings } from "./esign-settings.js";
 import { registerAgreementAuditTools } from "./agreement-audits.js";
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
@@ -72,6 +74,7 @@ import { registerHostingAdminTools, registerHostingTools } from "./hosting-tools
 import { registerSolanaAdminTools, registerSolanaTools } from "./solana/tools.js";
 import { registerMainnetGateTools } from "./solana/mainnet-gate.js";
 import { registerOpsTools } from "./ops.js";
+import { registerPlatformAdminTools } from "./platform-admin.js";
 import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
 import { effectiveStages, registerPromotionAdminTools, registerPromotionTools } from "./promotions.js";
@@ -198,7 +201,14 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     });
   }
   // Business agreements between an app's workspace and the licence providers and vendors behind its products (app-agreements.ts).
-  if (user && (has("developer") || has("license_provider") || has("vendor"))) registerAppAgreementTools(server, store, user, { app: has("developer"), counterparty: has("license_provider") || has("vendor") });
+  if (user && (has("developer") || has("license_provider") || has("vendor"))) {
+    const sides = { app: has("developer"), counterparty: has("license_provider") || has("vendor") };
+    registerAppAgreementTools(server, store, user, sides, ctx.esign ?? null);
+    // Licence providers' agreement templates, and signing program agreements by e-signature (agreement-esign.ts).
+    registerAgreementEsignTools(server, store, user, ctx.esign ?? null, sides);
+  }
+  // Admins set e-signature up from Mynt Studio: the service's key, its webhook, test mode (esign-settings.ts).
+  if (user && has("admin") && typeof (ctx.esign as Partial<EsignSettings> | null | undefined)?.setKey === "function") registerEsignAdminTools(server, store, user, ctx.esign as EsignSettings);
   // Oversight audits a licence provider runs on an app under a program agreement with its firm (agreement-audits.ts).
   if (user && (has("developer") || has("license_provider"))) registerAgreementAuditTools(server, store, user, { app: has("developer"), counterparty: has("license_provider") });
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
@@ -245,6 +255,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));
     if (ctx.review) registerReviewTools(server, ctx.review, user!);
     registerOpsTools(server, store.db);
+    // Every workspace, app and financial product, for the Studio's Admin area (read-only; platform-admin.ts).
+    registerPlatformAdminTools(server, store.db);
   }
 
   return server;

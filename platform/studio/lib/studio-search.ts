@@ -28,8 +28,12 @@ const MOVED: readonly StudioPage[] = [
   { href: "/coverage", label: "Licences" },
 ];
 
+// Pages only some accounts have (the Admin area, for Mynt admins): fixed pages, never an app's id, and not offered in
+// search.
+const RESTRICTED: readonly StudioPage[] = [{ href: "/admin", label: "Admin" }];
+
 // A tab of a page (/licences?tab=coverage) is that page.
-const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
+const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED, ...RESTRICTED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
 
 /** Whether a path is a financial product's workspace (/products/<product id>). */
 export function isProductPath(pathname: string): boolean {

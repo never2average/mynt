@@ -8,6 +8,8 @@ const dev = process.env.NODE_ENV !== "production";
 // Fails the build on a malformed PREVIEW_FRAME_SRC rather than serving a broken policy. The
 // policy itself is set per request, by proxy.ts.
 frameSources(process.env.PREVIEW_FRAME_SRC, dev);
+// The same for ESIGN_FRAME_SRC: the e-signature service's origin its signing pages are framed from (agreements' Sign).
+frameSources(process.env.ESIGN_FRAME_SRC, dev);
 
 const nextConfig: NextConfig = {
   devIndicators: false,
