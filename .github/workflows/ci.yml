@@ -178,12 +178,14 @@ jobs:
           programs = json.load(open(f"{tmp}/out/programs.json"))
           assert [p["name"] for p in programs] == ["ci_ledger"], programs
           assert programs[0]["declared_id"] == "HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw", programs
-          # The Cargo.lock the build used is hashed with the program; the template commits none, so a warning, not a failure.
+          # The Cargo.lock the build used is hashed with the program; the template commits one, so the build used it
+          # exactly as committed, with no warning. (A source with none is built below, in the cfg_attr step.)
           import hashlib, re
           assert re.fullmatch(r"[0-9a-f]{64}", programs[0]["cargo_lock_sha256"] or ""), programs
-          assert programs[0]["cargo_lock_committed"] is False, programs
+          assert programs[0]["cargo_lock_committed"] is True, programs
           assert hashlib.sha256(open(f"{tmp}/out/solana.Cargo.lock", "rb").read()).hexdigest() == programs[0]["cargo_lock_sha256"]
-          assert "warning: no Cargo.lock committed" in checks["solana_build"]["detail"], checks["solana_build"]
+          assert open(f"{tmp}/out/solana.Cargo.lock", "rb").read() == open(f"{tmp}/app/solana/Cargo.lock", "rb").read(), "the build changed the committed Cargo.lock"
+          assert "warning: no Cargo.lock committed" not in checks["solana_build"]["detail"], checks["solana_build"]
           PY
       - name: The mainnet program gate passes the template as Mynt captured it, and refuses a token vault
         run: |
@@ -287,8 +289,13 @@ jobs:
           printf '\n#[cfg_attr(any(), path = "clean.rs")]\npub mod y;\n' >> "$src/lib.rs"
           echo 'pub fn ok() {}' > "$src/clean.rs"
           echo 'pub fn permanent_delegate_note() {}' > "$src/y.rs"
+          # And with no Cargo.lock committed: Mynt resolves one (MSRV-aware, then schemas/solana-lock-pins.json) that the
+          # platform tools can build, and passes with a warning to commit it.
+          rm "$RUNNER_TEMP/app5/solana/Cargo.lock"
           bash "$RUNNER_TEMP/mynt/solana-verify.sh" build "$RUNNER_TEMP/app5" "$RUNNER_TEMP/out5" "$PWD/schemas/solana-crate-allowlist.json"
-          grep -q '"status": "pass"' "$RUNNER_TEMP/out5/checks.jsonl" || { cat "$RUNNER_TEMP/out5/checks.jsonl"; exit 1; }
+          grep -q '"status": "pass"' "$RUNNER_TEMP/out5/checks.jsonl" || { cat "$RUNNER_TEMP/out5/checks.jsonl"; tail -n 60 "$RUNNER_TEMP"/out5/*.build.log; exit 1; }
+          grep -q 'warning: no Cargo.lock committed' "$RUNNER_TEMP/out5/checks.jsonl" || { cat "$RUNNER_TEMP/out5/checks.jsonl"; exit 1; }
+          python3 -c 'import json,sys; [p] = json.load(open(sys.argv[1])); assert p["cargo_lock_committed"] is False, p' "$RUNNER_TEMP/out5/programs.json"
           if node scripts/program-rules.mjs --sources "$RUNNER_TEMP/out5/solana.sources.json" --program-id HJx8vD5GCm2j31s1ThrpmV6vGvS9xmjEuDAJJk5m8Qyw \
               --deps "$RUNNER_TEMP/out5/solana.deps.json" --depinfo "$RUNNER_TEMP/out5/solana.depinfo.json" > "$RUNNER_TEMP/rules5.json"; then
             echo "the cfg_attr module passed"; cat "$RUNNER_TEMP/rules5.json"; exit 1
