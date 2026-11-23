@@ -61,7 +61,7 @@ describe("page toolbars", () => {
       ["builds", renderToStaticMarkup(<BuildsView rows={[]} />)],
       ["licences", renderToStaticMarkup(<LicencesView licences={licences} now={NOW} />)],
       ["audits", renderToStaticMarkup(<AuditsView auditClass="security" rows={[]} filters={NO_AUDIT_FILTERS} onFilters={() => undefined} members={[]} apps={[]} actions={[]} page={1} hasNext={false} onPrev={() => undefined} onNext={() => undefined} />)],
-      ["obligations", renderToStaticMarkup(<ObligationsView obligations={[]} now={NOW} />)],
+      ["obligations", renderToStaticMarkup(<ObligationsView obligations={[]} />)],
     ];
     for (const [page, html] of pages) {
       const row = toolbarOf(html).split(" ");
