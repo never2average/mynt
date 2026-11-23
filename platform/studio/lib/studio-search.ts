@@ -10,6 +10,7 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/", label: "Dashboard", keywords: "home money customers spend" },
   { href: "/licences", label: "Licences", keywords: "licenses partners regulators coverage states map where serve" },
   { href: "/licences?view=map&region=us", label: "Coverage", keywords: "states map where serve licences world" },
+  { href: "/marketplace", label: "Marketplace", keywords: "vendors service providers services identity kyc bureau account data esign subscribe standard terms pricing" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
   { href: "/settings", label: "Settings", keywords: "workspace members team invite invitations people roles apps repositories general rename" },
   { href: "/earn", label: "Earn", keywords: "liquidity pools opportunities capital commit withdraw positions invest wallet" },

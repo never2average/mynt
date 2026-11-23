@@ -129,7 +129,9 @@ export type AgreementRow = {
   to: string | null;
   signatures: string | null;
 };
-export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null };
+// termsVersion: the provider's standard terms accepted for this app (the Marketplace's click-through); noStandardTerms:
+// subscribed with none on file (or before the provider had any).
+export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null; termsVersion: number | null; noStandardTerms: boolean };
 export type IntroRow = { id: string; counterparty: string | null; status: string; since: string | null };
 export type AppAgreements = {
   available: true;
@@ -185,7 +187,17 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
       .flatMap((v): VendorContractRow[] => {
         const id = str(v.subscription_id);
         if (!id) return [];
-        return [{ id, vendor: (isObj(v.vendor) ? str(v.vendor.name) : null) ?? "Unnamed vendor", offering: str(v.offering) ?? str(v.service_type) ?? "Service", environment: str(v.environment) === "live" ? "Live" : "Test", since: str(v.since) }];
+        return [
+          {
+            id,
+            vendor: (isObj(v.vendor) ? str(v.vendor.name) : null) ?? "Unnamed vendor",
+            offering: str(v.offering) ?? str(v.service_type) ?? "Service",
+            environment: str(v.environment) === "live" ? "Live" : "Test",
+            since: str(v.since),
+            termsVersion: typeof v.terms_version === "number" ? v.terms_version : null,
+            noStandardTerms: v.no_standard_terms === true,
+          },
+        ];
       }),
     introductions: Array.isArray(reply.introductions)
       ? reply.introductions.filter(isObj).flatMap((i): IntroRow[] => {

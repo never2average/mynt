@@ -7,6 +7,8 @@ import { noticeFirm } from "./firm-notices.js";
 import type { FirmWebhookEvent } from "./runtime.js";
 import { effectiveRoles, productStage, type App, type Store, type User } from "./store.js";
 import { appRole, memberApp } from "./workspaces.js";
+import { endVendorSubscription, getSubscription, subscriptionInLiveUse, type Subscription } from "./vendors.js";
+import { openSubscriptionAgreements } from "./vendor-terms.js";
 
 // An app is the distribution layer: it holds no licences of its own. The financial products it uses are the regulated
 // things, each covered by its own firm's licences or a licence provider's sponsorship (sponsorships.ts). What the app's
@@ -21,6 +23,10 @@ import { appRole, memberApp } from "./workspaces.js";
 // signs (sign_app_agreement), and it is signed only once both have. Either side may end it with a reason
 // (terminate_app_agreement). Every change is audited (with the app's id, so the app's trail shows it) and the other
 // firm is told on its webhooks and notices (firm-notices.ts). Going live doesn't wait on agreements yet.
+//
+// Vendor agreements are usually not negotiated: vendors list standard services under standard terms in the vendor
+// marketplace, and subscribing with subscribe_vendor_service accepts them, recording a 'vendor' agreement per app already
+// signed by both sides (vendor-terms.ts). Those end with their subscription, and ending the last of them ends it.
 //
 // The app also records which customer segments (personas) it targets, picked from its products' customer_segments
 // (set_app_target_segments), and get_app_customers reads them back with live customer counts where Mynt measures them.
@@ -63,6 +69,12 @@ export interface AppAgreement {
   terminated_by: string | null;
   terminated_at: string | null;
   termination_reason: string | null;
+  // A vendor's standard terms accepted by click-through (vendor-terms.ts): the subscription it came with, the offering,
+  // the version accepted and its pricing. Null on a negotiated agreement.
+  vendor_subscription_id: string | null;
+  offering_id: string | null;
+  terms_version: number | null;
+  pricing_summary: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -92,6 +104,10 @@ const toAgreement = (r: Row): AppAgreement => ({
   terminated_by: (r.terminated_by as string | null) ?? null,
   terminated_at: iso(r.terminated_at),
   termination_reason: (r.termination_reason as string | null) ?? null,
+  vendor_subscription_id: (r.vendor_subscription_id as string | null) ?? null,
+  offering_id: (r.offering_id as string | null) ?? null,
+  terms_version: r.terms_version == null ? null : Number(r.terms_version),
+  pricing_summary: (r.pricing_summary as string | null) ?? null,
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
 });
@@ -152,18 +168,31 @@ async function vendorContracts(store: Store, app: App) {
   const firms = await memberFirms(store, app);
   if (!firms.length) return [];
   const { rows } = await store.db.query(
-    `SELECT s.id, s.live, s.status, s.created_at, o.name AS offering, o.service_type, o.entity_id AS vendor_entity_id, e.name AS vendor
+    `SELECT s.id, s.live, s.status, s.created_at, s.offering_id, o.name AS offering, o.service_type, o.entity_id AS vendor_entity_id, o.terms_version AS current_terms_version, e.name AS vendor,
+            (SELECT count(*)::int FROM ${T}.app_agreements a WHERE a.vendor_subscription_id = s.id) AS accepted_any,
+            mine.id AS agreement_id, mine.terms_version, mine.document_url AS terms_document_url, mine.app_signed_at AS accepted_at
        FROM ${T}.vendor_subscriptions s JOIN ${T}.vendor_offerings o ON o.id = s.offering_id LEFT JOIN ${T}.entities e ON e.id = o.entity_id
+       LEFT JOIN ${T}.app_agreements mine ON mine.vendor_subscription_id = s.id AND mine.app_id = $2 AND mine.status IN ('proposed', 'accepted', 'signed')
       WHERE s.entity_id = ANY($1::uuid[]) AND s.status = 'active' ORDER BY s.created_at`,
-    [firms],
+    [firms, app.id],
   );
   return rows.map((r) => ({
     subscription_id: r.id,
+    offering_id: r.offering_id,
     vendor: { entity_id: r.vendor_entity_id, name: r.vendor ?? null },
     offering: r.offering,
     service_type: r.service_type,
     environment: r.live ? "live" : "test",
     since: iso(r.created_at),
+    // The vendor's standard terms accepted for this app (click-through), if any.
+    agreement_id: r.agreement_id ?? null,
+    terms_version: r.terms_version == null ? null : Number(r.terms_version),
+    terms_document_url: r.terms_document_url ?? null,
+    accepted_at: iso(r.accepted_at),
+    current_terms_version: r.current_terms_version == null ? null : Number(r.current_terms_version),
+    // Subscribed before the vendor had standard terms on file (or without accepting any): no agreement records them.
+    no_standard_terms: !r.accepted_any,
+    for_this_app: Boolean(r.agreement_id),
   }));
 }
 
@@ -292,7 +321,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         } else if (!sponsorsAny && !(await isVendorFirm(store, counterparty_entity_id))) {
           return fail(`${firm.name} neither sponsors the app's products nor lists vendor services on Mynt`);
         }
-        const open = (await store.db.query(`SELECT id FROM ${T}.app_agreements WHERE app_id = $1 AND counterparty_entity_id = $2 AND kind = $3 AND status = ANY($4)`, [app.id, counterparty_entity_id, kind, OPEN])).rows[0];
+        const open = (await store.db.query(`SELECT id FROM ${T}.app_agreements WHERE app_id = $1 AND counterparty_entity_id = $2 AND kind = $3 AND status = ANY($4) AND vendor_subscription_id IS NULL`, [app.id, counterparty_entity_id, kind, OPEN])).rows[0];
         if (open) return fail(`There's already an open ${kind} agreement with ${firm.name} for this app (${open.id}); terminate it first`);
         const id = randomUUID();
         const r = (
@@ -374,13 +403,25 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     {
       title: "End an app agreement",
       description:
-        "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told.",
+        "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told. A vendor's standard terms accepted with a subscription (vendor_subscription_id): ending the last such agreement ends the subscription too, refused while live products hand off through it.",
       inputSchema: { agreement_id: UUID, reason: z.string().trim().min(3).max(2000) },
     },
     async ({ agreement_id, reason }) => {
       const a = await getAgreement(store, agreement_id);
       const side = a ? await sideOf(a) : null;
       if (!a || !side) return fail(`No agreement '${agreement_id}' you can end`);
+      // A vendor's standard terms accepted with a subscription: ending the last of its agreements ends the subscription,
+      // so it's refused while live products hand off through it.
+      let subscription: Subscription | undefined;
+      if (a.vendor_subscription_id && OPEN.includes(a.status)) {
+        const others = (await openSubscriptionAgreements(store.db, a.vendor_subscription_id)).filter((x) => x.id !== a.id);
+        const s = others.length ? undefined : await getSubscription(store.db, a.vendor_subscription_id);
+        if (s?.status === "active") {
+          const inUse = await subscriptionInLiveUse(store, s);
+          if (inUse) return fail(`Ending this agreement ends the subscription it came with. ${inUse}`);
+          subscription = s;
+        }
+      }
       const r = (
         await store.db.query(
           `UPDATE ${T}.app_agreements SET status = 'terminated', terminated_by = $2, terminated_at = now(), termination_reason = $3, updated_at = now() WHERE id = $1 AND status = ANY($4) RETURNING *`,
@@ -389,9 +430,10 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       ).rows[0];
       if (!r) return fail(`That agreement is already ${a.status}`);
       const done = toAgreement(r);
-      await store.audit(user.id, "terminate_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, side, from_status: a.status, reason });
+      await store.audit(user.id, "terminate_app_agreement", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, side, from_status: a.status, reason, ...(done.vendor_subscription_id ? { vendor_subscription_id: done.vendor_subscription_id } : {}) });
       if (side === "app") await tell(done, "app_agreement.terminated", { reason });
-      return json(await describe(store, done));
+      const ended = subscription ? await endVendorSubscription(store, subscription, user.id, reason) : null;
+      return json({ ...(await describe(store, done)), ...(ended && !("error" in ended) ? { subscription_ended: ended.subscription_id } : {}) });
     },
   );
 
@@ -400,7 +442,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     {
       title: "App agreements",
       description:
-        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on, and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
+        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
       inputSchema: { app_id: UUID.optional(), status: z.enum(APP_AGREEMENT_STATUSES).optional() },
       annotations: { readOnlyHint: true },
     },
