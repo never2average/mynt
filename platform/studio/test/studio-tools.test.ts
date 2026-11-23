@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isDeveloper, parseStudioCall, rolesFrom, STUDIO_TOOLS } from "@/lib/studio-tools";
 
 describe("STUDIO_TOOLS", () => {
-  it("can create apps and start, steer and ship builds, and nothing else that writes: no running, stopping, hosting changes or VM access", () => {
+  it("can create apps, start, steer and ship builds and put a verified build online, and nothing else that writes: no running, stopping, undeploying or VM access", () => {
     const names = Object.keys(STUDIO_TOOLS);
     // finish_build is the builder chat's Ship.
     expect(names).toEqual(expect.arrayContaining(["start_build", "steer_build", "finish_build", "create_app"]));
@@ -14,8 +14,6 @@ describe("STUDIO_TOOLS", () => {
       "open_sandbox_editor",
       "reopen_sandbox",
       "update_app",
-      "request_hosting",
-      "deploy_app",
       "undeploy_app",
       "restart_app",
       "vm_access",
@@ -26,6 +24,20 @@ describe("STUDIO_TOOLS", () => {
     expect(names).toEqual(
       expect.arrayContaining(["whoami", "list_my_apps", "list_builds", "get_build", "get_build_activity", "app_status"]),
     );
+  });
+
+  it("checks Put online's tools strictly: one app and one build, the app's workspace, and an owner/name repository", () => {
+    expect(parseStudioCall("deploy_app", { app_id: "a1", build_id: "b1" })).toEqual({ tool: "deploy_app", args: { app_id: "a1", build_id: "b1" } });
+    expect(parseStudioCall("deploy_app", { app_id: "a1" })).toHaveProperty("error");
+    expect(parseStudioCall("deploy_app", { app_id: "a1", build_id: "b1", environment: "live" })).toHaveProperty("error");
+    expect(parseStudioCall("request_hosting", { workspace_id: "ws_1" })).toHaveProperty("tool");
+    expect(parseStudioCall("request_hosting", {})).toHaveProperty("error"); // always the app's workspace, never a default
+    expect(parseStudioCall("request_hosting", { workspace_id: "ws 1" })).toHaveProperty("error");
+    expect(parseStudioCall("hosting_status", {})).toHaveProperty("tool");
+    expect(parseStudioCall("hosting_status", { workspace_id: "ws_1" })).toHaveProperty("tool");
+    expect(parseStudioCall("set_app_repository", { app_id: "a1", repository: "octo/app" })).toHaveProperty("tool");
+    expect(parseStudioCall("set_app_repository", { app_id: "a1", repository: "not a repo" })).toHaveProperty("error");
+    expect(parseStudioCall("get_app_repository", { app_id: "a1", token: true })).toHaveProperty("error");
   });
 
   it("refuses tools that aren't listed, including admin tools and prototype keys", () => {

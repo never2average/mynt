@@ -11,8 +11,9 @@ import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 //
 // Writing tools join the list with the screens that use them. The chat starts and steers
 // builds, New app creates apps (and products, then tests and publishes them), the dashboard's Connect repository connects repositories and the app's stage
-// control promotes, and the builder chat's Ship ships (finish_build); stopping, sandbox commands and hosting changes
-// come later.
+// control promotes, the builder chat's Ship ships (finish_build), and the app's Put online hosts a
+// verified build (request_hosting for the app's workspace, then deploy_app) and chooses the repository
+// its builds push to (set_app_repository); stopping, undeploying, sandbox commands and VM access come later.
 
 const id = z.string().trim().min(1).max(200);
 // A compose app's service (e.g. api or web), as Mynt checks it (src/hosting-tools.ts).
@@ -199,8 +200,15 @@ export const STUDIO_TOOLS = {
   // sandbox (reading only)
   sandbox_files: z.object({ build_id: id, path: z.string().max(1000).optional() }).strict(),
   sandbox_diff: z.object({ build_id: id }).strict(),
-  // hosting (reading only)
-  hosting_status: z.object({}).strict(),
+  // The app's repository (Put online's sheet), and choosing one of the developer's own connected,
+  // approved repositories for its next builds (Mynt checks the connection again).
+  get_app_repository: z.object({ app_id: id }).strict(),
+  set_app_repository: z.object({ app_id: id, repository }).strict(),
+  // hosting: the workspace's hosting and its apps; Put online turns the app's workspace's hosting on
+  // (owners and admins; idempotent) and hosts one build Mynt verified.
+  hosting_status: z.object({ workspace_id: workspaceId.optional() }).strict(),
+  request_hosting: z.object({ workspace_id: workspaceId }).strict(),
+  deploy_app: z.object({ app_id: id, build_id: id }).strict(),
   app_status: z.object({ app_id: id }).strict(),
   app_logs: z.object({ app_id: id, tail: z.number().int().min(1).max(2000).optional(), service }).strict(),
   // Liquidity (/liquidity, lib/liquidity.ts): reading pools, positions, the withdrawal queue and

@@ -513,7 +513,7 @@ export function outcomeNote(build: unknown): string | null {
   if (status === "succeeded") {
     const pr = str(b.pr_url);
     const link = pr && /^https:\/\/[^\s<>()]+$/.test(pr) ? pr : null;
-    return `**Shipped.** Mynt verified this build in a clean sandbox${link ? ` and opened a pull request: ${link}` : ""}. Your next message starts a new build that carries on from it.`;
+    return `**Shipped.** Mynt verified this build in a clean sandbox${link ? ` and opened a pull request: ${link}` : ""}. Press **Put online** to host it at its own address. Your next message starts a new build that carries on from it.`;
   }
   const why = (str(b.error) ?? "").trim().replace(/[.\s]+$/, "");
   return `**${ENDED[status] ?? "This build ended"}**${why ? `: ${why}` : ""}. Your next message starts a new build. It carries on from this app's last shipped build, if there is one, not from this one: Mynt only builds on work it has verified.`;

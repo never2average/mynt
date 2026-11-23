@@ -9,6 +9,7 @@ import { useChat } from "@ai-sdk/react";
 import { type UIMessage } from "ai";
 import { Thread } from "@/components/assistant-ui/thread";
 import { HeldMessage, ShipButton } from "@/components/build-controls";
+import { ChatPutOnlineButton } from "@/components/hosting-control";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { APP_TABS, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
@@ -338,6 +339,8 @@ function ProjectAssistant({
   const toolbar = (
     <>
       {canShip(build) && <ShipButton onShip={() => void ship()} busy={shipping} />}
+      {/* Shipped: Put online opens the top bar's sheet for hosting the app's verified build. */}
+      {build?.status === "succeeded" && <ChatPutOnlineButton projectId={projectId} />}
     </>
   );
   const note = held ? <HeldMessage text={held.text} onRemove={() => setHeld(null)} /> : shipNote;
