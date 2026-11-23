@@ -200,7 +200,9 @@ describe("Docs links in the studio", () => {
           </SidebarProvider>
         </TooltipProvider>,
       );
-      expect(html).toMatch(/href="\/docs"[^>]*data-docs-link-sidebar/);
+      // Docs isn't in the sidebar (the header's Docs button opens it).
+      expect(html).not.toContain("data-docs-link-sidebar");
+      expect(html).not.toMatch(/href="\/docs"/);
     }
     const { DocsButton } = await import("@/components/connect-agent");
     render(<DocsButton />);

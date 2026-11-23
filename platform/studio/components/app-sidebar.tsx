@@ -8,12 +8,12 @@
 // button shown on hover or focus (components/nav-user.tsx). Each app and product says which it is (an
 // icon, "App: …" / "Financial product: …" to screen readers). Product chats that haven't made a product
 // yet have no stage, so they aren't in the folders: they reopen from the Build page (?thread=).
-// Docs (/docs) sits at the foot of the pages, for everyone. Build is in every page's header; Builds isn't in the
-// sidebar (/builds still works).
+// Docs isn't in the sidebar (the header's Docs button opens /docs). Build is in every page's header; Builds isn't in
+// the sidebar (/builds still works).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { BookOpen, Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
+import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -50,8 +50,6 @@ const PAGES = [
 ] as const
 // Only for builders and liquidity providers, after Settings.
 const EARN_PAGE = { href: "/earn", label: "Earn", icon: Coins } as const
-// Mynt's docs and tool reference (/docs, public), for everyone, below the apps.
-const DOCS_PAGE = { href: "/docs", label: "Docs", icon: BookOpen } as const
 
 export type SidebarViewProps = {
   workspaces: Workspace[]
@@ -110,18 +108,6 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
           </SidebarMenu>
         </SidebarGroup>
         {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} />}
-        <SidebarGroup className="mt-auto" data-sidebar-docs>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton asChild tooltip={DOCS_PAGE.label}>
-                <a href={DOCS_PAGE.href} data-docs-link-sidebar>
-                  <DOCS_PAGE.icon />
-                  <span>{DOCS_PAGE.label}</span>
-                </a>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={account} />
