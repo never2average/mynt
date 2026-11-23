@@ -244,8 +244,6 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
            JOIN financial_products.app_promotions ap ON ap.app_id = a.id AND ap.stage = 'production'
            CROSS JOIN LATERAL unnest(a.product_ids) AS p(product_id)
            JOIN financial_products.sponsorships s ON s.product_id = p.product_id AND s.status = 'approved'
-           WHERE cardinality(ap.target_states) = 0
-              OR EXISTS (SELECT 1 FROM unnest(s.jurisdictions) j, unnest(ap.target_states) t WHERE lower(j) = lower(t) OR lower(j) = split_part(lower(t), '-', 1))
          )
          SELECT n.app_id::text AS app_id, n.app_name, count(*)::int AS missing FROM need n
          WHERE NOT EXISTS (

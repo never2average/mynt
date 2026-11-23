@@ -230,9 +230,8 @@ async function licenceCheck(store: Store, app: App, s: State): Promise<{ check: 
 async function programAgreementsCheck(q: Q, store: Store, app: App, s: State): Promise<PromotionCheck> {
   const base = { id: "program_agreements", label: "Signed program agreement with each product's sponsor" };
   if (!app.product_ids.length) return { ...base, status: "pass", detail: "Not applicable: the app uses no financial products", coverage: [] };
-  const targets = ((s.promotion?.target_states as string[] | undefined) ?? []).map((x) => x.toLowerCase());
-  const coverage = await programAgreementCoverage(q, store, app, targets);
-  if (!coverage.length) return { ...base, status: "pass", detail: "Not applicable: no licence provider sponsors the app's products where it serves; their own firms' licences cover them", coverage };
+  const coverage = await programAgreementCoverage(q, store, app);
+  if (!coverage.length) return { ...base, status: "pass", detail: "Not applicable: no licence provider sponsors the app's products; their own firms' licences cover them", coverage };
   const missing = coverage.filter((c) => !c.covered);
   if (missing.length)
     return { ...base, status: "fail", detail: missing.map(missingAgreementText).join("; "), fix: { label: "Propose agreement", href: `/${app.id}?tab=agreements`, tool: "propose_app_agreement" }, coverage };
