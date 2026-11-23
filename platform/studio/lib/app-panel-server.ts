@@ -1,19 +1,16 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
-  appLicences,
+  appProductsFrom,
   buildsFrom,
   eventsFrom,
+  fromAgreements,
+  fromCustomers,
   fromPnl,
   fromProductSdk,
   NOT_YET,
   SECURITY_CHECKS,
-  type AppActivity,
-  type AppLicences,
-  type AppPnl,
-  type AppSdk,
-  type AppSecurity,
   type InfoTab,
-  type NotYet,
+  type TabData,
 } from "./app-panel";
 import { fromPromotionChecks, nextStage, type PromotionTarget } from "./promotions";
 import { callStudioTool, isAuthError, listMyntTools } from "./studio-server";
@@ -48,7 +45,7 @@ export async function panelApp(mynt: Client, appId: string): Promise<PanelApp | 
   };
 }
 
-export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): Promise<AppPnl | AppLicences | AppSecurity | AppSdk | AppActivity | NotYet> {
+export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): Promise<TabData> {
   const tools = await listMyntTools(mynt);
   const tool = (name: string) => tools.find((t) => t.name === name);
   // A read that Mynt refuses is left out (null); a lost sign-in isn't.
@@ -82,18 +79,21 @@ export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): P
       const pnl = fromPnl(await read("get_workspace_pnl", { workspace_id: app.workspaceId, granularity: "month", periods: 6, app_id: app.id }));
       return pnl ?? NOT_YET("Mynt's P&L for this app wasn't readable.");
     }
-    case "licences": {
-      if (!tool("get_compliance_coverage")) return NOT_YET("Licence coverage comes with Mynt's next update.");
-      const products = await Promise.all(
-        app.productIds.map(async (id) => {
-          const p = (await read("get_product", { id })) as { name?: unknown } | null;
-          return { id, name: typeof p?.name === "string" && p.name ? p.name : id };
-        }),
-      );
-      const coverage = await read("get_compliance_coverage", takes(tool("get_compliance_coverage"), "workspace_id") ? ws : {});
-      if (coverage === null) return NOT_YET("Mynt didn't answer with the workspace's coverage.");
+    case "products": {
+      // Licence coverage is the products': each with its stage, its sponsors and the states they cover.
+      if (!tool("list_app_agreements")) return NOT_YET("The app's products, with their sponsors, come with Mynt's next update.");
+      const reply = await read("list_app_agreements", { app_id: app.id });
+      if (reply === null) return NOT_YET("Mynt didn't answer with the app's products.");
       const checks = app.stage === "staging" ? await checksFor() : null;
-      return appLicences(coverage, products, checks?.checks.find((c) => c.id === "licences") ?? null);
+      return { available: true, products: appProductsFrom(reply), productionCheck: checks?.checks.find((c) => c.id === "licences") ?? null };
+    }
+    case "agreements": {
+      if (!tool("list_app_agreements")) return NOT_YET("Agreements come with Mynt's next update.");
+      return fromAgreements(await read("list_app_agreements", { app_id: app.id })) ?? NOT_YET("Mynt didn't answer with the app's agreements.");
+    }
+    case "customers": {
+      if (!tool("get_app_customers")) return NOT_YET("The app's customers come with Mynt's next update.");
+      return fromCustomers(await read("get_app_customers", { app_id: app.id })) ?? NOT_YET("Mynt didn't answer with the app's customers.");
     }
     case "security": {
       const [audit, checks] = await Promise.all([auditFor(true), checksFor()]);

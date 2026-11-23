@@ -351,7 +351,7 @@ describe("slash commands in the builder chat", () => {
   it("lists the panel tabs by their ids, /ship and the agent prompts; no /new", async () => {
     render(<BuilderChat sent={[]} />);
     await type("/");
-    expect(names()).toEqual(["preview", "pnl", "licences", "security", "sdk", "activity", "ship", "fix", "add"]);
+    expect(names()).toEqual(["preview", "products", "agreements", "customers", "security", "pnl", "sdk", "activity", "ship", "fix", "add"]);
     await type("/fi");
     await press("Enter");
     await settle();
@@ -381,6 +381,27 @@ describe("slash commands in the builder chat", () => {
     expect(asked).toEqual([{ projectId: "app-1", tab: "pnl" }]);
     expect(container.querySelector('[data-panel-tab="pnl"]')?.getAttribute("aria-selected")).toBe("true");
     expect(input().value).toBe("");
+    expect(sent).toEqual([]);
+  });
+
+  it.each(["products", "agreements", "customers"])("/%s shows that tab; there's no /licences", async (tab) => {
+    const sent: string[] = [];
+    const { container } = render(
+      <TooltipProvider>
+        <SidebarProvider>
+          <ProjectWorkspaceShell projectId="app-1">
+            <BuilderChat sent={sent} />
+          </ProjectWorkspaceShell>
+        </SidebarProvider>
+      </TooltipProvider>,
+    );
+    await settle();
+    await type("/lic");
+    expect(names()).toEqual([]);
+    await type(`/${tab}`);
+    await press("Enter");
+    await settle();
+    expect(container.querySelector(`[data-panel-tab="${tab}"]`)?.getAttribute("aria-selected")).toBe("true");
     expect(sent).toEqual([]);
   });
 });

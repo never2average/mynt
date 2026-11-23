@@ -151,6 +151,24 @@ export const STUDIO_TOOLS = {
   promote_app: z.object({ app_id: id, to_stage: promotionStage }).strict(),
   demote_app: z.object({ app_id: id, to_stage: demotionStage, reason: z.string().trim().min(3).max(1000) }).strict(),
   request_promotion_signoff: z.object({ app_id: id }).strict(),
+  // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
+  // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
+  list_app_agreements: z.object({ app_id: id, status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  propose_app_agreement: z
+    .object({
+      app_id: id,
+      counterparty_entity_id: uuid,
+      kind: z.enum(["program", "vendor", "data_sharing"]),
+      products: z.array(id).max(20),
+      terms_summary: z.string().trim().min(10).max(4000),
+      document_url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link").optional(),
+      document_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      effective_from: auditDate.optional(),
+      effective_to: auditDate.optional(),
+    })
+    .strict(),
+  get_app_customers: z.object({ app_id: id }).strict(),
+  set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
   // (no workspace_id for the implicit Personal one).
   get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),

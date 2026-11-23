@@ -67,8 +67,8 @@ describe("ChatWorkspaceShell", () => {
 });
 
 describe("an app's builder", () => {
-  it("renders the shared shell with Preview (the default), P&L, Licences, Security, SDK and Activity beside the chat; Promote is an action, not a tab", async () => {
-    expect(BUILDER_TABS.map((t) => t.label)).toEqual(["Preview", "P&L", "Licences", "Security", "SDK", "Activity"]);
+  it("renders the shared shell with Preview (the default), Products, Agreements, Customers, Security, P&L, SDK and Activity beside the chat; no Licences tab; Promote is an action, not a tab", async () => {
+    expect(BUILDER_TABS.map((t) => t.label)).toEqual(["Preview", "Products", "Agreements", "Customers", "Security", "P&L", "SDK", "Activity"]);
     const { container } = render(
       <TooltipProvider>
         <SidebarProvider>
@@ -82,18 +82,21 @@ describe("an app's builder", () => {
     expect(container.querySelector("[data-chat-workspace]")?.getAttribute("data-panel-open")).toBe("true");
     expect([...container.querySelectorAll("[data-panel-tab]")].map((b) => [b.getAttribute("data-panel-tab"), b.getAttribute("aria-selected")])).toEqual([
       ["preview", "true"],
-      ["pnl", "false"],
-      ["licences", "false"],
+      ["products", "false"],
+      ["agreements", "false"],
+      ["customers", "false"],
       ["security", "false"],
+      ["pnl", "false"],
       ["sdk", "false"],
       ["activity", "false"],
     ]);
     expect(container.querySelector('[data-panel-tab="promote"]')).toBeNull();
     // Only the Preview is read until another tab is opened: no app tab was fetched.
     expect(fetched.filter((u) => u.includes("/panel?"))).toEqual([]);
-    fireEvent.click(container.querySelector('[data-panel-tab="licences"]')!);
+    expect(container.querySelector('[data-panel-tab="licences"]')).toBeNull();
+    fireEvent.click(container.querySelector('[data-panel-tab="agreements"]')!);
     await act(async () => undefined);
-    expect(fetched.filter((u) => u.includes("/panel?"))).toEqual(["/api/apps/app-1/panel?tab=licences"]);
+    expect(fetched.filter((u) => u.includes("/panel?"))).toEqual(["/api/apps/app-1/panel?tab=agreements"]);
     expect(container.querySelector('[data-panel-content="preview"]')?.textContent).toContain("No preview yet");
     // A short label on the mock, not a sentence explaining it.
     expect(container.querySelector('[data-panel-content="preview"]')?.textContent).not.toContain("coding agent");

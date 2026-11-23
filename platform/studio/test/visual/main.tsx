@@ -32,7 +32,7 @@ import { fromAudit, fromCoverage, fromLicences } from "@/lib/compliance";
 import { fromAttention } from "@/lib/attention";
 import { fromClassAudit, fromObligations } from "@/lib/audit-classes";
 import { fromPools, fromPositions, fromWithdrawals, type LiquidityData } from "@/lib/liquidity";
-import { appLicences, fromPnl as appPnl } from "@/lib/app-panel";
+import { appProductsFrom, fromAgreements, fromCustomers, fromPnl as appPnl } from "@/lib/app-panel";
 import type { Draft } from "@/lib/earn";
 
 const q = new URLSearchParams(window.location.search);
@@ -244,16 +244,28 @@ const APP_PNL = {
   },
   unmeasured: [{ key: "fees", label: "Take-rate fees", reason: "Mynt doesn't record fees charged yet" }],
 };
-const APP_COVERAGE = {
-  states: [
-    { code: "us-ny", name: "New York", status: "unlocked", products: [{ id: "p1", name: "Card" }, { id: "p2", name: "Savings" }], licences: [{ type: "MTL", regulator: "NYDFS", number: "1", status: "active" }] },
-    { code: "us-ca", name: "California", status: "unlocked", products: [{ id: "p1", name: "Card" }], licences: [{ type: "MTL", regulator: "DFPI", number: "2", status: "active" }] },
+const SPONSOR_ID = "11111111-1111-4111-8111-111111111111";
+const APP_AGREEMENTS = {
+  can_manage: true,
+  agreements: [{ id: "g1", kind: "program", status: "accepted", counterparty: { entity_id: SPONSOR_ID, name: "Lead Bank" }, products: [{ id: "p1", name: "Card" }], effective_from: "2026-12-01", effective_to: null, signatures: { app_side: true, counterparty_side: false } }],
+  products: [
+    { id: "p1", name: "Card", stage: "production", sponsors: [{ entity_id: SPONSOR_ID, name: "Lead Bank", jurisdictions: ["us-ny", "us-ca"] }], states: ["us-ca", "us-ny"] },
+    { id: "p2", name: "Savings", stage: "staging", sponsors: [], states: [] },
   ],
+  vendor_contracts: [{ subscription_id: "v1", vendor: { name: "KYC Works" }, offering: "Identity check", environment: "test", since: "2026-11-01T00:00:00.000Z" }],
+  introductions: [{ id: "i1", status: "proposed", counterparty: null, since: "2026-11-10T00:00:00.000Z" }],
+};
+const APP_CUSTOMERS = {
+  can_manage: true,
+  products: [{ id: "p1", name: "Card", segments: [{ id: "retail", name: "Retail savers", customer_kind: "individual", targeted: true }] }],
+  customers: { live: { customers_with_sessions: null, customers_in_vault: null, reason: "No live client sessions yet" }, sandbox: { customers_with_sessions: 3, customers_in_vault: 2, reason: null } },
 };
 const ev = (i: number) => ({ at: `2026-11-${String(10 + (i % 10)).padStart(2, "0")}T10:00:00Z`, action: `api_key_created`, actor: "Ines", details: null });
 const panel: Record<string, unknown> = {
   pnl: appPnl(APP_PNL),
-  licences: appLicences(APP_COVERAGE, [{ id: "p1", name: "Card" }, { id: "p2", name: "Savings" }], { id: "licences", label: "Every product licensed", status: "fail", detail: "Savings isn't covered in California", fix: { label: "See licences", href: "/licences", external: false, tool: null } } as never),
+  products: { available: true, products: appProductsFrom(APP_AGREEMENTS), productionCheck: { id: "licences", label: "Every product licensed", status: "fail", detail: "Savings isn't covered in California", fix: { label: "See licences", href: "/licences", external: false, tool: null } } },
+  agreements: fromAgreements(APP_AGREEMENTS),
+  customers: fromCustomers(APP_CUSTOMERS),
   security: {
     available: true,
     events: Array.from({ length: 4 }, (_, i) => ev(i)),

@@ -1,46 +1,55 @@
 "use client"
 
-// An app's information tabs in the builder's right-hand panel: P&L, Licences, Security, SDK and
-// Activity (lib/app-panel.ts). Each is live while it's on screen: read when it's opened or the
+// An app's information tabs in the builder's right-hand panel: Products, Agreements, Customers,
+// Security, P&L, SDK and Activity (lib/app-panel.ts). There's no Licences tab: an app holds no
+// licences, its products do (the Products tab shows each one's sponsor and states). Each is live while it's on screen: read when it's opened or the
 // page comes back into view, and every 30 seconds while both are visible (never while the page
 // is hidden), with when it was last read. Every request names this app. Tabs only show
-// information: promoting, moving back and the rest are actions elsewhere (the top bar). They're
+// information: promoting, moving back and the rest are actions elsewhere (the top bar), and the
+// Agreements and Customers tabs' changes are labelled buttons opening a sheet. They're
 // laid out as the dashboard is (one column, the panel being narrow): key figures in a panel,
 // sections with headings, tables in a bordered box, and a View all row under a preview of a list.
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { ChevronRight, RefreshCw } from "lucide-react"
+import { ChevronRight, FilePlus2, RefreshCw, Users } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel, Section } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
-import { StatusDot } from "@/components/promotion-view"
+import { ChoosePersonasSheet, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
+import { StageMark, StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
   buildStatusLabel,
   buildTone,
+  countText,
   LIVE_INTERVAL_MS,
+  STAGE_TEXT,
+  stateLabel,
   updatedAgo,
   type AppActivity,
-  type AppLicences,
+  type AppAgreements,
+  type AppCustomers,
   type AppPnl,
+  type AppProducts,
   type AppSdk,
   type AppSecurity,
   type InfoTab,
-  type NotYet,
   type PanelEvent,
+  type TabData,
 } from "@/lib/app-panel"
 import { deltaOf, type Kpi } from "@/lib/dashboard-visual"
 import { CHECK_LABELS, CHECK_TONE } from "@/lib/promotions"
 import { cn } from "@/lib/utils"
+import type { Stage } from "@/lib/workspaces"
 
 const USD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 export const money = (c: number | null | undefined) => (c === null || c === undefined ? "Not measured" : USD.format(c / 100))
 const when = (iso: string | null) => (iso ? iso.replace("T", " ").slice(0, 16) : "—")
 
-type Loaded = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; data: AppPnl | AppLicences | AppSecurity | AppSdk | AppActivity | NotYet }
+type Loaded = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; data: TabData }
 
 // Live data for one tab of one app.
 export function useLiveTab(appId: string, tab: InfoTab, active: boolean, interval = LIVE_INTERVAL_MS) {
@@ -260,19 +269,14 @@ export function PnlView({ pnl }: { pnl: AppPnl }) {
   )
 }
 
-export function LicencesTabView({ data }: { data: AppLicences }) {
-  if (!data.products.length) return <Quiet>This app uses no regulated products, so no licences are needed for it.</Quiet>
-  const kpis: Kpi[] = [
-    { key: "states-covered", label: "States covered", value: data.fullyCovered, unit: "count", delta: null, spark: null, note: "Every product" },
-    { key: "partly-covered", label: "Partly covered", value: data.states.length - data.fullyCovered, unit: "count", delta: null, spark: null, note: "Some products" },
-    { key: "products", label: "Products", value: data.products.length, unit: "count", delta: null, spark: null, note: data.products.map((p) => p.name).join(", ") },
-  ]
+// The app's products: the regulated things, each with its stage, the licence providers sponsoring it
+// and the states they cover. The app's licence coverage is seen here, through its products: it holds
+// no licences of its own.
+export function ProductsTabView({ data }: { data: AppProducts }) {
+  if (!data.products.length) return <Quiet>This app uses no financial products yet.</Quiet>
   const check = data.productionCheck
   return (
-    <div className="flex flex-col gap-4" data-app-licences>
-      <Panel id="app-licences-kpis">
-        <KpiRow kpis={kpis} />
-      </Panel>
+    <div className="flex flex-col gap-4" data-app-products>
       {check && (
         <Section id="app-production-check" title="Production check">
           <div className="flex flex-col gap-1 text-sm" data-production-check={check.status}>
@@ -285,42 +289,209 @@ export function LicencesTabView({ data }: { data: AppLicences }) {
           </div>
         </Section>
       )}
-      <Section id="app-licences-states" title="Coverage by state">
-        {data.states.length ? (
+      <Section id="app-products" title="Products this app uses" description="Licence coverage is each product's: its own firm's licences, or a licence provider's sponsorship in the states shown.">
+        <TableBox>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Product</TableHead>
+                <TableHead>Stage</TableHead>
+                <TableHead>Sponsor</TableHead>
+                <TableHead>States covered</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.products.map((p) => (
+                <TableRow key={p.id} data-app-product={p.id}>
+                  <TableCell className="whitespace-normal">
+                    <Link href={`/products/${encodeURIComponent(p.id)}`} className="font-medium underline-offset-4 hover:underline" data-product-link={p.id}>
+                      {p.name}
+                    </Link>
+                  </TableCell>
+                  <TableCell>{p.stage && STAGE_TEXT[p.stage] ? <StageMark stage={p.stage as Stage} /> : <span className="text-xs text-muted-foreground">{p.missing ? "Not found" : "—"}</span>}</TableCell>
+                  <TableCell className="whitespace-normal">{p.sponsors.length ? p.sponsors.map((s) => s.name).join(", ") : <span className="text-muted-foreground">No sponsor on record</span>}</TableCell>
+                  <TableCell className="whitespace-normal text-xs">{p.states.length ? p.states.map(stateLabel).join(", ") : <span className="text-muted-foreground">None through a sponsor</span>}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableBox>
+      </Section>
+    </div>
+  )
+}
+
+const dates = (from: string | null, to: string | null) => (from || to ? `${from ?? "—"} to ${to ?? "open-ended"}` : "Not set")
+
+// Business development: program agreements with the products' sponsors, vendor contracts and the
+// introductions in progress. Status is always in words. Propose agreement is a labelled action.
+export function AgreementsTabView({ appId, data, onChanged }: { appId: string; data: AppAgreements; onChanged?: () => void }) {
+  const [proposing, setProposing] = useState(false)
+  return (
+    <div className="flex flex-col gap-5" data-app-agreements>
+      <Section
+        id="app-agreements"
+        title="Agreements"
+        description="Program agreements with the licence providers sponsoring this app's products, and data sharing with them."
+        action={
+          data.canManage ? (
+            <Button size="sm" variant="outline" onClick={() => setProposing(true)} data-propose-agreement>
+              <FilePlus2 /> Propose agreement
+            </Button>
+          ) : undefined
+        }
+      >
+        {data.agreements.length ? (
           <TableBox>
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>State</TableHead>
-                  <TableHead>Covered</TableHead>
-                  <TableHead>Not covered</TableHead>
-                  <TableHead>Licences</TableHead>
+                  <TableHead>With</TableHead>
+                  <TableHead>Kind</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Products covered</TableHead>
+                  <TableHead>Effective</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.states.map((s) => (
-                  <TableRow key={s.code} data-state={s.code} data-covered={s.missing.length ? "partly" : "fully"}>
-                    <TableCell>{s.name}</TableCell>
-                    <TableCell className="whitespace-normal">{s.covered.join(", ")}</TableCell>
-                    <TableCell className="whitespace-normal text-muted-foreground">{s.missing.join(", ") || "—"}</TableCell>
-                    <TableCell className="whitespace-normal text-xs">
-                      {s.licences.map((l, i) => (
-                        <div key={i}>
-                          {[l.type, l.regulator, l.number].filter(Boolean).join(" · ")}
-                          {l.status ? ` (${l.status})` : ""}
-                        </div>
-                      ))}
+                {data.agreements.map((a) => (
+                  <TableRow key={a.id} data-agreement={a.id} data-status={a.statusKey}>
+                    <TableCell className="whitespace-normal font-medium">{a.counterparty}</TableCell>
+                    <TableCell>{a.kind}</TableCell>
+                    <TableCell className="whitespace-normal">
+                      {a.status}
+                      {a.signatures && <div className="text-xs text-muted-foreground">{a.signatures}</div>}
                     </TableCell>
+                    <TableCell className="whitespace-normal">{a.products.join(", ") || "—"}</TableCell>
+                    <TableCell className="text-xs whitespace-nowrap tabular-nums">{dates(a.from, a.to)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </TableBox>
         ) : (
-          <Quiet>None of this app&apos;s products is covered by a licence in force in any state yet.</Quiet>
+          <Quiet>No agreements yet.{data.canManage ? " Propose one to a firm sponsoring this app's products." : ""}</Quiet>
         )}
-        <ViewAll href="/licences" />
       </Section>
+      <Section id="app-vendor-contracts" title="Vendor contracts" description="The vendor services this app's workspace subscribes to.">
+        {data.vendorContracts.length ? (
+          <TableBox>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>With</TableHead>
+                  <TableHead>Kind</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Service</TableHead>
+                  <TableHead>Since</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.vendorContracts.map((v) => (
+                  <TableRow key={v.id} data-vendor-contract={v.id}>
+                    <TableCell className="whitespace-normal font-medium">{v.vendor}</TableCell>
+                    <TableCell>Vendor subscription</TableCell>
+                    <TableCell>Active ({v.environment})</TableCell>
+                    <TableCell className="whitespace-normal">{v.offering}</TableCell>
+                    <TableCell className="text-xs whitespace-nowrap tabular-nums">{when(v.since)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableBox>
+        ) : (
+          <Quiet>No vendor services subscribed.</Quiet>
+        )}
+      </Section>
+      <Section id="app-introductions" title="Introductions in progress" description="From Mynt's business-development agent: the other side is named once both have said yes.">
+        {data.introductions === null ? (
+          <Quiet>Not available: Mynt&apos;s business-development agent isn&apos;t running here.</Quiet>
+        ) : data.introductions.length ? (
+          <TableBox>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>With</TableHead>
+                  <TableHead>Kind</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Since</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.introductions.map((i) => (
+                  <TableRow key={i.id} data-introduction={i.id}>
+                    <TableCell className="whitespace-normal">{i.counterparty ?? <span className="text-muted-foreground">Named once both say yes</span>}</TableCell>
+                    <TableCell>Introduction</TableCell>
+                    <TableCell className="whitespace-normal">{i.status}</TableCell>
+                    <TableCell className="text-xs whitespace-nowrap tabular-nums">{when(i.since)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableBox>
+        ) : (
+          <Quiet>No introductions in progress.</Quiet>
+        )}
+      </Section>
+      {data.canManage && <ProposeAgreementSheet appId={appId} data={data} open={proposing} onClose={() => setProposing(false)} onDone={() => onChanged?.()} />}
+    </div>
+  )
+}
+
+// The customers the app is for (personas from its products' segments) and how many it has, where
+// Mynt measures that: "Not measured" otherwise, never 0. Choose personas is a labelled action.
+export function CustomersTabView({ appId, data, onChanged }: { appId: string; data: AppCustomers; onChanged?: () => void }) {
+  const [choosing, setChoosing] = useState(false)
+  const targeted = data.products.flatMap((p) => p.personas.filter((s) => s.targeted).map((s) => ({ product: p.name, ...s })))
+  const kpis: Kpi[] = [
+    { key: "live-customers", label: "Live customers", value: data.live.withSessions, unit: "count", delta: null, spark: null, note: data.live.reason ?? "With client sessions" },
+    { key: "sandbox-customers", label: "Sandbox customers", value: data.sandbox.withSessions, unit: "count", delta: null, spark: null, note: data.sandbox.reason ?? "With client sessions" },
+  ]
+  return (
+    <div className="flex flex-col gap-5" data-app-customers>
+      <Panel id="app-customer-counts">
+        <KpiRow kpis={kpis} />
+        <p className="text-xs text-muted-foreground" data-vault-counts>
+          In the customer vault: {countText(data.live.inVault)} live, {countText(data.sandbox.inVault)} sandbox.
+        </p>
+      </Panel>
+      <Section
+        id="app-personas"
+        title="Personas this app targets"
+        action={
+          data.canManage ? (
+            <Button size="sm" variant="outline" onClick={() => setChoosing(true)} data-choose-personas>
+              <Users /> Choose personas
+            </Button>
+          ) : undefined
+        }
+      >
+        {targeted.length ? (
+          <TableBox>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Persona</TableHead>
+                  <TableHead>Kind</TableHead>
+                  <TableHead>From product</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {targeted.map((s) => (
+                  <TableRow key={`${s.product}/${s.id}`} data-targeted-persona={s.id}>
+                    <TableCell className="whitespace-normal font-medium">{s.name}</TableCell>
+                    <TableCell>{s.kind ?? "—"}</TableCell>
+                    <TableCell className="whitespace-normal">{s.product}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableBox>
+        ) : (
+          <Quiet>No personas chosen yet.{data.canManage ? " Choose them from the segments this app's products declare." : ""}</Quiet>
+        )}
+      </Section>
+      {data.canManage && <ChoosePersonasSheet appId={appId} data={data} open={choosing} onClose={() => setChoosing(false)} onDone={() => onChanged?.()} />}
     </div>
   )
 }
@@ -435,10 +606,12 @@ export function ActivityView({ data }: { data: AppActivity }) {
   )
 }
 
-export function InfoTabBody({ tab, data }: { tab: InfoTab; data: AppPnl | AppLicences | AppSecurity | AppSdk | AppActivity | NotYet }) {
+export function InfoTabBody({ tab, data, appId = "", onChanged }: { tab: InfoTab; data: TabData; appId?: string; onChanged?: () => void }) {
   if (!data.available) return <NotYetNote reason={data.reason} />
+  if (tab === "products") return <ProductsTabView data={data as AppProducts} />
+  if (tab === "agreements") return <AgreementsTabView appId={appId} data={data as AppAgreements} onChanged={onChanged} />
+  if (tab === "customers") return <CustomersTabView appId={appId} data={data as AppCustomers} onChanged={onChanged} />
   if (tab === "pnl") return <PnlView pnl={data as AppPnl} />
-  if (tab === "licences") return <LicencesTabView data={data as AppLicences} />
   if (tab === "security") return <SecurityView data={data as AppSecurity} />
   if (tab === "sdk") return <SdkView data={data as AppSdk} />
   return <ActivityView data={data as AppActivity} />
@@ -474,7 +647,7 @@ export function AppInfoTab({ appId, tab, active }: { appId: string; tab: InfoTab
             {state.message}
           </p>
         )}
-        {state.kind === "ready" && <InfoTabBody tab={tab} data={state.data} />}
+        {state.kind === "ready" && <InfoTabBody tab={tab} data={state.data} appId={appId} onChanged={() => void reload()} />}
       </div>
     </div>
   )
