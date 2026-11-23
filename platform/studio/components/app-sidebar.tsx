@@ -3,10 +3,11 @@
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
 // the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
 // members, invitations, apps and settings), the workspace's apps in three folders by stage
-// (Production, Staging, Ideas: a rocket, a flask and a lightbulb), and the signed-in account at the
-// foot, its Log out an icon button shown on hover or focus (components/nav-user.tsx). Under the Apps
-// folders, Financial products (components/nav-products.tsx): the user's products and product chats. Each
-// app and product says which it is (an icon, "App: …" / "Financial product: …" to screen readers).
+// (Production, Staging, Ideas: a rocket, a flask and a lightbulb) together with the user's financial
+// products, which go through the same stages, and the signed-in account at the foot, its Log out an icon
+// button shown on hover or focus (components/nav-user.tsx). Each app and product says which it is (an
+// icon, "App: …" / "Financial product: …" to screen readers). Product chats that haven't made a product
+// yet have no stage, so they aren't in the folders: they reopen from the Build page (?thread=).
 // Docs (/docs) sits at the foot of the pages, for everyone. Build is in every page's header; Builds isn't in the
 // sidebar (/builds still works).
 import Link from "next/link"
@@ -15,7 +16,6 @@ import { useCallback, useEffect, useState } from "react"
 import { BookOpen, Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
-import { NavProducts } from "@/components/nav-products"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
 import { useWorkspace } from "@/components/workspace-context"
@@ -34,9 +34,9 @@ import {
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
-import { listChats, type ThreadSummary } from "@/lib/chat-sessions"
-import { mergeThreads, myProductsFrom, THREADS_UPDATED, type StudioThread, type ThreadsUpdatedDetail } from "@/lib/threads"
-import { groupByStage, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
+import { myProductsFrom, THREADS_UPDATED, type MyProduct, type ThreadsUpdatedDetail } from "@/lib/threads"
+import { productStageOf } from "@/lib/products"
+import { groupByStage, STAGES, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
 
@@ -67,11 +67,18 @@ export type SidebarViewProps = {
   liquidity?: boolean
   developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
-  productThreads?: StudioThread[] | null // the Financial products group: the user's products and product chats (null while loading)
+  products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
+}
+
+// The folders' items: the workspace's apps and the user's products, each in its stage.
+export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products: MyProduct[] | null): Record<Stage, StagedApp[]> | null {
+  if (!groups) return null
+  const all = [...STAGES.flatMap((s) => groups[s].map((a) => ({ ...a, kind: a.kind ?? ("app" as const) }))), ...(products ?? []).map((p) => ({ id: p.id, name: p.name, stage: p.stage ?? productStageOf(p), kind: "product" as const }))]
+  return groupByStage(all)
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, productThreads = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, products = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -102,8 +109,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
-        {developer && <NavFolders groups={groups} activeAppId={appId} />}
-        {developer && <NavProducts threads={productThreads} />}
+        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} />}
         <SidebarGroup className="mt-auto" data-sidebar-docs>
           <SidebarMenu>
             <SidebarMenuItem>
@@ -157,27 +163,19 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     return () => window.removeEventListener("adorable:projects-updated", again)
   }, [loadApps])
 
-  // The Financial products group: the user's own products and their product chats (both from Mynt),
-  // read again when either changes.
-  const [productThreads, setProductThreads] = useState<StudioThread[] | null>(null)
+  // The user's own financial products (from Mynt), in the stage folders with the apps; read again when
+  // one is created or moves stage.
+  const [products, setProducts] = useState<MyProduct[] | null>(null)
   useEffect(() => {
     if (!developer) return
     let live = true
-    let chats: ThreadSummary[] = []
-    let mine: ReturnType<typeof myProductsFrom> = []
-    const show = () => live && setProductThreads(mergeThreads([], chats, mine))
-    const loadChats = async () => {
-      const list = await listChats("product")
-      if (list) chats = list
-    }
     const load = async () => {
-      const [res] = await Promise.all([fetch("/api/products?mine=1", { cache: "no-store" }).catch(() => null), loadChats()])
+      const res = await fetch("/api/products?mine=1", { cache: "no-store" }).catch(() => null)
       const data = res?.ok ? ((await res.json().catch(() => null)) as { mine?: unknown } | null) : null
-      mine = myProductsFrom(data?.mine)
-      show()
+      if (live) setProducts(myProductsFrom(data?.mine))
     }
     void load()
-    const again = (e: Event) => ((e as CustomEvent<ThreadsUpdatedDetail>).detail?.products ? void load() : void loadChats().then(show))
+    const again = (e: Event) => void ((e as CustomEvent<ThreadsUpdatedDetail>).detail?.products && load())
     window.addEventListener(THREADS_UPDATED, again)
     return () => {
       live = false
@@ -217,7 +215,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       liquidity={liquidity}
       developer={access ? developer : true}
       workspaceSettings={workspaceSettings}
-      productThreads={productThreads}
+      products={products}
     />
   )
 }

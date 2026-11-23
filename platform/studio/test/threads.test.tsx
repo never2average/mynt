@@ -4,15 +4,15 @@
 // first. Chats an older studio kept in this browser move to Mynt once, then leave the browser. The Build page's Recent shows at most six, each labelled App or
 // Financial product; View all lists every one with a search and a type filter; each kind opens in its
 // place (an app's page, a product chat back in Create product, a product in the Products tab); a first
-// message in Create product makes a thread. The sidebar marks every app and product and has a Financial
-// products group, its own icon when collapsed.
+// message in Create product makes a thread. The sidebar's stage folders list apps and products together,
+// each marked with its own icon and kind.
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NewAppWorkspace, type NewAppProduct } from "@/components/new-app-workspace";
 import { NavFolders } from "@/components/nav-folders";
-import { NavProducts } from "@/components/nav-products";
+import { stagedItems } from "@/components/app-sidebar";
 import { Sidebar, SidebarContent, SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChatSaver, LEGACY_KEYS, migrateLocalChats, saveTiming, sessionIdFor } from "@/lib/chat-sessions";
@@ -89,7 +89,7 @@ describe("the threads list", () => {
     const list = mergeThreads(APPS, CHATS, MINE);
     expect(list.map((t) => t.key)).toEqual(["app:app-2", "product:green-savings", "chat:c1", "app:app-1", "product:dollar-account", "chat:c2", "app:app-3"]);
     expect(list.map((t) => t.kind)).toEqual(["app", "product", "product", "app", "product", "product", "app"]);
-    expect(list.map((t) => t.status)).toEqual(["Idea", "Draft", "Chat", "Staging", "Published", "Created", "Production"]);
+    expect(list.map((t) => t.status)).toEqual(["Idea", "Idea", "Chat", "Staging", "Production", "Created", "Production"]);
     expect(list.find((t) => t.key === "app:app-1")?.href).toBe("/app-1");
     expect(list.find((t) => t.key === "chat:c1")?.href).toBe("/new?thread=c1");
     expect(list.find((t) => t.key === "product:green-savings")?.href).toBe("/new?product=green-savings");
@@ -122,10 +122,11 @@ describe("the threads list", () => {
   });
 
   it("reads the user's own products and the Build page's address", () => {
-    expect(myProductsFrom([{ id: "a", name: "A", status: "draft", updated_at: "2026-11-01" }, { id: "b", status: "published", published_at: "2026-11-02" }, { id: "c" }, null, { name: "no id" }])).toEqual([
-      { id: "a", name: "A", status: "draft", updatedAt: "2026-11-01" },
-      { id: "b", name: "b", status: "published", updatedAt: "2026-11-02" },
-      { id: "c", name: "c", status: "published", updatedAt: null },
+    expect(myProductsFrom([{ id: "a", name: "A", status: "draft", updated_at: "2026-11-01" }, { id: "b", status: "published", published_at: "2026-11-02" }, { id: "c" }, { id: "s", status: "unpublished", stage: "staging" }, null, { name: "no id" }])).toEqual([
+      { id: "a", name: "A", status: "draft", stage: "idea", updatedAt: "2026-11-01" },
+      { id: "b", name: "b", status: "published", stage: "production", updatedAt: "2026-11-02" },
+      { id: "c", name: "c", status: "published", stage: "production", updatedAt: null },
+      { id: "s", name: "s", status: "unpublished", stage: "staging", updatedAt: null },
     ]);
     expect(openFromSearch("?thread=c1")).toEqual({ thread: "c1" });
     expect(openFromSearch("?product=green-savings")).toEqual({ product: "green-savings" });
@@ -328,7 +329,6 @@ const withSidebar = (ui: React.ReactNode, open = true) => (
 
 describe("the sidebar's threads", () => {
   const groups = groupByStage(APPS.map(({ id, name, stage }) => ({ id, name, stage })));
-  const products = mergeThreads([], CHATS, MINE);
 
   it("marks every app as an App", () => {
     window.localStorage.setItem("mynt_studio_folder", "staging");
@@ -339,52 +339,43 @@ describe("the sidebar's threads", () => {
     expect(link.querySelector("[data-thread-icon=app]")).not.toBeNull();
   });
 
-  it("has a Financial products group listing products and product chats, each marked with its status", () => {
-    render(withSidebar(<NavProducts threads={products} />));
-    expect(document.querySelector("[data-products-group] [data-sidebar=group-label]")?.textContent).toBe("Financial products");
-    const items = [...document.querySelectorAll("[data-products-group] [data-thread-item]")] as HTMLElement[];
-    expect(items.map((i) => i.getAttribute("aria-label"))).toEqual([
-      "Financial product: Green Savings",
-      "Financial product: A green savings account",
-      "Financial product: Dollar account",
-      "Financial product: A card for students",
-    ]);
-    expect(items.every((i) => i.querySelector("[data-thread-icon=product]"))).toBe(true);
-    expect(items.map((i) => i.getAttribute("title"))).toEqual(["Financial product · Draft", "Financial product · Chat", "Financial product · Published", "Financial product · Created"]);
-    expect(items[1].getAttribute("href")).toBe("/new?thread=c1");
-    expect(items[0].getAttribute("href")).toBe("/new?product=green-savings");
+  it("lists apps and financial products together in the stage folders, each with its icon and kind", () => {
+    window.localStorage.setItem("mynt_studio_folder", "idea");
+    const both = stagedItems(groups, MINE);
+    expect(both!.production.map((i) => `${i.kind}:${i.id}`)).toEqual(["product:dollar-account", "app:app-3"]);
+    render(withSidebar(<NavFolders groups={both} />));
+    expect(document.querySelector("[data-sidebar=group-label]")?.textContent).toBe("Apps and products");
+    const idea = [...document.querySelectorAll("[data-folder=idea] [data-thread-item]")] as HTMLElement[];
+    expect(idea.map((i) => i.getAttribute("aria-label"))).toEqual(["Financial product: Green Savings", "App: Rent ready"]);
+    expect(idea[0].querySelector("[data-thread-icon=product]")).not.toBeNull();
+    expect(idea[1].querySelector("[data-thread-icon=app]")).not.toBeNull();
+    expect(idea[0].getAttribute("title")).toBe("Financial product · Idea");
+    expect(idea[0].getAttribute("href")).toBe("/new?product=green-savings");
+    // No separate Financial products group; product chats aren't in the folders (they have no stage).
+    expect(document.querySelector("[data-products-group]")).toBeNull();
+    expect(document.querySelector("[data-thread-item^=chat]")).toBeNull();
   });
 
-  it("picking a product chat there opens it in place when the Build page is open", () => {
+  it("picking a product there opens it in place when the Build page is open", () => {
+    window.localStorage.setItem("mynt_studio_folder", "idea");
     const seen: unknown[] = [];
     const listen = (e: Event) => seen.push((e as CustomEvent).detail);
     window.addEventListener("mynt:open-thread", listen);
     // jsdom can't follow the link itself.
     const stay = (e: Event) => e.preventDefault();
     document.addEventListener("click", stay);
-    render(withSidebar(<NavProducts threads={products} />));
-    fireEvent.click(screen.getByRole("link", { name: "Financial product: A green savings account" }));
+    render(withSidebar(<NavFolders groups={stagedItems(groups, MINE)} />));
+    fireEvent.click(screen.getByRole("link", { name: "Financial product: Green Savings" }));
     window.removeEventListener("mynt:open-thread", listen);
     document.removeEventListener("click", stay);
-    expect(seen).toEqual([{ thread: "c1" }]);
+    expect(seen).toEqual([{ product: "green-savings" }]);
   });
 
-  it("collapsed: the apps' folder icons and the products' own icon tell them apart; clicking it expands the group", async () => {
-    window.localStorage.setItem("mynt_studio_products_open", "0");
-    const { container } = render(
-      withSidebar(
-        <>
-          <NavFolders groups={groups} />
-          <NavProducts threads={products} />
-        </>,
-        false,
-      ),
-    );
+  it("collapsed: the three folder icons stay; clicking one expands the sidebar on its apps and products", async () => {
+    const { container } = render(withSidebar(<NavFolders groups={stagedItems(groups, MINE)} />, false));
     for (const s of ["production", "staging", "idea"]) expect(container.querySelector(`[data-folder-icon=${s}]`)).not.toBeNull();
-    expect(container.querySelector("[data-products-icon]")).not.toBeNull();
-    await act(async () => void fireEvent.click(container.querySelector("[data-products-folder] [data-sidebar=menu-button]")!));
+    await act(async () => void fireEvent.click(container.querySelector("[data-folder=production] [data-sidebar=menu-button]")!));
     expect(container.querySelector("[data-slot=sidebar]")?.getAttribute("data-state")).toBe("expanded");
-    expect(container.querySelector("[data-products-folder]")?.getAttribute("data-open")).toBe("true");
-    expect(screen.getByRole("link", { name: "Financial product: Green Savings" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Financial product: Dollar account" })).toBeTruthy();
   });
 });

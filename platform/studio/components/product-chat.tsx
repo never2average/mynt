@@ -114,7 +114,7 @@ export const ProductDraftCard: ToolCallMessagePartComponent = ({ result, status 
       </p>
       {done ? (
         <p role="status" className="text-xs" data-draft-created>
-          Created as a draft. Test and Publish it in the Products tab.
+          Created as an idea. Move it to staging in the Products tab.
         </p>
       ) : (
         <div className="flex items-center gap-2">

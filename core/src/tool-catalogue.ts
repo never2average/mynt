@@ -38,6 +38,7 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerProductRequestTools: "catalogue",
   registerInnovatorTools: "products",
   registerVersioningTools: "products",
+  registerProductStageTools: "products",
   registerDefinitionTools: "products",
   registerMarketplaceTools: "products",
   registerProductRequestInnovatorTools: "products",

@@ -4,7 +4,7 @@
 // a build; a Build app message that asks for a product only offers the switch. In Create product the
 // assistant's draft shows in the chat as a card, Review and create opens the Create product sheet filled
 // with it, and confirming calls POST /api/products once with the confirmed fields; the product is then a
-// Draft in the Products tab with Test and Publish. Mynt's refusals show; Build app sending is unchanged.
+// Idea in the Products tab with Move to staging. Mynt's refusals show; Build app sending is unchanged.
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { useState } from "react";
@@ -405,13 +405,12 @@ describe("drafting a product in the chat", () => {
     expect(posts).toEqual([{ url: "/api/products", body: { ...DRAFT.request, liquidity: "moderate" } }]);
     expect(sheet()).toBeNull();
 
-    // The card is done and can't be sent again; the product is a Draft in Products, with Test and Publish.
-    expect(card.querySelector("[data-draft-created]")!.textContent).toBe("Created as a draft. Test and Publish it in the Products tab.");
+    // The card is done and can't be sent again; the product is an Idea in Products, with Move to staging.
+    expect(card.querySelector("[data-draft-created]")!.textContent).toBe("Created as an idea. Move it to staging in the Products tab.");
     expect(within(card).queryByRole("button", { name: "Review and create" })).toBeNull();
     const row = document.querySelector('[data-panel-content="products"] [data-product-row="green-savings"]') as HTMLElement;
-    expect(row.querySelector("[data-product-status]")!.textContent).toBe("Draft");
-    expect(within(row).getByRole("button", { name: "Test" })).toBeTruthy();
-    expect(within(row).getByRole("button", { name: "Publish" })).toBeTruthy();
+    expect(row.querySelector("[data-product-status]")!.textContent).toBe("Idea");
+    expect(within(row).getByRole("button", { name: "Move to staging" })).toBeTruthy();
   });
 
   it("shows Mynt's refusal in the sheet and keeps the card open to try again", async () => {

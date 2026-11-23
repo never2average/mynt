@@ -31,7 +31,7 @@
           "title": "Your first app",
           "kind": "first-app",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Innovator workflow: create → test → publish", "title": "Compose, test, publish" },
+            { "file": "docs/reference.md", "heading": "Innovator workflow: idea → staging → production", "title": "Compose, test, promote" },
             { "file": "README.md", "heading": "What a developer ships" }
           ]
         }

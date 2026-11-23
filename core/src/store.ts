@@ -267,6 +267,10 @@ export interface AppJourney {
 }
 
 export type ProductStatus = "draft" | "published" | "unpublished";
+// The same three stages as an app's (workspaces.ts AppStage): idea (draft or unpublished), staging (tested, for
+// sandbox builds only), production (published).
+export type ProductStage = "idea" | "staging" | "production";
+export const productStage = (r: Pick<ProductRecord, "status" | "stage">): ProductStage => (r.status === "published" ? "production" : r.stage === "staging" ? "staging" : "idea");
 export interface Pins {
   version: number;
   pinned_at: string;
@@ -340,6 +344,7 @@ export interface ProductRecord {
   product: FinancialProduct;
   owner_id: string | null; // null = bundled catalog product
   status: ProductStatus;
+  stage: "staging" | null; // stored only for staging; see productStage
   version: number;
   last_test: TestReport | null;
   entity_id: string | null;
@@ -1329,6 +1334,11 @@ const TABLES = `
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS regime_summary jsonb;
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS take_rate jsonb;
   ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS derived_at timestamptz;
+  -- A product's stage, as an app's (idea → staging → production): only staging is stored. NULL means the stage
+  -- follows the status: published is production, anything else an idea, so adding the column (NULL on every
+  -- existing row) moves no product and changes no published product's availability. Staging: tested and open to
+  -- sandbox builds only (promote_product); publishing clears it.
+  ALTER TABLE financial_products.products ADD COLUMN IF NOT EXISTS stage text CHECK (stage IS NULL OR stage = 'staging');
   -- Licence providers' sponsorships: one component of a builder's product covered by the provider's held
   -- licences in the jurisdictions it approved (see sponsorships.ts).
   CREATE TABLE IF NOT EXISTS financial_products.sponsorships (
@@ -1845,6 +1855,7 @@ const toProductRecord = (r: Row): ProductRecord => ({
   product: r.data as FinancialProduct,
   owner_id: r.owner_id as string | null,
   status: r.status as ProductStatus,
+  stage: r.stage === "staging" ? "staging" : null,
   version: Number(r.version ?? 1),
   last_test: (r.last_test as TestReport | null) ?? null,
   entity_id: (r.entity_id as string | null) ?? null,
@@ -3214,6 +3225,17 @@ export class Store {
     return rows.map((r) => toProductRecord(r).product);
   }
 
+  // Products in staging: tested, not published, open to sandbox builds only.
+  async stagingProducts(): Promise<ProductRecord[]> {
+    return (await this.all("SELECT * FROM financial_products.products WHERE stage = 'staging' AND status <> 'published' ORDER BY updated_at, id")).map(toProductRecord);
+  }
+
+  // Sets or clears the stored staging stage (a published product is production whatever this says).
+  async setProductStage(id: string, stage: "staging" | null): Promise<ProductRecord> {
+    const r = await this.one("UPDATE financial_products.products SET stage = $2, updated_at = now() WHERE id = $1 RETURNING *", [id, stage]);
+    return toProductRecord(r!);
+  }
+
   async productsByOwner(ownerId: string): Promise<ProductRecord[]> {
     return (await this.all("SELECT * FROM financial_products.products WHERE owner_id = $1 ORDER BY created_at", [ownerId])).map(
       toProductRecord,
@@ -3265,7 +3287,7 @@ export class Store {
   async publishCurrentVersion(id: string): Promise<ProductRecord> {
     const r = await this.one(
       `WITH p AS (
-         UPDATE financial_products.products SET status = 'published', updated_at = now(), published_at = now()
+         UPDATE financial_products.products SET status = 'published', stage = NULL, updated_at = now(), published_at = now()
          WHERE id = $1 RETURNING *
        ), sup AS (
          UPDATE financial_products.product_versions SET status = 'superseded'
@@ -3341,7 +3363,7 @@ export class Store {
          FROM d WHERE v.product_id = d.product_id AND v.version = d.version RETURNING v.*
        )
        UPDATE financial_products.products p
-       SET data = pub.data, version = pub.version, last_test = pub.last_test, status = 'published', updated_at = now(), published_at = now()
+       SET data = pub.data, version = pub.version, last_test = pub.last_test, status = 'published', stage = NULL, updated_at = now(), published_at = now()
        FROM pub WHERE p.id = pub.product_id RETURNING p.*`,
       [id],
     );

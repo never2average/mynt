@@ -45,7 +45,13 @@ export const STUDIO_TOOLS = {
   whoami: z.object({}).strict(),
   list_my_apps: z.object({ workspace_id: workspaceId.optional() }).strict(),
   list_buildable_products: z
-    .object({ product_line: z.string().max(80).optional(), query: z.string().max(200).optional(), access_mode: z.string().max(40).optional() })
+    .object({
+      product_line: z.string().max(80).optional(),
+      query: z.string().max(200).optional(),
+      access_mode: z.string().max(40).optional(),
+      // sandbox: products in staging too (for sandbox builds only)
+      environment: z.enum(["production", "sandbox"]).optional(),
+    })
     .strict(),
   get_product: z.object({ id }).strict(),
   // New app's Templates: starting points for common finance apps.
@@ -57,7 +63,7 @@ export const STUDIO_TOOLS = {
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
   // New app's Create product: a draft product (create_product's own fields; Mynt checks them again), then
-  // Test and Publish on its row. The user's own products (drafts too) and the regions and categories the
+  // its stage actions on its row (Test, Move to staging or production, Move back). The user's own products (drafts too) and the regions and categories the
   // sheet offers are read alongside.
   list_my_products: z.object({}).strict(),
   list_regions: z.object({}).strict(),
@@ -82,6 +88,10 @@ export const STUDIO_TOOLS = {
     .strict(),
   test_product: z.object({ id: ProductId }).strict(),
   publish_product: z.object({ id: ProductId }).strict(),
+  // A product's stage, as an app's: Mynt's checks, then a move up or (with a reason) back down.
+  get_product_promotion_checks: z.object({ product_id: ProductId, to_stage: z.enum(["staging", "production"]) }).strict(),
+  promote_product: z.object({ product_id: ProductId, to_stage: z.enum(["staging", "production"]) }).strict(),
+  demote_product: z.object({ product_id: ProductId, to_stage: z.enum(["idea", "staging"]), reason: z.string().trim().min(3).max(1000) }).strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({

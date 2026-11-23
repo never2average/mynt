@@ -8,9 +8,12 @@
 // The first build runs on Mynt's own cap (there is no cap control here). Until it can send, the reason
 // is the disabled Send's tooltip, never a line under the composer.
 // An idea's chip picks its products (lib/new-app.ts picksForKind); one with no published product isn't a chip.
-// Each product shows the flags of the countries it's offered in. Create product (the picker's last item
-// and the Products tab's button) opens one sheet; the new product is listed as Draft, with Test and
-// Publish on its row, and can't be picked until it's published.
+// Each product shows the flags of the countries it's offered in, and its stage as apps show theirs (Idea,
+// Staging, Production). Create product (the picker's last item and the Products tab's button) opens one
+// sheet; the new product is listed as an Idea, with Move to staging on its row, and can't be picked until
+// it's in Staging (sandbox builds) or Production. The user's own products move between stages from their
+// rows (Move to staging, Move to production, Move back), each through the approval sheet
+// (components/product-stage-sheet.tsx), as apps move.
 // The composer's toggle switches between Build app and Create product (so does /create-product, and
 // "/create-product <description>" sent from Build app goes there with its description). In Create
 // product the chat drafts a product with the assistant (components/product-chat.tsx, lib/product-chat.ts);
@@ -45,7 +48,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { chipIdeas, CHIPS_MAX, ideaProducts, kindAsIdea, kindIdeas, NewAppRequest, picksForKind, sendBlockedReason, type AppIdea, type AppKind } from "@/lib/new-app"
 import { chipProductIdeas, productIdeaMessage, productIdeaPrefill, type ProductIdea } from "@/lib/product-ideas"
-import { flagsFor, isPickable, NOT_PUBLISHED, runProductAction, STATUS_LABEL, type ProductAction, type StudioProduct } from "@/lib/products"
+import { ProductStageSheet, demoteMove, promoteMove, type ProductMove } from "@/components/product-stage-sheet"
+import { StageMark } from "@/components/promotion-view"
+import { flagsFor, isPickable, MOVE_LABEL, NOT_PUBLISHED, productStageOf, STAGE_STATUS, type StudioProduct } from "@/lib/products"
+import type { Stage } from "@/lib/workspaces"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { cn } from "@/lib/utils"
 
@@ -175,7 +181,7 @@ export function ProductPicker({
                         <span className={cn("flex size-4 shrink-0 items-center justify-center rounded border", on && "border-primary bg-primary text-primary-foreground")}>{on && <Check className="size-3" />}</span>
                         <Flags product={p} />
                         <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                        {!pickable && p.status && <span className="shrink-0 text-xs text-muted-foreground">{STATUS_LABEL[p.status]}</span>}
+                        {stageOf(p) !== "production" && <span className="shrink-0 text-xs text-muted-foreground" data-picker-stage>{STAGE_STATUS[stageOf(p)]}</span>}
                       </button>
                     )
                   })}
@@ -416,8 +422,8 @@ const PRODUCT_COLUMNS = [
   { label: "", className: COL.actions },
 ]
 
-// A draft's Test or Publish: what Mynt said, shown on its row.
-export type RowNote = { text: string; failed: boolean }
+// A product's stage: Mynt's word, else from its status.
+const stageOf = (p: Pick<StudioProduct, "stage" | "status">): Stage => p.stage ?? productStageOf(p)
 
 export function ProductsTab({
   products,
@@ -426,7 +432,8 @@ export function ProductsTab({
   lines,
   onLines,
   onCreate,
-  onAction,
+  onMoved,
+  fetcher,
   focus = null,
 }: {
   products: NewAppProduct[] | null
@@ -435,20 +442,16 @@ export function ProductsTab({
   lines: string[]
   onLines: (lines: string[]) => void
   onCreate?: () => void
-  // Test or Publish one of the user's drafts: what to show on its row.
-  onAction?: (id: string, action: ProductAction) => Promise<RowNote>
+  // One of the user's own products moved stage (through the approval sheet).
+  onMoved?: (id: string, stage: Stage) => void
+  fetcher?: typeof fetch
   // A product opened from Recent or the sidebar: searched for and marked.
   focus?: string | null
 }) {
-  const [notes, setNotes] = useState<Record<string, RowNote>>({})
-  const [running, setRunning] = useState<string | null>(null)
-  const act = async (id: string, action: ProductAction) => {
-    if (!onAction || running) return
-    setRunning(`${id}:${action}`)
-    const note = await onAction(id, action)
-    setRunning(null)
-    setNotes((n) => ({ ...n, [id]: note }))
-  }
+  // The approval sheet a row's action opened: the product, its move and the stage it was opened at (the
+  // sheet keeps it: after the move it still shows what was done).
+  const [moving, setMoving] = useState<{ id: string; move: ProductMove; stage: Stage } | null>(null)
+  const movingProduct = moving ? products?.find((p) => p.id === moving.id) : undefined
   const [query, setQuery] = useState("")
   const options = useMemo(
     () => [...new Set((products ?? []).map((p) => p.productLine).filter(Boolean))].sort().map((l) => ({ value: l, label: lineLabel(l) })),
@@ -531,7 +534,9 @@ export function ProductsTab({
             paged.shown.map((p) => {
               const on = picked.includes(p.id)
               const pickable = isPickable(p)
-              const note = notes[p.id]
+              const stage = stageOf(p)
+              const up = promoteMove(stage)
+              const down = demoteMove(stage)
               return (
                 <TableRow key={p.id} data-product-row={p.id} data-state={on ? "selected" : undefined} data-focused={p.id === focus ? "true" : undefined} className={cn(p.id === focus && "bg-muted/60")}>
                   <TableCell className="w-px">
@@ -553,29 +558,26 @@ export function ProductsTab({
                     <span className="flex items-center gap-1.5">
                       <Flags product={p} />
                       <span className="truncate">{p.name}</span>
-                      {!pickable && p.status && (
-                        <span className="shrink-0 text-xs font-normal text-muted-foreground" data-product-status>
-                          {STATUS_LABEL[p.status]}
-                        </span>
-                      )}
-                    </span>
-                    {note && (
-                      <span role={note.failed ? "alert" : "status"} className={cn("mt-1 block max-w-96 text-xs font-normal whitespace-normal", note.failed ? "text-destructive" : "text-muted-foreground")} data-product-note>
-                        {note.text}
+                      <span className="shrink-0 font-normal" data-product-status={stage}>
+                        <StageMark stage={stage} label={STAGE_STATUS[stage]} />
                       </span>
-                    )}
+                    </span>
                   </TableCell>
                   <TableCell className={COL.text}>{p.by || "—"}</TableCell>
                   <TableCell className={COL.text}>{p.productLine ? <Badge variant="outline">{lineLabel(p.productLine)}</Badge> : "—"}</TableCell>
                   <TableCell className={COL.actions}>
-                    {p.mine && !pickable && onAction && (
+                    {p.mine && onMoved && (
                       <span className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" disabled={running !== null} onClick={() => void act(p.id, "test")} data-product-test={p.id}>
-                          {running === `${p.id}:test` ? "Testing…" : "Test"}
-                        </Button>
-                        <Button size="sm" variant="outline" disabled={running !== null} onClick={() => void act(p.id, "publish")} data-product-publish={p.id}>
-                          {running === `${p.id}:publish` ? "Publishing…" : "Publish"}
-                        </Button>
+                        {up?.mode === "promote" && (
+                          <Button size="sm" variant="outline" onClick={() => setMoving({ id: p.id, move: up, stage })} data-product-move={up.to}>
+                            {MOVE_LABEL[up.to]}
+                          </Button>
+                        )}
+                        {down && (
+                          <Button size="sm" variant="ghost" onClick={() => setMoving({ id: p.id, move: down, stage })} data-product-move-back={down.to}>
+                            Move back
+                          </Button>
+                        )}
                       </span>
                     )}
                   </TableCell>
@@ -587,6 +589,13 @@ export function ProductsTab({
           )}
         </TableBody>
       </Table>
+      <ProductStageSheet
+        product={movingProduct && moving ? { id: movingProduct.id, name: movingProduct.name, stage: moving.stage } : null}
+        move={moving?.move ?? null}
+        onClose={() => setMoving(null)}
+        onMoved={(id, stage) => onMoved?.(id, stage)}
+        fetcher={fetcher}
+      />
     </PanelList>
   )
 }
@@ -655,7 +664,7 @@ export function NewAppWorkspace({
       const id = sheetDraft.id
       setCreatedDrafts((c) => ({ ...c, [id]: p.id }))
       setSheetDraft(null)
-      // The new Draft, with its Test and Publish, in view.
+      // The new Idea, with its Move to staging, in view.
       setTab("products")
       setOpened(true)
     } else if (sheetIdea) {
@@ -691,15 +700,13 @@ export function NewAppWorkspace({
   const productText = useRef("")
   const onProductText = useCallback((t: string) => void (productText.current = t), [])
   const [carry, setCarry] = useState<{ text: string; n: number } | null>(null)
-  const onAction = async (id: string, action: ProductAction): Promise<RowNote> => {
-    const result = await runProductAction(id, action, fetcher)
-    if (!result.ok) return { text: result.message, failed: true }
-    if (action === "publish") {
-      onProductsChange?.((list) => list.map((p) => (p.id === id ? { ...p, status: "published" as const } : p)))
-      const p = products?.find((x) => x.id === id)
-      if (p) noteMine({ id, name: p.name, status: "published", updatedAt: new Date().toISOString() })
-    }
-    return { text: result.data.message ?? (action === "publish" ? "Published." : "Tested."), failed: action === "test" && result.data.passed === false }
+  // One of the user's products moved stage: the page's list, the picks and Recent follow.
+  const onMoved = (id: string, stage: Stage) => {
+    const status = stage === "production" ? ("published" as const) : stage === "staging" ? ("unpublished" as const) : ("draft" as const)
+    onProductsChange?.((list) => list.map((p) => (p.id === id ? { ...p, stage, status } : p)))
+    if (stage === "idea") setPicked((picks) => picks.filter((x) => x !== id))
+    const p = products?.find((x) => x.id === id)
+    if (p) noteMine({ id, name: p.name, status, stage, updatedAt: new Date().toISOString() })
   }
   const [picked, setPicked] = useState<string[]>([])
   const [lines, setLines] = useState<string[]>([])
@@ -709,7 +716,7 @@ export function NewAppWorkspace({
   const [messages, setMessages] = useState<ThreadMessageLike[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Only published products can be picked (a draft's checkbox is disabled; this holds whatever calls it).
+  // Only products in Staging or Production can be picked (an idea's checkbox is disabled; this holds whatever calls it).
   const toggle = (id: string) =>
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : products?.some((x) => x.id === id && isPickable(x)) ? [...p, id] : p))
   // What's typed, for the composer's reason it can't send yet.
@@ -952,7 +959,7 @@ export function NewAppWorkspace({
         <TemplatesTab kinds={kinds} onUse={applyIdea} products={products} onCreate={openSheet} />
       )
     ) : (
-      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onAction={onAction} focus={focus} />
+      <ProductsTab products={products} picked={picked} onToggle={toggle} lines={lines} onLines={setLines} onCreate={openSheet} onMoved={onMoved} fetcher={fetcher} focus={focus} />
     )
 
   return (
