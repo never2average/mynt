@@ -255,12 +255,6 @@ export interface ProgramCoverage {
 type Q = Pick<Store["db"], "query">;
 export const today = () => new Date().toISOString().slice(0, 10);
 
-// A sponsorship's jurisdictions cover a state: that state itself, or its whole country ('us' covers 'us-ny').
-const coversState = (jurisdictions: string[], state: string) => {
-  const s = state.toLowerCase();
-  return jurisdictions.some((j) => j.toLowerCase() === s || j.toLowerCase() === s.split("-")[0]);
-};
-
 // Whether a program agreement is signed and in force on `on`.
 export const inForce = (a: Pick<AppAgreement, "status" | "effective_from" | "effective_to">, on: string) =>
   a.status === "signed" && (!a.effective_from || a.effective_from <= on) && (!a.effective_to || a.effective_to >= on);
@@ -273,8 +267,9 @@ function whyNot(a: AppAgreement, sponsor: string, on: string): string {
   return `it was ended on ${a.terminated_at?.slice(0, 10) ?? "an earlier date"}${a.termination_reason ? `: ${a.termination_reason}` : ""}`;
 }
 
-// Each (product, sponsor) pair the app needs a program agreement for, and whether one in force covers it.
-export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App, "id" | "product_ids">, targets: string[], on = today()): Promise<ProgramCoverage[]> {
+// Each (product, sponsor) pair the app needs a program agreement for, and whether one in force covers it. Every
+// approved sponsor of every product the app uses counts, wherever the app serves (the operator's rule).
+export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App, "id" | "product_ids">, on = today()): Promise<ProgramCoverage[]> {
   if (!app.product_ids.length) return [];
   const agreements = (await q.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND kind = 'program' ORDER BY created_at DESC`, [app.id])).rows.map(toAgreement);
   // The nearest agreement when none is in force: one on its way first, then the latest that ended (expired,
@@ -285,10 +280,7 @@ export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App
     const record = await store.getProduct(productId);
     if (!record) continue; // the licences check names a product that doesn't exist
     const approved = await store.sponsorships({ product_id: productId, status: "approved" });
-    const sponsors = new Map<string, string[]>();
-    for (const s of approved) sponsors.set(s.provider_entity_id, [...(sponsors.get(s.provider_entity_id) ?? []), ...s.jurisdictions]);
-    for (const [sponsor, jurisdictions] of sponsors) {
-      if (targets.length && !targets.some((t) => coversState(jurisdictions, t))) continue;
+    for (const sponsor of new Set(approved.map((s) => s.provider_entity_id))) {
       const name = (await store.getEntity(sponsor))?.name ?? null;
       const nearest = agreements.filter((a) => a.counterparty_entity_id === sponsor && a.products.includes(productId)).sort((a, b) => rank(a) - rank(b))[0];
       const covered = !!nearest && inForce(nearest, on);
@@ -309,10 +301,6 @@ export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App
 
 // The words for one pair with no agreement in force.
 export const missingAgreementText = (c: ProgramCoverage) => `No signed program agreement with ${c.sponsor_name ?? c.sponsor_entity_id} for ${c.product_name}${c.note ? ` (${c.note})` : ""}`;
-
-// The app's target states, as promotions keeps them.
-const targetStatesOf = async (q: Q, appId: string) =>
-  (((await q.query(`SELECT target_states FROM ${T}.app_promotions WHERE app_id = $1`, [appId])).rows[0]?.target_states as string[] | undefined) ?? []).map((s) => s.toLowerCase());
 
 // A firm that lists vendor offerings on Mynt.
 const isVendorFirm = async (store: Store, entityId: string) =>
@@ -541,7 +529,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         if (!app) return fail(`No app '${app_id}' of yours`);
         const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`, [app.id, status ?? null]);
         const stage = ((await store.db.query(`SELECT stage FROM ${T}.app_promotions WHERE app_id = $1`, [app.id])).rows[0]?.stage as string | undefined) ?? "idea";
-        const coverage = await programAgreementCoverage(store.db, store, app, await targetStatesOf(store.db, app.id));
+        const coverage = await programAgreementCoverage(store.db, store, app);
         const missing = coverage.filter((c) => !c.covered);
         return json({
           app: { id: app.id, name: app.name, workspace_id: app.workspace_id, stage },
