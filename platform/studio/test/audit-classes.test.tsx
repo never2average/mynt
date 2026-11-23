@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { AuditsView, AuditTabs, CLASS_COLUMNS, dueWithin, NO_AUDIT_FILTERS, obligationKpis, ObligationsView } from "@/components/audits-view";
+import { AuditsView, AuditTabs, CLASS_COLUMNS, dueWithin, NO_AUDIT_FILTERS, ObligationsView } from "@/components/audits-view";
 import {
   AUDIT_CLASS_LABELS,
   auditClassOf,
@@ -127,19 +127,11 @@ describe("audit classes", () => {
     expect(renderToStaticMarkup(<ObligationsView obligations={[]} />)).toContain("No obligations yet");
   });
 
-  it("Licence obligations: key figures first, from the obligations loaded; Due soon reads Not measured when none has a due date", () => {
-    const now = Date.parse("2026-11-13T00:00:00Z");
-    // The fixture carries no due dates: Due soon isn't measured, never 0.
-    expect(obligationKpis(obligations, now).map((k) => [k.label, k.value])).toEqual([
-      ["Obligations", obligations.length],
-      ["Met", obligations.filter((o) => o.status === "met").length],
-      ["Due soon", null],
-      ["Overdue", 1],
-    ]);
-    const html = renderToStaticMarkup(<ObligationsView obligations={obligations} now={now} />);
-    expect(html.indexOf("data-kpis")).toBeGreaterThan(-1);
-    expect(html.indexOf("data-kpis")).toBeLessThan(html.indexOf("data-toolbar"));
-    expect(html).toMatch(/data-kpi="due-soon"[\s\S]*?data-measured="false"[^>]*>Not measured</);
+  it("Licence obligations: no row of figures; the tab starts at its search and filters, like the other tabs", () => {
+    const html = renderToStaticMarkup(<ObligationsView obligations={obligations} />);
+    expect(html).not.toContain("data-kpis");
+    expect(html).not.toContain("obligation-figures");
+    expect(html.indexOf("data-toolbar")).toBeGreaterThan(-1);
     const dated = fromObligations({
       obligations: [
         { obligation_id: "A", title: "Due in a week", status: "at_risk", due_at: "2026-11-20" },
@@ -148,7 +140,6 @@ describe("audit classes", () => {
         { obligation_id: "D", title: "No due date", status: "unknown" },
       ],
     });
-    expect(obligationKpis(dated, now).find((k) => k.key === "due-soon")?.value).toBe(1);
     // The Date range filter is on the due date; one without a due date is out once a range is set.
     expect(dated.filter((o) => dueWithin(o, "2026-11-01", "2026-12-31")).map((o) => o.obligationId)).toEqual(["A", "B"]);
     expect(dated.filter((o) => dueWithin(o, "", "")).map((o) => o.obligationId)).toEqual(["A", "B", "C", "D"]);

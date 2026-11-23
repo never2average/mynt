@@ -4,15 +4,12 @@
 // Financial activity or Workspace activity) as a paged table, with a full-width search over the
 // page shown, then in the same toolbar row one Filters popover (app, kind, severity or status
 // where the class has them, member), the date range, and a labelled Export CSV of the rows shown.
-// ObligationsView: key figures (obligations, met, due soon, overdue), then each licence's
-// regulatory obligations for the products it covers (met, at risk, overdue, with evidence),
+// ObligationsView: each licence's regulatory obligations for the products it covers (met, at risk, overdue, with evidence),
 // searchable, filtered by partner, regulator, status, product and due date, exportable, and paged
 // 25 rows at a time. Status is never colour alone. Server-renderable for the tests.
 import { useMemo, useState } from "react"
 import { ChevronLeft, ChevronRight, Download, Search } from "lucide-react"
 
-import { KpiRow } from "@/components/charts"
-import { Panel } from "@/components/dashboard-panels"
 import { anyOf, DateRangeFilter, FiltersPopover, picksOf, type Facet, type Picks } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { ListPager, TOOLBAR_ROW, TOOLBAR_SEARCH, usePaged } from "@/components/list-layout"
@@ -35,7 +32,6 @@ import {
   type ObligationStatus,
 } from "@/lib/audit-classes"
 import { distinct, toCsv } from "@/lib/compliance"
-import type { Kpi } from "@/lib/dashboard-visual"
 import { cn } from "@/lib/utils"
 import { Tab, TabList } from "@/components/ui/tabs"
 
@@ -266,25 +262,7 @@ export function ObligationStatusText({ status, reason = null }: { status: Obliga
 const partnersOf = (list: Obligation[]) =>
   [...new Map(list.flatMap((o) => (o.partnerId ? [[o.partnerId, o.partner ?? o.partnerId] as const] : []))).entries()].sort((a, b) => a[1].localeCompare(b[1]))
 
-export const DUE_SOON_DAYS = 30
-
 const dueAtOf = (o: Obligation) => (o.dueAt && !Number.isNaN(Date.parse(o.dueAt)) ? Date.parse(o.dueAt) : null)
-
-/** The key figures, from the obligations loaded. Due soon is "Not measured" when none has a due date, never 0. */
-export function obligationKpis(list: Obligation[], now = Date.now()): Kpi[] {
-  const dated = list.some((o) => dueAtOf(o) !== null)
-  const dueSoon = (o: Obligation) => {
-    const at = dueAtOf(o)
-    return o.status !== "met" && at !== null && at > now && at - now <= DUE_SOON_DAYS * 86_400_000
-  }
-  const k = (key: string, label: string, value: number | null, note: string): Kpi => ({ key, label, value, unit: "count", delta: null, spark: null, note })
-  return [
-    k("obligations", "Obligations", list.length, "Across your licences"),
-    k("met", "Met", list.filter((o) => o.status === "met").length, "With evidence"),
-    k("due-soon", "Due soon", dated ? list.filter(dueSoon).length : null, `Not met, due within ${DUE_SOON_DAYS} days`),
-    k("overdue", "Overdue", list.filter((o) => o.status === "overdue").length, "Past their due date"),
-  ]
-}
 
 // Due between two days (YYYY-MM-DD, inclusive); one without a due date is out once a range is set.
 export const dueWithin = (o: Obligation, from: string, to: string) => {
@@ -293,7 +271,7 @@ export const dueWithin = (o: Obligation, from: string, to: string) => {
   return Boolean(d) && (!from || d >= from) && (!to || d <= to)
 }
 
-export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS, now = Date.now() }: { obligations: Obligation[]; initial?: ObligationFilters; now?: number }) {
+export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS }: { obligations: Obligation[]; initial?: ObligationFilters }) {
   const [f, setF] = useState<ObligationFilters>(initial)
   const [due, setDue] = useState({ from: "", to: "" })
   const shown = useMemo(() => filterObligations(obligations, f).filter((o) => dueWithin(o, due.from, due.to)), [obligations, f, due])
@@ -327,9 +305,6 @@ export function ObligationsView({ obligations, initial = NO_OBLIGATION_FILTERS, 
     )
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 lg:gap-5" data-audit-class="obligations">
-      <Panel id="obligation-figures">
-        <KpiRow kpis={obligationKpis(obligations, now)} />
-      </Panel>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className={TOOLBAR_ROW} data-toolbar>
         <div className={TOOLBAR_SEARCH}>

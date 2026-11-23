@@ -367,7 +367,7 @@ function Audits({ tab }: { tab: "security" | "obligations" | "financial" | "work
       <AuditTabs tab={t} onTab={setT} />
       <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel={t}>
         {t === "obligations" ? (
-          <ObligationsView obligations={obligations} now={NOW} />
+          <ObligationsView obligations={obligations} />
         ) : (
           <AuditsView auditClass={t} rows={rows} filters={NO_AUDIT_FILTERS} onFilters={noop} members={[{ id: "u1", name: "Ines Diaz" }]} apps={[{ id: "a1", name: "Round-up savings" }]} actions={["build.audit_finding"]} page={1} hasNext onPrev={noop} onNext={noop} />
         )}
