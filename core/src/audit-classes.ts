@@ -253,6 +253,8 @@ const WORKSPACE = [
   // financial products move through the same stages (product-stages.ts)
   "product_promoted",
   "product_demoted",
+  "product_archived",
+  "product_unarchived",
   "start_build",
   "finish_build",
   "connect_repository",

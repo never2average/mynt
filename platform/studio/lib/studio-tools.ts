@@ -65,7 +65,8 @@ export const STUDIO_TOOLS = {
   // New app's Create product: a draft product (create_product's own fields; Mynt checks them again), then
   // its stage actions on its row (Test, Move to staging or production, Move back). The user's own products (drafts too) and the regions and categories the
   // sheet offers are read alongside.
-  list_my_products: z.object({}).strict(),
+  // include_archived: the Products tab's Archived filter (archive_product), flagged archived.
+  list_my_products: z.object({ include_archived: z.boolean().optional() }).strict(),
   list_regions: z.object({}).strict(),
   list_product_categories: z.object({ product_line: z.enum(PRODUCT_LINES).optional() }).strict(),
   create_product: z
@@ -92,6 +93,9 @@ export const STUDIO_TOOLS = {
   get_product_promotion_checks: z.object({ product_id: ProductId, to_stage: z.enum(["staging", "production"]) }).strict(),
   promote_product: z.object({ product_id: ProductId, to_stage: z.enum(["staging", "production"]) }).strict(),
   demote_product: z.object({ product_id: ProductId, to_stage: z.enum(["idea", "staging"]), reason: z.string().trim().min(3).max(1000) }).strict(),
+  // Out of the way (idea or staging only; Mynt refuses production), with a reason, and back to its stage. Never deleted.
+  archive_product: z.object({ product_id: ProductId, reason: z.string().trim().min(3).max(1000) }).strict(),
+  unarchive_product: z.object({ product_id: ProductId }).strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({

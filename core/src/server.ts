@@ -740,7 +740,8 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     for (const id of ids) {
       const record = await store.getProduct(id);
       const stage = record ? productStage(record) : "idea";
-      if (stage === "staging" && production) out.push(`${id} (in staging: sandbox builds only, so not on a production app until its firm promotes it)`);
+      if (record?.archived_at) out.push(`${id} (archived by its firm)`);
+      else if (stage === "staging" && production) out.push(`${id} (in staging: sandbox builds only, so not on a production app until its firm promotes it)`);
       else if (stage === "idea") out.push(`${id} (not published)`);
       else if (record && record.access_mode === "private" && !(await accessStatus(store, user, record, appId)).granted) out.push(`${id} (private)`);
     }
@@ -774,6 +775,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
         if (product_line && p.product_line !== product_line) continue;
         if (q && !`${p.name} ${p.description}`.toLowerCase().includes(q)) continue;
         const record = (await store.getProduct(p.id))!;
+        if (record.archived_at) continue;
         if (access_mode && record.access_mode !== access_mode) continue;
         const access = await accessStatus(store, user, record, null);
         if (record.access_mode === "private" && !access.granted) continue;
@@ -1213,6 +1215,7 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
       // staging's. A pending draft version goes live in place of the current one; otherwise the product itself.
       const draft = await store.draftVersion(id);
       if (!draft && record.status === "published") return fail("Product is already published; draft a new version with create_product_version");
+      if (record.archived_at) return fail("The product is archived; unarchive it first (unarchive_product)");
       const gate = await publishGate(store, user, record);
       if (gate.refusal) return gate.refusal.errors ? { ...json(gate.refusal), isError: true } : fail(gate.refusal.error);
       const { live, drifted } = await promoteToProduction(store, user, record, gate, "publish_product");
@@ -1255,17 +1258,18 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     {
       title: "List my financial products",
       description:
-        "Innovator: list the products you created with their status, stage (idea, staging or production, as apps have: promote_product, demote_product) and latest test result.",
-      inputSchema: {},
+        "Innovator: list the products you created with their status, stage (idea, staging or production, as apps have: promote_product, demote_product) and latest test result. Archived products (archive_product) are left out unless include_archived is true; then each one is flagged archived, with archived_at.",
+      inputSchema: { include_archived: z.boolean().default(false).describe("Also list your archived products, flagged archived") },
       annotations: { readOnlyHint: true },
     },
-    async () =>
+    async ({ include_archived }) =>
       json(
         await Promise.all(
-          (await store.productsByOwner(user.id)).map(async (r) => ({
+          (await store.productsByOwner(user.id)).filter((r) => include_archived || !r.archived_at).map(async (r) => ({
             ...r.product,
             status: r.status,
             stage: productStage(r),
+            ...(r.archived_at ? { archived: true, archived_at: r.archived_at } : {}),
             version: r.version,
             draft_version: (await store.draftVersion(r.product.id))?.version ?? null,
             last_test_passed: r.last_test?.passed ?? null,

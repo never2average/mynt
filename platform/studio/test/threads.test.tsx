@@ -132,6 +132,16 @@ describe("the threads list", () => {
     expect(openFromSearch("?product=green-savings")).toEqual({ product: "green-savings" });
     expect(openFromSearch("")).toBeNull();
   });
+
+  it("leaves archived products (archive_product) out of Recent and the sidebar's folders", () => {
+    const mine = myProductsFrom([
+      { id: "a", name: "A", status: "draft" },
+      { id: "devnet-demo-product", name: "Devnet demo product", status: "draft", stage: "staging", archived: true, archived_at: "2026-11-23T00:00:00Z" },
+    ]);
+    expect(mine.map((p) => p.id)).toEqual(["a"]);
+    const folders = stagedItems({ idea: [], staging: [], production: [] }, mine)!;
+    expect([...folders.idea, ...folders.staging, ...folders.production].map((i) => i.id)).toEqual(["a"]);
+  });
 });
 
 // ---- on the Build page ----

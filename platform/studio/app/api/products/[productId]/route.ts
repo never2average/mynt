@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 
 // A product's stage, as an app's: GET ?to=staging|production is Mynt's checks for moving it there
 // (get_product_promotion_checks), for the approval sheet. POST is the sheet's actions: Test (test_product),
-// Move to staging or production (promote_product), Move back (demote_product, with a reason), and Publish
-// (publish_product) for older callers. Mynt checks everything again and may refuse (untested, failing
+// Move to staging or production (promote_product), Move back (demote_product, with a reason), Archive
+// (archive_product, with a reason) and Unarchive (unarchive_product), and Publish (publish_product) for older callers. Mynt checks everything again and may refuse (untested, failing
 // checks, no licence or sponsorship covering it): its reason comes back in its own words.
 export async function GET(req: Request, { params }: { params: Promise<{ productId: string }> }) {
   const id = ProductId.safeParse((await params).productId);
@@ -41,6 +41,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ product
     return asDeveloper("moving a product back a stage", async (mynt) => {
       await callStudioTool(mynt, "demote_product", { product_id: productId, to_stage: change.to_stage, reason: change.reason });
       return json({ ok: true, stage: change.to_stage, message: `Moved back to ${STAGE_NAMES[change.to_stage]}.` });
+    });
+  if (change.action === "archive")
+    return asDeveloper("archiving a product", async (mynt) => {
+      await callStudioTool(mynt, "archive_product", { product_id: productId, reason: change.reason });
+      return json({ ok: true, archived: true, message: "Archived. It's out of your lists and builds; nothing was deleted." });
+    });
+  if (change.action === "unarchive")
+    return asDeveloper("unarchiving a product", async (mynt) => {
+      const reply = (await callStudioTool(mynt, "unarchive_product", { product_id: productId })) as { stage?: unknown } | null;
+      const stage = reply?.stage === "staging" || reply?.stage === "idea" ? reply.stage : undefined;
+      return json({ ok: true, archived: false, ...(stage ? { stage } : {}), message: stage ? `Unarchived, back in ${STAGE_NAMES[stage]}.` : "Unarchived." });
     });
   return asDeveloper("publishing a product", async (mynt) => {
     await callStudioTool(mynt, "publish_product", { id: productId });

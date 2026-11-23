@@ -26,7 +26,9 @@ import { isProduction } from "./promotion-schema.js";
 
 // What a build of an app gets: products in production, and in a sandbox build (an app not in production) those in
 // staging too (product-stages.ts).
-const buildableIn = (record: ProductRecord, sandbox: boolean) => record.status === "published" || (sandbox && productStage(record) === "staging");
+// An archived product (archive_product) is in no build.
+const buildableIn = (record: ProductRecord, sandbox: boolean) =>
+  !record.archived_at && (record.status === "published" || (sandbox && productStage(record) === "staging"));
 import { canSeeBuild, memberApp } from "./workspaces.js";
 import { checkRepoOwnership, type OwnershipCheck } from "./repo-ownership.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";

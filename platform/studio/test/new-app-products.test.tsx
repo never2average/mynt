@@ -23,6 +23,7 @@ const PRODUCTS = [
   { id: "my-draft", name: "My savings", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", mine: true },
   { id: "my-staged", name: "My card", productLine: "payments", by: "You", accessMode: "open", jurisdictions: ["US"], status: "unpublished", stage: "staging", mine: true },
 ];
+const ARCHIVED = [{ id: "my-old", name: "Devnet demo", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", stage: "staging", mine: true, archived: true }];
 const check = (id: string, status: string, detail: string) => ({ id, label: id, status, detail });
 const checksFor = (to: string, can: boolean, checks: unknown[]) => ({ checks: { appId: "", fromStage: null, toStage: to, checks, canPromote: can, needsAdminSignoff: false, signoff: null } });
 const OPTIONS = {
@@ -63,6 +64,7 @@ beforeEach(() => {
       if (body?.action === "test") return new Response(JSON.stringify({ passed: true, message: "Tests passed. You can move it on." }), { status: 200 });
       return new Response(JSON.stringify(publishReply.body), { status: publishReply.status });
     }
+    if (url === "/api/products?archived=1") return new Response(JSON.stringify({ products: ARCHIVED }), { status: 200 });
     if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
     if (url.startsWith("/api/app-kinds")) return new Response(JSON.stringify({ kinds: [] }), { status: 200 });
     return new Response("{}", { status: 404 });
@@ -193,8 +195,8 @@ describe("a product's stage", () => {
     expect((document.querySelector('[data-picker-option="my-staged"]') as HTMLButtonElement).disabled).toBe(false);
     // Others' products have no stage actions; the user's own have the labelled ones.
     expect(within(tabRow("p1")).queryAllByRole("button")).toEqual([]);
-    expect(within(tabRow("my-draft")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Move to staging"]);
-    expect(within(tabRow("my-staged")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Move to production", "Move back"]);
+    expect(within(tabRow("my-draft")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Move to staging", "Archive"]);
+    expect(within(tabRow("my-staged")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Move to production", "Move back", "Archive"]);
   });
 
   it("Move to staging opens the approval sheet with Mynt's checks; the test runs there; confirming moves it", async () => {
@@ -249,6 +251,52 @@ describe("a product's stage", () => {
     expect(calls).toEqual([{ url: "/api/products/my-staged", body: { action: "demote", to_stage: "idea", reason: "Rates changing" } }]);
     expect(tabRow("my-staged").querySelector("[data-product-status]")!.textContent).toBe("Idea");
     expect(tabCheckbox("my-staged").disabled).toBe(true);
+  });
+});
+
+describe("Archive and Unarchive", () => {
+  const archiveSheet = () => document.querySelector("[data-product-archive-sheet]") as HTMLElement | null;
+  const showArchived = async () => {
+    // The Filters popover stays open between toggles.
+    if (!document.querySelector('[data-facet="archived"]')) await act(async () => void fireEvent.click(document.querySelector('[data-panel-content="products"] [data-filters-menu-button]')!));
+    await act(async () => void fireEvent.click(document.querySelector('[data-facet="archived"] [data-chip="archived"]')!));
+    await settle();
+  };
+  it("Archive asks for a reason, then the product leaves the Products tab; production has no Archive", async () => {
+    publishReply = { status: 200, body: { ok: true, archived: true, message: "Archived. It's out of your lists and builds; nothing was deleted." } };
+    await loaded();
+    await openTab("Products");
+    expect(tabRow("p1").querySelector("[data-product-archive]")).toBeNull();
+    await act(async () => void fireEvent.click(within(tabRow("my-staged")).getByRole("button", { name: "Archive" })));
+    await settle();
+    const form = archiveSheet()!.querySelector("[data-archive-form]") as HTMLFormElement;
+    const submit = within(form).getByRole("button", { name: "Archive product" }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(within(form).getByLabelText("Reason"), { target: { value: "Test product" } });
+    await act(async () => void fireEvent.submit(form));
+    await settle();
+    expect(calls).toEqual([{ url: "/api/products/my-staged", body: { action: "archive", reason: "Test product" } }]);
+    expect(within(archiveSheet()!).getByRole("status").textContent).toContain("Archived.");
+    expect(tabRow("my-staged")).toBeNull();
+  });
+
+  it("the Archived filter lists archived products with Unarchive, which brings one back in its stage", async () => {
+    publishReply = { status: 200, body: { ok: true, archived: false, stage: "staging", message: "Unarchived, back in Staging." } };
+    await loaded();
+    await openTab("Products");
+    expect(tabRow("my-old")).toBeNull();
+    await showArchived();
+    expect(tabRow("p1")).toBeNull();
+    expect(within(tabRow("my-old")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Unarchive"]);
+    expect(tabCheckbox("my-old").disabled).toBe(true);
+    await act(async () => void fireEvent.click(within(tabRow("my-old")).getByRole("button", { name: "Unarchive" })));
+    await settle();
+    await act(async () => void fireEvent.click(archiveSheet()!.querySelector("[data-product-unarchive-confirm]")!));
+    await settle();
+    expect(calls).toEqual([{ url: "/api/products/my-old", body: { action: "unarchive" } }]);
+    expect(tabRow("my-old")).toBeNull();
+    await showArchived();
+    expect(tabRow("my-old")!.querySelector("[data-product-status]")!.textContent).toBe("Staging");
   });
 });
 

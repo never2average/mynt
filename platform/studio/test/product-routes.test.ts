@@ -258,6 +258,43 @@ describe("a product's stage (GET and POST /api/products/<id>)", () => {
   });
 });
 
+describe("Archive and Unarchive (POST /api/products/<id>, GET /api/products?archived=1)", () => {
+  it("archives with archive_product (a reason needed) and unarchives with unarchive_product", async () => {
+    expect((await productRoute.POST(req("/api/products/green-savings", "POST", { action: "archive" }), product("green-savings"))).status).toBe(400);
+    expect((await productRoute.POST(req("/api/products/green-savings", "POST", { action: "archive", reason: "Test product" }, "https://elsewhere.example"), product("green-savings"))).status).toBe(403);
+    const off = await productRoute.POST(req("/api/products/green-savings", "POST", { action: "archive", reason: "Test product" }), product("green-savings"));
+    expect(off.status).toBe(200);
+    expect((await off.json()).archived).toBe(true);
+    expect(called("archive_product")).toEqual([{ name: "archive_product", args: { product_id: "green-savings", reason: "Test product" } }]);
+    const back = await productRoute.POST(req("/api/products/green-savings", "POST", { action: "unarchive" }), product("green-savings"));
+    expect(back.status).toBe(200);
+    expect(called("unarchive_product")).toEqual([{ name: "unarchive_product", args: { product_id: "green-savings" } }]);
+  });
+
+  it("shows Mynt's refusal for a product in production in its words", async () => {
+    const reason = "The product is in production; move it back first (demote_product to staging), then archive it";
+    fake.refuse = { archive_product: reason };
+    const res = await productRoute.POST(req("/api/products/green-savings", "POST", { action: "archive", reason: "Retired" }), product("green-savings"));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "mynt_refused", message: reason });
+  });
+
+  it("leaves archived products out of the list and Recent, and lists them apart for the Archived view", async () => {
+    fake.mine = [
+      { id: "green-savings", name: "Green Savings", product_line: "account_operations", region: "US", status: "draft" },
+      { id: "devnet-demo", name: "Devnet demo", product_line: "account_operations", region: "US", status: "draft", stage: "staging", archived: true, archived_at: "2026-11-23T00:00:00Z" },
+    ];
+    const body = await (await productsRoute.GET(getReq("/api/products"))).json();
+    expect(body.products.map((p: { id: string }) => p.id)).toEqual(["dollar-account", "green-savings"]);
+    expect(body.mine.map((p: { id: string }) => p.id)).toEqual(["green-savings"]);
+    const archived = await (await productsRoute.GET(getReq("/api/products?archived=1"))).json();
+    expect(called("list_my_products").at(-1)!.args).toEqual({ include_archived: true });
+    expect(archived.products).toEqual([
+      { id: "devnet-demo", name: "Devnet demo", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", stage: "staging", mine: true, archived: true, lastTestPassed: null },
+    ]);
+  });
+});
+
 describe("Create product's choices", () => {
   it("are Mynt's regions with their regulators, and its categories", async () => {
     const body = await (await optionsRoute.GET()).json();
@@ -276,5 +313,10 @@ describe("the allow-list", () => {
     expect(parseStudioCall("promote_product", { product_id: "green-savings", to_stage: "production" })).toEqual({ tool: "promote_product", args: { product_id: "green-savings", to_stage: "production" } });
     expect(parseStudioCall("promote_product", { product_id: "green-savings", to_stage: "idea" })).toHaveProperty("error");
     expect(parseStudioCall("demote_product", { product_id: "green-savings", to_stage: "idea" })).toHaveProperty("error");
+    expect(parseStudioCall("archive_product", { product_id: "green-savings", reason: "Test product" })).toEqual({ tool: "archive_product", args: { product_id: "green-savings", reason: "Test product" } });
+    expect(parseStudioCall("archive_product", { product_id: "green-savings" })).toHaveProperty("error");
+    expect(parseStudioCall("unarchive_product", { product_id: "green-savings" })).toEqual({ tool: "unarchive_product", args: { product_id: "green-savings" } });
+    expect(parseStudioCall("unarchive_product", { product_id: "green-savings", stage: "production" })).toHaveProperty("error");
+    expect(parseStudioCall("list_my_products", { include_archived: true })).toEqual({ tool: "list_my_products", args: { include_archived: true } });
   });
 });

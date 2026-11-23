@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { NewProductRequest, productsFrom } from "@/lib/products";
+import { archivedProductsFrom, NewProductRequest, productsFrom } from "@/lib/products";
 import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool, isAuthError } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
@@ -17,6 +17,12 @@ export const dynamic = "force-dynamic";
 // on load, lib/chat-sessions.ts), for the Build page's Recent and the sidebar's Financial products;
 // ?mine=1 returns only those.
 export async function GET(req: NextRequest) {
+  // ?archived=1: the user's archived products (list_my_products with include_archived), for the Products tab's
+  // Archived view.
+  if (req.nextUrl.searchParams.get("archived") === "1")
+    return asDeveloper("loading archived products", async (mynt) =>
+      json({ products: archivedProductsFrom(await callStudioTool(mynt, "list_my_products", { include_archived: true })) }),
+    );
   const query = req.nextUrl.searchParams.get("query")?.trim().slice(0, 200) || undefined;
   const onlyMine = req.nextUrl.searchParams.get("mine") === "1";
   return asDeveloper("loading products", async (mynt, session) => {
