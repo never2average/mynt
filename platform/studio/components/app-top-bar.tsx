@@ -8,7 +8,9 @@
 // the right, labelled as in the page header (icons below md), with the GitHub and wallet controls
 // (hidden on phones) beside New app, and the theme switcher last. Sticky. Beside the stage is the stage control: Promote to Staging or Production
 // (and Move back, for owners and admins), which opens the promotion checks
-// (components/promotion-view.tsx). The studio has no code view yet.
+// (components/promotion-view.tsx). Then the app's hosting state (Online at its address, Deploying,
+// Not online) and Put online, which opens a sheet that hosts its newest verified build
+// (components/hosting-control.tsx). The studio has no code view yet.
 import { useEffect, useState } from "react";
 import {
   ArrowLeftIcon,
@@ -23,6 +25,7 @@ import {
 
 import { BuildMeter, type MeteredBuild } from "@/components/build-meter";
 import { StageControl } from "@/components/promotion-view";
+import { HostingControl } from "@/components/hosting-control";
 import { GithubControl } from "@/components/github-control";
 import { DeveloperOnly } from "@/components/studio-gates";
 import { ConnectAgentButton, DocsButton } from "@/components/connect-agent";
@@ -108,6 +111,8 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
         )}
         {/* Promote / Move back: a screen with Mynt's checks, never a drag between folders. */}
         {appId && appName && stage && !(isMobile && mobileView === "preview") && <StageControl appId={appId} appName={appName} stage={stage} />}
+        {/* Where the app stands on Mynt's hosting, and Put online (a sheet with the build it hosts). */}
+        {appId && appName && !(isMobile && mobileView === "preview") && <HostingControl appId={appId} appName={appName} />}
         {build && !isMobile && <BuildMeter build={build} className="hidden lg:flex" />}
       </div>
 
